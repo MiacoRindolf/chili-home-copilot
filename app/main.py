@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from sqlalchemy.orm import Session
 from datetime import date
 
@@ -8,6 +8,7 @@ from .chili_nlu import parse_message
 from .models import Chore, Birthday
 from .llm_planner import plan_action
 from .logger import new_trace_id, log_info
+from .health import check_db, check_ollama
 import time
 
 Base.metadata.create_all(bind=engine)
@@ -20,6 +21,19 @@ def get_db():
         yield db
     finally:
         db.close()
+
+@app.get("/health", response_class=JSONResponse)
+def health(db: Session = Depends(get_db)):
+    db_status = check_db(db)
+    ollama_status = check_ollama()
+
+    overall_ok = db_status.get("ok") and ollama_status.get("ok")
+
+    return {
+        "ok": bool(overall_ok),
+        "db": db_status,
+        "ollama": ollama_status,
+    }
 
 @app.get("/", response_class=HTMLResponse)
 def home(db: Session = Depends(get_db)):
