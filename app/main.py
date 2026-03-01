@@ -210,6 +210,10 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
           <p><b>You:</b> {safe_msg}</p>
           <p><b>CHILI:</b><br>{reply_html}</p>
         </div>
+
+        <p style="color:#888; font-size:12px; margin-top:16px;">
+          trace_id: <code>{trace_id}</code>
+        </p>
       </body>
     </html>
     """
