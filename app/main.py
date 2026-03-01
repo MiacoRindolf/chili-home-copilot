@@ -9,6 +9,7 @@ from .models import Chore, Birthday
 from .llm_planner import plan_action
 from .logger import new_trace_id, log_info
 from .health import check_db, check_ollama
+from .metrics import record_latency, latency_stats, get_counts
 import time
 
 Base.metadata.create_all(bind=engine)
@@ -209,6 +210,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
 
     ms = int((time.time() - t0) * 1000)
     log_info(trace_id, f"latency_ms={ms}")
+    record_latency(ms)
 
     return f"""
     <html>
@@ -255,3 +257,57 @@ def add_birthday(
     db.add(Birthday(name=name, date=date))
     db.commit()
     return RedirectResponse("/", status_code=303)
+
+@app.get("/metrics", response_class=JSONResponse)
+def metrics(db: Session = Depends(get_db)):
+    return {
+        "counts": get_counts(db),
+        "llm_chat_latency": latency_stats(),
+    }
+
+@app.get("/admin", response_class=HTMLResponse)
+def admin_dashboard(db: Session = Depends(get_db)):
+    # Reuse existing health + metrics logic
+    db_status = check_db(db)
+    ollama_status = check_ollama()
+
+    counts = get_counts(db)
+    lat = latency_stats()
+
+    ok = bool(db_status.get("ok") and ollama_status.get("ok"))
+
+    return f"""
+    <html>
+      <head>
+        <title>CHILI Admin</title>
+        <meta charset="utf-8"/>
+      </head>
+      <body style="font-family: Arial; max-width: 900px; margin: 40px auto;">
+        <h1>🛠️ CHILI Admin</h1>
+        <p><a href="/">Home</a> | <a href="/chat">Chat</a> | <a href="/health">/health</a> | <a href="/metrics">/metrics</a></p>
+
+        <h2>Status</h2>
+        <div style="padding: 12px; background: {'#e8f5e9' if ok else '#ffebee'}; border: 1px solid #ddd;">
+          <p><b>Overall:</b> {'✅ OK' if ok else '❌ Issues detected'}</p>
+          <p><b>DB:</b> {'✅ OK' if db_status.get('ok') else '❌ ' + db_status.get('error','')}</p>
+          <p><b>Ollama:</b> {'✅ OK' if ollama_status.get('ok') else '❌ ' + ollama_status.get('error','')}</p>
+          <p><b>Models:</b> {', '.join(ollama_status.get('models', [])) if ollama_status.get('ok') else 'N/A'}</p>
+        </div>
+
+        <h2>Counts</h2>
+        <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+          <p><b>Chores:</b> total={counts['chores']['total']}, pending={counts['chores']['pending']}, done={counts['chores']['done']}</p>
+          <p><b>Birthdays:</b> total={counts['birthdays']['total']}</p>
+        </div>
+
+        <h2>LLM Chat Latency (last {lat['count']} requests)</h2>
+        <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+          <p><b>Avg:</b> {lat['avg_ms']} ms</p>
+          <p><b>P95:</b> {lat['p95_ms']} ms</p>
+        </div>
+
+        <hr/>
+        <p style="color:#888; font-size:12px;">CHILI Admin — local dashboard</p>
+      </body>
+    </html>
+    """
