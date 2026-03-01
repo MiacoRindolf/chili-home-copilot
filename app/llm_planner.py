@@ -1,11 +1,18 @@
 import json
 import requests
 
+from .planner_schema import validate_plan
+
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 MODEL = "llama3"  # change if you're using a different one
 
 SYSTEM = """You are CHILI, an action planner for a household assistant.
 You MUST output ONLY valid JSON (no markdown, no extra text).
+
+IMPORTANT:
+- If the user request is ambiguous, underspecified, or not clearly one allowed action, output type="unknown".
+- Do NOT guess.
+- Ask for clarification via the "reply" field when unknown.
 
 Output MUST be a single JSON object with EXACT keys:
 - "type": one of the allowed action types
@@ -21,7 +28,7 @@ Allowed actions and required data:
 - list_birthdays: {}
 
 If the request is unclear or not supported:
-{"type":"unknown","data":{"reason":"..."},"reply":"I can help with chores and birthdays. Try: add chore..., list chores, add birthday Name YYYY-MM-DD."}
+{"type":"unknown","data":{"reason":"ambiguous"},"reply":"What would you like me to do—add a chore, list chores, or add a birthday reminder?"}
 """
 
 def plan_action(user_message: str) -> dict:
@@ -42,10 +49,27 @@ def plan_action(user_message: str) -> dict:
     text = r.json()["message"]["content"].strip()
 
     try:
-        return json.loads(text)
+        candidate = json.loads(text)
     except json.JSONDecodeError:
         start = text.find("{")
         end = text.rfind("}")
         if start != -1 and end != -1 and end > start:
-            return json.loads(text[start:end+1])
-        return {"type": "unknown", "data": {"reason": "Planner returned invalid JSON", "raw": text}}
+            candidate = json.loads(text[start:end+1])
+        else:
+            return {
+                "type": "unknown",
+                "data": {"reason": "Planner returned invalid JSON", "raw": text},
+                "reply": "I had trouble understanding that. Try: add chore..., list chores, add birthday Name YYYY-MM-DD.",
+            }
+
+    # ✅ NEW: Validate schema
+    validated = validate_plan(candidate)
+    if validated:
+        return validated
+
+    # ✅ If invalid, return safe fallback
+    return {
+        "type": "unknown",
+        "data": {"reason": "Invalid plan schema", "raw": candidate},
+        "reply": "I had trouble understanding that. Try: add chore..., list chores, add birthday Name YYYY-MM-DD.",
+    }
