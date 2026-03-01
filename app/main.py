@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, Form
+from fastapi import FastAPI, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
 from datetime import date
@@ -60,6 +60,7 @@ def home(db: Session = Depends(get_db)):
       <head>
         <title>CHILI Home Copilot</title>
         <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body style="font-family: Arial; max-width: 800px; margin: 40px auto;">
         <h1>🌶️ CHILI — Home Copilot</h1>
@@ -67,8 +68,8 @@ def home(db: Session = Depends(get_db)):
 
         <h2>Chores</h2>
         <form method="post" action="/chores">
-          <input name="title" placeholder="Add a chore..." style="width: 60%;" required />
-          <button type="submit">Add</button>
+          <input name="title" placeholder="Add a chore..." style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" required />
+          <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
         </form>
         <ul>{chore_items}</ul>
 
@@ -76,7 +77,7 @@ def home(db: Session = Depends(get_db)):
         <form method="post" action="/birthdays">
           <input name="name" placeholder="Name" required />
           <input name="date" type="date" required />
-          <button type="submit">Add</button>
+          <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
         </form>
         <ul>{bday_items}</ul>
 
@@ -101,8 +102,8 @@ def chat_page():
         <p><a href="/">← Back to Home</a></p>
 
         <form method="post" action="/chat">
-          <input name="message" placeholder="Type a request..." style="width: 70%;" required />
-          <button type="submit">Send</button>
+          <input name="message" placeholder="Type a request..." style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" required />
+          <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Send</button>
         </form>
 
         <div style="margin-top: 20px; padding: 12px; background: #f5f5f5;">
@@ -113,9 +114,12 @@ def chat_page():
     """
 
 @app.post("/chat", response_class=HTMLResponse)
-def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
+def chat_submit(request: Request, message: str = Form(...), db: Session = Depends(get_db)):
     trace_id = new_trace_id()
     t0 = time.time()
+
+    client_ip = request.client.host
+    log_info(trace_id, f"client_ip={client_ip}")
     log_info(trace_id, f"chat_message={message!r}")
     # Try LLM planner first, fallback to rules
     try:
@@ -222,6 +226,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
       <head>
         <title>CHILI Chat</title>
         <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body style="font-family: Arial; max-width: 800px; margin: 40px auto;">
         <h1>🌶️ CHILI Chat</h1>
@@ -234,6 +239,9 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
 
         <p style="color:#888; font-size:12px; margin-top:16px;">
           trace_id: <code>{trace_id}</code>
+        </p>
+        <p style="color:#888; font-size:12px;">
+          from: <code>{client_ip}</code>
         </p>
       </body>
     </html>
@@ -286,6 +294,7 @@ def admin_dashboard(db: Session = Depends(get_db)):
       <head>
         <title>CHILI Admin</title>
         <meta charset="utf-8"/>
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
       </head>
       <body style="font-family: Arial; max-width: 900px; margin: 40px auto;">
         <h1>🛠️ CHILI Admin</h1>
@@ -298,7 +307,7 @@ def admin_dashboard(db: Session = Depends(get_db)):
           <p><b>Ollama:</b> {'✅ OK' if ollama_status.get('ok') else '❌ ' + ollama_status.get('error','')}</p>
           <p><b>Models:</b> {', '.join(ollama_status.get('models', [])) if ollama_status.get('ok') else 'N/A'}</p>
           <form method="post" action="/admin/reset" style="margin-top: 12px;">
-            <button type="submit" onclick="return confirm('Reset demo data (delete all chores and birthdays)?')">
+            <button style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" type="submit" onclick="return confirm('Reset demo data (delete all chores and birthdays)?')">
               Reset demo data
             </button>
           </form>
