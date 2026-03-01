@@ -7,6 +7,8 @@ from .db import Base, engine, SessionLocal
 from .chili_nlu import parse_message
 from .models import Chore, Birthday
 from .llm_planner import plan_action
+from .logger import new_trace_id, log_info
+import time
 
 Base.metadata.create_all(bind=engine)
 
@@ -94,9 +96,13 @@ def chat_page():
 
 @app.post("/chat", response_class=HTMLResponse)
 def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
+    trace_id = new_trace_id()
+    t0 = time.time()
+    log_info(trace_id, f"chat_message={message!r}")
     # Try LLM planner first, fallback to rules
     try:
         planned = plan_action(message)
+        log_info(trace_id, f"planned={planned}")
         print("PLANNED_ACTION:", planned)
         llm_reply = planned.get("reply") if isinstance(planned, dict) else None
     except Exception as e:
@@ -125,9 +131,11 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         db.add(Chore(title=title, done=False))
         db.commit()
         reply_lines.append(f"Added chore: <b>{title}</b> ✅")
+        log_info(trace_id, "executed=add_chore")
 
     elif action_type == "list_chores":
         chores = db.query(Chore).order_by(Chore.id.desc()).all()
+        log_info(trace_id, "executed=list_chores")
         if chores:
             items = "".join([f"<li>#{c.id} {'✅' if c.done else '⬜'} {c.title}</li>" for c in chores])
             reply_lines.append(f"<ul>{items}</ul>")
@@ -136,6 +144,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
 
     elif action_type == "list_chores_pending":
         chores = db.query(Chore).filter(Chore.done == False).order_by(Chore.id.desc()).all()
+        log_info(trace_id, "executed=list_chores_pending")
         if chores:
             items = "".join([f"<li>#{c.id} ⬜ {c.title}</li>" for c in chores])
             reply_lines.append(f"Pending chores:<ul>{items}</ul>")
@@ -145,6 +154,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
     elif action_type == "mark_chore_done":
         chore_id = action_data["id"]
         chore = db.query(Chore).filter(Chore.id == chore_id).first()
+        log_info(trace_id, "executed=mark_chore_done")
         if chore:
             chore.done = True
             db.commit()
@@ -158,9 +168,11 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         db.add(Birthday(name=name, date=bday))
         db.commit()
         reply_lines.append(f"Added birthday: <b>{name}</b> on <b>{bday.isoformat()}</b> 🎂")
+        log_info(trace_id, "executed=add_birthday")
 
     elif action_type == "list_birthdays":
         birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
+        log_info(trace_id, "executed=list_birthdays")
         if birthdays:
             items = "".join([f"<li>🎂 {b.name} — {b.date.isoformat()}</li>" for b in birthdays])
             reply_lines.append(f"<ul>{items}</ul>")
@@ -168,6 +180,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
             reply_lines.append("No birthdays found.")
 
     else:
+        log_info(trace_id, "executed=unknown")
         reply_lines.append(
             "Try commands like:<br>"
             "<code>add chore take out trash</code><br>"
@@ -179,6 +192,9 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         )
 
     reply_html = "<br>".join(reply_lines)
+
+    ms = int((time.time() - t0) * 1000)
+    log_info(trace_id, f"latency_ms={ms}")
 
     return f"""
     <html>
