@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Depends, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response
 from sqlalchemy.orm import Session
 from datetime import date
 
@@ -10,7 +10,10 @@ from .llm_planner import plan_action
 from .logger import new_trace_id, log_info
 from .health import check_db, check_ollama
 from .metrics import record_latency, latency_stats, get_counts
+from .health import reset_demo_data
 import time
+import csv
+import io
 
 Base.metadata.create_all(bind=engine)
 
@@ -179,7 +182,9 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
 
     elif action_type == "add_birthday":
         name = action_data["name"]
-        bday = action_data["date"]
+        bday_str = action_data["date"]              # e.g. "1994-07-18"
+        bday = date.fromisoformat(bday_str)         # convert to datetime.date
+
         db.add(Birthday(name=name, date=bday))
         db.commit()
         reply_lines.append(f"Added birthday: <b>{name}</b> on <b>{bday.isoformat()}</b> 🎂")
@@ -292,6 +297,11 @@ def admin_dashboard(db: Session = Depends(get_db)):
           <p><b>DB:</b> {'✅ OK' if db_status.get('ok') else '❌ ' + db_status.get('error','')}</p>
           <p><b>Ollama:</b> {'✅ OK' if ollama_status.get('ok') else '❌ ' + ollama_status.get('error','')}</p>
           <p><b>Models:</b> {', '.join(ollama_status.get('models', [])) if ollama_status.get('ok') else 'N/A'}</p>
+          <form method="post" action="/admin/reset" style="margin-top: 12px;">
+            <button type="submit" onclick="return confirm('Reset demo data (delete all chores and birthdays)?')">
+              Reset demo data
+            </button>
+          </form>
         </div>
 
         <h2>Counts</h2>
@@ -306,8 +316,53 @@ def admin_dashboard(db: Session = Depends(get_db)):
           <p><b>P95:</b> {lat['p95_ms']} ms</p>
         </div>
 
+        <h2>Exports</h2>
+        <ul>
+          <li><a href="/export/chores.csv">Download chores.csv</a></li>
+          <li><a href="/export/birthdays.csv">Download birthdays.csv</a></li>
+        </ul>
+
         <hr/>
         <p style="color:#888; font-size:12px;">CHILI Admin — local dashboard</p>
       </body>
     </html>
     """
+
+@app.post("/admin/reset")
+def admin_reset(db: Session = Depends(get_db)):
+    result = reset_demo_data(db)
+    # Redirect back to admin page (even if failed)
+    return RedirectResponse("/admin", status_code=303)
+
+@app.get("/export/chores.csv")
+def export_chores_csv(db: Session = Depends(get_db)):
+    chores = db.query(Chore).order_by(Chore.id.asc()).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["id", "title", "done"])
+    for c in chores:
+        writer.writerow([c.id, c.title, c.done])
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=chores.csv"},
+    )
+
+
+@app.get("/export/birthdays.csv")
+def export_birthdays_csv(db: Session = Depends(get_db)):
+    birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
+
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["id", "name", "date"])
+    for b in birthdays:
+        writer.writerow([b.id, b.name, b.date.isoformat()])
+
+    return Response(
+        content=output.getvalue(),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=birthdays.csv"},
+    )
