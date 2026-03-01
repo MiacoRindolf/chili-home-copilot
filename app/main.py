@@ -6,6 +6,7 @@ from datetime import date
 from .db import Base, engine, SessionLocal
 from .chili_nlu import parse_message
 from .models import Chore, Birthday
+from .llm_planner import plan_action
 
 Base.metadata.create_all(bind=engine)
 
@@ -93,18 +94,39 @@ def chat_page():
 
 @app.post("/chat", response_class=HTMLResponse)
 def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
-    action = parse_message(message)
+    # Try LLM planner first, fallback to rules
+    try:
+        planned = plan_action(message)
+        print("PLANNED_ACTION:", planned)
+        llm_reply = planned.get("reply") if isinstance(planned, dict) else None
+    except Exception as e:
+        # fallback to rule-based parser if LLM is unavailable
+        fallback = parse_message(message)
+        planned = {"type": fallback.type, "data": fallback.data, "llm_error": str(e)}
+
+    if isinstance(planned, dict) and "type" in planned and "data" in planned:
+        action_type = planned["type"]
+        action_data = planned["data"]
+        llm_reply = planned.get("reply") if isinstance(planned, dict) else None
+    else:
+        # fallback
+        fallback = parse_message(message)
+        action_type = fallback.type
+        action_data = fallback.data
+        llm_reply = planned.get("reply") if isinstance(planned, dict) else None
 
     reply_lines = []
+    if llm_reply:
+      reply_lines.append(llm_reply)
     safe_msg = message.replace("<", "&lt;").replace(">", "&gt;")
 
-    if action.type == "add_chore":
-        title = action.data["title"]
+    if action_type == "add_chore":
+        title = action_data["title"]
         db.add(Chore(title=title, done=False))
         db.commit()
         reply_lines.append(f"Added chore: <b>{title}</b> ✅")
 
-    elif action.type == "list_chores":
+    elif action_type == "list_chores":
         chores = db.query(Chore).order_by(Chore.id.desc()).all()
         if chores:
             items = "".join([f"<li>#{c.id} {'✅' if c.done else '⬜'} {c.title}</li>" for c in chores])
@@ -112,7 +134,7 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         else:
             reply_lines.append("No chores found.")
 
-    elif action.type == "list_chores_pending":
+    elif action_type == "list_chores_pending":
         chores = db.query(Chore).filter(Chore.done == False).order_by(Chore.id.desc()).all()
         if chores:
             items = "".join([f"<li>#{c.id} ⬜ {c.title}</li>" for c in chores])
@@ -120,8 +142,8 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         else:
             reply_lines.append("No pending chores. Nice! ✅")
 
-    elif action.type == "mark_chore_done":
-        chore_id = action.data["id"]
+    elif action_type == "mark_chore_done":
+        chore_id = action_data["id"]
         chore = db.query(Chore).filter(Chore.id == chore_id).first()
         if chore:
             chore.done = True
@@ -130,14 +152,14 @@ def chat_submit(message: str = Form(...), db: Session = Depends(get_db)):
         else:
             reply_lines.append(f"Couldn't find chore #{chore_id}.")
 
-    elif action.type == "add_birthday":
-        name = action.data["name"]
-        bday = action.data["date"]
+    elif action_type == "add_birthday":
+        name = action_data["name"]
+        bday = action_data["date"]
         db.add(Birthday(name=name, date=bday))
         db.commit()
         reply_lines.append(f"Added birthday: <b>{name}</b> on <b>{bday.isoformat()}</b> 🎂")
 
-    elif action.type == "list_birthdays":
+    elif action_type == "list_birthdays":
         birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
         if birthdays:
             items = "".join([f"<li>🎂 {b.name} — {b.date.isoformat()}</li>" for b in birthdays])
