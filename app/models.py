@@ -73,3 +73,19 @@ class ChatMessage(Base):
 
     trace_id = Column(String, nullable=True)
     action_type = Column(String, nullable=True)
+    model_used = Column(String, nullable=True)  # "llama3", "gpt-4o-mini", "offline"
+
+
+class HousemateProfile(Base):
+    __tablename__ = "housemate_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    interests = Column(Text, nullable=True)      # JSON list
+    dietary = Column(String, nullable=True)
+    tone = Column(String, nullable=True)          # "casual", "formal", etc.
+    notes = Column(Text, nullable=True)           # freeform observations
+    last_extracted_at = Column(DateTime, nullable=True)
+    message_count_at_extraction = Column(Integer, default=0)
+
+    user = relationship("User")

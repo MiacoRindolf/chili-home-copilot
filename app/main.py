@@ -5,11 +5,13 @@ from datetime import date
 
 from .db import Base, engine, SessionLocal
 from .chili_nlu import parse_message
-from .models import Chore, Birthday, ChatLog, User, ChatMessage
+from .models import Chore, Birthday, ChatLog, User, ChatMessage, HousemateProfile
 from .pairing import DEVICE_COOKIE_NAME, redeem_pair_code, register_device, get_identity, generate_pair_code, get_identity_record
 from .llm_planner import plan_action
 from .logger import new_trace_id, log_info
 from . import rag as rag_module
+from . import openai_client
+from . import personality as personality_module
 from .health import check_db, check_ollama
 from .metrics import record_latency, latency_stats, get_counts
 from .health import reset_demo_data
@@ -210,7 +212,7 @@ def chat_page():
   <header>
     <div>
       <h1>&#x1F336;&#xFE0F; CHILI Chat</h1>
-      <nav><a href="/">Home</a> &#xB7; <a href="/admin">Admin</a></nav>
+      <nav><a href="/">Home</a> &#xB7; <a href="/profile">Profile</a> &#xB7; <a href="/admin">Admin</a></nav>
     </div>
     <button id="theme-toggle" title="Toggle dark mode">&#x1F319;</button>
   </header>
@@ -561,11 +563,132 @@ def add_birthday(
     db.commit()
     return RedirectResponse("/", status_code=303)
 
+@app.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, db: Session = Depends(get_db)):
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return HTMLResponse(
+            "<html><body style='font-family:Arial;max-width:800px;margin:40px auto;'>"
+            "<h1>Profile</h1><p>You need to be a paired housemate to view your profile.</p>"
+            "<p><a href='/pair'>Pair your device</a> | <a href='/chat'>Back to Chat</a></p>"
+            "</body></html>"
+        )
+
+    user_id = identity["user_id"]
+    user_name = identity["user_name"]
+    profile = db.query(HousemateProfile).filter(HousemateProfile.user_id == user_id).first()
+
+    import json as _json
+    interests_str = ""
+    if profile and profile.interests:
+        try:
+            interests_list = _json.loads(profile.interests)
+            interests_str = ", ".join(interests_list)
+        except _json.JSONDecodeError:
+            interests_str = profile.interests
+
+    dietary = profile.dietary if profile else ""
+    tone = profile.tone if profile else ""
+    notes = profile.notes if profile else ""
+    last_updated = profile.last_extracted_at.strftime("%B %d, %Y %H:%M") if profile and profile.last_extracted_at else "Never"
+
+    return f"""
+    <html><head>
+      <title>CHILI Profile - {user_name}</title>
+      <meta charset="utf-8"/>
+      <meta name="viewport" content="width=device-width, initial-scale=1" />
+    </head><body style="font-family:Arial;max-width:800px;margin:40px auto;">
+      <h1>Your Profile</h1>
+      <p><a href="/chat">Chat</a> | <a href="/">Home</a></p>
+      <p>Hi <b>{user_name}</b>! CHILI learns about you from your conversations to personalize responses.</p>
+
+      <form method="post" action="/profile">
+        <div style="margin:16px 0;">
+          <label><b>Interests</b> (comma-separated)</label><br/>
+          <input name="interests" value="{interests_str}" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+        </div>
+        <div style="margin:16px 0;">
+          <label><b>Dietary preferences</b></label><br/>
+          <input name="dietary" value="{dietary}" placeholder="e.g., vegetarian, no dairy" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+        </div>
+        <div style="margin:16px 0;">
+          <label><b>Communication style</b></label><br/>
+          <input name="tone" value="{tone}" placeholder="e.g., casual, brief, formal" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+        </div>
+        <div style="margin:16px 0;">
+          <label><b>Notes</b> (anything CHILI should know)</label><br/>
+          <textarea name="notes" rows="3" style="width:100%;max-width:520px;padding:10px;font-size:15px;">{notes}</textarea>
+        </div>
+        <button type="submit" style="padding:10px 20px;font-size:16px;">Save Profile</button>
+      </form>
+
+      <p style="color:#888;font-size:12px;margin-top:24px;">
+        Last auto-updated: {last_updated}
+      </p>
+    </body></html>
+    """
+
+
+@app.post("/profile")
+def profile_save(
+    request: Request,
+    interests: str = Form(""),
+    dietary: str = Form(""),
+    tone: str = Form(""),
+    notes: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return RedirectResponse("/profile", status_code=303)
+
+    user_id = identity["user_id"]
+    import json as _json
+
+    interests_list = [i.strip() for i in interests.split(",") if i.strip()]
+    interests_json = _json.dumps(interests_list)
+
+    profile = db.query(HousemateProfile).filter(HousemateProfile.user_id == user_id).first()
+    if profile:
+        profile.interests = interests_json
+        profile.dietary = dietary.strip()
+        profile.tone = tone.strip()
+        profile.notes = notes.strip()
+    else:
+        db.add(HousemateProfile(
+            user_id=user_id,
+            interests=interests_json,
+            dietary=dietary.strip(),
+            tone=tone.strip(),
+            notes=notes.strip(),
+        ))
+    db.commit()
+
+    return RedirectResponse("/profile", status_code=303)
+
+
+def _model_stats(db: Session) -> dict:
+    """Count assistant messages by model_used."""
+    from sqlalchemy import func
+    rows = (
+        db.query(ChatMessage.model_used, func.count(ChatMessage.id))
+        .filter(ChatMessage.role == "assistant")
+        .group_by(ChatMessage.model_used)
+        .all()
+    )
+    return {model or "unknown": count for model, count in rows}
+
+
 @app.get("/metrics", response_class=JSONResponse)
 def metrics(db: Session = Depends(get_db)):
     return {
         "counts": get_counts(db),
         "llm_chat_latency": latency_stats(),
+        "model_usage": _model_stats(db),
     }
 
 @app.get("/admin", response_class=HTMLResponse)
@@ -578,6 +701,9 @@ def admin_dashboard(db: Session = Depends(get_db)):
     lat = latency_stats()
 
     ok = bool(db_status.get("ok") and ollama_status.get("ok"))
+
+    model_stats = _model_stats(db)
+    openai_configured = openai_client.is_configured()
 
     logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(20).all()
     logs_html = "".join(
@@ -619,6 +745,12 @@ def admin_dashboard(db: Session = Depends(get_db)):
         <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
           <p><b>Avg:</b> {lat['avg_ms']} ms</p>
           <p><b>P95:</b> {lat['p95_ms']} ms</p>
+        </div>
+
+        <h2>Model Usage</h2>
+        <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+          <p><b>OpenAI:</b> {'Configured (' + openai_client.OPENAI_MODEL + ')' if openai_configured else 'Not configured (set OPENAI_API_KEY in .env)'}</p>
+          {''.join(f'<p><b>{model}:</b> {count} messages</p>' for model, count in model_stats.items()) or '<p>No messages yet.</p>'}
         </div>
 
         <h2>Exports</h2>
@@ -821,10 +953,19 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
         )
         log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
 
+    # Personality: load profile context for paired users
+    personality_context = None
+    user_id = identity.get("user_id")
+    if user_id and not identity["is_guest"]:
+        personality_context = personality_module.get_profile_context(user_id, db)
+        if personality_context:
+            log_info(trace_id, f"personality_injected user_id={user_id}")
+
     try:
         planned = plan_action(
             f"Conversation so far:\n{context}\n\nNew user message: {message}",
             rag_context=rag_context,
+            personality_context=personality_context,
         )
     except Exception as e:
         log_info(trace_id, f"llm_error={e}")
@@ -832,7 +973,7 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
             "CHILI's brain is offline. "
             "Start Ollama to use chat: ollama serve"
         )
-        db.add(ChatMessage(convo_key=convo_key, role="assistant", content=llm_reply, trace_id=trace_id, action_type="llm_offline"))
+        db.add(ChatMessage(convo_key=convo_key, role="assistant", content=llm_reply, trace_id=trace_id, action_type="llm_offline", model_used="offline"))
         db.commit()
         db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type="llm_offline"))
         db.commit()
@@ -922,6 +1063,31 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
         if source and llm_reply:
             llm_reply = f"{llm_reply}\n(source: {source})"
 
+    # OpenAI fallback: if planner returned unknown and OpenAI is configured,
+    # route to OpenAI for a full conversational response
+    model_used = "llama3"
+    if action_type == "unknown" and openai_client.is_configured():
+        openai_messages = [
+            {"role": m.role, "content": m.content} for m in recent
+        ]
+        openai_system = openai_client.SYSTEM_PROMPT
+        if personality_context:
+            openai_system += f"\n\n{personality_context}"
+        if rag_context:
+            openai_system += f"\n\nHousehold document context:\n{rag_context}"
+
+        result = openai_client.chat(
+            messages=openai_messages,
+            system_prompt=openai_system,
+            trace_id=trace_id,
+        )
+        if result["reply"]:
+            llm_reply = result["reply"]
+            action_type = "general_chat"
+            model_used = result["model"]
+            executed = True
+            log_info(trace_id, f"openai_fallback tokens={result['tokens_used']} model={model_used}")
+
     if not llm_reply:
         llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
 
@@ -931,7 +1097,8 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
         role="assistant",
         content=llm_reply,
         trace_id=trace_id,
-        action_type=action_type
+        action_type=action_type,
+        model_used=model_used,
     ))
     db.commit()
 
@@ -944,6 +1111,14 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
     ))
     db.commit()
 
+    # Personality extraction: check if it's time to update this user's profile
+    if user_id and not is_guest:
+        try:
+            if personality_module.should_update(user_id, db):
+                personality_module.extract_profile(user_id, db, trace_id=trace_id)
+        except Exception as e:
+            log_info(trace_id, f"personality_extraction_error={e}")
+
     ms = int((time.time() - t0) * 1000)
     record_latency(ms)
     log_info(trace_id, f"latency_ms={ms} action={action_type} executed={executed}")
@@ -955,4 +1130,5 @@ def chat_api(request: Request, message: str = Form(...), db: Session = Depends(g
         "action_type": action_type,
         "executed": executed,
         "reply": llm_reply,
+        "model_used": model_used,
     }

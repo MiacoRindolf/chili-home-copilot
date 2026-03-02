@@ -2,9 +2,9 @@
 
 **Conversational Home Interface & Life Intelligence**
 
-A local-first household assistant powered by a local LLM (Ollama llama3). Housemates interact through natural language to manage chores, birthday reminders, and ask questions about household documents -- all running on your own hardware with no cloud dependencies.
+A local-first household assistant powered by a local LLM (Ollama llama3) with optional OpenAI fallback. Housemates interact through natural language to manage chores, birthday reminders, ask questions about household documents, and have general conversations -- all running on your own hardware with cloud AI as an optional upgrade.
 
-Built as a production-style LLM application showcasing tool-calling architecture, RAG (Retrieval-Augmented Generation), strict validation, identity/auth, observability, and guardrails.
+Built as a production-style LLM application showcasing multi-model routing, RAG (Retrieval-Augmented Generation), personality profiling, tool-calling architecture, strict validation, identity/auth, observability, and guardrails.
 
 ## Architecture
 
@@ -17,21 +17,22 @@ Built as a production-style LLM application showcasing tool-calling architecture
  │                                             │
  │  /api/chat ──► RAG Search ──► LLM Planner   │
  │                (ChromaDB)      (Ollama)      │
- │                    │              │          │
- │                 context       Validator      │
- │                injected      (Pydantic)      │
+ │                    │    +          │         │
+ │                 context  personality    Validator│
+ │                injected  profile    (Pydantic)│
  │                                   │         │
- │                              valid plan?     │
- │                             ╱          ╲    │
- │                          yes            no  │
- │                           │              │  │
- │                      Tool Executor   Fallback│
- │                           │         (rules) │
- │                           ▼              │  │
- │                       SQLite DB ◄────────┘  │
+ │                          tool action?        │
+ │                         ╱     ╲              │
+ │                      yes       no (unknown)  │
+ │                       │              │       │
+ │                  Tool Executor   OpenAI API  │
+ │                       │        (gpt-4o-mini) │
+ │                       ▼              │       │
+ │                   SQLite DB     General Chat  │
  │                                             │
  │  Identity: cookie ──► Device ──► User       │
- │  Observability: trace_id, structured logs   │
+ │  Personality: auto-profiled, /profile page  │
+ │  Observability: trace_id, model_used, logs  │
  │  Guardrails: guest read-only, schema reject │
  └─────────────────────────────────────────────┘
 ```
@@ -52,6 +53,20 @@ Built as a production-style LLM application showcasing tool-calling architecture
 - Every chat message triggers a vector similarity search; relevant chunks are injected into the LLM prompt
 - The LLM uses `answer_from_docs` action type to cite which document it used
 - Graceful degradation: if ChromaDB is empty or embeddings are unavailable, CHILI falls back to normal tool-calling
+
+### Smart Multi-Model Routing
+- Local-first: tool actions (chores, birthdays, RAG) always use llama3 locally (free, private)
+- OpenAI fallback: general conversation routes to OpenAI API when the local planner returns `type=unknown`
+- Cost-aware: defaults to `gpt-4o-mini` (~$0.15/1M tokens). Configurable via `.env`
+- Graceful: works without an API key (existing help message). Zero breaking changes
+- `model_used` tracked on every message for observability (`/admin`, `/metrics`)
+
+### Housemate Personality Profiles
+- CHILI automatically learns each housemate's personality from their conversations
+- Profiles extracted every 20 messages via OpenAI (interests, dietary preferences, tone, notes)
+- Personality context injected into both llama3 and OpenAI prompts for personalized responses
+- `/profile` page where housemates can view and edit what CHILI has learned
+- Privacy: only your own profile visible. Admin can see all profiles
 
 ### Chat Memory
 - Persistent conversation history per user stored in SQLite (`chat_messages` table)
@@ -89,22 +104,45 @@ Built as a production-style LLM application showcasing tool-calling architecture
 |-------|-----------|
 | Backend | Python 3.11, FastAPI |
 | Database | SQLite via SQLAlchemy |
-| LLM | Ollama (llama3 for planning, nomic-embed-text for embeddings) |
+| LLM (local) | Ollama (llama3 for planning, nomic-embed-text for embeddings) |
+| LLM (cloud) | OpenAI API (gpt-4o-mini for general chat + personality extraction) |
 | Vector Store | ChromaDB (local, persistent) |
 | Validation | Pydantic v2 (strict schemas, discriminated unions) |
 | Frontend | Server-rendered HTML + vanilla JS (`fetch()` for chat) |
-| Environment | Conda (`chili-env`) |
+| Container | Docker + Docker Compose (Ollama sidecar) |
+| Environment | Conda (`chili-env`) or Docker |
 
 ## Quick Start
 
-### Prerequisites
+### Option A: Docker (recommended)
+
+The fastest way to get CHILI running. One command pulls Ollama + models, starts the app, and ingests documents.
+
+```bash
+git clone https://github.com/MiacoRindolf/chili-home-copilot.git
+cd chili-home-copilot
+
+# (Optional) Set up OpenAI for general chat
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY
+
+# Start everything
+bash scripts/docker-setup.sh
+```
+
+Open [http://localhost:8000/chat](http://localhost:8000/chat) to start chatting.
+
+To stop: `docker compose down`. To stop and wipe data: `docker compose down -v`.
+
+### Option B: Local (Conda)
+
+#### Prerequisites
 - Python 3.11+ (via Conda or system Python)
 - [Ollama](https://ollama.com/) installed with `llama3` pulled
 
-### Setup
+#### Setup
 
 ```bash
-# Clone the repo
 git clone https://github.com/MiacoRindolf/chili-home-copilot.git
 cd chili-home-copilot
 
@@ -113,7 +151,11 @@ conda create -n chili-env python=3.11 -y
 conda activate chili-env
 
 # Install dependencies
-pip install fastapi uvicorn sqlalchemy pydantic requests chromadb
+pip install -r requirements.txt
+
+# (Optional) Set up OpenAI for general chat
+cp .env.example .env
+# Edit .env and add your OPENAI_API_KEY
 
 # Pull the LLM and embedding models
 ollama pull llama3
@@ -138,10 +180,12 @@ CHILI is designed for household use. Run with `--host 0.0.0.0` and access from a
 
 ```
 app/
-├── main.py            # FastAPI routes and chat UI
-├── models.py          # SQLAlchemy models (Chore, Birthday, ChatMessage, User, Device, etc.)
+├── main.py            # FastAPI routes, chat UI, /profile page
+├── models.py          # SQLAlchemy models (incl. HousemateProfile)
 ├── db.py              # Database engine and session setup
-├── llm_planner.py     # Ollama integration and LLM planner (accepts RAG context)
+├── llm_planner.py     # Ollama planner (accepts RAG + personality context)
+├── openai_client.py   # OpenAI API wrapper for general chat fallback
+├── personality.py     # Personality profiling: extraction, context injection
 ├── planner_schema.py  # Pydantic validation schemas (incl. answer_from_docs)
 ├── rag.py             # RAG module: chunking, embedding, ChromaDB search
 ├── ingest.py          # CLI script: python -m app.ingest
@@ -159,10 +203,18 @@ data/
 ├── chili.db           # SQLite database (auto-created, gitignored)
 ├── chroma/            # ChromaDB vector store (auto-created, gitignored)
 tests/
-├── test_rag.py        # Tests for chunking, search, and ingestion
+├── test_rag.py             # Tests for chunking, search, and ingestion
 ├── test_planner_schema.py  # Schema validation tests (incl. answer_from_docs)
-├── test_api.py        # API integration tests
+├── test_api.py             # API integration tests
+├── test_openai_routing.py  # OpenAI fallback routing + model tracking tests
+├── test_personality.py     # Personality extraction and profile tests
 ├── test_fallback_parser.py # Fallback parser tests
+Dockerfile             # Container image for CHILI app
+docker-compose.yml     # Full stack: CHILI + Ollama
+scripts/
+├── docker-setup.sh    # One-command Docker bootstrap
+requirements.txt       # Pinned Python dependencies
+.env.example           # Template for environment variables
 TOOLING.md             # Deep dive into guardrails and tool-calling design
 ```
 
@@ -181,6 +233,12 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 | **RAG with local embeddings** | Ollama `nomic-embed-text` keeps embeddings local (no cloud API keys). ChromaDB provides persistent vector storage with zero infrastructure. |
 | **RAG is additive** | Document search enhances the planner without replacing tool-calling. Existing chore/birthday actions work identically whether RAG context is present or not. |
 | **Simple paragraph chunking** | Household docs are short and structured. Splitting by paragraph with a 500-char cap is sufficient without complex chunking libraries. |
+| **Local-first, cloud-optional** | Tool actions stay on llama3 (free, private). OpenAI only handles general conversation when the local planner can't. No API key required to use core features. |
+| **gpt-4o-mini default** | Cheapest OpenAI model with strong quality. ~$0.15/1M input tokens makes it viable for household use without budget worries. |
+| **Personality via extraction** | Every 20 messages, OpenAI summarizes the user's traits from conversation history. Cheaper and simpler than per-message analysis, and quality improves with more data. |
+| **User-editable profiles** | Auto-extraction can be wrong. The `/profile` page lets housemates correct CHILI's understanding, building trust and improving personalization. |
+| **Docker with Ollama sidecar** | `docker-compose.yml` runs Ollama as a service container with a health check. The app uses `OLLAMA_HOST` env var so the same code works locally and in Docker without config changes. |
+| **Pinned requirements.txt** | Exact versions for reproducible builds. Conda is great for local dev, but `pip install -r requirements.txt` works everywhere -- Docker, CI, VMs. |
 
 ## API Reference
 
@@ -194,6 +252,7 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 | `GET` | `/metrics` | Counts + LLM latency stats |
 | `GET` | `/admin` | Admin dashboard |
 | `GET` | `/admin/users` | User management + pairing |
+| `GET` | `/profile` | Housemate personality profile (view + edit) |
 | `GET` | `/pair` | Device pairing page |
 | `GET` | `/export/chores.csv` | CSV export of chores |
 | `GET` | `/export/birthdays.csv` | CSV export of birthdays |
@@ -202,9 +261,11 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 
 - [x] Pytest suite for guardrails, planner validation, and guest enforcement
 - [x] RAG over household documents (manuals, recipes, notes)
+- [x] Smart multi-model routing (local llama3 + OpenAI fallback)
+- [x] Housemate personality profiles (auto-extracted, editable)
 - [ ] Scheduled reminders (e.g., "remind me to take out trash every Tuesday")
 - [ ] Streaming LLM responses for better UX
-- [ ] Docker containerization
+- [x] Docker containerization (`docker compose up` one-liner)
 - [ ] Multi-household support
 
 ## Further Reading

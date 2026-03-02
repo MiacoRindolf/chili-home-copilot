@@ -1,9 +1,11 @@
+import os
 import requests
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from .models import Chore, Birthday
 
-OLLAMA_TAGS_URL = "http://127.0.0.1:11434/api/tags"
+_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_TAGS_URL = f"{_OLLAMA_HOST}/api/tags"
 
 def reset_demo_data(db: Session) -> dict:
     try:

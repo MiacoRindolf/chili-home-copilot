@@ -10,13 +10,15 @@ import requests
 import chromadb
 from chromadb.utils.embedding_functions import OllamaEmbeddingFunction
 
+import os
 from .logger import log_info
 
 DOCS_DIR = Path(__file__).resolve().parents[1] / "docs"
 CHROMA_DIR = Path(__file__).resolve().parents[1] / "data" / "chroma"
 COLLECTION_NAME = "household_docs"
 
-OLLAMA_EMBED_URL = "http://127.0.0.1:11434/api/embeddings"
+_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_EMBED_URL = f"{_OLLAMA_HOST}/api/embeddings"
 EMBED_MODEL = "nomic-embed-text"
 
 CHUNK_MAX_CHARS = 500

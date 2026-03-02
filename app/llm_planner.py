@@ -1,9 +1,11 @@
 import json
+import os
 import requests
 
 from .planner_schema import validate_plan
 
-OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
+_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
+OLLAMA_URL = f"{_OLLAMA_HOST}/api/chat"
 MODEL = "llama3"  # change if you're using a different one
 
 SYSTEM_BASE = """You are CHILI, an action planner for a household assistant.
@@ -41,13 +43,32 @@ use type="answer_from_docs", put the filename in data.source, and answer in "rep
 """
 
 
-def _build_system_prompt(rag_context: str | None = None) -> str:
-    if rag_context:
-        return SYSTEM_BASE + RAG_CONTEXT_TEMPLATE.format(context=rag_context)
-    return SYSTEM_BASE
+PERSONALITY_TEMPLATE = """
+HOUSEMATE CONTEXT:
+{personality}
 
-def plan_action(user_message: str, rag_context: str | None = None) -> dict:
-    system_prompt = _build_system_prompt(rag_context)
+Personalize your "reply" to match this housemate's preferences when possible.
+"""
+
+
+def _build_system_prompt(
+    rag_context: str | None = None,
+    personality_context: str | None = None,
+) -> str:
+    prompt = SYSTEM_BASE
+    if rag_context:
+        prompt += RAG_CONTEXT_TEMPLATE.format(context=rag_context)
+    if personality_context:
+        prompt += PERSONALITY_TEMPLATE.format(personality=personality_context)
+    return prompt
+
+
+def plan_action(
+    user_message: str,
+    rag_context: str | None = None,
+    personality_context: str | None = None,
+) -> dict:
+    system_prompt = _build_system_prompt(rag_context, personality_context)
     payload = {
         "model": MODEL,
         "messages": [
