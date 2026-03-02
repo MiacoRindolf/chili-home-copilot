@@ -25,6 +25,9 @@ class AnswerFromDocsData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     source: str = Field(min_length=1)
 
+class PairDeviceData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
 class UnknownData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1)
@@ -64,6 +67,10 @@ class AnswerFromDocsPlan(BasePlan):
     type: Literal["answer_from_docs"]
     data: AnswerFromDocsData
 
+class PairDevicePlan(BasePlan):
+    type: Literal["pair_device"]
+    data: PairDeviceData = Field(default_factory=PairDeviceData)
+
 class UnknownPlan(BasePlan):
     type: Literal["unknown"]
     data: UnknownData
@@ -76,6 +83,7 @@ Plan = Union[
     AddBirthdayPlan,
     ListBirthdaysPlan,
     AnswerFromDocsPlan,
+    PairDevicePlan,
     UnknownPlan,
 ]
 
@@ -91,7 +99,7 @@ def validate_plan(obj: dict) -> Optional[dict]:
         # Fallback for some environments: validate by attempting each model
         try:
             for cls in (AddChorePlan, ListChoresPlan, ListChoresPendingPlan, MarkChoreDonePlan,
-                        AddBirthdayPlan, ListBirthdaysPlan, AnswerFromDocsPlan, UnknownPlan):
+                        AddBirthdayPlan, ListBirthdaysPlan, AnswerFromDocsPlan, PairDevicePlan, UnknownPlan):
                 try:
                     plan = cls.model_validate(obj)
                     break

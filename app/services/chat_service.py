@@ -28,7 +28,7 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
     """Execute a tool action and return (reply, executed, action_type)."""
     WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday"}
     if is_guest and action_type in WRITE_ACTIONS:
-        return "Guest mode is read-only. Ask the admin to pair your device at /pair.", False, "guest_blocked"
+        return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked"
 
     executed = False
 
@@ -97,6 +97,17 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
         source = action_data.get("source", "")
         if source and llm_reply:
             llm_reply = f"{llm_reply}\n(source: {source})"
+
+    elif action_type == "pair_device":
+        executed = True
+        if is_guest:
+            llm_reply = (
+                "To pair your device, click the **Link your device** banner at the top of this page. "
+                "You'll enter the email your admin registered for you, receive a verification code, "
+                "and you're in! You can also go to `/pair` for manual pairing."
+            )
+        else:
+            llm_reply = "Your device is already paired! You're all set."
 
     return llm_reply, executed, action_type
 

@@ -287,6 +287,57 @@
     </div>
   </header>
 
+  <!-- Guest pairing banner (shown/hidden by JS based on isGuest) -->
+  <div id="pair-banner" style="display:none;background:var(--accent);color:#fff;padding:8px 16px;text-align:center;font-size:.85rem;cursor:pointer;" onclick="openPairModal()">
+    <span style="font-weight:600;">Link your device</span> to get full access &mdash; click here to pair
+  </div>
+
+  <!-- Pairing modal -->
+  <div id="pair-modal" style="display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.55);align-items:center;justify-content:center;">
+    <div style="background:var(--card-bg,#fff);border-radius:12px;padding:28px 24px;max-width:380px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3);">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
+        <h3 style="margin:0;font-size:1.1rem;">Pair Your Device</h3>
+        <button onclick="closePairModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--text-secondary);">&times;</button>
+      </div>
+
+      <!-- Step 1: email -->
+      <div id="pair-step-email">
+        <p style="font-size:.85rem;color:var(--text-secondary);margin:0 0 12px;">
+          Enter the email your admin registered for you. We'll send a 6-digit verification code.
+        </p>
+        <input id="pair-email" type="email" placeholder="your-email@example.com"
+               style="width:100%;padding:10px 12px;font-size:.95rem;border:1px solid var(--input-border);border-radius:8px;background:var(--input-bg);color:var(--text);box-sizing:border-box;" />
+        <button id="pair-send-btn" onclick="pairRequestCode()" style="margin-top:12px;width:100%;padding:10px;font-size:.95rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;">
+          Send Code
+        </button>
+        <div id="pair-email-error" style="color:#ef4444;font-size:.82rem;margin-top:8px;display:none;"></div>
+      </div>
+
+      <!-- Step 2: code -->
+      <div id="pair-step-code" style="display:none;">
+        <p id="pair-code-msg" style="font-size:.85rem;color:var(--text-secondary);margin:0 0 12px;"></p>
+        <input id="pair-code" type="text" placeholder="6-digit code" maxlength="8"
+               style="width:100%;padding:10px 12px;font-size:1.3rem;letter-spacing:.2em;text-align:center;font-weight:700;border:1px solid var(--input-border);border-radius:8px;background:var(--input-bg);color:var(--text);box-sizing:border-box;" />
+        <input id="pair-label" type="text" placeholder="Device name (e.g. My Phone)"
+               style="width:100%;padding:10px 12px;font-size:.95rem;margin-top:8px;border:1px solid var(--input-border);border-radius:8px;background:var(--input-bg);color:var(--text);box-sizing:border-box;" />
+        <button id="pair-verify-btn" onclick="pairVerifyCode()" style="margin-top:12px;width:100%;padding:10px;font-size:.95rem;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;">
+          Verify &amp; Pair
+        </button>
+        <div id="pair-code-error" style="color:#ef4444;font-size:.82rem;margin-top:8px;display:none;"></div>
+        <button onclick="pairBackToEmail()" style="margin-top:8px;width:100%;padding:6px;font-size:.82rem;background:none;border:none;color:var(--text-secondary);cursor:pointer;text-decoration:underline;">
+          Use a different email
+        </button>
+      </div>
+
+      <!-- Step 3: success -->
+      <div id="pair-step-success" style="display:none;text-align:center;">
+        <div style="font-size:2.5rem;margin-bottom:8px;">&#x2705;</div>
+        <p id="pair-success-msg" style="font-size:1rem;font-weight:600;margin:0 0 12px;"></p>
+        <p style="font-size:.85rem;color:var(--text-secondary);">Reloading in a moment&hellip;</p>
+      </div>
+    </div>
+  </div>
+
   <div id="app-layout">
     <div id="sidebar-backdrop"></div>
     <aside id="sidebar" class="hidden">
@@ -884,6 +935,10 @@
 
     var _allConvos = [];
 
+    var pairBanner = document.getElementById('pair-banner');
+
+    function isMobileView() { return window.innerWidth <= 700; }
+
     async function loadConversationsData() {
       try {
         var res = await fetch('/api/conversations');
@@ -892,15 +947,28 @@
         if (isGuest) {
           sidebar.classList.add('hidden');
           sidebarToggleBtn.style.display = 'none';
+          pairBanner.style.display = '';
           return [];
         }
-        sidebar.classList.remove('hidden');
+        if (isMobileView()) {
+          sidebar.classList.add('hidden');
+        } else {
+          sidebar.classList.remove('hidden');
+        }
         sidebarToggleBtn.style.display = '';
+        pairBanner.style.display = 'none';
         _allConvos = data.conversations || [];
         renderConvoList(_allConvos);
         return _allConvos;
       } catch(e) { return []; }
     }
+
+    window.addEventListener('resize', function() {
+      if (isMobileView() && !sidebar.classList.contains('hidden')) {
+        sidebar.classList.add('hidden');
+        sidebarBackdrop.classList.remove('visible');
+      }
+    });
 
     var _searchTimer = null;
     convoSearch.addEventListener('input', function() {
@@ -949,6 +1017,105 @@
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker.register('/static/sw.js').catch(function() {});
     }
+
+    /* ---- Self-service pairing modal ---- */
+    var pairModal      = document.getElementById('pair-modal');
+    var pairStepEmail  = document.getElementById('pair-step-email');
+    var pairStepCode   = document.getElementById('pair-step-code');
+    var pairStepOk     = document.getElementById('pair-step-success');
+    var pairEmailInput = document.getElementById('pair-email');
+    var pairCodeInput  = document.getElementById('pair-code');
+    var pairLabelInput = document.getElementById('pair-label');
+    var pairEmailErr   = document.getElementById('pair-email-error');
+    var pairCodeErr    = document.getElementById('pair-code-error');
+    var pairCodeMsg    = document.getElementById('pair-code-msg');
+    var pairSuccessMsg = document.getElementById('pair-success-msg');
+    var pairSendBtn    = document.getElementById('pair-send-btn');
+    var pairVerifyBtn  = document.getElementById('pair-verify-btn');
+
+    window.openPairModal = function() {
+      pairStepEmail.style.display = '';
+      pairStepCode.style.display = 'none';
+      pairStepOk.style.display = 'none';
+      pairEmailErr.style.display = 'none';
+      pairCodeErr.style.display = 'none';
+      pairModal.style.display = 'flex';
+      pairEmailInput.focus();
+    };
+    window.closePairModal = function() { pairModal.style.display = 'none'; };
+    window.pairBackToEmail = function() {
+      pairStepCode.style.display = 'none';
+      pairStepEmail.style.display = '';
+      pairEmailInput.focus();
+    };
+
+    pairModal.addEventListener('click', function(e) {
+      if (e.target === pairModal) closePairModal();
+    });
+
+    window.pairRequestCode = async function() {
+      var email = pairEmailInput.value.trim();
+      if (!email) { pairEmailErr.textContent = 'Enter your email.'; pairEmailErr.style.display = ''; return; }
+      pairSendBtn.disabled = true;
+      pairSendBtn.textContent = 'Sending\u2026';
+      pairEmailErr.style.display = 'none';
+      try {
+        var res = await fetch('/api/pair/request', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({email: email})
+        });
+        var data = await res.json();
+        if (data.ok) {
+          pairCodeMsg.textContent = data.message || 'Check your email for the code.';
+          if (data.dev_code) pairCodeInput.value = data.dev_code;
+          pairStepEmail.style.display = 'none';
+          pairStepCode.style.display = '';
+          pairCodeInput.focus();
+        } else {
+          pairEmailErr.textContent = data.error || 'Something went wrong.';
+          pairEmailErr.style.display = '';
+        }
+      } catch(e) {
+        pairEmailErr.textContent = 'Network error. Try again.';
+        pairEmailErr.style.display = '';
+      }
+      pairSendBtn.disabled = false;
+      pairSendBtn.textContent = 'Send Code';
+    };
+
+    window.pairVerifyCode = async function() {
+      var code = pairCodeInput.value.trim();
+      if (!code) { pairCodeErr.textContent = 'Enter the code.'; pairCodeErr.style.display = ''; return; }
+      pairVerifyBtn.disabled = true;
+      pairVerifyBtn.textContent = 'Verifying\u2026';
+      pairCodeErr.style.display = 'none';
+      try {
+        var res = await fetch('/api/pair/verify', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({code: code, label: pairLabelInput.value.trim() || navigator.userAgent.split('(')[0].trim()})
+        });
+        var data = await res.json();
+        if (data.ok) {
+          pairStepCode.style.display = 'none';
+          pairSuccessMsg.textContent = 'Welcome, ' + (data.user_name || 'Housemate') + '!';
+          pairStepOk.style.display = '';
+          setTimeout(function() { location.reload(); }, 1500);
+        } else {
+          pairCodeErr.textContent = data.error || 'Invalid code.';
+          pairCodeErr.style.display = '';
+        }
+      } catch(e) {
+        pairCodeErr.textContent = 'Network error. Try again.';
+        pairCodeErr.style.display = '';
+      }
+      pairVerifyBtn.disabled = false;
+      pairVerifyBtn.textContent = 'Verify & Pair';
+    };
+
+    pairEmailInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); pairRequestCode(); } });
+    pairCodeInput.addEventListener('keydown', function(e) { if (e.key === 'Enter') { e.preventDefault(); pairVerifyCode(); } });
 
     (async function() {
       var convos = await loadConversationsData();

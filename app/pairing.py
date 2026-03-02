@@ -1,12 +1,13 @@
 import secrets
+import random
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
 from .models import User, Device, PairCode
 
 DEVICE_COOKIE_NAME = "chili_device_token"
 
-def generate_pair_code(db: Session, user_id: int, minutes_valid: int = 10) -> str:
-    code = secrets.token_hex(4)  # 8 hex chars
+def generate_pair_code(db: Session, user_id: int, minutes_valid: int = 10, numeric: bool = False) -> str:
+    code = f"{random.randint(100000, 999999)}" if numeric else secrets.token_hex(4)
     pc = PairCode(
         code=code,
         user_id=user_id,

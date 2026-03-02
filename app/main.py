@@ -9,6 +9,14 @@ from .routers import chat, admin, pages, health_routes
 
 Base.metadata.create_all(bind=engine)
 
+# Lightweight migration: add columns that may be missing on existing DBs
+from sqlalchemy import inspect as sa_inspect, text
+with engine.connect() as conn:
+    cols = {c["name"] for c in sa_inspect(engine).get_columns("users")}
+    if "email" not in cols:
+        conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))
+        conn.commit()
+
 app = FastAPI(title="CHILI Home Copilot")
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")

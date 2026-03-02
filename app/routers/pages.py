@@ -1,17 +1,19 @@
 """Page routes: home, profile, pair, chores, birthdays form handlers."""
 from fastapi import APIRouter, Depends, Form, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from datetime import date
+from pydantic import BaseModel
 import json as json_mod
 
 from ..deps import get_db
-from ..models import Chore, Birthday, HousemateProfile
+from ..models import Chore, Birthday, HousemateProfile, User
 from ..pairing import (
     DEVICE_COOKIE_NAME, redeem_pair_code, register_device,
-    get_identity_record,
+    get_identity_record, generate_pair_code,
 )
+from .. import email_service
 
 router = APIRouter()
 templates = None
@@ -173,5 +175,72 @@ def pair_submit(
 
     token = register_device(db, user_id=pc.user_id, label=label.strip(), client_ip=client_ip)
     resp = RedirectResponse("/chat", status_code=303)
+    resp.set_cookie(DEVICE_COOKIE_NAME, token, httponly=True, samesite="lax")
+    return resp
+
+
+# ---------------------------------------------------------------------------
+# Self-service email pairing API
+# ---------------------------------------------------------------------------
+
+class PairRequestBody(BaseModel):
+    email: str
+
+class PairVerifyBody(BaseModel):
+    code: str
+    label: str = "Unknown Device"
+
+
+@router.post("/api/pair/request")
+def pair_request(body: PairRequestBody, db: Session = Depends(get_db)):
+    """Guest sends their email to receive a pairing code."""
+    email = body.email.strip().lower()
+    if not email:
+        return JSONResponse({"ok": False, "error": "Email is required."}, status_code=400)
+
+    user = db.query(User).filter(User.email == email).first()
+    if not user:
+        return JSONResponse({
+            "ok": False,
+            "error": "This email isn't registered. Ask the admin to add you as a housemate.",
+        }, status_code=404)
+
+    code = generate_pair_code(db, user_id=user.id, minutes_valid=10, numeric=True)
+
+    if email_service.is_configured():
+        sent = email_service.send_pairing_code(email, code, user.name)
+        if not sent:
+            return JSONResponse({
+                "ok": False,
+                "error": "Could not send email. Ask the admin to check email settings.",
+            }, status_code=500)
+        return JSONResponse({"ok": True, "message": f"Code sent to {email}."})
+    else:
+        # Email not configured -- return code directly (dev/local mode)
+        return JSONResponse({
+            "ok": True,
+            "message": f"Email not configured. Your code is: {code}",
+            "dev_code": code,
+        })
+
+
+@router.post("/api/pair/verify")
+def pair_verify(body: PairVerifyBody, request: Request, db: Session = Depends(get_db)):
+    """Guest submits the code to pair their device."""
+    code = body.code.strip()
+    label = body.label.strip() or "Unknown Device"
+
+    pc = redeem_pair_code(db, code)
+    if not pc:
+        return JSONResponse({
+            "ok": False,
+            "error": "Invalid or expired code. Request a new one.",
+        }, status_code=400)
+
+    client_ip = request.client.host
+    token = register_device(db, user_id=pc.user_id, label=label, client_ip=client_ip)
+
+    user = db.query(User).filter(User.id == pc.user_id).first()
+    resp = JSONResponse({"ok": True, "user_name": user.name if user else "Housemate"})
     resp.set_cookie(DEVICE_COOKIE_NAME, token, httponly=True, samesite="lax")
     return resp

@@ -107,13 +107,20 @@ def admin_users_page(request: Request, ctx=Depends(require_paired)):
 
 
 @router.post("/admin/users")
-def admin_create_user(name: str = Form(...), ctx=Depends(require_paired)):
+def admin_create_user(
+    name: str = Form(...),
+    email: str = Form(""),
+    ctx=Depends(require_paired),
+):
     redirect = _guard(ctx)
     if redirect:
         return redirect
 
     db: Session = ctx["db"]
-    db.add(User(name=name.strip()))
+    user = User(name=name.strip())
+    if email.strip():
+        user.email = email.strip().lower()
+    db.add(user)
     db.commit()
     return RedirectResponse("/admin/users", status_code=303)
 
@@ -140,8 +147,8 @@ def admin_delete_user(user_id: int, ctx=Depends(require_paired)):
 # Pairing
 # ---------------------------------------------------------------------------
 
-@router.post("/admin/pair-code", response_class=HTMLResponse)
-def admin_pair_code(user_id: int = Form(...), ctx=Depends(require_paired)):
+@router.post("/admin/pair-code")
+def admin_pair_code(request: Request, user_id: int = Form(...), ctx=Depends(require_paired)):
     redirect = _guard(ctx)
     if redirect:
         return redirect
@@ -149,17 +156,14 @@ def admin_pair_code(user_id: int = Form(...), ctx=Depends(require_paired)):
     db: Session = ctx["db"]
     user = db.query(User).filter(User.id == user_id).first()
     if not user:
-        return RedirectResponse("/admin/users", status_code=303)
+        return JSONResponse({"ok": False, "error": "User not found"}, status_code=404)
 
     code = generate_pair_code(db, user_id=user_id, minutes_valid=10)
-    return HTMLResponse(
-        f"<div style='font-family:system-ui;max-width:500px;margin:80px auto;text-align:center;'>"
-        f"<h2>Pairing Code Generated</h2>"
-        f"<p style='font-size:2rem;font-weight:bold;letter-spacing:.3em;'>{code}</p>"
-        f"<p>Valid for 10 minutes. Go to <code>/pair</code> on the device.</p>"
-        f"<p><a href='/admin/users'>Back to Users</a></p>"
-        f"</div>"
-    )
+
+    if request.headers.get("accept", "").startswith("application/json"):
+        return JSONResponse({"ok": True, "code": code, "user_name": user.name})
+
+    return JSONResponse({"ok": True, "code": code, "user_name": user.name})
 
 
 # ---------------------------------------------------------------------------

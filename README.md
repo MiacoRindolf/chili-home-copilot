@@ -86,9 +86,11 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - Last 12 messages sent as context window to the planner for multi-turn conversations
 
 ### Identity & Device Pairing
-- Admin creates housemate accounts and generates one-time pairing codes
-- Devices pair via `/pair` using the code; a cookie-based device token maps the browser to a user
-- Unpaired devices are treated as Guest (read-only)
+- Admin registers housemates with name + email at `/admin/users`
+- **Self-service pairing**: guests click "Link your device" in `/chat`, enter their email, receive a 6-digit code via Gmail SMTP, and verify to pair
+- When email isn't configured, the code is shown directly (dev mode)
+- Manual fallback via `/pair` with admin-generated codes still available
+- Cookie-based device tokens map browsers to users; unpaired devices are Guest (read-only)
 
 ### Guardrails & Safety
 - **Guest read-only enforcement**: write actions (`add_chore`, `mark_chore_done`, `add_birthday`) are blocked *before* any DB mutation
@@ -218,6 +220,7 @@ app/
 ├── ingest.py            # CLI script: python -m app.ingest
 ├── chili_nlu.py         # Rule-based fallback parser
 ├── pairing.py           # Device pairing and identity resolution
+├── email_service.py     # Gmail SMTP for self-service pairing codes
 ├── schemas.py           # API-level Pydantic schemas
 ├── logger.py            # Structured logging with trace_id
 ├── health.py            # Health checks (DB + Ollama) and demo reset
@@ -300,7 +303,9 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 | `GET` | `/admin` | Admin dashboard |
 | `GET` | `/admin/users` | User management + pairing |
 | `GET` | `/profile` | Housemate personality profile (view + edit) |
-| `GET` | `/pair` | Device pairing page |
+| `GET` | `/pair` | Device pairing page (manual fallback) |
+| `POST` | `/api/pair/request` | Request email pairing code (guest) |
+| `POST` | `/api/pair/verify` | Verify code and pair device (guest) |
 | `GET` | `/export/chores.csv` | CSV export of chores |
 | `GET` | `/export/birthdays.csv` | CSV export of birthdays |
 

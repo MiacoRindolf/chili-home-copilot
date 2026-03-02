@@ -1,14 +1,86 @@
 {% extends "base.html" %}
 {% block title %}Pair Device{% endblock %}
+
+{% block extra_head %}
+<style>
+  .pair-container {
+    max-width: 420px;
+    margin: 80px auto;
+    padding: 32px 28px;
+    background: var(--card-bg, #fff);
+    border-radius: 14px;
+    box-shadow: 0 2px 16px rgba(0,0,0,.12);
+  }
+  .pair-container h1 {
+    font-size: 1.4rem;
+    margin: 0 0 6px;
+  }
+  .pair-container p {
+    font-size: .88rem;
+    color: var(--text-secondary, #6b7280);
+    margin: 0 0 20px;
+  }
+  .pair-input {
+    display: block;
+    width: 100%;
+    padding: 12px 14px;
+    font-size: .95rem;
+    border: 1px solid var(--input-border, #d1d5db);
+    border-radius: 8px;
+    background: var(--input-bg, #f9fafb);
+    color: var(--text, #111);
+    box-sizing: border-box;
+    margin-bottom: 10px;
+  }
+  .pair-input:focus { outline: 2px solid var(--accent, #2563eb); }
+  .pair-btn {
+    display: block;
+    width: 100%;
+    padding: 12px;
+    font-size: .95rem;
+    font-weight: 600;
+    background: var(--accent, #2563eb);
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    margin-top: 4px;
+  }
+  .pair-btn:hover { opacity: .9; }
+  .pair-footer {
+    margin-top: 20px;
+    text-align: center;
+    font-size: .85rem;
+  }
+  .pair-footer a { color: var(--accent, #2563eb); text-decoration: none; }
+  .pair-footer a:hover { text-decoration: underline; }
+  .pair-tip {
+    margin-top: 20px;
+    padding: 12px 14px;
+    background: var(--bg-secondary, #f3f4f6);
+    border-radius: 8px;
+    font-size: .82rem;
+    color: var(--text-secondary, #6b7280);
+    line-height: 1.5;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="font-family:Arial;max-width:800px;margin:40px auto;">
-  <h1>🔗 Pair this device to CHILI</h1>
-  <p>Ask the admin for a pairing code.</p>
+<div class="pair-container">
+  <h1>&#x1F517; Pair Your Device</h1>
+  <p>Enter the pairing code from your admin to link this device to your account.</p>
   <form method="post" action="/pair">
-    <input name="code" placeholder="Pairing code" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
-    <input name="label" placeholder="Device label (e.g., Alex iPhone)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;margin-top:8px;" />
-    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Pair</button>
+    <input class="pair-input" name="code" placeholder="Pairing code" required autocomplete="off" />
+    <input class="pair-input" name="label" placeholder="Device name (e.g. Alex's iPhone)" required />
+    <button type="submit" class="pair-btn">Pair Device</button>
   </form>
-  <p><a href="/chat">Go to Chat</a></p>
+  <div class="pair-tip">
+    <strong>Tip:</strong> You can also pair from the <a href="/chat">Chat page</a> using your email
+    (no code needed). Just click "Link your device" at the top.
+  </div>
+  <div class="pair-footer">
+    <a href="/chat">&#x2190; Back to Chat</a>
+  </div>
 </div>
 {% endblock %}

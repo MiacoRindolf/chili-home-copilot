@@ -39,5 +39,9 @@ def parse_message(text: str) -> Action:
     if re.match(r"(?i)^\s*(list|show)\s+birthdays\s*$", t):
         return Action(type="list_birthdays", data={})
 
+    # Pair device: "pair", "pair my device", "link my device", "log in", "sign in"
+    if re.match(r"(?i)^\s*(pair(\s+(my\s+)?device)?|link(\s+(my\s+)?device)?|log\s*in|sign\s*in)\s*$", t):
+        return Action(type="pair_device", data={})
+
     # Default
     return Action(type="unknown", data={"text": t})

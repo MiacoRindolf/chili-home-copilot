@@ -24,7 +24,7 @@ class TestGuestReadOnly:
         data = resp.json()
 
         assert data["is_guest"] is True
-        assert data["reply"] == "Guest mode is read-only. Ask the admin to pair your device at /pair."
+        assert "Guest mode is read-only" in data["reply"]
         assert db.query(Chore).count() == 0, "No chore should be created for guests"
 
     @patch("app.services.chat_service.plan_action")

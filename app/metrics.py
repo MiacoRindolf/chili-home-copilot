@@ -98,6 +98,7 @@ def user_stats(db: Session) -> list[dict]:
         results.append({
             "id": u.id,
             "name": u.name,
+            "email": u.email or "",
             "device_count": len(devices),
             "devices": [
                 {
