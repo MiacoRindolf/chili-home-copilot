@@ -1,15 +1,17 @@
 """Chat routes: chat page, API chat, streaming, history, conversations."""
-from fastapi import APIRouter, Depends, Form, Request, Query
+from fastapi import APIRouter, Depends, Form, Request, Query, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from fastapi.templating import Jinja2Templates
 from typing import Optional
 from sqlalchemy.orm import Session
+import json as json_stdlib
 import time
 
 from ..deps import get_db, get_convo_key
 from ..models import ChatMessage, ChatLog, Conversation
 from ..logger import new_trace_id, log_info
 from .. import openai_client
+from .. import vision as vision_module
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..services.chat_service import (
@@ -185,17 +187,57 @@ def chat_history(
             {
                 "role": m.role, "content": m.content, "created_at": str(m.created_at),
                 "model_used": m.model_used, "trace_id": m.trace_id, "action_type": m.action_type,
+                "image_paths": _parse_image_paths(m.image_path),
             }
             for m in msgs
         ],
     }
 
 
+async def _handle_image_uploads(images: list[UploadFile], trace_id: str) -> list[str]:
+    """Read and save multiple uploaded images. Returns list of saved filenames."""
+    saved_names: list[str] = []
+    for image in images:
+        if not image or not image.filename:
+            continue
+        file_bytes = await image.read()
+        if not file_bytes:
+            continue
+        saved = vision_module.save_upload(file_bytes, image.filename, image.content_type or "")
+        if not saved:
+            log_info(trace_id, f"image_upload_rejected type={image.content_type} size={len(file_bytes)}")
+        else:
+            log_info(trace_id, f"image_uploaded name={saved} size={len(file_bytes)}")
+            saved_names.append(saved)
+    return saved_names
+
+
+def _image_path_json(saved_images: list[str]) -> str | None:
+    """Serialize saved image names to JSON for storage, or None if empty."""
+    if not saved_images:
+        return None
+    return json_stdlib.dumps(saved_images)
+
+
+def _parse_image_paths(image_path_raw: str | None) -> list[str]:
+    """Parse the image_path column back into a list. Handles JSON array and legacy single-name."""
+    if not image_path_raw:
+        return []
+    try:
+        parsed = json_stdlib.loads(image_path_raw)
+        if isinstance(parsed, list):
+            return parsed
+    except (json_stdlib.JSONDecodeError, TypeError):
+        pass
+    return [image_path_raw]
+
+
 @router.post("/api/chat", response_class=JSONResponse)
-def chat_api(
+async def chat_api(
     request: Request,
-    message: str = Form(...),
+    message: str = Form(""),
     conversation_id: Optional[int] = Form(None),
+    images: list[UploadFile] = File([]),
     db: Session = Depends(get_db),
 ):
     trace_id = new_trace_id()
@@ -209,12 +251,40 @@ def chat_api(
     is_guest = identity["is_guest"]
     user_id = identity.get("user_id")
 
-    log_info(trace_id, f"client_ip={client_ip} user={user_name} guest={is_guest} convo={convo_key} conversation_id={conversation_id}")
-    log_info(trace_id, f"chat_message={message!r}")
+    saved_images = await _handle_image_uploads(images, trace_id)
+    if not message.strip() and not saved_images:
+        return JSONResponse({"error": "Message or image required"}, status_code=400)
 
-    chat_init = init_chat(db, convo_key, conversation_id, message, identity, trace_id)
+    display_message = message.strip() or "(image)"
+    log_info(trace_id, f"client_ip={client_ip} user={user_name} guest={is_guest} convo={convo_key} conversation_id={conversation_id} images={len(saved_images)}")
+    log_info(trace_id, f"chat_message={display_message!r}")
+
+    image_path_val = _image_path_json(saved_images)
+    chat_init = init_chat(db, convo_key, conversation_id, display_message, identity, trace_id, image_path=image_path_val)
     conversation_id = chat_init["conversation_id"]
     recent = chat_init["recent"]
+
+    if saved_images:
+        system = build_openai_prompt(user_name, None, None, vision_module.VISION_SYSTEM_PROMPT)
+        llm_reply, model_used = vision_module.describe_image(saved_images, message.strip(), system, trace_id)
+        action_type = "vision"
+        executed = True
+
+        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used=model_used))
+        db.commit()
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=display_message, action_type=action_type))
+        db.commit()
+
+        if conversation_id:
+            convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if convo_obj and convo_obj.title == "New Chat":
+                title_text = message.strip()[:40] if message.strip() else "Image chat"
+                convo_obj.title = title_text + ("..." if len(title_text) > 39 else "")
+                db.commit()
+
+        ms = int((time.time() - t0) * 1000)
+        record_latency(ms)
+        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
 
     rag_sources = []
     personality_used = False
@@ -322,10 +392,11 @@ def chat_api(
 
 
 @router.post("/api/chat/stream")
-def chat_stream_api(
+async def chat_stream_api(
     request: Request,
-    message: str = Form(...),
+    message: str = Form(""),
     conversation_id: Optional[int] = Form(None),
+    images: list[UploadFile] = File([]),
     db: Session = Depends(get_db),
 ):
     trace_id = new_trace_id()
@@ -339,9 +410,35 @@ def chat_stream_api(
     is_guest = identity["is_guest"]
     user_id = identity.get("user_id")
 
-    chat_init = init_chat(db, convo_key, conversation_id, message, identity, trace_id)
+    saved_images = await _handle_image_uploads(images, trace_id)
+    if not message.strip() and not saved_images:
+        return JSONResponse({"error": "Message or image required"}, status_code=400)
+
+    display_message = message.strip() or "(image)"
+
+    image_path_val = _image_path_json(saved_images)
+    chat_init = init_chat(db, convo_key, conversation_id, display_message, identity, trace_id, image_path=image_path_val)
     conversation_id = chat_init["conversation_id"]
     recent = chat_init["recent"]
+
+    if saved_images:
+        system = build_openai_prompt(user_name, None, None, vision_module.VISION_SYSTEM_PROMPT)
+
+        def vision_gen():
+            full = []
+            model_used = "none"
+            for tok, model in vision_module.describe_image_stream(saved_images, message.strip(), system, trace_id):
+                model_used = model
+                if tok:
+                    full.append(tok)
+                    yield sse_event({"token": tok, "done": False})
+            complete = "".join(full) or "Could not analyze the image."
+            if not full:
+                yield sse_event({"token": complete, "done": False})
+            yield sse_event({"token": "", "done": True, "action_type": "vision", "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+            store_and_title(convo_key, conversation_id, complete, trace_id, "vision", model_used, client_ip, display_message)
+
+        return StreamingResponse(vision_gen(), media_type="text/event-stream")
 
     rag_sources = []
     personality_used = False
@@ -477,7 +574,6 @@ def export_conversation(
             for m in msgs
         ],
     }
-    import json as json_stdlib
     content = json_stdlib.dumps(data, indent=2)
     return StreamingResponse(
         iter([content]),
@@ -561,6 +657,7 @@ def guest_chat_history(
             {
                 "role": m.role, "content": m.content, "created_at": str(m.created_at),
                 "model_used": m.model_used, "trace_id": m.trace_id, "action_type": m.action_type,
+                "image_paths": _parse_image_paths(m.image_path),
             }
             for m in msgs
         ],

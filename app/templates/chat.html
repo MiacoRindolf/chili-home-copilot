@@ -90,6 +90,72 @@
       max-width: 800px; margin: 6px auto 0; text-align: center;
     }
 
+    #image-preview-strip {
+      display: none; max-width: 800px; margin: 0 auto 8px;
+      padding: 8px 12px; background: var(--code-bg); border-radius: 8px;
+      gap: 8px; flex-wrap: wrap; align-items: flex-start;
+    }
+    #image-preview-strip.visible { display: flex; }
+    .preview-item {
+      position: relative; display: inline-block;
+    }
+    .preview-item img {
+      height: 72px; width: 72px; border-radius: 6px; object-fit: cover;
+      border: 1px solid var(--border);
+    }
+    .preview-item .preview-x {
+      position: absolute; top: -6px; right: -6px; width: 20px; height: 20px;
+      background: var(--accent); color: #fff; border: none; border-radius: 50%;
+      font-size: 12px; line-height: 20px; text-align: center; cursor: pointer;
+      padding: 0;
+    }
+    .preview-item .preview-x:hover { background: #dc2626; }
+    #preview-clear-all {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 10px; cursor: pointer; color: var(--text-secondary); font-size: 12px;
+      align-self: center;
+    }
+    #preview-clear-all:hover { background: var(--bg-msg-assist); }
+
+    .msg-images { display: flex; flex-wrap: wrap; gap: 6px; margin: 6px 0; }
+    .msg-image {
+      max-width: 300px; max-height: 200px; border-radius: 8px;
+      cursor: pointer; transition: opacity 0.15s; object-fit: cover;
+    }
+    .msg-image:hover { opacity: 0.85; }
+    .msg.user .msg-image { max-width: 160px; max-height: 160px; }
+
+    .image-full-overlay {
+      position: fixed; inset: 0; z-index: 1000; background: rgba(0,0,0,.8);
+      display: flex; align-items: center; justify-content: center; cursor: zoom-out;
+    }
+    .image-full-overlay img {
+      max-width: 90vw; max-height: 90vh; border-radius: 8px;
+    }
+
+    .input-actions {
+      display: flex; gap: 4px; align-items: center;
+    }
+    .input-action-btn {
+      background: none; border: 1px solid var(--input-border); border-radius: 8px;
+      padding: 6px 10px; cursor: pointer; font-size: 18px;
+      color: var(--text-secondary); transition: all 0.15s; line-height: 1;
+    }
+    .input-action-btn:hover { background: var(--code-bg); color: var(--text); }
+
+    .drag-overlay {
+      display: none; position: fixed; inset: 0; z-index: 998;
+      background: rgba(37, 99, 235, 0.15); border: 3px dashed var(--accent);
+      align-items: center; justify-content: center;
+    }
+    .drag-overlay.visible {
+      display: flex;
+    }
+    .drag-overlay span {
+      background: var(--accent); color: #fff; padding: 16px 32px;
+      border-radius: 12px; font-size: 1.1rem; font-weight: 600;
+    }
+
     .msg.assistant .md-body p { margin: 0.4em 0; }
     .msg.assistant .md-body p:first-child { margin-top: 0; }
     .msg.assistant .md-body p:last-child { margin-bottom: 0; }
@@ -246,6 +312,9 @@
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
 
+    @media (min-width: 701px) {
+      #camera-btn { display: none; }
+    }
     @media (max-width: 700px) {
       header { padding: 8px 12px; }
       header h1 { font-size: 17px; }
@@ -372,13 +441,24 @@
       </div>
 
       <div id="input-bar">
+        <div id="image-preview-strip">
+          <button id="preview-clear-all" title="Remove all images">&times; Clear all</button>
+        </div>
         <form id="chat-form">
-          <textarea id="msg-input" name="message" placeholder="Type a message..." autocomplete="off" required rows="1"></textarea>
+          <input type="file" id="image-input" accept="image/jpeg,image/png,image/gif,image/webp" multiple style="display:none;" />
+          <input type="file" id="camera-input" accept="image/*" capture="environment" style="display:none;" />
+          <div class="input-actions">
+            <button type="button" class="input-action-btn" id="attach-btn" title="Attach image">&#128206;</button>
+            <button type="button" class="input-action-btn" id="camera-btn" title="Take photo">&#128247;</button>
+          </div>
+          <textarea id="msg-input" name="message" placeholder="Type a message or paste an image..." autocomplete="off" rows="1"></textarea>
           <button type="button" id="mic-btn" title="Voice input" style="background:none;border:1px solid var(--input-border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:18px;color:var(--text-secondary);transition:all 0.15s;display:none;">🎤</button>
           <button type="submit">Send</button>
         </form>
         <div id="status"></div>
       </div>
+
+      <div class="drag-overlay" id="drag-overlay"><span>Drop image here</span></div>
     </div>
   </div>
 
@@ -398,6 +478,104 @@
     var sidebarBackdrop = document.getElementById('sidebar-backdrop');
     var micBtn    = document.getElementById('mic-btn');
     var convoSearch = document.getElementById('convo-search');
+    var imageInput = document.getElementById('image-input');
+    var cameraInput = document.getElementById('camera-input');
+    var attachBtn = document.getElementById('attach-btn');
+    var cameraBtn = document.getElementById('camera-btn');
+    var previewStrip = document.getElementById('image-preview-strip');
+    var clearAllBtn = document.getElementById('preview-clear-all');
+    var dragOverlay = document.getElementById('drag-overlay');
+    var pendingImages = [];
+
+    function addPendingImage(file) {
+      if (!file || !file.type.startsWith('image/')) return;
+      pendingImages.push(file);
+      var item = document.createElement('div');
+      item.className = 'preview-item';
+      var img = document.createElement('img');
+      var xBtn = document.createElement('button');
+      xBtn.className = 'preview-x';
+      xBtn.textContent = '\u00d7';
+      xBtn.title = 'Remove';
+      var idx = pendingImages.length - 1;
+      xBtn.onclick = function() { removePendingImage(item, idx); };
+      var reader = new FileReader();
+      reader.onload = function(e) { img.src = e.target.result; };
+      reader.readAsDataURL(file);
+      img.alt = file.name || 'image';
+      img.title = file.name || 'Pasted image';
+      item.appendChild(img);
+      item.appendChild(xBtn);
+      previewStrip.insertBefore(item, clearAllBtn);
+      previewStrip.classList.add('visible');
+    }
+
+    function removePendingImage(itemEl, idx) {
+      pendingImages[idx] = null;
+      itemEl.remove();
+      if (pendingImages.filter(Boolean).length === 0) clearAllPending();
+    }
+
+    function clearAllPending() {
+      pendingImages = [];
+      previewStrip.querySelectorAll('.preview-item').forEach(function(el) { el.remove(); });
+      previewStrip.classList.remove('visible');
+      imageInput.value = '';
+      cameraInput.value = '';
+    }
+
+    clearAllBtn.onclick = clearAllPending;
+    attachBtn.onclick = function() { imageInput.click(); };
+    cameraBtn.onclick = function() { cameraInput.click(); };
+
+    imageInput.onchange = function() {
+      for (var i = 0; i < this.files.length; i++) addPendingImage(this.files[i]);
+    };
+    cameraInput.onchange = function() { if (this.files[0]) addPendingImage(this.files[0]); };
+
+    document.addEventListener('paste', function(e) {
+      var items = (e.clipboardData || {}).items;
+      if (!items) return;
+      var found = false;
+      for (var i = 0; i < items.length; i++) {
+        if (items[i].type.indexOf('image') !== -1) {
+          if (!found) { e.preventDefault(); found = true; }
+          addPendingImage(items[i].getAsFile());
+        }
+      }
+    });
+
+    var _dragCounter = 0;
+    document.addEventListener('dragenter', function(e) {
+      e.preventDefault();
+      _dragCounter++;
+      if (e.dataTransfer && e.dataTransfer.types.indexOf('Files') !== -1) {
+        dragOverlay.classList.add('visible');
+      }
+    });
+    document.addEventListener('dragleave', function(e) {
+      e.preventDefault();
+      _dragCounter--;
+      if (_dragCounter <= 0) { _dragCounter = 0; dragOverlay.classList.remove('visible'); }
+    });
+    document.addEventListener('dragover', function(e) { e.preventDefault(); });
+    document.addEventListener('drop', function(e) {
+      e.preventDefault();
+      _dragCounter = 0;
+      dragOverlay.classList.remove('visible');
+      var files = e.dataTransfer ? e.dataTransfer.files : [];
+      for (var i = 0; i < files.length; i++) {
+        if (files[i].type.startsWith('image/')) addPendingImage(files[i]);
+      }
+    });
+
+    function openImageFull(src) {
+      var overlay = document.createElement('div');
+      overlay.className = 'image-full-overlay';
+      overlay.innerHTML = '<img src="' + src + '" />';
+      overlay.onclick = function() { overlay.remove(); };
+      document.body.appendChild(overlay);
+    }
 
     var currentConvoId = null;
     var isGuest = true;
@@ -532,11 +710,26 @@
       var timeStr = fmtTime(ts);
       meta = meta || {};
 
+      var imageHTML = '';
+      var imgList = meta.image_paths || (meta.image_path ? [meta.image_path] : []);
+      var blobList = meta.image_blob_urls || (meta.image_blob_url ? [meta.image_blob_url] : []);
+      if (imgList.length > 0 || blobList.length > 0) {
+        imageHTML = '<div class="msg-images">';
+        imgList.forEach(function(p) {
+          imageHTML += '<img class="msg-image" src="/uploads/' + encodeURIComponent(p) + '" alt="uploaded image" loading="lazy" />';
+        });
+        blobList.forEach(function(u) {
+          imageHTML += '<img class="msg-image" src="' + u + '" alt="uploaded image" />';
+        });
+        imageHTML += '</div>';
+      }
+
       var bodyHTML;
       if (role === 'assistant') {
         bodyHTML = '<div class="md-body">' + renderMd(content) + '</div>';
       } else {
-        bodyHTML = '<div>' + esc(content).split('\n').join('<br>') + '</div>';
+        var textContent = (content && content !== '(image)') ? '<div>' + esc(content).split('\n').join('<br>') + '</div>' : '';
+        bodyHTML = imageHTML + textContent;
       }
 
       var footerHTML = '';
@@ -593,6 +786,10 @@
           });
         };
       }
+
+      div.querySelectorAll('.msg-image').forEach(function(img) {
+        img.onclick = function() { openImageFull(img.src); };
+      });
 
       chatLog.appendChild(div);
       chatArea.scrollTop = chatArea.scrollHeight;
@@ -768,6 +965,7 @@
           data.messages.forEach(function(m) {
             addMsg(m.role, m.content, m.created_at, {
               model_used: m.model_used, trace_id: m.trace_id, action_type: m.action_type,
+              image_paths: m.image_paths || [],
             });
           });
         }
@@ -784,6 +982,7 @@
           data.messages.forEach(function(m) {
             addMsg(m.role, m.content, m.created_at, {
               model_used: m.model_used, trace_id: m.trace_id, action_type: m.action_type,
+              image_paths: m.image_paths || [],
             });
           });
         }
@@ -852,18 +1051,22 @@
     form.addEventListener('submit', async function(e) {
       e.preventDefault();
       var msg = input.value.trim();
-      if (!msg) return;
+      var imageFiles = pendingImages.filter(Boolean);
+      if (!msg && imageFiles.length === 0) return;
 
-      addMsg('user', msg, '');
+      var imageBlobUrls = imageFiles.map(function(f) { return URL.createObjectURL(f); });
+      addMsg('user', msg || '(image)', '', { image_blob_urls: imageBlobUrls });
       input.value = '';
       input.style.height = 'auto';
+      clearAllPending();
       btn.disabled = true;
-      statusEl.textContent = 'Thinking...';
+      statusEl.textContent = imageFiles.length > 0 ? 'Analyzing image...' : 'Thinking...';
 
       try {
         var body = new FormData();
         body.append('message', msg);
         if (currentConvoId != null) body.append('conversation_id', currentConvoId);
+        imageFiles.forEach(function(f) { body.append('images', f); });
 
         var res = await fetch('/api/chat/stream', { method: 'POST', body: body });
 
@@ -871,6 +1074,7 @@
           var fbody = new FormData();
           fbody.append('message', msg);
           if (currentConvoId != null) fbody.append('conversation_id', currentConvoId);
+          imageFiles.forEach(function(f) { fbody.append('images', f); });
           var fres = await fetch('/api/chat', { method: 'POST', body: fbody });
           var fdata = await fres.json();
           if (fdata.conversation_id && currentConvoId == null) currentConvoId = fdata.conversation_id;

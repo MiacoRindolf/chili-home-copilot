@@ -112,7 +112,7 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
     return llm_reply, executed, action_type
 
 
-def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str):
+def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None):
     """Create conversation if needed, store user message, load memory. Always safe (no LLM call)."""
     is_guest = identity["is_guest"]
 
@@ -123,7 +123,7 @@ def init_chat(db: Session, convo_key: str, conversation_id, message: str, identi
         db.refresh(convo)
         conversation_id = convo.id
 
-    db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="user", content=message, trace_id=trace_id))
+    db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="user", content=message, trace_id=trace_id, image_path=image_path))
     db.commit()
 
     mem_filter = ChatMessage.conversation_id == conversation_id if conversation_id else ChatMessage.convo_key == convo_key

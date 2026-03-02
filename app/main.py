@@ -12,14 +12,23 @@ Base.metadata.create_all(bind=engine)
 # Lightweight migration: add columns that may be missing on existing DBs
 from sqlalchemy import inspect as sa_inspect, text
 with engine.connect() as conn:
-    cols = {c["name"] for c in sa_inspect(engine).get_columns("users")}
-    if "email" not in cols:
+    user_cols = {c["name"] for c in sa_inspect(engine).get_columns("users")}
+    if "email" not in user_cols:
         conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))
+        conn.commit()
+
+    msg_cols = {c["name"] for c in sa_inspect(engine).get_columns("chat_messages")}
+    if "image_path" not in msg_cols:
+        conn.execute(text("ALTER TABLE chat_messages ADD COLUMN image_path TEXT"))
         conn.commit()
 
 app = FastAPI(title="CHILI Home Copilot")
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
+
+_uploads_dir = Path(__file__).resolve().parent.parent / "data" / "uploads"
+_uploads_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
 
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 

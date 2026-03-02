@@ -85,6 +85,7 @@ class ChatMessage(Base):
     trace_id = Column(String, nullable=True)
     action_type = Column(String, nullable=True)
     model_used = Column(String, nullable=True)
+    image_path = Column(String, nullable=True)
 
     conversation = relationship("Conversation", back_populates="messages")
 
