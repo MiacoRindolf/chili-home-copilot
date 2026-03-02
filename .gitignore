@@ -6,3 +6,6 @@ __pycache__/
 # local database files
 data/*.db
 data/*.sqlite
+
+# ChromaDB vector store
+data/chroma/

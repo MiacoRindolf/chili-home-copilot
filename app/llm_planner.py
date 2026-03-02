@@ -6,7 +6,7 @@ from .planner_schema import validate_plan
 OLLAMA_URL = "http://127.0.0.1:11434/api/chat"
 MODEL = "llama3"  # change if you're using a different one
 
-SYSTEM = """You are CHILI, an action planner for a household assistant.
+SYSTEM_BASE = """You are CHILI, an action planner for a household assistant.
 You MUST output ONLY valid JSON (no markdown, no extra text).
 
 IMPORTANT:
@@ -26,16 +26,32 @@ Allowed actions and required data:
 - mark_chore_done: {"id": int}
 - add_birthday: {"name": str, "date": "YYYY-MM-DD"}
 - list_birthdays: {}
+- answer_from_docs: {"source": str}  -- use ONLY when DOCUMENT CONTEXT is provided below
 
 If the request is unclear or not supported:
-{"type":"unknown","data":{"reason":"ambiguous"},"reply":"What would you like me to do—add a chore, list chores, or add a birthday reminder?"}
+{"type":"unknown","data":{"reason":"ambiguous"},"reply":"What would you like me to do\u2014add a chore, list chores, or add a birthday reminder?"}
 """
 
-def plan_action(user_message: str) -> dict:
+RAG_CONTEXT_TEMPLATE = """
+DOCUMENT CONTEXT (retrieved from household documents):
+{context}
+
+When the user's question can be answered using the DOCUMENT CONTEXT above,
+use type="answer_from_docs", put the filename in data.source, and answer in "reply".
+"""
+
+
+def _build_system_prompt(rag_context: str | None = None) -> str:
+    if rag_context:
+        return SYSTEM_BASE + RAG_CONTEXT_TEMPLATE.format(context=rag_context)
+    return SYSTEM_BASE
+
+def plan_action(user_message: str, rag_context: str | None = None) -> dict:
+    system_prompt = _build_system_prompt(rag_context)
     payload = {
         "model": MODEL,
         "messages": [
-            {"role": "system", "content": SYSTEM},
+            {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
         ],
         "stream": False,

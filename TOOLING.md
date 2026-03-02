@@ -1,4 +1,3 @@
-
 # CHILI Tooling & Guardrails
 
 CHILI uses a production-style LLM architecture:
@@ -35,7 +34,6 @@ All planner outputs must match:
   "data": { },
   "reply": "<short sentence>"
 }
-````
 
 Supported actions:
 
