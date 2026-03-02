@@ -257,6 +257,62 @@
 
   .overflow-x { overflow-x: auto; }
 
+  /* ---- Activity controls ---- */
+  .activity-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .activity-controls {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .activity-controls select,
+  .activity-controls input {
+    padding: 5px 10px;
+    font-size: .8rem;
+    border: 1px solid var(--input-border);
+    border-radius: 6px;
+    background: var(--input-bg);
+    color: var(--text);
+  }
+  .activity-controls input { width: 110px; }
+  .activity-scroll {
+    max-height: 420px;
+    overflow-y: auto;
+    overflow-x: auto;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+  }
+  .activity-scroll::-webkit-scrollbar { width: 6px; }
+  .activity-scroll::-webkit-scrollbar-track { background: var(--bg); }
+  .activity-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .activity-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 10px;
+    font-size: .8rem;
+    color: var(--text-secondary);
+  }
+  .page-btn {
+    padding: 4px 12px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: var(--card-bg);
+    color: var(--text);
+    cursor: pointer;
+    font-size: .78rem;
+    transition: .15s;
+  }
+  .page-btn:hover { border-color: var(--accent); color: var(--accent); }
+  .page-btn:disabled { opacity: .4; cursor: default; }
+
   .admin-footer {
     margin-top: 32px;
     text-align: center;
@@ -414,10 +470,28 @@
 
   <!-- Recent Activity -->
   <div class="card">
-    <h2>Recent Activity</h2>
+    <div class="activity-header">
+      <h2 style="margin-bottom:0;">Recent Activity</h2>
+      <div class="activity-controls">
+        <select id="action-filter" onchange="filterActivity()">
+          <option value="">All actions</option>
+          {% for a in action_types %}
+            <option value="{{ a }}">{{ a }}</option>
+          {% endfor %}
+        </select>
+        <input id="ip-search" type="text" placeholder="Filter IP..." oninput="filterActivity()" />
+        <select id="page-size" onchange="filterActivity()">
+          <option value="10">10</option>
+          <option value="25" selected>25</option>
+          <option value="50">50</option>
+          <option value="100">100</option>
+        </select>
+        <span style="font-size:.78rem;color:var(--text-muted);">per page</span>
+      </div>
+    </div>
     {% if log_rows %}
-    <div class="overflow-x">
-      <table class="activity-table">
+    <div class="activity-scroll" id="activity-scroll">
+      <table class="activity-table" id="activity-table">
         <thead>
           <tr>
             <th>Time</th>
@@ -427,9 +501,9 @@
             <th>Message</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="activity-body">
           {% for row in log_rows %}
-          <tr>
+          <tr data-action="{{ row.action }}" data-ip="{{ row.ip }}">
             <td>{{ row.time }}</td>
             <td>{{ row.ip }}</td>
             <td><span class="action-badge">{{ row.action }}</span></td>
@@ -440,6 +514,7 @@
         </tbody>
       </table>
     </div>
+    <div class="activity-footer" id="activity-footer"></div>
     {% else %}
       <p style="color:var(--text-muted);font-size:.9rem;">No activity logged yet.</p>
     {% endif %}
@@ -464,6 +539,56 @@
     applyTheme();
   });
 })();
+
+var activityPage = 0;
+
+function filterActivity() {
+  activityPage = 0;
+  renderActivity();
+}
+
+function renderActivity() {
+  var actionFilter = document.getElementById('action-filter').value;
+  var ipSearch = document.getElementById('ip-search').value.toLowerCase();
+  var pageSize = parseInt(document.getElementById('page-size').value, 10);
+  var rows = document.querySelectorAll('#activity-body tr');
+  var matched = [];
+
+  for (var i = 0; i < rows.length; i++) {
+    var r = rows[i];
+    var action = r.getAttribute('data-action') || '';
+    var ip = (r.getAttribute('data-ip') || '').toLowerCase();
+    var show = true;
+    if (actionFilter && action !== actionFilter) show = false;
+    if (ipSearch && ip.indexOf(ipSearch) === -1) show = false;
+    if (show) matched.push(r);
+    r.style.display = 'none';
+  }
+
+  var totalPages = Math.max(1, Math.ceil(matched.length / pageSize));
+  if (activityPage >= totalPages) activityPage = totalPages - 1;
+  var start = activityPage * pageSize;
+  var end = Math.min(start + pageSize, matched.length);
+
+  for (var j = start; j < end; j++) {
+    matched[j].style.display = '';
+  }
+
+  var footer = document.getElementById('activity-footer');
+  if (footer) {
+    footer.innerHTML =
+      '<span>Showing ' + (matched.length ? start + 1 : 0) + '\u2013' + end + ' of ' + matched.length + '</span>' +
+      '<span>' +
+        '<button class="page-btn" onclick="activityPage--;renderActivity()" ' + (activityPage <= 0 ? 'disabled' : '') + '>\u2190 Prev</button> ' +
+        '<span style="margin:0 8px;">Page ' + (activityPage + 1) + ' / ' + totalPages + '</span>' +
+        '<button class="page-btn" onclick="activityPage++;renderActivity()" ' + (activityPage >= totalPages - 1 ? 'disabled' : '') + '>Next \u2192</button>' +
+      '</span>';
+  }
+}
+
+if (document.getElementById('activity-body')) {
+  renderActivity();
+}
 
 function triggerIngest() {
   var btn = document.getElementById('rag-ingest-btn');

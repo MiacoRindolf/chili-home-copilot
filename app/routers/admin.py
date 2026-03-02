@@ -52,7 +52,7 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
     rs = rag_stats()
     openai_configured = openai_client.is_configured()
 
-    logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(30).all()
+    logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(200).all()
     log_rows = [
         {
             "time": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else "—",
@@ -65,6 +65,7 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
     ]
 
     total_model_msgs = sum(ms.values()) if ms else 1
+    action_types = sorted(set(r["action"] for r in log_rows))
 
     return templates.TemplateResponse(request, "admin.html", {
         "user_name": ctx["user_name"],
@@ -80,6 +81,7 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
         "openai_configured": openai_configured,
         "openai_model": openai_client.OPENAI_MODEL,
         "log_rows": log_rows,
+        "action_types": action_types,
     })
 
 

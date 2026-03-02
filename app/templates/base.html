@@ -26,6 +26,12 @@
       --code-bg: #374151;
       --accent: #3b82f6; --accent-hover: #2563eb; --accent-disabled: #1e40af;
     }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      margin: 0;
+      transition: background .2s, color .2s;
+    }
   </style>
   <script>
     (function(){var t=localStorage.getItem('chili-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();
