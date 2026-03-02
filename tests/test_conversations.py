@@ -150,10 +150,12 @@ class TestStreamingEndpoint:
         assert last_event["action_type"] == "list_chores"
         assert last_event["model_used"] == "llama3"
 
+    @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action")
-    def test_stream_offline(self, mock_plan, paired_client, db):
+    def test_stream_offline(self, mock_plan, mock_openai, paired_client, db):
         client, user = paired_client
         mock_plan.side_effect = Exception("Ollama is down")
+        mock_openai.is_configured.return_value = False
 
         resp = client.post("/api/chat/stream", data={"message": "hello"})
         assert resp.status_code == 200
@@ -216,3 +218,133 @@ class TestExecuteTool:
         reply, executed, atype = _execute_tool(db, "list_chores", {}, "", False)
         assert executed is True
         assert "No chores" in reply
+
+
+class TestNLUFallback:
+    """Tests for the rule-based NLU fallback when Ollama is offline."""
+
+    def test_nlu_fallback_known_action(self):
+        from app.services.chat_service import nlu_fallback
+        result = nlu_fallback("list chores")
+        assert result is not None
+        assert result["type"] == "list_chores"
+
+    def test_nlu_fallback_add_chore(self):
+        from app.services.chat_service import nlu_fallback
+        result = nlu_fallback("add chore buy milk")
+        assert result is not None
+        assert result["type"] == "add_chore"
+        assert result["data"]["title"] == "buy milk"
+
+    def test_nlu_fallback_unknown(self):
+        from app.services.chat_service import nlu_fallback
+        result = nlu_fallback("tell me a funny joke")
+        assert result is None
+
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action", side_effect=Exception("offline"))
+    def test_nlu_fallback_stream(self, mock_plan, mock_openai, paired_client, db):
+        """Streaming endpoint uses NLU fallback when Ollama is offline."""
+        client, user = paired_client
+        mock_openai.is_configured.return_value = False
+
+        resp = client.post("/api/chat/stream", data={"message": "list chores"})
+        assert resp.status_code == 200
+
+        import json
+        lines = resp.text.strip().split("\n")
+        events = [l for l in lines if l.startswith("data: ")]
+        last_event = json.loads(events[-1].replace("data: ", ""))
+        assert last_event["done"] is True
+        assert last_event["model_used"] == "nlu-fallback"
+
+
+class TestConversationExport:
+    """Tests for conversation export endpoint."""
+
+    @patch("app.services.chat_service.plan_action")
+    def test_export_json(self, mock_plan, paired_client, db):
+        client, user = paired_client
+        mock_plan.return_value = {"type": "list_chores", "data": {}, "reply": "No chores."}
+        r = client.post("/api/chat", data={"message": "hello"})
+        convo_id = r.json()["conversation_id"]
+
+        resp = client.get(f"/api/conversations/{convo_id}/export?fmt=json")
+        assert resp.status_code == 200
+        assert "application/json" in resp.headers.get("content-type", "")
+
+        import json
+        data = json.loads(resp.text)
+        assert "conversation" in data
+        assert "messages" in data
+        assert len(data["messages"]) >= 2
+
+    @patch("app.services.chat_service.plan_action")
+    def test_export_markdown(self, mock_plan, paired_client, db):
+        client, user = paired_client
+        mock_plan.return_value = {"type": "list_chores", "data": {}, "reply": "No chores."}
+        r = client.post("/api/chat", data={"message": "hello"})
+        convo_id = r.json()["conversation_id"]
+
+        resp = client.get(f"/api/conversations/{convo_id}/export?fmt=md")
+        assert resp.status_code == 200
+        assert "text/markdown" in resp.headers.get("content-type", "")
+        assert "**CHILI**" in resp.text
+
+    def test_export_nonexistent(self, paired_client):
+        client, user = paired_client
+        resp = client.get("/api/conversations/9999/export")
+        assert resp.status_code == 404
+
+
+class TestGuestChatVisibility:
+    """Tests for housemate viewing guest conversations."""
+
+    def _seed_guest_messages(self, db):
+        """Insert guest chat messages directly into the DB."""
+        db.add(ChatMessage(convo_key="guest:test-ip", role="user", content="hello from guest", trace_id="t1"))
+        db.add(ChatMessage(convo_key="guest:test-ip", role="assistant", content="Hi guest!", trace_id="t1", model_used="llama3"))
+        db.commit()
+
+    def test_guest_cannot_list_guest_chats(self, client):
+        resp = client.get("/api/conversations/guests")
+        assert resp.status_code == 403
+
+    def test_housemate_sees_guest_chats(self, paired_client, db):
+        self._seed_guest_messages(db)
+        pc, user = paired_client
+        resp = pc.get("/api/conversations/guests")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["guest_conversations"]) >= 1
+        assert data["guest_conversations"][0]["convo_key"] == "guest:test-ip"
+
+    def test_housemate_view_guest_history(self, paired_client, db):
+        self._seed_guest_messages(db)
+        pc, user = paired_client
+
+        resp = pc.get("/api/chat/guest-history?guest_convo_key=guest:test-ip")
+        assert resp.status_code == 200
+        msgs = resp.json()["messages"]
+        assert any("hello from guest" in m["content"] for m in msgs)
+
+    def test_housemate_reply_to_guest(self, paired_client, db):
+        self._seed_guest_messages(db)
+        pc, user = paired_client
+
+        resp = pc.post("/api/chat/guest-reply", data={"guest_convo_key": "guest:test-ip", "message": "I can help!"})
+        assert resp.status_code == 200
+        assert resp.json()["ok"] is True
+
+        history = pc.get("/api/chat/guest-history?guest_convo_key=guest:test-ip").json()
+        assert any("[TestUser]" in m["content"] for m in history["messages"])
+
+    def test_guest_cannot_reply(self, client, db):
+        self._seed_guest_messages(db)
+        resp = client.post("/api/chat/guest-reply", data={"guest_convo_key": "guest:test-ip", "message": "sneaky"})
+        assert resp.status_code == 403
+
+    def test_invalid_convo_key_rejected(self, paired_client, db):
+        pc, user = paired_client
+        resp = pc.get("/api/chat/guest-history?guest_convo_key=user:1")
+        assert resp.status_code == 400

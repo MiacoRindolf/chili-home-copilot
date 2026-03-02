@@ -14,6 +14,7 @@ from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..services.chat_service import (
     execute_tool,
+    nlu_fallback,
     init_chat,
     plan_and_enrich,
     build_openai_prompt,
@@ -179,8 +180,12 @@ def chat_history(
         "convo_key": convo_key,
         "user": identity["user_name"],
         "is_guest": identity["is_guest"],
+        "conversation_id": conversation_id,
         "messages": [
-            {"role": m.role, "content": m.content, "created_at": str(m.created_at), "model_used": m.model_used}
+            {
+                "role": m.role, "content": m.content, "created_at": str(m.created_at),
+                "model_used": m.model_used, "trace_id": m.trace_id, "action_type": m.action_type,
+            }
             for m in msgs
         ],
     }
@@ -211,20 +216,53 @@ def chat_api(
     conversation_id = chat_init["conversation_id"]
     recent = chat_init["recent"]
 
+    rag_sources = []
+    personality_used = False
+
     try:
         ctx = plan_and_enrich(db, message, identity, recent, trace_id)
     except Exception as e:
-        log_info(trace_id, f"llm_error={e}")
-        llm_reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
-        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type="llm_offline", model_used="offline"))
+        log_info(trace_id, f"llm_error={e}, trying NLU fallback")
+        ctx = None
+
+        nlu_result = nlu_fallback(message)
+        if nlu_result:
+            log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
+            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest)
+            model_used = "nlu-fallback"
+        elif openai_client.is_configured():
+            log_info(trace_id, "nlu_fallback_miss, trying OpenAI")
+            openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
+            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id)
+            if result["reply"]:
+                llm_reply = result["reply"]
+                action_type = "general_chat"
+                model_used = result["model"]
+                executed = True
+            else:
+                llm_reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
+                action_type = "llm_offline"
+                model_used = "offline"
+                executed = False
+        else:
+            llm_reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
+            action_type = "llm_offline"
+            model_used = "offline"
+            executed = False
+
+        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used=model_used))
         db.commit()
-        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type="llm_offline"))
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
         db.commit()
         ms = int((time.time() - t0) * 1000)
         record_latency(ms)
-        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": "llm_offline", "executed": False, "reply": llm_reply, "conversation_id": conversation_id}
+        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
 
     planned = ctx["planned"]
+    if ctx.get("rag_context"):
+        rag_sources = [h["source"] for h in (ctx.get("rag_hits") or [])]
+    personality_used = bool(ctx.get("personality_context"))
 
     action_type = planned.get("type", "unknown")
     action_data = planned.get("data", {})
@@ -278,6 +316,8 @@ def chat_api(
         "reply": llm_reply,
         "model_used": model_used,
         "conversation_id": conversation_id,
+        "rag_sources": rag_sources,
+        "personality_used": personality_used,
     }
 
 
@@ -303,18 +343,52 @@ def chat_stream_api(
     conversation_id = chat_init["conversation_id"]
     recent = chat_init["recent"]
 
+    rag_sources = []
+    personality_used = False
+
     try:
         ctx = plan_and_enrich(db, message, identity, recent, trace_id)
-    except Exception:
-        reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
+    except Exception as e:
+        log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
 
+        nlu_result = nlu_fallback(message)
+        if nlu_result:
+            log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
+            reply, _exec, act_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest)
+            model = "nlu-fallback"
+            def nlu_gen():
+                yield sse_event({"token": reply, "done": False})
+                yield sse_event({"token": "", "done": True, "action_type": act_type, "model_used": model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+                store_and_title(convo_key, conversation_id, reply, trace_id, act_type, model, client_ip, message)
+            return StreamingResponse(nlu_gen(), media_type="text/event-stream")
+
+        if openai_client.is_configured():
+            log_info(trace_id, "nlu_fallback_miss, trying OpenAI (stream)")
+            openai_msgs = [{"role": m.role, "content": m.content} for m in recent]
+            openai_sys = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
+            def openai_fb_gen():
+                full = []
+                for tok in openai_client.chat_stream(messages=openai_msgs, system_prompt=openai_sys, trace_id=trace_id):
+                    full.append(tok)
+                    yield sse_event({"token": tok, "done": False})
+                complete = "".join(full) or "I'm not sure what to do with that."
+                if not full:
+                    yield sse_event({"token": complete, "done": False})
+                yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": openai_client.OPENAI_MODEL, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+                store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", openai_client.OPENAI_MODEL, client_ip, message)
+            return StreamingResponse(openai_fb_gen(), media_type="text/event-stream")
+
+        reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
         def offline_gen():
             yield sse_event({"token": reply, "done": False})
-            yield sse_event({"token": "", "done": True, "action_type": "llm_offline", "model_used": "offline", "conversation_id": conversation_id})
+            yield sse_event({"token": "", "done": True, "action_type": "llm_offline", "model_used": "offline", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
             store_and_title(convo_key, conversation_id, reply, trace_id, "llm_offline", "offline", client_ip, message)
         return StreamingResponse(offline_gen(), media_type="text/event-stream")
 
     planned = ctx["planned"]
+    if ctx.get("rag_context"):
+        rag_sources = [h["source"] for h in (ctx.get("rag_hits") or [])]
+    personality_used = bool(ctx.get("personality_context"))
 
     action_type = planned.get("type", "unknown")
     action_data = planned.get("data", {})
@@ -329,7 +403,7 @@ def chat_stream_api(
 
         def tool_gen():
             yield sse_event({"token": llm_reply, "done": False})
-            yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id})
+            yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
             store_and_title(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message)
         return StreamingResponse(tool_gen(), media_type="text/event-stream")
 
@@ -347,7 +421,182 @@ def chat_stream_api(
             complete = "I'm not sure what to do with that."
             yield sse_event({"token": complete, "done": False})
 
-        yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": openai_client.OPENAI_MODEL, "conversation_id": conversation_id})
+        yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": openai_client.OPENAI_MODEL, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
         store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", openai_client.OPENAI_MODEL, client_ip, message)
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
+
+
+# --- Conversation export ---
+
+@router.get("/api/conversations/{convo_id}/export", response_class=JSONResponse)
+def export_conversation(
+    convo_id: int,
+    request: Request,
+    fmt: str = Query("json"),
+    db: Session = Depends(get_db),
+):
+    client_ip = request.client.host
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+    convo_key = get_convo_key(identity, device_token, client_ip)
+
+    convo = db.query(Conversation).filter(Conversation.id == convo_id).first()
+    if not convo:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+
+    is_owner = convo.convo_key == convo_key
+    is_housemate_viewing_guest = (not identity["is_guest"] and convo.convo_key.startswith("guest:"))
+    if not is_owner and not is_housemate_viewing_guest:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    msgs = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.conversation_id == convo_id, ChatMessage.content != "")
+        .order_by(ChatMessage.id.asc())
+        .all()
+    )
+
+    if fmt == "md":
+        lines = [f"# {convo.title}\n"]
+        for m in msgs:
+            label = "**You**" if m.role == "user" else "**CHILI**"
+            ts = str(m.created_at) if m.created_at else ""
+            lines.append(f"{label} ({ts}):\n{m.content}\n")
+        content = "\n".join(lines)
+        return StreamingResponse(
+            iter([content]),
+            media_type="text/markdown",
+            headers={"Content-Disposition": f"attachment; filename=chili-chat-{convo_id}.md"},
+        )
+
+    data = {
+        "conversation": {"id": convo.id, "title": convo.title, "created_at": str(convo.created_at)},
+        "messages": [
+            {"role": m.role, "content": m.content, "created_at": str(m.created_at), "model_used": m.model_used, "trace_id": m.trace_id}
+            for m in msgs
+        ],
+    }
+    import json as json_stdlib
+    content = json_stdlib.dumps(data, indent=2)
+    return StreamingResponse(
+        iter([content]),
+        media_type="application/json",
+        headers={"Content-Disposition": f"attachment; filename=chili-chat-{convo_id}.json"},
+    )
+
+
+# --- Guest chat visibility for housemates ---
+
+@router.get("/api/conversations/guests", response_class=JSONResponse)
+def list_guest_conversations(request: Request, db: Session = Depends(get_db)):
+    """Return guest conversations visible to paired housemates only."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"]:
+        return JSONResponse({"error": "Guests cannot view other guest chats"}, status_code=403)
+
+    from sqlalchemy import func
+    guest_convos = (
+        db.query(
+            ChatMessage.convo_key,
+            func.count(ChatMessage.id).label("msg_count"),
+            func.max(ChatMessage.created_at).label("last_active"),
+        )
+        .filter(ChatMessage.convo_key.like("guest:%"))
+        .group_by(ChatMessage.convo_key)
+        .order_by(func.max(ChatMessage.created_at).desc())
+        .all()
+    )
+
+    results = []
+    for convo_key_val, msg_count, last_active in guest_convos:
+        first_msg = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.convo_key == convo_key_val, ChatMessage.role == "user")
+            .order_by(ChatMessage.id.asc())
+            .first()
+        )
+        title = (first_msg.content[:40] + "...") if first_msg and len(first_msg.content) > 40 else (first_msg.content if first_msg else "Guest Chat")
+        results.append({
+            "convo_key": convo_key_val,
+            "title": title,
+            "msg_count": msg_count,
+            "last_active": str(last_active),
+        })
+
+    return {"guest_conversations": results}
+
+
+@router.get("/api/chat/guest-history", response_class=JSONResponse)
+def guest_chat_history(
+    request: Request,
+    guest_convo_key: str = Query(...),
+    db: Session = Depends(get_db),
+):
+    """Let a housemate view a guest's chat history."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"]:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    if not guest_convo_key.startswith("guest:"):
+        return JSONResponse({"error": "Invalid convo key"}, status_code=400)
+
+    msgs = (
+        db.query(ChatMessage)
+        .filter(ChatMessage.convo_key == guest_convo_key, ChatMessage.content != "")
+        .order_by(ChatMessage.id.asc())
+        .limit(50)
+        .all()
+    )
+
+    return {
+        "convo_key": guest_convo_key,
+        "user": "Guest",
+        "is_guest": True,
+        "messages": [
+            {
+                "role": m.role, "content": m.content, "created_at": str(m.created_at),
+                "model_used": m.model_used, "trace_id": m.trace_id, "action_type": m.action_type,
+            }
+            for m in msgs
+        ],
+    }
+
+
+@router.post("/api/chat/guest-reply", response_class=JSONResponse)
+def reply_to_guest(
+    request: Request,
+    guest_convo_key: str = Form(...),
+    message: str = Form(...),
+    db: Session = Depends(get_db),
+):
+    """Let a housemate post a reply visible in a guest's conversation."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"]:
+        return JSONResponse({"error": "Forbidden"}, status_code=403)
+
+    if not guest_convo_key.startswith("guest:"):
+        return JSONResponse({"error": "Invalid convo key"}, status_code=400)
+
+    user_name = identity["user_name"]
+    trace_id = new_trace_id()
+    content = f"[{user_name}]: {message}"
+
+    db.add(ChatMessage(
+        convo_key=guest_convo_key,
+        conversation_id=None,
+        role="assistant",
+        content=content,
+        trace_id=trace_id,
+        action_type="housemate_reply",
+        model_used="human",
+    ))
+    db.commit()
+
+    return {"ok": True, "trace_id": trace_id}

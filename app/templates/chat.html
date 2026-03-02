@@ -125,7 +125,7 @@
     .msg.assistant .md-body hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
 
     .msg-footer {
-      display: flex; align-items: center; gap: 8px;
+      display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
       margin-top: 6px; font-size: 11px;
     }
     .msg-footer .ts { margin-top: 0; }
@@ -133,6 +133,19 @@
       background: var(--code-bg); color: var(--text-secondary);
       padding: 2px 8px; border-radius: 4px; font-weight: 500;
     }
+    .rag-badge {
+      background: #dcfce7; color: #166534; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+    }
+    [data-theme="dark"] .rag-badge { background: #14532d; color: #86efac; }
+    .personality-badge {
+      background: #ede9fe; color: #5b21b6; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+    }
+    [data-theme="dark"] .personality-badge { background: #3b0764; color: #c4b5fd; }
+    .trace-id {
+      color: var(--text-muted); font-family: monospace; font-size: 10px; cursor: pointer;
+      opacity: 0.5; transition: opacity 0.15s;
+    }
+    .trace-id:hover { opacity: 1; }
     .copy-btn {
       background: none; border: 1px solid var(--border); border-radius: 4px;
       padding: 2px 8px; cursor: pointer; color: var(--text-secondary);
@@ -146,6 +159,31 @@
       opacity: 0; transition: opacity 0.15s;
     }
     .msg.assistant .md-body pre:hover .code-copy-btn { opacity: 1; }
+    #export-btn {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      padding: 6px 12px; cursor: pointer; font-size: 12px; color: var(--text-secondary);
+      width: 100%; text-align: left; transition: background 0.15s;
+    }
+    #export-btn:hover { background: var(--code-bg); }
+    .guest-section-label {
+      font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px;
+      padding: 12px 12px 4px; border-top: 1px solid var(--border); margin-top: 8px;
+    }
+    .convo-item.guest-convo .convo-title { font-style: italic; }
+    .guest-reply-bar {
+      display: flex; gap: 6px; padding: 8px;
+      border-top: 1px solid var(--border); background: var(--bg-input-bar);
+    }
+    .guest-reply-bar input {
+      flex: 1; padding: 8px 10px; font-size: 13px;
+      border: 1px solid var(--input-border); border-radius: 6px;
+      background: var(--input-bg); color: var(--text); outline: none;
+    }
+    .guest-reply-bar button {
+      padding: 8px 14px; font-size: 13px; font-weight: 600;
+      background: var(--accent); color: #fff; border: none; border-radius: 6px; cursor: pointer;
+    }
 
     #app-layout { display: flex; flex: 1; overflow: hidden; }
     #sidebar {
@@ -259,6 +297,13 @@
         <input id="convo-search" type="text" placeholder="Search conversations..." style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;" />
       </div>
       <div id="convo-list"></div>
+      <div id="guest-convo-section" style="display:none;">
+        <div class="guest-section-label">Guest Chats</div>
+        <div id="guest-convo-list"></div>
+      </div>
+      <div style="padding:8px 12px; border-top:1px solid var(--border);">
+        <button id="export-btn" style="display:none;" title="Export current conversation">Export Chat</button>
+      </div>
     </aside>
 
     <div id="main-col">
@@ -305,6 +350,10 @@
 
     var currentConvoId = null;
     var isGuest = true;
+    var viewingGuestKey = null;
+    var exportBtn = document.getElementById('export-btn');
+    var guestConvoSection = document.getElementById('guest-convo-section');
+    var guestConvoList = document.getElementById('guest-convo-list');
 
     var _marked = (typeof marked !== 'undefined') ? marked : null;
     var _DOMPurify = (typeof DOMPurify !== 'undefined') ? DOMPurify : null;
@@ -430,6 +479,7 @@
       div.className = 'msg ' + role;
       var label = role === 'user' ? 'You' : 'CHILI';
       var timeStr = fmtTime(ts);
+      meta = meta || {};
 
       var bodyHTML;
       if (role === 'assistant') {
@@ -441,11 +491,24 @@
       var footerHTML = '';
       if (role === 'assistant') {
         footerHTML = '<div class="msg-footer">';
-        if (meta && meta.model_used) {
+        if (meta.model_used) {
           footerHTML += '<span class="model-badge">' + esc(meta.model_used) + '</span>';
+        }
+        if (meta.rag_sources && meta.rag_sources.length > 0) {
+          var srcs = meta.rag_sources.filter(function(v, i, a) { return a.indexOf(v) === i; });
+          footerHTML += '<span class="rag-badge" title="Sources: ' + esc(srcs.join(', ')) + '">RAG: ' + esc(srcs.join(', ')) + '</span>';
+        }
+        if (meta.action_type === 'answer_from_docs') {
+          footerHTML += '<span class="rag-badge">from docs</span>';
+        }
+        if (meta.personality_used) {
+          footerHTML += '<span class="personality-badge">personalized</span>';
         }
         footerHTML += '<button class="copy-btn" title="Copy message">Copy</button>';
         if (timeStr) footerHTML += '<span class="ts">' + esc(timeStr) + '</span>';
+        if (meta.trace_id) {
+          footerHTML += '<span class="trace-id" title="Click to copy trace ID: ' + esc(meta.trace_id) + '">' + esc(meta.trace_id) + '</span>';
+        }
         footerHTML += '</div>';
       } else if (timeStr) {
         footerHTML = '<div class="ts">' + esc(timeStr) + '</div>';
@@ -467,6 +530,16 @@
         msgCopyBtn.onclick = function() {
           var md = div.querySelector('.md-body');
           copyText(md ? md.textContent : content, msgCopyBtn);
+        };
+      }
+
+      var traceEl = div.querySelector('.trace-id');
+      if (traceEl) {
+        traceEl.onclick = function() {
+          navigator.clipboard.writeText(meta.trace_id).then(function() {
+            traceEl.textContent = 'copied!';
+            setTimeout(function() { traceEl.textContent = meta.trace_id; }, 1500);
+          });
         };
       }
 
@@ -498,6 +571,86 @@
 
     async function loadConversations() {
       await loadConversationsData();
+      if (!isGuest) loadGuestConversations();
+    }
+
+    function updateExportBtn() {
+      if (currentConvoId && !isGuest) {
+        exportBtn.style.display = '';
+      } else {
+        exportBtn.style.display = 'none';
+      }
+    }
+
+    exportBtn.onclick = function() {
+      if (!currentConvoId) return;
+      window.open('/api/conversations/' + currentConvoId + '/export?fmt=md', '_blank');
+    };
+
+    async function loadGuestConversations() {
+      try {
+        var res = await fetch('/api/conversations/guests');
+        if (!res.ok) return;
+        var data = await res.json();
+        var guests = data.guest_conversations || [];
+        if (guests.length === 0) {
+          guestConvoSection.style.display = 'none';
+          return;
+        }
+        guestConvoSection.style.display = '';
+        guestConvoList.innerHTML = '';
+        guests.forEach(function(g) {
+          var item = document.createElement('div');
+          item.className = 'convo-item guest-convo' + (viewingGuestKey === g.convo_key ? ' active' : '');
+          item.innerHTML = '<span class="convo-title">' + esc(g.title) + '</span>'
+            + '<span style="font-size:10px;color:var(--text-muted);flex-shrink:0;">' + g.msg_count + ' msgs</span>';
+          item.onclick = function() { openGuestChat(g.convo_key); };
+          guestConvoList.appendChild(item);
+        });
+      } catch(e) {}
+    }
+
+    async function openGuestChat(guestKey) {
+      viewingGuestKey = guestKey;
+      currentConvoId = null;
+      chatLog.innerHTML = '';
+      welcome.style.display = 'none';
+      statusEl.textContent = 'Viewing guest chat (read-only)';
+      updateExportBtn();
+
+      var items = convoList.querySelectorAll('.convo-item');
+      items.forEach(function(i) { i.classList.remove('active'); });
+
+      await loadGuestHistory(guestKey);
+      await loadGuestConversations();
+
+      var replyBar = document.getElementById('guest-reply-bar');
+      if (!replyBar) {
+        replyBar = document.createElement('div');
+        replyBar.id = 'guest-reply-bar';
+        replyBar.className = 'guest-reply-bar';
+        replyBar.innerHTML = '<input type="text" id="guest-reply-input" placeholder="Reply to guest..." />'
+          + '<button id="guest-reply-send">Reply</button>';
+        document.getElementById('input-bar').appendChild(replyBar);
+        document.getElementById('guest-reply-send').onclick = sendGuestReply;
+        document.getElementById('guest-reply-input').addEventListener('keydown', function(e) {
+          if (e.key === 'Enter') sendGuestReply();
+        });
+      }
+      replyBar.style.display = '';
+    }
+
+    async function sendGuestReply() {
+      var inp = document.getElementById('guest-reply-input');
+      var msg = inp.value.trim();
+      if (!msg || !viewingGuestKey) return;
+      inp.value = '';
+      var body = new FormData();
+      body.append('guest_convo_key', viewingGuestKey);
+      body.append('message', msg);
+      await fetch('/api/chat/guest-reply', { method: 'POST', body: body });
+      chatLog.innerHTML = '';
+      await loadGuestHistory(viewingGuestKey);
     }
 
     function renderConvoList(convos) {
@@ -518,10 +671,14 @@
 
     async function switchConvo(id) {
       currentConvoId = id;
+      viewingGuestKey = null;
       chatLog.innerHTML = '';
       welcome.style.display = 'none';
+      var replyBar = document.getElementById('guest-reply-bar');
+      if (replyBar) replyBar.style.display = 'none';
       await loadHistory(id);
       await loadConversations();
+      updateExportBtn();
     }
 
     async function deleteConvo(id) {
@@ -536,10 +693,14 @@
 
     newChatBtn.addEventListener('click', async function() {
       currentConvoId = null;
+      viewingGuestKey = null;
       chatLog.innerHTML = '';
       welcome.style.display = '';
+      var replyBar = document.getElementById('guest-reply-bar');
+      if (replyBar) replyBar.style.display = 'none';
       var items = convoList.querySelectorAll('.convo-item');
       items.forEach(function(i) { i.classList.remove('active'); });
+      updateExportBtn();
       input.focus();
     });
 
@@ -554,11 +715,29 @@
           : 'Signed in as ' + data.user;
         if (data.messages && data.messages.length > 0) {
           data.messages.forEach(function(m) {
-            addMsg(m.role, m.content, m.created_at, { model_used: m.model_used });
+            addMsg(m.role, m.content, m.created_at, {
+              model_used: m.model_used, trace_id: m.trace_id, action_type: m.action_type,
+            });
           });
         }
       } catch(e) {
         statusEl.textContent = 'Could not load history.';
+      }
+    }
+
+    async function loadGuestHistory(guestKey) {
+      try {
+        var res = await fetch('/api/chat/guest-history?guest_convo_key=' + encodeURIComponent(guestKey));
+        var data = await res.json();
+        if (data.messages && data.messages.length > 0) {
+          data.messages.forEach(function(m) {
+            addMsg(m.role, m.content, m.created_at, {
+              model_used: m.model_used, trace_id: m.trace_id, action_type: m.action_type,
+            });
+          });
+        }
+      } catch(e) {
+        statusEl.textContent = 'Could not load guest history.';
       }
     }
 
@@ -572,6 +751,7 @@
     }
 
     function finalizeStreamingMsg(div, fullText, meta) {
+      meta = meta || {};
       var mdBody = div.querySelector('.md-body');
       mdBody.innerHTML = renderMd(fullText);
 
@@ -586,8 +766,15 @@
 
       var footer = document.createElement('div');
       footer.className = 'msg-footer';
-      if (meta && meta.model_used) {
+      if (meta.model_used) {
         footer.innerHTML += '<span class="model-badge">' + esc(meta.model_used) + '</span>';
+      }
+      if (meta.rag_sources && meta.rag_sources.length > 0) {
+        var srcs = meta.rag_sources.filter(function(v, i, a) { return a.indexOf(v) === i; });
+        footer.innerHTML += '<span class="rag-badge" title="Sources: ' + esc(srcs.join(', ')) + '">RAG: ' + esc(srcs.join(', ')) + '</span>';
+      }
+      if (meta.personality_used) {
+        footer.innerHTML += '<span class="personality-badge">personalized</span>';
       }
       var copyBtn = document.createElement('button');
       copyBtn.className = 'copy-btn';
@@ -595,6 +782,19 @@
       copyBtn.title = 'Copy message';
       copyBtn.onclick = function() { copyText(mdBody.textContent, copyBtn); };
       footer.appendChild(copyBtn);
+      if (meta.trace_id) {
+        var traceSpan = document.createElement('span');
+        traceSpan.className = 'trace-id';
+        traceSpan.title = 'Click to copy trace ID: ' + meta.trace_id;
+        traceSpan.textContent = meta.trace_id;
+        traceSpan.onclick = function() {
+          navigator.clipboard.writeText(meta.trace_id).then(function() {
+            traceSpan.textContent = 'copied!';
+            setTimeout(function() { traceSpan.textContent = meta.trace_id; }, 1500);
+          });
+        };
+        footer.appendChild(traceSpan);
+      }
       div.appendChild(footer);
     }
 
@@ -623,9 +823,13 @@
           var fres = await fetch('/api/chat', { method: 'POST', body: fbody });
           var fdata = await fres.json();
           if (fdata.conversation_id && currentConvoId == null) currentConvoId = fdata.conversation_id;
-          addMsg('assistant', fdata.reply || '(no reply)', '', { model_used: fdata.model_used });
+          addMsg('assistant', fdata.reply || '(no reply)', '', {
+            model_used: fdata.model_used, trace_id: fdata.trace_id, action_type: fdata.action_type,
+            rag_sources: fdata.rag_sources, personality_used: fdata.personality_used,
+          });
           statusEl.textContent = '';
           if (!isGuest) loadConversations();
+          updateExportBtn();
           return;
         }
 
@@ -668,6 +872,7 @@
         finalizeStreamingMsg(streamDiv, fullText, meta);
         statusEl.textContent = '';
         if (!isGuest) loadConversations();
+        updateExportBtn();
       } catch(e) {
         addMsg('assistant', 'Error: could not reach CHILI backend.', '');
         statusEl.textContent = '';
@@ -752,6 +957,8 @@
       } else if (isGuest) {
         await loadHistory();
       }
+      if (!isGuest) loadGuestConversations();
+      updateExportBtn();
       input.focus();
     })();
   </script>

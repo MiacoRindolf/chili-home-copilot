@@ -112,8 +112,10 @@ class TestModelUsedTracking:
         ).first()
         assert assistant_msg.model_used == "llama3"
 
+    @patch("app.routers.chat.openai_client")
     @patch("app.services.chat_service.plan_action", side_effect=Exception("offline"))
-    def test_offline_model_recorded(self, mock_plan, client, db):
+    def test_offline_model_recorded(self, mock_plan, mock_openai, client, db):
+        mock_openai.is_configured.return_value = False
         client.post("/api/chat", data={"message": "hello"})
 
         assistant_msg = db.query(ChatMessage).filter(

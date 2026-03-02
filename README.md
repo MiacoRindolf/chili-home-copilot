@@ -273,6 +273,10 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 | **SSE streaming** | Server-Sent Events let the frontend display tokens as they arrive from OpenAI, matching the ChatGPT typing experience. Tool actions (instant) send the full reply as one chunk. |
 | **Conversation sidebar for users only** | Paired users get multi-conversation management (create, switch, delete). Guests see a single shared thread -- no sidebar clutter, simpler UX for casual visitors. |
 | **CDN for frontend libs** | marked.js, highlight.js, and DOMPurify loaded from CDN. Zero build step, instant updates, keeps the repo lean. |
+| **NLU fallback parser** | When Ollama is offline, a rule-based regex parser handles common commands (add/list chores, mark done, add/list birthdays) without any LLM. OpenAI picks up general chat. Full graceful degradation. |
+| **RAG + personality badges** | Assistant messages show badges indicating when RAG context was used (with source filenames) and when personality profiling personalized the response. Trace IDs are clickable for debugging. |
+| **Conversation export** | Download any conversation as Markdown or JSON for archiving, sharing, or debugging. |
+| **Guest chat visibility** | Housemates can view and reply to guest conversations from a dedicated sidebar section, enabling support for visitors without requiring them to pair devices. |
 
 ## API Reference
 
@@ -283,9 +287,14 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 | `POST` | `/api/chat` | Send a message, get JSON response |
 | `POST` | `/api/chat/stream` | Send a message, get SSE streaming response |
 | `GET` | `/api/chat/history` | Retrieve conversation history (optional `?conversation_id=`) |
+| `GET` | `/api/chat/guest-history` | View a guest's chat history (housemates only, `?guest_convo_key=`) |
+| `POST` | `/api/chat/guest-reply` | Reply to a guest's conversation (housemates only) |
 | `GET` | `/api/conversations` | List conversations for current user |
 | `POST` | `/api/conversations` | Create a new conversation |
 | `DELETE` | `/api/conversations/{id}` | Delete a conversation and its messages |
+| `GET` | `/api/conversations/search` | Search conversations by message content |
+| `GET` | `/api/conversations/guests` | List guest conversations (housemates only) |
+| `GET` | `/api/conversations/{id}/export` | Export conversation as Markdown or JSON (`?fmt=md\|json`) |
 | `GET` | `/health` | DB + Ollama health check |
 | `GET` | `/metrics` | Counts + LLM latency stats |
 | `GET` | `/admin` | Admin dashboard |
@@ -301,9 +310,17 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 - [x] RAG over household documents (manuals, recipes, notes)
 - [x] Smart multi-model routing (local llama3 + OpenAI fallback)
 - [x] Housemate personality profiles (auto-extracted, editable)
-- [ ] Scheduled reminders (e.g., "remind me to take out trash every Tuesday")
+- [x] NLU fallback parser (rule-based, works when Ollama is offline)
+- [x] RAG source badges, personality indicator, and trace ID display in chat
+- [x] Conversation export (Markdown / JSON)
+- [x] Guest chat visibility and housemate replies
 - [x] Streaming LLM responses via SSE + ChatGPT-style UI (markdown, sidebar, conversations)
 - [x] Docker containerization (`docker compose up` one-liner)
+- [ ] Expanded tool actions (shopping list, edit/delete, chore assignment)
+- [ ] Image & file understanding (GPT-4o vision, PDF ingestion)
+- [ ] Scheduled reminders & push notifications
+- [ ] LLM evaluation & observability dashboard
+- [ ] Real-time collaboration (WebSockets, live updates)
 - [ ] Multi-household support
 
 ## Further Reading

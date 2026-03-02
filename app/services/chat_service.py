@@ -7,9 +7,21 @@ from sqlalchemy.orm import Session
 from ..db import SessionLocal
 from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation
 from ..llm_planner import plan_action
+from ..chili_nlu import parse_message as nlu_parse
 from ..logger import log_info
 from .. import rag as rag_module
 from .. import personality as personality_module
+
+
+def nlu_fallback(message: str) -> dict | None:
+    """Try the rule-based NLU parser as fallback when Ollama is offline.
+
+    Returns a planner-compatible dict if a known action is matched, else None.
+    """
+    action = nlu_parse(message)
+    if action.type != "unknown":
+        return {"type": action.type, "data": action.data, "reply": ""}
+    return None
 
 
 def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: str, is_guest: bool):
@@ -138,6 +150,7 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
     return {
         "planned": planned,
         "rag_context": rag_context,
+        "rag_hits": rag_hits if rag_context else [],
         "personality_context": personality_context,
     }
 

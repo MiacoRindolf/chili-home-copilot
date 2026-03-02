@@ -61,25 +61,38 @@ class TestGuestReadOnly:
 
 
 class TestLLMOffline:
-    """When Ollama is down, the app must return an offline message and not execute."""
+    """When Ollama is down, the NLU fallback handles known patterns; otherwise returns offline."""
 
     @patch("app.services.chat_service.plan_action", side_effect=Exception("Connection refused"))
-    def test_offline_returns_message(self, mock_plan, client):
+    def test_nlu_fallback_handles_list_chores(self, mock_plan, client):
+        """NLU parser picks up 'list chores' when Ollama is offline."""
         resp = client.post("/api/chat", data={"message": "list chores"})
         data = resp.json()
 
         assert resp.status_code == 200
-        assert data["action_type"] == "llm_offline"
-        assert data["executed"] is False
-        assert "offline" in data["reply"].lower()
+        assert data["action_type"] == "list_chores"
+        assert data["model_used"] == "nlu-fallback"
 
     @patch("app.services.chat_service.plan_action", side_effect=Exception("Connection refused"))
-    def test_offline_no_action_executed(self, mock_plan, client, db):
+    def test_nlu_fallback_guest_blocked_write(self, mock_plan, client, db):
+        """NLU parser matches 'add chore' but guest is still blocked from writing."""
         resp = client.post("/api/chat", data={"message": "add chore sneak attack"})
         data = resp.json()
 
+        assert data["action_type"] == "guest_blocked"
+        assert db.query(Chore).count() == 0, "No chore created for guest even via NLU fallback"
+
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action", side_effect=Exception("Connection refused"))
+    def test_offline_unknown_message(self, mock_plan, mock_openai, client):
+        """Unrecognized messages with no OpenAI configured return offline message."""
+        mock_openai.is_configured.return_value = False
+        resp = client.post("/api/chat", data={"message": "tell me a joke about cats"})
+        data = resp.json()
+
+        assert resp.status_code == 200
         assert data["action_type"] == "llm_offline"
-        assert db.query(Chore).count() == 0, "No chore created when LLM is offline"
+        assert "offline" in data["reply"].lower()
 
 
 class TestChatMemory:
