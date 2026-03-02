@@ -1,4 +1,4 @@
-"""Admin routes: dashboard, user management, pairing, exports, reset."""
+"""Admin routes: dashboard, user management, pairing, exports."""
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
 from fastapi.templating import Jinja2Templates
@@ -6,10 +6,12 @@ from sqlalchemy.orm import Session
 import csv
 import io
 
-from ..deps import get_db
-from ..models import Chore, Birthday, ChatLog, User
-from ..health import check_db, check_ollama, reset_demo_data
-from ..metrics import latency_stats, get_counts, model_stats
+from ..deps import get_db, require_paired
+from ..models import Chore, Birthday, ChatLog, User, Device, HousemateProfile
+from ..health import check_db, check_ollama
+from ..metrics import (
+    latency_stats, get_counts, model_stats, total_stats, user_stats, rag_stats,
+)
 from .. import openai_client
 from ..pairing import generate_pair_code
 
@@ -22,69 +24,169 @@ def init_templates(t: Jinja2Templates):
     templates = t
 
 
+def _guard(ctx):
+    """Return a redirect response if the user is a guest, else None."""
+    if ctx is None:
+        return RedirectResponse("/chat", status_code=303)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Dashboard
+# ---------------------------------------------------------------------------
+
 @router.get("/admin", response_class=HTMLResponse)
-def admin_dashboard(request: Request, db: Session = Depends(get_db)):
+def admin_dashboard(request: Request, ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    db: Session = ctx["db"]
     db_status = check_db(db)
     ollama_status = check_ollama()
     counts = get_counts(db)
     lat = latency_stats()
     ok = bool(db_status.get("ok") and ollama_status.get("ok"))
     ms = model_stats(db)
+    ts = total_stats(db)
+    rs = rag_stats()
     openai_configured = openai_client.is_configured()
 
-    logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(20).all()
-    logs_html = "".join(
-        f"<li>{l.created_at} | {l.client_ip} | {l.action_type} | <code>{l.trace_id}</code> | {l.message}</li>"
+    logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(30).all()
+    log_rows = [
+        {
+            "time": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else "—",
+            "ip": l.client_ip,
+            "action": l.action_type,
+            "trace_id": l.trace_id,
+            "message": (l.message[:80] + "...") if len(l.message) > 80 else l.message,
+        }
         for l in logs
-    ) or "<li>No chat logs yet.</li>"
+    ]
+
+    total_model_msgs = sum(ms.values()) if ms else 1
 
     return templates.TemplateResponse(request, "admin.html", {
+        "user_name": ctx["user_name"],
         "ok": ok,
         "db_status": db_status,
         "ollama_status": ollama_status,
         "counts": counts,
         "lat": lat,
         "model_stats": ms,
+        "total_model_msgs": total_model_msgs,
+        "total_stats": ts,
+        "rag": rs,
         "openai_configured": openai_configured,
         "openai_model": openai_client.OPENAI_MODEL,
-        "logs_html": logs_html,
+        "log_rows": log_rows,
     })
 
 
-@router.post("/admin/reset")
-def admin_reset(db: Session = Depends(get_db)):
-    reset_demo_data(db)
-    return RedirectResponse("/admin", status_code=303)
-
+# ---------------------------------------------------------------------------
+# User Management
+# ---------------------------------------------------------------------------
 
 @router.get("/admin/users", response_class=HTMLResponse)
-def admin_users(request: Request, db: Session = Depends(get_db)):
-    users = db.query(User).order_by(User.name.asc()).all()
-    user_items = "".join(
-        [f"<li>#{u.id} {u.name}</li>" for u in users]
-    ) or "<li>No users yet.</li>"
+def admin_users_page(request: Request, ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    db: Session = ctx["db"]
+    users = user_stats(db)
+    all_users = db.query(User).order_by(User.name.asc()).all()
 
     return templates.TemplateResponse(request, "admin_users.html", {
-        "user_items": user_items,
+        "user_name": ctx["user_name"],
+        "users": users,
+        "all_users": all_users,
     })
 
 
 @router.post("/admin/users")
-def admin_create_user(name: str = Form(...), db: Session = Depends(get_db)):
+def admin_create_user(name: str = Form(...), ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    db: Session = ctx["db"]
     db.add(User(name=name.strip()))
     db.commit()
     return RedirectResponse("/admin/users", status_code=303)
 
 
+@router.post("/admin/users/{user_id}/delete")
+def admin_delete_user(user_id: int, ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    db: Session = ctx["db"]
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return RedirectResponse("/admin/users", status_code=303)
+
+    db.query(Device).filter(Device.user_id == user_id).delete()
+    db.query(HousemateProfile).filter(HousemateProfile.user_id == user_id).delete()
+    db.delete(user)
+    db.commit()
+    return RedirectResponse("/admin/users", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# Pairing
+# ---------------------------------------------------------------------------
+
 @router.post("/admin/pair-code", response_class=HTMLResponse)
-def admin_pair_code(user_id: int = Form(...), db: Session = Depends(get_db)):
+def admin_pair_code(user_id: int = Form(...), ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    db: Session = ctx["db"]
+    user = db.query(User).filter(User.id == user_id).first()
+    if not user:
+        return RedirectResponse("/admin/users", status_code=303)
+
     code = generate_pair_code(db, user_id=user_id, minutes_valid=10)
     return HTMLResponse(
-        f"<p>Pairing code (valid 10 min): <b>{code}</b></p>"
-        f"<p>Go to <code>/pair</code> on the device.</p>"
-        f"<p><a href='/admin/users'>Back</a></p>"
+        f"<div style='font-family:system-ui;max-width:500px;margin:80px auto;text-align:center;'>"
+        f"<h2>Pairing Code Generated</h2>"
+        f"<p style='font-size:2rem;font-weight:bold;letter-spacing:.3em;'>{code}</p>"
+        f"<p>Valid for 10 minutes. Go to <code>/pair</code> on the device.</p>"
+        f"<p><a href='/admin/users'>Back to Users</a></p>"
+        f"</div>"
     )
 
+
+# ---------------------------------------------------------------------------
+# RAG Management
+# ---------------------------------------------------------------------------
+
+@router.post("/admin/rag/ingest")
+def admin_rag_ingest(ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    from ..rag import ingest_documents
+    result = ingest_documents(trace_id="admin-ingest")
+    return JSONResponse(result)
+
+
+@router.get("/admin/rag/status")
+def admin_rag_status(ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+
+    return JSONResponse(rag_stats())
+
+
+# ---------------------------------------------------------------------------
+# CSV Exports
+# ---------------------------------------------------------------------------
 
 @router.get("/export/chores.csv")
 def export_chores_csv(db: Session = Depends(get_db)):

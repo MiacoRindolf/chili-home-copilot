@@ -1,53 +1,489 @@
 {% extends "base.html" %}
 {% block title %}CHILI Admin{% endblock %}
+{% block head_extra %}
+<style>
+  :root {
+    --status-ok: #22c55e;
+    --status-error: #ef4444;
+    --card-bg: var(--bg-msg-assist);
+    --stat-accent: var(--accent);
+  }
+  [data-theme="dark"] {
+    --status-ok: #4ade80;
+    --status-error: #f87171;
+  }
+
+  .admin-shell {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: var(--text);
+  }
+
+  /* ---- Top bar ---- */
+  .admin-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .admin-topbar h1 {
+    font-size: 1.5rem;
+    font-weight: 700;
+    margin: 0;
+  }
+  .admin-topbar nav {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .admin-topbar nav a, .admin-topbar nav button {
+    text-decoration: none;
+    font-size: .85rem;
+    padding: 6px 14px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    cursor: pointer;
+    transition: .15s;
+  }
+  .admin-topbar nav a:hover, .admin-topbar nav button:hover {
+    background: var(--accent);
+    color: #fff;
+    border-color: var(--accent);
+  }
+
+  /* ---- Cards ---- */
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 1rem;
+    font-weight: 600;
+    margin: 0 0 14px 0;
+    color: var(--text-secondary);
+    text-transform: uppercase;
+    letter-spacing: .04em;
+  }
+
+  /* ---- Stats row ---- */
+  .stats-row {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+  }
+  .stat-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px;
+    text-align: center;
+  }
+  .stat-card .stat-value {
+    font-size: 1.75rem;
+    font-weight: 700;
+    color: var(--stat-accent);
+  }
+  .stat-card .stat-label {
+    font-size: .8rem;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+
+  /* ---- Two-col grid ---- */
+  .two-col {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+  @media (max-width: 700px) {
+    .two-col { grid-template-columns: 1fr; }
+  }
+
+  /* ---- Status indicators ---- */
+  .status-dot {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    margin-right: 6px;
+  }
+  .status-dot.ok { background: var(--status-ok); }
+  .status-dot.err { background: var(--status-error); }
+
+  .status-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    margin-bottom: 8px;
+    font-size: .9rem;
+  }
+  .status-row:last-child { margin-bottom: 0; }
+
+  /* ---- Model usage bars ---- */
+  .model-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 8px;
+    font-size: .85rem;
+  }
+  .model-bar-label {
+    min-width: 110px;
+    text-align: right;
+    color: var(--text-secondary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .model-bar-track {
+    flex: 1;
+    height: 12px;
+    background: var(--bg);
+    border-radius: 6px;
+    overflow: hidden;
+  }
+  .model-bar-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 6px;
+    transition: width .3s;
+  }
+  .model-bar-count {
+    min-width: 40px;
+    color: var(--text-secondary);
+  }
+
+  /* ---- RAG ---- */
+  .rag-info { font-size: .9rem; margin-bottom: 8px; }
+  .rag-info span { color: var(--text-secondary); }
+  .rag-btn {
+    padding: 8px 18px;
+    border-radius: 8px;
+    border: 1px solid var(--accent);
+    background: var(--accent);
+    color: #fff;
+    font-size: .85rem;
+    cursor: pointer;
+    transition: .15s;
+  }
+  .rag-btn:hover { background: var(--accent-hover); }
+  .rag-btn:disabled { opacity: .5; cursor: not-allowed; }
+
+  /* ---- Exports ---- */
+  .export-btns {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .export-btns a {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    text-decoration: none;
+    padding: 8px 16px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    font-size: .85rem;
+    transition: .15s;
+  }
+  .export-btns a:hover {
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  /* ---- Activity table ---- */
+  .activity-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: .82rem;
+  }
+  .activity-table th {
+    text-align: left;
+    padding: 8px 10px;
+    border-bottom: 2px solid var(--border);
+    color: var(--text-secondary);
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .activity-table td {
+    padding: 7px 10px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+    max-width: 260px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .activity-table tr:last-child td { border-bottom: none; }
+  .activity-table code {
+    font-size: .78rem;
+    background: var(--code-bg);
+    padding: 2px 5px;
+    border-radius: 4px;
+  }
+  .action-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 6px;
+    font-size: .75rem;
+    font-weight: 600;
+    background: var(--code-bg);
+    color: var(--text-secondary);
+  }
+
+  /* ---- Dark toggle ---- */
+  .theme-toggle {
+    background: none;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 1rem;
+    color: var(--text);
+    transition: .15s;
+  }
+
+  .overflow-x { overflow-x: auto; }
+
+  .admin-footer {
+    margin-top: 32px;
+    text-align: center;
+    font-size: .75rem;
+    color: var(--text-muted);
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="font-family: Arial; max-width: 900px; margin: 40px auto;">
-  <h1>🛠️ CHILI Admin</h1>
-  <p><a href="/">Home</a> | <a href="/chat">Chat</a> | <a href="/health">/health</a> | <a href="/metrics">/metrics</a> | <a href="/admin/users">Manage users & pairing</a></p>
+<div class="admin-shell">
 
-  <h2>Status</h2>
-  <div style="padding: 12px; background: {{ '#e8f5e9' if ok else '#ffebee' }}; border: 1px solid #ddd;">
-    <p><b>Overall:</b> {{ '✅ OK' if ok else '❌ Issues detected' }}</p>
-    <p><b>DB:</b> {{ '✅ OK' if db_status.ok else '❌ ' ~ db_status.get('error', '') }}</p>
-    <p><b>Ollama:</b> {{ '✅ OK' if ollama_status.ok else '❌ ' ~ ollama_status.get('error', '') }}</p>
-    <p><b>Models:</b> {{ ollama_status.get('models', []) | join(', ') if ollama_status.ok else 'N/A' }}</p>
-    <form method="post" action="/admin/reset" style="margin-top: 12px;">
-      <button style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" type="submit" onclick="return confirm('Reset demo data (delete all chores and birthdays)?')">Reset demo data</button>
-    </form>
+  <!-- Top bar -->
+  <div class="admin-topbar">
+    <h1>CHILI Admin</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/chat">Chat</a>
+      <a href="/admin/users">Users</a>
+      <a href="/health" target="_blank">/health</a>
+      <a href="/metrics" target="_blank">/metrics</a>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode"></button>
+    </nav>
   </div>
 
-  <h2>Counts</h2>
-  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
-    <p><b>Chores:</b> total={{ counts.chores.total }}, pending={{ counts.chores.pending }}, done={{ counts.chores.done }}</p>
-    <p><b>Birthdays:</b> total={{ counts.birthdays.total }}</p>
+  <!-- Quick Stats -->
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-value">{{ total_stats.users }}</div>
+      <div class="stat-label">Housemates</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ total_stats.conversations }}</div>
+      <div class="stat-label">Conversations</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ total_stats.messages }}</div>
+      <div class="stat-label">Messages</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ counts.chores.pending }}</div>
+      <div class="stat-label">Pending Chores</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ total_stats.active_users_7d }}</div>
+      <div class="stat-label">Active (7d)</div>
+    </div>
   </div>
 
-  <h2>LLM Chat Latency (last {{ lat.count }} requests)</h2>
-  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
-    <p><b>Avg:</b> {{ lat.avg_ms }} ms</p>
-    <p><b>P95:</b> {{ lat.p95_ms }} ms</p>
+  <!-- System Health + LLM Perf -->
+  <div class="two-col">
+    <div class="card">
+      <h2>System Health</h2>
+      <div class="status-row">
+        <span class="status-dot {{ 'ok' if db_status.ok else 'err' }}"></span>
+        <span>Database</span>
+        {% if not db_status.ok %}
+          <span style="color:var(--status-error);font-size:.8rem;">{{ db_status.get('error', '') }}</span>
+        {% endif %}
+      </div>
+      <div class="status-row">
+        <span class="status-dot {{ 'ok' if ollama_status.ok else 'err' }}"></span>
+        <span>Ollama</span>
+        {% if ollama_status.ok %}
+          <span style="color:var(--text-muted);font-size:.8rem;">{{ ollama_status.get('models', []) | join(', ') }}</span>
+        {% else %}
+          <span style="color:var(--status-error);font-size:.8rem;">offline</span>
+        {% endif %}
+      </div>
+      <div class="status-row">
+        <span class="status-dot {{ 'ok' if openai_configured else 'err' }}"></span>
+        <span>OpenAI</span>
+        {% if openai_configured %}
+          <span style="color:var(--text-muted);font-size:.8rem;">{{ openai_model }}</span>
+        {% else %}
+          <span style="color:var(--text-muted);font-size:.8rem;">not configured</span>
+        {% endif %}
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>LLM Performance</h2>
+      {% if lat.count > 0 %}
+        <div style="display:flex;gap:24px;">
+          <div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--stat-accent);">{{ lat.avg_ms }}ms</div>
+            <div style="font-size:.8rem;color:var(--text-secondary);">Avg Latency</div>
+          </div>
+          <div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--stat-accent);">{{ lat.p95_ms }}ms</div>
+            <div style="font-size:.8rem;color:var(--text-secondary);">P95 Latency</div>
+          </div>
+          <div>
+            <div style="font-size:1.5rem;font-weight:700;color:var(--text);">{{ lat.count }}</div>
+            <div style="font-size:.8rem;color:var(--text-secondary);">Requests</div>
+          </div>
+        </div>
+      {% else %}
+        <p style="color:var(--text-muted);font-size:.9rem;">No latency data yet.</p>
+      {% endif %}
+    </div>
   </div>
 
-  <h2>Model Usage</h2>
-  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
-    <p><b>OpenAI:</b> {{ 'Configured (' ~ openai_model ~ ')' if openai_configured else 'Not configured (set OPENAI_API_KEY in .env)' }}</p>
-    {% for model, count in model_stats.items() %}
-    <p><b>{{ model }}:</b> {{ count }} messages</p>
+  <!-- Model Usage + RAG -->
+  <div class="two-col">
+    <div class="card">
+      <h2>Model Usage</h2>
+      {% if model_stats %}
+        {% for model, count in model_stats.items() %}
+          <div class="model-bar-row">
+            <div class="model-bar-label">{{ model }}</div>
+            <div class="model-bar-track">
+              <div class="model-bar-fill" style="width:{{ (count / total_model_msgs * 100) | int }}%"></div>
+            </div>
+            <div class="model-bar-count">{{ count }}</div>
+          </div>
+        {% endfor %}
+      {% else %}
+        <p style="color:var(--text-muted);font-size:.9rem;">No messages yet.</p>
+      {% endif %}
+    </div>
+
+    <div class="card">
+      <h2>RAG Knowledge Base</h2>
+      {% if rag.available %}
+        <div class="rag-info">Chunks indexed: <strong>{{ rag.chunk_count }}</strong></div>
+        <div class="rag-info">Source files: <span>{{ rag.source_files | join(', ') or 'none' }}</span></div>
+        <div class="rag-info">Docs on disk: <span>{{ rag.docs_on_disk | join(', ') or 'none' }}</span></div>
+      {% else %}
+        <div class="rag-info" style="color:var(--text-muted);">{{ rag.reason }}</div>
+      {% endif %}
+      <button class="rag-btn" id="rag-ingest-btn" onclick="triggerIngest()">Re-ingest Documents</button>
+      <span id="rag-status" style="margin-left:10px;font-size:.8rem;color:var(--text-secondary);"></span>
+    </div>
+  </div>
+
+  <!-- Data + Exports -->
+  <div class="two-col">
+    <div class="card">
+      <h2>Data Summary</h2>
+      <div style="font-size:.9rem;">
+        <div style="margin-bottom:6px;">Chores: <strong>{{ counts.chores.total }}</strong> total, <strong>{{ counts.chores.pending }}</strong> pending, <strong>{{ counts.chores.done }}</strong> done</div>
+        <div>Birthdays: <strong>{{ counts.birthdays.total }}</strong> total</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Exports</h2>
+      <div class="export-btns">
+        <a href="/export/chores.csv" download>Chores CSV</a>
+        <a href="/export/birthdays.csv" download>Birthdays CSV</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recent Activity -->
+  <div class="card">
+    <h2>Recent Activity</h2>
+    {% if log_rows %}
+    <div class="overflow-x">
+      <table class="activity-table">
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>IP</th>
+            <th>Action</th>
+            <th>Trace ID</th>
+            <th>Message</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in log_rows %}
+          <tr>
+            <td>{{ row.time }}</td>
+            <td>{{ row.ip }}</td>
+            <td><span class="action-badge">{{ row.action }}</span></td>
+            <td><code>{{ row.trace_id }}</code></td>
+            <td title="{{ row.message }}">{{ row.message }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
     {% else %}
-    <p>No messages yet.</p>
-    {% endfor %}
+      <p style="color:var(--text-muted);font-size:.9rem;">No activity logged yet.</p>
+    {% endif %}
   </div>
 
-  <h2>Exports</h2>
-  <ul>
-    <li><a href="/export/chores.csv">Download chores.csv</a></li>
-    <li><a href="/export/birthdays.csv">Download birthdays.csv</a></li>
-  </ul>
-
-  <h2>Recent Chat Activity</h2>
-  <ul>{{ logs_html | safe }}</ul>
-
-  <hr/>
-  <p style="color:#888; font-size:12px;">CHILI Admin — local dashboard</p>
+  <div class="admin-footer">CHILI Home Copilot &mdash; Admin Dashboard</div>
 </div>
+
+<script>
+(function() {
+  var btn = document.getElementById('theme-toggle');
+  function applyTheme() {
+    var t = document.documentElement.getAttribute('data-theme');
+    btn.textContent = t === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+  }
+  applyTheme();
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('chili-theme', next);
+    applyTheme();
+  });
+})();
+
+function triggerIngest() {
+  var btn = document.getElementById('rag-ingest-btn');
+  var status = document.getElementById('rag-status');
+  btn.disabled = true;
+  status.textContent = 'Ingesting...';
+  fetch('/admin/rag/ingest', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        status.textContent = 'Done: ' + d.files + ' files, ' + d.chunks + ' chunks';
+      } else {
+        status.textContent = 'Error: ' + (d.error || 'unknown');
+      }
+      btn.disabled = false;
+    })
+    .catch(function(e) {
+      status.textContent = 'Network error';
+      btn.disabled = false;
+    });
+}
+</script>
 {% endblock %}

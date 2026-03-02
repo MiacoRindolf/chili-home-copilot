@@ -1,25 +1,366 @@
 {% extends "base.html" %}
 {% block title %}CHILI Admin - Users{% endblock %}
+{% block head_extra %}
+<style>
+  :root {
+    --status-ok: #22c55e;
+    --status-error: #ef4444;
+    --card-bg: var(--bg-msg-assist);
+  }
+  [data-theme="dark"] {
+    --status-ok: #4ade80;
+    --status-error: #f87171;
+  }
+
+  .admin-shell {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+    font-family: system-ui, -apple-system, sans-serif;
+    color: var(--text);
+  }
+
+  .admin-topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 12px;
+    margin-bottom: 28px;
+  }
+  .admin-topbar h1 { font-size: 1.5rem; font-weight: 700; margin: 0; }
+  .admin-topbar nav { display: flex; gap: 8px; flex-wrap: wrap; }
+  .admin-topbar nav a, .admin-topbar nav button {
+    text-decoration: none; font-size: .85rem; padding: 6px 14px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card-bg); color: var(--text); cursor: pointer; transition: .15s;
+  }
+  .admin-topbar nav a:hover, .admin-topbar nav button:hover {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+
+  .card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: 1rem; font-weight: 600; margin: 0 0 14px 0;
+    color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em;
+  }
+
+  /* ---- Forms ---- */
+  .form-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    align-items: flex-end;
+  }
+  .form-row input, .form-row select {
+    flex: 1;
+    min-width: 180px;
+    padding: 10px 14px;
+    font-size: .9rem;
+    border: 1px solid var(--input-border);
+    border-radius: 8px;
+    background: var(--input-bg);
+    color: var(--text);
+  }
+  .form-row button {
+    padding: 10px 20px;
+    font-size: .9rem;
+    border: none;
+    border-radius: 8px;
+    background: var(--accent);
+    color: #fff;
+    cursor: pointer;
+    transition: .15s;
+    white-space: nowrap;
+  }
+  .form-row button:hover { background: var(--accent-hover); }
+
+  /* ---- User cards ---- */
+  .user-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+    margin-top: 16px;
+  }
+  .user-card {
+    background: var(--card-bg);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 18px;
+    position: relative;
+  }
+  .user-card-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .user-card-header h3 {
+    margin: 0;
+    font-size: 1.1rem;
+    font-weight: 600;
+  }
+  .user-id-badge {
+    font-size: .75rem;
+    color: var(--text-muted);
+    background: var(--code-bg);
+    padding: 2px 8px;
+    border-radius: 6px;
+  }
+
+  .user-stats-row {
+    display: flex;
+    gap: 16px;
+    margin-bottom: 12px;
+    flex-wrap: wrap;
+  }
+  .user-stat {
+    text-align: center;
+  }
+  .user-stat-val {
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--accent);
+  }
+  .user-stat-lbl {
+    font-size: .72rem;
+    color: var(--text-secondary);
+  }
+
+  .profile-badge {
+    display: inline-block;
+    padding: 2px 10px;
+    border-radius: 6px;
+    font-size: .75rem;
+    font-weight: 600;
+  }
+  .profile-badge.yes { background: #dcfce7; color: #166534; }
+  .profile-badge.no  { background: var(--code-bg); color: var(--text-muted); }
+  [data-theme="dark"] .profile-badge.yes { background: #14532d; color: #86efac; }
+
+  /* ---- Device list ---- */
+  .device-toggle {
+    font-size: .8rem;
+    color: var(--accent);
+    cursor: pointer;
+    border: none;
+    background: none;
+    padding: 0;
+    margin-bottom: 8px;
+  }
+  .device-toggle:hover { text-decoration: underline; }
+  .device-list {
+    display: none;
+    font-size: .82rem;
+    margin-bottom: 10px;
+  }
+  .device-list.open { display: block; }
+  .device-item {
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .device-item:last-child { border-bottom: none; }
+  .device-label { font-weight: 500; }
+  .device-meta { color: var(--text-muted); font-size: .78rem; }
+
+  /* ---- Profile preview ---- */
+  .profile-preview {
+    font-size: .82rem;
+    margin-top: 8px;
+    padding: 10px;
+    background: var(--bg);
+    border-radius: 8px;
+    display: none;
+  }
+  .profile-preview.open { display: block; }
+  .profile-row { margin-bottom: 4px; }
+  .profile-row strong { color: var(--text-secondary); }
+
+  /* ---- Delete button ---- */
+  .delete-btn {
+    font-size: .78rem;
+    padding: 4px 12px;
+    border-radius: 6px;
+    border: 1px solid var(--status-error);
+    background: none;
+    color: var(--status-error);
+    cursor: pointer;
+    transition: .15s;
+  }
+  .delete-btn:hover {
+    background: var(--status-error);
+    color: #fff;
+  }
+
+  .theme-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 10px; cursor: pointer; font-size: 1rem; color: var(--text); transition: .15s;
+  }
+
+  .empty-state {
+    text-align: center;
+    color: var(--text-muted);
+    padding: 30px;
+    font-size: .9rem;
+  }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="font-family:Arial;max-width:900px;margin:40px auto;">
-  <h1>👥 CHILI Admin - Users</h1>
-  <p><a href="/admin">← Admin</a></p>
+<div class="admin-shell">
 
-  <h2>Create housemate</h2>
-  <form method="post" action="/admin/users">
-    <input name="name" placeholder="Name (e.g., Alex)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
-    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Create</button>
-  </form>
+  <div class="admin-topbar">
+    <h1>Users &amp; Devices</h1>
+    <nav>
+      <a href="/admin">Dashboard</a>
+      <a href="/chat">Chat</a>
+      <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode"></button>
+    </nav>
+  </div>
 
-  <h2>Existing users</h2>
-  <ul>{{ user_items | safe }}</ul>
+  <!-- Create housemate -->
+  <div class="card">
+    <h2>Add Housemate</h2>
+    <form method="post" action="/admin/users" class="form-row">
+      <input name="name" placeholder="Name (e.g. Alex)" required />
+      <button type="submit">Create</button>
+    </form>
+  </div>
 
-  <h2>Generate pairing code</h2>
-  <form method="post" action="/admin/pair-code">
-    <input name="user_id" placeholder="User ID (e.g., 1)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
-    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Generate code</button>
-  </form>
+  <!-- Generate pairing code -->
+  <div class="card">
+    <h2>Generate Pairing Code</h2>
+    {% if all_users %}
+    <form method="post" action="/admin/pair-code" class="form-row">
+      <select name="user_id" required>
+        <option value="" disabled selected>Select housemate...</option>
+        {% for u in all_users %}
+          <option value="{{ u.id }}">{{ u.name }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit">Generate Code</button>
+    </form>
+    <p style="font-size:.8rem;color:var(--text-muted);margin-top:8px;">
+      Housemate opens <code>/pair</code> on their device and enters the code.
+    </p>
+    {% else %}
+      <p style="color:var(--text-muted);font-size:.9rem;">Create a housemate first.</p>
+    {% endif %}
+  </div>
 
-  <p>Housemate pairs at: <code>/pair</code></p>
+  <!-- User cards -->
+  {% if users %}
+  <div class="user-grid">
+    {% for u in users %}
+    <div class="user-card">
+      <div class="user-card-header">
+        <h3>{{ u.name }}</h3>
+        <span class="user-id-badge">#{{ u.id }}</span>
+      </div>
+
+      <div class="user-stats-row">
+        <div class="user-stat">
+          <div class="user-stat-val">{{ u.device_count }}</div>
+          <div class="user-stat-lbl">Devices</div>
+        </div>
+        <div class="user-stat">
+          <div class="user-stat-val">{{ u.message_count }}</div>
+          <div class="user-stat-lbl">Messages</div>
+        </div>
+        <div class="user-stat">
+          <div class="user-stat-val">{{ u.conversation_count }}</div>
+          <div class="user-stat-lbl">Convos</div>
+        </div>
+        <div class="user-stat">
+          <span class="profile-badge {{ 'yes' if u.has_profile else 'no' }}">
+            {{ 'Profile' if u.has_profile else 'No Profile' }}
+          </span>
+        </div>
+      </div>
+
+      <!-- Devices expandable -->
+      {% if u.devices %}
+      <button class="device-toggle" onclick="toggleSection(this, 'devices-{{ u.id }}')">
+        Show {{ u.device_count }} device{{ 's' if u.device_count != 1 else '' }}
+      </button>
+      <div class="device-list" id="devices-{{ u.id }}">
+        {% for d in u.devices %}
+        <div class="device-item">
+          <div>
+            <span class="device-label">{{ d.label }}</span>
+            <span class="device-meta">&middot; {{ d.token_short }}</span>
+          </div>
+          <div class="device-meta">{{ d.last_ip }} &middot; {{ d.last_seen }}</div>
+        </div>
+        {% endfor %}
+      </div>
+      {% endif %}
+
+      <!-- Profile expandable -->
+      {% if u.profile %}
+      <button class="device-toggle" onclick="toggleSection(this, 'profile-{{ u.id }}')">
+        Show personality profile
+      </button>
+      <div class="profile-preview" id="profile-{{ u.id }}">
+        <div class="profile-row"><strong>Interests:</strong> {{ u.profile.interests }}</div>
+        <div class="profile-row"><strong>Dietary:</strong> {{ u.profile.dietary }}</div>
+        <div class="profile-row"><strong>Tone:</strong> {{ u.profile.tone }}</div>
+        <div class="profile-row"><strong>Notes:</strong> {{ u.profile.notes }}</div>
+        <div class="profile-row" style="color:var(--text-muted);margin-top:4px;">Last extracted: {{ u.profile.last_extracted }}</div>
+      </div>
+      {% endif %}
+
+      <!-- Delete -->
+      <div style="margin-top:12px;text-align:right;">
+        <form method="post" action="/admin/users/{{ u.id }}/delete" style="display:inline;">
+          <button type="submit" class="delete-btn"
+                  onclick="return confirm('Delete {{ u.name }} and all their devices? This cannot be undone.')">
+            Delete User
+          </button>
+        </form>
+      </div>
+    </div>
+    {% endfor %}
+  </div>
+  {% else %}
+    <div class="empty-state">No housemates yet. Create one above to get started.</div>
+  {% endif %}
 </div>
+
+<script>
+(function() {
+  var btn = document.getElementById('theme-toggle');
+  function applyTheme() {
+    var t = document.documentElement.getAttribute('data-theme');
+    btn.textContent = t === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+  }
+  applyTheme();
+  btn.addEventListener('click', function() {
+    var current = document.documentElement.getAttribute('data-theme');
+    var next = current === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('chili-theme', next);
+    applyTheme();
+  });
+})();
+
+function toggleSection(btn, id) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var isOpen = el.classList.contains('open');
+  el.classList.toggle('open');
+  var label = btn.textContent;
+  btn.textContent = isOpen ? label.replace('Hide', 'Show') : label.replace('Show', 'Hide');
+}
+</script>
 {% endblock %}

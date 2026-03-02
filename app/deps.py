@@ -1,5 +1,6 @@
 """Shared FastAPI dependencies for CHILI routes."""
 from fastapi import Depends, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
@@ -38,3 +39,11 @@ def get_identity_ctx(request: Request, db: Session = Depends(get_db)):
         "client_ip": client_ip,
         "device_token": device_token,
     }
+
+
+def require_paired(request: Request, db: Session = Depends(get_db)):
+    """Gate for admin routes -- redirects guests to /chat."""
+    ctx = get_identity_ctx(request, db)
+    if ctx["is_guest"]:
+        return None
+    return ctx
