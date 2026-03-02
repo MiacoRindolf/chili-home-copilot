@@ -40,8 +40,8 @@ class Device(Base):
     __tablename__ = "devices"
 
     id = Column(Integer, primary_key=True, index=True)
-    token = Column(String, unique=True, nullable=False, index=True)  # stored in cookie
-    label = Column(String, nullable=False)  # e.g. "Alex iPhone"
+    token = Column(String, unique=True, nullable=False, index=True)
+    label = Column(String, nullable=False)
     client_ip_last = Column(String, nullable=True)
     last_seen_at = Column(DateTime, default=datetime.utcnow)
 
@@ -52,10 +52,22 @@ class Device(Base):
 class PairCode(Base):
     __tablename__ = "pair_codes"
 
-    code = Column(String, primary_key=True, index=True)   # e.g. 8-char code
+    code = Column(String, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False)
+
+
+class Conversation(Base):
+    __tablename__ = "conversations"
+
+    id = Column(Integer, primary_key=True, index=True)
+    convo_key = Column(String, index=True, nullable=False)
+    title = Column(String, default="New Chat")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    messages = relationship("ChatMessage", back_populates="conversation", cascade="all, delete-orphan")
+
 
 class ChatMessage(Base):
     __tablename__ = "chat_messages"
@@ -63,17 +75,17 @@ class ChatMessage(Base):
     id = Column(Integer, primary_key=True, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
-    # memory scope:
-    # - paired users: "user:<user_id>"
-    # - guests: "guest:<device_token>" (so guest still gets a “thread” but not shared)
     convo_key = Column(String, index=True, nullable=False)
+    conversation_id = Column(Integer, ForeignKey("conversations.id"), nullable=True, index=True)
 
     role = Column(String, nullable=False)   # "user" or "assistant"
     content = Column(Text, nullable=False)
 
     trace_id = Column(String, nullable=True)
     action_type = Column(String, nullable=True)
-    model_used = Column(String, nullable=True)  # "llama3", "gpt-4o-mini", "offline"
+    model_used = Column(String, nullable=True)
+
+    conversation = relationship("Conversation", back_populates="messages")
 
 
 class HousemateProfile(Base):
@@ -81,10 +93,10 @@ class HousemateProfile(Base):
 
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-    interests = Column(Text, nullable=True)      # JSON list
+    interests = Column(Text, nullable=True)
     dietary = Column(String, nullable=True)
-    tone = Column(String, nullable=True)          # "casual", "formal", etc.
-    notes = Column(Text, nullable=True)           # freeform observations
+    tone = Column(String, nullable=True)
+    notes = Column(Text, nullable=True)
     last_extracted_at = Column(DateTime, nullable=True)
     message_count_at_extraction = Column(Integer, default=0)
 

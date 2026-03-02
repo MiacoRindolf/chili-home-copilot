@@ -10,31 +10,32 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 
 ```
  Browser (/chat)                    Admin (/admin)
-      │                                  │
-      ▼                                  ▼
- ┌─────────────────────────────────────────────┐
- │              FastAPI (Python)                │
- │                                             │
- │  /api/chat ──► RAG Search ──► LLM Planner   │
- │                (ChromaDB)      (Ollama)      │
- │                    │    +          │         │
- │                 context  personality    Validator│
- │                injected  profile    (Pydantic)│
- │                                   │         │
- │                          tool action?        │
- │                         ╱     ╲              │
- │                      yes       no (unknown)  │
- │                       │              │       │
- │                  Tool Executor   OpenAI API  │
- │                       │        (gpt-4o-mini) │
- │                       ▼              │       │
- │                   SQLite DB     General Chat  │
- │                                             │
- │  Identity: cookie ──► Device ──► User       │
- │  Personality: auto-profiled, /profile page  │
- │  Observability: trace_id, model_used, logs  │
- │  Guardrails: guest read-only, schema reject │
- └─────────────────────────────────────────────┘
+      │  Sidebar + Markdown + SSE          │
+      ▼                                    ▼
+ ┌──────────────────────────────────────────────┐
+ │              FastAPI (Python)                 │
+ │                                              │
+ │  /api/chat/stream ──► RAG ──► LLM Planner    │
+ │   (SSE streaming)   (ChromaDB)   (Ollama)    │
+ │         │               │    +       │       │
+ │         │            context  personality  Validator│
+ │         │            injected  profile   (Pydantic)│
+ │         │                               │    │
+ │         │                     tool action?   │
+ │         │                    ╱     ╲         │
+ │         │                 yes       no       │
+ │         │                  │         │       │
+ │         │             Tool Exec  OpenAI SSE  │
+ │         │                  │    (streaming)  │
+ │         ▼                  ▼         │       │
+ │       SQLite DB ◄──────────┘─────────┘       │
+ │  (conversations, chat_messages)              │
+ │                                              │
+ │  Identity: cookie ──► Device ──► User        │
+ │  Conversations: sidebar, auto-title, CRUD    │
+ │  Observability: trace_id, model_used, logs   │
+ │  Guardrails: guest read-only, schema reject  │
+ └──────────────────────────────────────────────┘
 ```
 
 **Key design principle: "LLM plans, code executes."** The model chooses an action via strict JSON; application code validates the schema and performs the database operation. The LLM never touches state directly.
@@ -57,6 +58,7 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 ### Smart Multi-Model Routing
 - Local-first: tool actions (chores, birthdays, RAG) always use llama3 locally (free, private)
 - OpenAI fallback: general conversation routes to OpenAI API when the local planner returns `type=unknown`
+- **Streaming responses**: OpenAI fallback streams tokens via SSE for real-time ChatGPT-like typing experience
 - Cost-aware: defaults to `gpt-4o-mini` (~$0.15/1M tokens). Configurable via `.env`
 - Graceful: works without an API key (existing help message). Zero breaking changes
 - `model_used` tracked on every message for observability (`/admin`, `/metrics`)
@@ -68,11 +70,20 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - `/profile` page where housemates can view and edit what CHILI has learned
 - Privacy: only your own profile visible. Admin can see all profiles
 
+### ChatGPT-Style Chat UI
+- **Markdown rendering** with syntax-highlighted code blocks (marked.js + highlight.js)
+- **Streaming responses** via Server-Sent Events -- tokens appear in real-time like ChatGPT
+- **Conversation sidebar** for paired users: create, switch, and delete named conversations
+- **Multi-line input** with auto-resize textarea (Enter sends, Shift+Enter for newline)
+- **Model badge** on each assistant message showing which LLM responded (llama3, gpt-4o-mini, etc.)
+- **Copy buttons** on messages and code blocks
+- Dark mode with persistent theme toggle
+- Guests see a single continuous thread; paired users get full conversation management
+
 ### Chat Memory
-- Persistent conversation history per user stored in SQLite (`chat_messages` table)
-- Memory scoped by `convo_key`: paired users share history across devices (`user:<id>`), guests get isolated threads (`guest:<token>`)
+- Persistent conversation history per user stored in SQLite (`chat_messages` + `conversations` tables)
+- Memory scoped by `convo_key`: paired users get named conversations, guests get isolated threads
 - Last 12 messages sent as context window to the planner for multi-turn conversations
-- Single-page chat UI with `fetch()` -- no page reloads
 
 ### Identity & Device Pairing
 - Admin creates housemate accounts and generates one-time pairing codes
@@ -208,6 +219,7 @@ tests/
 ├── test_api.py             # API integration tests
 ├── test_openai_routing.py  # OpenAI fallback routing + model tracking tests
 ├── test_personality.py     # Personality extraction and profile tests
+├── test_conversations.py   # Conversation CRUD, streaming, and sidebar tests
 ├── test_fallback_parser.py # Fallback parser tests
 Dockerfile             # Container image for CHILI app
 docker-compose.yml     # Full stack: CHILI + Ollama
@@ -239,6 +251,9 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 | **User-editable profiles** | Auto-extraction can be wrong. The `/profile` page lets housemates correct CHILI's understanding, building trust and improving personalization. |
 | **Docker with Ollama sidecar** | `docker-compose.yml` runs Ollama as a service container with a health check. The app uses `OLLAMA_HOST` env var so the same code works locally and in Docker without config changes. |
 | **Pinned requirements.txt** | Exact versions for reproducible builds. Conda is great for local dev, but `pip install -r requirements.txt` works everywhere -- Docker, CI, VMs. |
+| **SSE streaming** | Server-Sent Events let the frontend display tokens as they arrive from OpenAI, matching the ChatGPT typing experience. Tool actions (instant) send the full reply as one chunk. |
+| **Conversation sidebar for users only** | Paired users get multi-conversation management (create, switch, delete). Guests see a single shared thread -- no sidebar clutter, simpler UX for casual visitors. |
+| **CDN for frontend libs** | marked.js, highlight.js, and DOMPurify loaded from CDN. Zero build step, instant updates, keeps the repo lean. |
 
 ## API Reference
 
@@ -247,7 +262,11 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 | `GET` | `/` | Home page (chores + birthdays) |
 | `GET` | `/chat` | Chat UI (single-page, fetch-based) |
 | `POST` | `/api/chat` | Send a message, get JSON response |
-| `GET` | `/api/chat/history` | Retrieve conversation history for current user |
+| `POST` | `/api/chat/stream` | Send a message, get SSE streaming response |
+| `GET` | `/api/chat/history` | Retrieve conversation history (optional `?conversation_id=`) |
+| `GET` | `/api/conversations` | List conversations for current user |
+| `POST` | `/api/conversations` | Create a new conversation |
+| `DELETE` | `/api/conversations/{id}` | Delete a conversation and its messages |
 | `GET` | `/health` | DB + Ollama health check |
 | `GET` | `/metrics` | Counts + LLM latency stats |
 | `GET` | `/admin` | Admin dashboard |
@@ -264,7 +283,7 @@ TOOLING.md             # Deep dive into guardrails and tool-calling design
 - [x] Smart multi-model routing (local llama3 + OpenAI fallback)
 - [x] Housemate personality profiles (auto-extracted, editable)
 - [ ] Scheduled reminders (e.g., "remind me to take out trash every Tuesday")
-- [ ] Streaming LLM responses for better UX
+- [x] Streaming LLM responses via SSE + ChatGPT-style UI (markdown, sidebar, conversations)
 - [x] Docker containerization (`docker compose up` one-liner)
 - [ ] Multi-household support
 

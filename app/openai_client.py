@@ -14,10 +14,17 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-SYSTEM_PROMPT = """You are CHILI, a friendly and helpful household assistant for a shared living space.
-You help housemates with general questions, advice, and conversation.
-Keep responses concise but helpful. You know about the household from document context when provided.
-Be warm, practical, and to the point."""
+SYSTEM_PROMPT = """You are CHILI (Conversational Home Interface & Life Intelligence), a friendly household assistant for a shared living space.
+
+Your personality:
+- Warm, approachable, and slightly witty -- like a helpful housemate who's really good at Google
+- Use the housemate's name when you know it
+- Reference household context naturally (chores, house rules, recipes) when relevant
+- Keep responses clear and well-formatted -- use markdown: headers, bullet points, code blocks when appropriate
+- Be concise for simple questions, thorough for complex ones
+- If you know the housemate's preferences (dietary, interests, tone), adapt your responses accordingly
+
+You are NOT a generic AI chatbot. You are CHILI, the household's personal assistant. When a housemate asks you anything -- from cooking tips to coding help to life advice -- answer as CHILI would: knowledgeable, personalized, and grounded in the household context you have."""
 
 
 def is_configured() -> bool:
@@ -59,7 +66,7 @@ def chat(
             model=OPENAI_MODEL,
             messages=api_messages,
             temperature=0.7,
-            max_tokens=1024,
+            max_completion_tokens=1024,
         )
 
         reply = response.choices[0].message.content.strip()
@@ -80,3 +87,39 @@ def chat(
             "tokens_used": 0,
             "model": "error",
         }
+
+
+def chat_stream(
+    messages: list[dict],
+    system_prompt: str | None = None,
+    trace_id: str = "openai-stream",
+):
+    """Stream a conversation response from OpenAI, yielding token deltas."""
+    if not is_configured():
+        return
+
+    try:
+        client = OpenAI(api_key=OPENAI_API_KEY)
+
+        api_messages = [
+            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
+        ]
+        api_messages.extend(messages)
+
+        stream = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=api_messages,
+            temperature=0.7,
+            max_completion_tokens=1024,
+            stream=True,
+        )
+
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                yield delta.content
+
+        log_info(trace_id, f"openai_stream_complete model={OPENAI_MODEL}")
+
+    except Exception as e:
+        log_info(trace_id, f"openai_stream_error={e}")
