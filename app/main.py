@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Depends, Form, Request, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, Response, StreamingResponse
+from fastapi.staticfiles import StaticFiles
 from typing import Optional
+from pathlib import Path
 import json as json_mod
 from sqlalchemy.orm import Session
 from datetime import date
@@ -24,6 +26,7 @@ import io
 Base.metadata.create_all(bind=engine)
 
 app = FastAPI(title="CHILI Home Copilot")
+app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
 def get_db():
     db = SessionLocal()
@@ -185,7 +188,12 @@ def chat_page():
 <head>
   <title>CHILI Chat</title>
   <meta charset="utf-8"/>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
   <style>
     :root {
       --bg: #f9fafb; --bg-header: #fff; --bg-input-bar: #fff;
@@ -394,9 +402,40 @@ def chat_page():
 
     #main-col { display: flex; flex-direction: column; flex: 1; min-width: 0; }
 
+    #sidebar-backdrop {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+      z-index: 99;
+    }
+    #sidebar-backdrop.visible { display: block; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .search-snippet {
+      font-size: 11px; color: var(--text-muted); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
     @media (max-width: 700px) {
-      #sidebar { position: fixed; left: 0; top: 0; bottom: 0; z-index: 100; }
-      #sidebar.hidden { margin-left: -260px; }
+      header { padding: 8px 12px; }
+      header h1 { font-size: 17px; }
+      header nav { font-size: 12px; }
+      #sidebar {
+        position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
+        width: 280px;
+      }
+      #sidebar.hidden { margin-left: -280px; }
+      #chat-area { padding: 10px 8px; }
+      .msg { max-width: 95%; font-size: 14px; padding: 8px 12px; }
+      #input-bar { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+      #chat-form { gap: 6px; }
+      #msg-input { font-size: 16px; padding: 10px 12px; }
+      #chat-form button, #mic-btn { min-height: 44px; min-width: 44px; }
+      .convo-item { padding: 12px; min-height: 44px; }
+      #welcome { margin-top: 12vh; }
+      #welcome h2 { font-size: 24px; }
     }
   </style>
   <script>
@@ -416,13 +455,20 @@ def chat_page():
         <nav><a href="/">Home</a> &#xB7; <a href="/profile">Profile</a> &#xB7; <a href="/admin">Admin</a></nav>
       </div>
     </div>
-    <button id="theme-toggle" title="Toggle dark mode">&#x1F319;</button>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button id="install-btn" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;">Install App</button>
+      <button id="theme-toggle" title="Toggle dark mode">&#x1F319;</button>
+    </div>
   </header>
 
   <div id="app-layout">
+    <div id="sidebar-backdrop"></div>
     <aside id="sidebar" class="hidden">
       <div id="sidebar-header">
         <button id="new-chat-btn">+ New Chat</button>
+      </div>
+      <div id="sidebar-search-wrap" style="padding:0 12px 8px;">
+        <input id="convo-search" type="text" placeholder="Search conversations..." style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;" />
       </div>
       <div id="convo-list"></div>
     </aside>
@@ -444,6 +490,7 @@ def chat_page():
       <div id="input-bar">
         <form id="chat-form">
           <textarea id="msg-input" name="message" placeholder="Type a message..." autocomplete="off" required rows="1"></textarea>
+          <button type="button" id="mic-btn" title="Voice input" style="background:none;border:1px solid var(--input-border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:18px;color:var(--text-secondary);transition:all 0.15s;display:none;">&#x1F3A4;</button>
           <button type="submit">Send</button>
         </form>
         <div id="status"></div>
@@ -458,12 +505,15 @@ def chat_page():
     var form      = document.getElementById('chat-form');
     var input     = document.getElementById('msg-input');
     var statusEl  = document.getElementById('status');
-    var btn       = form.querySelector('button');
+    var btn       = form.querySelector('button[type="submit"]');
     var themeBtn  = document.getElementById('theme-toggle');
     var sidebar   = document.getElementById('sidebar');
     var convoList = document.getElementById('convo-list');
     var newChatBtn = document.getElementById('new-chat-btn');
     var sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+    var sidebarBackdrop = document.getElementById('sidebar-backdrop');
+    var micBtn    = document.getElementById('mic-btn');
+    var convoSearch = document.getElementById('convo-search');
 
     var currentConvoId = null;
     var isGuest = true;
@@ -494,6 +544,71 @@ def chat_page():
       setTheme(cur === 'dark' ? 'light' : 'dark');
     };
     setTheme(localStorage.getItem('chili-theme') || 'light');
+
+    var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var speechRec = null;
+    var _wantMic = false;
+    if (SpeechRec) {
+      micBtn.style.display = '';
+      function micOn() {
+        micBtn.style.background = '#ef4444';
+        micBtn.style.color = '#fff';
+        micBtn.style.animation = 'pulse 1s infinite';
+        statusEl.textContent = 'Listening... tap mic to stop';
+      }
+      function micOff() {
+        micBtn.style.background = 'none';
+        micBtn.style.color = 'var(--text-secondary)';
+        micBtn.style.animation = '';
+        if (statusEl.textContent.indexOf('Listen') === 0) statusEl.textContent = '';
+      }
+      function micStart() {
+        speechRec = new SpeechRec();
+        speechRec.continuous = true;
+        speechRec.interimResults = true;
+        speechRec.lang = 'en-US';
+        speechRec.onresult = function(e) {
+          var transcript = '';
+          for (var i = 0; i < e.results.length; i++) {
+            transcript += e.results[i][0].transcript;
+          }
+          input.value = transcript;
+          input.style.height = 'auto';
+          input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+        };
+        speechRec.onend = function() {
+          if (!_wantMic) { micOff(); input.focus(); return; }
+          setTimeout(function() {
+            if (!_wantMic) { micOff(); input.focus(); return; }
+            try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
+          }, 800);
+        };
+        speechRec.onerror = function(e) {
+          if (e.error === 'aborted' || e.error === 'no-speech') return;
+          _wantMic = false;
+          micOff();
+          var msgs = { network: 'Voice needs internet connection', 'not-allowed': 'Mic permission denied (check browser settings)' };
+          statusEl.textContent = msgs[e.error] || ('Mic error: ' + e.error);
+          setTimeout(function() { var t = statusEl.textContent; if (t.indexOf('Mic') === 0 || t.indexOf('Voice') === 0) statusEl.textContent = ''; }, 4000);
+        };
+        speechRec.start();
+      }
+      function micToggle(e) {
+        e.preventDefault();
+        if (_wantMic) {
+          _wantMic = false;
+          try { speechRec.abort(); } catch(ex) {}
+          micOff();
+          input.focus();
+          return;
+        }
+        _wantMic = true;
+        micOn();
+        try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
+      }
+      micBtn.addEventListener('mousedown', micToggle);
+      micBtn.addEventListener('touchstart', micToggle, { passive: false });
+    }
 
     function esc(s) {
       var d = document.createElement('div');
@@ -582,8 +697,15 @@ def chat_page():
       }
     });
 
-    sidebarToggleBtn.addEventListener('click', function() {
+    function toggleSidebar() {
+      var willShow = sidebar.classList.contains('hidden');
       sidebar.classList.toggle('hidden');
+      sidebarBackdrop.classList.toggle('visible', willShow);
+    }
+    sidebarToggleBtn.addEventListener('click', toggleSidebar);
+    sidebarBackdrop.addEventListener('click', function() {
+      sidebar.classList.add('hidden');
+      sidebarBackdrop.classList.remove('visible');
     });
 
     async function loadConversations() {
@@ -785,6 +907,54 @@ def chat_page():
         renderConvoList(_allConvos);
         return _allConvos;
       } catch(e) { return []; }
+    }
+
+    var _searchTimer = null;
+    convoSearch.addEventListener('input', function() {
+      clearTimeout(_searchTimer);
+      var q = convoSearch.value.trim();
+      if (!q) { renderConvoList(_allConvos); return; }
+      _searchTimer = setTimeout(async function() {
+        try {
+          var res = await fetch('/api/conversations/search?q=' + encodeURIComponent(q));
+          var data = await res.json();
+          renderSearchResults(data.results || []);
+        } catch(e) { renderConvoList(_allConvos); }
+      }, 300);
+    });
+
+    function renderSearchResults(results) {
+      convoList.innerHTML = '';
+      if (results.length === 0) {
+        convoList.innerHTML = '<div style="padding:12px;font-size:13px;color:var(--text-muted);text-align:center;">No matches<\/div>';
+        return;
+      }
+      results.forEach(function(r) {
+        var item = document.createElement('div');
+        item.className = 'convo-item' + (r.id === currentConvoId ? ' active' : '');
+        var html = '<div style="flex:1;min-width:0;"><div class="convo-title">' + esc(r.title) + '<\/div>';
+        if (r.snippet) html += '<div class="search-snippet">' + esc(r.snippet) + '<\/div>';
+        html += '<\/div>';
+        item.innerHTML = html;
+        item.onclick = function() { convoSearch.value = ''; switchConvo(r.id); };
+        convoList.appendChild(item);
+      });
+    }
+
+    var _installPrompt = null;
+    var installBtn = document.getElementById('install-btn');
+    window.addEventListener('beforeinstallprompt', function(e) {
+      e.preventDefault();
+      _installPrompt = e;
+      installBtn.style.display = '';
+    });
+    installBtn.onclick = function() {
+      if (!_installPrompt) return;
+      _installPrompt.prompt();
+      _installPrompt.userChoice.then(function() { installBtn.style.display = 'none'; _installPrompt = null; });
+    };
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(function() {});
     }
 
     (async function() {
@@ -1404,6 +1574,51 @@ def delete_conversation(convo_id: int, request: Request, db: Session = Depends(g
     db.delete(convo)
     db.commit()
     return {"ok": True}
+
+
+@app.get("/api/conversations/search", response_class=JSONResponse)
+def search_conversations(request: Request, q: str = Query(""), db: Session = Depends(get_db)):
+    client_ip = request.client.host
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+    convo_key = get_convo_key(identity, device_token, client_ip)
+
+    if not q.strip() or identity.get("is_guest"):
+        return {"results": []}
+
+    pattern = f"%{q.strip()}%"
+    matches = (
+        db.query(ChatMessage.conversation_id, ChatMessage.content)
+        .filter(
+            ChatMessage.convo_key == convo_key,
+            ChatMessage.conversation_id.isnot(None),
+            ChatMessage.content.ilike(pattern),
+        )
+        .order_by(ChatMessage.id.desc())
+        .limit(100)
+        .all()
+    )
+
+    seen = {}
+    for convo_id, content in matches:
+        if convo_id not in seen:
+            snippet = content[:80] + ("..." if len(content) > 80 else "")
+            seen[convo_id] = snippet
+
+    convo_ids = list(seen.keys())[:20]
+    convos = (
+        db.query(Conversation)
+        .filter(Conversation.id.in_(convo_ids))
+        .all()
+    )
+    convo_map = {c.id: c.title for c in convos}
+
+    results = [
+        {"id": cid, "title": convo_map.get(cid, "Untitled"), "snippet": seen[cid]}
+        for cid in convo_ids
+        if cid in convo_map
+    ]
+    return {"results": results}
 
 
 @app.get("/api/chat/history", response_class=JSONResponse)

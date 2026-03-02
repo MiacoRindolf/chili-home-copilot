@@ -9,3 +9,7 @@ data/*.sqlite
 
 # ChromaDB vector store
 data/chroma/
+
+# HTTPS certificates
+*.pem
+mkcert.exe
