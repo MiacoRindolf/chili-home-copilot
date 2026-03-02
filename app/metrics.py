@@ -1,5 +1,6 @@
 from sqlalchemy.orm import Session
-from .models import Chore, Birthday
+from sqlalchemy import func
+from .models import Chore, Birthday, ChatMessage
 
 # Simple in-memory latency tracking (resets when server restarts)
 _LATENCIES_MS = []
@@ -36,3 +37,14 @@ def get_counts(db: Session) -> dict:
             "total": total_birthdays,
         },
     }
+
+
+def model_stats(db: Session) -> dict:
+    """Count assistant messages by model_used."""
+    rows = (
+        db.query(ChatMessage.model_used, func.count(ChatMessage.id))
+        .filter(ChatMessage.role == "assistant")
+        .group_by(ChatMessage.model_used)
+        .all()
+    )
+    return {model or "unknown": count for model, count in rows}

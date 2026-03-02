@@ -1,0 +1,758 @@
+{% extends "base.html" %}
+
+{% block title %}CHILI Chat{% endblock %}
+
+{% block head_extra %}
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      height: 100vh; display: flex; flex-direction: column;
+      background: var(--bg); color: var(--text);
+    }
+    header {
+      background: var(--bg-header); border-bottom: 1px solid var(--border);
+      padding: 12px 20px; flex-shrink: 0;
+      display: flex; justify-content: space-between; align-items: center;
+    }
+    header h1 { font-size: 20px; }
+    header nav { font-size: 13px; margin-top: 4px; }
+    header nav a { color: var(--text-secondary); text-decoration: none; }
+    header nav a:hover { text-decoration: underline; }
+    #theme-toggle {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 10px; font-size: 18px; cursor: pointer; line-height: 1;
+      color: var(--text);
+    }
+
+    #chat-area {
+      flex: 1; overflow-y: auto; padding: 16px 20px;
+    }
+    #chat-log {
+      display: flex; flex-direction: column; gap: 10px;
+      max-width: 800px; width: 100%; margin: 0 auto;
+    }
+
+    .msg {
+      padding: 10px 14px; border-radius: 12px;
+      max-width: 80%; word-wrap: break-word;
+      line-height: 1.45; font-size: 15px;
+    }
+    .msg.user {
+      background: var(--accent); color: #fff;
+      align-self: flex-end;
+      border-bottom-right-radius: 4px;
+    }
+    .msg.assistant {
+      background: var(--bg-msg-assist); color: var(--text);
+      align-self: flex-start;
+      border: 1px solid var(--border);
+      border-bottom-left-radius: 4px;
+    }
+    .msg .role { font-weight: 600; font-size: 12px; margin-bottom: 3px; opacity: 0.7; }
+    .msg.user .role { color: rgba(255,255,255,0.8); }
+    .msg .ts { font-size: 11px; margin-top: 4px; opacity: 0.5; }
+
+    #welcome {
+      text-align: center; margin-top: 20vh; color: var(--text-muted);
+      max-width: 800px; width: 100%; margin-left: auto; margin-right: auto;
+    }
+    #welcome h2 { font-size: 28px; margin-bottom: 8px; color: var(--text-secondary); }
+    #welcome p { font-size: 14px; line-height: 1.6; }
+    #welcome code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+
+    #input-bar {
+      flex-shrink: 0; background: var(--bg-input-bar);
+      border-top: 1px solid var(--border); padding: 12px 20px;
+    }
+    #chat-form {
+      display: flex; gap: 8px;
+      max-width: 800px; margin: 0 auto;
+    }
+    #msg-input {
+      flex: 1; padding: 10px 14px; font-size: 15px;
+      border: 1px solid var(--input-border); border-radius: 8px;
+      outline: none; transition: border-color 0.15s;
+      background: var(--input-bg); color: var(--text);
+      resize: none; overflow-y: auto; min-height: 44px; max-height: 160px;
+      font-family: inherit; line-height: 1.4;
+    }
+    #msg-input:focus { border-color: var(--accent); }
+    #chat-form button {
+      padding: 10px 20px; font-size: 15px; font-weight: 600;
+      background: var(--accent); color: #fff; border: none;
+      border-radius: 8px; cursor: pointer; transition: background 0.15s;
+    }
+    #chat-form button:hover { background: var(--accent-hover); }
+    #chat-form button:disabled { background: var(--accent-disabled); cursor: not-allowed; }
+    #status {
+      font-size: 12px; color: var(--text-muted);
+      max-width: 800px; margin: 6px auto 0; text-align: center;
+    }
+
+    .msg.assistant .md-body p { margin: 0.4em 0; }
+    .msg.assistant .md-body p:first-child { margin-top: 0; }
+    .msg.assistant .md-body p:last-child { margin-bottom: 0; }
+    .msg.assistant .md-body ul, .msg.assistant .md-body ol { margin: 0.4em 0; padding-left: 1.5em; }
+    .msg.assistant .md-body li { margin: 0.2em 0; }
+    .msg.assistant .md-body code {
+      background: var(--code-bg); padding: 2px 6px; border-radius: 4px; font-size: 0.9em;
+    }
+    .msg.assistant .md-body pre {
+      background: var(--code-bg); padding: 12px; border-radius: 8px;
+      overflow-x: auto; margin: 0.6em 0; position: relative;
+    }
+    .msg.assistant .md-body pre code {
+      background: none; padding: 0; font-size: 0.85em; line-height: 1.5;
+    }
+    .msg.assistant .md-body pre code.hljs { background: transparent; }
+    .msg.assistant .md-body blockquote {
+      border-left: 3px solid var(--accent); padding-left: 12px;
+      margin: 0.6em 0; color: var(--text-secondary);
+    }
+    .msg.assistant .md-body table { border-collapse: collapse; margin: 0.6em 0; width: 100%; }
+    .msg.assistant .md-body th, .msg.assistant .md-body td {
+      border: 1px solid var(--border); padding: 6px 10px; text-align: left;
+    }
+    .msg.assistant .md-body th { background: var(--code-bg); font-weight: 600; }
+    .msg.assistant .md-body h1, .msg.assistant .md-body h2, .msg.assistant .md-body h3 {
+      margin: 0.6em 0 0.3em; line-height: 1.3;
+    }
+    .msg.assistant .md-body h1 { font-size: 1.3em; }
+    .msg.assistant .md-body h2 { font-size: 1.15em; }
+    .msg.assistant .md-body h3 { font-size: 1.05em; }
+    .msg.assistant .md-body a { color: var(--accent); }
+    .msg.assistant .md-body hr { border: none; border-top: 1px solid var(--border); margin: 0.8em 0; }
+
+    .msg-footer {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 6px; font-size: 11px;
+    }
+    .msg-footer .ts { margin-top: 0; }
+    .model-badge {
+      background: var(--code-bg); color: var(--text-secondary);
+      padding: 2px 8px; border-radius: 4px; font-weight: 500;
+    }
+    .copy-btn {
+      background: none; border: 1px solid var(--border); border-radius: 4px;
+      padding: 2px 8px; cursor: pointer; color: var(--text-secondary);
+      font-size: 11px; transition: all 0.15s;
+    }
+    .copy-btn:hover { background: var(--code-bg); color: var(--text); }
+    .code-copy-btn {
+      position: absolute; top: 6px; right: 6px; background: var(--bg-msg-assist);
+      border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px;
+      cursor: pointer; color: var(--text-secondary); font-size: 11px;
+      opacity: 0; transition: opacity 0.15s;
+    }
+    .msg.assistant .md-body pre:hover .code-copy-btn { opacity: 1; }
+
+    #app-layout { display: flex; flex: 1; overflow: hidden; }
+    #sidebar {
+      width: 260px; flex-shrink: 0; background: var(--bg-header);
+      border-right: 1px solid var(--border); display: flex; flex-direction: column;
+      transition: margin-left 0.2s;
+    }
+    #sidebar.hidden { margin-left: -260px; }
+    #sidebar-header {
+      padding: 12px; border-bottom: 1px solid var(--border);
+      display: flex; gap: 8px;
+    }
+    #sidebar-header button {
+      flex: 1; padding: 8px; font-size: 13px; font-weight: 600;
+      border: 1px solid var(--border); border-radius: 6px; cursor: pointer;
+      background: var(--accent); color: #fff; transition: background 0.15s;
+    }
+    #sidebar-header button:hover { background: var(--accent-hover); }
+    #sidebar-toggle {
+      background: none; border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 10px; cursor: pointer; font-size: 16px; color: var(--text-secondary);
+      flex-shrink: 0;
+    }
+    #convo-list {
+      flex: 1; overflow-y: auto; padding: 8px;
+    }
+    .convo-item {
+      padding: 10px 12px; border-radius: 8px; cursor: pointer;
+      font-size: 13px; color: var(--text); margin-bottom: 2px;
+      display: flex; justify-content: space-between; align-items: center;
+      transition: background 0.1s;
+    }
+    .convo-item:hover { background: var(--code-bg); }
+    .convo-item.active { background: var(--accent); color: #fff; }
+    .convo-item .convo-title {
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1;
+    }
+    .convo-item .convo-delete {
+      opacity: 0; background: none; border: none; cursor: pointer;
+      color: inherit; font-size: 14px; padding: 0 4px; flex-shrink: 0;
+    }
+    .convo-item:hover .convo-delete { opacity: 0.6; }
+    .convo-item .convo-delete:hover { opacity: 1; }
+
+    #main-col { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+
+    #sidebar-backdrop {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.4);
+      z-index: 99;
+    }
+    #sidebar-backdrop.visible { display: block; }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.6; }
+    }
+
+    .search-snippet {
+      font-size: 11px; color: var(--text-muted); margin-top: 2px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+
+    @media (max-width: 700px) {
+      header { padding: 8px 12px; }
+      header h1 { font-size: 17px; }
+      header nav { font-size: 12px; }
+      #sidebar {
+        position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
+        width: 280px;
+      }
+      #sidebar.hidden { margin-left: -280px; }
+      #chat-area { padding: 10px 8px; }
+      .msg { max-width: 95%; font-size: 14px; padding: 8px 12px; }
+      #input-bar { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
+      #chat-form { gap: 6px; }
+      #msg-input { font-size: 16px; padding: 10px 12px; }
+      #chat-form button, #mic-btn { min-height: 44px; min-width: 44px; }
+      .convo-item { padding: 12px; min-height: 44px; }
+      #welcome { margin-top: 12vh; }
+      #welcome h2 { font-size: 24px; }
+    }
+  </style>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css"/>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+{% endblock %}
+
+{% block content %}
+  <header>
+    <div style="display:flex;align-items:center;gap:10px;">
+      <button id="sidebar-toggle-btn" title="Toggle sidebar" style="background:none;border:1px solid var(--border);border-radius:6px;padding:4px 10px;cursor:pointer;font-size:16px;color:var(--text-secondary);">☰</button>
+      <div>
+        <h1>🌶️ CHILI Chat</h1>
+        <nav><a href="/">Home</a> &middot; <a href="/profile">Profile</a> &middot; <a href="/admin">Admin</a></nav>
+      </div>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;">
+      <button id="install-btn" style="display:none;background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 12px;font-size:12px;font-weight:600;cursor:pointer;">Install App</button>
+      <button id="theme-toggle" title="Toggle dark mode">🌙</button>
+    </div>
+  </header>
+
+  <div id="app-layout">
+    <div id="sidebar-backdrop"></div>
+    <aside id="sidebar" class="hidden">
+      <div id="sidebar-header">
+        <button id="new-chat-btn">+ New Chat</button>
+      </div>
+      <div id="sidebar-search-wrap" style="padding:0 12px 8px;">
+        <input id="convo-search" type="text" placeholder="Search conversations..." style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;" />
+      </div>
+      <div id="convo-list"></div>
+    </aside>
+
+    <div id="main-col">
+      <div id="chat-area">
+        <div id="welcome">
+          <h2>🌶️</h2>
+          <p>
+            Ask me anything about your household.<br/>
+            Try: <code>add chore take out trash</code>
+            or <code>list chores</code><br/>
+            or <code>add birthday Mom 2026-05-12</code>
+          </p>
+        </div>
+        <div id="chat-log"></div>
+      </div>
+
+      <div id="input-bar">
+        <form id="chat-form">
+          <textarea id="msg-input" name="message" placeholder="Type a message..." autocomplete="off" required rows="1"></textarea>
+          <button type="button" id="mic-btn" title="Voice input" style="background:none;border:1px solid var(--input-border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:18px;color:var(--text-secondary);transition:all 0.15s;display:none;">🎤</button>
+          <button type="submit">Send</button>
+        </form>
+        <div id="status"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    var chatArea  = document.getElementById('chat-area');
+    var chatLog   = document.getElementById('chat-log');
+    var welcome   = document.getElementById('welcome');
+    var form      = document.getElementById('chat-form');
+    var input     = document.getElementById('msg-input');
+    var statusEl  = document.getElementById('status');
+    var btn       = form.querySelector('button[type="submit"]');
+    var themeBtn  = document.getElementById('theme-toggle');
+    var sidebar   = document.getElementById('sidebar');
+    var convoList = document.getElementById('convo-list');
+    var newChatBtn = document.getElementById('new-chat-btn');
+    var sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
+    var sidebarBackdrop = document.getElementById('sidebar-backdrop');
+    var micBtn    = document.getElementById('mic-btn');
+    var convoSearch = document.getElementById('convo-search');
+
+    var currentConvoId = null;
+    var isGuest = true;
+
+    var _marked = (typeof marked !== 'undefined') ? marked : null;
+    var _DOMPurify = (typeof DOMPurify !== 'undefined') ? DOMPurify : null;
+    var _hljs = (typeof hljs !== 'undefined') ? hljs : null;
+
+    if (_marked && _marked.use) { try { _marked.use({ breaks: true, gfm: true }); } catch(e) {} }
+
+    function renderMd(text) {
+      if (!text) return '';
+      try {
+        var html = _marked ? _marked.parse(text) : esc(text).split('\n').join('<br>');
+        return _DOMPurify ? _DOMPurify.sanitize(html) : html;
+      } catch(e) {
+        return esc(text).split('\n').join('<br>');
+      }
+    }
+
+    function setTheme(t) {
+      document.documentElement.setAttribute('data-theme', t);
+      themeBtn.innerHTML = (t === 'dark') ? '&#9728;&#65039;' : '&#127769;';
+      localStorage.setItem('chili-theme', t);
+    }
+    themeBtn.onclick = function() {
+      var cur = document.documentElement.getAttribute('data-theme');
+      setTheme(cur === 'dark' ? 'light' : 'dark');
+    };
+    setTheme(localStorage.getItem('chili-theme') || 'light');
+
+    var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    var speechRec = null;
+    var _wantMic = false;
+    if (SpeechRec) {
+      micBtn.style.display = '';
+      function micOn() {
+        micBtn.style.background = '#ef4444';
+        micBtn.style.color = '#fff';
+        micBtn.style.animation = 'pulse 1s infinite';
+        statusEl.textContent = 'Listening... tap mic to stop';
+      }
+      function micOff() {
+        micBtn.style.background = 'none';
+        micBtn.style.color = 'var(--text-secondary)';
+        micBtn.style.animation = '';
+        if (statusEl.textContent.indexOf('Listen') === 0) statusEl.textContent = '';
+      }
+      function micStart() {
+        speechRec = new SpeechRec();
+        speechRec.continuous = true;
+        speechRec.interimResults = true;
+        speechRec.lang = 'en-US';
+        speechRec.onresult = function(e) {
+          var transcript = '';
+          for (var i = 0; i < e.results.length; i++) {
+            transcript += e.results[i][0].transcript;
+          }
+          input.value = transcript;
+          input.style.height = 'auto';
+          input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+        };
+        speechRec.onend = function() {
+          if (!_wantMic) { micOff(); input.focus(); return; }
+          setTimeout(function() {
+            if (!_wantMic) { micOff(); input.focus(); return; }
+            try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
+          }, 800);
+        };
+        speechRec.onerror = function(e) {
+          if (e.error === 'aborted' || e.error === 'no-speech') return;
+          _wantMic = false;
+          micOff();
+          var msgs = { network: 'Voice needs internet connection', 'not-allowed': 'Mic permission denied (check browser settings)' };
+          statusEl.textContent = msgs[e.error] || ('Mic error: ' + e.error);
+          setTimeout(function() { var t = statusEl.textContent; if (t.indexOf('Mic') === 0 || t.indexOf('Voice') === 0) statusEl.textContent = ''; }, 4000);
+        };
+        speechRec.start();
+      }
+      function micToggle(e) {
+        e.preventDefault();
+        if (_wantMic) {
+          _wantMic = false;
+          try { speechRec.abort(); } catch(ex) {}
+          micOff();
+          input.focus();
+          return;
+        }
+        _wantMic = true;
+        micOn();
+        try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
+      }
+      micBtn.addEventListener('mousedown', micToggle);
+      micBtn.addEventListener('touchstart', micToggle, { passive: false });
+    }
+
+    function esc(s) {
+      var d = document.createElement('div');
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function fmtTime(raw) {
+      if (!raw) return '';
+      try {
+        var d = new Date(raw.replace(' ', 'T'));
+        if (isNaN(d)) return '';
+        var now = new Date();
+        var time = d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+        if (d.toDateString() === now.toDateString()) return time;
+        return d.toLocaleDateString([], { month: 'short', day: 'numeric' }) + ', ' + time;
+      } catch(e) { return ''; }
+    }
+
+    function copyText(text, el) {
+      navigator.clipboard.writeText(text).then(function() {
+        var orig = el.textContent;
+        el.textContent = 'Copied!';
+        setTimeout(function() { el.textContent = orig; }, 1500);
+      });
+    }
+
+    function addMsg(role, content, ts, meta) {
+      welcome.style.display = 'none';
+      var div = document.createElement('div');
+      div.className = 'msg ' + role;
+      var label = role === 'user' ? 'You' : 'CHILI';
+      var timeStr = fmtTime(ts);
+
+      var bodyHTML;
+      if (role === 'assistant') {
+        bodyHTML = '<div class="md-body">' + renderMd(content) + '</div>';
+      } else {
+        bodyHTML = '<div>' + esc(content).split('\n').join('<br>') + '</div>';
+      }
+
+      var footerHTML = '';
+      if (role === 'assistant') {
+        footerHTML = '<div class="msg-footer">';
+        if (meta && meta.model_used) {
+          footerHTML += '<span class="model-badge">' + esc(meta.model_used) + '</span>';
+        }
+        footerHTML += '<button class="copy-btn" title="Copy message">Copy</button>';
+        if (timeStr) footerHTML += '<span class="ts">' + esc(timeStr) + '</span>';
+        footerHTML += '</div>';
+      } else if (timeStr) {
+        footerHTML = '<div class="ts">' + esc(timeStr) + '</div>';
+      }
+
+      div.innerHTML = '<div class="role">' + esc(label) + '</div>' + bodyHTML + footerHTML;
+
+      if (_hljs) { div.querySelectorAll('pre code').forEach(function(el) { try { _hljs.highlightElement(el); } catch(e){} }); }
+      div.querySelectorAll('.md-body pre').forEach(function(pre) {
+        var cbtn = document.createElement('button');
+        cbtn.className = 'code-copy-btn';
+        cbtn.textContent = 'Copy';
+        cbtn.onclick = function() { copyText(pre.querySelector('code').textContent, cbtn); };
+        pre.appendChild(cbtn);
+      });
+
+      var msgCopyBtn = div.querySelector('.copy-btn');
+      if (msgCopyBtn) {
+        msgCopyBtn.onclick = function() {
+          var md = div.querySelector('.md-body');
+          copyText(md ? md.textContent : content, msgCopyBtn);
+        };
+      }
+
+      chatLog.appendChild(div);
+      chatArea.scrollTop = chatArea.scrollHeight;
+    }
+
+    input.addEventListener('input', function() {
+      this.style.height = 'auto';
+      this.style.height = Math.min(this.scrollHeight, 160) + 'px';
+    });
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        form.dispatchEvent(new Event('submit', { cancelable: true }));
+      }
+    });
+
+    function toggleSidebar() {
+      var willShow = sidebar.classList.contains('hidden');
+      sidebar.classList.toggle('hidden');
+      sidebarBackdrop.classList.toggle('visible', willShow);
+    }
+    sidebarToggleBtn.addEventListener('click', toggleSidebar);
+    sidebarBackdrop.addEventListener('click', function() {
+      sidebar.classList.add('hidden');
+      sidebarBackdrop.classList.remove('visible');
+    });
+
+    async function loadConversations() {
+      await loadConversationsData();
+    }
+
+    function renderConvoList(convos) {
+      convoList.innerHTML = '';
+      convos.forEach(function(c) {
+        var item = document.createElement('div');
+        item.className = 'convo-item' + (c.id === currentConvoId ? ' active' : '');
+        item.innerHTML = '<span class="convo-title">' + esc(c.title) + '</span>'
+          + '<button class="convo-delete" title="Delete">&times;</button>';
+        item.querySelector('.convo-title').onclick = function() { switchConvo(c.id); };
+        item.querySelector('.convo-delete').onclick = function(e) {
+          e.stopPropagation();
+          deleteConvo(c.id);
+        };
+        convoList.appendChild(item);
+      });
+    }
+
+    async function switchConvo(id) {
+      currentConvoId = id;
+      chatLog.innerHTML = '';
+      welcome.style.display = 'none';
+      await loadHistory(id);
+      await loadConversations();
+    }
+
+    async function deleteConvo(id) {
+      await fetch('/api/conversations/' + id, { method: 'DELETE' });
+      if (currentConvoId === id) {
+        currentConvoId = null;
+        chatLog.innerHTML = '';
+        welcome.style.display = '';
+      }
+      await loadConversations();
+    }
+
+    newChatBtn.addEventListener('click', async function() {
+      currentConvoId = null;
+      chatLog.innerHTML = '';
+      welcome.style.display = '';
+      var items = convoList.querySelectorAll('.convo-item');
+      items.forEach(function(i) { i.classList.remove('active'); });
+      input.focus();
+    });
+
+    async function loadHistory(convoId) {
+      try {
+        var url = '/api/chat/history';
+        if (convoId != null) url += '?conversation_id=' + convoId;
+        var res = await fetch(url);
+        var data = await res.json();
+        statusEl.textContent = data.is_guest
+          ? 'Guest mode (read-only for writes)'
+          : 'Signed in as ' + data.user;
+        if (data.messages && data.messages.length > 0) {
+          data.messages.forEach(function(m) {
+            addMsg(m.role, m.content, m.created_at, { model_used: m.model_used });
+          });
+        }
+      } catch(e) {
+        statusEl.textContent = 'Could not load history.';
+      }
+    }
+
+    function createStreamingMsg() {
+      welcome.style.display = 'none';
+      var div = document.createElement('div');
+      div.className = 'msg assistant';
+      div.innerHTML = '<div class="role">CHILI</div><div class="md-body"></div>';
+      chatLog.appendChild(div);
+      return div;
+    }
+
+    function finalizeStreamingMsg(div, fullText, meta) {
+      var mdBody = div.querySelector('.md-body');
+      mdBody.innerHTML = renderMd(fullText);
+
+      if (_hljs) { div.querySelectorAll('pre code').forEach(function(el) { try { _hljs.highlightElement(el); } catch(e){} }); }
+      div.querySelectorAll('.md-body pre').forEach(function(pre) {
+        var cbtn = document.createElement('button');
+        cbtn.className = 'code-copy-btn';
+        cbtn.textContent = 'Copy';
+        cbtn.onclick = function() { copyText(pre.querySelector('code').textContent, cbtn); };
+        pre.appendChild(cbtn);
+      });
+
+      var footer = document.createElement('div');
+      footer.className = 'msg-footer';
+      if (meta && meta.model_used) {
+        footer.innerHTML += '<span class="model-badge">' + esc(meta.model_used) + '</span>';
+      }
+      var copyBtn = document.createElement('button');
+      copyBtn.className = 'copy-btn';
+      copyBtn.textContent = 'Copy';
+      copyBtn.title = 'Copy message';
+      copyBtn.onclick = function() { copyText(mdBody.textContent, copyBtn); };
+      footer.appendChild(copyBtn);
+      div.appendChild(footer);
+    }
+
+    form.addEventListener('submit', async function(e) {
+      e.preventDefault();
+      var msg = input.value.trim();
+      if (!msg) return;
+
+      addMsg('user', msg, '');
+      input.value = '';
+      input.style.height = 'auto';
+      btn.disabled = true;
+      statusEl.textContent = 'Thinking...';
+
+      try {
+        var body = new FormData();
+        body.append('message', msg);
+        if (currentConvoId != null) body.append('conversation_id', currentConvoId);
+
+        var res = await fetch('/api/chat/stream', { method: 'POST', body: body });
+
+        if (!res.ok || !res.body) {
+          var fbody = new FormData();
+          fbody.append('message', msg);
+          if (currentConvoId != null) fbody.append('conversation_id', currentConvoId);
+          var fres = await fetch('/api/chat', { method: 'POST', body: fbody });
+          var fdata = await fres.json();
+          if (fdata.conversation_id && currentConvoId == null) currentConvoId = fdata.conversation_id;
+          addMsg('assistant', fdata.reply || '(no reply)', '', { model_used: fdata.model_used });
+          statusEl.textContent = '';
+          if (!isGuest) loadConversations();
+          return;
+        }
+
+        var streamDiv = createStreamingMsg();
+        var fullText = '';
+        var reader = res.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+        var meta = {};
+
+        while (true) {
+          var result = await reader.read();
+          if (result.done) break;
+          buffer += decoder.decode(result.value, { stream: true });
+
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+
+          for (var i = 0; i < lines.length; i++) {
+            var line = lines[i];
+            if (line.startsWith('data: ')) {
+              try {
+                var evt = JSON.parse(line.slice(6));
+                if (evt.done) {
+                  meta = evt;
+                  if (evt.conversation_id && currentConvoId == null) {
+                    currentConvoId = evt.conversation_id;
+                  }
+                } else if (evt.token) {
+                  fullText += evt.token;
+                  var mdBody = streamDiv.querySelector('.md-body');
+                  mdBody.innerHTML = renderMd(fullText);
+                  chatArea.scrollTop = chatArea.scrollHeight;
+                }
+              } catch(pe) {}
+            }
+          }
+        }
+
+        finalizeStreamingMsg(streamDiv, fullText, meta);
+        statusEl.textContent = '';
+        if (!isGuest) loadConversations();
+      } catch(e) {
+        addMsg('assistant', 'Error: could not reach CHILI backend.', '');
+        statusEl.textContent = '';
+      } finally {
+        btn.disabled = false;
+        input.focus();
+      }
+    });
+
+    var _allConvos = [];
+
+    async function loadConversationsData() {
+      try {
+        var res = await fetch('/api/conversations');
+        var data = await res.json();
+        isGuest = data.is_guest;
+        if (isGuest) {
+          sidebar.classList.add('hidden');
+          sidebarToggleBtn.style.display = 'none';
+          return [];
+        }
+        sidebar.classList.remove('hidden');
+        sidebarToggleBtn.style.display = '';
+        _allConvos = data.conversations || [];
+        renderConvoList(_allConvos);
+        return _allConvos;
+      } catch(e) { return []; }
+    }
+
+    var _searchTimer = null;
+    convoSearch.addEventListener('input', function() {
+      clearTimeout(_searchTimer);
+      var q = convoSearch.value.trim();
+      if (!q) { renderConvoList(_allConvos); return; }
+      _searchTimer = setTimeout(async function() {
+        try {
+          var res = await fetch('/api/conversations/search?q=' + encodeURIComponent(q));
+          var data = await res.json();
+          renderSearchResults(data.results || []);
+        } catch(e) { renderConvoList(_allConvos); }
+      }, 300);
+    });
+
+    function renderSearchResults(results) {
+      convoList.innerHTML = '';
+      if (results.length === 0) {
+        convoList.innerHTML = '<div style="padding:12px;font-size:13px;color:var(--text-muted);text-align:center;">No matches</div>';
+        return;
+      }
+      results.forEach(function(r) {
+        var item = document.createElement('div');
+        item.className = 'convo-item' + (r.id === currentConvoId ? ' active' : '');
+        var html = '<div style="flex:1;min-width:0;"><div class="convo-title">' + esc(r.title) + '</div>';
+        if (r.snippet) html += '<div class="search-snippet">' + esc(r.snippet) + '</div>';
+        html += '</div>';
+        item.innerHTML = html;
+        item.onclick = function() { convoSearch.value = ''; switchConvo(r.id); };
+        convoList.appendChild(item);
+      });
+    }
+
+    var _installPrompt = null;
+    var installBtn = document.getElementById('install-btn');
+    window.addEventListener('beforeinstallprompt', function(e) {
+      e.preventDefault();
+      _installPrompt = e;
+      installBtn.style.display = '';
+    });
+    installBtn.onclick = function() {
+      if (!_installPrompt) return;
+      _installPrompt.prompt();
+      _installPrompt.userChoice.then(function() { installBtn.style.display = 'none'; _installPrompt = null; });
+    };
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(function() {});
+    }
+
+    (async function() {
+      var convos = await loadConversationsData();
+      if (!isGuest && convos.length > 0) {
+        await switchConvo(convos[0].id);
+      } else if (isGuest) {
+        await loadHistory();
+      }
+      input.focus();
+    })();
+  </script>
+{% endblock %}

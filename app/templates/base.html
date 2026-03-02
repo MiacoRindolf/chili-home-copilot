@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <title>{% block title %}CHILI Home Copilot{% endblock %}</title>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#2563eb" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <link rel="manifest" href="/static/manifest.json" />
+  <link rel="apple-touch-icon" href="/static/icon-192.png" />
+  <style>
+    :root {
+      --bg: #f9fafb; --bg-header: #fff; --bg-input-bar: #fff;
+      --bg-msg-assist: #fff; --border: #e5e7eb; --text: #1f2937;
+      --text-secondary: #6b7280; --text-muted: #9ca3af;
+      --input-border: #d1d5db; --input-bg: #fff;
+      --code-bg: #f3f4f6;
+      --accent: #2563eb; --accent-hover: #1d4ed8; --accent-disabled: #93c5fd;
+    }
+    [data-theme="dark"] {
+      --bg: #111827; --bg-header: #1f2937; --bg-input-bar: #1f2937;
+      --bg-msg-assist: #1f2937; --border: #374151; --text: #f3f4f6;
+      --text-secondary: #9ca3af; --text-muted: #6b7280;
+      --input-border: #4b5563; --input-bg: #111827;
+      --code-bg: #374151;
+      --accent: #3b82f6; --accent-hover: #2563eb; --accent-disabled: #1e40af;
+    }
+  </style>
+  <script>
+    (function(){var t=localStorage.getItem('chili-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();
+  </script>
+  {% block head_extra %}{% endblock %}
+</head>
+<body>
+  {% block content %}{% endblock %}
+</body>
+</html>

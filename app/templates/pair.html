@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Pair Device{% endblock %}
+{% block content %}
+<div style="font-family:Arial;max-width:800px;margin:40px auto;">
+  <h1>🔗 Pair this device to CHILI</h1>
+  <p>Ask the admin for a pairing code.</p>
+  <form method="post" action="/pair">
+    <input name="code" placeholder="Pairing code" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
+    <input name="label" placeholder="Device label (e.g., Alex iPhone)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;margin-top:8px;" />
+    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Pair</button>
+  </form>
+  <p><a href="/chat">Go to Chat</a></p>
+</div>
+{% endblock %}

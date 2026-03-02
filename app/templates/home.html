@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}CHILI Home Copilot{% endblock %}
+{% block content %}
+<div style="font-family: Arial; max-width: 800px; margin: 40px auto;">
+  <h1>🌶️ CHILI — Home Copilot</h1>
+  <p><b>Conversational Home Interface & Life Intelligence</b></p>
+
+  <h2>Chores</h2>
+  <form method="post" action="/chores">
+    <input name="title" placeholder="Add a chore..." style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" required />
+    <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
+  </form>
+  <ul>{{ chore_items | safe }}</ul>
+
+  <h2>Birthday reminders</h2>
+  <form method="post" action="/birthdays">
+    <input name="name" placeholder="Name" required />
+    <input name="date" type="date" required />
+    <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
+  </form>
+  <ul>{{ bday_items | safe }}</ul>
+
+  <hr/>
+  <p style="color: #666;">
+    Local-first household copilot. <a href="/chat">Open Chat</a> | <a href="/admin">Admin</a>
+  </p>
+</div>
+{% endblock %}

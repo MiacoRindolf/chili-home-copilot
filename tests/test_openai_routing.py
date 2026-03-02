@@ -10,8 +10,8 @@ from app.models import ChatMessage
 class TestOpenAIFallbackRouting:
     """When planner returns unknown, route to OpenAI if configured."""
 
-    @patch("app.main.openai_client")
-    @patch("app.main.plan_action")
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action")
     def test_routes_to_openai_when_configured(self, mock_plan, mock_oc, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -35,8 +35,8 @@ class TestOpenAIFallbackRouting:
         assert "CHILI" in data["reply"]
         mock_oc.chat.assert_called_once()
 
-    @patch("app.main.openai_client")
-    @patch("app.main.plan_action")
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action")
     def test_falls_back_to_help_when_no_key(self, mock_plan, mock_oc, client, db):
         mock_plan.return_value = {
             "type": "unknown",
@@ -52,8 +52,8 @@ class TestOpenAIFallbackRouting:
         assert "add chore" in data["reply"].lower()
         mock_oc.chat.assert_not_called()
 
-    @patch("app.main.openai_client")
-    @patch("app.main.plan_action")
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action")
     def test_openai_error_falls_back_gracefully(self, mock_plan, mock_oc, client, db):
         mock_plan.return_value = {
             "type": "unknown",
@@ -73,8 +73,8 @@ class TestOpenAIFallbackRouting:
 
         assert "add chore" in data["reply"].lower()
 
-    @patch("app.main.openai_client")
-    @patch("app.main.plan_action")
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action")
     def test_tool_actions_stay_local(self, mock_plan, mock_oc, paired_client, db):
         """Tool actions should use llama3 even when OpenAI is configured."""
         client, user = paired_client
@@ -96,7 +96,7 @@ class TestOpenAIFallbackRouting:
 class TestModelUsedTracking:
     """model_used should be recorded on every assistant ChatMessage."""
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_llama3_model_recorded(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -112,7 +112,7 @@ class TestModelUsedTracking:
         ).first()
         assert assistant_msg.model_used == "llama3"
 
-    @patch("app.main.plan_action", side_effect=Exception("offline"))
+    @patch("app.services.chat_service.plan_action", side_effect=Exception("offline"))
     def test_offline_model_recorded(self, mock_plan, client, db):
         client.post("/api/chat", data={"message": "hello"})
 

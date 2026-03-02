@@ -60,7 +60,7 @@ class TestConversationCRUD:
 class TestConversationChat:
     """Chat with conversation_id support."""
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_auto_creates_conversation_for_paired_user(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -75,7 +75,7 @@ class TestConversationChat:
         convos = client.get("/api/conversations").json()["conversations"]
         assert len(convos) == 1
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_auto_title_from_first_message(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -88,7 +88,7 @@ class TestConversationChat:
         convos = client.get("/api/conversations").json()["conversations"]
         assert convos[0]["title"] == "what are my chores?"
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_history_by_conversation_id(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -113,7 +113,7 @@ class TestConversationChat:
         assert any("Hello from convo 1" in m["content"] for m in hist1["messages"])
         assert any("Hello from convo 2" in m["content"] for m in hist2["messages"])
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_guest_no_conversation_id(self, mock_plan, client, db):
         mock_plan.return_value = {
             "type": "list_chores",
@@ -128,7 +128,7 @@ class TestConversationChat:
 class TestStreamingEndpoint:
     """SSE streaming endpoint tests."""
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_stream_tool_action(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -150,7 +150,7 @@ class TestStreamingEndpoint:
         assert last_event["action_type"] == "list_chores"
         assert last_event["model_used"] == "llama3"
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_stream_offline(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.side_effect = Exception("Ollama is down")
@@ -166,8 +166,8 @@ class TestStreamingEndpoint:
         assert last_event["done"] is True
         assert last_event["action_type"] == "llm_offline"
 
-    @patch("app.main.openai_client")
-    @patch("app.main.plan_action")
+    @patch("app.routers.chat.openai_client")
+    @patch("app.services.chat_service.plan_action")
     def test_stream_openai_fallback(self, mock_plan, mock_openai, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -205,14 +205,14 @@ class TestExecuteTool:
     """Tests for the _execute_tool helper."""
 
     def test_guest_blocked(self, db):
-        from app.main import _execute_tool
+        from app.services.chat_service import execute_tool as _execute_tool
         reply, executed, atype = _execute_tool(db, "add_chore", {"title": "x"}, "", True)
         assert atype == "guest_blocked"
         assert executed is False
         assert "read-only" in reply
 
     def test_list_chores_empty(self, db):
-        from app.main import _execute_tool
+        from app.services.chat_service import execute_tool as _execute_tool
         reply, executed, atype = _execute_tool(db, "list_chores", {}, "", False)
         assert executed is True
         assert "No chores" in reply

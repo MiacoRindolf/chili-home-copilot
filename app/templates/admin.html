@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}CHILI Admin{% endblock %}
+{% block content %}
+<div style="font-family: Arial; max-width: 900px; margin: 40px auto;">
+  <h1>🛠️ CHILI Admin</h1>
+  <p><a href="/">Home</a> | <a href="/chat">Chat</a> | <a href="/health">/health</a> | <a href="/metrics">/metrics</a> | <a href="/admin/users">Manage users & pairing</a></p>
+
+  <h2>Status</h2>
+  <div style="padding: 12px; background: {{ '#e8f5e9' if ok else '#ffebee' }}; border: 1px solid #ddd;">
+    <p><b>Overall:</b> {{ '✅ OK' if ok else '❌ Issues detected' }}</p>
+    <p><b>DB:</b> {{ '✅ OK' if db_status.ok else '❌ ' ~ db_status.get('error', '') }}</p>
+    <p><b>Ollama:</b> {{ '✅ OK' if ollama_status.ok else '❌ ' ~ ollama_status.get('error', '') }}</p>
+    <p><b>Models:</b> {{ ollama_status.get('models', []) | join(', ') if ollama_status.ok else 'N/A' }}</p>
+    <form method="post" action="/admin/reset" style="margin-top: 12px;">
+      <button style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" type="submit" onclick="return confirm('Reset demo data (delete all chores and birthdays)?')">Reset demo data</button>
+    </form>
+  </div>
+
+  <h2>Counts</h2>
+  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+    <p><b>Chores:</b> total={{ counts.chores.total }}, pending={{ counts.chores.pending }}, done={{ counts.chores.done }}</p>
+    <p><b>Birthdays:</b> total={{ counts.birthdays.total }}</p>
+  </div>
+
+  <h2>LLM Chat Latency (last {{ lat.count }} requests)</h2>
+  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+    <p><b>Avg:</b> {{ lat.avg_ms }} ms</p>
+    <p><b>P95:</b> {{ lat.p95_ms }} ms</p>
+  </div>
+
+  <h2>Model Usage</h2>
+  <div style="padding: 12px; background: #f5f5f5; border: 1px solid #ddd;">
+    <p><b>OpenAI:</b> {{ 'Configured (' ~ openai_model ~ ')' if openai_configured else 'Not configured (set OPENAI_API_KEY in .env)' }}</p>
+    {% for model, count in model_stats.items() %}
+    <p><b>{{ model }}:</b> {{ count }} messages</p>
+    {% else %}
+    <p>No messages yet.</p>
+    {% endfor %}
+  </div>
+
+  <h2>Exports</h2>
+  <ul>
+    <li><a href="/export/chores.csv">Download chores.csv</a></li>
+    <li><a href="/export/birthdays.csv">Download birthdays.csv</a></li>
+  </ul>
+
+  <h2>Recent Chat Activity</h2>
+  <ul>{{ logs_html | safe }}</ul>
+
+  <hr/>
+  <p style="color:#888; font-size:12px;">CHILI Admin — local dashboard</p>
+</div>
+{% endblock %}

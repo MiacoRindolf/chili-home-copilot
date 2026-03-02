@@ -191,43 +191,62 @@ CHILI is designed for household use. Run with `--host 0.0.0.0` and access from a
 
 ```
 app/
-├── main.py            # FastAPI routes, chat UI, /profile page
-├── models.py          # SQLAlchemy models (incl. HousemateProfile)
-├── db.py              # Database engine and session setup
-├── llm_planner.py     # Ollama planner (accepts RAG + personality context)
-├── openai_client.py   # OpenAI API wrapper for general chat fallback
-├── personality.py     # Personality profiling: extraction, context injection
-├── planner_schema.py  # Pydantic validation schemas (incl. answer_from_docs)
-├── rag.py             # RAG module: chunking, embedding, ChromaDB search
-├── ingest.py          # CLI script: python -m app.ingest
-├── chili_nlu.py       # Rule-based fallback parser
-├── pairing.py         # Device pairing and identity resolution
-├── schemas.py         # API-level Pydantic schemas
-├── logger.py          # Structured logging with trace_id
-├── health.py          # Health checks (DB + Ollama) and demo reset
-├── metrics.py         # Latency tracking and count aggregation
+├── main.py              # FastAPI app creation, router mounting (~25 lines)
+├── deps.py              # Shared FastAPI dependencies (get_db, identity resolution)
+├── routers/
+│   ├── chat.py          # Chat page, /api/chat, streaming, conversations
+│   ├── admin.py         # Admin dashboard, user management, exports
+│   ├── pages.py         # Home, profile, pair pages + form handlers
+│   └── health_routes.py # /health and /metrics endpoints
+├── services/
+│   └── chat_service.py  # Unified chat logic: tool execution, planning, SSE
+├── templates/
+│   ├── base.html        # Shared layout (PWA meta, theme vars, dark mode)
+│   ├── chat.html        # Chat UI (sidebar, streaming, voice, search)
+│   ├── home.html        # Home page (chores + birthdays)
+│   ├── admin.html       # Admin dashboard
+│   ├── admin_users.html # User management + pairing
+│   ├── profile.html     # Housemate personality profile
+│   └── pair.html        # Device pairing page
+├── models.py            # SQLAlchemy models (incl. HousemateProfile)
+├── db.py                # Database engine and session setup
+├── llm_planner.py       # Ollama planner (accepts RAG + personality context)
+├── openai_client.py     # OpenAI API wrapper for general chat fallback
+├── personality.py       # Personality profiling: extraction, context injection
+├── planner_schema.py    # Pydantic validation schemas (incl. answer_from_docs)
+├── rag.py               # RAG module: chunking, embedding, ChromaDB search
+├── ingest.py            # CLI script: python -m app.ingest
+├── chili_nlu.py         # Rule-based fallback parser
+├── pairing.py           # Device pairing and identity resolution
+├── schemas.py           # API-level Pydantic schemas
+├── logger.py            # Structured logging with trace_id
+├── health.py            # Health checks (DB + Ollama) and demo reset
+├── metrics.py           # Latency tracking, count aggregation, model stats
+├── static/              # PWA assets (manifest, service worker, icons)
 docs/
-├── house-info.txt     # Example: WiFi, landlord, trash, parking
-├── house-rules.txt    # Example: quiet hours, kitchen, guests
-├── recipes.txt        # Example: household favorite recipes
+├── house-info.txt       # Example: WiFi, landlord, trash, parking
+├── house-rules.txt      # Example: quiet hours, kitchen, guests
+├── recipes.txt          # Example: household favorite recipes
 data/
-├── chili.db           # SQLite database (auto-created, gitignored)
-├── chroma/            # ChromaDB vector store (auto-created, gitignored)
+├── chili.db             # SQLite database (auto-created, gitignored)
+├── chroma/              # ChromaDB vector store (auto-created, gitignored)
 tests/
-├── test_rag.py             # Tests for chunking, search, and ingestion
-├── test_planner_schema.py  # Schema validation tests (incl. answer_from_docs)
-├── test_api.py             # API integration tests
-├── test_openai_routing.py  # OpenAI fallback routing + model tracking tests
-├── test_personality.py     # Personality extraction and profile tests
-├── test_conversations.py   # Conversation CRUD, streaming, and sidebar tests
-├── test_fallback_parser.py # Fallback parser tests
-Dockerfile             # Container image for CHILI app
-docker-compose.yml     # Full stack: CHILI + Ollama
+├── conftest.py               # Shared fixtures (in-memory DB, test client)
+├── test_api.py               # API integration tests
+├── test_conversations.py     # Conversation CRUD, streaming, sidebar tests
+├── test_openai_routing.py    # OpenAI fallback routing + model tracking
+├── test_personality.py       # Personality extraction and profile tests
+├── test_rag.py               # Chunking, search, and ingestion tests
+├── test_planner_schema.py    # Schema validation tests
+├── test_fallback_parser.py   # Fallback parser tests
+Dockerfile               # Container image for CHILI app
+docker-compose.yml       # Full stack: CHILI + Ollama
 scripts/
-├── docker-setup.sh    # One-command Docker bootstrap
-requirements.txt       # Pinned Python dependencies
-.env.example           # Template for environment variables
-TOOLING.md             # Deep dive into guardrails and tool-calling design
+├── docker-setup.sh      # One-command Docker bootstrap
+├── start-https.ps1      # HTTPS setup for LAN (mkcert)
+requirements.txt         # Pinned Python dependencies
+.env.example             # Template for environment variables
+TOOLING.md               # Deep dive into guardrails and tool-calling design
 ```
 
 ## Design Decisions

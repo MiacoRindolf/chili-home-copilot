@@ -7,6 +7,7 @@ chromadb==1.5.2
 openai==2.24.0
 python-dotenv==1.2.1
 ollama==0.6.1
+jinja2==3.1.6
 
 # dev / test
 pytest==9.0.2

@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}CHILI Profile - {{ user_name }}{% endblock %}
+{% block content %}
+<div style="font-family:Arial;max-width:800px;margin:40px auto;">
+  <h1>Your Profile</h1>
+  <p><a href="/chat">Chat</a> | <a href="/">Home</a></p>
+  <p>Hi <b>{{ user_name }}</b>! CHILI learns about you from your conversations to personalize responses.</p>
+
+  <form method="post" action="/profile">
+    <div style="margin:16px 0;">
+      <label><b>Interests</b> (comma-separated)</label><br/>
+      <input name="interests" value="{{ interests_str }}" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+    </div>
+    <div style="margin:16px 0;">
+      <label><b>Dietary preferences</b></label><br/>
+      <input name="dietary" value="{{ dietary }}" placeholder="e.g., vegetarian, no dairy" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+    </div>
+    <div style="margin:16px 0;">
+      <label><b>Communication style</b></label><br/>
+      <input name="tone" value="{{ tone }}" placeholder="e.g., casual, brief, formal" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
+    </div>
+    <div style="margin:16px 0;">
+      <label><b>Notes</b> (anything CHILI should know)</label><br/>
+      <textarea name="notes" rows="3" style="width:100%;max-width:520px;padding:10px;font-size:15px;">{{ notes }}</textarea>
+    </div>
+    <button type="submit" style="padding:10px 20px;font-size:16px;">Save Profile</button>
+  </form>
+
+  <p style="color:#888;font-size:12px;margin-top:24px;">
+    Last auto-updated: {{ last_updated }}
+  </p>
+</div>
+{% endblock %}

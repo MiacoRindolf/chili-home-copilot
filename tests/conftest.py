@@ -10,7 +10,8 @@ from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
 
 from app.db import Base
-from app.main import app, get_db
+from app.main import app
+from app.deps import get_db
 from app.models import User, Device
 from app.pairing import DEVICE_COOKIE_NAME
 

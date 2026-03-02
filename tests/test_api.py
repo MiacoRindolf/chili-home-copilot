@@ -13,7 +13,7 @@ class TestGuestReadOnly:
     def _post_chat(self, client, message):
         return client.post("/api/chat", data={"message": message})
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_guest_add_chore_blocked(self, mock_plan, client, db):
         mock_plan.return_value = {
             "type": "add_chore",
@@ -27,7 +27,7 @@ class TestGuestReadOnly:
         assert data["reply"] == "Guest mode is read-only. Ask the admin to pair your device at /pair."
         assert db.query(Chore).count() == 0, "No chore should be created for guests"
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_guest_mark_done_blocked(self, mock_plan, client, db):
         db.add(Chore(title="Existing chore", done=False))
         db.commit()
@@ -44,7 +44,7 @@ class TestGuestReadOnly:
         chore = db.query(Chore).first()
         assert chore.done is False, "Guest must not be able to mark chores done"
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_paired_user_can_write(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -63,7 +63,7 @@ class TestGuestReadOnly:
 class TestLLMOffline:
     """When Ollama is down, the app must return an offline message and not execute."""
 
-    @patch("app.main.plan_action", side_effect=Exception("Connection refused"))
+    @patch("app.services.chat_service.plan_action", side_effect=Exception("Connection refused"))
     def test_offline_returns_message(self, mock_plan, client):
         resp = client.post("/api/chat", data={"message": "list chores"})
         data = resp.json()
@@ -73,7 +73,7 @@ class TestLLMOffline:
         assert data["executed"] is False
         assert "offline" in data["reply"].lower()
 
-    @patch("app.main.plan_action", side_effect=Exception("Connection refused"))
+    @patch("app.services.chat_service.plan_action", side_effect=Exception("Connection refused"))
     def test_offline_no_action_executed(self, mock_plan, client, db):
         resp = client.post("/api/chat", data={"message": "add chore sneak attack"})
         data = resp.json()
@@ -85,7 +85,7 @@ class TestLLMOffline:
 class TestChatMemory:
     """Messages must be stored in chat_messages and retrievable via /api/chat/history."""
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_messages_stored(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -102,7 +102,7 @@ class TestChatMemory:
         assert msgs[1].role == "assistant"
         assert msgs[1].content == "No chores yet."
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_convo_key_paired_user(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -117,13 +117,13 @@ class TestChatMemory:
 
     def test_convo_key_guest(self, client, db):
         """Guest convo_key should start with 'guest:'."""
-        with patch("app.main.plan_action", side_effect=Exception("offline")):
+        with patch("app.services.chat_service.plan_action", side_effect=Exception("offline")):
             client.post("/api/chat", data={"message": "hi"})
 
         msg = db.query(ChatMessage).first()
         assert msg.convo_key.startswith("guest:")
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_history_returns_messages(self, mock_plan, paired_client, db):
         client, user = paired_client
         mock_plan.return_value = {
@@ -142,7 +142,7 @@ class TestChatMemory:
         assert data["messages"][0]["role"] == "user"
         assert data["messages"][1]["role"] == "assistant"
 
-    @patch("app.main.plan_action")
+    @patch("app.services.chat_service.plan_action")
     def test_history_filters_empty_content(self, mock_plan, paired_client, db):
         client, user = paired_client
         db.add(ChatMessage(

@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}CHILI Admin - Users{% endblock %}
+{% block content %}
+<div style="font-family:Arial;max-width:900px;margin:40px auto;">
+  <h1>👥 CHILI Admin - Users</h1>
+  <p><a href="/admin">← Admin</a></p>
+
+  <h2>Create housemate</h2>
+  <form method="post" action="/admin/users">
+    <input name="name" placeholder="Name (e.g., Alex)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
+    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Create</button>
+  </form>
+
+  <h2>Existing users</h2>
+  <ul>{{ user_items | safe }}</ul>
+
+  <h2>Generate pairing code</h2>
+  <form method="post" action="/admin/pair-code">
+    <input name="user_id" placeholder="User ID (e.g., 1)" required style="width:100%;max-width:520px;padding:10px;font-size:16px;" />
+    <button type="submit" style="padding:10px 14px;font-size:16px;margin-top:8px;">Generate code</button>
+  </form>
+
+  <p>Housemate pairs at: <code>/pair</code></p>
+</div>
+{% endblock %}
