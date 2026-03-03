@@ -249,12 +249,92 @@
       width: 100%; text-align: left; transition: background 0.15s;
     }
     #export-btn:hover { background: var(--code-bg); }
-    .guest-section-label {
+    .guest-section-label, .sidebar-section-label {
       font-size: 11px; font-weight: 600; color: var(--text-muted);
       text-transform: uppercase; letter-spacing: 0.5px;
       padding: 12px 12px 4px; border-top: 1px solid var(--border); margin-top: 8px;
     }
+    .sidebar-section-label:first-child { border-top: none; margin-top: 0; }
     .convo-item.guest-convo .convo-title { font-style: italic; }
+
+    .project-group { margin-bottom: 2px; }
+    .project-header {
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 12px; cursor: pointer; font-size: 13px; font-weight: 600;
+      color: var(--text); border-radius: 8px; transition: background 0.1s;
+    }
+    .project-header:hover { background: var(--code-bg); }
+    .project-header.drop-target { background: rgba(99,102,241,0.15); outline: 2px dashed var(--accent); }
+    .project-color-dot {
+      width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    }
+    .project-expand { font-size: 10px; flex-shrink: 0; width: 14px; text-align: center; color: var(--text-muted); }
+    .project-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .project-badge {
+      font-size: 10px; font-weight: 500; color: var(--text-muted); flex-shrink: 0;
+    }
+    .project-menu-btn {
+      background: none; border: none; cursor: pointer; font-size: 16px;
+      color: var(--text-muted); padding: 0 2px; opacity: 0; transition: opacity 0.1s;
+    }
+    .project-header:hover .project-menu-btn { opacity: 1; }
+    .project-convo-list { padding-left: 12px; }
+    .project-convo-item { font-size: 12px; }
+    .project-empty {
+      font-size: 11px; color: var(--text-muted); font-style: italic;
+      padding: 6px 12px;
+    }
+    .project-ctx-menu {
+      position: fixed; z-index: 1001; background: var(--bg-header);
+      border: 1px solid var(--border); border-radius: 8px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.25); padding: 4px 0; min-width: 160px;
+      color: var(--text);
+    }
+    .project-ctx-menu button {
+      display: block; width: 100%; text-align: left; padding: 8px 16px;
+      font-size: 13px; background: none; border: none; cursor: pointer;
+      color: var(--text);
+    }
+    .project-ctx-menu button:hover { background: var(--code-bg); }
+    .project-ctx-menu button.danger { color: #ef4444; }
+
+    .chili-upload-zone {
+      border: 2px dashed var(--border); border-radius: 10px;
+      padding: 24px 16px; text-align: center; transition: all 0.2s;
+      cursor: pointer; margin: 8px 0;
+    }
+    .chili-upload-zone:hover, .chili-upload-zone.chili-upload-hover {
+      border-color: var(--accent); background: rgba(99,102,241,0.06);
+    }
+    .chili-upload-icon { font-size: 28px; margin-bottom: 6px; }
+    .chili-upload-text { font-size: 13px; font-weight: 600; color: var(--text); }
+    .chili-upload-subtext { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+    .chili-upload-browse { color: var(--accent); text-decoration: none; }
+    .chili-upload-browse:hover { text-decoration: underline; }
+    .chili-upload-progress { margin-top: 10px; }
+    .chili-upload-progress-bar {
+      height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;
+    }
+    .chili-upload-progress-fill {
+      height: 100%; background: var(--accent); width: 0%; transition: width 0.2s;
+    }
+    .chili-upload-progress-text { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+    .file-list-item {
+      display: flex; align-items: center; gap: 8px;
+      padding: 8px 12px; border-radius: 6px; font-size: 13px;
+      transition: background 0.1s;
+    }
+    .file-list-item:hover { background: var(--code-bg); }
+    .file-list-icon { font-size: 18px; flex-shrink: 0; }
+    .file-list-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .file-list-size { font-size: 11px; color: var(--text-muted); flex-shrink: 0; }
+    .file-list-delete {
+      background: none; border: none; cursor: pointer; color: var(--text-muted);
+      font-size: 14px; padding: 2px 4px; opacity: 0; transition: opacity 0.1s;
+    }
+    .file-list-item:hover .file-list-delete { opacity: 1; }
+    .file-list-delete:hover { color: #ef4444; }
     .guest-reply-bar {
       display: flex; gap: 6px; padding: 8px;
       border-top: 1px solid var(--border); background: var(--bg-input-bar);
@@ -357,6 +437,9 @@
   <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/highlight.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js"></script>
+  <script src="/static/components/modal.js"></script>
+  <script src="/static/components/file-upload.js"></script>
+  <script src="/static/components/sidebar.js"></script>
 {% endblock %}
 
 {% block content %}
@@ -381,7 +464,7 @@
 
   <!-- Pairing modal -->
   <div id="pair-modal" style="display:none;position:fixed;inset:0;z-index:999;background:rgba(0,0,0,.55);align-items:center;justify-content:center;">
-    <div style="background:var(--card-bg,#fff);border-radius:12px;padding:28px 24px;max-width:380px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3);">
+    <div style="background:var(--bg-header);color:var(--text);border-radius:12px;padding:28px 24px;max-width:380px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.3);">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;">
         <h3 style="margin:0;font-size:1.1rem;">Pair Your Device</h3>
         <button onclick="closePairModal()" style="background:none;border:none;font-size:1.4rem;cursor:pointer;color:var(--text-secondary);">&times;</button>
@@ -430,6 +513,7 @@
     <aside id="sidebar" class="hidden">
       <div id="sidebar-header">
         <button id="new-chat-btn">+ New Chat</button>
+        <button id="new-project-btn" style="background:transparent;color:var(--accent);border:1px solid var(--accent);">+ Project</button>
       </div>
       <div id="sidebar-search-wrap" style="padding:0 12px 8px;">
         <input id="convo-search" type="text" placeholder="Search conversations..." style="width:100%;padding:8px 10px;font-size:13px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;" />
@@ -601,6 +685,8 @@
     var exportBtn = document.getElementById('export-btn');
     var guestConvoSection = document.getElementById('guest-convo-section');
     var guestConvoList = document.getElementById('guest-convo-list');
+    var newProjectBtn = document.getElementById('new-project-btn');
+    var _allProjects = [];
 
     var _marked = (typeof marked !== 'undefined') ? marked : null;
     var _DOMPurify = (typeof DOMPurify !== 'undefined') ? DOMPurify : null;
@@ -928,7 +1014,21 @@
       await loadGuestHistory(viewingGuestKey);
     }
 
+    if (typeof ChiliSidebar !== 'undefined') {
+      ChiliSidebar.init({
+        onSwitchConvo: function(id) { switchConvo(id); },
+        onDeleteConvo: function(id) { deleteConvo(id); },
+        onProjectMenu: function(project, btnEl) { showProjectContextMenu(project, btnEl); },
+        onAssignConvo: function(projectId, convoId) { assignConvoToProject(projectId, convoId); },
+      });
+    }
+
     function renderConvoList(convos) {
+      if (typeof ChiliSidebar !== 'undefined' && _allProjects.length > 0) {
+        ChiliSidebar.setData(_allProjects, convos);
+        ChiliSidebar.render(convoList, currentConvoId, null);
+        return;
+      }
       convoList.innerHTML = '';
       convos.forEach(function(c) {
         var item = document.createElement('div');
@@ -1189,6 +1289,13 @@
         sidebarToggleBtn.style.display = '';
         pairBanner.style.display = 'none';
         _allConvos = data.conversations || [];
+
+        try {
+          var projRes = await fetch('/api/projects');
+          var projData = await projRes.json();
+          _allProjects = projData.projects || [];
+        } catch(pe) { _allProjects = []; }
+
         renderConvoList(_allConvos);
         return _allConvos;
       } catch(e) { return []; }
@@ -1205,7 +1312,15 @@
     convoSearch.addEventListener('input', function() {
       clearTimeout(_searchTimer);
       var q = convoSearch.value.trim();
-      if (!q) { renderConvoList(_allConvos); return; }
+      if (!q) {
+        if (typeof ChiliSidebar !== 'undefined') {
+          ChiliSidebar.setData(_allProjects, _allConvos);
+          ChiliSidebar.render(convoList, currentConvoId, null);
+        } else {
+          renderConvoList(_allConvos);
+        }
+        return;
+      }
       _searchTimer = setTimeout(async function() {
         try {
           var res = await fetch('/api/conversations/search?q=' + encodeURIComponent(q));
@@ -1231,6 +1346,153 @@
         item.onclick = function() { convoSearch.value = ''; switchConvo(r.id); };
         convoList.appendChild(item);
       });
+    }
+
+    /* ---- Project management ---- */
+    newProjectBtn.addEventListener('click', function() {
+      var modal = ChiliModal.create({ title: 'New Project', maxWidth: '400px' });
+      var body = modal.getBody();
+      body.innerHTML =
+        '<div style="margin-bottom:12px;">' +
+          '<label style="font-size:13px;font-weight:600;display:block;margin-bottom:4px;">Name</label>' +
+          '<input id="proj-name" type="text" placeholder="e.g. Recipes, Budget..." style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;box-sizing:border-box;" />' +
+        '</div>' +
+        '<div style="margin-bottom:12px;">' +
+          '<label style="font-size:13px;font-weight:600;display:block;margin-bottom:4px;">Description (optional)</label>' +
+          '<input id="proj-desc" type="text" placeholder="Brief description..." style="width:100%;padding:8px 10px;font-size:14px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);outline:none;box-sizing:border-box;" />' +
+        '</div>' +
+        '<div style="margin-bottom:16px;">' +
+          '<label style="font-size:13px;font-weight:600;display:block;margin-bottom:4px;">Color</label>' +
+          '<div id="proj-colors" style="display:flex;gap:6px;flex-wrap:wrap;"></div>' +
+        '</div>' +
+        '<button id="proj-create-btn" style="width:100%;padding:10px;font-size:14px;font-weight:600;background:var(--accent);color:#fff;border:none;border-radius:8px;cursor:pointer;">Create Project</button>';
+
+      var colors = ['#6366f1','#ef4444','#f59e0b','#10b981','#3b82f6','#8b5cf6','#ec4899','#14b8a6'];
+      var selectedColor = colors[0];
+      var colorsDiv = body.querySelector('#proj-colors');
+      colors.forEach(function(c) {
+        var dot = document.createElement('div');
+        dot.style.cssText = 'width:28px;height:28px;border-radius:50%;cursor:pointer;border:3px solid transparent;background:' + c + ';';
+        if (c === selectedColor) dot.style.borderColor = 'var(--text)';
+        dot.onclick = function() {
+          selectedColor = c;
+          colorsDiv.querySelectorAll('div').forEach(function(d) { d.style.borderColor = 'transparent'; });
+          dot.style.borderColor = 'var(--text)';
+        };
+        colorsDiv.appendChild(dot);
+      });
+
+      body.querySelector('#proj-create-btn').onclick = async function() {
+        var name = body.querySelector('#proj-name').value.trim();
+        if (!name) { body.querySelector('#proj-name').style.borderColor = '#ef4444'; return; }
+        var desc = body.querySelector('#proj-desc').value.trim();
+        var fd = new FormData();
+        fd.append('name', name);
+        fd.append('description', desc);
+        fd.append('color', selectedColor);
+        await fetch('/api/projects', { method: 'POST', body: fd });
+        modal.close();
+        modal.destroy();
+        await loadConversations();
+      };
+
+      body.querySelector('#proj-name').addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { e.preventDefault(); body.querySelector('#proj-create-btn').click(); }
+      });
+
+      modal.open();
+      setTimeout(function() { body.querySelector('#proj-name').focus(); }, 100);
+    });
+
+    var _activeCtxMenu = null;
+    function _closeCtxMenu() {
+      if (_activeCtxMenu) { _activeCtxMenu.remove(); _activeCtxMenu = null; }
+      document.removeEventListener('click', _closeCtxMenu);
+    }
+
+    function showProjectContextMenu(project, btnEl) {
+      _closeCtxMenu();
+      var rect = btnEl.getBoundingClientRect();
+      var menu = document.createElement('div');
+      menu.className = 'project-ctx-menu';
+      menu.style.top = rect.bottom + 4 + 'px';
+      menu.style.left = Math.min(rect.left, window.innerWidth - 180) + 'px';
+
+      menu.innerHTML =
+        '<button data-action="files">Manage Files</button>' +
+        '<button data-action="rename">Rename</button>' +
+        '<button data-action="delete" class="danger">Delete Project</button>';
+
+      menu.querySelector('[data-action="files"]').onclick = function() { _closeCtxMenu(); openProjectFilesModal(project); };
+      menu.querySelector('[data-action="rename"]').onclick = function() { _closeCtxMenu(); renameProject(project); };
+      menu.querySelector('[data-action="delete"]').onclick = function() { _closeCtxMenu(); deleteProject(project); };
+
+      document.body.appendChild(menu);
+      _activeCtxMenu = menu;
+      setTimeout(function() { document.addEventListener('click', _closeCtxMenu); }, 10);
+    }
+
+    function openProjectFilesModal(project) {
+      var modal = ChiliModal.create({ title: project.name + ' — Files', maxWidth: '520px' });
+      var body = modal.getBody();
+      body.innerHTML = '<div id="pf-upload-zone"></div><div id="pf-file-list" style="margin-top:12px;"></div>';
+
+      var uploader = ChiliFileUpload.create(body.querySelector('#pf-upload-zone'), {
+        uploadUrl: '/api/projects/' + project.id + '/files',
+        multiple: true,
+        onUploadComplete: function() { refreshFileList(); loadConversations(); },
+        onError: function(err) { alert('Upload error: ' + err); },
+      });
+
+      function refreshFileList() {
+        fetch('/api/projects/' + project.id + '/files').then(function(r) { return r.json(); }).then(function(data) {
+          var listEl = body.querySelector('#pf-file-list');
+          listEl.innerHTML = '';
+          var files = data.files || [];
+          if (files.length === 0) {
+            listEl.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted);font-size:13px;">No files yet</div>';
+            return;
+          }
+          files.forEach(function(f) {
+            var item = document.createElement('div');
+            item.className = 'file-list-item';
+            item.innerHTML =
+              '<span class="file-list-icon">' + ChiliFileUpload.getIcon(f.original_name) + '</span>' +
+              '<span class="file-list-name" title="' + esc(f.original_name) + '">' + esc(f.original_name) + '</span>' +
+              '<span class="file-list-size">' + ChiliFileUpload.formatSize(f.file_size) + '</span>' +
+              '<button class="file-list-delete" title="Delete">&times;</button>';
+            item.querySelector('.file-list-delete').onclick = async function() {
+              await fetch('/api/projects/' + project.id + '/files/' + f.id, { method: 'DELETE' });
+              refreshFileList();
+              loadConversations();
+            };
+            listEl.appendChild(item);
+          });
+        });
+      }
+
+      refreshFileList();
+      modal.open();
+    }
+
+    async function renameProject(project) {
+      var newName = prompt('Rename project:', project.name);
+      if (!newName || newName.trim() === project.name) return;
+      var fd = new FormData();
+      fd.append('name', newName.trim());
+      await fetch('/api/projects/' + project.id, { method: 'PUT', body: fd });
+      await loadConversations();
+    }
+
+    async function deleteProject(project) {
+      if (!confirm('Delete project "' + project.name + '"? Conversations will be kept but unlinked.')) return;
+      await fetch('/api/projects/' + project.id, { method: 'DELETE' });
+      await loadConversations();
+    }
+
+    async function assignConvoToProject(projectId, convoId) {
+      await fetch('/api/projects/' + projectId + '/conversations/' + convoId, { method: 'POST' });
+      await loadConversations();
     }
 
     var _installPrompt = null;

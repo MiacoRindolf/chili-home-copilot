@@ -122,6 +122,33 @@ def ingest_documents(trace_id: str = "ingest") -> dict:
     return {"ok": True, "files": len(txt_files), "chunks": len(all_chunks)}
 
 
+def get_project_collection(project_id: int, read_only: bool = False):
+    """Return (or create) a project-specific ChromaDB collection."""
+    CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+    client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+    ef = _get_embedding_function()
+    name = f"project_{project_id}"
+
+    if read_only:
+        try:
+            return client.get_collection(name=name, embedding_function=ef)
+        except Exception:
+            return None
+    return client.get_or_create_collection(name=name, embedding_function=ef)
+
+
+def delete_project_collection(project_id: int, trace_id: str = "rag"):
+    """Delete a project's ChromaDB collection entirely."""
+    try:
+        CHROMA_DIR.mkdir(parents=True, exist_ok=True)
+        client = chromadb.PersistentClient(path=str(CHROMA_DIR))
+        name = f"project_{project_id}"
+        client.delete_collection(name=name)
+        log_info(trace_id, f"deleted_project_collection project={project_id}")
+    except Exception as e:
+        log_info(trace_id, f"delete_project_collection_error={e}")
+
+
 def search(query: str, n_results: int = 3, trace_id: str = "rag") -> list[dict]:
     """Search ChromaDB for chunks relevant to the query.
 

@@ -65,14 +65,14 @@ def list_conversations(request: Request, db: Session = Depends(get_db)):
     return {
         "is_guest": False,
         "conversations": [
-            {"id": c.id, "title": c.title, "created_at": str(c.created_at)}
+            {"id": c.id, "title": c.title, "project_id": c.project_id, "created_at": str(c.created_at)}
             for c in convos
         ],
     }
 
 
 @router.post("/api/conversations", response_class=JSONResponse)
-def create_conversation(request: Request, db: Session = Depends(get_db)):
+async def create_conversation(request: Request, db: Session = Depends(get_db)):
     client_ip = request.client.host
     device_token = request.cookies.get(DEVICE_COOKIE_NAME)
     identity = get_identity_record(db, device_token)
@@ -81,11 +81,18 @@ def create_conversation(request: Request, db: Session = Depends(get_db)):
     if identity["is_guest"]:
         return JSONResponse({"error": "Guests cannot create conversations"}, status_code=403)
 
-    convo = Conversation(convo_key=convo_key, title="New Chat")
+    project_id = None
+    try:
+        body = await request.json()
+        project_id = body.get("project_id")
+    except Exception:
+        pass
+
+    convo = Conversation(convo_key=convo_key, title="New Chat", project_id=project_id)
     db.add(convo)
     db.commit()
     db.refresh(convo)
-    return {"id": convo.id, "title": convo.title, "created_at": str(convo.created_at)}
+    return {"id": convo.id, "title": convo.title, "project_id": convo.project_id, "created_at": str(convo.created_at)}
 
 
 @router.delete("/api/conversations/{convo_id}", response_class=JSONResponse)
@@ -322,8 +329,15 @@ async def chat_api(
     rag_sources = []
     personality_used = False
 
+    # Resolve project_id from the conversation for project-scoped RAG
+    _project_id = None
+    if conversation_id:
+        _convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if _convo_obj:
+            _project_id = _convo_obj.project_id
+
     try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id)
+        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id)
     except Exception as e:
         log_info(trace_id, f"llm_error={e}, trying NLU fallback")
         ctx = None
@@ -524,8 +538,14 @@ async def chat_stream_api(
     rag_sources = []
     personality_used = False
 
+    _project_id_stream = None
+    if conversation_id:
+        _convo_obj_stream = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if _convo_obj_stream:
+            _project_id_stream = _convo_obj_stream.project_id
+
     try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id)
+        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream)
     except Exception as e:
         log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
 

@@ -13,6 +13,7 @@ from .. import rag as rag_module
 from .. import personality as personality_module
 from .. import web_search as web_search_module
 from .. import memory as memory_module
+from . import project_file_service as pfs_module
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -141,12 +142,12 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
     return llm_reply, executed, action_type
 
 
-def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None):
+def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None, project_id: int | None = None):
     """Create conversation if needed, store user message, load memory. Always safe (no LLM call)."""
     is_guest = identity["is_guest"]
 
     if not is_guest and conversation_id is None:
-        convo = Conversation(convo_key=convo_key, title="New Chat")
+        convo = Conversation(convo_key=convo_key, title="New Chat", project_id=project_id)
         db.add(convo)
         db.commit()
         db.refresh(convo)
@@ -163,7 +164,7 @@ def init_chat(db: Session, convo_key: str, conversation_id, message: str, identi
     return {"conversation_id": conversation_id, "recent": recent}
 
 
-def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id: str):
+def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id: str, project_id: int | None = None):
     """Run RAG search, personality lookup, and LLM planner. May raise if Ollama is offline."""
     is_guest = identity["is_guest"]
     user_id = identity.get("user_id")
@@ -174,6 +175,14 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
     if rag_hits and rag_hits[0]["distance"] < 1.5:
         rag_context = "\n---\n".join(f"[{h['source']}]: {h['text']}" for h in rag_hits)
         log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
+
+    if project_id:
+        proj_hits = pfs_module.search_project(project_id, message, n_results=3, trace_id=trace_id)
+        if proj_hits:
+            proj_context = "\n---\n".join(f"[project:{h['source']}]: {h['text']}" for h in proj_hits)
+            rag_context = f"{proj_context}\n---\n{rag_context}" if rag_context else proj_context
+            rag_hits = proj_hits + (rag_hits or [])
+            log_info(trace_id, f"project_rag_injected project={project_id} sources={[h['source'] for h in proj_hits]}")
 
     personality_context = None
     memory_context = None
