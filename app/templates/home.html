@@ -9,105 +9,190 @@
     min-height: 100vh; background: var(--bg); color: var(--text);
   }
 
-  header {
+  /* ── Header ───────────────────────────────────────────────────── */
+  .home-header {
     background: var(--bg-header); border-bottom: 1px solid var(--border);
-    padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;
+    padding: 20px 24px; display: flex; justify-content: space-between; align-items: flex-start;
   }
-  header h1 { font-size: 22px; font-weight: 700; }
-  header .subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
-  header nav { font-size: 13px; margin-top: 6px; }
-  header nav a { color: var(--text-secondary); text-decoration: none; margin-right: 14px; }
-  header nav a:hover { text-decoration: underline; color: var(--accent); }
+  .home-header h1 { font-size: 24px; font-weight: 700; }
+  .home-header .subtitle { font-size: 14px; color: var(--text-secondary); margin-top: 4px; }
+  .home-header nav { font-size: 13px; margin-top: 8px; }
+  .home-header nav a {
+    color: var(--text-secondary); text-decoration: none; margin-right: 16px;
+    transition: color .15s;
+  }
+  .home-header nav a:hover { color: var(--accent); }
+  .header-actions { display: flex; align-items: center; gap: 8px; }
   #theme-toggle {
-    background: none; border: 1px solid var(--border); border-radius: 6px;
-    padding: 4px 10px; font-size: 18px; cursor: pointer; line-height: 1;
-    color: var(--text);
+    background: none; border: 1px solid var(--border); border-radius: 8px;
+    padding: 6px 12px; font-size: 18px; cursor: pointer; color: var(--text);
   }
 
-  .dashboard {
-    max-width: 960px; width: 100%; margin: 0 auto;
-    padding: 24px 20px 60px;
-  }
+  /* ── Dashboard layout ─────────────────────────────────────────── */
+  .dashboard { max-width: 1100px; width: 100%; margin: 0 auto; padding: 24px 20px 60px; }
 
+  /* ── Insights banner ──────────────────────────────────────────── */
+  .insights-bar {
+    display: flex; gap: 10px; margin-bottom: 20px; overflow-x: auto;
+    padding-bottom: 4px; scrollbar-width: thin;
+  }
+  .insight-chip {
+    display: flex; align-items: center; gap: 6px; padding: 8px 14px;
+    border-radius: 10px; font-size: 13px; font-weight: 500; white-space: nowrap;
+    flex-shrink: 0; border: 1px solid transparent;
+    animation: slideIn .3s ease-out both;
+  }
+  .insight-chip.warning { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+  [data-theme="dark"] .insight-chip.warning { background: #78350f; color: #fde68a; border-color: #92400e; }
+  .insight-chip.success { background: #dcfce7; color: #166534; border-color: #bbf7d0; }
+  [data-theme="dark"] .insight-chip.success { background: #14532d; color: #86efac; border-color: #166534; }
+  .insight-chip.info { background: #dbeafe; color: #1e40af; border-color: #bfdbfe; }
+  [data-theme="dark"] .insight-chip.info { background: #1e3a5f; color: #93c5fd; border-color: #1e40af; }
+  .insight-chip.celebration { background: #fce7f3; color: #9d174d; border-color: #fbcfe8; }
+  [data-theme="dark"] .insight-chip.celebration { background: #831843; color: #f9a8d4; border-color: #9d174d; }
+  .insight-chip.reminder { background: #ede9fe; color: #5b21b6; border-color: #ddd6fe; }
+  [data-theme="dark"] .insight-chip.reminder { background: #3b0764; color: #c4b5fd; border-color: #5b21b6; }
+  .insight-icon { font-size: 16px; }
+
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: none; } }
+
+  /* ── Weather widget ───────────────────────────────────────────── */
+  .weather-widget {
+    display: flex; align-items: center; gap: 12px;
+    background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
+    padding: 14px 18px; margin-bottom: 20px;
+  }
+  .weather-icon { font-size: 36px; }
+  .weather-temp { font-size: 28px; font-weight: 700; }
+  .weather-detail { font-size: 13px; color: var(--text-secondary); }
+  .weather-location { font-size: 12px; color: var(--text-muted); }
+
+  /* ── Stats row ────────────────────────────────────────────────── */
   .stats-row {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
     gap: 12px; margin-bottom: 24px;
   }
   .stat-card {
     background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
-    padding: 16px 18px; text-align: center;
+    padding: 18px; position: relative; overflow: hidden;
+    transition: transform .15s, box-shadow .15s;
   }
-  .stat-card .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); }
-  .stat-card .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+  .stat-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,.1); }
+  .stat-value {
+    font-size: 32px; font-weight: 700; line-height: 1;
+    transition: color .3s;
+  }
+  .stat-value.accent { color: var(--accent); }
+  .stat-value.danger { color: #ef4444; }
+  .stat-value.success { color: #22c55e; }
+  .stat-value.purple { color: #8b5cf6; }
+  .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 6px; }
+  .stat-icon { position: absolute; right: 14px; top: 14px; font-size: 28px; opacity: .15; }
+  .stat-bar { height: 3px; border-radius: 2px; background: var(--border); margin-top: 10px; overflow: hidden; }
+  .stat-bar-fill { height: 100%; border-radius: 2px; transition: width .6s ease; }
 
-  .card-grid {
-    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
-  }
-  @media (max-width: 640px) {
-    .card-grid { grid-template-columns: 1fr; }
-  }
+  /* ── Card grid ────────────────────────────────────────────────── */
+  .card-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .card-grid { grid-template-columns: 1fr; } }
 
   .card {
     background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
     padding: 20px; display: flex; flex-direction: column;
   }
-  .card h2 {
+  .card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
+  .card-header h2 {
     font-size: 13px; font-weight: 600; text-transform: uppercase;
-    letter-spacing: .04em; color: var(--text-muted); margin-bottom: 14px;
+    letter-spacing: .04em; color: var(--text-muted); margin: 0;
   }
-
+  .card-header-actions { display: flex; gap: 4px; }
+  .card-header-btn {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 3px 8px; font-size: 11px; cursor: pointer; color: var(--text-secondary);
+    transition: .15s;
+  }
+  .card-header-btn:hover { background: var(--code-bg); color: var(--text); }
+  .card-header-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
   .card-full { grid-column: 1 / -1; }
 
-  .add-row {
-    display: flex; gap: 8px; margin-bottom: 14px;
+  /* ── Add row ──────────────────────────────────────────────────── */
+  .add-row { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+  .add-row input, .add-row select {
+    padding: 8px 12px; border-radius: 8px; font-size: 13px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+    outline: none;
   }
-  .add-row input {
-    flex: 1; padding: 8px 12px; border-radius: 8px; font-size: 14px;
+  .add-row input:focus, .add-row select:focus { border-color: var(--accent); }
+  .add-row input[type="text"] { flex: 1; min-width: 120px; }
+  .add-row input[type="date"] { width: 140px; }
+  .add-row select { width: auto; }
+  .add-btn {
+    padding: 8px 16px; border-radius: 8px; border: none; font-size: 13px; font-weight: 600;
+    background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap;
+    transition: .15s;
+  }
+  .add-btn:hover { background: var(--accent-hover); }
+
+  /* ── Chore expand row ─────────────────────────────────────────── */
+  .chore-extras { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+  .chore-extras-toggle {
+    background: none; border: none; cursor: pointer; font-size: 11px;
+    color: var(--accent); padding: 0;
+  }
+  .chore-extras-panel { display: none; margin-top: 6px; }
+  .chore-extras-panel.open { display: flex; gap: 6px; flex-wrap: wrap; }
+  .chore-extras-panel select, .chore-extras-panel input {
+    padding: 4px 8px; border-radius: 6px; font-size: 12px;
     border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
   }
-  .add-row input:focus { outline: none; border-color: var(--accent); }
-  .add-row button {
-    padding: 8px 16px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600;
-    background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap;
-  }
-  .add-row button:hover { background: var(--accent-hover); }
 
-  .filter-tabs {
-    display: flex; gap: 4px; margin-bottom: 12px;
-  }
-  .filter-tabs button {
-    padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
-    background: transparent; color: var(--text-secondary); font-size: 12px;
-    cursor: pointer; transition: .15s;
-  }
-  .filter-tabs button.active {
-    background: var(--accent); color: #fff; border-color: var(--accent);
-  }
-
-  .item-list { list-style: none; flex: 1; overflow-y: auto; max-height: 320px; }
+  /* ── Item list ────────────────────────────────────────────────── */
+  .item-list { list-style: none; flex: 1; overflow-y: auto; max-height: 360px; }
   .item-list li {
     display: flex; align-items: center; gap: 10px;
     padding: 10px 0; border-bottom: 1px solid var(--border);
+    animation: fadeIn .2s ease;
   }
   .item-list li:last-child { border-bottom: none; }
+  @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
 
   .chore-check {
-    width: 20px; height: 20px; border-radius: 6px; border: 2px solid var(--input-border);
+    width: 22px; height: 22px; border-radius: 6px; border: 2px solid var(--input-border);
     cursor: pointer; display: flex; align-items: center; justify-content: center;
     flex-shrink: 0; transition: .15s; font-size: 12px; background: transparent; color: transparent;
   }
   .chore-check.done { background: var(--accent); border-color: var(--accent); color: #fff; }
-  .chore-title { flex: 1; font-size: 14px; }
+  .chore-check:hover { border-color: var(--accent); }
+  .chore-content { flex: 1; min-width: 0; }
+  .chore-title { font-size: 14px; }
   .chore-title.done { text-decoration: line-through; color: var(--text-muted); }
+  .chore-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
+  .chore-tag {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px; font-weight: 500;
+  }
+  .chore-tag.priority-high { background: #fee2e2; color: #991b1b; }
+  [data-theme="dark"] .chore-tag.priority-high { background: #7f1d1d; color: #fca5a5; }
+  .chore-tag.priority-low { background: #dbeafe; color: #1e40af; }
+  [data-theme="dark"] .chore-tag.priority-low { background: #1e3a5f; color: #93c5fd; }
+  .chore-tag.overdue { background: #fee2e2; color: #dc2626; font-weight: 600; }
+  [data-theme="dark"] .chore-tag.overdue { background: #7f1d1d; color: #f87171; }
+  .chore-tag.due { background: #fef3c7; color: #92400e; }
+  [data-theme="dark"] .chore-tag.due { background: #78350f; color: #fde68a; }
+  .chore-tag.assigned { background: #ede9fe; color: #5b21b6; }
+  [data-theme="dark"] .chore-tag.assigned { background: #3b0764; color: #c4b5fd; }
+  .chore-tag.recurring { background: #dcfce7; color: #166534; }
+  [data-theme="dark"] .chore-tag.recurring { background: #14532d; color: #86efac; }
 
   .btn-delete {
     background: none; border: none; cursor: pointer; padding: 4px 6px;
     border-radius: 6px; font-size: 16px; color: var(--text-muted); line-height: 1;
+    opacity: 0; transition: .15s;
   }
+  .item-list li:hover .btn-delete { opacity: 1; }
   .btn-delete:hover { background: rgba(239,68,68,.15); color: #ef4444; }
 
+  /* ── Birthday ─────────────────────────────────────────────────── */
   .bday-days {
-    font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+    font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
     flex-shrink: 0; white-space: nowrap;
     background: var(--code-bg); color: var(--text-secondary);
   }
@@ -117,100 +202,223 @@
   .bday-name { flex: 1; font-size: 14px; }
   .bday-date { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
 
-  .quick-actions {
-    display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px;
+  /* ── Calendar ─────────────────────────────────────────────────── */
+  .cal-nav { display: flex; align-items: center; gap: 12px; margin-bottom: 12px; }
+  .cal-nav button {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; cursor: pointer; color: var(--text-secondary); font-size: 14px;
   }
+  .cal-nav button:hover { background: var(--code-bg); }
+  .cal-nav .cal-title { font-size: 14px; font-weight: 600; }
+  .cal-grid {
+    display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px;
+  }
+  .cal-day-header {
+    text-align: center; font-size: 11px; font-weight: 600;
+    color: var(--text-muted); padding: 4px 0;
+  }
+  .cal-day {
+    min-height: 44px; padding: 4px; border-radius: 6px; font-size: 12px;
+    position: relative; cursor: default; transition: .1s;
+  }
+  .cal-day:hover { background: var(--code-bg); }
+  .cal-day.today { background: rgba(37,99,235,.1); font-weight: 700; }
+  .cal-day.other-month { color: var(--text-muted); opacity: .4; }
+  .cal-day .cal-num { display: block; font-weight: 500; margin-bottom: 2px; }
+  .cal-dots { display: flex; gap: 2px; flex-wrap: wrap; }
+  .cal-dot {
+    width: 6px; height: 6px; border-radius: 50%;
+  }
+  .cal-dot.chore-dot { background: var(--accent); }
+  .cal-dot.birthday-dot { background: #ec4899; }
+  .cal-dot.chore-done-dot { background: #22c55e; }
+
+  /* ── Activity feed ────────────────────────────────────────────── */
+  .activity-list { list-style: none; max-height: 320px; overflow-y: auto; }
+  .activity-item {
+    display: flex; align-items: flex-start; gap: 10px; padding: 10px 0;
+    border-bottom: 1px solid var(--border); font-size: 13px;
+  }
+  .activity-item:last-child { border-bottom: none; }
+  .activity-icon {
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px; flex-shrink: 0;
+    background: var(--code-bg);
+  }
+  .activity-text { flex: 1; }
+  .activity-user { font-weight: 600; }
+  .activity-time { font-size: 11px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── Quick Actions ────────────────────────────────────────────── */
+  .quick-actions { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 10px; }
   .qa-tile {
-    display: flex; flex-direction: column; align-items: center; gap: 6px;
-    padding: 16px 10px; border-radius: 10px; border: 1px solid var(--border);
-    text-decoration: none; color: var(--text); transition: .15s;
-    background: transparent;
+    display: flex; flex-direction: column; align-items: center; gap: 8px;
+    padding: 18px 10px; border-radius: 12px; border: 1px solid var(--border);
+    text-decoration: none; color: var(--text); transition: .15s; background: transparent;
   }
-  .qa-tile:hover { background: rgba(37,99,235,.06); border-color: var(--accent); }
-  .qa-tile .qa-icon { font-size: 26px; }
+  .qa-tile:hover { background: rgba(37,99,235,.06); border-color: var(--accent); transform: translateY(-2px); }
+  .qa-tile .qa-icon { font-size: 28px; }
   .qa-tile .qa-label { font-size: 12px; font-weight: 600; }
 
+  /* ── Housemates ───────────────────────────────────────────────── */
   .hm-row {
     display: flex; align-items: center; gap: 10px;
-    padding: 8px 0; border-bottom: 1px solid var(--border);
+    padding: 10px 0; border-bottom: 1px solid var(--border);
   }
   .hm-row:last-child { border-bottom: none; }
+  .hm-avatar {
+    width: 36px; height: 36px; border-radius: 50%; background: var(--accent);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; font-weight: 700; color: #fff; flex-shrink: 0;
+  }
   .hm-dot {
     width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+    border: 2px solid var(--bg-header);
+    position: relative; margin-left: -14px; margin-top: 20px;
   }
   .hm-dot.available { background: #22c55e; }
   .hm-dot.dnd { background: #ef4444; }
   .hm-dot.offline { background: var(--text-muted); }
-  .hm-name { font-size: 14px; flex: 1; }
+  .hm-name { font-size: 14px; flex: 1; font-weight: 500; }
   .hm-status { font-size: 12px; color: var(--text-muted); }
 
-  .empty-state { font-size: 13px; color: var(--text-muted); padding: 12px 0; }
+  .empty-state { font-size: 13px; color: var(--text-muted); padding: 12px 0; text-align: center; }
+
+  /* ── Quick chat ───────────────────────────────────────────────── */
+  .quick-chat-form { display: flex; gap: 8px; }
+  .quick-chat-form input {
+    flex: 1; padding: 10px 14px; font-size: 14px;
+    border: 1px solid var(--input-border); border-radius: 8px;
+    background: var(--input-bg); color: var(--text); outline: none;
+  }
+  .quick-chat-form input:focus { border-color: var(--accent); }
+  .quick-chat-form button {
+    padding: 10px 18px; font-size: 14px; font-weight: 600;
+    background: var(--accent); color: #fff; border: none; border-radius: 8px;
+    cursor: pointer; transition: .15s;
+  }
+  .quick-chat-form button:hover { background: var(--accent-hover); }
+  .quick-chat-reply {
+    margin-top: 10px; padding: 12px; border-radius: 8px; font-size: 14px;
+    background: var(--code-bg); display: none; line-height: 1.5;
+  }
+  .quick-chat-reply.visible { display: block; }
+
+  /* ── Responsive ───────────────────────────────────────────────── */
+  @media (max-width: 700px) {
+    .home-header { padding: 14px 16px; }
+    .dashboard { padding: 16px 12px 40px; }
+    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .weather-widget { padding: 10px 14px; }
+  }
 </style>
 {% endblock %}
 
 {% block content %}
-<header>
+<header class="home-header">
   <div>
     <h1>&#x1F336;&#xFE0F; CHILI Home</h1>
-    <div class="subtitle">{{ greeting }}, {{ user_name }}</div>
+    <div class="subtitle" id="greeting">{{ greeting }}, {{ user_name }}</div>
     <nav>
       <a href="/chat">Chat</a>
       <a href="/intercom">Intercom</a>
       {% if not is_guest %}<a href="/profile">Profile</a>{% endif %}
       {% if not is_guest %}<a href="/admin">Admin</a>{% endif %}
+      {% if not is_guest %}<a href="/metrics">Metrics</a>{% endif %}
     </nav>
   </div>
-  <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
+  <div class="header-actions">
+    <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
+  </div>
 </header>
 
 <div class="dashboard">
-  <div class="stats-row">
-    <div class="stat-card">
-      <div class="stat-value" id="stat-pending">{{ pending_chores }}</div>
-      <div class="stat-label">Pending Chores</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">{{ upcoming_bdays }}</div>
-      <div class="stat-label">Birthdays This Week</div>
-    </div>
-    {% if not is_guest %}
-    <div class="stat-card">
-      <div class="stat-value">{{ housemates_online }}</div>
-      <div class="stat-label">Housemates Online</div>
-    </div>
-    {% endif %}
-  </div>
+  <!-- Insights banner -->
+  <div class="insights-bar" id="insights-bar"></div>
 
+  <!-- Weather -->
+  <div class="weather-widget" id="weather-widget" style="display:none;"></div>
+
+  <!-- Stats row -->
+  <div class="stats-row" id="stats-row"></div>
+
+  <!-- Main card grid -->
   <div class="card-grid">
     <!-- Chores -->
     <div class="card">
-      <h2>Chores</h2>
+      <div class="card-header">
+        <h2>Chores</h2>
+        <div class="card-header-actions" id="chore-filters"></div>
+      </div>
       <div class="add-row">
         <input type="text" id="chore-input" placeholder="Add a chore..." />
-        <button onclick="addChore()">Add</button>
-      </div>
-      <div class="filter-tabs">
-        <button class="active" data-filter="all" onclick="filterChores('all',this)">All</button>
-        <button data-filter="pending" onclick="filterChores('pending',this)">Pending</button>
-        <button data-filter="done" onclick="filterChores('done',this)">Done</button>
+        <input type="date" id="chore-due" title="Due date (optional)" />
+        <select id="chore-priority" title="Priority">
+          <option value="medium">Normal</option>
+          <option value="high">High</option>
+          <option value="low">Low</option>
+        </select>
+        <button class="add-btn" onclick="addChore()">Add</button>
       </div>
       <ul class="item-list" id="chore-list"></ul>
     </div>
 
     <!-- Birthdays -->
     <div class="card">
-      <h2>Birthdays</h2>
+      <div class="card-header">
+        <h2>Birthdays</h2>
+      </div>
       <div class="add-row">
         <input type="text" id="bday-name-input" placeholder="Name" />
         <input type="date" id="bday-date-input" />
-        <button onclick="addBirthday()">Add</button>
+        <button class="add-btn" onclick="addBirthday()">Add</button>
       </div>
       <ul class="item-list" id="bday-list"></ul>
     </div>
 
-    <!-- Quick Actions -->
+    <!-- Calendar -->
     <div class="card">
-      <h2>Quick Actions</h2>
+      <div class="card-header">
+        <h2>Calendar</h2>
+      </div>
+      <div class="cal-nav">
+        <button onclick="calNav(-1)">&lsaquo;</button>
+        <span class="cal-title" id="cal-title"></span>
+        <button onclick="calNav(1)">&rsaquo;</button>
+        <button onclick="calNav(0)" style="margin-left:auto;font-size:11px;">Today</button>
+      </div>
+      <div class="cal-grid" id="cal-grid"></div>
+    </div>
+
+    <!-- Activity Feed -->
+    <div class="card">
+      <div class="card-header">
+        <h2>Activity</h2>
+        <div class="card-header-actions">
+          <button class="card-header-btn" onclick="refreshActivity()">Refresh</button>
+        </div>
+      </div>
+      <ul class="activity-list" id="activity-list">
+        <li class="empty-state">No activity yet</li>
+      </ul>
+    </div>
+
+    <!-- Quick Chat -->
+    <div class="card card-full">
+      <div class="card-header">
+        <h2>Quick Chat with CHILI</h2>
+      </div>
+      <div class="quick-chat-form">
+        <input type="text" id="quick-chat-input" placeholder="Ask CHILI anything..." />
+        <button onclick="quickChat()">Ask</button>
+      </div>
+      <div class="quick-chat-reply" id="quick-chat-reply"></div>
+    </div>
+
+    <!-- Quick Actions & Housemates -->
+    <div class="card">
+      <div class="card-header"><h2>Quick Actions</h2></div>
       <div class="quick-actions">
         <a class="qa-tile" href="/chat">
           <span class="qa-icon">&#128172;</span>
@@ -238,23 +446,10 @@
       </div>
     </div>
 
-    <!-- Housemates -->
     {% if not is_guest %}
     <div class="card">
-      <h2>Housemates</h2>
-      <div id="housemate-list">
-        {% if housemates %}
-          {% for h in housemates %}
-          <div class="hm-row">
-            <span class="hm-dot {{ h.status }}"></span>
-            <span class="hm-name">{{ h.name }}</span>
-            <span class="hm-status">{{ h.status | upper }}</span>
-          </div>
-          {% endfor %}
-        {% else %}
-          <div class="empty-state">No other housemates yet</div>
-        {% endif %}
-      </div>
+      <div class="card-header"><h2>Housemates</h2></div>
+      <div id="housemate-list"></div>
     </div>
     {% endif %}
   </div>
@@ -272,62 +467,152 @@ themeBtn.onclick = function() {
 };
 setTheme(localStorage.getItem('chili-theme') || 'light');
 
+var D = {{ dashboard_json | safe }};
+var chores = D.chores || [];
+var birthdays = D.birthdays || [];
 var choreFilter = 'all';
-var chores = {{ chores | tojson }};
-var birthdays = {{ birthdays | tojson }};
 
-function esc(s) {
-  var d = document.createElement('div');
-  d.textContent = s;
-  return d.innerHTML;
+function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+
+function relTime(iso) {
+  if (!iso) return '';
+  var d = new Date(iso);
+  var now = new Date();
+  var diff = (now - d) / 1000;
+  if (diff < 60) return 'just now';
+  if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+  return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+}
+
+/* ── Insights ──────────────────────────────────────────────── */
+function renderInsights() {
+  var bar = document.getElementById('insights-bar');
+  bar.innerHTML = '';
+  var insights = D.insights || [];
+  if (!insights.length) { bar.style.display = 'none'; return; }
+  bar.style.display = '';
+  var icons = { alert: '&#9888;&#65039;', check: '&#10004;&#65039;', list: '&#128203;', cake: '&#127874;', calendar: '&#128197;', clock: '&#9200;', brain: '&#129504;' };
+  insights.forEach(function(ins, i) {
+    var chip = document.createElement('div');
+    chip.className = 'insight-chip ' + (ins.type || 'info');
+    chip.style.animationDelay = (i * 0.08) + 's';
+    chip.innerHTML = '<span class="insight-icon">' + (icons[ins.icon] || '') + '</span>' + esc(ins.text);
+    bar.appendChild(chip);
+  });
+}
+
+/* ── Weather ───────────────────────────────────────────────── */
+function renderWeather() {
+  var w = D.weather;
+  if (!w) return;
+  var el = document.getElementById('weather-widget');
+  el.style.display = '';
+  var wicons = { sun: '&#9728;&#65039;', cloud: '&#9729;&#65039;', rain: '&#127783;&#65039;', snow: '&#127784;&#65039;', thunder: '&#9889;' };
+  el.innerHTML =
+    '<span class="weather-icon">' + (wicons[w.icon] || '&#9729;&#65039;') + '</span>' +
+    '<div><div class="weather-temp">' + esc(w.temp_f) + '°F</div>' +
+    '<div class="weather-detail">' + esc(w.description) + ' · Feels ' + esc(w.feels_like_f) + '°F</div>' +
+    '<div class="weather-location">' + esc(w.location) + '</div></div>';
+}
+
+/* ── Stats ─────────────────────────────────────────────────── */
+function renderStats() {
+  var row = document.getElementById('stats-row');
+  var total = chores.length || 1;
+  var pending = D.pending_chores || 0;
+  var overdue = D.overdue_chores || 0;
+  var doneWeek = D.chores_done_week || 0;
+  var bdays = D.upcoming_bdays || 0;
+  var online = D.housemates_online || 0;
+  var donePct = Math.round(((total - pending) / total) * 100);
+
+  var cards = [
+    { value: pending, label: 'Pending', cls: pending > 0 ? 'accent' : 'success', icon: '&#128203;', bar: donePct, barColor: 'var(--accent)' },
+    { value: overdue, label: 'Overdue', cls: overdue > 0 ? 'danger' : 'success', icon: '&#9888;&#65039;', bar: null },
+    { value: doneWeek, label: 'Done This Week', cls: 'success', icon: '&#10004;&#65039;', bar: null },
+    { value: bdays, label: 'Birthdays Soon', cls: 'purple', icon: '&#127874;', bar: null },
+  ];
+
+  row.innerHTML = '';
+  cards.forEach(function(c) {
+    var card = document.createElement('div');
+    card.className = 'stat-card';
+    var html = '<span class="stat-icon">' + c.icon + '</span>' +
+      '<div class="stat-value ' + c.cls + '">' + c.value + '</div>' +
+      '<div class="stat-label">' + c.label + '</div>';
+    if (c.bar !== null) {
+      html += '<div class="stat-bar"><div class="stat-bar-fill" style="width:' + c.bar + '%;background:' + c.barColor + ';"></div></div>';
+    }
+    card.innerHTML = html;
+    row.appendChild(card);
+  });
+}
+
+/* ── Chores ────────────────────────────────────────────────── */
+function renderChoreFilters() {
+  var el = document.getElementById('chore-filters');
+  ['all', 'pending', 'done', 'overdue'].forEach(function(f) {
+    var btn = document.createElement('button');
+    btn.className = 'card-header-btn' + (choreFilter === f ? ' active' : '');
+    btn.textContent = f.charAt(0).toUpperCase() + f.slice(1);
+    btn.onclick = function() { choreFilter = f; renderChoreFilters(); renderChores(); };
+    el.appendChild(btn);
+  });
 }
 
 function renderChores() {
   var list = document.getElementById('chore-list');
+  var today = new Date().toISOString().slice(0, 10);
   var filtered = chores;
   if (choreFilter === 'pending') filtered = chores.filter(function(c) { return !c.done; });
   else if (choreFilter === 'done') filtered = chores.filter(function(c) { return c.done; });
+  else if (choreFilter === 'overdue') filtered = chores.filter(function(c) { return !c.done && c.due_date && c.due_date < today; });
 
-  if (filtered.length === 0) {
+  if (!filtered.length) {
     list.innerHTML = '<li class="empty-state">No chores ' + (choreFilter === 'all' ? 'yet' : choreFilter) + '</li>';
     return;
   }
-
   list.innerHTML = '';
   filtered.forEach(function(c) {
     var li = document.createElement('li');
+    var metaHTML = '';
+    if (c.priority === 'high') metaHTML += '<span class="chore-tag priority-high">High</span>';
+    if (c.priority === 'low') metaHTML += '<span class="chore-tag priority-low">Low</span>';
+    if (c.due_date) {
+      if (!c.done && c.due_date < today) metaHTML += '<span class="chore-tag overdue">Overdue</span>';
+      else if (c.due_date === today) metaHTML += '<span class="chore-tag due">Due today</span>';
+      else metaHTML += '<span class="chore-tag due">' + c.due_date + '</span>';
+    }
+    if (c.assignee_name) metaHTML += '<span class="chore-tag assigned">' + esc(c.assignee_name) + '</span>';
+    if (c.recurrence && c.recurrence !== 'none') metaHTML += '<span class="chore-tag recurring">' + c.recurrence + '</span>';
+
     li.innerHTML =
-      '<button class="chore-check ' + (c.done ? 'done' : '') + '" onclick="toggleChore(' + c.id + ')">'
-        + (c.done ? '&#10003;' : '') + '</button>'
-      + '<span class="chore-title ' + (c.done ? 'done' : '') + '">' + esc(c.title) + '</span>'
-      + '<button class="btn-delete" onclick="deleteChore(' + c.id + ')" title="Delete">&#128465;</button>';
+      '<button class="chore-check ' + (c.done ? 'done' : '') + '" onclick="toggleChore(' + c.id + ')">' + (c.done ? '&#10003;' : '') + '</button>' +
+      '<div class="chore-content"><span class="chore-title ' + (c.done ? 'done' : '') + '">' + esc(c.title) + '</span>' +
+      (metaHTML ? '<div class="chore-meta">' + metaHTML + '</div>' : '') + '</div>' +
+      '<button class="btn-delete" onclick="deleteChore(' + c.id + ')" title="Delete">&#128465;</button>';
     list.appendChild(li);
   });
-
-  document.getElementById('stat-pending').textContent = chores.filter(function(c) { return !c.done; }).length;
-}
-
-function filterChores(f, btn) {
-  choreFilter = f;
-  document.querySelectorAll('.filter-tabs button').forEach(function(b) { b.classList.remove('active'); });
-  btn.classList.add('active');
-  renderChores();
+  document.getElementById('stats-row').querySelector('.stat-value').textContent = chores.filter(function(c) { return !c.done; }).length;
 }
 
 function addChore() {
   var input = document.getElementById('chore-input');
   var title = input.value.trim();
   if (!title) return;
+  var due = document.getElementById('chore-due').value || null;
+  var priority = document.getElementById('chore-priority').value;
   input.value = '';
+  document.getElementById('chore-due').value = '';
+  document.getElementById('chore-priority').value = 'medium';
   fetch('/api/chores', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ title: title })
+    body: JSON.stringify({ title: title, due_date: due, priority: priority })
   }).then(function(r) { return r.json(); }).then(function(d) {
-    if (d.ok) {
-      chores.unshift(d.chore);
-      renderChores();
-    }
+    if (d.ok) { chores.unshift(d.chore); renderChores(); renderStats(); refreshActivity(); }
   });
 }
 
@@ -337,9 +622,11 @@ function toggleChore(id) {
     .then(function(d) {
       if (d.ok) {
         for (var i = 0; i < chores.length; i++) {
-          if (chores[i].id === id) { chores[i].done = d.chore.done; break; }
+          if (chores[i].id === id) { chores[i] = d.chore; break; }
         }
         renderChores();
+        renderStats();
+        refreshActivity();
       }
     });
 }
@@ -351,6 +638,7 @@ function deleteChore(id) {
       if (d.ok) {
         chores = chores.filter(function(c) { return c.id !== id; });
         renderChores();
+        renderStats();
       }
     });
 }
@@ -359,24 +647,22 @@ document.getElementById('chore-input').addEventListener('keydown', function(e) {
   if (e.key === 'Enter') { e.preventDefault(); addChore(); }
 });
 
+/* ── Birthdays ─────────────────────────────────────────────── */
 function renderBirthdays() {
   var list = document.getElementById('bday-list');
-  if (birthdays.length === 0) {
-    list.innerHTML = '<li class="empty-state">No birthdays yet</li>';
-    return;
-  }
+  if (!birthdays.length) { list.innerHTML = '<li class="empty-state">No birthdays yet</li>'; return; }
   list.innerHTML = '';
   birthdays.forEach(function(b) {
     var li = document.createElement('li');
-    var badgeClass = 'bday-days';
+    var cls = 'bday-days';
     var label = b.days_until + 'd';
-    if (b.days_until === 0) { badgeClass += ' today'; label = 'Today!'; }
-    else if (b.days_until <= 7) { badgeClass += ' soon'; }
+    if (b.days_until === 0) { cls += ' today'; label = 'Today!'; }
+    else if (b.days_until <= 7) { cls += ' soon'; }
     li.innerHTML =
-      '<span class="' + badgeClass + '">' + label + '</span>'
-      + '<span class="bday-name">' + esc(b.name) + '</span>'
-      + '<span class="bday-date">' + b.date + '</span>'
-      + '<button class="btn-delete" onclick="deleteBirthday(' + b.id + ')" title="Delete">&#128465;</button>';
+      '<span class="' + cls + '">' + label + '</span>' +
+      '<span class="bday-name">' + esc(b.name) + '</span>' +
+      '<span class="bday-date">' + b.date + '</span>' +
+      '<button class="btn-delete" onclick="deleteBirthday(' + b.id + ')" title="Delete">&#128465;</button>';
     list.appendChild(li);
   });
 }
@@ -387,17 +673,15 @@ function addBirthday() {
   var name = nameInput.value.trim();
   var dateVal = dateInput.value;
   if (!name || !dateVal) return;
-  nameInput.value = '';
-  dateInput.value = '';
+  nameInput.value = ''; dateInput.value = '';
   fetch('/api/birthdays', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name, date: dateVal })
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.ok) {
       birthdays.push(d.birthday);
       birthdays.sort(function(a, b) { return a.days_until - b.days_until; });
-      renderBirthdays();
+      renderBirthdays(); renderStats(); refreshActivity();
     }
   });
 }
@@ -406,14 +690,164 @@ function deleteBirthday(id) {
   fetch('/api/birthdays/' + id, { method: 'DELETE' })
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.ok) {
-        birthdays = birthdays.filter(function(b) { return b.id !== id; });
-        renderBirthdays();
-      }
+      if (d.ok) { birthdays = birthdays.filter(function(b) { return b.id !== id; }); renderBirthdays(); renderStats(); }
     });
 }
 
+/* ── Calendar ──────────────────────────────────────────────── */
+var calYear, calMonth;
+(function() { var d = new Date(); calYear = d.getFullYear(); calMonth = d.getMonth() + 1; })();
+
+function calNav(dir) {
+  if (dir === 0) { var d = new Date(); calYear = d.getFullYear(); calMonth = d.getMonth() + 1; }
+  else { calMonth += dir; if (calMonth > 12) { calMonth = 1; calYear++; } if (calMonth < 1) { calMonth = 12; calYear--; } }
+  renderCalendar();
+}
+
+function renderCalendar() {
+  var title = document.getElementById('cal-title');
+  var months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  title.textContent = months[calMonth - 1] + ' ' + calYear;
+  fetch('/api/calendar?year=' + calYear + '&month=' + calMonth)
+    .then(function(r) { return r.json(); })
+    .then(function(data) { drawCalGrid(data.events || []); });
+}
+
+function drawCalGrid(events) {
+  var grid = document.getElementById('cal-grid');
+  grid.innerHTML = '';
+  var dayNames = ['Su','Mo','Tu','We','Th','Fr','Sa'];
+  dayNames.forEach(function(d) {
+    var h = document.createElement('div');
+    h.className = 'cal-day-header';
+    h.textContent = d;
+    grid.appendChild(h);
+  });
+
+  var first = new Date(calYear, calMonth - 1, 1);
+  var lastDay = new Date(calYear, calMonth, 0).getDate();
+  var startDow = first.getDay();
+  var todayStr = new Date().toISOString().slice(0, 10);
+
+  var evMap = {};
+  events.forEach(function(e) {
+    if (!evMap[e.date]) evMap[e.date] = [];
+    evMap[e.date].push(e);
+  });
+
+  var prevLast = new Date(calYear, calMonth - 1, 0).getDate();
+  for (var i = startDow - 1; i >= 0; i--) {
+    var cell = document.createElement('div');
+    cell.className = 'cal-day other-month';
+    cell.innerHTML = '<span class="cal-num">' + (prevLast - i) + '</span>';
+    grid.appendChild(cell);
+  }
+
+  for (var d = 1; d <= lastDay; d++) {
+    var dateStr = calYear + '-' + String(calMonth).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    var cell = document.createElement('div');
+    cell.className = 'cal-day' + (dateStr === todayStr ? ' today' : '');
+    var html = '<span class="cal-num">' + d + '</span>';
+    if (evMap[dateStr]) {
+      html += '<div class="cal-dots">';
+      evMap[dateStr].forEach(function(e) {
+        var cls = e.type === 'birthday' ? 'birthday-dot' : (e.done ? 'chore-done-dot' : 'chore-dot');
+        html += '<span class="cal-dot ' + cls + '" title="' + esc(e.title) + '"></span>';
+      });
+      html += '</div>';
+    }
+    cell.innerHTML = html;
+    grid.appendChild(cell);
+  }
+
+  var totalCells = startDow + lastDay;
+  var remaining = (7 - (totalCells % 7)) % 7;
+  for (var i = 1; i <= remaining; i++) {
+    var cell = document.createElement('div');
+    cell.className = 'cal-day other-month';
+    cell.innerHTML = '<span class="cal-num">' + i + '</span>';
+    grid.appendChild(cell);
+  }
+}
+
+/* ── Activity Feed ─────────────────────────────────────────── */
+function refreshActivity() {
+  fetch('/api/activity?limit=15')
+    .then(function(r) { return r.json(); })
+    .then(function(data) { renderActivity(data.events || []); });
+}
+
+function renderActivity(events) {
+  var list = document.getElementById('activity-list');
+  if (!events.length) { list.innerHTML = '<li class="empty-state">No activity yet</li>'; return; }
+  list.innerHTML = '';
+  var icons = { chore_added: '&#10133;', chore_done: '&#9989;', birthday_added: '&#127874;', chat_started: '&#128172;', memory_added: '&#129504;' };
+  events.forEach(function(e) {
+    var li = document.createElement('li');
+    li.className = 'activity-item';
+    li.innerHTML =
+      '<div class="activity-icon">' + (icons[e.event_type] || '&#128196;') + '</div>' +
+      '<div class="activity-text">' +
+        (e.user_name ? '<span class="activity-user">' + esc(e.user_name) + '</span> ' : '') +
+        esc(e.description) +
+        '<div class="activity-time">' + relTime(e.created_at) + '</div>' +
+      '</div>';
+    list.appendChild(li);
+  });
+}
+
+/* ── Housemates ────────────────────────────────────────────── */
+function renderHousemates() {
+  var el = document.getElementById('housemate-list');
+  if (!el) return;
+  var housemates = D.housemates || [];
+  if (!housemates.length) { el.innerHTML = '<div class="empty-state">No other housemates yet</div>'; return; }
+  el.innerHTML = '';
+  housemates.forEach(function(h) {
+    var row = document.createElement('div');
+    row.className = 'hm-row';
+    var initial = h.name.charAt(0).toUpperCase();
+    row.innerHTML =
+      '<div class="hm-avatar">' + initial + '</div>' +
+      '<span class="hm-dot ' + h.status + '"></span>' +
+      '<span class="hm-name">' + esc(h.name) + '</span>' +
+      '<span class="hm-status">' + h.status.toUpperCase() + '</span>';
+    el.appendChild(row);
+  });
+}
+
+/* ── Quick Chat ────────────────────────────────────────────── */
+var quickChatInput = document.getElementById('quick-chat-input');
+function quickChat() {
+  var msg = quickChatInput.value.trim();
+  if (!msg) return;
+  quickChatInput.value = '';
+  var reply = document.getElementById('quick-chat-reply');
+  reply.textContent = 'Thinking...';
+  reply.classList.add('visible');
+
+  var body = new FormData();
+  body.append('message', msg);
+  fetch('/api/chat', { method: 'POST', body: body })
+    .then(function(r) { return r.json(); })
+    .then(function(d) { reply.textContent = d.reply || '(no reply)'; })
+    .catch(function() { reply.textContent = 'Could not reach CHILI.'; });
+}
+quickChatInput.addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); quickChat(); }
+});
+
+/* ── Init ──────────────────────────────────────────────────── */
+renderInsights();
+renderWeather();
+renderStats();
+renderChoreFilters();
 renderChores();
 renderBirthdays();
+renderCalendar();
+refreshActivity();
+renderHousemates();
+
+setInterval(function() { refreshActivity(); }, 30000);
 </script>
 {% endblock %}

@@ -1,10 +1,11 @@
 """Page routes: home, profile, pair, chores, birthdays form handlers."""
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, Request, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from pydantic import BaseModel
+from typing import Optional
 import json as json_mod
 
 from ..deps import get_db
@@ -14,6 +15,7 @@ from ..pairing import (
     get_identity_record, generate_pair_code,
 )
 from .. import email_service
+from ..services import home_service
 
 router = APIRouter()
 templates = None
@@ -46,47 +48,13 @@ def _greeting() -> str:
 def home(request: Request, db: Session = Depends(get_db)):
     device_token = request.cookies.get(DEVICE_COOKIE_NAME)
     identity = get_identity_record(db, device_token)
-
-    chores = db.query(Chore).order_by(Chore.id.desc()).all()
-    chore_list = [{"id": c.id, "title": c.title, "done": c.done} for c in chores]
-
-    birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
-    bday_list = sorted(
-        [{"id": b.id, "name": b.name, "date": b.date.isoformat(), "days_until": _days_until(b.date)} for b in birthdays],
-        key=lambda x: x["days_until"],
-    )
-
-    pending_chores = sum(1 for c in chores if not c.done)
-    upcoming_bdays = sum(1 for b in bday_list if b["days_until"] <= 7)
-
-    housemates = []
-    housemates_online = 0
-    if not identity["is_guest"]:
-        users = db.query(User).all()
-        for u in users:
-            if u.id == identity["user_id"]:
-                continue
-            st_row = db.query(UserStatus).filter(UserStatus.user_id == u.id).first()
-            status = "available"
-            if st_row:
-                if st_row.status == "dnd" and st_row.dnd_until and datetime.utcnow() > st_row.dnd_until:
-                    status = "available"
-                else:
-                    status = st_row.status
-            housemates.append({"name": u.name, "status": status})
-            if status == "available":
-                housemates_online += 1
+    dashboard = home_service.get_dashboard_data(db, identity)
 
     return templates.TemplateResponse(request, "home.html", {
         "greeting": _greeting(),
         "user_name": identity["user_name"],
         "is_guest": identity["is_guest"],
-        "chores": chore_list,
-        "birthdays": bday_list,
-        "pending_chores": pending_chores,
-        "upcoming_bdays": upcoming_bdays,
-        "housemates_online": housemates_online,
-        "housemates": housemates,
+        "dashboard_json": json_mod.dumps(dashboard),
     })
 
 
@@ -123,29 +91,132 @@ def add_birthday_form(
 
 class AddChoreBody(BaseModel):
     title: str
+    priority: str = "medium"
+    due_date: Optional[str] = None
+    recurrence: str = "none"
+    assigned_to: Optional[int] = None
+
+class UpdateChoreBody(BaseModel):
+    title: Optional[str] = None
+    priority: Optional[str] = None
+    due_date: Optional[str] = None
+    recurrence: Optional[str] = None
+    assigned_to: Optional[int] = None
 
 class AddBirthdayBody(BaseModel):
     name: str
     date: str
 
 
+def _chore_dict(c: Chore) -> dict:
+    return {
+        "id": c.id, "title": c.title, "done": c.done,
+        "priority": c.priority or "medium",
+        "due_date": c.due_date.isoformat() if c.due_date else None,
+        "recurrence": c.recurrence or "none",
+        "assigned_to": c.assigned_to,
+        "assignee_name": c.assignee.name if c.assigned_to and c.assignee else "",
+        "created_at": c.created_at.isoformat() if c.created_at else None,
+        "completed_at": c.completed_at.isoformat() if c.completed_at else None,
+    }
+
+
 @router.post("/api/chores", response_class=JSONResponse)
-def api_add_chore(body: AddChoreBody, db: Session = Depends(get_db)):
-    c = Chore(title=body.title.strip(), done=False)
+def api_add_chore(body: AddChoreBody, request: Request, db: Session = Depends(get_db)):
+    due = None
+    if body.due_date:
+        try:
+            due = date.fromisoformat(body.due_date)
+        except ValueError:
+            pass
+    c = Chore(
+        title=body.title.strip(), done=False,
+        priority=body.priority if body.priority in ("low", "medium", "high") else "medium",
+        due_date=due, recurrence=body.recurrence if body.recurrence in ("none", "daily", "weekly", "monthly") else "none",
+        assigned_to=body.assigned_to, created_at=datetime.utcnow(),
+    )
     db.add(c)
     db.commit()
     db.refresh(c)
-    return {"ok": True, "chore": {"id": c.id, "title": c.title, "done": c.done}}
+
+    identity = get_identity_record(db, request.cookies.get(DEVICE_COOKIE_NAME))
+    home_service.log_activity(
+        db, "chore_added", f'Added chore "{c.title}"',
+        user_id=identity.get("user_id"), user_name=identity["user_name"], icon="plus",
+    )
+
+    return {"ok": True, "chore": _chore_dict(c)}
+
+
+@router.put("/api/chores/{chore_id}", response_class=JSONResponse)
+def api_chore_update(chore_id: int, body: UpdateChoreBody, db: Session = Depends(get_db)):
+    c = db.query(Chore).filter(Chore.id == chore_id).first()
+    if not c:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    if body.title is not None:
+        c.title = body.title.strip()
+    if body.priority is not None and body.priority in ("low", "medium", "high"):
+        c.priority = body.priority
+    if body.due_date is not None:
+        try:
+            c.due_date = date.fromisoformat(body.due_date) if body.due_date else None
+        except ValueError:
+            pass
+    if body.recurrence is not None and body.recurrence in ("none", "daily", "weekly", "monthly"):
+        c.recurrence = body.recurrence
+    if body.assigned_to is not None:
+        c.assigned_to = body.assigned_to if body.assigned_to > 0 else None
+    db.commit()
+    db.refresh(c)
+    return {"ok": True, "chore": _chore_dict(c)}
 
 
 @router.post("/api/chores/{chore_id}/done", response_class=JSONResponse)
-def api_chore_done(chore_id: int, db: Session = Depends(get_db)):
+def api_chore_done(chore_id: int, request: Request, db: Session = Depends(get_db)):
     c = db.query(Chore).filter(Chore.id == chore_id).first()
     if not c:
         return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
     c.done = not c.done
+    c.completed_at = datetime.utcnow() if c.done else None
+
+    if c.done and c.recurrence and c.recurrence != "none" and c.due_date:
+        _spawn_recurring(c, db)
+
     db.commit()
-    return {"ok": True, "chore": {"id": c.id, "title": c.title, "done": c.done}}
+
+    if c.done:
+        identity = get_identity_record(db, request.cookies.get(DEVICE_COOKIE_NAME))
+        home_service.log_activity(
+            db, "chore_done", f'Completed "{c.title}"',
+            user_id=identity.get("user_id"), user_name=identity["user_name"], icon="check",
+        )
+
+    return {"ok": True, "chore": _chore_dict(c)}
+
+
+def _spawn_recurring(chore: Chore, db: Session):
+    """Create the next occurrence of a recurring chore."""
+    from dateutil.relativedelta import relativedelta
+    deltas = {
+        "daily": timedelta(days=1),
+        "weekly": timedelta(weeks=1),
+        "monthly": relativedelta(months=1),
+    }
+    delta = deltas.get(chore.recurrence)
+    if not delta or not chore.due_date:
+        return
+    next_date = chore.due_date + delta
+    exists = db.query(Chore).filter(
+        Chore.title == chore.title,
+        Chore.due_date == next_date,
+        Chore.done == False,
+    ).first()
+    if not exists:
+        db.add(Chore(
+            title=chore.title, done=False, priority=chore.priority,
+            due_date=next_date, recurrence=chore.recurrence,
+            assigned_to=chore.assigned_to, created_at=datetime.utcnow(),
+        ))
 
 
 @router.delete("/api/chores/{chore_id}", response_class=JSONResponse)
@@ -159,7 +230,7 @@ def api_chore_delete(chore_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/api/birthdays", response_class=JSONResponse)
-def api_add_birthday(body: AddBirthdayBody, db: Session = Depends(get_db)):
+def api_add_birthday(body: AddBirthdayBody, request: Request, db: Session = Depends(get_db)):
     try:
         d = date.fromisoformat(body.date)
     except ValueError:
@@ -169,6 +240,13 @@ def api_add_birthday(body: AddBirthdayBody, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(b)
     days = _days_until(b.date)
+
+    identity = get_identity_record(db, request.cookies.get(DEVICE_COOKIE_NAME))
+    home_service.log_activity(
+        db, "birthday_added", f"Added {b.name}'s birthday",
+        user_id=identity.get("user_id"), user_name=identity["user_name"], icon="cake",
+    )
+
     return {"ok": True, "birthday": {"id": b.id, "name": b.name, "date": b.date.isoformat(), "days_until": days}}
 
 
@@ -180,6 +258,36 @@ def api_birthday_delete(bday_id: int, db: Session = Depends(get_db)):
     db.delete(b)
     db.commit()
     return {"ok": True}
+
+
+# ── Dashboard & Activity APIs ─────────────────────────────────────────────────
+
+@router.get("/api/dashboard", response_class=JSONResponse)
+def dashboard_api(request: Request, db: Session = Depends(get_db)):
+    identity = get_identity_record(db, request.cookies.get(DEVICE_COOKIE_NAME))
+    return home_service.get_dashboard_data(db, identity)
+
+
+@router.get("/api/activity", response_class=JSONResponse)
+def activity_api(
+    request: Request,
+    limit: int = Query(20, ge=1, le=50),
+    before_id: Optional[int] = None,
+    db: Session = Depends(get_db),
+):
+    return {"events": home_service.get_activity_feed(db, limit=limit, before_id=before_id)}
+
+
+@router.get("/api/calendar", response_class=JSONResponse)
+def calendar_api(
+    year: int = Query(None),
+    month: int = Query(None),
+    db: Session = Depends(get_db),
+):
+    today = date.today()
+    y = year or today.year
+    m = month or today.month
+    return {"events": home_service.get_calendar_events(db, y, m), "year": y, "month": m}
 
 
 @router.get("/profile", response_class=HTMLResponse)

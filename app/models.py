@@ -9,6 +9,14 @@ class Chore(Base):
     id = Column(Integer, primary_key=True, index=True)
     title = Column(String, nullable=False)
     done = Column(Boolean, default=False)
+    priority = Column(String, default="medium")  # low | medium | high
+    due_date = Column(Date, nullable=True)
+    recurrence = Column(String, default="none")  # none | daily | weekly | monthly
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    completed_at = Column(DateTime, nullable=True)
+
+    assignee = relationship("User", foreign_keys=[assigned_to])
 
 class Birthday(Base):
     __tablename__ = "birthdays"
@@ -189,3 +197,17 @@ class IntercomConsent(Base):
     revoked_at = Column(DateTime, nullable=True)
 
     user = relationship("User")
+
+
+class ActivityLog(Base):
+    __tablename__ = "activity_logs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=True)
+    user_name = Column(String, nullable=True)
+    event_type = Column(String, nullable=False)  # chore_added | chore_done | birthday_added | chat_started | memory_added
+    description = Column(Text, nullable=False)
+    icon = Column(String, default="")
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    user = relationship("User", foreign_keys=[user_id])

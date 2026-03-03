@@ -29,6 +29,21 @@ with engine.connect() as conn:
             conn.execute(text("ALTER TABLE conversations ADD COLUMN project_id INTEGER REFERENCES projects(id)"))
             conn.commit()
 
+    if "chores" in existing_tables:
+        chore_cols = {c["name"] for c in sa_inspect(engine).get_columns("chores")}
+        new_chore_cols = {
+            "priority": "TEXT DEFAULT 'medium'",
+            "due_date": "DATE",
+            "recurrence": "TEXT DEFAULT 'none'",
+            "assigned_to": "INTEGER REFERENCES users(id)",
+            "created_at": "DATETIME",
+            "completed_at": "DATETIME",
+        }
+        for col_name, col_def in new_chore_cols.items():
+            if col_name not in chore_cols:
+                conn.execute(text(f"ALTER TABLE chores ADD COLUMN {col_name} {col_def}"))
+                conn.commit()
+
 app = FastAPI(title="CHILI Home Copilot")
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
