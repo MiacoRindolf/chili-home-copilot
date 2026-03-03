@@ -26,8 +26,8 @@ _OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
 OLLAMA_VISION_URL = f"{_OLLAMA_HOST}/api/chat"
 OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llava-llama3")
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL", os.getenv("OPENAI_MODEL", "gpt-4o-mini"))
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("PREMIUM_API_KEY", "")
+OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL") or os.getenv("PREMIUM_MODEL", "gpt-4o-mini")
 
 VISION_SYSTEM_PROMPT = (
     "You are CHILI, a helpful household assistant with vision capabilities. "
