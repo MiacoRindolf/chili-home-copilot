@@ -109,6 +109,20 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
         else:
             llm_reply = "Your device is already paired! You're all set."
 
+    elif action_type == "intercom_broadcast":
+        executed = True
+        broadcast_text = action_data.get("text", "")
+        if is_guest:
+            llm_reply = "Intercom broadcast is only available for paired housemates."
+        elif broadcast_text:
+            llm_reply = (
+                f'Broadcast queued: **"{broadcast_text}"**\n\n'
+                "Open the [Intercom page](/intercom) to send voice broadcasts, "
+                "or your housemates will hear this as a text notification."
+            )
+        else:
+            llm_reply = "What would you like to announce? Try: `announce dinner is ready`"
+
     return llm_reply, executed, action_type
 
 

@@ -31,6 +31,9 @@ self.addEventListener('activate', function(e) {
 self.addEventListener('fetch', function(e) {
   var url = new URL(e.request.url);
 
+  // Skip WebSocket upgrade requests
+  if (url.pathname.startsWith('/ws/')) return;
+
   // Network-first for API calls
   if (url.pathname.startsWith('/api/')) {
     e.respondWith(

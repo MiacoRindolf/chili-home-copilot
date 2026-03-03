@@ -5,7 +5,7 @@ from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
 from .db import Base, engine
-from .routers import chat, admin, pages, health_routes
+from .routers import chat, admin, pages, health_routes, intercom
 
 Base.metadata.create_all(bind=engine)
 
@@ -30,13 +30,19 @@ _uploads_dir = Path(__file__).resolve().parent.parent / "data" / "uploads"
 _uploads_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/uploads", StaticFiles(directory=_uploads_dir), name="uploads")
 
+_voice_dir = Path(__file__).resolve().parent.parent / "data" / "voice"
+_voice_dir.mkdir(parents=True, exist_ok=True)
+app.mount("/voice", StaticFiles(directory=_voice_dir), name="voice")
+
 templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 chat.init_templates(templates)
 admin.init_templates(templates)
 pages.init_templates(templates)
+intercom.init_templates(templates)
 
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(pages.router)
 app.include_router(health_routes.router)
+app.include_router(intercom.router)

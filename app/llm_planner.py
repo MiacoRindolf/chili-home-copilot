@@ -30,6 +30,7 @@ Allowed actions and required data:
 - list_birthdays: {}
 - answer_from_docs: {"source": str}  -- use ONLY when DOCUMENT CONTEXT is provided below
 - pair_device: {}  -- use when the user asks to pair/link their device, log in, sign in, or create an account
+- intercom_broadcast: {"text": str}  -- use when the user asks to announce/broadcast a message to all housemates via intercom
 
 If the request is unclear or not supported:
 {"type":"unknown","data":{"reason":"ambiguous"},"reply":"What would you like me to do\u2014add a chore, list chores, or add a birthday reminder?"}

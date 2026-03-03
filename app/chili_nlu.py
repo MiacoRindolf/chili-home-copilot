@@ -43,5 +43,10 @@ def parse_message(text: str) -> Action:
     if re.match(r"(?i)^\s*(pair(\s+(my\s+)?device)?|link(\s+(my\s+)?device)?|log\s*in|sign\s*in)\s*$", t):
         return Action(type="pair_device", data={})
 
+    # Intercom broadcast: "announce dinner is ready", "broadcast lights out"
+    m = re.match(r"(?i)^\s*(announce|broadcast)\s*:?\s*(.+)$", t)
+    if m:
+        return Action(type="intercom_broadcast", data={"text": m.group(2).strip()})
+
     # Default
     return Action(type="unknown", data={"text": t})

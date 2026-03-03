@@ -118,3 +118,16 @@ This is a common production LLM pattern:
 * log decisions
 
 It makes the system safer, more predictable, and easier to test.
+
+---
+
+## Intercom: Tier 2 native wrapper (future)
+
+**Goal:** PTT audio plays on mobile even when the screen is locked, with push notifications for incoming messages. The PWA cannot do this (browsers suspend JS and close WebSockets when the screen locks).
+
+**Approach:**
+
+* **Capacitor** (recommended): Wrap the existing PWA in a native Android/iOS shell. Add a background plugin to keep the WebSocket connection alive.
+* **Foreground Service** (Android): Keep the app alive with a persistent notification (e.g. "CHILI Intercom active"). Play incoming PTT via native audio APIs.
+* **Push Notifications**: Use Firebase Cloud Messaging (FCM) to wake the app when a PTT is incoming, even if the app is in the background or closed.
+* **Scope:** Separate project (e.g. new repo or `/native` folder). Estimated 2–3 days. Document detailed steps in `docs/native-intercom.md` when starting.

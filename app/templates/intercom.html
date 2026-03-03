@@ -1,0 +1,637 @@
+{% extends "base.html" %}
+
+{% block title %}CHILI Intercom{% endblock %}
+
+{% block head_extra %}
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    height: 100vh; display: flex; flex-direction: column;
+    background: var(--bg); color: var(--text);
+  }
+  header {
+    background: var(--bg-header); border-bottom: 1px solid var(--border);
+    padding: 12px 20px; flex-shrink: 0;
+    display: flex; justify-content: space-between; align-items: center;
+  }
+  header h1 { font-size: 20px; }
+  header nav { font-size: 13px; margin-top: 4px; }
+  header nav a { color: var(--text-secondary); text-decoration: none; margin-right: 12px; }
+  header nav a:hover { text-decoration: underline; }
+  #theme-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; font-size: 18px; cursor: pointer; line-height: 1;
+    color: var(--text);
+  }
+
+  .ic-container {
+    flex: 1; overflow-y: auto; padding: 20px;
+    display: flex; flex-direction: column; align-items: center; gap: 24px;
+    max-width: 600px; width: 100%; margin: 0 auto;
+  }
+
+  .ic-status-bar {
+    display: flex; align-items: center; gap: 12px; width: 100%;
+    padding: 12px 16px; background: var(--bg-header); border-radius: 12px;
+    border: 1px solid var(--border);
+  }
+  .ic-status-bar .label { flex: 1; font-size: 14px; color: var(--text-secondary); }
+  .ic-status-bar .ws-indicator { font-size: 10px; color: var(--text-muted); }
+  .ic-status-bar .ws-indicator.connected { color: #22c55e; }
+  .ic-status-bar select {
+    padding: 6px 10px; border-radius: 6px; border: 1px solid var(--input-border);
+    background: var(--input-bg); color: var(--text); font-size: 14px;
+  }
+
+  .ic-housemates {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+    gap: 12px; width: 100%;
+  }
+  .hm-card {
+    padding: 16px 12px; border-radius: 12px; text-align: center;
+    border: 2px solid var(--border); cursor: pointer; transition: all .15s;
+    background: var(--bg-header); position: relative;
+  }
+  .hm-card.selected { border-color: var(--accent); background: rgba(37,99,235,.08); }
+  .hm-card .hm-name { font-weight: 600; font-size: 14px; margin-top: 6px; }
+  .hm-card .hm-dot {
+    width: 10px; height: 10px; border-radius: 50%; display: inline-block;
+    margin-bottom: 2px;
+  }
+  .hm-dot.available { background: #22c55e; }
+  .hm-dot.dnd { background: #ef4444; }
+  .hm-dot.offline { background: var(--text-muted); }
+  .hm-card .hm-status-label { font-size: 11px; color: var(--text-muted); }
+
+  .broadcast-card {
+    padding: 12px; border-radius: 12px; text-align: center;
+    border: 2px solid var(--border); cursor: pointer; transition: all .15s;
+    background: var(--bg-header); width: 100%; font-weight: 600; font-size: 14px;
+  }
+  .broadcast-card.selected { border-color: var(--accent); background: rgba(37,99,235,.08); }
+
+  .ptt-area {
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    padding: 20px 0;
+  }
+  #ptt-btn {
+    width: 120px; height: 120px; border-radius: 50%;
+    border: 4px solid var(--accent); background: var(--bg-header);
+    cursor: pointer; font-size: 40px; transition: all .15s;
+    display: flex; align-items: center; justify-content: center;
+    user-select: none; -webkit-user-select: none;
+  }
+  #ptt-btn:active, #ptt-btn.active {
+    background: var(--accent); border-color: var(--accent);
+    transform: scale(1.08);
+  }
+  #ptt-btn.active { animation: ptt-pulse 1s infinite; }
+  @keyframes ptt-pulse {
+    0%,100% { box-shadow: 0 0 0 0 rgba(37,99,235,.4); }
+    50% { box-shadow: 0 0 0 16px rgba(37,99,235,0); }
+  }
+  #ptt-status {
+    font-size: 14px; color: var(--text-secondary);
+    min-height: 20px; text-align: center;
+  }
+  #ptt-incoming {
+    display: none; padding: 16px 24px; border-radius: 12px;
+    background: rgba(37,99,235,.1); border: 1px solid var(--accent);
+    text-align: center; font-size: 15px; width: 100%;
+    animation: fade-in .2s;
+  }
+  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+
+  .ic-section-title {
+    font-size: 13px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .5px; color: var(--text-muted); width: 100;
+    align-self: flex-start;
+  }
+
+  .voice-inbox { width: 100%; display: flex; flex-direction: column; gap: 8px; }
+  .voice-msg {
+    display: flex; align-items: center; gap: 12px;
+    padding: 12px 16px; background: var(--bg-header); border-radius: 10px;
+    border: 1px solid var(--border);
+  }
+  .voice-msg.unread { border-left: 3px solid var(--accent); }
+  .voice-msg .vm-from { font-weight: 600; font-size: 14px; flex: 1; min-width: 0; }
+  .voice-msg .vm-time { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
+  .voice-msg audio { height: 32px; max-width: 200px; flex-shrink: 0; }
+  .voice-msg .vm-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
+  .voice-msg .btn-delete {
+    background: none; border: none; padding: 6px; cursor: pointer; border-radius: 6px;
+    color: var(--text-muted); font-size: 18px; line-height: 1;
+  }
+  .voice-msg .btn-delete:hover { background: rgba(239,68,68,.15); color: #ef4444; }
+
+  .consent-overlay {
+    position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.6);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .consent-box {
+    background: var(--bg-header); border-radius: 16px; padding: 32px;
+    max-width: 420px; width: 90%; text-align: center;
+    box-shadow: 0 20px 60px rgba(0,0,0,.3);
+  }
+  .consent-box h2 { margin-bottom: 16px; font-size: 20px; }
+  .consent-box p { font-size: 14px; color: var(--text-secondary); line-height: 1.5; margin-bottom: 20px; }
+  .consent-box button {
+    padding: 12px 32px; border-radius: 8px; border: none; font-size: 15px;
+    font-weight: 600; cursor: pointer; margin: 4px;
+  }
+  .consent-box .btn-agree { background: var(--accent); color: #fff; }
+  .consent-box .btn-cancel { background: var(--code-bg); color: var(--text); }
+
+  .guest-block {
+    flex: 1; display: flex; align-items: center; justify-content: center;
+    text-align: center; padding: 40px;
+  }
+  .guest-block p { font-size: 16px; color: var(--text-secondary); line-height: 1.6; }
+</style>
+{% endblock %}
+
+{% block content %}
+<header>
+  <div>
+    <h1>&#x1F3E0; CHILI Intercom</h1>
+    <nav>
+      <a href="/chat">Chat</a>
+      <a href="/admin">Admin</a>
+    </nav>
+  </div>
+  <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
+</header>
+
+<div id="guest-block" class="guest-block" style="display:none;">
+  <p>Intercom is available for paired housemates only.<br/>
+  <a href="/chat">Go to Chat</a> and pair your device first.</p>
+</div>
+
+<div id="consent-gate" class="consent-overlay" style="display:none;">
+  <div class="consent-box">
+    <h2>&#128266; Enable Intercom</h2>
+    <p>CHILI Intercom lets housemates send voice messages that play automatically on your device.
+    You can enable <strong>Do Not Disturb</strong> anytime to pause incoming audio.</p>
+    <button class="btn-agree" onclick="unlockAudio(); grantConsent()">I Agree</button>
+    <button class="btn-cancel" onclick="location.href='/chat'">Not Now</button>
+  </div>
+</div>
+
+<div id="main-ui" class="ic-container" style="display:none;">
+  <div class="ic-status-bar">
+    <span id="ws-indicator" class="ws-indicator" title="Connection">&#9679;</span>
+    <span class="label">Your status:</span>
+    <select id="status-select" onchange="changeStatus()">
+      <option value="available">Available</option>
+      <option value="dnd-0">Do Not Disturb</option>
+      <option value="dnd-30">DND 30 min</option>
+      <option value="dnd-60">DND 1 hour</option>
+      <option value="dnd-120">DND 2 hours</option>
+    </select>
+  </div>
+
+  <div class="ic-section-title">Housemates</div>
+  <div class="broadcast-card" id="broadcast-card" onclick="selectTarget('broadcast')">
+    &#128227; Broadcast to All
+  </div>
+  <div class="ic-housemates" id="housemate-grid"></div>
+
+  <div class="ptt-area">
+    <div id="ptt-incoming"></div>
+    <button id="ptt-btn">&#127908;</button>
+    <div id="ptt-status">Select a housemate, then hold to talk</div>
+  </div>
+
+  <div class="ic-section-title">Voice Messages</div>
+  <div class="voice-inbox" id="voice-inbox">
+    <div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>
+  </div>
+</div>
+
+<script>
+var themeBtn = document.getElementById('theme-toggle');
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  themeBtn.innerHTML = (t === 'dark') ? '&#9728;&#65039;' : '&#127769;';
+  localStorage.setItem('chili-theme', t);
+}
+themeBtn.onclick = function() {
+  setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+};
+setTheme(localStorage.getItem('chili-theme') || 'light');
+
+var ws = null;
+var myUserId = null;
+var selectedTarget = null;
+var isRecording = false;
+var mediaRecorder = null;
+var _currentStream = null;
+var _audioCtx = null;
+var pttBtn = document.getElementById('ptt-btn');
+var pttStatus = document.getElementById('ptt-status');
+var pttIncoming = document.getElementById('ptt-incoming');
+var hmGrid = document.getElementById('housemate-grid');
+var bcCard = document.getElementById('broadcast-card');
+var inbox = document.getElementById('voice-inbox');
+var statusSelect = document.getElementById('status-select');
+var incomingChunks = [];
+var incomingMimeType = 'audio/webm';
+var recordingStartTime = 0;
+
+async function init() {
+  try {
+    var consentRes = await fetch('/api/intercom/consent');
+    if (consentRes.status === 403) {
+      document.getElementById('guest-block').style.display = '';
+      return;
+    }
+    var consentData = await consentRes.json();
+
+    var statusRes = await fetch('/api/intercom/status');
+    var statusData = await statusRes.json();
+    myUserId = statusData.user_id;
+
+    if (!consentData.consented) {
+      document.getElementById('consent-gate').style.display = '';
+      return;
+    }
+
+    showMainUI(statusData);
+  } catch (e) {
+    document.getElementById('guest-block').style.display = '';
+  }
+}
+
+async function grantConsent() {
+  await fetch('/api/intercom/consent', { method: 'POST' });
+  document.getElementById('consent-gate').style.display = 'none';
+  var statusRes = await fetch('/api/intercom/status');
+  var statusData = await statusRes.json();
+  myUserId = statusData.user_id;
+  showMainUI(statusData);
+}
+
+var statusPollTimer = null;
+
+function showMainUI(statusData) {
+  document.getElementById('main-ui').style.display = '';
+  renderHousemates(statusData.housemates, {});
+  loadMessages();
+  connectWS();
+  if (statusPollTimer) clearInterval(statusPollTimer);
+  document.addEventListener('visibilitychange', function() {
+    if (document.visibilityState === 'hidden') {
+      if (isRecording) stopRecording();
+    } else {
+      if (!ws || ws.readyState !== WebSocket.OPEN) connectWS();
+    }
+  });
+  statusPollTimer = setInterval(function() {
+    fetch('/api/intercom/status').then(function(r) { return r.ok ? r.json() : null; }).then(function(d) {
+      if (d && d.housemates) {
+        _housemates = d.housemates;
+        var onlineMap = {};
+        d.housemates.forEach(function(h) { onlineMap[h.user_id] = !!h.online; });
+        renderHousemates(d.housemates, onlineMap);
+      }
+    }).catch(function() {});
+  }, 12000);
+}
+
+function renderHousemates(housemates, onlineMap) {
+  hmGrid.innerHTML = '';
+  housemates.forEach(function(h) {
+    if (h.user_id === myUserId) return;
+    var card = document.createElement('div');
+    card.className = 'hm-card' + (selectedTarget === h.user_id ? ' selected' : '');
+    card.dataset.uid = h.user_id;
+    var isOnline = onlineMap[h.user_id] || h.online;
+    var dotClass = !isOnline ? 'offline' : (h.status === 'dnd' ? 'dnd' : 'available');
+    var statusLabel = !isOnline ? 'offline' : (h.status === 'dnd' ? 'DND' : 'available');
+    card.innerHTML = '<span class="hm-dot ' + dotClass + '"></span>'
+      + '<div class="hm-name">' + esc(h.name) + '</div>'
+      + '<div class="hm-status-label">' + statusLabel + '</div>';
+    card.onclick = function() { selectTarget(h.user_id); };
+    hmGrid.appendChild(card);
+  });
+}
+
+function selectTarget(t) {
+  selectedTarget = t;
+  document.querySelectorAll('.hm-card').forEach(function(c) {
+    c.classList.toggle('selected', parseInt(c.dataset.uid) === t);
+  });
+  bcCard.classList.toggle('selected', t === 'broadcast');
+  pttStatus.textContent = t === 'broadcast'
+    ? 'Hold to broadcast to everyone'
+    : 'Hold to talk';
+}
+
+function esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function connectWS() {
+  var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(proto + '//' + location.host + '/ws/intercom');
+  ws.binaryType = 'blob';
+
+  ws.onopen = function() {
+    pttStatus.textContent = selectedTarget ? 'Hold to talk' : 'Select a housemate, then hold to talk';
+  };
+
+  ws.onmessage = function(e) {
+    if (typeof e.data === 'string') {
+      var msg = JSON.parse(e.data);
+      handleWSMessage(msg);
+    } else {
+      var blob = e.data instanceof Blob ? e.data : new Blob([e.data]);
+      handleAudioChunk(blob);
+    }
+  };
+
+  ws.onclose = function() {
+    var ind = document.getElementById('ws-indicator');
+    if (ind) { ind.classList.remove('connected'); ind.title = 'Disconnected'; }
+    pttStatus.textContent = 'Disconnected. Reconnecting...';
+    setTimeout(connectWS, 3000);
+  };
+}
+
+var _housemates = [];
+
+function handleWSMessage(msg) {
+  if (msg.type === 'PRESENCE') {
+    if (msg.housemates && msg.housemates.length >= 0) {
+      _housemates = msg.housemates;
+      var onlineMap = {};
+      msg.housemates.forEach(function(h) { onlineMap[h.user_id] = !!h.online; });
+      renderHousemates(msg.housemates, onlineMap);
+    } else {
+      fetch('/api/intercom/status').then(function(r) { return r.json(); }).then(function(d) {
+        _housemates = d.housemates;
+        var onlineMap = {};
+        for (var uid in (msg.online || {})) onlineMap[parseInt(uid)] = true;
+        renderHousemates(d.housemates, onlineMap);
+      });
+    }
+  } else if (msg.type === 'PTT_INCOMING') {
+    incomingChunks = [];
+    incomingMimeType = msg.mime_type || 'audio/webm';
+    pttIncoming.style.display = '';
+    pttIncoming.textContent = (msg.from_name || 'Someone') + ' is speaking' + (msg.is_broadcast ? ' (broadcast)' : '') + '...';
+  } else if (msg.type === 'PTT_END') {
+    pttIncoming.textContent = '';
+    pttIncoming.style.display = 'none';
+    var chunks = incomingChunks.slice();
+    incomingChunks = [];
+    if (chunks.length > 0) {
+      setTimeout(function() {
+        playAudioChunks(chunks);
+      }, 150);
+    }
+    loadMessages();
+  } else if (msg.type === 'PTT_DND') {
+    pttStatus.textContent = msg.message || 'Recipient is on DND';
+    setTimeout(function() {
+      pttStatus.textContent = 'Hold to talk';
+    }, 3000);
+  } else if (msg.type === 'NEED_CONSENT') {
+    document.getElementById('consent-gate').style.display = '';
+  } else if (msg.type === 'ERROR') {
+    pttStatus.textContent = msg.message || 'Error';
+  }
+}
+
+function unlockAudio() {
+  try {
+    if (_audioCtx) {
+      _audioCtx.resume();
+      return;
+    }
+    _audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var buf = _audioCtx.createBuffer(1, 1, 22050);
+    var src = _audioCtx.createBufferSource();
+    src.buffer = buf;
+    src.connect(_audioCtx.destination);
+    src.start(0);
+    _audioCtx.resume();
+  } catch(e) {}
+}
+
+function handleAudioChunk(blob) {
+  incomingChunks.push(blob);
+}
+
+function playAudioChunks(chunks) {
+  if (!chunks || chunks.length === 0) return;
+  var blob = new Blob(chunks, { type: incomingMimeType || 'audio/webm' });
+  blob.arrayBuffer().then(function(ab) {
+    if (!_audioCtx) unlockAudio();
+    if (!_audioCtx) return;
+    var ctx = _audioCtx;
+    (ctx.resume ? ctx.resume() : Promise.resolve()).then(function() {
+      ctx.decodeAudioData(ab, function(decoded) {
+        var src = ctx.createBufferSource();
+        src.buffer = decoded;
+        src.connect(ctx.destination);
+        src.start(0);
+      }, function() {
+        var url = URL.createObjectURL(blob);
+        var a = new Audio(url);
+        a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
+        a.play().catch(function() {});
+      });
+    }).catch(function() {
+      var url = URL.createObjectURL(blob);
+      var a = new Audio(url);
+      a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
+      a.play().catch(function() {});
+    });
+  }).catch(function() {
+    var url = URL.createObjectURL(blob);
+    var a = new Audio(url);
+    a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
+    a.play().catch(function() {});
+  });
+}
+
+var _recMimeType = null;
+
+function getSupportedMimeType() {
+  var types = ['audio/webm;codecs=opus', 'audio/webm', 'audio/mp4', 'audio/ogg;codecs=opus'];
+  for (var i = 0; i < types.length; i++) {
+    if (typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(types[i])) return types[i];
+  }
+  return '';
+}
+
+function releaseMic() {
+  if (_currentStream) {
+    _currentStream.getTracks().forEach(function(t) { try { t.stop(); } catch(e) {} });
+    _currentStream = null;
+  }
+  mediaRecorder = null;
+}
+
+async function startRecording() {
+  if (!selectedTarget) {
+    pttStatus.textContent = 'Select a housemate or Broadcast first!';
+    return;
+  }
+  if (!ws || ws.readyState !== WebSocket.OPEN) {
+    pttStatus.textContent = 'Not connected';
+    return;
+  }
+  if (isRecording) return;
+
+  unlockAudio();
+
+  try {
+    var stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    _currentStream = stream;
+
+    _recMimeType = getSupportedMimeType();
+    var options = _recMimeType ? { mimeType: _recMimeType } : {};
+    mediaRecorder = new MediaRecorder(stream, options);
+    if (!_recMimeType && mediaRecorder.mimeType) _recMimeType = mediaRecorder.mimeType;
+
+    mediaRecorder.ondataavailable = function(e) {
+      if (e.data && e.data.size > 0 && ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(e.data);
+      }
+    };
+
+    mediaRecorder.onstop = function() {
+      var dur = Date.now() - recordingStartTime;
+      if (_currentStream) {
+        _currentStream.getTracks().forEach(function(t) { try { t.stop(); } catch(e) {} });
+        _currentStream = null;
+      }
+      mediaRecorder = null;
+      isRecording = false;
+      pttBtn.classList.remove('active');
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'PTT_END', duration_ms: dur }));
+      }
+      pttStatus.textContent = selectedTarget ? 'Hold to talk' : 'Select a housemate, then hold to talk';
+    };
+
+    ws.send(JSON.stringify({
+      type: 'PTT_START',
+      target: selectedTarget === 'broadcast' ? 'broadcast' : String(selectedTarget),
+      mime_type: _recMimeType || '',
+    }));
+
+    mediaRecorder.start(200);
+    isRecording = true;
+    recordingStartTime = Date.now();
+    pttBtn.classList.add('active');
+    pttStatus.textContent = 'Recording...';
+  } catch (err) {
+    pttStatus.textContent = 'Mic access denied. Tap the mic and allow.';
+    releaseMic();
+    isRecording = false;
+  }
+}
+
+function stopRecording() {
+  if (!isRecording) return;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch(e) {}
+  } else {
+    if (_currentStream) {
+      _currentStream.getTracks().forEach(function(t) { try { t.stop(); } catch(e) {} });
+      _currentStream = null;
+    }
+    mediaRecorder = null;
+    isRecording = false;
+    pttBtn.classList.remove('active');
+    pttStatus.textContent = selectedTarget ? 'Hold to talk' : 'Select a housemate, then hold to talk';
+  }
+}
+
+pttBtn.addEventListener('mousedown', function(e) { e.preventDefault(); startRecording(); });
+pttBtn.addEventListener('mouseup', function(e) { e.preventDefault(); stopRecording(); });
+pttBtn.addEventListener('mouseleave', function(e) { if (isRecording) stopRecording(); });
+pttBtn.addEventListener('touchstart', function(e) { e.preventDefault(); unlockAudio(); startRecording(); }, { passive: false });
+pttBtn.addEventListener('touchend', function(e) { e.preventDefault(); stopRecording(); });
+pttBtn.addEventListener('touchcancel', function(e) { stopRecording(); });
+
+async function changeStatus() {
+  var val = statusSelect.value;
+  var status = 'available';
+  var dnd_minutes = null;
+  if (val.startsWith('dnd')) {
+    status = 'dnd';
+    var mins = parseInt(val.split('-')[1]);
+    dnd_minutes = mins || null;
+  }
+  var body = new FormData();
+  body.append('status', status);
+  if (dnd_minutes) body.append('dnd_minutes', dnd_minutes);
+  await fetch('/api/intercom/status', { method: 'POST', body: body });
+
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'STATUS_UPDATE', status: status, dnd_minutes: dnd_minutes }));
+  }
+}
+
+async function deleteMessage(id, rowEl) {
+  try {
+    var res = await fetch('/api/intercom/messages/' + id, { method: 'DELETE' });
+    if (res.ok) {
+      if (rowEl && rowEl.parentNode) rowEl.remove();
+      var left = inbox.querySelectorAll('.voice-msg');
+      if (left.length === 0) inbox.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>';
+    }
+  } catch (e) {}
+}
+
+async function loadMessages() {
+  try {
+    var res = await fetch('/api/intercom/messages');
+    var data = await res.json();
+    if (!data.messages || data.messages.length === 0) {
+      inbox.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>';
+      return;
+    }
+    inbox.innerHTML = '';
+    data.messages.forEach(function(m) {
+      var div = document.createElement('div');
+      div.className = 'voice-msg' + (m.read ? '' : ' unread');
+      div.dataset.messageId = m.id;
+      var timeStr = '';
+      try {
+        var d = new Date(m.created_at);
+        timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+      } catch(e) {}
+      var durationStr = m.duration_ms != null ? Math.floor(m.duration_ms / 1000) + 's' : '';
+      div.innerHTML = '<div class="vm-from">' + esc(m.from_name)
+        + (m.is_broadcast ? ' <span style="font-size:11px;color:var(--text-muted)">(broadcast)</span>' : '')
+        + '</div>'
+        + '<audio controls preload="none" src="/voice/' + encodeURIComponent(m.audio_path) + '"></audio>'
+        + '<div class="vm-actions">'
+        + '<button class="btn-delete" type="button" title="Delete" aria-label="Delete">&#128465;</button>'
+        + '</div>'
+        + '<div class="vm-time">' + timeStr + (durationStr ? ' &middot; ' + durationStr : '') + '</div>';
+
+      if (!m.read) {
+        div.querySelector('audio').addEventListener('play', function() {
+          fetch('/api/intercom/messages/' + m.id + '/read', { method: 'POST' });
+          div.classList.remove('unread');
+        });
+      }
+      div.querySelector('.btn-delete').addEventListener('click', function() { deleteMessage(m.id, div); });
+      inbox.appendChild(div);
+    });
+  } catch(e) {}
+}
+
+init();
+</script>
+{% endblock %}
