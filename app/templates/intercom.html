@@ -109,23 +109,6 @@
     align-self: flex-start;
   }
 
-  .voice-inbox { width: 100%; display: flex; flex-direction: column; gap: 8px; }
-  .voice-msg {
-    display: flex; align-items: center; gap: 12px;
-    padding: 12px 16px; background: var(--bg-header); border-radius: 10px;
-    border: 1px solid var(--border);
-  }
-  .voice-msg.unread { border-left: 3px solid var(--accent); }
-  .voice-msg .vm-from { font-weight: 600; font-size: 14px; flex: 1; min-width: 0; }
-  .voice-msg .vm-time { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
-  .voice-msg audio { height: 32px; max-width: 200px; flex-shrink: 0; }
-  .voice-msg .vm-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-  .voice-msg .btn-delete {
-    background: none; border: none; padding: 6px; cursor: pointer; border-radius: 6px;
-    color: var(--text-muted); font-size: 18px; line-height: 1;
-  }
-  .voice-msg .btn-delete:hover { background: rgba(239,68,68,.15); color: #ef4444; }
-
   .consent-overlay {
     position: fixed; inset: 0; z-index: 100; background: rgba(0,0,0,.6);
     display: flex; align-items: center; justify-content: center;
@@ -204,10 +187,6 @@
     <div id="ptt-status">Select a housemate, then hold to talk</div>
   </div>
 
-  <div class="ic-section-title">Voice Messages</div>
-  <div class="voice-inbox" id="voice-inbox">
-    <div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>
-  </div>
 </div>
 
 <script>
@@ -234,7 +213,6 @@ var pttStatus = document.getElementById('ptt-status');
 var pttIncoming = document.getElementById('ptt-incoming');
 var hmGrid = document.getElementById('housemate-grid');
 var bcCard = document.getElementById('broadcast-card');
-var inbox = document.getElementById('voice-inbox');
 var statusSelect = document.getElementById('status-select');
 var incomingChunks = [];
 var incomingMimeType = 'audio/webm';
@@ -278,7 +256,6 @@ var statusPollTimer = null;
 function showMainUI(statusData) {
   document.getElementById('main-ui').style.display = '';
   renderHousemates(statusData.housemates, {});
-  loadMessages();
   connectWS();
   if (statusPollTimer) clearInterval(statusPollTimer);
   document.addEventListener('visibilitychange', function() {
@@ -394,7 +371,6 @@ function handleWSMessage(msg) {
         playAudioChunks(chunks);
       }, 150);
     }
-    loadMessages();
   } else if (msg.type === 'PTT_DND') {
     pttStatus.textContent = msg.message || 'Recipient is on DND';
     setTimeout(function() {
@@ -427,36 +403,32 @@ function handleAudioChunk(blob) {
   incomingChunks.push(blob);
 }
 
+function playViaAudioEl(blob) {
+  var url = URL.createObjectURL(blob);
+  var a = new Audio(url);
+  a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
+  a.play().catch(function() {});
+}
+
 function playAudioChunks(chunks) {
   if (!chunks || chunks.length === 0) return;
   var blob = new Blob(chunks, { type: incomingMimeType || 'audio/webm' });
-  blob.arrayBuffer().then(function(ab) {
-    if (!_audioCtx) unlockAudio();
-    if (!_audioCtx) return;
-    var ctx = _audioCtx;
-    (ctx.resume ? ctx.resume() : Promise.resolve()).then(function() {
-      ctx.decodeAudioData(ab, function(decoded) {
-        var src = ctx.createBufferSource();
-        src.buffer = decoded;
-        src.connect(ctx.destination);
-        src.start(0);
-      }, function() {
-        var url = URL.createObjectURL(blob);
-        var a = new Audio(url);
-        a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
-        a.play().catch(function() {});
-      });
-    }).catch(function() {
-      var url = URL.createObjectURL(blob);
-      var a = new Audio(url);
-      a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
-      a.play().catch(function() {});
-    });
+
+  if (!_audioCtx) unlockAudio();
+  if (!_audioCtx) { playViaAudioEl(blob); return; }
+
+  var ctx = _audioCtx;
+  (ctx.resume ? ctx.resume() : Promise.resolve()).then(function() {
+    return blob.arrayBuffer();
+  }).then(function(ab) {
+    return ctx.decodeAudioData(ab);
+  }).then(function(decoded) {
+    var src = ctx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(ctx.destination);
+    src.start(0);
   }).catch(function() {
-    var url = URL.createObjectURL(blob);
-    var a = new Audio(url);
-    a.onended = a.onerror = function() { try { URL.revokeObjectURL(url); } catch(e) {} };
-    a.play().catch(function() {});
+    playViaAudioEl(blob);
   });
 }
 
@@ -579,57 +551,6 @@ async function changeStatus() {
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ type: 'STATUS_UPDATE', status: status, dnd_minutes: dnd_minutes }));
   }
-}
-
-async function deleteMessage(id, rowEl) {
-  try {
-    var res = await fetch('/api/intercom/messages/' + id, { method: 'DELETE' });
-    if (res.ok) {
-      if (rowEl && rowEl.parentNode) rowEl.remove();
-      var left = inbox.querySelectorAll('.voice-msg');
-      if (left.length === 0) inbox.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>';
-    }
-  } catch (e) {}
-}
-
-async function loadMessages() {
-  try {
-    var res = await fetch('/api/intercom/messages');
-    var data = await res.json();
-    if (!data.messages || data.messages.length === 0) {
-      inbox.innerHTML = '<div style="font-size:13px;color:var(--text-muted);padding:8px 0;">No messages yet</div>';
-      return;
-    }
-    inbox.innerHTML = '';
-    data.messages.forEach(function(m) {
-      var div = document.createElement('div');
-      div.className = 'voice-msg' + (m.read ? '' : ' unread');
-      div.dataset.messageId = m.id;
-      var timeStr = '';
-      try {
-        var d = new Date(m.created_at);
-        timeStr = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-      } catch(e) {}
-      var durationStr = m.duration_ms != null ? Math.floor(m.duration_ms / 1000) + 's' : '';
-      div.innerHTML = '<div class="vm-from">' + esc(m.from_name)
-        + (m.is_broadcast ? ' <span style="font-size:11px;color:var(--text-muted)">(broadcast)</span>' : '')
-        + '</div>'
-        + '<audio controls preload="none" src="/voice/' + encodeURIComponent(m.audio_path) + '"></audio>'
-        + '<div class="vm-actions">'
-        + '<button class="btn-delete" type="button" title="Delete" aria-label="Delete">&#128465;</button>'
-        + '</div>'
-        + '<div class="vm-time">' + timeStr + (durationStr ? ' &middot; ' + durationStr : '') + '</div>';
-
-      if (!m.read) {
-        div.querySelector('audio').addEventListener('play', function() {
-          fetch('/api/intercom/messages/' + m.id + '/read', { method: 'POST' });
-          div.classList.remove('unread');
-        });
-      }
-      div.querySelector('.btn-delete').addEventListener('click', function() { deleteMessage(m.id, div); });
-      inbox.appendChild(div);
-    });
-  } catch(e) {}
 }
 
 init();
