@@ -1,484 +1,356 @@
 {% extends "base.html" %}
 {% block title %}CHILI Admin{% endblock %}
 {% block head_extra %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <style>
   :root {
-    --status-ok: #22c55e;
-    --status-error: #ef4444;
-    --card-bg: var(--bg-msg-assist);
-    --stat-accent: var(--accent);
+    --status-ok: #22c55e; --status-warn: #f59e0b; --status-error: #ef4444;
+    --status-info: #3b82f6;
+    --card-bg: var(--bg-msg-assist); --stat-accent: var(--accent);
+    --green: #22c55e; --amber: #f59e0b; --red: #ef4444;
+    --chart-1: #3b82f6; --chart-2: #8b5cf6; --chart-3: #ec4899;
+    --chart-4: #f59e0b; --chart-5: #10b981; --chart-6: #06b6d4;
   }
   [data-theme="dark"] {
-    --status-ok: #4ade80;
-    --status-error: #f87171;
+    --status-ok: #4ade80; --status-warn: #fbbf24; --status-error: #f87171;
+    --green: #4ade80; --amber: #fbbf24; --red: #f87171;
   }
 
   .admin-shell {
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 24px 20px 60px;
-    font-family: system-ui, -apple-system, sans-serif;
-    color: var(--text);
+    max-width: 1280px; margin: 0 auto; padding: 24px 20px 60px;
+    font-family: system-ui, -apple-system, sans-serif; color: var(--text);
   }
 
-  /* ---- Top bar ---- */
   .admin-topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-    margin-bottom: 28px;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
   }
-  .admin-topbar h1 {
-    font-size: 1.5rem;
-    font-weight: 700;
-    margin: 0;
+  .admin-topbar h1 { font-size: 1.5rem; font-weight: 700; margin: 0; display: flex; align-items: center; gap: 10px; }
+  .admin-topbar nav { display: flex; gap: 8px; flex-wrap: wrap; }
+  .nav-btn {
+    text-decoration: none; font-size: .82rem; padding: 6px 14px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card-bg); color: var(--text); cursor: pointer; transition: .15s;
   }
-  .admin-topbar nav {
-    display: flex;
-    gap: 8px;
-    flex-wrap: wrap;
-  }
-  .admin-topbar nav a, .admin-topbar nav button {
-    text-decoration: none;
-    font-size: .85rem;
-    padding: 6px 14px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--card-bg);
-    color: var(--text);
-    cursor: pointer;
-    transition: .15s;
-  }
-  .admin-topbar nav a:hover, .admin-topbar nav button:hover {
-    background: var(--accent);
-    color: #fff;
-    border-color: var(--accent);
-  }
+  .nav-btn:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .nav-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
-  /* ---- Cards ---- */
-  .card {
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 20px;
-    margin-bottom: 16px;
+  .alerts-bar { margin-bottom: 16px; display: flex; flex-direction: column; gap: 6px; }
+  .alert-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 16px; border-radius: 10px; font-size: .85rem; font-weight: 500;
   }
-  .card h2 {
-    font-size: 1rem;
-    font-weight: 600;
-    margin: 0 0 14px 0;
-    color: var(--text-secondary);
-    text-transform: uppercase;
-    letter-spacing: .04em;
-  }
+  .alert-item.warning { background: rgba(245,158,11,.12); border: 1px solid var(--amber); color: var(--amber); }
+  .alert-item.error { background: rgba(239,68,68,.12); border: 1px solid var(--red); color: var(--red); }
+  .alert-item.info { background: rgba(59,130,246,.1); border: 1px solid var(--status-info); color: var(--status-info); }
+  .alert-item.ok { background: rgba(34,197,94,.1); border: 1px solid var(--green); color: var(--green); }
 
-  /* ---- Stats row ---- */
   .stats-row {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
-    gap: 12px;
-    margin-bottom: 16px;
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 12px; margin-bottom: 20px;
   }
   .stat-card {
-    background: var(--card-bg);
-    border: 1px solid var(--border);
-    border-radius: 12px;
-    padding: 16px;
-    text-align: center;
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 14px; padding: 18px; text-align: center; position: relative; overflow: hidden;
   }
   .stat-card .stat-value {
-    font-size: 1.75rem;
-    font-weight: 700;
-    color: var(--stat-accent);
+    font-size: 2rem; font-weight: 800; color: var(--stat-accent);
+    transition: color .3s;
   }
-  .stat-card .stat-label {
-    font-size: .8rem;
-    color: var(--text-secondary);
-    margin-top: 4px;
+  .stat-card .stat-label { font-size: .78rem; color: var(--text-secondary); margin-top: 4px; }
+  .stat-card .stat-change {
+    font-size: .7rem; margin-top: 4px; font-weight: 600;
+  }
+  .stat-card .stat-icon {
+    position: absolute; top: 12px; right: 14px; font-size: 1.3rem; opacity: .3;
+  }
+  @keyframes countUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: translateY(0); } }
+  .stat-card .stat-value { animation: countUp .5s ease-out; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
+  @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: 14px; padding: 20px; margin-bottom: 16px;
+  }
+  .card-header {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: .85rem; font-weight: 600; margin: 0;
+    color: var(--text-secondary); text-transform: uppercase; letter-spacing: .04em;
   }
 
-  /* ---- Two-col grid ---- */
-  .two-col {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 16px;
+  .health-grid { display: flex; gap: 20px; flex-wrap: wrap; }
+  .health-item { display: flex; align-items: center; gap: 10px; }
+  .health-dot {
+    width: 12px; height: 12px; border-radius: 50%; flex-shrink: 0;
+    position: relative;
   }
-  @media (max-width: 700px) {
-    .two-col { grid-template-columns: 1fr; }
+  .health-dot.ok { background: var(--green); }
+  .health-dot.err { background: var(--red); }
+  .health-dot.ok::after {
+    content: ''; position: absolute; inset: -3px;
+    border-radius: 50%; border: 2px solid var(--green); opacity: .4;
+    animation: pulse-ring 2s ease-out infinite;
   }
+  @keyframes pulse-ring { 0% { transform: scale(1); opacity: .4; } 100% { transform: scale(1.6); opacity: 0; } }
+  .health-label { font-size: .88rem; }
+  .health-sub { font-size: .75rem; color: var(--text-muted); }
 
-  /* ---- Status indicators ---- */
-  .status-dot {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    margin-right: 6px;
-  }
-  .status-dot.ok { background: var(--status-ok); }
-  .status-dot.err { background: var(--status-error); }
+  .perf-grid { display: flex; gap: 28px; flex-wrap: wrap; }
+  .perf-item { text-align: center; }
+  .perf-value { font-size: 1.8rem; font-weight: 800; color: var(--stat-accent); }
+  .perf-label { font-size: .75rem; color: var(--text-secondary); }
 
-  .status-row {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    margin-bottom: 8px;
-    font-size: .9rem;
-  }
-  .status-row:last-child { margin-bottom: 0; }
+  .chart-container { position: relative; width: 100%; }
+  .chart-container canvas { width: 100% !important; }
 
-  /* ---- Model usage bars ---- */
   .model-bar-row {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin-bottom: 8px;
-    font-size: .85rem;
+    display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: .82rem;
   }
-  .model-bar-label {
-    min-width: 110px;
-    text-align: right;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .model-bar-track {
-    flex: 1;
-    height: 12px;
-    background: var(--bg);
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .model-bar-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 6px;
-    transition: width .3s;
-  }
-  .model-bar-count {
-    min-width: 40px;
-    color: var(--text-secondary);
-  }
+  .model-bar-label { min-width: 120px; text-align: right; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .model-bar-track { flex: 1; height: 10px; background: var(--bg); border-radius: 5px; overflow: hidden; }
+  .model-bar-fill { height: 100%; border-radius: 5px; transition: width .6s ease-out; }
+  .model-bar-count { min-width: 40px; color: var(--text-secondary); font-size: .78rem; }
 
-  /* ---- RAG ---- */
-  .rag-info { font-size: .9rem; margin-bottom: 8px; }
+  .feature-row {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 8px 0; border-bottom: 1px solid var(--border); font-size: .85rem;
+  }
+  .feature-row:last-child { border-bottom: none; }
+  .feature-count { font-weight: 700; color: var(--stat-accent); }
+
+  .leaderboard-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: .85rem;
+  }
+  .leaderboard-row:last-child { border-bottom: none; }
+  .lb-rank {
+    width: 24px; height: 24px; border-radius: 50%; display: flex;
+    align-items: center; justify-content: center; font-size: .72rem; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .lb-rank.gold { background: #fbbf24; color: #000; }
+  .lb-rank.silver { background: #94a3b8; color: #fff; }
+  .lb-rank.bronze { background: #d97706; color: #fff; }
+  .lb-rank.other { background: var(--code-bg); color: var(--text-secondary); }
+  .lb-name { flex: 1; }
+  .lb-count { font-weight: 700; color: var(--stat-accent); }
+
+  .chore-user-row {
+    display: flex; align-items: center; gap: 10px; padding: 8px 0;
+    border-bottom: 1px solid var(--border); font-size: .85rem;
+  }
+  .chore-user-row:last-child { border-bottom: none; }
+  .chore-progress-track { flex: 1; height: 8px; background: var(--bg); border-radius: 4px; overflow: hidden; }
+  .chore-progress-fill { height: 100%; background: var(--green); border-radius: 4px; transition: width .6s; }
+  .chore-rate { font-weight: 700; min-width: 50px; text-align: right; }
+
+  .rag-info { font-size: .88rem; margin-bottom: 6px; }
   .rag-info span { color: var(--text-secondary); }
   .rag-btn {
-    padding: 8px 18px;
-    border-radius: 8px;
-    border: 1px solid var(--accent);
-    background: var(--accent);
-    color: #fff;
-    font-size: .85rem;
-    cursor: pointer;
-    transition: .15s;
+    padding: 8px 18px; border-radius: 8px; border: 1px solid var(--accent);
+    background: var(--accent); color: #fff; font-size: .82rem; cursor: pointer; transition: .15s;
   }
   .rag-btn:hover { background: var(--accent-hover); }
   .rag-btn:disabled { opacity: .5; cursor: not-allowed; }
 
-  /* ---- Exports ---- */
-  .export-btns {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
+  .export-grid { display: flex; gap: 10px; flex-wrap: wrap; }
+  .export-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    text-decoration: none; padding: 10px 18px; border-radius: 10px;
+    border: 1px solid var(--border); background: var(--card-bg);
+    color: var(--text); font-size: .85rem; transition: .15s;
   }
-  .export-btns a {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    text-decoration: none;
-    padding: 8px 16px;
-    border-radius: 8px;
-    border: 1px solid var(--border);
-    background: var(--card-bg);
-    color: var(--text);
-    font-size: .85rem;
-    transition: .15s;
-  }
-  .export-btns a:hover {
-    border-color: var(--accent);
-    color: var(--accent);
-  }
+  .export-btn:hover { border-color: var(--accent); color: var(--accent); }
 
-  /* ---- Activity table ---- */
-  .activity-table {
-    width: 100%;
-    border-collapse: collapse;
-    font-size: .82rem;
-  }
-  .activity-table th {
-    text-align: left;
-    padding: 8px 10px;
-    border-bottom: 2px solid var(--border);
-    color: var(--text-secondary);
-    font-weight: 600;
-    white-space: nowrap;
-  }
-  .activity-table td {
-    padding: 7px 10px;
-    border-bottom: 1px solid var(--border);
-    color: var(--text);
-    max-width: 260px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-  .activity-table tr:last-child td { border-bottom: none; }
-  .activity-table code {
-    font-size: .78rem;
-    background: var(--code-bg);
-    padding: 2px 5px;
-    border-radius: 4px;
-  }
-  .action-badge {
-    display: inline-block;
-    padding: 2px 8px;
-    border-radius: 6px;
-    font-size: .75rem;
-    font-weight: 600;
-    background: var(--code-bg);
-    color: var(--text-secondary);
-  }
-
-  /* ---- Dark toggle ---- */
-  .theme-toggle {
-    background: none;
-    border: 1px solid var(--border);
-    border-radius: 8px;
-    padding: 6px 10px;
-    cursor: pointer;
-    font-size: 1rem;
-    color: var(--text);
-    transition: .15s;
-  }
-
-  .overflow-x { overflow-x: auto; }
-
-  /* ---- Activity controls ---- */
   .activity-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 10px;
-    margin-bottom: 14px;
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 10px; margin-bottom: 14px;
   }
   .activity-controls {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-wrap: wrap;
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
   }
-  .activity-controls select,
-  .activity-controls input {
-    padding: 5px 10px;
-    font-size: .8rem;
-    border: 1px solid var(--input-border);
-    border-radius: 6px;
-    background: var(--input-bg);
-    color: var(--text);
+  .activity-controls select, .activity-controls input {
+    padding: 5px 10px; font-size: .8rem; border: 1px solid var(--input-border);
+    border-radius: 6px; background: var(--input-bg); color: var(--text);
   }
   .activity-controls input { width: 110px; }
   .activity-scroll {
-    max-height: 420px;
-    overflow-y: auto;
-    overflow-x: auto;
-    border: 1px solid var(--border);
-    border-radius: 8px;
+    max-height: 380px; overflow-y: auto; overflow-x: auto;
+    border: 1px solid var(--border); border-radius: 10px;
   }
   .activity-scroll::-webkit-scrollbar { width: 6px; }
   .activity-scroll::-webkit-scrollbar-track { background: var(--bg); }
   .activity-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  .activity-table {
+    width: 100%; border-collapse: collapse; font-size: .8rem;
+  }
+  .activity-table th {
+    text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border);
+    color: var(--text-secondary); font-weight: 600; white-space: nowrap;
+    position: sticky; top: 0; background: var(--card-bg); z-index: 1;
+  }
+  .activity-table td {
+    padding: 7px 10px; border-bottom: 1px solid var(--border); color: var(--text);
+    max-width: 240px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .activity-table tr:last-child td { border-bottom: none; }
+  .activity-table code { font-size: .75rem; background: var(--code-bg); padding: 2px 5px; border-radius: 4px; }
+  .action-badge {
+    display: inline-block; padding: 2px 8px; border-radius: 6px;
+    font-size: .72rem; font-weight: 600; background: var(--code-bg); color: var(--text-secondary);
+  }
   .activity-footer {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-top: 10px;
-    font-size: .8rem;
-    color: var(--text-secondary);
+    display: flex; align-items: center; justify-content: space-between;
+    margin-top: 10px; font-size: .78rem; color: var(--text-secondary);
   }
   .page-btn {
-    padding: 4px 12px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: var(--card-bg);
-    color: var(--text);
-    cursor: pointer;
-    font-size: .78rem;
-    transition: .15s;
+    padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--card-bg); color: var(--text); cursor: pointer;
+    font-size: .76rem; transition: .15s;
   }
   .page-btn:hover { border-color: var(--accent); color: var(--accent); }
   .page-btn:disabled { opacity: .4; cursor: default; }
 
-  .admin-footer {
-    margin-top: 32px;
-    text-align: center;
-    font-size: .75rem;
-    color: var(--text-muted);
+  .refresh-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: var(--green);
+    display: inline-block; margin-right: 6px;
+    animation: blink 2s infinite;
   }
+  @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+
+  .admin-footer {
+    margin-top: 32px; text-align: center; font-size: .75rem; color: var(--text-muted);
+  }
+
+  .convo-stats { display: flex; gap: 24px; flex-wrap: wrap; }
+  .convo-stat { text-align: center; }
+  .convo-stat-val { font-size: 1.6rem; font-weight: 800; color: var(--stat-accent); }
+  .convo-stat-lbl { font-size: .75rem; color: var(--text-secondary); }
+
+  .tab-bar { display: flex; gap: 4px; margin-bottom: 16px; }
+  .tab-btn {
+    padding: 6px 16px; border-radius: 8px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-secondary); cursor: pointer;
+    font-size: .8rem; transition: .15s;
+  }
+  .tab-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+  .tab-content { display: none; }
+  .tab-content.active { display: block; }
 </style>
 {% endblock %}
 
 {% block content %}
 <div class="admin-shell">
 
-  <!-- Top bar -->
   <div class="admin-topbar">
-    <h1>CHILI Admin</h1>
+    <h1>
+      <span style="font-size:1.6rem;">&#127798;</span> CHILI Admin
+    </h1>
     <nav>
-      <a href="/">Home</a>
-      <a href="/chat">Chat</a>
-      <a href="/admin/users">Users</a>
-      <a href="/health" target="_blank">/health</a>
-      <a href="/metrics">Metrics</a>
-      <a href="/api/metrics" target="_blank">/api/metrics</a>
-      <button class="theme-toggle" id="theme-toggle" title="Toggle dark mode"></button>
+      <a href="/" class="nav-btn">Home</a>
+      <a href="/chat" class="nav-btn">Chat</a>
+      <a href="/admin/users" class="nav-btn">Users</a>
+      <a href="/voice" class="nav-btn">Voice</a>
+      <a href="/metrics" class="nav-btn">Metrics</a>
+      <a href="/health" target="_blank" class="nav-btn">/health</a>
+      <button class="nav-btn" id="theme-toggle" title="Toggle dark mode"></button>
     </nav>
   </div>
 
-  <!-- Quick Stats -->
-  <div class="stats-row">
-    <div class="stat-card">
-      <div class="stat-value">{{ total_stats.users }}</div>
-      <div class="stat-label">Housemates</div>
+  <div class="alerts-bar" id="alerts-bar"></div>
+
+  <div class="stats-row" id="stats-row"></div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header">
+        <h2>System Health</h2>
+        <span class="refresh-dot"></span>
+      </div>
+      <div class="health-grid" id="health-grid"></div>
     </div>
-    <div class="stat-card">
-      <div class="stat-value">{{ total_stats.conversations }}</div>
-      <div class="stat-label">Conversations</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">{{ total_stats.messages }}</div>
-      <div class="stat-label">Messages</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">{{ counts.chores.pending }}</div>
-      <div class="stat-label">Pending Chores</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-value">{{ total_stats.active_users_7d }}</div>
-      <div class="stat-label">Active (7d)</div>
+    <div class="card">
+      <div class="card-header"><h2>LLM Performance</h2></div>
+      <div class="perf-grid" id="perf-grid"></div>
     </div>
   </div>
 
-  <!-- System Health + LLM Perf -->
-  <div class="two-col">
+  <div class="grid-2">
     <div class="card">
-      <h2>System Health</h2>
-      <div class="status-row">
-        <span class="status-dot {{ 'ok' if db_status.ok else 'err' }}"></span>
-        <span>Database</span>
-        {% if not db_status.ok %}
-          <span style="color:var(--status-error);font-size:.8rem;">{{ db_status.get('error', '') }}</span>
-        {% endif %}
-      </div>
-      <div class="status-row">
-        <span class="status-dot {{ 'ok' if ollama_status.ok else 'err' }}"></span>
-        <span>Ollama</span>
-        {% if ollama_status.ok %}
-          <span style="color:var(--text-muted);font-size:.8rem;">{{ ollama_status.get('models', []) | join(', ') }}</span>
-        {% else %}
-          <span style="color:var(--status-error);font-size:.8rem;">offline</span>
-        {% endif %}
-      </div>
-      <div class="status-row">
-        <span class="status-dot {{ 'ok' if openai_configured else 'err' }}"></span>
-        <span>OpenAI</span>
-        {% if openai_configured %}
-          <span style="color:var(--text-muted);font-size:.8rem;">{{ openai_model }}</span>
-        {% else %}
-          <span style="color:var(--text-muted);font-size:.8rem;">not configured</span>
-        {% endif %}
-      </div>
+      <div class="card-header"><h2>Messages (14 days)</h2></div>
+      <div class="chart-container" style="height:220px;"><canvas id="chart-messages"></canvas></div>
     </div>
-
     <div class="card">
-      <h2>LLM Performance</h2>
-      {% if lat.count > 0 %}
-        <div style="display:flex;gap:24px;">
-          <div>
-            <div style="font-size:1.5rem;font-weight:700;color:var(--stat-accent);">{{ lat.avg_ms }}ms</div>
-            <div style="font-size:.8rem;color:var(--text-secondary);">Avg Latency</div>
-          </div>
-          <div>
-            <div style="font-size:1.5rem;font-weight:700;color:var(--stat-accent);">{{ lat.p95_ms }}ms</div>
-            <div style="font-size:.8rem;color:var(--text-secondary);">P95 Latency</div>
-          </div>
-          <div>
-            <div style="font-size:1.5rem;font-weight:700;color:var(--text);">{{ lat.count }}</div>
-            <div style="font-size:.8rem;color:var(--text-secondary);">Requests</div>
-          </div>
-        </div>
-      {% else %}
-        <p style="color:var(--text-muted);font-size:.9rem;">No latency data yet.</p>
-      {% endif %}
+      <div class="card-header"><h2>Hourly Activity</h2></div>
+      <div class="chart-container" style="height:220px;"><canvas id="chart-hourly"></canvas></div>
     </div>
   </div>
 
-  <!-- Model Usage + RAG -->
-  <div class="two-col">
+  <div class="grid-3">
     <div class="card">
-      <h2>Model Usage</h2>
-      {% if model_stats %}
-        {% for model, count in model_stats.items() %}
-          <div class="model-bar-row">
-            <div class="model-bar-label">{{ model }}</div>
-            <div class="model-bar-track">
-              <div class="model-bar-fill" style="width:{{ (count / total_model_msgs * 100) | int }}%"></div>
-            </div>
-            <div class="model-bar-count">{{ count }}</div>
-          </div>
-        {% endfor %}
-      {% else %}
-        <p style="color:var(--text-muted);font-size:.9rem;">No messages yet.</p>
-      {% endif %}
+      <div class="card-header"><h2>Model Usage</h2></div>
+      <div class="chart-container" style="height:200px;"><canvas id="chart-models"></canvas></div>
     </div>
-
     <div class="card">
-      <h2>RAG Knowledge Base</h2>
-      {% if rag.available %}
-        <div class="rag-info">Chunks indexed: <strong>{{ rag.chunk_count }}</strong></div>
-        <div class="rag-info">Source files: <span>{{ rag.source_files | join(', ') or 'none' }}</span></div>
-        <div class="rag-info">Docs on disk: <span>{{ rag.docs_on_disk | join(', ') or 'none' }}</span></div>
-      {% else %}
-        <div class="rag-info" style="color:var(--text-muted);">{{ rag.reason }}</div>
-      {% endif %}
-      <button class="rag-btn" id="rag-ingest-btn" onclick="triggerIngest()">Re-ingest Documents</button>
-      <span id="rag-status" style="margin-left:10px;font-size:.8rem;color:var(--text-secondary);"></span>
+      <div class="card-header"><h2>Feature Usage</h2></div>
+      <div id="feature-list"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Conversations</h2></div>
+      <div class="convo-stats" id="convo-stats"></div>
     </div>
   </div>
 
-  <!-- Data + Exports -->
-  <div class="two-col">
+  <div class="grid-2">
     <div class="card">
-      <h2>Data Summary</h2>
-      <div style="font-size:.9rem;">
-        <div style="margin-bottom:6px;">Chores: <strong>{{ counts.chores.total }}</strong> total, <strong>{{ counts.chores.pending }}</strong> pending, <strong>{{ counts.chores.done }}</strong> done</div>
-        <div>Birthdays: <strong>{{ counts.birthdays.total }}</strong> total</div>
-      </div>
+      <div class="card-header"><h2>Top Users</h2></div>
+      <div id="leaderboard"></div>
     </div>
-
     <div class="card">
-      <h2>Exports</h2>
-      <div class="export-btns">
-        <a href="/export/chores.csv" download>Chores CSV</a>
-        <a href="/export/birthdays.csv" download>Birthdays CSV</a>
+      <div class="card-header"><h2>Chore Completion by User</h2></div>
+      <div id="chore-rates"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><h2>Response Time Trend</h2></div>
+      <div class="chart-container" style="height:200px;"><canvas id="chart-latency"></canvas></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>RAG Knowledge Base</h2></div>
+      <div id="rag-section"></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-header"><h2>Data Summary</h2></div>
+      <div id="data-summary"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Exports</h2></div>
+      <div class="export-grid">
+        <a href="/export/chores.csv" download class="export-btn">&#128196; Chores CSV</a>
+        <a href="/export/birthdays.csv" download class="export-btn">&#127874; Birthdays CSV</a>
       </div>
     </div>
   </div>
 
-  <!-- Recent Activity -->
   <div class="card">
     <div class="activity-header">
       <h2 style="margin-bottom:0;">Recent Activity</h2>
       <div class="activity-controls">
         <select id="action-filter" onchange="filterActivity()">
           <option value="">All actions</option>
-          {% for a in action_types %}
-            <option value="{{ a }}">{{ a }}</option>
-          {% endfor %}
+          {% for a in action_types %}<option value="{{ a }}">{{ a }}</option>{% endfor %}
         </select>
         <input id="ip-search" type="text" placeholder="Filter IP..." oninput="filterActivity()" />
         <select id="page-size" onchange="filterActivity()">
@@ -487,21 +359,13 @@
           <option value="50">50</option>
           <option value="100">100</option>
         </select>
-        <span style="font-size:.78rem;color:var(--text-muted);">per page</span>
+        <span style="font-size:.76rem;color:var(--text-muted);">per page</span>
       </div>
     </div>
     {% if log_rows %}
     <div class="activity-scroll" id="activity-scroll">
       <table class="activity-table" id="activity-table">
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>IP</th>
-            <th>Action</th>
-            <th>Trace ID</th>
-            <th>Message</th>
-          </tr>
-        </thead>
+        <thead><tr><th>Time</th><th>IP</th><th>Action</th><th>Trace ID</th><th>Message</th></tr></thead>
         <tbody id="activity-body">
           {% for row in log_rows %}
           <tr data-action="{{ row.action }}" data-ip="{{ row.ip }}">
@@ -517,7 +381,7 @@
     </div>
     <div class="activity-footer" id="activity-footer"></div>
     {% else %}
-      <p style="color:var(--text-muted);font-size:.9rem;">No activity logged yet.</p>
+    <p style="color:var(--text-muted);font-size:.88rem;">No activity logged yet.</p>
     {% endif %}
   </div>
 
@@ -525,91 +389,265 @@
 </div>
 
 <script>
-(function() {
-  var btn = document.getElementById('theme-toggle');
-  function applyTheme() {
-    var t = document.documentElement.getAttribute('data-theme');
-    btn.textContent = t === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
-  }
-  applyTheme();
-  btn.addEventListener('click', function() {
-    var current = document.documentElement.getAttribute('data-theme');
-    var next = current === 'dark' ? 'light' : 'dark';
-    document.documentElement.setAttribute('data-theme', next);
-    localStorage.setItem('chili-theme', next);
-    applyTheme();
+(function(){
+  var btn=document.getElementById('theme-toggle');
+  function apply(){var t=document.documentElement.getAttribute('data-theme');btn.textContent=t==='dark'?'\u2600\uFE0F':'\uD83C\uDF19';}
+  apply();
+  btn.addEventListener('click',function(){
+    var c=document.documentElement.getAttribute('data-theme');
+    var n=c==='dark'?'light':'dark';
+    document.documentElement.setAttribute('data-theme',n);
+    localStorage.setItem('chili-theme',n);
+    apply(); initCharts();
   });
 })();
 
-var activityPage = 0;
+var D = JSON.parse({{ dashboard_json | tojson }});
+var chartInstances = {};
 
-function filterActivity() {
-  activityPage = 0;
-  renderActivity();
+function isDark(){ return document.documentElement.getAttribute('data-theme')==='dark'; }
+function gridColor(){ return isDark()?'rgba(255,255,255,.08)':'rgba(0,0,0,.06)'; }
+function textColor(){ return isDark()?'#9ca3af':'#6b7280'; }
+
+function renderAlerts(){
+  var el=document.getElementById('alerts-bar'); if(!el) return;
+  var alerts=D.alerts||[];
+  el.innerHTML=alerts.map(function(a){
+    return '<div class="alert-item '+a.level+'">'+
+      (a.level==='error'?'&#9888;&#65039;':a.level==='warning'?'&#9888;&#65039;':a.level==='ok'?'&#9989;':'&#8505;&#65039;')+
+      ' '+a.text+'</div>';
+  }).join('');
 }
 
-function renderActivity() {
-  var actionFilter = document.getElementById('action-filter').value;
-  var ipSearch = document.getElementById('ip-search').value.toLowerCase();
-  var pageSize = parseInt(document.getElementById('page-size').value, 10);
-  var rows = document.querySelectorAll('#activity-body tr');
-  var matched = [];
-
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    var action = r.getAttribute('data-action') || '';
-    var ip = (r.getAttribute('data-ip') || '').toLowerCase();
-    var show = true;
-    if (actionFilter && action !== actionFilter) show = false;
-    if (ipSearch && ip.indexOf(ipSearch) === -1) show = false;
-    if (show) matched.push(r);
-    r.style.display = 'none';
-  }
-
-  var totalPages = Math.max(1, Math.ceil(matched.length / pageSize));
-  if (activityPage >= totalPages) activityPage = totalPages - 1;
-  var start = activityPage * pageSize;
-  var end = Math.min(start + pageSize, matched.length);
-
-  for (var j = start; j < end; j++) {
-    matched[j].style.display = '';
-  }
-
-  var footer = document.getElementById('activity-footer');
-  if (footer) {
-    footer.innerHTML =
-      '<span>Showing ' + (matched.length ? start + 1 : 0) + '\u2013' + end + ' of ' + matched.length + '</span>' +
-      '<span>' +
-        '<button class="page-btn" onclick="activityPage--;renderActivity()" ' + (activityPage <= 0 ? 'disabled' : '') + '>\u2190 Prev</button> ' +
-        '<span style="margin:0 8px;">Page ' + (activityPage + 1) + ' / ' + totalPages + '</span>' +
-        '<button class="page-btn" onclick="activityPage++;renderActivity()" ' + (activityPage >= totalPages - 1 ? 'disabled' : '') + '>Next \u2192</button>' +
-      '</span>';
-  }
+function renderStats(){
+  var el=document.getElementById('stats-row'); if(!el) return;
+  var t=D.totals||{}, c=D.counts||{};
+  var items=[
+    {v:t.users||0, l:'Housemates', icon:'&#128101;'},
+    {v:t.conversations||0, l:'Conversations', icon:'&#128172;'},
+    {v:t.messages||0, l:'Messages', icon:'&#128233;'},
+    {v:(c.chores||{}).pending||0, l:'Pending Chores', icon:'&#128203;'},
+    {v:t.active_users_7d||0, l:'Active (7d)', icon:'&#128200;'},
+    {v:(c.birthdays||{}).total||0, l:'Birthdays', icon:'&#127874;'},
+  ];
+  el.innerHTML=items.map(function(s){
+    return '<div class="stat-card"><span class="stat-icon">'+s.icon+'</span>'+
+      '<div class="stat-value">'+s.v+'</div><div class="stat-label">'+s.l+'</div></div>';
+  }).join('');
 }
 
-if (document.getElementById('activity-body')) {
-  renderActivity();
+function renderHealth(){
+  var el=document.getElementById('health-grid'); if(!el) return;
+  var h=D.health||{};
+  var items=[
+    {ok:h.db&&h.db.ok, name:'Database', sub:h.db&&h.db.ok?'Connected':'Error'},
+    {ok:h.ollama&&h.ollama.ok, name:'Ollama', sub:h.ollama&&h.ollama.ok?(h.ollama.models||[]).join(', '):'Offline'},
+    {ok:h.openai_configured, name:'OpenAI/Groq', sub:h.openai_configured?h.openai_model:'Not configured'},
+  ];
+  el.innerHTML=items.map(function(i){
+    return '<div class="health-item"><div class="health-dot '+(i.ok?'ok':'err')+'"></div>'+
+      '<div><div class="health-label">'+i.name+'</div><div class="health-sub">'+i.sub+'</div></div></div>';
+  }).join('');
 }
 
-function triggerIngest() {
-  var btn = document.getElementById('rag-ingest-btn');
-  var status = document.getElementById('rag-status');
-  btn.disabled = true;
-  status.textContent = 'Ingesting...';
-  fetch('/admin/rag/ingest', { method: 'POST' })
-    .then(function(r) { return r.json(); })
-    .then(function(d) {
-      if (d.ok) {
-        status.textContent = 'Done: ' + d.files + ' files, ' + d.chunks + ' chunks';
-      } else {
-        status.textContent = 'Error: ' + (d.error || 'unknown');
-      }
-      btn.disabled = false;
-    })
-    .catch(function(e) {
-      status.textContent = 'Network error';
-      btn.disabled = false;
-    });
+function renderPerf(){
+  var el=document.getElementById('perf-grid'); if(!el) return;
+  var lat=D.latency||{};
+  if(!lat.count){
+    el.innerHTML='<span style="color:var(--text-muted);font-size:.88rem;">No latency data yet.</span>';
+    return;
+  }
+  el.innerHTML=[
+    {v:lat.avg_ms+'ms', l:'Avg Latency'},
+    {v:lat.p95_ms+'ms', l:'P95 Latency'},
+    {v:lat.count, l:'Requests'},
+  ].map(function(p){
+    return '<div class="perf-item"><div class="perf-value">'+p.v+'</div><div class="perf-label">'+p.l+'</div></div>';
+  }).join('');
+}
+
+function renderFeatures(){
+  var el=document.getElementById('feature-list'); if(!el) return;
+  var f=D.features||{};
+  var icons={general_chat:'&#128172;',web_search:'&#128269;',wellness_support:'&#128154;',crisis_support:'&#127973;',vision:'&#128064;',intercom_broadcast:'&#128226;',tool_actions:'&#128295;'};
+  var labels={general_chat:'General Chat',web_search:'Web Search',wellness_support:'Wellness',crisis_support:'Crisis',vision:'Vision',intercom_broadcast:'Intercom',tool_actions:'Tool Actions'};
+  el.innerHTML=Object.keys(f).map(function(k){
+    return '<div class="feature-row"><span>'+(icons[k]||'')+' '+(labels[k]||k)+'</span><span class="feature-count">'+f[k]+'</span></div>';
+  }).join('');
+}
+
+function renderConvoStats(){
+  var el=document.getElementById('convo-stats'); if(!el) return;
+  var cs=D.conversation_stats||{};
+  el.innerHTML=[
+    {v:cs.total||0, l:'Total'},
+    {v:cs.avg_messages||0, l:'Avg Messages'},
+    {v:cs.longest||0, l:'Longest'},
+  ].map(function(s){
+    return '<div class="convo-stat"><div class="convo-stat-val">'+s.v+'</div><div class="convo-stat-lbl">'+s.l+'</div></div>';
+  }).join('');
+}
+
+function renderLeaderboard(){
+  var el=document.getElementById('leaderboard'); if(!el) return;
+  var users=D.top_users||[];
+  if(!users.length){ el.innerHTML='<span style="color:var(--text-muted);font-size:.85rem;">No data yet.</span>'; return; }
+  el.innerHTML=users.map(function(u,i){
+    var cls=i===0?'gold':i===1?'silver':i===2?'bronze':'other';
+    return '<div class="leaderboard-row"><span class="lb-rank '+cls+'">'+(i+1)+'</span>'+
+      '<span class="lb-name">'+u.name+'</span><span class="lb-count">'+u.messages+'</span></div>';
+  }).join('');
+}
+
+function renderChoreRates(){
+  var el=document.getElementById('chore-rates'); if(!el) return;
+  var rates=D.per_user_chores||[];
+  if(!rates.length){ el.innerHTML='<span style="color:var(--text-muted);font-size:.85rem;">No assigned chores yet.</span>'; return; }
+  el.innerHTML=rates.map(function(r){
+    return '<div class="chore-user-row"><span style="min-width:80px;">'+r.name+'</span>'+
+      '<div class="chore-progress-track"><div class="chore-progress-fill" style="width:'+r.rate+'%"></div></div>'+
+      '<span class="chore-rate">'+r.rate+'%</span><span style="color:var(--text-muted);font-size:.75rem;">'+r.done+'/'+r.assigned+'</span></div>';
+  }).join('');
+}
+
+function renderRAG(){
+  var el=document.getElementById('rag-section'); if(!el) return;
+  var rag=D.rag||{};
+  var html='';
+  if(rag.available){
+    html+='<div class="rag-info">Chunks: <strong>'+rag.chunk_count+'</strong></div>';
+    html+='<div class="rag-info">Sources: <span>'+(rag.source_files||[]).join(', ')||'none'+'</span></div>';
+    html+='<div class="rag-info">Docs: <span>'+(rag.docs_on_disk||[]).join(', ')||'none'+'</span></div>';
+  } else {
+    html+='<div class="rag-info" style="color:var(--text-muted);">'+rag.reason+'</div>';
+  }
+  html+='<div style="margin-top:10px;"><button class="rag-btn" id="rag-ingest-btn" onclick="triggerIngest()">Re-ingest</button>';
+  html+=' <span id="rag-status" style="font-size:.8rem;color:var(--text-secondary);"></span></div>';
+  el.innerHTML=html;
+}
+
+function renderDataSummary(){
+  var el=document.getElementById('data-summary'); if(!el) return;
+  var c=D.counts||{};
+  el.innerHTML='<div style="font-size:.88rem;">'+
+    '<div style="margin-bottom:6px;">Chores: <strong>'+(c.chores||{}).total+'</strong> total, <strong>'+(c.chores||{}).pending+'</strong> pending, <strong>'+(c.chores||{}).done+'</strong> done</div>'+
+    '<div>Birthdays: <strong>'+(c.birthdays||{}).total+'</strong></div></div>';
+}
+
+function initCharts(){
+  var gc=gridColor(), tc=textColor();
+  var chartColors=['#3b82f6','#8b5cf6','#ec4899','#f59e0b','#10b981','#06b6d4','#f43f5e','#84cc16'];
+
+  if(chartInstances.messages) chartInstances.messages.destroy();
+  var mpd=D.messages_per_day||[];
+  chartInstances.messages=new Chart(document.getElementById('chart-messages'),{
+    type:'line',
+    data:{labels:mpd.map(function(d){return d.date.slice(5);}),datasets:[{
+      label:'Messages',data:mpd.map(function(d){return d.count;}),
+      borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.15)',fill:true,tension:.4,pointRadius:3,
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:tc,font:{size:10}},grid:{color:gc}},y:{ticks:{color:tc,font:{size:10}},grid:{color:gc},beginAtZero:true}}}
+  });
+
+  if(chartInstances.hourly) chartInstances.hourly.destroy();
+  var ha=D.hourly_activity||[];
+  chartInstances.hourly=new Chart(document.getElementById('chart-hourly'),{
+    type:'bar',
+    data:{labels:ha.map(function(h){return h.hour+'h';}),datasets:[{
+      label:'Messages',data:ha.map(function(h){return h.count;}),
+      backgroundColor:ha.map(function(h){
+        var max=Math.max.apply(null,ha.map(function(x){return x.count;}))||1;
+        var intensity=Math.max(.15,h.count/max);
+        return 'rgba(59,130,246,'+intensity+')';
+      }),borderRadius:4,
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:tc,font:{size:9}},grid:{display:false}},y:{ticks:{color:tc,font:{size:10}},grid:{color:gc},beginAtZero:true}}}
+  });
+
+  if(chartInstances.models) chartInstances.models.destroy();
+  var ms=D.model_stats||{};
+  var mLabels=Object.keys(ms), mData=Object.values(ms);
+  chartInstances.models=new Chart(document.getElementById('chart-models'),{
+    type:'doughnut',
+    data:{labels:mLabels,datasets:[{data:mData,backgroundColor:chartColors.slice(0,mLabels.length),borderWidth:0}]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'right',labels:{color:tc,font:{size:10},boxWidth:12,padding:8}}}}
+  });
+
+  if(chartInstances.latency) chartInstances.latency.destroy();
+  var rt=D.response_time_trend||[];
+  chartInstances.latency=new Chart(document.getElementById('chart-latency'),{
+    type:'line',
+    data:{labels:rt.map(function(d){return d.date.slice(5);}),datasets:[{
+      label:'Avg (ms)',data:rt.map(function(d){return d.avg_ms;}),
+      borderColor:'#8b5cf6',backgroundColor:'rgba(139,92,246,.15)',fill:true,tension:.4,pointRadius:3,
+    }]},
+    options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+      scales:{x:{ticks:{color:tc,font:{size:10}},grid:{color:gc}},y:{ticks:{color:tc,font:{size:10}},grid:{color:gc},beginAtZero:true}}}
+  });
+}
+
+renderAlerts();
+renderStats();
+renderHealth();
+renderPerf();
+renderFeatures();
+renderConvoStats();
+renderLeaderboard();
+renderChoreRates();
+renderRAG();
+renderDataSummary();
+initCharts();
+
+setInterval(function(){
+  fetch('/api/admin/dashboard').then(function(r){return r.json();}).then(function(data){
+    D=data; renderAlerts(); renderStats(); renderHealth(); renderPerf();
+    renderFeatures(); renderConvoStats(); renderLeaderboard(); renderChoreRates();
+    renderRAG(); renderDataSummary(); initCharts();
+  }).catch(function(){});
+}, 30000);
+
+var activityPage=0;
+function filterActivity(){activityPage=0;renderActivity();}
+function renderActivity(){
+  var af=document.getElementById('action-filter').value;
+  var ip=document.getElementById('ip-search').value.toLowerCase();
+  var ps=parseInt(document.getElementById('page-size').value,10);
+  var rows=document.querySelectorAll('#activity-body tr');
+  var matched=[];
+  for(var i=0;i<rows.length;i++){
+    var r=rows[i];
+    var a=r.getAttribute('data-action')||'';
+    var rip=(r.getAttribute('data-ip')||'').toLowerCase();
+    var show=true;
+    if(af&&a!==af)show=false;
+    if(ip&&rip.indexOf(ip)===-1)show=false;
+    if(show)matched.push(r);
+    r.style.display='none';
+  }
+  var tp=Math.max(1,Math.ceil(matched.length/ps));
+  if(activityPage>=tp)activityPage=tp-1;
+  var start=activityPage*ps, end=Math.min(start+ps,matched.length);
+  for(var j=start;j<end;j++)matched[j].style.display='';
+  var footer=document.getElementById('activity-footer');
+  if(footer){
+    footer.innerHTML='<span>Showing '+(matched.length?start+1:0)+'\u2013'+end+' of '+matched.length+'</span>'+
+      '<span><button class="page-btn" onclick="activityPage--;renderActivity()" '+(activityPage<=0?'disabled':'')+'>Prev</button> '+
+      '<span style="margin:0 8px;">Page '+(activityPage+1)+'/'+tp+'</span>'+
+      '<button class="page-btn" onclick="activityPage++;renderActivity()" '+(activityPage>=tp-1?'disabled':'')+'>Next</button></span>';
+  }
+}
+if(document.getElementById('activity-body'))renderActivity();
+
+function triggerIngest(){
+  var btn=document.getElementById('rag-ingest-btn');
+  var st=document.getElementById('rag-status');
+  btn.disabled=true; st.textContent='Ingesting...';
+  fetch('/admin/rag/ingest',{method:'POST'}).then(function(r){return r.json();}).then(function(d){
+    st.textContent=d.ok?'Done: '+d.files+' files, '+d.chunks+' chunks':'Error: '+(d.error||'unknown');
+    btn.disabled=false;
+  }).catch(function(){st.textContent='Network error';btn.disabled=false;});
 }
 </script>
 {% endblock %}

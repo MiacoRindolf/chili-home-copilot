@@ -5,12 +5,16 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import csv
 import io
+import json
 
 from ..deps import get_db, require_paired
-from ..models import Chore, Birthday, ChatLog, User, Device, HousemateProfile
+from ..models import Chore, Birthday, ChatLog, User, Device, HousemateProfile, UserMemory
 from ..health import check_db, check_ollama
 from ..metrics import (
     latency_stats, get_counts, model_stats, total_stats, user_stats, rag_stats,
+    admin_dashboard_json, messages_per_day, hourly_activity, feature_usage,
+    per_user_chore_stats, system_alerts, response_time_trend, top_users,
+    conversation_stats, action_type_stats, latency_history,
 )
 from .. import openai_client
 from ..pairing import generate_pair_code
@@ -42,15 +46,7 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
         return redirect
 
     db: Session = ctx["db"]
-    db_status = check_db(db)
-    ollama_status = check_ollama()
-    counts = get_counts(db)
-    lat = latency_stats()
-    ok = bool(db_status.get("ok") and ollama_status.get("ok"))
-    ms = model_stats(db)
-    ts = total_stats(db)
-    rs = rag_stats()
-    openai_configured = openai_client.is_configured()
+    dashboard = admin_dashboard_json(db)
 
     logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(200).all()
     log_rows = [
@@ -63,26 +59,51 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
         }
         for l in logs
     ]
-
-    total_model_msgs = sum(ms.values()) if ms else 1
     action_types = sorted(set(r["action"] for r in log_rows))
 
     return templates.TemplateResponse(request, "admin.html", {
         "user_name": ctx["user_name"],
-        "ok": ok,
-        "db_status": db_status,
-        "ollama_status": ollama_status,
-        "counts": counts,
-        "lat": lat,
-        "model_stats": ms,
-        "total_model_msgs": total_model_msgs,
-        "total_stats": ts,
-        "rag": rs,
-        "openai_configured": openai_configured,
-        "openai_model": openai_client.OPENAI_MODEL,
+        "dashboard_json": json.dumps(dashboard),
         "log_rows": log_rows,
         "action_types": action_types,
     })
+
+
+@router.get("/api/admin/dashboard")
+def api_admin_dashboard(ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+    return JSONResponse(admin_dashboard_json(db))
+
+
+@router.get("/api/admin/alerts")
+def api_admin_alerts(ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+    return JSONResponse(system_alerts(db))
+
+
+@router.get("/api/admin/logs")
+def api_admin_logs(ctx=Depends(require_paired), limit: int = 200):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+    logs = db.query(ChatLog).order_by(ChatLog.id.desc()).limit(min(limit, 500)).all()
+    return JSONResponse([
+        {
+            "time": l.created_at.strftime("%Y-%m-%d %H:%M:%S") if l.created_at else "—",
+            "ip": l.client_ip,
+            "action": l.action_type,
+            "trace_id": l.trace_id,
+            "message": (l.message[:80] + "...") if len(l.message) > 80 else l.message,
+        }
+        for l in logs
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +165,34 @@ def admin_delete_user(user_id: int, ctx=Depends(require_paired)):
 
 
 # ---------------------------------------------------------------------------
+# User Memories API
+# ---------------------------------------------------------------------------
+
+@router.get("/api/admin/user/{user_id}/memories")
+def api_user_memories(user_id: int, ctx=Depends(require_paired)):
+    redirect = _guard(ctx)
+    if redirect:
+        return redirect
+    db: Session = ctx["db"]
+    memories = (
+        db.query(UserMemory)
+        .filter(UserMemory.user_id == user_id, UserMemory.superseded == False)
+        .order_by(UserMemory.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return JSONResponse([
+        {
+            "id": m.id,
+            "category": m.category,
+            "content": m.content,
+            "created_at": m.created_at.strftime("%Y-%m-%d %H:%M") if m.created_at else "",
+        }
+        for m in memories
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Pairing
 # ---------------------------------------------------------------------------
 
@@ -199,9 +248,15 @@ def export_chores_csv(db: Session = Depends(get_db)):
     chores = db.query(Chore).order_by(Chore.id.asc()).all()
     output = io.StringIO()
     writer = csv.writer(output)
-    writer.writerow(["id", "title", "done"])
+    writer.writerow(["id", "title", "done", "priority", "due_date", "recurrence", "assigned_to", "created_at", "completed_at"])
     for c in chores:
-        writer.writerow([c.id, c.title, c.done])
+        writer.writerow([
+            c.id, c.title, c.done, c.priority or "", 
+            c.due_date.isoformat() if c.due_date else "",
+            c.recurrence or "", c.assigned_to or "",
+            c.created_at.isoformat() if c.created_at else "",
+            c.completed_at.isoformat() if c.completed_at else "",
+        ])
     return Response(
         content=output.getvalue(),
         media_type="text/csv",

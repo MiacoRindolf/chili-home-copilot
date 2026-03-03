@@ -1,7 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime, date, timedelta
 from sqlalchemy.orm import Session
 from sqlalchemy import func, distinct
-from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile
+from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile, ActivityLog
 
 # In-memory latency tracking (resets on server restart, keeps last 500)
 _LATENCIES_MS: list[tuple[float, int]] = []  # (timestamp, ms)
@@ -244,6 +244,85 @@ def top_users(db: Session, limit: int = 5) -> list[dict]:
                 name = user.name
         result.append({"name": name, "messages": cnt})
     return result
+
+
+def per_user_chore_stats(db: Session) -> list[dict]:
+    """Chore completion stats per user (assigned chores)."""
+    users = db.query(User).all()
+    results = []
+    for u in users:
+        assigned = db.query(Chore).filter(Chore.assigned_to == u.id).count()
+        done = db.query(Chore).filter(Chore.assigned_to == u.id, Chore.done == True).count()
+        rate = round((done / assigned) * 100, 1) if assigned > 0 else 0
+        results.append({
+            "name": u.name, "assigned": assigned, "done": done,
+            "rate": rate,
+        })
+    return results
+
+
+def system_alerts(db: Session) -> list[dict]:
+    """Generate system-level alerts for admin."""
+    alerts = []
+
+    overdue = db.query(Chore).filter(
+        Chore.done == False, Chore.due_date != None,
+        Chore.due_date < date.today(),
+    ).count()
+    if overdue:
+        alerts.append({"level": "warning", "text": f"{overdue} chore{'s' if overdue != 1 else ''} overdue"})
+
+    from .health import check_ollama
+    ollama = check_ollama()
+    if not ollama.get("ok"):
+        alerts.append({"level": "error", "text": "Ollama is offline"})
+
+    from . import openai_client
+    if not openai_client.is_configured():
+        alerts.append({"level": "info", "text": "No OpenAI/Groq API key configured"})
+
+    rag = rag_stats()
+    if not rag.get("available"):
+        alerts.append({"level": "info", "text": "RAG knowledge base not ingested"})
+
+    lat = latency_stats()
+    if lat.get("p95_ms") and lat["p95_ms"] > 5000:
+        alerts.append({"level": "warning", "text": f"High P95 latency: {lat['p95_ms']}ms"})
+
+    if not alerts:
+        alerts.append({"level": "ok", "text": "All systems operational"})
+
+    return alerts
+
+
+def admin_dashboard_json(db: Session) -> dict:
+    """Full admin dashboard data as JSON for AJAX rendering."""
+    from .health import check_db, check_ollama
+    from . import openai_client
+
+    return {
+        "health": {
+            "db": check_db(db),
+            "ollama": check_ollama(),
+            "openai_configured": openai_client.is_configured(),
+            "openai_model": openai_client.OPENAI_MODEL,
+        },
+        "totals": total_stats(db),
+        "counts": get_counts(db),
+        "latency": latency_stats(),
+        "latency_history": latency_history(),
+        "model_stats": model_stats(db),
+        "action_types": action_type_stats(db),
+        "features": feature_usage(db),
+        "messages_per_day": messages_per_day(db),
+        "hourly_activity": hourly_activity(db),
+        "response_time_trend": response_time_trend(db),
+        "conversation_stats": conversation_stats(db),
+        "top_users": top_users(db),
+        "per_user_chores": per_user_chore_stats(db),
+        "rag": rag_stats(),
+        "alerts": system_alerts(db),
+    }
 
 
 def rag_stats() -> dict:
