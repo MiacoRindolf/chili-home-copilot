@@ -90,14 +90,14 @@ class TestNLUWebSearch:
 class TestSearch:
     @patch("app.web_search.DDGS")
     def test_returns_results(self, mock_ddgs_cls):
-        mock_ddgs = MagicMock()
-        mock_ddgs.__enter__ = MagicMock(return_value=mock_ddgs)
-        mock_ddgs.__exit__ = MagicMock(return_value=False)
-        mock_ddgs.text.return_value = [
+        mock_instance = MagicMock()
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.__exit__ = MagicMock(return_value=False)
+        mock_instance.text.return_value = [
             {"title": "Result 1", "href": "https://example.com/1", "body": "Description 1"},
             {"title": "Result 2", "href": "https://example.com/2", "body": "Description 2"},
         ]
-        mock_ddgs_cls.return_value = mock_ddgs
+        mock_ddgs_cls.return_value = mock_instance
 
         results = search("test query")
         assert len(results) == 2
@@ -106,7 +106,11 @@ class TestSearch:
 
     @patch("app.web_search.DDGS")
     def test_handles_error(self, mock_ddgs_cls):
-        mock_ddgs_cls.side_effect = Exception("network error")
+        mock_instance = MagicMock()
+        mock_instance.__enter__ = MagicMock(return_value=mock_instance)
+        mock_instance.__exit__ = MagicMock(return_value=False)
+        mock_instance.text.side_effect = Exception("network error")
+        mock_ddgs_cls.return_value = mock_instance
 
         results = search("test query")
         assert results == []

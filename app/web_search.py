@@ -4,7 +4,7 @@ Provides search() for fetching results and format_results() for
 producing a context block the LLM can use to compose an answer.
 """
 import re
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 from .logger import log_info
 
