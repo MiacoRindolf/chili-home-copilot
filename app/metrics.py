@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, distinct, cast, Date
+from sqlalchemy import func, distinct
 from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile
 
 # In-memory latency tracking (resets on server restart, keeps last 500)
@@ -130,17 +130,15 @@ def user_stats(db: Session) -> list[dict]:
 def messages_per_day(db: Session, days: int = 14) -> list[dict]:
     """Daily message counts for the last N days."""
     cutoff = datetime.utcnow() - timedelta(days=days)
+    day_col = func.strftime("%Y-%m-%d", ChatMessage.created_at).label("day")
     rows = (
-        db.query(
-            cast(ChatMessage.created_at, Date).label("day"),
-            func.count(ChatMessage.id),
-        )
+        db.query(day_col, func.count(ChatMessage.id))
         .filter(ChatMessage.created_at >= cutoff)
         .group_by("day")
         .order_by("day")
         .all()
     )
-    return [{"date": d.isoformat() if d else "unknown", "count": c} for d, c in rows]
+    return [{"date": d or "unknown", "count": c} for d, c in rows]
 
 
 def hourly_activity(db: Session, days: int = 7) -> list[dict]:
