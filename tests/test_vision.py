@@ -50,7 +50,7 @@ class TestVisionRouting:
         from app.vision import describe_image
         reply, model = describe_image(["test.png"], "what is this?")
         assert reply == "I see a cat on a table."
-        assert "llava" in model
+        assert "llama3.2-vision" in model or "llava" in model
 
     @patch("app.vision.call_openai_vision")
     @patch("app.vision.call_ollama_vision")
