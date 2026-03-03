@@ -215,6 +215,10 @@
       background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 4px; font-weight: 600;
     }
     [data-theme="dark"] .crisis-badge { background: #7f1d1d; color: #fca5a5; }
+    .search-badge {
+      background: #dbeafe; color: #1e40af; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+    }
+    [data-theme="dark"] .search-badge { background: #1e3a5f; color: #93c5fd; }
     .msg.assistant.crisis-msg {
       border-left: 4px solid #ef4444;
     }
@@ -768,6 +772,8 @@
           footerHTML += '<span class="crisis-badge">crisis support</span>';
         } else if (meta.action_type === 'wellness_support') {
           footerHTML += '<span class="wellness-badge">wellness support</span>';
+        } else if (meta.action_type === 'web_search') {
+          footerHTML += '<span class="search-badge">web search</span>';
         }
         footerHTML += '<button class="copy-btn" title="Copy message">Copy</button>';
         if (timeStr) footerHTML += '<span class="ts">' + esc(timeStr) + '</span>';

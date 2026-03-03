@@ -32,6 +32,10 @@ class IntercomBroadcastData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     text: str = Field(min_length=1)
 
+class WebSearchData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    query: str = Field(min_length=1)
+
 class UnknownData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1)
@@ -79,6 +83,10 @@ class IntercomBroadcastPlan(BasePlan):
     type: Literal["intercom_broadcast"]
     data: IntercomBroadcastData
 
+class WebSearchPlan(BasePlan):
+    type: Literal["web_search"]
+    data: WebSearchData
+
 class UnknownPlan(BasePlan):
     type: Literal["unknown"]
     data: UnknownData
@@ -93,6 +101,7 @@ Plan = Union[
     AnswerFromDocsPlan,
     PairDevicePlan,
     IntercomBroadcastPlan,
+    WebSearchPlan,
     UnknownPlan,
 ]
 
@@ -109,7 +118,7 @@ def validate_plan(obj: dict) -> Optional[dict]:
         try:
             for cls in (AddChorePlan, ListChoresPlan, ListChoresPendingPlan, MarkChoreDonePlan,
                         AddBirthdayPlan, ListBirthdaysPlan, AnswerFromDocsPlan, PairDevicePlan,
-                        IntercomBroadcastPlan, UnknownPlan):
+                        IntercomBroadcastPlan, WebSearchPlan, UnknownPlan):
                 try:
                     plan = cls.model_validate(obj)
                     break

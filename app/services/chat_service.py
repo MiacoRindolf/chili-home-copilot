@@ -11,6 +11,7 @@ from ..chili_nlu import parse_message as nlu_parse
 from ..logger import log_info
 from .. import rag as rag_module
 from .. import personality as personality_module
+from .. import web_search as web_search_module
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -122,6 +123,19 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
             )
         else:
             llm_reply = "What would you like to announce? Try: `announce dinner is ready`"
+
+    elif action_type == "web_search":
+        query = action_data.get("query", "")
+        if query:
+            results = web_search_module.search(query)
+            executed = True
+            if results:
+                formatted = web_search_module.format_results(results)
+                llm_reply = f"Here's what I found for **\"{query}\"**:\n\n{formatted}"
+            else:
+                llm_reply = f"I searched for \"{query}\" but couldn't find any results. Try rephrasing your query."
+        else:
+            llm_reply = "What would you like me to search for?"
 
     return llm_reply, executed, action_type
 

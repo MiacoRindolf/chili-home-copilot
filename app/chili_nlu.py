@@ -48,5 +48,10 @@ def parse_message(text: str) -> Action:
     if m:
         return Action(type="intercom_broadcast", data={"text": m.group(2).strip()})
 
+    # Web search: "search for ...", "google ...", "look up ..."
+    m = re.match(r"(?i)^\s*(?:search\s+(?:for\s+)?|google\s+|look\s+up\s+|web\s+search\s+(?:for\s+)?)(.+)$", t)
+    if m:
+        return Action(type="web_search", data={"query": m.group(1).strip()})
+
     # Default
     return Action(type="unknown", data={"text": t})

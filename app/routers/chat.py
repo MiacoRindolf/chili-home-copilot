@@ -13,6 +13,7 @@ from ..logger import new_trace_id, log_info
 from .. import openai_client
 from .. import vision as vision_module
 from .. import wellness
+from .. import web_search as web_search_module
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..services.chat_service import (
@@ -368,10 +369,31 @@ async def chat_api(
     action_data = planned.get("data", {})
     llm_reply = planned.get("reply") or ""
 
+    if action_type == "unknown" and web_search_module.detect_search_intent(message):
+        search_query = web_search_module.extract_search_query(message)
+        action_data = {"query": search_query}
+        action_type = "web_search"
+        llm_reply = ""
+
     llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest)
 
     model_used = "llama3"
-    if action_type == "unknown" and openai_client.is_configured():
+    if action_type == "web_search" and executed and openai_client.is_configured():
+        search_context = llm_reply
+        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+        search_system = (
+            openai_client.SYSTEM_PROMPT +
+            f"\n\nThe user asked to search the web. Here are the search results:\n\n{search_context}\n\n"
+            "Using these search results, provide a helpful, well-formatted answer. "
+            "Include relevant links from the results. Be specific and actionable."
+        )
+        result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
+        if result["reply"]:
+            llm_reply = result["reply"]
+            model_used = result["model"]
+            log_info(trace_id, f"web_search_synthesized model={model_used}")
+
+    elif action_type == "unknown" and openai_client.is_configured():
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
         openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT)
         result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
@@ -549,12 +571,43 @@ async def chat_stream_api(
     action_data = planned.get("data", {})
     llm_reply = planned.get("reply") or ""
 
+    if action_type == "unknown" and web_search_module.detect_search_intent(message):
+        search_query = web_search_module.extract_search_query(message)
+        action_data = {"query": search_query}
+        action_type = "web_search"
+        llm_reply = ""
+
     llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest)
 
-    if action_type != "unknown" or not openai_client.is_configured():
+    if action_type == "web_search" and executed and openai_client.is_configured():
+        search_context = llm_reply
+        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+        search_system = (
+            openai_client.SYSTEM_PROMPT +
+            f"\n\nThe user asked to search the web. Here are the search results:\n\n{search_context}\n\n"
+            "Using these search results, provide a helpful, well-formatted answer. "
+            "Include relevant links from the results. Be specific and actionable."
+        )
+        def search_stream_gen():
+            full = []
+            used_model = openai_client.LLM_MODEL
+            for tok, model in openai_client.chat_stream(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message):
+                full.append(tok)
+                used_model = model
+                yield sse_event({"token": tok, "done": False})
+            complete = "".join(full) or llm_reply
+            if not full:
+                yield sse_event({"token": complete, "done": False})
+            yield sse_event({"token": "", "done": True, "action_type": "web_search", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
+            store_and_title(convo_key, conversation_id, complete, trace_id, "web_search", used_model, client_ip, message)
+        return StreamingResponse(search_stream_gen(), media_type="text/event-stream")
+
+    if action_type not in ("unknown", "web_search") or not openai_client.is_configured():
         if not llm_reply:
             llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
         model_used = "llama3"
+        if action_type == "web_search":
+            model_used = "duckduckgo"
 
         def tool_gen():
             yield sse_event({"token": llm_reply, "done": False})
