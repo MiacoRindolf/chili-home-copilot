@@ -12,6 +12,7 @@ from ..models import ChatMessage, ChatLog, Conversation
 from ..logger import new_trace_id, log_info
 from .. import openai_client
 from .. import vision as vision_module
+from .. import wellness
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..services.chat_service import (
@@ -286,6 +287,35 @@ async def chat_api(
         record_latency(ms)
         return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
 
+    # --- Wellness detection (fires before planner) ---
+    if wellness.detect_crisis(message):
+        log_info(trace_id, "crisis_detected")
+        llm_reply = wellness.CRISIS_RESPONSE
+        action_type = "crisis_support"
+        model_used = "crisis-detector"
+        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used=model_used))
+        db.commit()
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        db.commit()
+        ms = int((time.time() - t0) * 1000)
+        record_latency(ms)
+        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": True, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
+
+    if wellness.detect_wellness_topic(message):
+        log_info(trace_id, "wellness_topic_detected")
+        wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+        result = wellness.wellness_chat(messages=wellness_msgs, user_name=user_name, trace_id=trace_id)
+        llm_reply = result["reply"]
+        action_type = "wellness_support"
+        model_used = result["model"]
+        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used=model_used))
+        db.commit()
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        db.commit()
+        ms = int((time.time() - t0) * 1000)
+        record_latency(ms)
+        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": True, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
+
     rag_sources = []
     personality_used = False
 
@@ -304,7 +334,7 @@ async def chat_api(
             log_info(trace_id, "nlu_fallback_miss, trying OpenAI")
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
             openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
-            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id)
+            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
             if result["reply"]:
                 llm_reply = result["reply"]
                 action_type = "general_chat"
@@ -344,13 +374,13 @@ async def chat_api(
     if action_type == "unknown" and openai_client.is_configured():
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
         openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT)
-        result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id)
+        result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
         if result["reply"]:
             llm_reply = result["reply"]
             action_type = "general_chat"
             model_used = result["model"]
             executed = True
-            log_info(trace_id, f"openai_fallback tokens={result['tokens_used']} model={model_used}")
+            log_info(trace_id, f"llm_fallback tokens={result['tokens_used']} model={model_used}")
 
     if not llm_reply:
         llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
@@ -440,6 +470,32 @@ async def chat_stream_api(
 
         return StreamingResponse(vision_gen(), media_type="text/event-stream")
 
+    # --- Wellness detection (stream) ---
+    if wellness.detect_crisis(message):
+        log_info(trace_id, "crisis_detected (stream)")
+        def crisis_gen():
+            yield sse_event({"token": wellness.CRISIS_RESPONSE, "done": False})
+            yield sse_event({"token": "", "done": True, "action_type": "crisis_support", "model_used": "crisis-detector", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+            store_and_title(convo_key, conversation_id, wellness.CRISIS_RESPONSE, trace_id, "crisis_support", "crisis-detector", client_ip, message)
+        return StreamingResponse(crisis_gen(), media_type="text/event-stream")
+
+    if wellness.detect_wellness_topic(message):
+        log_info(trace_id, "wellness_topic_detected (stream)")
+        wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+        def wellness_gen():
+            full = []
+            used_model = "llama3-wellness"
+            for tok, model in wellness.wellness_chat_stream(messages=wellness_msgs, user_name=user_name, trace_id=trace_id):
+                full.append(tok)
+                used_model = model
+                yield sse_event({"token": tok, "done": False})
+            complete = "".join(full) or "I'm here for you. Tell me more about what you're feeling."
+            if not full:
+                yield sse_event({"token": complete, "done": False})
+            yield sse_event({"token": "", "done": True, "action_type": "wellness_support", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+            store_and_title(convo_key, conversation_id, complete, trace_id, "wellness_support", used_model, client_ip, message)
+        return StreamingResponse(wellness_gen(), media_type="text/event-stream")
+
     rag_sources = []
     personality_used = False
 
@@ -460,19 +516,21 @@ async def chat_stream_api(
             return StreamingResponse(nlu_gen(), media_type="text/event-stream")
 
         if openai_client.is_configured():
-            log_info(trace_id, "nlu_fallback_miss, trying OpenAI (stream)")
+            log_info(trace_id, "nlu_fallback_miss, trying LLM (stream)")
             openai_msgs = [{"role": m.role, "content": m.content} for m in recent]
             openai_sys = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
             def openai_fb_gen():
                 full = []
-                for tok in openai_client.chat_stream(messages=openai_msgs, system_prompt=openai_sys, trace_id=trace_id):
+                used_model = openai_client.LLM_MODEL
+                for tok, model in openai_client.chat_stream(messages=openai_msgs, system_prompt=openai_sys, trace_id=trace_id, user_message=message):
                     full.append(tok)
+                    used_model = model
                     yield sse_event({"token": tok, "done": False})
                 complete = "".join(full) or "I'm not sure what to do with that."
                 if not full:
                     yield sse_event({"token": complete, "done": False})
-                yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": openai_client.OPENAI_MODEL, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", openai_client.OPENAI_MODEL, client_ip, message)
+                yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+                store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message)
             return StreamingResponse(openai_fb_gen(), media_type="text/event-stream")
 
         reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
@@ -509,8 +567,10 @@ async def chat_stream_api(
 
     def stream_gen():
         full_reply = []
-        for token in openai_client.chat_stream(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id):
+        used_model = openai_client.LLM_MODEL
+        for token, model in openai_client.chat_stream(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message):
             full_reply.append(token)
+            used_model = model
             yield sse_event({"token": token, "done": False})
 
         complete = "".join(full_reply)
@@ -518,8 +578,8 @@ async def chat_stream_api(
             complete = "I'm not sure what to do with that."
             yield sse_event({"token": complete, "done": False})
 
-        yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": openai_client.OPENAI_MODEL, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-        store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", openai_client.OPENAI_MODEL, client_ip, message)
+        yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
+        store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message)
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 

@@ -1,9 +1,21 @@
-"""OpenAI API client for CHILI's general chat fallback.
+"""Tiered LLM API client for CHILI's general chat.
 
-When the local llama3 planner returns type=unknown (can't map to a tool action),
-this module provides a full conversational response via OpenAI's API.
+Primary model (free):  Groq Llama 3.3 70B (or any OpenAI-compatible API)
+Premium model (paid):  OpenAI GPT-5.2 (or whatever PREMIUM_MODEL is set to)
+
+Auto-escalation: if the primary model returns an empty, errored, or
+refused response, the premium model is tried automatically.
+
+Configure via env vars:
+  LLM_API_KEY   / OPENAI_API_KEY     — Primary API key (e.g. Groq gsk_...)
+  LLM_MODEL     / OPENAI_MODEL       — Primary model (default: llama-3.3-70b-versatile)
+  LLM_BASE_URL  / OPENAI_BASE_URL    — Primary base URL (default: Groq)
+  PREMIUM_API_KEY                     — Premium API key (e.g. OpenAI sk-...)
+  PREMIUM_MODEL                      — Premium model (default: gpt-5.2)
+  PREMIUM_BASE_URL                   — Premium base URL (default: OpenAI)
 """
 import os
+import re
 from openai import OpenAI
 from dotenv import load_dotenv
 
@@ -11,8 +23,19 @@ from .logger import log_info
 
 load_dotenv()
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+# --- Primary (free) provider ---
+LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
+LLM_MODEL = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL", "llama-3.3-70b-versatile")
+LLM_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
+
+# --- Premium (paid) provider ---
+PREMIUM_API_KEY = os.getenv("PREMIUM_API_KEY", "")
+PREMIUM_MODEL = os.getenv("PREMIUM_MODEL", "gpt-5.2")
+PREMIUM_BASE_URL = os.getenv("PREMIUM_BASE_URL", "https://api.openai.com/v1")
+
+# Backward compat aliases
+OPENAI_API_KEY = LLM_API_KEY
+OPENAI_MODEL = LLM_MODEL
 
 SYSTEM_PROMPT = """You are CHILI (Conversational Home Interface & Life Intelligence), a friendly household assistant for a shared living space.
 
@@ -26,100 +49,167 @@ Your personality:
 
 You are NOT a generic AI chatbot. You are CHILI, the household's personal assistant. When a housemate asks you anything -- from cooking tips to coding help to life advice -- answer as CHILI would: knowledgeable, personalized, and grounded in the household context you have."""
 
+_REFUSAL_PATTERNS = re.compile(
+    r"(?i)(i\s+can(?:'?t| ?not)\s+(?:help|assist|provide|answer|do that))"
+    r"|(as an ai|i(?:'m| am) (?:just )?(?:a language model|an ai))"
+    r"|(i\s+don(?:'?t| ?not)\s+(?:have (?:the )?(?:ability|capability|information)))"
+    r"|((?:sorry|apologi[zs]e),?\s+(?:but )?i\s+(?:can(?:'?t| ?not)|am (?:not |un)able))"
+)
+
+
+def _is_weak_response(reply: str, user_message: str) -> bool:
+    """Detect if a response should be escalated to the premium model."""
+    if not reply or len(reply.strip()) < 20:
+        return True
+    if _REFUSAL_PATTERNS.search(reply):
+        return True
+    if len(user_message) > 100 and len(reply.strip()) < 60:
+        return True
+    return False
+
 
 def is_configured() -> bool:
-    return bool(OPENAI_API_KEY and OPENAI_API_KEY.strip())
+    return bool(LLM_API_KEY and LLM_API_KEY.strip())
+
+
+def _premium_configured() -> bool:
+    return bool(PREMIUM_API_KEY and PREMIUM_API_KEY.strip())
+
+
+def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict],
+                   system_prompt: str, trace_id: str) -> dict:
+    """Make a non-streaming call to an OpenAI-compatible API."""
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=api_messages,
+        temperature=0.7,
+        max_tokens=1024,
+    )
+    reply = response.choices[0].message.content.strip()
+    tokens = response.usage.total_tokens if response.usage else 0
+    log_info(trace_id, f"llm_reply model={model} tokens={tokens}")
+    return {"reply": reply, "tokens_used": tokens, "model": model}
+
+
+def _stream_provider(api_key: str, base_url: str, model: str, messages: list[dict],
+                     system_prompt: str, trace_id: str):
+    """Make a streaming call to an OpenAI-compatible API, yielding (token, model)."""
+    client = OpenAI(api_key=api_key, base_url=base_url)
+    api_messages = [{"role": "system", "content": system_prompt}] + messages
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=api_messages,
+        temperature=0.7,
+        max_tokens=1024,
+        stream=True,
+    )
+    for chunk in stream:
+        delta = chunk.choices[0].delta if chunk.choices else None
+        if delta and delta.content:
+            yield delta.content, model
+    log_info(trace_id, f"llm_stream_complete model={model}")
 
 
 def chat(
     messages: list[dict],
     system_prompt: str | None = None,
-    trace_id: str = "openai",
+    trace_id: str = "llm",
+    user_message: str = "",
 ) -> dict:
-    """Send a conversation to OpenAI and return the response.
+    """Chat with auto-escalation: primary model first, premium if response is weak."""
+    prompt = system_prompt or SYSTEM_PROMPT
 
-    Args:
-        messages: list of {"role": "user"|"assistant", "content": str}
-        system_prompt: override the default system prompt
-        trace_id: for structured logging
-
-    Returns:
-        {"reply": str, "tokens_used": int, "model": str}
-        On failure: {"reply": str, "tokens_used": 0, "model": "error"}
-    """
     if not is_configured():
-        return {
-            "reply": "",
-            "tokens_used": 0,
-            "model": "none",
-        }
+        if _premium_configured():
+            try:
+                return _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                      messages, prompt, trace_id)
+            except Exception as e:
+                log_info(trace_id, f"premium_error={e}")
+        return {"reply": "", "tokens_used": 0, "model": "none"}
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        result = _call_provider(LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, messages, prompt, trace_id)
 
-        api_messages = [
-            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
-        ]
-        api_messages.extend(messages)
+        if _is_weak_response(result["reply"], user_message) and _premium_configured():
+            log_info(trace_id, f"escalating to premium: primary reply was weak ({len(result['reply'])} chars)")
+            try:
+                premium_result = _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                                messages, prompt, trace_id)
+                if premium_result["reply"]:
+                    return premium_result
+            except Exception as e:
+                log_info(trace_id, f"premium_escalation_error={e}")
 
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=api_messages,
-            temperature=0.7,
-            max_completion_tokens=1024,
-        )
-
-        reply = response.choices[0].message.content.strip()
-        tokens = response.usage.total_tokens if response.usage else 0
-
-        log_info(trace_id, f"openai_reply model={OPENAI_MODEL} tokens={tokens}")
-
-        return {
-            "reply": reply,
-            "tokens_used": tokens,
-            "model": OPENAI_MODEL,
-        }
+        return result
 
     except Exception as e:
-        log_info(trace_id, f"openai_error={e}")
-        return {
-            "reply": "",
-            "tokens_used": 0,
-            "model": "error",
-        }
+        log_info(trace_id, f"primary_error={e}")
+        if _premium_configured():
+            try:
+                log_info(trace_id, "primary failed, falling back to premium")
+                return _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                      messages, prompt, trace_id)
+            except Exception as e2:
+                log_info(trace_id, f"premium_fallback_error={e2}")
+        return {"reply": "", "tokens_used": 0, "model": "error"}
 
 
 def chat_stream(
     messages: list[dict],
     system_prompt: str | None = None,
-    trace_id: str = "openai-stream",
+    trace_id: str = "llm-stream",
+    user_message: str = "",
 ):
-    """Stream a conversation response from OpenAI, yielding token deltas."""
+    """Stream with auto-escalation, yielding (token, model_name) tuples.
+
+    Groq is fast enough (~500 tok/s) to collect the full response first,
+    evaluate quality, then either yield it or escalate to premium streaming.
+    """
+    prompt = system_prompt or SYSTEM_PROMPT
+
     if not is_configured():
+        if _premium_configured():
+            try:
+                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                                   messages, prompt, trace_id):
+                    yield tok, model
+            except Exception as e:
+                log_info(trace_id, f"premium_stream_error={e}")
         return
 
     try:
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        primary_tokens = []
+        for tok, model in _stream_provider(LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+                                           messages, prompt, trace_id):
+            primary_tokens.append((tok, model))
 
-        api_messages = [
-            {"role": "system", "content": system_prompt or SYSTEM_PROMPT},
-        ]
-        api_messages.extend(messages)
+        full_reply = "".join(t for t, _ in primary_tokens)
 
-        stream = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=api_messages,
-            temperature=0.7,
-            max_completion_tokens=1024,
-            stream=True,
-        )
+        if _is_weak_response(full_reply, user_message) and _premium_configured():
+            log_info(trace_id, f"stream escalating to premium: primary reply was weak ({len(full_reply)} chars)")
+            try:
+                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                                   messages, prompt, trace_id):
+                    yield tok, model
+                return
+            except Exception as e:
+                log_info(trace_id, f"premium_stream_escalation_error={e}")
 
-        for chunk in stream:
-            delta = chunk.choices[0].delta if chunk.choices else None
-            if delta and delta.content:
-                yield delta.content
-
-        log_info(trace_id, f"openai_stream_complete model={OPENAI_MODEL}")
+        for tok, model in primary_tokens:
+            yield tok, model
 
     except Exception as e:
-        log_info(trace_id, f"openai_stream_error={e}")
+        log_info(trace_id, f"primary_stream_error={e}")
+        if _premium_configured():
+            try:
+                log_info(trace_id, "primary stream failed, falling back to premium")
+                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                                                   messages, prompt, trace_id):
+                    yield tok, model
+            except Exception as e2:
+                log_info(trace_id, f"premium_stream_fallback_error={e2}")

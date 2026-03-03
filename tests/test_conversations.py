@@ -180,7 +180,8 @@ class TestStreamingEndpoint:
         mock_openai.is_configured.return_value = True
         mock_openai.SYSTEM_PROMPT = "Test system"
         mock_openai.OPENAI_MODEL = "gpt-test"
-        mock_openai.chat_stream.return_value = iter(["Hello", " world", "!"])
+        mock_openai.LLM_MODEL = "gpt-test"
+        mock_openai.chat_stream.return_value = iter([("Hello", "gpt-test"), (" world", "gpt-test"), ("!", "gpt-test")])
 
         resp = client.post("/api/chat/stream", data={"message": "tell me a joke"})
         assert resp.status_code == 200

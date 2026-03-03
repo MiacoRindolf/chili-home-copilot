@@ -207,6 +207,20 @@
       background: #ede9fe; color: #5b21b6; padding: 2px 8px; border-radius: 4px; font-weight: 500;
     }
     [data-theme="dark"] .personality-badge { background: #3b0764; color: #c4b5fd; }
+    .wellness-badge {
+      background: #fef3c7; color: #92400e; padding: 2px 8px; border-radius: 4px; font-weight: 500;
+    }
+    [data-theme="dark"] .wellness-badge { background: #78350f; color: #fde68a; }
+    .crisis-badge {
+      background: #fee2e2; color: #991b1b; padding: 2px 8px; border-radius: 4px; font-weight: 600;
+    }
+    [data-theme="dark"] .crisis-badge { background: #7f1d1d; color: #fca5a5; }
+    .msg.assistant.crisis-msg {
+      border-left: 4px solid #ef4444;
+    }
+    .msg.assistant.wellness-msg {
+      border-left: 4px solid #f59e0b;
+    }
     .trace-id {
       color: var(--text-muted); font-family: monospace; font-size: 10px; cursor: pointer;
       opacity: 0.5; transition: opacity 0.15s;
@@ -706,9 +720,11 @@
       welcome.style.display = 'none';
       var div = document.createElement('div');
       div.className = 'msg ' + role;
+      meta = meta || {};
+      if (role === 'assistant' && meta.action_type === 'crisis_support') div.className += ' crisis-msg';
+      else if (role === 'assistant' && meta.action_type === 'wellness_support') div.className += ' wellness-msg';
       var label = role === 'user' ? 'You' : 'CHILI';
       var timeStr = fmtTime(ts);
-      meta = meta || {};
 
       var imageHTML = '';
       var imgList = meta.image_paths || (meta.image_path ? [meta.image_path] : []);
@@ -747,6 +763,11 @@
         }
         if (meta.personality_used) {
           footerHTML += '<span class="personality-badge">personalized</span>';
+        }
+        if (meta.action_type === 'crisis_support') {
+          footerHTML += '<span class="crisis-badge">crisis support</span>';
+        } else if (meta.action_type === 'wellness_support') {
+          footerHTML += '<span class="wellness-badge">wellness support</span>';
         }
         footerHTML += '<button class="copy-btn" title="Copy message">Copy</button>';
         if (timeStr) footerHTML += '<span class="ts">' + esc(timeStr) + '</span>';
