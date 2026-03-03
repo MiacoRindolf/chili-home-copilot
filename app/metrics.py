@@ -1,26 +1,29 @@
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
-from sqlalchemy import func, distinct
-from .models import Chore, Birthday, ChatMessage, Conversation, User, Device, HousemateProfile
+from sqlalchemy import func, distinct, cast, Date
+from .models import Chore, Birthday, ChatMessage, ChatLog, Conversation, User, Device, HousemateProfile
 
-# Simple in-memory latency tracking (resets when server restarts)
-_LATENCIES_MS = []
+# In-memory latency tracking (resets on server restart, keeps last 500)
+_LATENCIES_MS: list[tuple[float, int]] = []  # (timestamp, ms)
 
 def record_latency(ms: int):
-    _LATENCIES_MS.append(ms)
-    # keep only last 100 to avoid unbounded growth
-    if len(_LATENCIES_MS) > 100:
-        del _LATENCIES_MS[:-100]
+    _LATENCIES_MS.append((datetime.utcnow().timestamp(), ms))
+    if len(_LATENCIES_MS) > 500:
+        del _LATENCIES_MS[:-500]
 
 def latency_stats() -> dict:
     if not _LATENCIES_MS:
         return {"count": 0, "avg_ms": None, "p95_ms": None}
 
-    xs = sorted(_LATENCIES_MS)
+    xs = sorted(m for _, m in _LATENCIES_MS)
     n = len(xs)
     avg = sum(xs) / n
     p95 = xs[int(0.95 * (n - 1))]
     return {"count": n, "avg_ms": int(avg), "p95_ms": int(p95)}
+
+def latency_history() -> list[dict]:
+    """Return recent latencies as [{timestamp, ms}] for chart rendering."""
+    return [{"t": int(t * 1000), "ms": ms} for t, ms in _LATENCIES_MS[-100:]]
 
 def get_counts(db: Session) -> dict:
     total_chores = db.query(Chore).count()
@@ -122,6 +125,127 @@ def user_stats(db: Session) -> list[dict]:
             } if profile else None,
         })
     return results
+
+
+def messages_per_day(db: Session, days: int = 14) -> list[dict]:
+    """Daily message counts for the last N days."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(
+            cast(ChatMessage.created_at, Date).label("day"),
+            func.count(ChatMessage.id),
+        )
+        .filter(ChatMessage.created_at >= cutoff)
+        .group_by("day")
+        .order_by("day")
+        .all()
+    )
+    return [{"date": d.isoformat() if d else "unknown", "count": c} for d, c in rows]
+
+
+def hourly_activity(db: Session, days: int = 7) -> list[dict]:
+    """Message counts by hour of day (0-23) for the last N days."""
+    cutoff = datetime.utcnow() - timedelta(days=days)
+    rows = (
+        db.query(
+            func.strftime("%H", ChatMessage.created_at).label("hour"),
+            func.count(ChatMessage.id),
+        )
+        .filter(ChatMessage.created_at >= cutoff)
+        .group_by("hour")
+        .order_by("hour")
+        .all()
+    )
+    hour_map = {int(h): c for h, c in rows if h is not None}
+    return [{"hour": h, "count": hour_map.get(h, 0)} for h in range(24)]
+
+
+def action_type_stats(db: Session) -> dict:
+    """Count messages by action_type."""
+    rows = (
+        db.query(ChatMessage.action_type, func.count(ChatMessage.id))
+        .filter(ChatMessage.role == "assistant", ChatMessage.action_type.isnot(None))
+        .group_by(ChatMessage.action_type)
+        .all()
+    )
+    return {action or "unknown": count for action, count in rows}
+
+
+def feature_usage(db: Session) -> dict:
+    """Aggregate counts for key features: web_search, wellness, crisis, vision, intercom, general_chat."""
+    stats = action_type_stats(db)
+    return {
+        "web_search": stats.get("web_search", 0),
+        "wellness_support": stats.get("wellness_support", 0),
+        "crisis_support": stats.get("crisis_support", 0),
+        "vision": stats.get("vision", 0),
+        "intercom_broadcast": stats.get("intercom_broadcast", 0),
+        "general_chat": stats.get("general_chat", 0),
+        "tool_actions": sum(
+            v for k, v in stats.items()
+            if k in ("add_chore", "list_chores", "list_chores_pending",
+                      "mark_chore_done", "add_birthday", "list_birthdays",
+                      "answer_from_docs", "pair_device")
+        ),
+    }
+
+
+def response_time_trend(db: Session, days: int = 7) -> list[dict]:
+    """Average response time per day from ChatLog (approximated from trace_id timestamps)."""
+    if not _LATENCIES_MS:
+        return []
+    cutoff_ts = (datetime.utcnow() - timedelta(days=days)).timestamp()
+    day_buckets: dict[str, list[int]] = {}
+    for ts, ms in _LATENCIES_MS:
+        if ts >= cutoff_ts:
+            day = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d")
+            day_buckets.setdefault(day, []).append(ms)
+    return [
+        {"date": d, "avg_ms": int(sum(vals) / len(vals)), "count": len(vals)}
+        for d, vals in sorted(day_buckets.items())
+    ]
+
+
+def conversation_stats(db: Session) -> dict:
+    """Conversation-level analytics."""
+    total = db.query(Conversation).count()
+    if total == 0:
+        return {"total": 0, "avg_messages": 0, "longest": 0}
+
+    msg_counts = (
+        db.query(func.count(ChatMessage.id))
+        .filter(ChatMessage.conversation_id.isnot(None))
+        .group_by(ChatMessage.conversation_id)
+        .all()
+    )
+    counts = [c for (c,) in msg_counts]
+    return {
+        "total": total,
+        "avg_messages": round(sum(counts) / len(counts), 1) if counts else 0,
+        "longest": max(counts) if counts else 0,
+    }
+
+
+def top_users(db: Session, limit: int = 5) -> list[dict]:
+    """Top users by message count."""
+    rows = (
+        db.query(ChatMessage.convo_key, func.count(ChatMessage.id).label("cnt"))
+        .filter(ChatMessage.convo_key.like("user:%"))
+        .group_by(ChatMessage.convo_key)
+        .order_by(func.count(ChatMessage.id).desc())
+        .limit(limit)
+        .all()
+    )
+    result = []
+    for convo_key, cnt in rows:
+        user_id = int(convo_key.replace("user:", "")) if convo_key.startswith("user:") else None
+        name = "Unknown"
+        if user_id:
+            user = db.query(User).filter(User.id == user_id).first()
+            if user:
+                name = user.name
+        result.append({"name": name, "messages": cnt})
+    return result
 
 
 def rag_stats() -> dict:

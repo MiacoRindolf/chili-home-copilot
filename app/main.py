@@ -39,6 +39,7 @@ templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 chat.init_templates(templates)
 admin.init_templates(templates)
 pages.init_templates(templates)
+health_routes.init_templates(templates)
 intercom.init_templates(templates)
 
 app.include_router(chat.router)
