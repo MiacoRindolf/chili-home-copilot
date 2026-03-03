@@ -1,32 +1,31 @@
 """Housemate personality profiling.
 
-Automatically extracts personality traits from conversation history using OpenAI,
+Consolidates UserMemory facts into a summary HousemateProfile,
 and provides profile context for injection into LLM prompts.
 """
 import json
 from datetime import datetime
 from sqlalchemy.orm import Session
 
-from .models import HousemateProfile, ChatMessage
+from .models import HousemateProfile, ChatMessage, UserMemory
 from . import openai_client
 from .logger import log_info
 
-EXTRACTION_THRESHOLD = 20  # re-extract after this many new messages
+EXTRACTION_THRESHOLD = 20  # re-consolidate after this many new messages
 
-EXTRACTION_PROMPT = """Analyze the following conversation messages from a housemate and extract a personality profile.
-Return ONLY valid JSON with these exact keys:
-{
-  "interests": ["list", "of", "interests"],
-  "dietary": "any dietary preferences or restrictions, or empty string",
-  "tone": "their preferred communication style: casual, formal, friendly, brief, etc.",
-  "notes": "any other observations about this person (habits, preferences, schedule patterns)"
-}
-
-If there isn't enough information for a field, use an empty string or empty list.
-Be concise. Base your analysis only on what's actually evident in the messages.
-
-Messages:
-"""
+CONSOLIDATION_PROMPT = (
+    "Given these personal facts about a housemate, create a concise personality summary.\n"
+    "Return ONLY valid JSON with these exact keys:\n"
+    "{\n"
+    '  "interests": ["list", "of", "interests"],\n'
+    '  "dietary": "any dietary preferences or restrictions, or empty string",\n'
+    '  "tone": "their preferred communication style: casual, formal, friendly, brief, etc.",\n'
+    '  "notes": "any other observations about this person (habits, preferences, schedule patterns)"\n'
+    "}\n\n"
+    "Merge related items, resolve contradictions (prefer newer facts), and be concise.\n"
+    "If there isn't enough information for a field, use an empty string or empty list.\n\n"
+    "Facts:\n"
+)
 
 
 def should_update(user_id: int, db: Session) -> bool:
@@ -51,34 +50,53 @@ def should_update(user_id: int, db: Session) -> bool:
 
 
 def extract_profile(user_id: int, db: Session, trace_id: str = "personality") -> dict | None:
-    """Extract personality traits from recent conversation history.
+    """Consolidate UserMemory facts into a summary HousemateProfile.
 
+    If memories exist, uses LLM to synthesize them into the profile fields.
+    Falls back to direct message analysis if no memories are available.
     Returns the extracted profile dict or None on failure.
     """
-    messages = (
-        db.query(ChatMessage)
-        .filter(ChatMessage.convo_key == f"user:{user_id}")
-        .filter(ChatMessage.content != "")
-        .order_by(ChatMessage.id.desc())
-        .limit(40)
+    memories = (
+        db.query(UserMemory)
+        .filter(UserMemory.user_id == user_id, UserMemory.superseded == False)
+        .order_by(UserMemory.created_at.asc())
         .all()
     )
-    messages = list(reversed(messages))
 
-    if not messages:
-        return None
-
-    conversation_text = "\n".join(
-        f"{m.role.upper()}: {m.content}" for m in messages
-    )
+    if memories:
+        facts_text = "\n".join(
+            f"- [{m.category}] {m.content}" for m in memories
+        )
+        prompt = CONSOLIDATION_PROMPT + facts_text
+    else:
+        messages = (
+            db.query(ChatMessage)
+            .filter(ChatMessage.convo_key == f"user:{user_id}")
+            .filter(ChatMessage.content != "")
+            .order_by(ChatMessage.id.desc())
+            .limit(40)
+            .all()
+        )
+        messages = list(reversed(messages))
+        if not messages:
+            return None
+        conversation_text = "\n".join(
+            f"{m.role.upper()}: {m.content}" for m in messages
+        )
+        prompt = (
+            "Analyze these conversation messages from a housemate and extract a personality profile.\n"
+            "Return ONLY valid JSON with these exact keys:\n"
+            '{"interests": [...], "dietary": "...", "tone": "...", "notes": "..."}\n\n'
+            "Messages:\n" + conversation_text
+        )
 
     result = openai_client.chat(
-        messages=[{"role": "user", "content": EXTRACTION_PROMPT + conversation_text}],
+        messages=[{"role": "user", "content": prompt}],
         system_prompt="You are a personality analysis assistant. Return only valid JSON.",
         trace_id=trace_id,
     )
 
-    if not result["reply"]:
+    if not result.get("reply"):
         return None
 
     try:
@@ -126,7 +144,7 @@ def extract_profile(user_id: int, db: Session, trace_id: str = "personality") ->
         ))
 
     db.commit()
-    log_info(trace_id, f"personality_extracted user_id={user_id} interests={interests}")
+    log_info(trace_id, f"personality_consolidated user_id={user_id} memories={len(memories)} interests={interests}")
     return profile_data
 
 

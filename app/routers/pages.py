@@ -8,7 +8,7 @@ from pydantic import BaseModel
 import json as json_mod
 
 from ..deps import get_db
-from ..models import Chore, Birthday, HousemateProfile, User, UserStatus
+from ..models import Chore, Birthday, HousemateProfile, User, UserStatus, UserMemory
 from ..pairing import (
     DEVICE_COOKIE_NAME, redeem_pair_code, register_device,
     get_identity_record, generate_pair_code,
@@ -195,34 +195,66 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "</body></html>"
         )
 
+    return templates.TemplateResponse(request, "profile.html", {
+        "user_name": identity["user_name"],
+    })
+
+
+@router.get("/api/profile", response_class=JSONResponse)
+def profile_api(request: Request, db: Session = Depends(get_db)):
+    """Full profile data for the profile page."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return JSONResponse({"error": "Not paired"}, status_code=403)
+
     user_id = identity["user_id"]
-    user_name = identity["user_name"]
+    user = db.query(User).filter(User.id == user_id).first()
     profile = db.query(HousemateProfile).filter(HousemateProfile.user_id == user_id).first()
 
-    interests_str = ""
+    interests_list = []
     if profile and profile.interests:
         try:
             interests_list = json_mod.loads(profile.interests)
-            interests_str = ", ".join(interests_list)
         except json_mod.JSONDecodeError:
-            interests_str = profile.interests
+            interests_list = [profile.interests]
 
-    dietary = profile.dietary if profile else ""
-    tone = profile.tone if profile else ""
-    notes = profile.notes if profile else ""
-    last_updated = (
-        profile.last_extracted_at.strftime("%B %d, %Y %H:%M")
-        if profile and profile.last_extracted_at else "Never"
-    )
+    from .. import memory as memory_module
+    breakdown = memory_module.get_interest_breakdown(user_id, db)
+    memory_count = db.query(UserMemory).filter(
+        UserMemory.user_id == user_id, UserMemory.superseded == False
+    ).count()
 
-    return templates.TemplateResponse(request, "profile.html", {
-        "user_name": user_name,
-        "interests_str": interests_str,
-        "dietary": dietary,
-        "tone": tone,
-        "notes": notes,
-        "last_updated": last_updated,
-    })
+    return {
+        "user_name": user.name if user else identity["user_name"],
+        "member_since": user.id if user else None,
+        "profile": {
+            "interests": interests_list,
+            "dietary": profile.dietary if profile else "",
+            "tone": profile.tone if profile else "",
+            "notes": profile.notes if profile else "",
+            "last_updated": (
+                profile.last_extracted_at.strftime("%B %d, %Y %H:%M")
+                if profile and profile.last_extracted_at else "Never"
+            ),
+        },
+        "memory_count": memory_count,
+        "interest_breakdown": breakdown,
+    }
+
+
+@router.post("/api/profile", response_class=JSONResponse)
+def profile_save_api(request: Request, db: Session = Depends(get_db)):
+    """Save profile fields via JSON body."""
+    import asyncio
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return JSONResponse({"error": "Not paired"}, status_code=403)
+
+    return JSONResponse({"ok": True})
 
 
 @router.post("/profile")
@@ -260,6 +292,52 @@ def profile_save(
         ))
     db.commit()
     return RedirectResponse("/profile", status_code=303)
+
+
+@router.get("/api/profile/memories", response_class=JSONResponse)
+def profile_memories(
+    request: Request,
+    page: int = 1,
+    db: Session = Depends(get_db),
+):
+    """Paginated memories for the profile timeline."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return JSONResponse({"error": "Not paired"}, status_code=403)
+
+    from .. import memory as memory_module
+    return memory_module.get_memories_paginated(identity["user_id"], db, page=page)
+
+
+@router.delete("/api/profile/memories/{memory_id}", response_class=JSONResponse)
+def delete_memory(memory_id: int, request: Request, db: Session = Depends(get_db)):
+    """Delete a specific memory."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return JSONResponse({"error": "Not paired"}, status_code=403)
+
+    from .. import memory as memory_module
+    ok = memory_module.delete_memory(memory_id, identity["user_id"], db)
+    if not ok:
+        return JSONResponse({"error": "Not found"}, status_code=404)
+    return {"ok": True}
+
+
+@router.get("/api/profile/interests", response_class=JSONResponse)
+def profile_interests(request: Request, db: Session = Depends(get_db)):
+    """Interest/category breakdown for chart."""
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
+    if identity["is_guest"] or not identity["user_id"]:
+        return JSONResponse({"error": "Not paired"}, status_code=403)
+
+    from .. import memory as memory_module
+    return {"breakdown": memory_module.get_interest_breakdown(identity["user_id"], db)}
 
 
 @router.get("/pair", response_class=HTMLResponse)

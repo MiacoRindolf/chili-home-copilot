@@ -12,6 +12,7 @@ from ..logger import log_info
 from .. import rag as rag_module
 from .. import personality as personality_module
 from .. import web_search as web_search_module
+from .. import memory as memory_module
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -175,10 +176,18 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
         log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
 
     personality_context = None
+    memory_context = None
     if user_id and not is_guest:
         personality_context = personality_module.get_profile_context(user_id, db)
         if personality_context:
             log_info(trace_id, f"personality_injected user_id={user_id}")
+        memory_context = memory_module.get_memory_context(user_id, db)
+        if memory_context:
+            log_info(trace_id, f"memory_context_injected user_id={user_id}")
+            if personality_context:
+                personality_context += "\n\n" + memory_context
+            else:
+                personality_context = memory_context
 
     planned = plan_action(
         f"Conversation so far:\n{context}\n\nNew user message: {message}",
@@ -237,3 +246,65 @@ def try_personality_update(user_id, is_guest, db, trace_id):
                 personality_module.extract_profile(user_id, db, trace_id=trace_id)
         except Exception as e:
             log_info(trace_id, f"personality_extraction_error={e}")
+
+
+def try_memory_extraction(
+    user_id, is_guest, user_message, assistant_reply, action_type, db, trace_id,
+    source_message_id=None,
+):
+    """Extract personal facts from a conversation turn (non-blocking)."""
+    if not user_id or is_guest:
+        return
+    try:
+        memory_module.extract_facts(
+            user_message=user_message,
+            assistant_reply=assistant_reply,
+            user_id=user_id,
+            db=db,
+            action_type=action_type,
+            source_message_id=source_message_id,
+            trace_id=trace_id,
+        )
+    except Exception as e:
+        log_info(trace_id, f"memory_extraction_error={e}")
+
+
+def store_and_title_with_memory(
+    convo_key, conversation_id, content, trace_id, action_type, model_used,
+    client_ip, message, user_id=None, is_guest=True,
+):
+    """Store assistant message, auto-title, and extract memories (for streaming generators)."""
+    s = SessionLocal()
+    try:
+        s.add(ChatMessage(
+            convo_key=convo_key, conversation_id=conversation_id,
+            role="assistant", content=content, trace_id=trace_id,
+            action_type=action_type, model_used=model_used,
+        ))
+        if conversation_id:
+            c = s.query(Conversation).filter(Conversation.id == conversation_id).first()
+            if c and c.title == "New Chat":
+                c.title = message[:40].strip() + ("..." if len(message) > 40 else "")
+        s.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        s.commit()
+
+        if user_id and not is_guest:
+            try:
+                memory_module.extract_facts(
+                    user_message=message,
+                    assistant_reply=content,
+                    user_id=user_id,
+                    db=s,
+                    action_type=action_type,
+                    trace_id=trace_id,
+                )
+            except Exception as e:
+                log_info(trace_id, f"memory_extraction_error={e}")
+
+            try:
+                if personality_module.should_update(user_id, s):
+                    personality_module.extract_profile(user_id, s, trace_id=trace_id)
+            except Exception as e:
+                log_info(trace_id, f"personality_extraction_error={e}")
+    finally:
+        s.close()

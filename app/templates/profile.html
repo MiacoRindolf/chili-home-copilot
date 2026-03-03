@@ -1,33 +1,456 @@
 {% extends "base.html" %}
 {% block title %}CHILI Profile - {{ user_name }}{% endblock %}
+{% block head_extra %}
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+<style>
+  :root {
+    --card-bg: var(--bg-msg-assist);
+    --card-radius: 14px;
+    --card-shadow: 0 1px 3px rgba(0,0,0,.06);
+    --cat-interest: #3b82f6;
+    --cat-preference: #8b5cf6;
+    --cat-habit: #10b981;
+    --cat-event: #f59e0b;
+    --cat-person: #ec4899;
+    --cat-dietary: #ef4444;
+    --cat-work: #06b6d4;
+    --cat-health: #84cc16;
+    --cat-memory: #f97316;
+    --cat-schedule: #6366f1;
+    --cat-goal: #14b8a6;
+  }
+  [data-theme="dark"] {
+    --card-shadow: 0 1px 3px rgba(0,0,0,.2);
+  }
+
+  .profile-shell {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 24px 20px 60px;
+    font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    color: var(--text);
+  }
+
+  /* Top bar */
+  .p-topbar {
+    display: flex; align-items: center; justify-content: space-between;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+  }
+  .p-topbar h1 { font-size: 1.5rem; font-weight: 700; margin: 0; }
+  .p-topbar nav { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .p-topbar nav a, .p-topbar nav button {
+    text-decoration: none; font-size: .82rem; padding: 6px 14px;
+    border-radius: 8px; border: 1px solid var(--border);
+    background: var(--card-bg); color: var(--text); cursor: pointer; transition: .15s;
+  }
+  .p-topbar nav a:hover, .p-topbar nav button:hover { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+  /* Cards */
+  .card {
+    background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: var(--card-radius); padding: 22px;
+    margin-bottom: 16px; box-shadow: var(--card-shadow);
+  }
+  .card h2 {
+    font-size: .85rem; font-weight: 700; margin: 0 0 16px;
+    color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em;
+  }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+
+  /* Profile header */
+  .profile-header {
+    display: flex; align-items: center; gap: 18px; margin-bottom: 20px;
+  }
+  .avatar {
+    width: 72px; height: 72px; border-radius: 50%;
+    background: var(--accent); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 2rem; font-weight: 700; flex-shrink: 0;
+  }
+  .profile-name { font-size: 1.5rem; font-weight: 700; }
+  .profile-meta { font-size: .82rem; color: var(--text-muted); margin-top: 2px; }
+
+  /* Stats bar */
+  .profile-stats {
+    display: flex; gap: 24px; flex-wrap: wrap; margin-bottom: 20px;
+    padding: 16px 20px; background: var(--card-bg); border: 1px solid var(--border);
+    border-radius: var(--card-radius); box-shadow: var(--card-shadow);
+  }
+  .p-stat-val { font-size: 1.4rem; font-weight: 700; color: var(--accent); }
+  .p-stat-lbl { font-size: .72rem; color: var(--text-secondary); text-transform: uppercase; }
+
+  /* Editable fields */
+  .field-group { margin-bottom: 14px; }
+  .field-label { font-size: .8rem; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
+  .field-value {
+    font-size: .92rem; color: var(--text); padding: 10px 14px;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+    min-height: 20px;
+  }
+  .field-value:empty::after { content: 'Not set yet'; color: var(--text-muted); font-style: italic; }
+
+  .edit-input, .edit-textarea {
+    width: 100%; padding: 10px 14px; font-size: .92rem;
+    border: 1px solid var(--accent); border-radius: 8px;
+    background: var(--input-bg); color: var(--text);
+    font-family: inherit; box-sizing: border-box;
+  }
+  .edit-textarea { resize: vertical; min-height: 60px; }
+
+  .btn-row { display: flex; gap: 8px; margin-top: 12px; }
+  .btn {
+    padding: 8px 18px; border-radius: 8px; font-size: .82rem;
+    font-weight: 600; cursor: pointer; transition: .15s; border: none;
+  }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: var(--accent-hover); }
+  .btn-outline {
+    background: transparent; color: var(--text); border: 1px solid var(--border);
+  }
+  .btn-outline:hover { border-color: var(--accent); color: var(--accent); }
+  .btn-sm { padding: 4px 10px; font-size: .75rem; }
+
+  /* Tags */
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tag {
+    display: inline-block; padding: 4px 12px; border-radius: 20px;
+    font-size: .78rem; font-weight: 600;
+    background: var(--accent); color: #fff; opacity: .85;
+  }
+  .tag:hover { opacity: 1; }
+
+  /* Category badges */
+  .cat-badge {
+    display: inline-block; padding: 2px 10px; border-radius: 10px;
+    font-size: .72rem; font-weight: 600; color: #fff;
+    text-transform: capitalize;
+  }
+  .cat-interest { background: var(--cat-interest); }
+  .cat-preference { background: var(--cat-preference); }
+  .cat-habit { background: var(--cat-habit); }
+  .cat-event { background: var(--cat-event); }
+  .cat-person { background: var(--cat-person); }
+  .cat-dietary { background: var(--cat-dietary); }
+  .cat-work { background: var(--cat-work); }
+  .cat-health { background: var(--cat-health); }
+  .cat-memory { background: var(--cat-memory); }
+  .cat-schedule { background: var(--cat-schedule); }
+  .cat-goal { background: var(--cat-goal); }
+
+  /* Chart */
+  .chart-wrap { position: relative; width: 100%; height: 200px; }
+
+  /* Timeline */
+  .timeline { list-style: none; padding: 0; margin: 0; }
+  .timeline-item {
+    display: flex; align-items: flex-start; gap: 12px; padding: 12px 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .timeline-item:last-child { border-bottom: none; }
+  .timeline-content { flex: 1; font-size: .88rem; color: var(--text); }
+  .timeline-time { font-size: .72rem; color: var(--text-muted); white-space: nowrap; }
+  .timeline-actions { display: flex; gap: 6px; align-items: center; }
+  .delete-btn {
+    background: none; border: none; color: var(--text-muted); cursor: pointer;
+    font-size: .8rem; padding: 2px 6px; border-radius: 4px; transition: .15s;
+  }
+  .delete-btn:hover { color: #ef4444; background: rgba(239,68,68,.1); }
+
+  .timeline-empty { color: var(--text-muted); font-size: .88rem; padding: 16px 0; text-align: center; }
+
+  .load-more {
+    display: block; width: 100%; padding: 10px; margin-top: 12px;
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--card-bg); color: var(--text); font-size: .82rem;
+    cursor: pointer; text-align: center; transition: .15s;
+  }
+  .load-more:hover { border-color: var(--accent); color: var(--accent); }
+
+  .p-footer { margin-top: 32px; text-align: center; font-size: .72rem; color: var(--text-muted); }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="font-family:Arial;max-width:800px;margin:40px auto;">
-  <h1>Your Profile</h1>
-  <p><a href="/chat">Chat</a> | <a href="/">Home</a></p>
-  <p>Hi <b>{{ user_name }}</b>! CHILI learns about you from your conversations to personalize responses.</p>
+<div class="profile-shell">
 
-  <form method="post" action="/profile">
-    <div style="margin:16px 0;">
-      <label><b>Interests</b> (comma-separated)</label><br/>
-      <input name="interests" value="{{ interests_str }}" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
-    </div>
-    <div style="margin:16px 0;">
-      <label><b>Dietary preferences</b></label><br/>
-      <input name="dietary" value="{{ dietary }}" placeholder="e.g., vegetarian, no dairy" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
-    </div>
-    <div style="margin:16px 0;">
-      <label><b>Communication style</b></label><br/>
-      <input name="tone" value="{{ tone }}" placeholder="e.g., casual, brief, formal" style="width:100%;max-width:520px;padding:10px;font-size:15px;" />
-    </div>
-    <div style="margin:16px 0;">
-      <label><b>Notes</b> (anything CHILI should know)</label><br/>
-      <textarea name="notes" rows="3" style="width:100%;max-width:520px;padding:10px;font-size:15px;">{{ notes }}</textarea>
-    </div>
-    <button type="submit" style="padding:10px 20px;font-size:16px;">Save Profile</button>
-  </form>
+  <div class="p-topbar">
+    <h1>Profile</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/chat">Chat</a>
+      <a href="/admin">Admin</a>
+      <button id="theme-toggle" title="Toggle dark mode"></button>
+    </nav>
+  </div>
 
-  <p style="color:#888;font-size:12px;margin-top:24px;">
-    Last auto-updated: {{ last_updated }}
-  </p>
+  <!-- Header -->
+  <div class="profile-header">
+    <div class="avatar" id="avatar">{{ user_name[0] | upper }}</div>
+    <div>
+      <div class="profile-name" id="profile-name">{{ user_name }}</div>
+      <div class="profile-meta" id="profile-meta">Loading profile...</div>
+    </div>
+  </div>
+
+  <!-- Stats bar -->
+  <div class="profile-stats">
+    <div><div class="p-stat-val" id="mem-count">—</div><div class="p-stat-lbl">Memories</div></div>
+    <div><div class="p-stat-val" id="interest-count">—</div><div class="p-stat-lbl">Interests</div></div>
+    <div><div class="p-stat-val" id="category-count">—</div><div class="p-stat-lbl">Categories</div></div>
+    <div><div class="p-stat-val" id="last-updated">—</div><div class="p-stat-lbl">Last Updated</div></div>
+  </div>
+
+  <!-- About + Interest Tracking -->
+  <div class="grid-2">
+    <div class="card">
+      <h2>About You</h2>
+      <div id="about-section">
+        <div class="field-group">
+          <div class="field-label">Interests</div>
+          <div id="interests-display" class="tags"></div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Dietary Preferences</div>
+          <div class="field-value" id="dietary-display"></div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Communication Style</div>
+          <div class="field-value" id="tone-display"></div>
+        </div>
+        <div class="field-group">
+          <div class="field-label">Notes</div>
+          <div class="field-value" id="notes-display"></div>
+        </div>
+        <div class="btn-row">
+          <button class="btn btn-outline" id="edit-btn" onclick="toggleEdit()">Edit Profile</button>
+        </div>
+      </div>
+
+      <!-- Edit form (hidden by default) -->
+      <form id="edit-form" style="display:none;" method="post" action="/profile">
+        <div class="field-group">
+          <div class="field-label">Interests (comma-separated)</div>
+          <input class="edit-input" name="interests" id="edit-interests" />
+        </div>
+        <div class="field-group">
+          <div class="field-label">Dietary Preferences</div>
+          <input class="edit-input" name="dietary" id="edit-dietary" placeholder="e.g., vegetarian, no dairy" />
+        </div>
+        <div class="field-group">
+          <div class="field-label">Communication Style</div>
+          <input class="edit-input" name="tone" id="edit-tone" placeholder="e.g., casual, brief, formal" />
+        </div>
+        <div class="field-group">
+          <div class="field-label">Notes</div>
+          <textarea class="edit-textarea" name="notes" id="edit-notes" placeholder="Anything CHILI should know"></textarea>
+        </div>
+        <div class="btn-row">
+          <button type="submit" class="btn btn-primary">Save</button>
+          <button type="button" class="btn btn-outline" onclick="toggleEdit()">Cancel</button>
+        </div>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Interest Tracking</h2>
+      <div class="chart-wrap"><canvas id="chart-interests"></canvas></div>
+      <div id="interest-empty" style="display:none;" class="timeline-empty">
+        CHILI will track your interests as you chat. Start a conversation to build your profile.
+      </div>
+    </div>
+  </div>
+
+  <!-- Memories Timeline -->
+  <div class="card">
+    <h2>Memories <span style="font-weight:400;font-size:.72rem;color:var(--text-muted);text-transform:none;letter-spacing:0;">Things CHILI has learned about you</span></h2>
+    <ul class="timeline" id="timeline"></ul>
+    <div id="timeline-empty" class="timeline-empty" style="display:none;">
+      No memories yet. As you chat with CHILI, personal facts and preferences will appear here.
+    </div>
+    <button class="load-more" id="load-more-btn" style="display:none;" onclick="loadMoreMemories()">Load more</button>
+  </div>
+
+  <div class="p-footer">CHILI Home Copilot &mdash; Your memories are private and never shared.</div>
 </div>
+
+<script>
+(function() {
+  var CAT_COLORS = {
+    interest: '#3b82f6', preference: '#8b5cf6', habit: '#10b981',
+    event: '#f59e0b', person: '#ec4899', dietary: '#ef4444',
+    work: '#06b6d4', health: '#84cc16', memory: '#f97316',
+    schedule: '#6366f1', goal: '#14b8a6'
+  };
+
+  var profileData = null;
+  var memoryPage = 1;
+  var memoryPages = 1;
+  var chart = null;
+
+  // Theme toggle
+  var themeBtn = document.getElementById('theme-toggle');
+  function applyTheme() {
+    themeBtn.textContent = document.documentElement.getAttribute('data-theme') === 'dark' ? '\u2600\uFE0F' : '\uD83C\uDF19';
+  }
+  applyTheme();
+  themeBtn.addEventListener('click', function() {
+    var next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem('chili-theme', next);
+    applyTheme();
+    if (chart) { chart.destroy(); chart = null; }
+    if (profileData) renderInterestChart(profileData.interest_breakdown);
+  });
+
+  function loadProfile() {
+    fetch('/api/profile').then(function(r) { return r.json(); }).then(function(d) {
+      profileData = d;
+      var p = d.profile || {};
+
+      document.getElementById('profile-meta').textContent =
+        'Last auto-updated: ' + (p.last_updated || 'Never');
+
+      document.getElementById('mem-count').textContent = d.memory_count || 0;
+      var interests = p.interests || [];
+      document.getElementById('interest-count').textContent = interests.length;
+      document.getElementById('category-count').textContent = (d.interest_breakdown || []).length;
+      document.getElementById('last-updated').textContent = p.last_updated === 'Never' ? 'Never' : p.last_updated.split(',')[0] || '—';
+
+      // Interests tags
+      var tagsEl = document.getElementById('interests-display');
+      if (interests.length) {
+        tagsEl.innerHTML = interests.map(function(i) { return '<span class="tag">' + i + '</span>'; }).join('');
+      } else {
+        tagsEl.innerHTML = '<span style="color:var(--text-muted);font-size:.85rem;font-style:italic;">No interests discovered yet</span>';
+      }
+
+      document.getElementById('dietary-display').textContent = p.dietary || '';
+      document.getElementById('tone-display').textContent = p.tone || '';
+      document.getElementById('notes-display').textContent = p.notes || '';
+
+      // Populate edit form
+      document.getElementById('edit-interests').value = interests.join(', ');
+      document.getElementById('edit-dietary').value = p.dietary || '';
+      document.getElementById('edit-tone').value = p.tone || '';
+      document.getElementById('edit-notes').value = p.notes || '';
+
+      renderInterestChart(d.interest_breakdown || []);
+    });
+  }
+
+  function renderInterestChart(breakdown) {
+    var el = document.getElementById('chart-interests');
+    var emptyEl = document.getElementById('interest-empty');
+
+    if (!breakdown || breakdown.length === 0) {
+      el.style.display = 'none';
+      emptyEl.style.display = 'block';
+      return;
+    }
+    el.style.display = 'block';
+    emptyEl.style.display = 'none';
+
+    var textColor = getComputedStyle(document.documentElement).getPropertyValue('--text-secondary').trim() || '#6b7280';
+    var gridColor = getComputedStyle(document.documentElement).getPropertyValue('--border').trim() || '#e5e7eb';
+
+    if (chart) chart.destroy();
+    chart = new Chart(el, {
+      type: 'bar',
+      data: {
+        labels: breakdown.map(function(b) { return b.category; }),
+        datasets: [{
+          data: breakdown.map(function(b) { return b.count; }),
+          backgroundColor: breakdown.map(function(b) { return CAT_COLORS[b.category] || '#6b7280'; }),
+          borderRadius: 6, borderSkipped: false,
+        }]
+      },
+      options: {
+        indexAxis: 'y',
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { beginAtZero: true, ticks: { color: textColor, stepSize: 1 }, grid: { color: gridColor } },
+          y: { ticks: { color: textColor }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  function loadMemories(append) {
+    fetch('/api/profile/memories?page=' + memoryPage).then(function(r) { return r.json(); }).then(function(d) {
+      var timeline = document.getElementById('timeline');
+      var emptyEl = document.getElementById('timeline-empty');
+      var loadBtn = document.getElementById('load-more-btn');
+
+      memoryPages = d.pages;
+
+      if (d.total === 0 && !append) {
+        emptyEl.style.display = 'block';
+        loadBtn.style.display = 'none';
+        return;
+      }
+      emptyEl.style.display = 'none';
+
+      var html = '';
+      d.memories.forEach(function(m) {
+        var catClass = 'cat-' + m.category;
+        html +=
+          '<li class="timeline-item" id="mem-' + m.id + '">' +
+            '<span class="cat-badge ' + catClass + '">' + m.category + '</span>' +
+            '<span class="timeline-content">' + escapeHtml(m.content) + '</span>' +
+            '<span class="timeline-time">' + m.created_at + '</span>' +
+            '<span class="timeline-actions"><button class="delete-btn" onclick="deleteMemory(' + m.id + ')" title="Remove">&times;</button></span>' +
+          '</li>';
+      });
+
+      if (append) {
+        timeline.insertAdjacentHTML('beforeend', html);
+      } else {
+        timeline.innerHTML = html;
+      }
+
+      loadBtn.style.display = memoryPage < memoryPages ? 'block' : 'none';
+    });
+  }
+
+  window.loadMoreMemories = function() {
+    memoryPage++;
+    loadMemories(true);
+  };
+
+  window.deleteMemory = function(id) {
+    fetch('/api/profile/memories/' + id, { method: 'DELETE' }).then(function(r) { return r.json(); }).then(function(d) {
+      if (d.ok) {
+        var el = document.getElementById('mem-' + id);
+        if (el) el.remove();
+        var countEl = document.getElementById('mem-count');
+        var c = parseInt(countEl.textContent) || 0;
+        countEl.textContent = Math.max(0, c - 1);
+      }
+    });
+  };
+
+  window.toggleEdit = function() {
+    var form = document.getElementById('edit-form');
+    var about = document.getElementById('about-section');
+    if (form.style.display === 'none') {
+      form.style.display = 'block';
+      about.style.display = 'none';
+    } else {
+      form.style.display = 'none';
+      about.style.display = 'block';
+    }
+  };
+
+  function escapeHtml(s) {
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+
+  loadProfile();
+  loadMemories(false);
+})();
+</script>
 {% endblock %}

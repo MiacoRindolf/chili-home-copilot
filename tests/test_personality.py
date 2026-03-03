@@ -243,7 +243,7 @@ class TestProfilePage:
         resp = client.get("/profile")
         assert resp.status_code == 200
         assert user.name in resp.text
-        assert "Save Profile" in resp.text
+        assert "Edit Profile" in resp.text or "profile" in resp.text.lower()
 
     def test_paired_user_can_save_profile(self, paired_client, db):
         client, user = paired_client

@@ -24,7 +24,9 @@ from ..services.chat_service import (
     build_openai_prompt,
     sse_event,
     store_and_title,
+    store_and_title_with_memory,
     try_personality_update,
+    try_memory_extraction,
 )
 
 router = APIRouter()
@@ -424,6 +426,7 @@ async def chat_api(
     db.commit()
 
     try_personality_update(user_id, is_guest, db, trace_id)
+    try_memory_extraction(user_id, is_guest, message, llm_reply, action_type, db, trace_id)
 
     ms = int((time.time() - t0) * 1000)
     record_latency(ms)
@@ -488,7 +491,7 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "vision", "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title(convo_key, conversation_id, complete, trace_id, "vision", model_used, client_ip, display_message)
+            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "vision", model_used, client_ip, display_message, user_id=user_id, is_guest=is_guest)
 
         return StreamingResponse(vision_gen(), media_type="text/event-stream")
 
@@ -498,7 +501,7 @@ async def chat_stream_api(
         def crisis_gen():
             yield sse_event({"token": wellness.CRISIS_RESPONSE, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "crisis_support", "model_used": "crisis-detector", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title(convo_key, conversation_id, wellness.CRISIS_RESPONSE, trace_id, "crisis_support", "crisis-detector", client_ip, message)
+            store_and_title_with_memory(convo_key, conversation_id, wellness.CRISIS_RESPONSE, trace_id, "crisis_support", "crisis-detector", client_ip, message, user_id=user_id, is_guest=is_guest)
         return StreamingResponse(crisis_gen(), media_type="text/event-stream")
 
     if wellness.detect_wellness_topic(message):
@@ -515,7 +518,7 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "wellness_support", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title(convo_key, conversation_id, complete, trace_id, "wellness_support", used_model, client_ip, message)
+            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "wellness_support", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
         return StreamingResponse(wellness_gen(), media_type="text/event-stream")
 
     rag_sources = []
@@ -534,7 +537,7 @@ async def chat_stream_api(
             def nlu_gen():
                 yield sse_event({"token": reply, "done": False})
                 yield sse_event({"token": "", "done": True, "action_type": act_type, "model_used": model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                store_and_title(convo_key, conversation_id, reply, trace_id, act_type, model, client_ip, message)
+                store_and_title_with_memory(convo_key, conversation_id, reply, trace_id, act_type, model, client_ip, message, user_id=user_id, is_guest=is_guest)
             return StreamingResponse(nlu_gen(), media_type="text/event-stream")
 
         if openai_client.is_configured():
@@ -552,14 +555,14 @@ async def chat_stream_api(
                 if not full:
                     yield sse_event({"token": complete, "done": False})
                 yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message)
+                store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
             return StreamingResponse(openai_fb_gen(), media_type="text/event-stream")
 
         reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
         def offline_gen():
             yield sse_event({"token": reply, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "llm_offline", "model_used": "offline", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title(convo_key, conversation_id, reply, trace_id, "llm_offline", "offline", client_ip, message)
+            store_and_title_with_memory(convo_key, conversation_id, reply, trace_id, "llm_offline", "offline", client_ip, message, user_id=user_id, is_guest=is_guest)
         return StreamingResponse(offline_gen(), media_type="text/event-stream")
 
     planned = ctx["planned"]
@@ -599,7 +602,7 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "web_search", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-            store_and_title(convo_key, conversation_id, complete, trace_id, "web_search", used_model, client_ip, message)
+            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "web_search", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
         return StreamingResponse(search_stream_gen(), media_type="text/event-stream")
 
     if action_type not in ("unknown", "web_search") or not openai_client.is_configured():
@@ -612,7 +615,7 @@ async def chat_stream_api(
         def tool_gen():
             yield sse_event({"token": llm_reply, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-            store_and_title(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message)
+            store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message, user_id=user_id, is_guest=is_guest)
         return StreamingResponse(tool_gen(), media_type="text/event-stream")
 
     openai_messages = [{"role": m.role, "content": m.content} for m in recent]
@@ -632,7 +635,7 @@ async def chat_stream_api(
             yield sse_event({"token": complete, "done": False})
 
         yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-        store_and_title(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message)
+        store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
 
     return StreamingResponse(stream_gen(), media_type="text/event-stream")
 

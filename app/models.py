@@ -134,6 +134,20 @@ class IntercomMessage(Base):
     to_user = relationship("User", foreign_keys=[to_user_id])
 
 
+class UserMemory(Base):
+    __tablename__ = "user_memories"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    category = Column(String, nullable=False)
+    content = Column(Text, nullable=False)
+    source_message_id = Column(Integer, ForeignKey("chat_messages.id"), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    superseded = Column(Boolean, default=False)
+
+    user = relationship("User")
+
+
 class IntercomConsent(Base):
     __tablename__ = "intercom_consents"
 
