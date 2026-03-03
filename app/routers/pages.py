@@ -3,12 +3,12 @@ from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from datetime import date
+from datetime import date, datetime
 from pydantic import BaseModel
 import json as json_mod
 
 from ..deps import get_db
-from ..models import Chore, Birthday, HousemateProfile, User
+from ..models import Chore, Birthday, HousemateProfile, User, UserStatus
 from ..pairing import (
     DEVICE_COOKIE_NAME, redeem_pair_code, register_device,
     get_identity_record, generate_pair_code,
@@ -24,25 +24,69 @@ def init_templates(t: Jinja2Templates):
     templates = t
 
 
+def _days_until(bday_date: date) -> int:
+    """Days until the next occurrence of this birthday."""
+    today = date.today()
+    this_year = bday_date.replace(year=today.year)
+    if this_year < today:
+        this_year = this_year.replace(year=today.year + 1)
+    return (this_year - today).days
+
+
+def _greeting() -> str:
+    hour = datetime.now().hour
+    if hour < 12:
+        return "Good morning"
+    elif hour < 17:
+        return "Good afternoon"
+    return "Good evening"
+
+
 @router.get("/", response_class=HTMLResponse)
 def home(request: Request, db: Session = Depends(get_db)):
+    device_token = request.cookies.get(DEVICE_COOKIE_NAME)
+    identity = get_identity_record(db, device_token)
+
     chores = db.query(Chore).order_by(Chore.id.desc()).all()
+    chore_list = [{"id": c.id, "title": c.title, "done": c.done} for c in chores]
+
     birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
+    bday_list = sorted(
+        [{"id": b.id, "name": b.name, "date": b.date.isoformat(), "days_until": _days_until(b.date)} for b in birthdays],
+        key=lambda x: x["days_until"],
+    )
 
-    chore_items = "".join(
-        f"<li>{'✅' if c.done else '⬜'} {c.title} "
-        f"<a href='/chores/{c.id}/done'>mark done</a></li>"
-        for c in chores
-    ) or "<li>No chores yet.</li>"
+    pending_chores = sum(1 for c in chores if not c.done)
+    upcoming_bdays = sum(1 for b in bday_list if b["days_until"] <= 7)
 
-    bday_items = "".join(
-        f"<li>🎂 {b.name} — {b.date.isoformat()}</li>"
-        for b in birthdays
-    ) or "<li>No birthdays yet.</li>"
+    housemates = []
+    housemates_online = 0
+    if not identity["is_guest"]:
+        users = db.query(User).all()
+        for u in users:
+            if u.id == identity["user_id"]:
+                continue
+            st_row = db.query(UserStatus).filter(UserStatus.user_id == u.id).first()
+            status = "available"
+            if st_row:
+                if st_row.status == "dnd" and st_row.dnd_until and datetime.utcnow() > st_row.dnd_until:
+                    status = "available"
+                else:
+                    status = st_row.status
+            housemates.append({"name": u.name, "status": status})
+            if status == "available":
+                housemates_online += 1
 
     return templates.TemplateResponse(request, "home.html", {
-        "chore_items": chore_items,
-        "bday_items": bday_items,
+        "greeting": _greeting(),
+        "user_name": identity["user_name"],
+        "is_guest": identity["is_guest"],
+        "chores": chore_list,
+        "birthdays": bday_list,
+        "pending_chores": pending_chores,
+        "upcoming_bdays": upcoming_bdays,
+        "housemates_online": housemates_online,
+        "housemates": housemates,
     })
 
 
@@ -71,6 +115,71 @@ def add_birthday_form(
     db.add(Birthday(name=name, date=date))
     db.commit()
     return RedirectResponse("/", status_code=303)
+
+
+# ---------------------------------------------------------------------------
+# JSON API for AJAX home page interactions
+# ---------------------------------------------------------------------------
+
+class AddChoreBody(BaseModel):
+    title: str
+
+class AddBirthdayBody(BaseModel):
+    name: str
+    date: str
+
+
+@router.post("/api/chores", response_class=JSONResponse)
+def api_add_chore(body: AddChoreBody, db: Session = Depends(get_db)):
+    c = Chore(title=body.title.strip(), done=False)
+    db.add(c)
+    db.commit()
+    db.refresh(c)
+    return {"ok": True, "chore": {"id": c.id, "title": c.title, "done": c.done}}
+
+
+@router.post("/api/chores/{chore_id}/done", response_class=JSONResponse)
+def api_chore_done(chore_id: int, db: Session = Depends(get_db)):
+    c = db.query(Chore).filter(Chore.id == chore_id).first()
+    if not c:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    c.done = not c.done
+    db.commit()
+    return {"ok": True, "chore": {"id": c.id, "title": c.title, "done": c.done}}
+
+
+@router.delete("/api/chores/{chore_id}", response_class=JSONResponse)
+def api_chore_delete(chore_id: int, db: Session = Depends(get_db)):
+    c = db.query(Chore).filter(Chore.id == chore_id).first()
+    if not c:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    db.delete(c)
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/api/birthdays", response_class=JSONResponse)
+def api_add_birthday(body: AddBirthdayBody, db: Session = Depends(get_db)):
+    try:
+        d = date.fromisoformat(body.date)
+    except ValueError:
+        return JSONResponse({"ok": False, "error": "Invalid date"}, status_code=400)
+    b = Birthday(name=body.name.strip(), date=d)
+    db.add(b)
+    db.commit()
+    db.refresh(b)
+    days = _days_until(b.date)
+    return {"ok": True, "birthday": {"id": b.id, "name": b.name, "date": b.date.isoformat(), "days_until": days}}
+
+
+@router.delete("/api/birthdays/{bday_id}", response_class=JSONResponse)
+def api_birthday_delete(bday_id: int, db: Session = Depends(get_db)):
+    b = db.query(Birthday).filter(Birthday.id == bday_id).first()
+    if not b:
+        return JSONResponse({"ok": False, "error": "Not found"}, status_code=404)
+    db.delete(b)
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/profile", response_class=HTMLResponse)

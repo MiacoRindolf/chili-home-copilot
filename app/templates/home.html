@@ -1,28 +1,419 @@
 {% extends "base.html" %}
 {% block title %}CHILI Home Copilot{% endblock %}
+
+{% block head_extra %}
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh; background: var(--bg); color: var(--text);
+  }
+
+  header {
+    background: var(--bg-header); border-bottom: 1px solid var(--border);
+    padding: 16px 20px; display: flex; justify-content: space-between; align-items: center;
+  }
+  header h1 { font-size: 22px; font-weight: 700; }
+  header .subtitle { font-size: 13px; color: var(--text-secondary); margin-top: 2px; }
+  header nav { font-size: 13px; margin-top: 6px; }
+  header nav a { color: var(--text-secondary); text-decoration: none; margin-right: 14px; }
+  header nav a:hover { text-decoration: underline; color: var(--accent); }
+  #theme-toggle {
+    background: none; border: 1px solid var(--border); border-radius: 6px;
+    padding: 4px 10px; font-size: 18px; cursor: pointer; line-height: 1;
+    color: var(--text);
+  }
+
+  .dashboard {
+    max-width: 960px; width: 100%; margin: 0 auto;
+    padding: 24px 20px 60px;
+  }
+
+  .stats-row {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
+    padding: 16px 18px; text-align: center;
+  }
+  .stat-card .stat-value { font-size: 28px; font-weight: 700; color: var(--accent); }
+  .stat-card .stat-label { font-size: 12px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-top: 4px; }
+
+  .card-grid {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+  }
+  @media (max-width: 640px) {
+    .card-grid { grid-template-columns: 1fr; }
+  }
+
+  .card {
+    background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px;
+    padding: 20px; display: flex; flex-direction: column;
+  }
+  .card h2 {
+    font-size: 13px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: .04em; color: var(--text-muted); margin-bottom: 14px;
+  }
+
+  .card-full { grid-column: 1 / -1; }
+
+  .add-row {
+    display: flex; gap: 8px; margin-bottom: 14px;
+  }
+  .add-row input {
+    flex: 1; padding: 8px 12px; border-radius: 8px; font-size: 14px;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+  }
+  .add-row input:focus { outline: none; border-color: var(--accent); }
+  .add-row button {
+    padding: 8px 16px; border-radius: 8px; border: none; font-size: 14px; font-weight: 600;
+    background: var(--accent); color: #fff; cursor: pointer; white-space: nowrap;
+  }
+  .add-row button:hover { background: var(--accent-hover); }
+
+  .filter-tabs {
+    display: flex; gap: 4px; margin-bottom: 12px;
+  }
+  .filter-tabs button {
+    padding: 5px 12px; border-radius: 6px; border: 1px solid var(--border);
+    background: transparent; color: var(--text-secondary); font-size: 12px;
+    cursor: pointer; transition: .15s;
+  }
+  .filter-tabs button.active {
+    background: var(--accent); color: #fff; border-color: var(--accent);
+  }
+
+  .item-list { list-style: none; flex: 1; overflow-y: auto; max-height: 320px; }
+  .item-list li {
+    display: flex; align-items: center; gap: 10px;
+    padding: 10px 0; border-bottom: 1px solid var(--border);
+  }
+  .item-list li:last-child { border-bottom: none; }
+
+  .chore-check {
+    width: 20px; height: 20px; border-radius: 6px; border: 2px solid var(--input-border);
+    cursor: pointer; display: flex; align-items: center; justify-content: center;
+    flex-shrink: 0; transition: .15s; font-size: 12px; background: transparent; color: transparent;
+  }
+  .chore-check.done { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chore-title { flex: 1; font-size: 14px; }
+  .chore-title.done { text-decoration: line-through; color: var(--text-muted); }
+
+  .btn-delete {
+    background: none; border: none; cursor: pointer; padding: 4px 6px;
+    border-radius: 6px; font-size: 16px; color: var(--text-muted); line-height: 1;
+  }
+  .btn-delete:hover { background: rgba(239,68,68,.15); color: #ef4444; }
+
+  .bday-days {
+    font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 10px;
+    flex-shrink: 0; white-space: nowrap;
+    background: var(--code-bg); color: var(--text-secondary);
+  }
+  .bday-days.today { background: var(--accent); color: #fff; }
+  .bday-days.soon { background: rgba(234,179,8,.15); color: #ca8a04; }
+  [data-theme="dark"] .bday-days.soon { color: #facc15; }
+  .bday-name { flex: 1; font-size: 14px; }
+  .bday-date { font-size: 12px; color: var(--text-muted); flex-shrink: 0; }
+
+  .quick-actions {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(100px, 1fr)); gap: 10px;
+  }
+  .qa-tile {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    padding: 16px 10px; border-radius: 10px; border: 1px solid var(--border);
+    text-decoration: none; color: var(--text); transition: .15s;
+    background: transparent;
+  }
+  .qa-tile:hover { background: rgba(37,99,235,.06); border-color: var(--accent); }
+  .qa-tile .qa-icon { font-size: 26px; }
+  .qa-tile .qa-label { font-size: 12px; font-weight: 600; }
+
+  .hm-row {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 0; border-bottom: 1px solid var(--border);
+  }
+  .hm-row:last-child { border-bottom: none; }
+  .hm-dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .hm-dot.available { background: #22c55e; }
+  .hm-dot.dnd { background: #ef4444; }
+  .hm-dot.offline { background: var(--text-muted); }
+  .hm-name { font-size: 14px; flex: 1; }
+  .hm-status { font-size: 12px; color: var(--text-muted); }
+
+  .empty-state { font-size: 13px; color: var(--text-muted); padding: 12px 0; }
+</style>
+{% endblock %}
+
 {% block content %}
-<div style="font-family: Arial; max-width: 800px; margin: 40px auto;">
-  <h1>🌶️ CHILI — Home Copilot</h1>
-  <p><b>Conversational Home Interface & Life Intelligence</b></p>
+<header>
+  <div>
+    <h1>&#x1F336;&#xFE0F; CHILI Home</h1>
+    <div class="subtitle">{{ greeting }}, {{ user_name }}</div>
+    <nav>
+      <a href="/chat">Chat</a>
+      <a href="/intercom">Intercom</a>
+      {% if not is_guest %}<a href="/profile">Profile</a>{% endif %}
+      {% if not is_guest %}<a href="/admin">Admin</a>{% endif %}
+    </nav>
+  </div>
+  <button id="theme-toggle" title="Toggle dark mode">&#127769;</button>
+</header>
 
-  <h2>Chores</h2>
-  <form method="post" action="/chores">
-    <input name="title" placeholder="Add a chore..." style="width: 100%; max-width: 520px; padding: 10px; font-size: 16px;" required />
-    <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
-  </form>
-  <ul>{{ chore_items | safe }}</ul>
+<div class="dashboard">
+  <div class="stats-row">
+    <div class="stat-card">
+      <div class="stat-value" id="stat-pending">{{ pending_chores }}</div>
+      <div class="stat-label">Pending Chores</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-value">{{ upcoming_bdays }}</div>
+      <div class="stat-label">Birthdays This Week</div>
+    </div>
+    {% if not is_guest %}
+    <div class="stat-card">
+      <div class="stat-value">{{ housemates_online }}</div>
+      <div class="stat-label">Housemates Online</div>
+    </div>
+    {% endif %}
+  </div>
 
-  <h2>Birthday reminders</h2>
-  <form method="post" action="/birthdays">
-    <input name="name" placeholder="Name" required />
-    <input name="date" type="date" required />
-    <button style="padding: 10px 14px; font-size: 16px; margin-top: 8px;" type="submit">Add</button>
-  </form>
-  <ul>{{ bday_items | safe }}</ul>
+  <div class="card-grid">
+    <!-- Chores -->
+    <div class="card">
+      <h2>Chores</h2>
+      <div class="add-row">
+        <input type="text" id="chore-input" placeholder="Add a chore..." />
+        <button onclick="addChore()">Add</button>
+      </div>
+      <div class="filter-tabs">
+        <button class="active" data-filter="all" onclick="filterChores('all',this)">All</button>
+        <button data-filter="pending" onclick="filterChores('pending',this)">Pending</button>
+        <button data-filter="done" onclick="filterChores('done',this)">Done</button>
+      </div>
+      <ul class="item-list" id="chore-list"></ul>
+    </div>
 
-  <hr/>
-  <p style="color: #666;">
-    Local-first household copilot. <a href="/chat">Open Chat</a> | <a href="/admin">Admin</a>
-  </p>
+    <!-- Birthdays -->
+    <div class="card">
+      <h2>Birthdays</h2>
+      <div class="add-row">
+        <input type="text" id="bday-name-input" placeholder="Name" />
+        <input type="date" id="bday-date-input" />
+        <button onclick="addBirthday()">Add</button>
+      </div>
+      <ul class="item-list" id="bday-list"></ul>
+    </div>
+
+    <!-- Quick Actions -->
+    <div class="card">
+      <h2>Quick Actions</h2>
+      <div class="quick-actions">
+        <a class="qa-tile" href="/chat">
+          <span class="qa-icon">&#128172;</span>
+          <span class="qa-label">Chat</span>
+        </a>
+        <a class="qa-tile" href="/intercom">
+          <span class="qa-icon">&#128266;</span>
+          <span class="qa-label">Intercom</span>
+        </a>
+        {% if not is_guest %}
+        <a class="qa-tile" href="/profile">
+          <span class="qa-icon">&#128100;</span>
+          <span class="qa-label">Profile</span>
+        </a>
+        <a class="qa-tile" href="/admin">
+          <span class="qa-icon">&#9881;&#65039;</span>
+          <span class="qa-label">Admin</span>
+        </a>
+        {% else %}
+        <a class="qa-tile" href="/pair">
+          <span class="qa-icon">&#128279;</span>
+          <span class="qa-label">Pair Device</span>
+        </a>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Housemates -->
+    {% if not is_guest %}
+    <div class="card">
+      <h2>Housemates</h2>
+      <div id="housemate-list">
+        {% if housemates %}
+          {% for h in housemates %}
+          <div class="hm-row">
+            <span class="hm-dot {{ h.status }}"></span>
+            <span class="hm-name">{{ h.name }}</span>
+            <span class="hm-status">{{ h.status | upper }}</span>
+          </div>
+          {% endfor %}
+        {% else %}
+          <div class="empty-state">No other housemates yet</div>
+        {% endif %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
 </div>
+
+<script>
+var themeBtn = document.getElementById('theme-toggle');
+function setTheme(t) {
+  document.documentElement.setAttribute('data-theme', t);
+  themeBtn.innerHTML = (t === 'dark') ? '&#9728;&#65039;' : '&#127769;';
+  localStorage.setItem('chili-theme', t);
+}
+themeBtn.onclick = function() {
+  setTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+};
+setTheme(localStorage.getItem('chili-theme') || 'light');
+
+var choreFilter = 'all';
+var chores = {{ chores | tojson }};
+var birthdays = {{ birthdays | tojson }};
+
+function esc(s) {
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function renderChores() {
+  var list = document.getElementById('chore-list');
+  var filtered = chores;
+  if (choreFilter === 'pending') filtered = chores.filter(function(c) { return !c.done; });
+  else if (choreFilter === 'done') filtered = chores.filter(function(c) { return c.done; });
+
+  if (filtered.length === 0) {
+    list.innerHTML = '<li class="empty-state">No chores ' + (choreFilter === 'all' ? 'yet' : choreFilter) + '</li>';
+    return;
+  }
+
+  list.innerHTML = '';
+  filtered.forEach(function(c) {
+    var li = document.createElement('li');
+    li.innerHTML =
+      '<button class="chore-check ' + (c.done ? 'done' : '') + '" onclick="toggleChore(' + c.id + ')">'
+        + (c.done ? '&#10003;' : '') + '</button>'
+      + '<span class="chore-title ' + (c.done ? 'done' : '') + '">' + esc(c.title) + '</span>'
+      + '<button class="btn-delete" onclick="deleteChore(' + c.id + ')" title="Delete">&#128465;</button>';
+    list.appendChild(li);
+  });
+
+  document.getElementById('stat-pending').textContent = chores.filter(function(c) { return !c.done; }).length;
+}
+
+function filterChores(f, btn) {
+  choreFilter = f;
+  document.querySelectorAll('.filter-tabs button').forEach(function(b) { b.classList.remove('active'); });
+  btn.classList.add('active');
+  renderChores();
+}
+
+function addChore() {
+  var input = document.getElementById('chore-input');
+  var title = input.value.trim();
+  if (!title) return;
+  input.value = '';
+  fetch('/api/chores', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title: title })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      chores.unshift(d.chore);
+      renderChores();
+    }
+  });
+}
+
+function toggleChore(id) {
+  fetch('/api/chores/' + id + '/done', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        for (var i = 0; i < chores.length; i++) {
+          if (chores[i].id === id) { chores[i].done = d.chore.done; break; }
+        }
+        renderChores();
+      }
+    });
+}
+
+function deleteChore(id) {
+  fetch('/api/chores/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        chores = chores.filter(function(c) { return c.id !== id; });
+        renderChores();
+      }
+    });
+}
+
+document.getElementById('chore-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter') { e.preventDefault(); addChore(); }
+});
+
+function renderBirthdays() {
+  var list = document.getElementById('bday-list');
+  if (birthdays.length === 0) {
+    list.innerHTML = '<li class="empty-state">No birthdays yet</li>';
+    return;
+  }
+  list.innerHTML = '';
+  birthdays.forEach(function(b) {
+    var li = document.createElement('li');
+    var badgeClass = 'bday-days';
+    var label = b.days_until + 'd';
+    if (b.days_until === 0) { badgeClass += ' today'; label = 'Today!'; }
+    else if (b.days_until <= 7) { badgeClass += ' soon'; }
+    li.innerHTML =
+      '<span class="' + badgeClass + '">' + label + '</span>'
+      + '<span class="bday-name">' + esc(b.name) + '</span>'
+      + '<span class="bday-date">' + b.date + '</span>'
+      + '<button class="btn-delete" onclick="deleteBirthday(' + b.id + ')" title="Delete">&#128465;</button>';
+    list.appendChild(li);
+  });
+}
+
+function addBirthday() {
+  var nameInput = document.getElementById('bday-name-input');
+  var dateInput = document.getElementById('bday-date-input');
+  var name = nameInput.value.trim();
+  var dateVal = dateInput.value;
+  if (!name || !dateVal) return;
+  nameInput.value = '';
+  dateInput.value = '';
+  fetch('/api/birthdays', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name, date: dateVal })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok) {
+      birthdays.push(d.birthday);
+      birthdays.sort(function(a, b) { return a.days_until - b.days_until; });
+      renderBirthdays();
+    }
+  });
+}
+
+function deleteBirthday(id) {
+  fetch('/api/birthdays/' + id, { method: 'DELETE' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        birthdays = birthdays.filter(function(b) { return b.id !== id; });
+        renderBirthdays();
+      }
+    });
+}
+
+renderChores();
+renderBirthdays();
+</script>
 {% endblock %}
