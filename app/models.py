@@ -211,3 +211,35 @@ class ActivityLog(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     user = relationship("User", foreign_keys=[user_id])
+
+
+class CloneProfile(Base):
+    """High-level constitution / values document for a user's AI clone."""
+    __tablename__ = "clone_profiles"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
+    display_name = Column(String, nullable=True)
+    constitution = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    user = relationship("User")
+    answers = relationship("CloneQA", back_populates="profile", cascade="all, delete-orphan")
+
+
+class CloneQA(Base):
+    """Individual Q&A entry for AI clone training data."""
+    __tablename__ = "clone_qa"
+
+    id = Column(Integer, primary_key=True, index=True)
+    profile_id = Column(Integer, ForeignKey("clone_profiles.id"), nullable=False, index=True)
+    question_key = Column(String, nullable=False, index=True)
+    category = Column(String, nullable=False)
+    question_text = Column(Text, nullable=False)
+    selected_options = Column(Text, nullable=True)  # JSON list of chosen option ids
+    freeform_answer = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    profile = relationship("CloneProfile", back_populates="answers")

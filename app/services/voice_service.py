@@ -1,10 +1,13 @@
-"""Voice assistant service: Whisper STT integration and voice command routing.
+"""Voice assistant service: Whisper STT, edge-tts TTS, and voice command routing.
 
-Transcription backends (tried in order):
-  1. Ollama whisper model (local, free)
-  2. OpenAI Whisper API (requires API key)
-  3. Returns error if neither available
+STT backends (tried in order):
+  1. OpenAI/Groq Whisper API (requires API key)
+  2. Returns error if not available
+
+TTS backend:
+  - Microsoft Edge TTS (free neural voices via edge-tts)
 """
+import asyncio
 import io
 import json
 import tempfile
@@ -16,6 +19,10 @@ import requests
 from sqlalchemy.orm import Session
 
 from ..logger import log_info, new_trace_id
+
+TTS_VOICE = "aria"
+TTS_VOICE_EDGE = "en-US-AriaNeural"
+UNCLOSEAI_TTS_URL = "https://speech.ai.unturf.com/v1"
 
 OLLAMA_URL = "http://localhost:11434"
 VOICE_COMMANDS: list[tuple[str, dict]] = [
@@ -133,6 +140,69 @@ def get_voice_capabilities() -> dict:
             "browser_speech_api": True,
         },
         "tts_backends": {
-            "browser_speech_synthesis": True,
+            "qwen3_tts": True,
+            "edge_tts": True,
         },
     }
+
+
+def _clean_text_for_tts(text: str) -> Optional[str]:
+    """Strip HTML/markdown and truncate for TTS input."""
+    clean = re.sub(r'<[^>]*>', '', text)
+    clean = re.sub(r'\*\*', '', clean)
+    clean = re.sub(r'[#_`]', '', clean)
+    clean = clean.strip()
+    if not clean:
+        return None
+    if len(clean) > 1500:
+        clean = clean[:1500] + "..."
+    return clean
+
+
+async def _try_qwen3_tts(text: str, voice: str) -> Optional[bytes]:
+    """Primary TTS: Qwen3-TTS via uncloseai (free, human-cloned voices)."""
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key="not-needed", base_url=UNCLOSEAI_TTS_URL)
+        response = client.audio.speech.create(
+            model="tts-1",
+            voice=voice,
+            input=text,
+        )
+        audio_bytes = response.read()
+        if audio_bytes and len(audio_bytes) > 100:
+            return audio_bytes
+        return None
+    except Exception as e:
+        log_info(new_trace_id(), f"[voice] Qwen3-TTS failed: {e}")
+        return None
+
+
+async def _try_edge_tts(text: str, voice: str) -> Optional[bytes]:
+    """Fallback TTS: Microsoft Edge neural voices."""
+    try:
+        import edge_tts
+        communicate = edge_tts.Communicate(text, voice)
+        audio_chunks = []
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio_chunks.append(chunk["data"])
+        if not audio_chunks:
+            return None
+        return b"".join(audio_chunks)
+    except Exception as e:
+        log_info(new_trace_id(), f"[voice] Edge TTS failed: {e}")
+        return None
+
+
+async def text_to_speech(text: str, voice: str = TTS_VOICE) -> Optional[bytes]:
+    """Generate speech audio. Tries Qwen3-TTS first, falls back to Edge TTS."""
+    clean = _clean_text_for_tts(text)
+    if not clean:
+        return None
+
+    result = await _try_qwen3_tts(clean, voice)
+    if result:
+        return result
+
+    return await _try_edge_tts(clean, TTS_VOICE_EDGE)

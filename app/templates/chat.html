@@ -753,16 +753,26 @@
     var voiceWave = document.getElementById('voice-wave');
     var vbars = voiceWave ? voiceWave.querySelectorAll('.vbar') : [];
     var actionBtn = document.getElementById('action-btn');
-    var synthesis = window.speechSynthesis;
+    var _ttsAudio = null;
 
     function speakText(text) {
-      if (!synthesis) return;
-      synthesis.cancel();
-      var clean = text.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replace(/[#_`]/g, '').substring(0, 600);
-      if (!clean.trim()) return;
-      var utter = new SpeechSynthesisUtterance(clean);
-      utter.rate = 1.0; utter.pitch = 1.0;
-      synthesis.speak(utter);
+      if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
+      var clean = text.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replace(/[#_`]/g, '').trim();
+      if (!clean) return;
+      var fd = new FormData();
+      fd.append('text', clean.substring(0, 1500));
+      fetch('/api/voice/tts', { method: 'POST', body: fd })
+        .then(function(r) {
+          if (!r.ok) throw new Error('TTS failed');
+          return r.blob();
+        })
+        .then(function(blob) {
+          var url = URL.createObjectURL(blob);
+          _ttsAudio = new Audio(url);
+          _ttsAudio.play();
+          _ttsAudio.onended = function() { URL.revokeObjectURL(url); _ttsAudio = null; };
+        })
+        .catch(function() {});
     }
 
     function updateActionBtn() {

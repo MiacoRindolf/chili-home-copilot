@@ -1,9 +1,9 @@
-"""Voice assistant API routes: transcription and command parsing.
+"""Voice assistant API routes: transcription, command parsing, and TTS.
 
 Voice UI is integrated directly into the chat page (chat.html).
 """
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from sqlalchemy.orm import Session
 
 from ..deps import get_db
@@ -38,6 +38,26 @@ async def voice_command(
     """Parse transcribed text for voice commands or route to chat."""
     parsed = voice_service.parse_voice_command(text)
     return JSONResponse(parsed)
+
+
+@router.post("/api/voice/tts")
+async def voice_tts(
+    text: str = Form(...),
+    voice: str = Form("aria"),
+):
+    """Generate natural-sounding speech audio from text (Qwen3-TTS primary, Edge fallback)."""
+    if not text or not text.strip():
+        return JSONResponse({"ok": False, "error": "No text provided"}, status_code=400)
+
+    audio_bytes = await voice_service.text_to_speech(text.strip(), voice)
+    if not audio_bytes:
+        return JSONResponse({"ok": False, "error": "TTS generation failed"}, status_code=500)
+
+    return Response(
+        content=audio_bytes,
+        media_type="audio/mpeg",
+        headers={"Content-Disposition": "inline; filename=speech.mp3"},
+    )
 
 
 @router.get("/api/voice/capabilities")

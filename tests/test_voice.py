@@ -101,7 +101,8 @@ class TestVoiceCapabilities:
         caps = get_voice_capabilities()
         assert caps["stt_backends"]["openai_whisper"] is True
         assert caps["stt_backends"]["browser_speech_api"] is True
-        assert caps["tts_backends"]["browser_speech_synthesis"] is True
+        assert caps["tts_backends"]["qwen3_tts"] is True
+        assert caps["tts_backends"]["edge_tts"] is True
 
     @patch("app.openai_client.is_configured", return_value=False)
     def test_without_openai(self, mock_oai):
