@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation, PlanProject, PlanTask
+from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation, PlanProject, PlanTask, ProjectMember
 from ..llm_planner import plan_action
 from ..chili_nlu import parse_message as nlu_parse
 from ..logger import log_info
@@ -157,10 +157,12 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
         project_name = action_data.get("project_name", "")
         title = action_data.get("title", "")
         if project_name and title and not is_guest and user_id:
-            project = db.query(PlanProject).filter(
-                PlanProject.user_id == user_id,
-                PlanProject.name.ilike(f"%{project_name}%"),
-            ).first()
+            project = (
+                db.query(PlanProject)
+                .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+                .filter(ProjectMember.user_id == user_id, PlanProject.name.ilike(f"%{project_name}%"))
+                .first()
+            )
             if project:
                 t = planner_service.create_task(db, project.id, user_id, title)
                 executed = True

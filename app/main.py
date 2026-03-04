@@ -44,6 +44,34 @@ with engine.connect() as conn:
                 conn.execute(text(f"ALTER TABLE chores ADD COLUMN {col_name} {col_def}"))
                 conn.commit()
 
+    if "plan_projects" in existing_tables:
+        pp_cols = {c["name"] for c in sa_inspect(engine).get_columns("plan_projects")}
+        if "key" not in pp_cols:
+            conn.execute(text("ALTER TABLE plan_projects ADD COLUMN key TEXT"))
+            conn.commit()
+
+    if "plan_tasks" in existing_tables:
+        pt_cols = {c["name"] for c in sa_inspect(engine).get_columns("plan_tasks")}
+        if "parent_id" not in pt_cols:
+            conn.execute(text("ALTER TABLE plan_tasks ADD COLUMN parent_id INTEGER REFERENCES plan_tasks(id)"))
+            conn.commit()
+        if "reporter_id" not in pt_cols:
+            conn.execute(text("ALTER TABLE plan_tasks ADD COLUMN reporter_id INTEGER REFERENCES users(id)"))
+            conn.commit()
+
+    # Backfill: ensure existing plan_project owners have a ProjectMember row
+    if "plan_projects" in existing_tables and "project_members" in existing_tables:
+        rows = conn.execute(text(
+            "SELECT pp.id, pp.user_id FROM plan_projects pp "
+            "WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = pp.id AND pm.user_id = pp.user_id)"
+        )).fetchall()
+        for row in rows:
+            conn.execute(text(
+                "INSERT INTO project_members (project_id, user_id, role, joined_at) VALUES (:pid, :uid, 'owner', datetime('now'))"
+            ), {"pid": row[0], "uid": row[1]})
+        if rows:
+            conn.commit()
+
 app = FastAPI(title="CHILI Home Copilot")
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
