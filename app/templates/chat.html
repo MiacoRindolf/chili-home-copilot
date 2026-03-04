@@ -757,10 +757,10 @@
 
     function speakText(text) {
       if (_ttsAudio) { _ttsAudio.pause(); _ttsAudio = null; }
-      var clean = text.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replace(/[#_`]/g, '').trim();
+      var clean = text.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replace(/[#_`\-\[\]]/g, '').trim();
       if (!clean) return;
       var fd = new FormData();
-      fd.append('text', clean.substring(0, 1500));
+      fd.append('text', clean.substring(0, 500));
       fetch('/api/voice/tts', { method: 'POST', body: fd })
         .then(function(r) {
           if (!r.ok) throw new Error('TTS failed');
@@ -1336,6 +1336,7 @@
         var decoder = new TextDecoder();
         var buffer = '';
         var meta = {};
+        var _ttsFired = false;
 
         while (true) {
           var result = await reader.read();
@@ -1360,6 +1361,11 @@
                   var mdBody = streamDiv.querySelector('.md-body');
                   mdBody.innerHTML = renderMd(fullText);
                   chatArea.scrollTop = chatArea.scrollHeight;
+
+                  if (_sentViaVoice && !_ttsFired && /[.!?]\s/.test(fullText) && fullText.length > 40) {
+                    _ttsFired = true;
+                    speakText(fullText);
+                  }
                 }
               } catch(pe) {}
             }
@@ -1367,7 +1373,7 @@
         }
 
         finalizeStreamingMsg(streamDiv, fullText, meta);
-        if (_sentViaVoice) speakText(fullText);
+        if (_sentViaVoice && !_ttsFired) speakText(fullText);
         statusEl.textContent = '';
         if (!isGuest) loadConversations();
         updateExportBtn();

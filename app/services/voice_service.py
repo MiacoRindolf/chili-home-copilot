@@ -146,30 +146,53 @@ def get_voice_capabilities() -> dict:
     }
 
 
-def _clean_text_for_tts(text: str) -> Optional[str]:
-    """Strip HTML/markdown and truncate for TTS input."""
+def _clean_text_for_tts(text: str, max_sentences: int = 3) -> Optional[str]:
+    """Strip HTML/markdown and keep only the first few sentences for fast TTS."""
     clean = re.sub(r'<[^>]*>', '', text)
     clean = re.sub(r'\*\*', '', clean)
-    clean = re.sub(r'[#_`]', '', clean)
+    clean = re.sub(r'[#_`\-\[\]]', '', clean)
+    clean = re.sub(r'\n{2,}', '. ', clean)
+    clean = re.sub(r'\n', ' ', clean)
+    clean = re.sub(r'\s{2,}', ' ', clean)
     clean = clean.strip()
     if not clean:
         return None
-    if len(clean) > 1500:
-        clean = clean[:1500] + "..."
-    return clean
+
+    sentences = re.split(r'(?<=[.!?])\s+', clean)
+    truncated = ' '.join(sentences[:max_sentences]).strip()
+    if not truncated:
+        truncated = clean[:300]
+    if len(truncated) > 500:
+        truncated = truncated[:500]
+    return truncated
+
+
+_qwen3_client = None
+
+def _get_qwen3_client():
+    global _qwen3_client
+    if _qwen3_client is None:
+        from openai import OpenAI
+        from httpx import Timeout
+        _qwen3_client = OpenAI(
+            api_key="not-needed",
+            base_url=UNCLOSEAI_TTS_URL,
+            timeout=Timeout(8.0, connect=3.0),
+        )
+    return _qwen3_client
 
 
 async def _try_qwen3_tts(text: str, voice: str) -> Optional[bytes]:
     """Primary TTS: Qwen3-TTS via uncloseai (free, human-cloned voices)."""
     try:
-        from openai import OpenAI
-        client = OpenAI(api_key="not-needed", base_url=UNCLOSEAI_TTS_URL)
-        response = client.audio.speech.create(
-            model="tts-1",
-            voice=voice,
-            input=text,
-        )
-        audio_bytes = response.read()
+        loop = asyncio.get_event_loop()
+        def _call():
+            client = _get_qwen3_client()
+            response = client.audio.speech.create(
+                model="tts-1", voice=voice, input=text,
+            )
+            return response.read()
+        audio_bytes = await loop.run_in_executor(None, _call)
         if audio_bytes and len(audio_bytes) > 100:
             return audio_bytes
         return None
@@ -196,13 +219,13 @@ async def _try_edge_tts(text: str, voice: str) -> Optional[bytes]:
 
 
 async def text_to_speech(text: str, voice: str = TTS_VOICE) -> Optional[bytes]:
-    """Generate speech audio. Tries Qwen3-TTS first, falls back to Edge TTS."""
+    """Generate speech audio. Edge TTS primary (~1s), Qwen3-TTS fallback."""
     clean = _clean_text_for_tts(text)
     if not clean:
         return None
 
-    result = await _try_qwen3_tts(clean, voice)
+    result = await _try_edge_tts(clean, TTS_VOICE_EDGE)
     if result:
         return result
 
-    return await _try_edge_tts(clean, TTS_VOICE_EDGE)
+    return await _try_qwen3_tts(clean, voice)
