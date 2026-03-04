@@ -1,29 +1,19 @@
-"""Voice assistant routes: transcription, command execution, page."""
+"""Voice assistant API routes: transcription and command parsing.
+
+Voice UI is integrated directly into the chat page (chat.html).
+"""
 from fastapi import APIRouter, Depends, Request, UploadFile, File, Form
-from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, get_identity_ctx
+from ..deps import get_db
 from ..services import voice_service
 
 router = APIRouter()
-templates = None
 
 
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
-
-
-@router.get("/voice", response_class=HTMLResponse)
-def voice_page(request: Request, db: Session = Depends(get_db)):
-    from ..pairing import DEVICE_COOKIE_NAME, get_identity
-    token = request.cookies.get(DEVICE_COOKIE_NAME)
-    user_name, _ = get_identity(db, token)
-    return templates.TemplateResponse(request, "voice.html", {
-        "user_name": user_name,
-    })
+def init_templates(t):
+    pass
 
 
 @router.post("/api/voice/transcribe")

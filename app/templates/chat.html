@@ -404,6 +404,29 @@
       0%, 100% { opacity: 1; }
       50% { opacity: 0.6; }
     }
+    @keyframes mic-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(239,68,68,.4); }
+      50% { box-shadow: 0 0 0 8px rgba(239,68,68,0); }
+    }
+    #action-btn {
+      background: none; border: 1px solid var(--input-border); border-radius: 8px;
+      padding: 8px 14px; cursor: pointer; font-size: 18px;
+      color: var(--text-secondary); transition: all 0.15s; line-height: 1;
+      flex-shrink: 0;
+    }
+    #action-btn:hover { background: var(--code-bg); color: var(--text); }
+    #action-btn.send-mode {
+      background: var(--accent); color: #fff; border-color: var(--accent);
+    }
+    #action-btn.send-mode:hover { background: var(--accent-hover); }
+    #action-btn.recording {
+      background: #ef4444; color: #fff; border-color: #ef4444;
+      animation: mic-pulse 1.2s ease-in-out infinite;
+    }
+    .vbar {
+      display: inline-block; width: 3px; border-radius: 2px;
+      background: var(--accent); min-height: 4px; transition: height .08s;
+    }
 
     .search-snippet {
       font-size: 11px; color: var(--text-muted); margin-top: 2px;
@@ -427,7 +450,7 @@
       #input-bar { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
       #chat-form { gap: 6px; }
       #msg-input { font-size: 16px; padding: 10px 12px; }
-      #chat-form button, #mic-btn { min-height: 44px; min-width: 44px; }
+      #chat-form button, #action-btn { min-height: 44px; min-width: 44px; }
       .convo-item { padding: 12px; min-height: 44px; }
       #welcome { margin-top: 12vh; }
       #welcome h2 { font-size: 24px; }
@@ -554,8 +577,10 @@
             <button type="button" class="input-action-btn" id="camera-btn" title="Take photo">&#128247;</button>
           </div>
           <textarea id="msg-input" name="message" placeholder="Type a message or paste an image..." autocomplete="off" rows="1"></textarea>
-          <button type="button" id="mic-btn" title="Voice input" style="background:none;border:1px solid var(--input-border);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:18px;color:var(--text-secondary);transition:all 0.15s;display:none;">🎤</button>
-          <button type="submit">Send</button>
+          <div id="voice-wave" style="display:none;align-items:center;gap:2px;height:28px;padding:0 4px;">
+            <span class="vbar"></span><span class="vbar"></span><span class="vbar"></span><span class="vbar"></span><span class="vbar"></span><span class="vbar"></span>
+          </div>
+          <button type="button" id="action-btn" class="mic-mode" title="Voice input">&#127908;</button>
         </form>
         <div id="status"></div>
       </div>
@@ -571,14 +596,12 @@
     var form      = document.getElementById('chat-form');
     var input     = document.getElementById('msg-input');
     var statusEl  = document.getElementById('status');
-    var btn       = form.querySelector('button[type="submit"]');
     var themeBtn  = document.getElementById('theme-toggle');
     var sidebar   = document.getElementById('sidebar');
     var convoList = document.getElementById('convo-list');
     var newChatBtn = document.getElementById('new-chat-btn');
     var sidebarToggleBtn = document.getElementById('sidebar-toggle-btn');
     var sidebarBackdrop = document.getElementById('sidebar-backdrop');
-    var micBtn    = document.getElementById('mic-btn');
     var convoSearch = document.getElementById('convo-search');
     var imageInput = document.getElementById('image-input');
     var cameraInput = document.getElementById('camera-input');
@@ -610,12 +633,14 @@
       item.appendChild(xBtn);
       previewStrip.insertBefore(item, clearAllBtn);
       previewStrip.classList.add('visible');
+      if (typeof updateActionBtn === 'function') updateActionBtn();
     }
 
     function removePendingImage(itemEl, idx) {
       pendingImages[idx] = null;
       itemEl.remove();
       if (pendingImages.filter(Boolean).length === 0) clearAllPending();
+      else if (typeof updateActionBtn === 'function') updateActionBtn();
     }
 
     function clearAllPending() {
@@ -624,6 +649,7 @@
       previewStrip.classList.remove('visible');
       imageInput.value = '';
       cameraInput.value = '';
+      if (typeof updateActionBtn === 'function') updateActionBtn();
     }
 
     clearAllBtn.onclick = clearAllPending;
@@ -715,70 +741,147 @@
     };
     setTheme(localStorage.getItem('chili-theme') || 'light');
 
-    var SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-    var speechRec = null;
-    var _wantMic = false;
-    if (SpeechRec) {
-      micBtn.style.display = '';
-      function micOn() {
-        micBtn.style.background = '#ef4444';
-        micBtn.style.color = '#fff';
-        micBtn.style.animation = 'pulse 1s infinite';
-        statusEl.textContent = 'Listening... tap mic to stop';
-      }
-      function micOff() {
-        micBtn.style.background = 'none';
-        micBtn.style.color = 'var(--text-secondary)';
-        micBtn.style.animation = '';
-        if (statusEl.textContent.indexOf('Listen') === 0) statusEl.textContent = '';
-      }
-      function micStart() {
-        speechRec = new SpeechRec();
-        speechRec.continuous = true;
-        speechRec.interimResults = true;
-        speechRec.lang = 'en-US';
-        speechRec.onresult = function(e) {
-          var transcript = '';
-          for (var i = 0; i < e.results.length; i++) {
-            transcript += e.results[i][0].transcript;
-          }
-          input.value = transcript;
-          input.style.height = 'auto';
-          input.style.height = Math.min(input.scrollHeight, 160) + 'px';
-        };
-        speechRec.onend = function() {
-          if (!_wantMic) { micOff(); input.focus(); return; }
-          setTimeout(function() {
-            if (!_wantMic) { micOff(); input.focus(); return; }
-            try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
-          }, 800);
-        };
-        speechRec.onerror = function(e) {
-          if (e.error === 'aborted' || e.error === 'no-speech') return;
-          _wantMic = false;
-          micOff();
-          var msgs = { network: 'Voice needs internet connection', 'not-allowed': 'Mic permission denied (check browser settings)' };
-          statusEl.textContent = msgs[e.error] || ('Mic error: ' + e.error);
-          setTimeout(function() { var t = statusEl.textContent; if (t.indexOf('Mic') === 0 || t.indexOf('Voice') === 0) statusEl.textContent = ''; }, 4000);
-        };
-        speechRec.start();
-      }
-      function micToggle(e) {
-        e.preventDefault();
-        if (_wantMic) {
-          _wantMic = false;
-          try { speechRec.abort(); } catch(ex) {}
-          micOff();
-          input.focus();
-          return;
-        }
-        _wantMic = true;
-        micOn();
-        try { micStart(); } catch(ex) { _wantMic = false; micOff(); }
-      }
-      micBtn.addEventListener('mousedown', micToggle);
-      micBtn.addEventListener('touchstart', micToggle, { passive: false });
+    /* ---- Voice: unified action button + MediaRecorder + auto-TTS ---- */
+    var _isRecording = false;
+    var _mediaRec = null;
+    var _audioChunks = [];
+    var _voiceStream = null;
+    var _voiceCtx = null;
+    var _voiceAnalyser = null;
+    var _waveAnim = null;
+    var _sentViaVoice = false;
+    var voiceWave = document.getElementById('voice-wave');
+    var vbars = voiceWave ? voiceWave.querySelectorAll('.vbar') : [];
+    var actionBtn = document.getElementById('action-btn');
+    var synthesis = window.speechSynthesis;
+
+    function speakText(text) {
+      if (!synthesis) return;
+      synthesis.cancel();
+      var clean = text.replace(/<[^>]*>/g, '').replace(/\*\*/g, '').replace(/[#_`]/g, '').substring(0, 600);
+      if (!clean.trim()) return;
+      var utter = new SpeechSynthesisUtterance(clean);
+      utter.rate = 1.0; utter.pitch = 1.0;
+      synthesis.speak(utter);
     }
+
+    function updateActionBtn() {
+      if (_isRecording) return;
+      var hasContent = input.value.trim().length > 0 || pendingImages.filter(Boolean).length > 0;
+      if (hasContent) {
+        actionBtn.className = 'send-mode';
+        actionBtn.innerHTML = '&#10148;';
+        actionBtn.title = 'Send message';
+      } else {
+        actionBtn.className = 'mic-mode';
+        actionBtn.innerHTML = '&#127908;';
+        actionBtn.title = 'Voice input';
+      }
+    }
+
+    input.addEventListener('input', updateActionBtn);
+
+    function startWaveform(stream) {
+      try {
+        if (!_voiceCtx) _voiceCtx = new (window.AudioContext || window.webkitAudioContext)();
+        var source = _voiceCtx.createMediaStreamSource(stream);
+        _voiceAnalyser = _voiceCtx.createAnalyser();
+        _voiceAnalyser.fftSize = 64;
+        source.connect(_voiceAnalyser);
+        animateWave();
+      } catch(e) {}
+    }
+    function animateWave() {
+      if (!_voiceAnalyser) return;
+      var data = new Uint8Array(_voiceAnalyser.frequencyBinCount);
+      _voiceAnalyser.getByteFrequencyData(data);
+      for (var i = 0; i < vbars.length; i++) {
+        var val = (data[i * 2] || 0) / 255;
+        vbars[i].style.height = Math.max(4, val * 24) + 'px';
+      }
+      _waveAnim = requestAnimationFrame(animateWave);
+    }
+    function stopWaveform() {
+      if (_waveAnim) { cancelAnimationFrame(_waveAnim); _waveAnim = null; }
+      for (var i = 0; i < vbars.length; i++) vbars[i].style.height = '4px';
+      if (_voiceStream) { _voiceStream.getTracks().forEach(function(t) { t.stop(); }); _voiceStream = null; }
+    }
+
+    function startRecording() {
+      navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream) {
+        _voiceStream = stream;
+        _isRecording = true;
+        _audioChunks = [];
+        actionBtn.className = 'recording';
+        actionBtn.innerHTML = '&#9632;';
+        actionBtn.title = 'Stop recording';
+        voiceWave.style.display = 'flex';
+        statusEl.textContent = 'Listening... tap to stop';
+        startWaveform(stream);
+        _mediaRec = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+        _mediaRec.ondataavailable = function(e) { if (e.data.size > 0) _audioChunks.push(e.data); };
+        _mediaRec.onstop = function() {
+          _isRecording = false;
+          stopWaveform();
+          voiceWave.style.display = 'none';
+          if (_audioChunks.length === 0) { updateActionBtn(); statusEl.textContent = ''; return; }
+          var blob = new Blob(_audioChunks, { type: 'audio/webm' });
+          statusEl.textContent = 'Transcribing...';
+          actionBtn.disabled = true;
+          var fd = new FormData();
+          fd.append('audio', blob, 'voice.webm');
+          fd.append('mime_type', 'audio/webm');
+          fetch('/api/voice/transcribe', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+              actionBtn.disabled = false;
+              if (d.ok && d.text) {
+                _sentViaVoice = true;
+                input.value = d.text;
+                input.style.height = 'auto';
+                input.style.height = Math.min(input.scrollHeight, 160) + 'px';
+                updateActionBtn();
+                form.dispatchEvent(new Event('submit', { cancelable: true }));
+              } else {
+                statusEl.textContent = d.error || 'Transcription failed';
+                setTimeout(function() { statusEl.textContent = ''; }, 4000);
+                updateActionBtn();
+              }
+            })
+            .catch(function() {
+              actionBtn.disabled = false;
+              statusEl.textContent = 'Transcription error';
+              setTimeout(function() { statusEl.textContent = ''; }, 4000);
+              updateActionBtn();
+            });
+        };
+        _mediaRec.start();
+      }).catch(function() {
+        _isRecording = false;
+        statusEl.textContent = 'Mic permission denied';
+        setTimeout(function() { statusEl.textContent = ''; }, 4000);
+        updateActionBtn();
+      });
+    }
+
+    function stopRecording() {
+      if (_mediaRec && _mediaRec.state === 'recording') _mediaRec.stop();
+    }
+
+    actionBtn.addEventListener('click', function(e) {
+      e.preventDefault();
+      if (_isRecording) { stopRecording(); return; }
+      var hasContent = input.value.trim().length > 0 || pendingImages.filter(Boolean).length > 0;
+      if (hasContent) {
+        form.dispatchEvent(new Event('submit', { cancelable: true }));
+      } else {
+        startRecording();
+      }
+    });
+
+    document.addEventListener('keydown', function(e) {
+      if (e.key === 'Escape' && _isRecording) { _audioChunks = []; stopRecording(); }
+    });
 
     function esc(s) {
       var d = document.createElement('div');
@@ -1186,7 +1289,7 @@
       input.value = '';
       input.style.height = 'auto';
       clearAllPending();
-      btn.disabled = true;
+      actionBtn.disabled = true;
       statusEl.textContent = imageFiles.length > 0 ? 'Analyzing image...' : 'Thinking...';
 
       try {
@@ -1205,10 +1308,12 @@
           var fres = await fetch('/api/chat', { method: 'POST', body: fbody });
           var fdata = await fres.json();
           if (fdata.conversation_id && currentConvoId == null) currentConvoId = fdata.conversation_id;
-          addMsg('assistant', fdata.reply || '(no reply)', '', {
+          var _fallbackReply = fdata.reply || '(no reply)';
+          addMsg('assistant', _fallbackReply, '', {
             model_used: fdata.model_used, trace_id: fdata.trace_id, action_type: fdata.action_type,
             rag_sources: fdata.rag_sources, personality_used: fdata.personality_used,
           });
+          if (_sentViaVoice) speakText(_fallbackReply);
           statusEl.textContent = '';
           if (!isGuest) loadConversations();
           updateExportBtn();
@@ -1252,6 +1357,7 @@
         }
 
         finalizeStreamingMsg(streamDiv, fullText, meta);
+        if (_sentViaVoice) speakText(fullText);
         statusEl.textContent = '';
         if (!isGuest) loadConversations();
         updateExportBtn();
@@ -1259,7 +1365,9 @@
         addMsg('assistant', 'Error: could not reach CHILI backend.', '');
         statusEl.textContent = '';
       } finally {
-        btn.disabled = false;
+        actionBtn.disabled = false;
+        _sentViaVoice = false;
+        updateActionBtn();
         input.focus();
       }
     });

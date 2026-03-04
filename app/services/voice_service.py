@@ -15,7 +15,7 @@ from typing import Optional
 import requests
 from sqlalchemy.orm import Session
 
-from ..logger import log_info
+from ..logger import log_info, new_trace_id
 
 OLLAMA_URL = "http://localhost:11434"
 VOICE_COMMANDS: list[tuple[str, dict]] = [
@@ -53,6 +53,7 @@ def _try_openai_whisper(audio_bytes: bytes, mime_type: str) -> Optional[dict]:
     """Use OpenAI/Groq Whisper API if configured."""
     try:
         from .. import openai_client
+        from openai import OpenAI
         if not openai_client.is_configured():
             return None
 
@@ -61,20 +62,26 @@ def _try_openai_whisper(audio_bytes: bytes, mime_type: str) -> Optional[dict]:
             f.write(audio_bytes)
             tmp_path = f.name
 
+        is_groq = "groq" in openai_client.LLM_BASE_URL.lower()
+        whisper_model = "whisper-large-v3-turbo" if is_groq else "whisper-1"
+
         try:
-            client = openai_client.get_client()
+            client = OpenAI(
+                api_key=openai_client.LLM_API_KEY,
+                base_url=openai_client.LLM_BASE_URL,
+            )
             with open(tmp_path, "rb") as audio_file:
                 transcript = client.audio.transcriptions.create(
-                    model="whisper-1",
+                    model=whisper_model,
                     file=audio_file,
                 )
             text = transcript.text.strip()
-            return {"ok": True, "text": text, "backend": "openai-whisper"}
+            return {"ok": True, "text": text, "backend": f"whisper-{'groq' if is_groq else 'openai'}"}
         finally:
             Path(tmp_path).unlink(missing_ok=True)
 
     except Exception as e:
-        log_info(f"[voice] OpenAI Whisper failed: {e}")
+        log_info(new_trace_id(), f"[voice] Whisper transcription failed: {e}")
         return None
 
 

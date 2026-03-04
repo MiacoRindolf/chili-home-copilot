@@ -110,11 +110,6 @@ class TestVoiceCapabilities:
 
 
 class TestVoiceAPI:
-    def test_voice_page_loads(self, client):
-        resp = client.get("/voice")
-        assert resp.status_code == 200
-        assert "Voice Assistant" in resp.text
-
     def test_capabilities_endpoint(self, client):
         resp = client.get("/api/voice/capabilities")
         assert resp.status_code == 200
