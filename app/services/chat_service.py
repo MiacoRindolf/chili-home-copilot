@@ -172,7 +172,7 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
 
     rag_context = None
     rag_hits = rag_module.search(message, n_results=3, trace_id=trace_id)
-    if rag_hits and rag_hits[0]["distance"] < 1.5:
+    if rag_hits and rag_hits[0]["distance"] < 1.0:
         rag_context = "\n---\n".join(f"[{h['source']}]: {h['text']}" for h in rag_hits)
         log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
 
@@ -219,7 +219,7 @@ def build_openai_prompt(user_name: str, personality_context: str | None, rag_con
     if personality_context:
         openai_system += f"\n\n{personality_context}"
     if rag_context:
-        openai_system += f"\n\nHousehold document context:\n{rag_context}"
+        openai_system += f"\n\nHousehold document context (use ONLY if the user asks about these topics -- do NOT volunteer this info unprompted):\n{rag_context}"
     return openai_system
 
 
