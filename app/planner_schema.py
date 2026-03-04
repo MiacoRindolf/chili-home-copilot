@@ -36,6 +36,18 @@ class WebSearchData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     query: str = Field(min_length=1)
 
+class AddPlanProjectData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+
+class AddPlanTaskData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    project_name: str = Field(min_length=1)
+    title: str = Field(min_length=1)
+
+class ListPlanProjectsData(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
 class UnknownData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     reason: str = Field(min_length=1)
@@ -87,6 +99,18 @@ class WebSearchPlan(BasePlan):
     type: Literal["web_search"]
     data: WebSearchData
 
+class AddPlanProjectPlan(BasePlan):
+    type: Literal["add_plan_project"]
+    data: AddPlanProjectData
+
+class AddPlanTaskPlan(BasePlan):
+    type: Literal["add_plan_task"]
+    data: AddPlanTaskData
+
+class ListPlanProjectsPlan(BasePlan):
+    type: Literal["list_plan_projects"]
+    data: ListPlanProjectsData = Field(default_factory=ListPlanProjectsData)
+
 class UnknownPlan(BasePlan):
     type: Literal["unknown"]
     data: UnknownData
@@ -102,6 +126,9 @@ Plan = Union[
     PairDevicePlan,
     IntercomBroadcastPlan,
     WebSearchPlan,
+    AddPlanProjectPlan,
+    AddPlanTaskPlan,
+    ListPlanProjectsPlan,
     UnknownPlan,
 ]
 
@@ -118,7 +145,9 @@ def validate_plan(obj: dict) -> Optional[dict]:
         try:
             for cls in (AddChorePlan, ListChoresPlan, ListChoresPendingPlan, MarkChoreDonePlan,
                         AddBirthdayPlan, ListBirthdaysPlan, AnswerFromDocsPlan, PairDevicePlan,
-                        IntercomBroadcastPlan, WebSearchPlan, UnknownPlan):
+                        IntercomBroadcastPlan, WebSearchPlan,
+                        AddPlanProjectPlan, AddPlanTaskPlan, ListPlanProjectsPlan,
+                        UnknownPlan):
                 try:
                     plan = cls.model_validate(obj)
                     break

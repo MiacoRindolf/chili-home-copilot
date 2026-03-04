@@ -33,6 +33,9 @@ Allowed actions and required data:
 - pair_device: {}  -- use when the user asks to pair/link their device, log in, sign in, or create an account
 - intercom_broadcast: {"text": str}  -- use when the user asks to announce/broadcast a message to all housemates via intercom
 - web_search: {"query": str}  -- use when the user asks to search the web, look something up online, find links, get current/latest info, or browse the internet. Put a clear search query in "query".
+- add_plan_project: {"name": str}  -- use when the user wants to create a new project in the planner (e.g. "create a project for kitchen renovation", "new project: garden redesign")
+- add_plan_task: {"project_name": str, "title": str}  -- use when the user wants to add a task to a project (e.g. "add task buy paint to kitchen renovation project")
+- list_plan_projects: {}  -- use when the user asks to see their projects, project status, or what they're working on
 
 For anything conversational, general knowledge, or not a clear action request:
 {"type":"unknown","data":{},"reply":""}
@@ -55,16 +58,27 @@ HOUSEMATE CONTEXT:
 Personalize your "reply" to match this housemate's preferences when possible.
 """
 
+PROJECT_CONTEXT_TEMPLATE = """
+ACTIVE PROJECTS & TASKS:
+{projects}
+
+Use this context when the user asks about their projects, tasks, progress, or deadlines.
+When adding tasks, match the project_name to an existing project above if possible.
+"""
+
 
 def _build_system_prompt(
     rag_context: str | None = None,
     personality_context: str | None = None,
+    project_context: str | None = None,
 ) -> str:
     prompt = SYSTEM_BASE
     if rag_context:
         prompt += RAG_CONTEXT_TEMPLATE.format(context=rag_context)
     if personality_context:
         prompt += PERSONALITY_TEMPLATE.format(personality=personality_context)
+    if project_context:
+        prompt += PROJECT_CONTEXT_TEMPLATE.format(projects=project_context)
     return prompt
 
 
@@ -72,8 +86,9 @@ def plan_action(
     user_message: str,
     rag_context: str | None = None,
     personality_context: str | None = None,
+    project_context: str | None = None,
 ) -> dict:
-    system_prompt = _build_system_prompt(rag_context, personality_context)
+    system_prompt = _build_system_prompt(rag_context, personality_context, project_context)
     payload = {
         "model": MODEL,
         "messages": [

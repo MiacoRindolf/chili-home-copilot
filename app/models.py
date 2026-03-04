@@ -213,33 +213,42 @@ class ActivityLog(Base):
     user = relationship("User", foreign_keys=[user_id])
 
 
-class CloneProfile(Base):
-    """High-level constitution / values document for a user's AI clone."""
-    __tablename__ = "clone_profiles"
+class PlanProject(Base):
+    __tablename__ = "plan_projects"
 
     id = Column(Integer, primary_key=True, index=True)
-    user_id = Column(Integer, ForeignKey("users.id"), unique=True, nullable=False)
-    display_name = Column(String, nullable=True)
-    constitution = Column(Text, nullable=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    name = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String, default="active")  # active | completed | archived
+    color = Column(String, default="#6366f1")
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     user = relationship("User")
-    answers = relationship("CloneQA", back_populates="profile", cascade="all, delete-orphan")
+    tasks = relationship("PlanTask", back_populates="project", cascade="all, delete-orphan")
 
 
-class CloneQA(Base):
-    """Individual Q&A entry for AI clone training data."""
-    __tablename__ = "clone_qa"
+class PlanTask(Base):
+    __tablename__ = "plan_tasks"
 
     id = Column(Integer, primary_key=True, index=True)
-    profile_id = Column(Integer, ForeignKey("clone_profiles.id"), nullable=False, index=True)
-    question_key = Column(String, nullable=False, index=True)
-    category = Column(String, nullable=False)
-    question_text = Column(Text, nullable=False)
-    selected_options = Column(Text, nullable=True)  # JSON list of chosen option ids
-    freeform_answer = Column(Text, nullable=True)
+    project_id = Column(Integer, ForeignKey("plan_projects.id"), nullable=False, index=True)
+    title = Column(String, nullable=False)
+    description = Column(Text, nullable=True)
+    status = Column(String, default="todo")  # todo | in_progress | done | blocked
+    priority = Column(String, default="medium")  # low | medium | high | critical
+    start_date = Column(Date, nullable=True)
+    end_date = Column(Date, nullable=True)
+    assigned_to = Column(Integer, ForeignKey("users.id"), nullable=True)
+    depends_on = Column(Integer, ForeignKey("plan_tasks.id"), nullable=True)
+    progress = Column(Integer, default=0)
+    sort_order = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
-    profile = relationship("CloneProfile", back_populates="answers")
+    project = relationship("PlanProject", back_populates="tasks")
+    assignee = relationship("User", foreign_keys=[assigned_to])
+    dependency = relationship("PlanTask", remote_side=[id])

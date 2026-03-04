@@ -5,7 +5,7 @@ from fastapi.templating import Jinja2Templates
 from pathlib import Path
 
 from .db import Base, engine
-from .routers import chat, admin, pages, health_routes, intercom, projects, voice, clone
+from .routers import chat, admin, pages, health_routes, intercom, projects, voice, planner
 
 Base.metadata.create_all(bind=engine)
 
@@ -68,7 +68,7 @@ pages.init_templates(templates)
 health_routes.init_templates(templates)
 intercom.init_templates(templates)
 voice.init_templates(templates)
-clone.init_templates(templates)
+planner.init_templates(templates)
 
 app.include_router(chat.router)
 app.include_router(admin.router)
@@ -77,4 +77,4 @@ app.include_router(health_routes.router)
 app.include_router(intercom.router)
 app.include_router(projects.router)
 app.include_router(voice.router)
-app.include_router(clone.router)
+app.include_router(planner.router)

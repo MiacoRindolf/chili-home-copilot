@@ -323,7 +323,7 @@
     <nav>
       <a href="/chat">Chat</a>
       <a href="/intercom">Intercom</a>
-      {% if not is_guest %}<a href="/clone">AI Clone</a>{% endif %}
+      {% if not is_guest %}<a href="/planner">Planner</a>{% endif %}
       {% if not is_guest %}<a href="/profile">Profile</a>{% endif %}
       {% if not is_guest %}<a href="/admin">Admin</a>{% endif %}
       {% if not is_guest %}<a href="/metrics">Metrics</a>{% endif %}
@@ -430,9 +430,9 @@
           <span class="qa-label">Intercom</span>
         </a>
         {% if not is_guest %}
-        <a class="qa-tile" href="/clone">
-          <span class="qa-icon">&#129302;</span>
-          <span class="qa-label">AI Clone</span>
+        <a class="qa-tile" href="/planner">
+          <span class="qa-icon">&#128203;</span>
+          <span class="qa-label">Planner</span>
         </a>
         <a class="qa-tile" href="/profile">
           <span class="qa-icon">&#128100;</span>

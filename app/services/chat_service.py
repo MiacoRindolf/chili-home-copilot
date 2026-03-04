@@ -5,7 +5,7 @@ from datetime import date
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation
+from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation, PlanProject, PlanTask
 from ..llm_planner import plan_action
 from ..chili_nlu import parse_message as nlu_parse
 from ..logger import log_info
@@ -14,6 +14,7 @@ from .. import personality as personality_module
 from .. import web_search as web_search_module
 from .. import memory as memory_module
 from . import project_file_service as pfs_module
+from . import planner_service
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -27,9 +28,9 @@ def nlu_fallback(message: str) -> dict | None:
     return None
 
 
-def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: str, is_guest: bool):
+def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None = None):
     """Execute a tool action and return (reply, executed, action_type)."""
-    WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday"}
+    WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday", "add_plan_project", "add_plan_task"}
     if is_guest and action_type in WRITE_ACTIONS:
         return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked"
 
@@ -139,6 +140,53 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
         else:
             llm_reply = "What would you like me to search for?"
 
+    elif action_type == "add_plan_project":
+        name = action_data.get("name", "")
+        if name and not is_guest and user_id:
+            p = planner_service.create_project(db, user_id, name)
+            executed = True
+            llm_reply = llm_reply or f'Created project **"{name}"**! View it in the [Project Planner](/planner).'
+        elif is_guest:
+            llm_reply = "Project management is only available for paired housemates."
+        elif not user_id:
+            llm_reply = "You need to be a paired housemate to create projects."
+        else:
+            llm_reply = "What would you like to name the project?"
+
+    elif action_type == "add_plan_task":
+        project_name = action_data.get("project_name", "")
+        title = action_data.get("title", "")
+        if project_name and title and not is_guest and user_id:
+            project = db.query(PlanProject).filter(
+                PlanProject.user_id == user_id,
+                PlanProject.name.ilike(f"%{project_name}%"),
+            ).first()
+            if project:
+                t = planner_service.create_task(db, project.id, user_id, title)
+                executed = True
+                llm_reply = llm_reply or f'Added task **"{title}"** to project **{project.name}**. View in [Project Planner](/planner).'
+            else:
+                llm_reply = f'I couldn\'t find a project matching "{project_name}". Check your [Project Planner](/planner) or create one first.'
+        elif is_guest:
+            llm_reply = "Project management is only available for paired housemates."
+        else:
+            llm_reply = "Please specify both the task title and which project to add it to."
+
+    elif action_type == "list_plan_projects":
+        executed = True
+        if is_guest or not user_id:
+            llm_reply = "Project management is only available for paired housemates."
+        else:
+            projects = planner_service.list_projects(db, user_id)
+            if projects:
+                lines = []
+                for p in projects:
+                    pct = round(p["done_count"] / p["task_count"] * 100) if p["task_count"] else 0
+                    lines.append(f"- **{p['name']}** ({p['done_count']}/{p['task_count']} tasks, {pct}% done)")
+                llm_reply = "Your projects:\n" + "\n".join(lines) + "\n\nView details in the [Project Planner](/planner)."
+            else:
+                llm_reply = "You don't have any projects yet. Create one in the [Project Planner](/planner) or say \"create project [name]\"."
+
     return llm_reply, executed, action_type
 
 
@@ -198,10 +246,17 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
             else:
                 personality_context = memory_context
 
+    project_context = None
+    if user_id and not is_guest:
+        project_context = planner_service.get_user_project_summary(db, user_id)
+        if project_context:
+            log_info(trace_id, f"project_context_injected user_id={user_id}")
+
     planned = plan_action(
         f"Conversation so far:\n{context}\n\nNew user message: {message}",
         rag_context=rag_context,
         personality_context=personality_context,
+        project_context=project_context,
     )
 
     return {

@@ -345,7 +345,7 @@ async def chat_api(
         nlu_result = nlu_fallback(message)
         if nlu_result:
             log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
-            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest)
+            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
             model_used = "nlu-fallback"
         elif openai_client.is_configured():
             log_info(trace_id, "nlu_fallback_miss, trying OpenAI")
@@ -391,7 +391,7 @@ async def chat_api(
         action_type = "web_search"
         llm_reply = ""
 
-    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest)
+    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
     model_used = "llama3"
     if action_type == "web_search" and executed and openai_client.is_configured():
@@ -552,7 +552,7 @@ async def chat_stream_api(
         nlu_result = nlu_fallback(message)
         if nlu_result:
             log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
-            reply, _exec, act_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest)
+            reply, _exec, act_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
             model = "nlu-fallback"
             def nlu_gen():
                 yield sse_event({"token": reply, "done": False})
@@ -600,7 +600,7 @@ async def chat_stream_api(
         action_type = "web_search"
         llm_reply = ""
 
-    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest)
+    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
     if action_type == "web_search" and executed and openai_client.is_configured():
         search_context = llm_reply

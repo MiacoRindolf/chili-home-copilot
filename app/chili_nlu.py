@@ -53,5 +53,19 @@ def parse_message(text: str) -> Action:
     if m:
         return Action(type="web_search", data={"query": m.group(1).strip()})
 
+    # List projects: "list projects", "show projects", "my projects"
+    if re.match(r"(?i)^\s*(list|show|my)\s+projects?\s*$", t):
+        return Action(type="list_plan_projects", data={})
+
+    # Create project: "create project Kitchen Reno", "new project Garden"
+    m = re.match(r"(?i)^\s*(?:create|new|add)\s+project\s*:?\s*(.+)$", t)
+    if m:
+        return Action(type="add_plan_project", data={"name": m.group(1).strip()})
+
+    # Add task to project: "add task Buy paint to Kitchen Reno"
+    m = re.match(r"(?i)^\s*add\s+task\s+(.+?)\s+to\s+(?:project\s+)?(.+)$", t)
+    if m:
+        return Action(type="add_plan_task", data={"title": m.group(1).strip(), "project_name": m.group(2).strip()})
+
     # Default
     return Action(type="unknown", data={"text": t})
