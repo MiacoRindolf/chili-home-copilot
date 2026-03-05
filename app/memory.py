@@ -150,7 +150,7 @@ def _is_duplicate(user_id: int, content: str, db: Session) -> bool:
     return False
 
 
-def get_memory_context(user_id: int, db: Session, limit: int = 20) -> str | None:
+def get_memory_context(user_id: int, db: Session, limit: int = 30) -> str | None:
     """Return recent memories as a prompt-ready string for LLM injection.
 
     Returns None if no memories exist.

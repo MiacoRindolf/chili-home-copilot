@@ -24,7 +24,7 @@
     padding: 4px 10px; font-size: 16px; cursor: pointer; color: var(--text);
   }
 
-  .planner-layout { display: flex; height: calc(100vh - 57px); overflow: hidden; }
+  .planner-layout { display: flex; height: calc(100vh - 57px); overflow: hidden; position: relative; }
 
   /* ── Sidebar ─────────────────────────────────────────────── */
   .planner-sidebar {
@@ -191,8 +191,8 @@
   .task-title { font-size: 14px; font-weight: 500; }
   .task-title.done { text-decoration: line-through; color: var(--text-muted); }
   .task-id-label { font-size: 10px; color: var(--text-muted); font-weight: 600; margin-right: 4px; }
-  .task-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; }
-  .task-tag { font-size: 10px; padding: 1px 7px; border-radius: 4px; font-weight: 600; }
+  .task-meta { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 3px; align-items: center; }
+  .task-tag { font-size: 10px; padding: 1px 7px; border-radius: 4px; font-weight: 600; flex-shrink: 0; white-space: nowrap; }
   .tag-critical { background: #fee2e2; color: #991b1b; }
   [data-theme="dark"] .tag-critical { background: #7f1d1d; color: #fca5a5; }
   .tag-high { background: #ffedd5; color: #9a3412; }
@@ -210,8 +210,20 @@
   .tag-in-progress { background: #dbeafe; color: #1d4ed8; }
   [data-theme="dark"] .tag-in-progress { background: #1e3a5f; color: #93c5fd; }
   .tag-label {
-    border-radius: 4px; padding: 1px 7px; font-size: 10px; font-weight: 600; color: #fff;
+    border-radius: 4px; padding: 1px 7px; font-size: 10px; font-weight: 600;
+    display: inline-flex; align-items: center;
   }
+  .planner-chat-msg.assistant strong { font-weight: 700; }
+  .planner-chat-msg.assistant a { color: var(--accent); text-decoration: none; }
+  .planner-chat-msg.assistant a:hover { text-decoration: underline; }
+  .planner-chat-msg.assistant .chat-h3 { font-size: 12px; font-weight: 700; margin: 6px 0 2px; color: var(--text); }
+  .planner-chat-msg.assistant .chat-h2 { font-size: 13px; font-weight: 700; margin: 8px 0 2px; color: var(--text); }
+  .planner-chat-msg.assistant .chat-h1 { font-size: 14px; font-weight: 700; margin: 8px 0 3px; color: var(--text); }
+  .planner-chat-msg.assistant .chat-h3:first-child,
+  .planner-chat-msg.assistant .chat-h2:first-child,
+  .planner-chat-msg.assistant .chat-h1:first-child { margin-top: 0; }
+  .planner-chat-msg.assistant ul { margin: 4px 0 4px 12px; padding: 0; list-style: disc; }
+  .planner-chat-msg.assistant li { margin: 1px 0; }
   .tag-subtasks { background: #f0fdf4; color: #15803d; }
   [data-theme="dark"] .tag-subtasks { background: #14532d; color: #86efac; }
 
@@ -452,9 +464,9 @@
     padding: 2px 8px; border-radius: 4px; color: #fff; cursor: default;
   }
   .detail-label-pill .remove-label {
-    background: none; border: none; color: rgba(255,255,255,.7); cursor: pointer; font-size: 12px; padding: 0 2px;
+    background: none; border: none; color: inherit; opacity: .85; cursor: pointer; font-size: 12px; padding: 0 2px;
   }
-  .detail-label-pill .remove-label:hover { color: #fff; }
+  .detail-label-pill .remove-label:hover { opacity: 1; }
   .add-label-row { display: flex; gap: 4px; }
   .add-label-row select { flex: 1; font-size: 11px; padding: 3px 6px; }
   .add-label-row button { padding: 3px 8px; font-size: 11px; border-radius: 4px; border: none; background: var(--accent); color: #fff; cursor: pointer; }
@@ -516,10 +528,75 @@
   .label-add-row input[type="color"] { width: 32px; padding: 2px; border-radius: 6px; }
   .label-add-row button { padding: 6px 14px; border-radius: 6px; border: none; font-size: 12px; font-weight: 600; background: var(--accent); color: #fff; cursor: pointer; }
 
+  /* ── Right-side CHILI chat panel ───────────────────────────── */
+  .planner-chat-panel {
+    width: 320px; min-width: 320px; max-width: 100%;
+    background: var(--bg-header); border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+    transition: width .2s ease, min-width .2s ease;
+  }
+  .planner-chat-panel.collapsed {
+    width: 0; min-width: 0; overflow: hidden; border-left: none;
+  }
+  .planner-chat-panel.collapsed .planner-chat-inner { display: none; }
+  .planner-chat-header {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 6px 10px; border-bottom: 1px solid var(--border);
+    font-size: 13px; font-weight: 700; flex-shrink: 0;
+  }
+  .planner-chat-toggle {
+    background: none; border: none; cursor: pointer; font-size: 18px;
+    color: var(--text-muted); padding: 2px 6px; border-radius: 6px;
+  }
+  .planner-chat-toggle:hover { background: var(--code-bg); color: var(--text); }
+  .planner-chat-messages {
+    flex: 1; overflow-y: auto; padding: 8px; display: flex; flex-direction: column;
+    gap: 6px; min-height: 120px;
+  }
+  .planner-chat-msg {
+    font-size: 12px; line-height: 1.35; max-width: 95%;
+    padding: 6px 8px; border-radius: 8px; white-space: pre-wrap; word-break: break-word;
+  }
+  .planner-chat-msg.user {
+    align-self: flex-end; background: var(--accent); color: #fff;
+  }
+  .planner-chat-msg.assistant {
+    align-self: flex-start; background: var(--code-bg); border: 1px solid var(--border);
+  }
+  .planner-chat-input-wrap {
+    padding: 6px 8px; border-top: 1px solid var(--border); flex-shrink: 0;
+  }
+  .planner-chat-input-wrap textarea {
+    width: 100%; min-height: 40px; max-height: 100px; resize: none;
+    padding: 6px 8px; border-radius: 6px; font-size: 13px; font-family: inherit;
+    border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+    outline: none; margin-bottom: 4px;
+  }
+  .planner-chat-input-wrap textarea:focus { border-color: var(--accent); }
+  .planner-chat-send {
+    width: 100%; padding: 6px 10px; border-radius: 6px; border: none;
+    font-size: 13px; font-weight: 600; background: var(--accent); color: #fff;
+    cursor: pointer; transition: background .15s;
+  }
+  .planner-chat-send:hover { background: var(--accent-hover); }
+  .planner-chat-send:disabled { opacity: .6; cursor: not-allowed; }
+  .planner-chat-open-btn {
+    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+    width: 36px; height: 80px; border-radius: 8px 0 0 8px;
+    background: var(--bg-header); border: 1px solid var(--border); border-right: none;
+    font-size: 18px; cursor: pointer; color: var(--text-muted);
+    display: none; align-items: center; justify-content: center;
+    box-shadow: -2px 0 8px rgba(0,0,0,.08);
+  }
+  .planner-chat-panel.collapsed + .planner-chat-open-btn { display: flex; }
+  .planner-chat-open-btn:hover { background: var(--code-bg); color: var(--accent); }
+
   @media (max-width: 768px) {
     .planner-layout { flex-direction: column; height: auto; }
     .planner-sidebar { width: 100%; min-width: 100%; max-height: 200px; border-right: none; border-bottom: 1px solid var(--border); }
     .planner-main { padding: 16px; }
+    .planner-chat-panel { width: 100%; min-width: 100%; max-height: 50vh; }
+    .planner-chat-panel.collapsed { width: 0; min-width: 0; max-height: 0; }
     .detail-panel { width: 100vw; }
     .detail-body { flex-direction: column; }
     .detail-right { width: 100%; min-width: 100%; border-top: 1px solid var(--border); }
@@ -567,6 +644,22 @@
     </div>
     <div id="project-view" style="display:none;"></div>
   </main>
+
+  <!-- Right-side CHILI chat panel -->
+  <aside class="planner-chat-panel" id="planner-chat-panel">
+    <div class="planner-chat-inner" style="display:flex;flex-direction:column;height:100%;">
+      <div class="planner-chat-header">
+        <span>&#129472; CHILI</span>
+        <button class="planner-chat-toggle" id="planner-chat-close" title="Close chat">&#10005;</button>
+      </div>
+      <div class="planner-chat-messages" id="planner-chat-messages"></div>
+      <div class="planner-chat-input-wrap">
+        <textarea id="planner-chat-input" placeholder="Ask CHILI to add tasks, create projects, or anything else..." rows="2"></textarea>
+        <button class="planner-chat-send" id="planner-chat-send">Send</button>
+      </div>
+    </div>
+  </aside>
+  <button class="planner-chat-open-btn" id="planner-chat-open" title="Open CHILI chat">&#129492;</button>
 </div>
 
 <!-- Project Modal -->
@@ -726,11 +819,50 @@ var editingProjectId = null;
 var detailTaskId = null;
 var detailTask = null;
 var activeFilters = {};
+var plannerChatConversationId = null;
 
 var COLORS = ['#6366f1','#3b82f6','#06b6d4','#10b981','#22c55e','#eab308','#f59e0b','#ef4444','#ec4899','#8b5cf6','#64748b'];
 var AVATAR_COLORS = ['#6366f1','#3b82f6','#10b981','#f59e0b','#ef4444','#ec4899','#8b5cf6','#06b6d4'];
 
 function esc(s) { var d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function simpleMarkdown(html) {
+  var s = esc(html);
+  var lines = s.split('\n');
+  var out = [];
+  var inList = false;
+  for (var i = 0; i < lines.length; i++) {
+    var line = lines[i];
+    if (/^### .+/.test(line)) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<h3 class="chat-h3">' + line.slice(4) + '</h3>');
+    } else if (/^## .+/.test(line)) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<h2 class="chat-h2">' + line.slice(3) + '</h2>');
+    } else if (/^# .+/.test(line)) {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push('<h1 class="chat-h1">' + line.slice(2) + '</h1>');
+    } else if (/^[-*] .+/.test(line)) {
+      if (!inList) { out.push('<ul>'); inList = true; }
+      out.push('<li>' + line.slice(2) + '</li>');
+    } else {
+      if (inList) { out.push('</ul>'); inList = false; }
+      out.push(line);
+    }
+  }
+  if (inList) out.push('</ul>');
+  s = out.join('<br>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/__(.+?)__/g, '<strong>$1</strong>');
+  return s;
+}
+function labelTextColor(hex) {
+  if (!hex || hex.length < 4) return '#fff';
+  var h = hex.replace(/^#/, '');
+  if (h.length === 3) h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2];
+  var r = parseInt(h.slice(0,2), 16), g = parseInt(h.slice(2,4), 16), b = parseInt(h.slice(4,6), 16);
+  var lum = (0.299*r + 0.587*g + 0.114*b) / 255;
+  return lum > 0.5 ? '#1a1a1a' : '#fff';
+}
 function avatarColor(id) { return AVATAR_COLORS[id % AVATAR_COLORS.length]; }
 function userInitial(name) { return name ? name.charAt(0).toUpperCase() : '?'; }
 function relTime(iso) {
@@ -1016,7 +1148,8 @@ function renderListView() {
     }
     if (t.assignee_name) meta += '<span class="task-tag tag-assigned">' + esc(t.assignee_name) + '</span>';
     (t.labels || []).forEach(function(l) {
-      meta += '<span class="task-tag tag-label" style="background:' + esc(l.color) + ';">' + esc(l.name) + '</span>';
+      var lc = labelTextColor(l.color);
+      meta += '<span class="task-tag tag-label" style="background:' + esc(l.color || '#6366f1') + ';color:' + lc + ';">' + esc(l.name) + '</span>';
     });
     if (t.subtask_count > 0) {
       var doneSubs = (t.subtasks || []).filter(function(s) { return s.status === 'done'; }).length;
@@ -1066,7 +1199,10 @@ function renderBoardView() {
       var labelsHtml = '';
       if (t.labels && t.labels.length) {
         labelsHtml = '<div class="board-card-labels">';
-        t.labels.forEach(function(l) { labelsHtml += '<span class="tag-label" style="background:' + esc(l.color) + ';">' + esc(l.name) + '</span>'; });
+        t.labels.forEach(function(l) {
+          var lc = labelTextColor(l.color);
+          labelsHtml += '<span class="task-tag tag-label" style="background:' + esc(l.color || '#6366f1') + ';color:' + lc + ';">' + esc(l.name) + '</span>';
+        });
         labelsHtml += '</div>';
       }
       html += '<div class="board-card" style="border-left:3px solid ' + priColor + ';" onclick="openDetailPanel(' + t.id + ')">' +
@@ -1443,7 +1579,8 @@ function renderDetailLabels() {
   var el = document.getElementById('detail-labels');
   el.innerHTML = '';
   (t.labels || []).forEach(function(l) {
-    el.innerHTML += '<span class="detail-label-pill" style="background:' + esc(l.color) + ';">' + esc(l.name) +
+    var lc = labelTextColor(l.color);
+    el.innerHTML += '<span class="detail-label-pill" style="background:' + esc(l.color || '#6366f1') + ';color:' + lc + ';">' + esc(l.name) +
       '<button class="remove-label" onclick="removeTaskLabel(' + l.id + ')">&times;</button></span>';
   });
   var sel = document.getElementById('detail-label-select');
@@ -1653,6 +1790,89 @@ function updateProjectsArray() {
   }
   renderSidebar();
 }
+
+/* ── Planner CHILI chat panel ──────────────────────────────── */
+function plannerChatAppendMessage(role, content) {
+  var el = document.getElementById('planner-chat-messages');
+  var div = document.createElement('div');
+  div.className = 'planner-chat-msg ' + role;
+  if (role === 'assistant' && content) {
+    div.innerHTML = simpleMarkdown(content);
+  } else {
+    div.textContent = content || '';
+  }
+  el.appendChild(div);
+  el.scrollTop = el.scrollHeight;
+}
+
+function plannerChatLoadHistory() {
+  var url = '/api/chat/history';
+  if (plannerChatConversationId != null) url += '?conversation_id=' + plannerChatConversationId;
+  fetch(url).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.conversation_id) plannerChatConversationId = d.conversation_id;
+    var el = document.getElementById('planner-chat-messages');
+    el.innerHTML = '';
+    (d.messages || []).forEach(function(m) {
+      plannerChatAppendMessage(m.role, m.content || '');
+    });
+  });
+}
+
+function plannerChatSend() {
+  var input = document.getElementById('planner-chat-input');
+  var msg = (input.value || '').trim();
+  if (!msg) return;
+  var sendBtn = document.getElementById('planner-chat-send');
+  sendBtn.disabled = true;
+  input.value = '';
+  plannerChatAppendMessage('user', msg);
+
+  var form = new FormData();
+  form.append('message', msg);
+  form.append('from_planner_page', '1');
+  if (plannerChatConversationId != null) form.append('conversation_id', plannerChatConversationId);
+  if (activeProjectId != null) form.append('planner_project_id', activeProjectId);
+  if (activeProject && activeProject.name) form.append('planner_project_name', activeProject.name);
+
+  fetch('/api/chat', { method: 'POST', body: form })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      sendBtn.disabled = false;
+      if (d.error) { plannerChatAppendMessage('assistant', d.error); return; }
+      if (d.conversation_id) plannerChatConversationId = d.conversation_id;
+      plannerChatAppendMessage('assistant', d.reply || 'No response.');
+      if (d.action_type && ['add_plan_project', 'add_plan_project_with_tasks', 'add_plan_task', 'list_plan_projects'].indexOf(d.action_type) !== -1) {
+        if (d.action_type === 'add_plan_project' || d.action_type === 'add_plan_project_with_tasks') {
+          fetch('/api/planner/projects').then(function(r) { return r.json(); }).then(function(dd) {
+            if (dd.projects) { projects = dd.projects; renderSidebar(); }
+          });
+        } else if (activeProjectId) loadProject(activeProjectId);
+        else {
+          fetch('/api/planner/projects').then(function(r) { return r.json(); }).then(function(dd) {
+            if (dd.projects) { projects = dd.projects; renderSidebar(); }
+          });
+        }
+      }
+    })
+    .catch(function() {
+      sendBtn.disabled = false;
+      plannerChatAppendMessage('assistant', 'Something went wrong. Try again.');
+    });
+}
+
+function plannerChatToggle(open) {
+  var panel = document.getElementById('planner-chat-panel');
+  if (open === undefined) open = panel.classList.contains('collapsed');
+  panel.classList.toggle('collapsed', !open);
+  if (open && plannerChatConversationId != null) plannerChatLoadHistory();
+}
+
+document.getElementById('planner-chat-close').onclick = function() { plannerChatToggle(false); };
+document.getElementById('planner-chat-open').onclick = function() { plannerChatToggle(true); };
+document.getElementById('planner-chat-send').onclick = plannerChatSend;
+document.getElementById('planner-chat-input').addEventListener('keydown', function(e) {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); plannerChatSend(); }
+});
 
 /* ── Init ─────────────────────────────────────────────────── */
 renderSidebar();

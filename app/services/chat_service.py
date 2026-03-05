@@ -1,6 +1,8 @@
 """Core chat logic shared by /api/chat and /api/chat/stream."""
 import json as json_mod
-from datetime import date
+import re
+from datetime import date, timedelta
+from math import ceil
 
 from sqlalchemy.orm import Session
 
@@ -13,6 +15,7 @@ from .. import rag as rag_module
 from .. import personality as personality_module
 from .. import web_search as web_search_module
 from .. import memory as memory_module
+from .. import openai_client
 from . import project_file_service as pfs_module
 from . import planner_service
 
@@ -28,9 +31,110 @@ def nlu_fallback(message: str) -> dict | None:
     return None
 
 
+# Pattern: "create/make (a) project (for me)? (for)? X" and message also mentions tasks
+_CREATE_PROJECT_AND_TASKS = re.compile(
+    r"(?i)\b(?:create|make)\s+(?:a\s+)?project\s+(?:for\s+(?:me\s+)?)?(?:for\s+)?([^!.\n]+?)(?:\s*[!.]|\s+also\s+add|\s+and\s+add|\s+add\s+in\s+the\s+tasks|\s*$)",
+)
+_ADD_TASKS_PATTERN = re.compile(
+    r"(?i)\b(?:add\s+(?:in\s+)?the\s+)?tasks?\b|tasks?\s+(?:you\s+think\s+)?(?:i\s+)?need\s+to\s+do|add\s+in\s+the\s+tasks|suggest\s+tasks|tasks?\s+in\s+which|what\s+tasks?\s+(?:i\s+)?(?:need\s+to\s+)?do"
+)
+
+
+def detect_create_project_with_tasks_intent(message: str) -> tuple[bool, str | None]:
+    """If the user clearly wants to create a project and add tasks but the planner returned unknown,
+    return (True, project_name). Otherwise (False, None). Used as fallback so the project is actually created.
+    """
+    msg = (message or "").strip()
+    if not msg or not _ADD_TASKS_PATTERN.search(msg):
+        return False, None
+    m = _CREATE_PROJECT_AND_TASKS.search(msg)
+    if not m:
+        return False, None
+    name = m.group(1).strip()
+    if len(name) < 2:
+        return False, None
+    # Title-case for display (e.g. "software engineering job hunting" -> "Software Engineering Job Hunting")
+    name = name.title()
+    return True, name
+
+
+def generate_tasks_for_project(
+    db: Session, project_id: int, project_name: str, user_id: int, trace_id: str,
+) -> int:
+    """Use the cloud LLM to suggest tasks with well-researched ETAs, then create them with start/end dates for Gantt. Returns number of tasks added."""
+    if not openai_client.is_configured():
+        return 0
+    today = date.today().isoformat()
+    prompt = (
+        f'For a project called "{project_name}", suggest 6 to 12 concrete, actionable tasks. '
+        'Use well-researched, realistic time estimates (industry benchmarks, common studies: e.g. resume update 2-4 hours, job application 1-2 hours each, interview prep 3-5 hours). '
+        'Return ONLY a JSON array. Each object must have: "title" (string), "description" (string, include Complexity, Duration, Reasoning), and "estimated_days" (number, working days to complete). '
+        'estimated_days: use decimals for part-days (e.g. 0.25 = ~2 hours, 0.5 = half day, 1 = one full day). Minimum 0.25. Be accurate based on typical task duration research. '
+        f'Today is {today}. Tasks will be scheduled sequentially starting from today. '
+        'Example: [{"title": "Update resume", "description": "Complexity: Low. Duration: 2-3 hours. Reasoning: ATS-friendly resume increases callback rate.", "estimated_days": 0.25}, {"title": "Apply to 5 target companies", "description": "Complexity: Medium. Duration: 5-10 hours total. Reasoning: Quality applications take 1-2 hrs each (research, tailoring).", "estimated_days": 1.5}]'
+    )
+    try:
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": prompt}],
+            system_prompt="You are a project planning assistant. Return only a valid JSON array. Every task must have title, description, and estimated_days (number).",
+            trace_id=trace_id,
+        )
+        text = (result.get("reply") or "").strip()
+    except Exception as e:
+        log_info(trace_id, f"generate_tasks_for_project_error={e}")
+        return 0
+    start = text.find("[")
+    end = text.rfind("]")
+    if start == -1 or end == -1 or end <= start:
+        return 0
+    try:
+        items = json_mod.loads(text[start : end + 1])
+    except json_mod.JSONDecodeError:
+        return 0
+    if not isinstance(items, list):
+        return 0
+    cursor = date.today()
+    added = 0
+    for item in items[:20]:
+        if isinstance(item, dict) and item.get("title"):
+            title = str(item.get("title", "")).strip()
+            desc = str(item.get("description", "")).strip()
+            raw_days = item.get("estimated_days")
+            try:
+                days = max(0.25, min(365, float(raw_days))) if raw_days is not None else 1.0
+            except (TypeError, ValueError):
+                days = 1.0
+            task_start = cursor
+            # Span in calendar days (min 1 so the Gantt bar is visible)
+            span_days = max(1, int(ceil(days)))
+            task_end = cursor + timedelta(days=span_days - 1)
+            cursor = task_end + timedelta(days=1)
+            start_str = task_start.isoformat()
+            end_str = task_end.isoformat()
+            if title and planner_service.create_task(
+                db, project_id, user_id, title,
+                description=desc,
+                start_date=start_str,
+                end_date=end_str,
+            ):
+                added += 1
+        elif isinstance(item, str) and item.strip():
+            start_str = cursor.isoformat()
+            end_str = cursor.isoformat()
+            if planner_service.create_task(
+                db, project_id, user_id, item.strip(),
+                description="",
+                start_date=start_str,
+                end_date=end_str,
+            ):
+                added += 1
+                cursor += timedelta(days=1)
+    return added
+
+
 def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None = None):
     """Execute a tool action and return (reply, executed, action_type)."""
-    WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday", "add_plan_project", "add_plan_task"}
+    WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday", "add_plan_project", "add_plan_project_with_tasks", "add_plan_task"}
     if is_guest and action_type in WRITE_ACTIONS:
         return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked"
 
@@ -153,6 +257,43 @@ def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: st
         else:
             llm_reply = "What would you like to name the project?"
 
+    elif action_type == "add_plan_project_with_tasks":
+        name = (action_data.get("name") or "").strip()
+        description = (action_data.get("description") or "").strip()
+        raw_tasks = action_data.get("tasks") or []
+        if not isinstance(raw_tasks, list):
+            raw_tasks = []
+        # Each task can be str (title only) or dict with title + description (complexity, duration, reasoning)
+        task_specs = []
+        for t in raw_tasks[:30]:
+            if isinstance(t, str) and t.strip():
+                task_specs.append({"title": t.strip(), "description": ""})
+            elif isinstance(t, dict) and (t.get("title") or t.get("description")):
+                task_specs.append({
+                    "title": (str(t.get("title", "")).strip() or "Task"),
+                    "description": str(t.get("description", "")).strip(),
+                })
+        if name and not is_guest and user_id:
+            p = planner_service.create_project(db, user_id, name, description=description)
+            executed = True
+            added = 0
+            for spec in task_specs:
+                title = spec.get("title", "").strip()
+                desc = (spec.get("description") or "").strip()
+                if title:
+                    planner_service.create_task(db, p["id"], user_id, title, description=desc)
+                    added += 1
+            if added:
+                llm_reply = llm_reply or f'Created project **"{name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
+            else:
+                llm_reply = llm_reply or f'Created project **"{name}"**! View it in the [Project Planner](/planner).'
+        elif is_guest:
+            llm_reply = "Project management is only available for paired housemates."
+        elif not user_id:
+            llm_reply = "You need to be a paired housemate to create projects."
+        else:
+            llm_reply = "What would you like to name the project?"
+
     elif action_type == "add_plan_task":
         project_name = action_data.get("project_name", "")
         title = action_data.get("title", "")
@@ -208,17 +349,39 @@ def init_chat(db: Session, convo_key: str, conversation_id, message: str, identi
 
     mem_filter = ChatMessage.conversation_id == conversation_id if conversation_id else ChatMessage.convo_key == convo_key
     recent = list(reversed(
-        db.query(ChatMessage).filter(mem_filter).order_by(ChatMessage.id.desc()).limit(12).all()
+        db.query(ChatMessage).filter(mem_filter).order_by(ChatMessage.id.desc()).limit(24).all()
     ))
 
     return {"conversation_id": conversation_id, "recent": recent}
 
 
-def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id: str, project_id: int | None = None):
-    """Run RAG search, personality lookup, and LLM planner. May raise if Ollama is offline."""
+def plan_and_enrich(
+    db: Session,
+    message: str,
+    identity: dict,
+    recent,
+    trace_id: str,
+    project_id: int | None = None,
+    planner_current_project: dict | None = None,
+):
+    """Run RAG search, personality lookup, and LLM planner. May raise if Ollama is offline.
+    planner_current_project: optional {"name": str, "id": int} when user is on planner page with a project selected."""
     is_guest = identity["is_guest"]
     user_id = identity.get("user_id")
     context = "\n".join([f"{m.role.upper()}: {m.content}" for m in recent])
+
+    if planner_current_project and planner_current_project.get("name"):
+        message = (
+            message
+            + "\n\n[Planner context: User is on the Planner page viewing project \""
+            + str(planner_current_project.get("name", ""))
+            + "\" (id "
+            + str(planner_current_project.get("id", ""))
+            + "). When they say 'add a task' or 'add task X' without naming a project, use project_name=\""
+            + str(planner_current_project.get("name", ""))
+            + "\".]"
+        )
+        log_info(trace_id, f"planner_current_project_injected name={planner_current_project.get('name')}")
 
     rag_context = None
     rag_hits = rag_module.search(message, n_results=3, trace_id=trace_id)
@@ -269,14 +432,37 @@ def plan_and_enrich(db: Session, message: str, identity: dict, recent, trace_id:
     }
 
 
-def build_openai_prompt(user_name: str, personality_context: str | None, rag_context: str | None, base_system_prompt: str = "") -> str:
-    """Build the OpenAI system prompt with personality and RAG context."""
+PLANNER_PAGE_CONTEXT = """
+LOCATION: The user is chatting from the **Project Planner** page (the right-hand CHILI panel on the planner).
+
+When they ask what you can do, what you can help with, what your capabilities are, or what you can do "here" / "on this page", **lead with your planner-related capabilities**:
+- **Create projects** (e.g. "create a project for kitchen reno")
+- **Add tasks** to the current project or a named one (e.g. "add task buy paint", "add task call contractor to Kitchen")
+- **List projects and tasks** (e.g. "what are my projects?", "what's left to do?")
+- **Assign tasks** to housemates, **set due dates**, and **manage the plan from chat**
+
+Then mention you can also help with general household stuff (chores, birthdays, recipes, research, etc.). Keep the reply focused and scannable (bullets or short list). Do NOT give a long generic list that ignores the planner.
+
+When you need more info to act (e.g. project name, task details, timeline), ask one short clarifying question instead of guessing.
+"""
+
+
+def build_openai_prompt(
+    user_name: str,
+    personality_context: str | None,
+    rag_context: str | None,
+    base_system_prompt: str = "",
+    planner_context: bool = False,
+) -> str:
+    """Build the OpenAI system prompt with personality, RAG, and optional planner-page context."""
     openai_system = base_system_prompt
     openai_system += f"\n\nYou are talking to: {user_name}."
     if personality_context:
         openai_system += f"\n\n{personality_context}"
     if rag_context:
         openai_system += f"\n\nHousehold document context (use ONLY if the user asks about these topics -- do NOT volunteer this info unprompted):\n{rag_context}"
+    if planner_context:
+        openai_system += "\n\n" + PLANNER_PAGE_CONTEXT
     return openai_system
 
 

@@ -16,12 +16,15 @@ from .. import wellness
 from .. import web_search as web_search_module
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
+from ..services import planner_service
 from ..services.chat_service import (
     execute_tool,
     nlu_fallback,
     init_chat,
     plan_and_enrich,
     build_openai_prompt,
+    detect_create_project_with_tasks_intent,
+    generate_tasks_for_project,
     sse_event,
     store_and_title,
     store_and_title_with_memory,
@@ -249,6 +252,9 @@ async def chat_api(
     message: str = Form(""),
     conversation_id: Optional[int] = Form(None),
     images: list[UploadFile] = File([]),
+    planner_project_id: Optional[int] = Form(None),
+    planner_project_name: Optional[str] = Form(None),
+    from_planner_page: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
     trace_id = new_trace_id()
@@ -336,11 +342,41 @@ async def chat_api(
         if _convo_obj:
             _project_id = _convo_obj.project_id
 
+    planner_current = None
+    if planner_project_id is not None and planner_project_name:
+        planner_current = {"id": planner_project_id, "name": planner_project_name.strip()}
+    on_planner_page = from_planner_page in ("1", "true", "yes") or planner_current is not None
+
     try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id)
+        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id, planner_current_project=planner_current)
     except Exception as e:
         log_info(trace_id, f"llm_error={e}, trying NLU fallback")
         ctx = None
+
+        # When Ollama fails, still try to create the project if user clearly asked for "create project X and add tasks"
+        if not is_guest and user_id:
+            ok, project_name = detect_create_project_with_tasks_intent(message)
+            if ok and project_name:
+                llm_reply, executed, action_type = execute_tool(
+                    db, "add_plan_project_with_tasks",
+                    {"name": project_name, "description": "", "tasks": []},
+                    "", is_guest, user_id=user_id,
+                )
+                if executed and openai_client.is_configured():
+                    projects = planner_service.list_projects(db, user_id)
+                    proj = next((p for p in projects if p["name"] == project_name), None)
+                    if proj:
+                        added = generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
+                        if added:
+                            llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
+                log_info(trace_id, f"create_project_with_tasks_after_ollama_error name={project_name!r}")
+                db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used="fallback"))
+                db.commit()
+                db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+                db.commit()
+                ms = int((time.time() - t0) * 1000)
+                record_latency(ms)
+                return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": "fallback", "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
 
         nlu_result = nlu_fallback(message)
         if nlu_result:
@@ -350,7 +386,7 @@ async def chat_api(
         elif openai_client.is_configured():
             log_info(trace_id, "nlu_fallback_miss, trying OpenAI")
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
+            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
             result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
             if result["reply"]:
                 llm_reply = result["reply"]
@@ -391,7 +427,27 @@ async def chat_api(
         action_type = "web_search"
         llm_reply = ""
 
+    # Fallback: user said "create project X and add tasks" but planner returned unknown — create the project so it appears in the Planner
+    fallback_project_name = None
+    if action_type == "unknown" and not is_guest and user_id:
+        ok, project_name = detect_create_project_with_tasks_intent(message)
+        if ok and project_name:
+            fallback_project_name = project_name
+            action_type = "add_plan_project_with_tasks"
+            action_data = {"name": project_name, "description": "", "tasks": []}
+            llm_reply = ""
+            log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
+
     llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
+
+    # When we created a project via fallback with no tasks, generate tasks via cloud LLM so the project has content
+    if action_type == "add_plan_project_with_tasks" and executed and fallback_project_name and openai_client.is_configured():
+        projects = planner_service.list_projects(db, user_id)
+        proj = next((p for p in projects if p["name"] == fallback_project_name), None)
+        if proj:
+            added = generate_tasks_for_project(db, proj["id"], fallback_project_name, user_id, trace_id)
+            if added:
+                llm_reply = f'Created project **"{fallback_project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
 
     model_used = "llama3"
     if action_type == "web_search" and executed and openai_client.is_configured():
@@ -411,7 +467,10 @@ async def chat_api(
 
     elif action_type == "unknown" and openai_client.is_configured():
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT)
+        openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
+        # If the planner suggested a clarifying question, pass it so the conversational AI can use or expand it
+        if llm_reply and llm_reply.strip():
+            openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
         result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
         if result["reply"]:
             llm_reply = result["reply"]
@@ -466,6 +525,9 @@ async def chat_stream_api(
     message: str = Form(""),
     conversation_id: Optional[int] = Form(None),
     images: list[UploadFile] = File([]),
+    planner_project_id: Optional[int] = Form(None),
+    planner_project_name: Optional[str] = Form(None),
+    from_planner_page: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
     trace_id = new_trace_id()
@@ -544,10 +606,38 @@ async def chat_stream_api(
         if _convo_obj_stream:
             _project_id_stream = _convo_obj_stream.project_id
 
+    planner_current_stream = None
+    if planner_project_id is not None and planner_project_name:
+        planner_current_stream = {"id": planner_project_id, "name": planner_project_name.strip()}
+    on_planner_page_stream = from_planner_page in ("1", "true", "yes") or planner_current_stream is not None
+
     try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream)
+        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream, planner_current_project=planner_current_stream)
     except Exception as e:
         log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
+
+        # When Ollama fails, still create the project if user asked for "create project X and add tasks"
+        if not is_guest and user_id:
+            ok, project_name = detect_create_project_with_tasks_intent(message)
+            if ok and project_name:
+                llm_reply, _exec, act_type = execute_tool(
+                    db, "add_plan_project_with_tasks",
+                    {"name": project_name, "description": "", "tasks": []},
+                    "", is_guest, user_id=user_id,
+                )
+                if _exec and openai_client.is_configured():
+                    projects = planner_service.list_projects(db, user_id)
+                    proj = next((p for p in projects if p["name"] == project_name), None)
+                    if proj:
+                        added = generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
+                        if added:
+                            llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
+                log_info(trace_id, f"create_project_with_tasks_after_ollama_error name={project_name!r}")
+                def fallback_create_gen():
+                    yield sse_event({"token": llm_reply, "done": False})
+                    yield sse_event({"token": "", "done": True, "action_type": act_type, "model_used": "fallback", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+                    store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, act_type, "fallback", client_ip, message, user_id=user_id, is_guest=is_guest)
+                return StreamingResponse(fallback_create_gen(), media_type="text/event-stream")
 
         nlu_result = nlu_fallback(message)
         if nlu_result:
@@ -600,6 +690,15 @@ async def chat_stream_api(
         action_type = "web_search"
         llm_reply = ""
 
+    # Fallback: create project when user said "create project X and add tasks" but planner returned unknown
+    if action_type == "unknown" and not is_guest and user_id:
+        ok, project_name = detect_create_project_with_tasks_intent(message)
+        if ok and project_name:
+            action_type = "add_plan_project_with_tasks"
+            action_data = {"name": project_name, "description": "", "tasks": []}
+            llm_reply = ""
+            log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
+
     llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
     if action_type == "web_search" and executed and openai_client.is_configured():
@@ -639,7 +738,9 @@ async def chat_stream_api(
         return StreamingResponse(tool_gen(), media_type="text/event-stream")
 
     openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-    openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT)
+    openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page_stream)
+    if action_type == "unknown" and llm_reply and llm_reply.strip():
+        openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
 
     def stream_gen():
         full_reply = []

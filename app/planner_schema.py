@@ -1,5 +1,5 @@
-from typing import Literal, Union, Optional
-from pydantic import BaseModel, Field, ValidationError, ConfigDict
+from typing import Literal, Union, Optional, Any
+from pydantic import BaseModel, Field, ValidationError, ConfigDict, field_validator
 from datetime import date
 
 # --- Data payload schemas ---
@@ -39,6 +39,38 @@ class WebSearchData(BaseModel):
 class AddPlanProjectData(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1)
+
+
+class TaskSpec(BaseModel):
+    """One task when creating a project with tasks; description can include complexity, duration, reasoning."""
+    model_config = ConfigDict(extra="forbid")
+    title: str = Field(min_length=1)
+    description: str = ""
+
+
+class AddPlanProjectWithTasksData(BaseModel):
+    """Create a project and add multiple tasks in one action."""
+    model_config = ConfigDict(extra="forbid")
+    name: str = Field(min_length=1)
+    description: str = ""
+    tasks: list[TaskSpec] = Field(default_factory=list, max_length=30)
+
+    @field_validator("tasks", mode="before")
+    @classmethod
+    def coerce_tasks(cls, v: Any) -> list[dict]:
+        if not isinstance(v, list):
+            return []
+        out = []
+        for item in v:
+            if isinstance(item, str) and item.strip():
+                out.append({"title": item.strip(), "description": ""})
+            elif isinstance(item, dict) and (item.get("title") or item.get("description")):
+                out.append({
+                    "title": (str(item.get("title", "")).strip() or "Task"),
+                    "description": str(item.get("description", "")).strip(),
+                })
+        return out[:30]
+
 
 class AddPlanTaskData(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -103,6 +135,12 @@ class AddPlanProjectPlan(BasePlan):
     type: Literal["add_plan_project"]
     data: AddPlanProjectData
 
+
+class AddPlanProjectWithTasksPlan(BasePlan):
+    type: Literal["add_plan_project_with_tasks"]
+    data: AddPlanProjectWithTasksData
+
+
 class AddPlanTaskPlan(BasePlan):
     type: Literal["add_plan_task"]
     data: AddPlanTaskData
@@ -127,6 +165,7 @@ Plan = Union[
     IntercomBroadcastPlan,
     WebSearchPlan,
     AddPlanProjectPlan,
+    AddPlanProjectWithTasksPlan,
     AddPlanTaskPlan,
     ListPlanProjectsPlan,
     UnknownPlan,
@@ -146,7 +185,7 @@ def validate_plan(obj: dict) -> Optional[dict]:
             for cls in (AddChorePlan, ListChoresPlan, ListChoresPendingPlan, MarkChoreDonePlan,
                         AddBirthdayPlan, ListBirthdaysPlan, AnswerFromDocsPlan, PairDevicePlan,
                         IntercomBroadcastPlan, WebSearchPlan,
-                        AddPlanProjectPlan, AddPlanTaskPlan, ListPlanProjectsPlan,
+                        AddPlanProjectPlan, AddPlanProjectWithTasksPlan, AddPlanTaskPlan, ListPlanProjectsPlan,
                         UnknownPlan):
                 try:
                     plan = cls.model_validate(obj)
