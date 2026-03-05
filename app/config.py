@@ -34,6 +34,17 @@ class Settings(BaseSettings):
     # Optional
     weather_location: str = ""
 
+    # Module marketplace / registry
+    # Optional HTTPS URL pointing to a JSON index that describes available
+    # third-party modules. When empty, the marketplace operates in
+    # "local only" mode and only shows modules already installed under
+    # data/modules/.
+    module_registry_url: str = ""
+
+    # Optional modules (comma-separated: planner,intercom,voice,projects)
+    # Empty means: enable all known modules.
+    chili_modules: str = "planner,intercom,voice,projects"
+
     @property
     def primary_api_key(self) -> str:
         """Primary LLM key: LLM_API_KEY or OPENAI_API_KEY."""

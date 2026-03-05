@@ -2,17 +2,30 @@
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from jinja2 import ChoiceLoader
 
-from .db import Base, engine
+from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import chat, admin, pages, health_routes, intercom, projects, voice, planner
+from .routers import admin, chat, health_routes, pages, marketplace, mobile
+from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
+from .models import MarketplaceModule
 
 Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
 app = FastAPI(title="CHILI Home Copilot")
+
+# CORS for web and mobile clients (development-friendly defaults).
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -28,13 +41,47 @@ _voice_dir = Path(__file__).resolve().parent.parent / "data" / "voice"
 _voice_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/voice-files", StaticFiles(directory=_voice_dir), name="voice-files")
 
-app.state.templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
+_templates_dir = Path(__file__).parent / "templates"
+enabled_modules = load_enabled_modules()
+
+base_loader = Jinja2Templates(directory=_templates_dir)
+
+# If modules contribute their own template directories in the future we can
+# extend this list; for now they re-use the core templates directory.
+loader_list = [base_loader.env.loader]
+app.state.templates = Jinja2Templates(directory=_templates_dir)
+app.state.templates.env.loader = ChoiceLoader(loader_list)
+
+# Navigation entries for optional modules (used by templates)
+app.state.nav_modules = get_nav_modules()
 
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(pages.router)
 app.include_router(health_routes.router)
-app.include_router(intercom.router)
-app.include_router(projects.router)
-app.include_router(voice.router)
-app.include_router(planner.router)
+app.include_router(marketplace.router)
+app.include_router(mobile.router)
+
+# Optional feature modules (planner, intercom, voice, projects, ...)
+for mod in enabled_modules:
+    if mod.router:
+        app.include_router(mod.router)
+
+# Third-party marketplace modules (installed under data/modules/).
+try:
+    db = SessionLocal()
+    try:
+        enabled_third_party = (
+            db.query(MarketplaceModule)
+            .filter(MarketplaceModule.enabled.is_(True))
+            .all()
+        )
+        for m in enabled_third_party:
+            root = Path(m.local_path)
+            if root.exists() and root.is_dir():
+                load_third_party_module(app, root)
+    finally:
+        db.close()
+except Exception:
+    # Fail-soft on marketplace load; core app must still boot.
+    pass

@@ -1,0 +1,445 @@
+{% extends "base.html" %}
+{% block title %}Marketplace — CHILI{% endblock %}
+
+{% block head_extra %}
+<style>
+  .mkp-wrap {
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 24px 16px 40px;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  .mkp-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 18px;
+  }
+  .mkp-title {
+    font-size: 22px;
+    font-weight: 700;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .mkp-subtitle {
+    font-size: 13px;
+    color: var(--text-secondary);
+    margin-top: 4px;
+  }
+  .mkp-badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--code-bg);
+    color: var(--text-muted);
+  }
+  .mkp-controls {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+  }
+  .mkp-search {
+    padding: 8px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    color: var(--text);
+    font-size: 13px;
+    min-width: 220px;
+  }
+  .mkp-search:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .mkp-filter-select {
+    padding: 7px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--input-border);
+    background: var(--input-bg);
+    color: var(--text);
+    font-size: 13px;
+  }
+  .mkp-tag-pill {
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 999px;
+    background: var(--code-bg);
+    color: var(--text-muted);
+    margin-right: 4px;
+  }
+  .mkp-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 14px;
+    margin-top: 16px;
+  }
+  .mkp-card {
+    border-radius: 14px;
+    border: 1px solid var(--border);
+    background: var(--bg-header);
+    padding: 14px 14px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease;
+  }
+  .mkp-card:hover {
+    box-shadow: 0 6px 18px rgba(0,0,0,.1);
+    transform: translateY(-2px);
+    border-color: var(--accent);
+  }
+  .mkp-card-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .mkp-icon {
+    width: 32px;
+    height: 32px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 18px;
+    background: var(--code-bg);
+  }
+  .mkp-card-title {
+    font-size: 14px;
+    font-weight: 600;
+  }
+  .mkp-card-version {
+    font-size: 11px;
+    color: var(--text-muted);
+  }
+  .mkp-card-summary {
+    font-size: 12px;
+    color: var(--text-secondary);
+    margin-top: 2px;
+  }
+  .mkp-card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 8px;
+  }
+  .mkp-status-pill {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .mkp-status-pill.not-installed { background: var(--code-bg); color: var(--text-secondary); }
+  .mkp-status-pill.installed { background: #dbeafe; color: #1e40af; }
+  .mkp-status-pill.enabled { background: #dcfce7; color: #166534; }
+  [data-theme="dark"] .mkp-status-pill.installed { background: #1e3a5f; color: #93c5fd; }
+  [data-theme="dark"] .mkp-status-pill.enabled { background: #14532d; color: #86efac; }
+
+  .mkp-card-actions {
+    display: flex;
+    gap: 6px;
+  }
+  .mkp-btn {
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 11px;
+    padding: 5px 10px;
+    cursor: pointer;
+    transition: background .15s, color .15s, border-color .15s;
+  }
+  .mkp-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+  }
+  .mkp-btn.primary:hover {
+    background: var(--accent-hover);
+  }
+  .mkp-btn.secondary:hover {
+    background: var(--code-bg);
+    color: var(--text);
+  }
+  .mkp-btn.danger {
+    border-color: #fecaca;
+    color: #ef4444;
+  }
+  .mkp-btn.danger:hover {
+    background: rgba(239,68,68,.08);
+  }
+  .mkp-btn:disabled {
+    opacity: .6;
+    cursor: not-allowed;
+  }
+
+  .mkp-empty {
+    padding: 32px 16px;
+    text-align: center;
+    font-size: 14px;
+    color: var(--text-muted);
+  }
+
+  .mkp-warning {
+    margin-top: 18px;
+    padding: 12px 14px;
+    border-radius: 10px;
+    border: 1px solid #f97316;
+    background: #fffbeb;
+    font-size: 12px;
+    color: #92400e;
+  }
+  [data-theme="dark"] .mkp-warning {
+    background: #451a03;
+    color: #fed7aa;
+    border-color: #fdba74;
+  }
+
+  @media (max-width: 700px) {
+    .mkp-header {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 10px;
+    }
+    .mkp-controls {
+      width: 100%;
+      flex-wrap: wrap;
+      justify-content: flex-start;
+    }
+    .mkp-search {
+      flex: 1;
+      min-width: 0;
+    }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="mkp-wrap">
+  <div class="mkp-header">
+    <div>
+      <div class="mkp-title">
+        <span>&#129472;</span>
+        <span>Marketplace</span>
+        <span class="mkp-badge">Preview</span>
+      </div>
+      <div class="mkp-subtitle">
+        Browse add-ons for CHILI. Install only modules you trust&mdash;they can run code on your server.
+      </div>
+    </div>
+    <div class="mkp-controls">
+      <input id="mkp-search" class="mkp-search" type="search" placeholder="Search modules..." />
+      <select id="mkp-filter" class="mkp-filter-select">
+        <option value="all">All</option>
+        <option value="enabled">Enabled</option>
+        <option value="installed">Installed</option>
+        <option value="not-installed">Not installed</option>
+      </select>
+    </div>
+  </div>
+
+  <div id="mkp-grid" class="mkp-grid"></div>
+  <div id="mkp-empty" class="mkp-empty" style="display:none;">No modules found.</div>
+
+  <div class="mkp-warning">
+    <strong>Security note:</strong> Third-party modules can execute arbitrary Python code
+    inside your CHILI instance. Only install modules from registries you control or trust,
+    and consider reviewing their source code before enabling them.
+  </div>
+</div>
+
+<script>
+(function() {
+  var modules = [];
+  var loading = false;
+
+  function esc(s) {
+    var d = document.createElement('div');
+    d.textContent = s == null ? '' : String(s);
+    return d.innerHTML;
+  }
+
+  function fetchModules() {
+    loading = true;
+    var grid = document.getElementById('mkp-grid');
+    grid.innerHTML = '';
+    document.getElementById('mkp-empty').style.display = 'none';
+    var skeleton = document.createElement('div');
+    skeleton.className = 'mkp-empty';
+    skeleton.textContent = 'Loading modules...';
+    grid.appendChild(skeleton);
+
+    fetch('/api/marketplace/modules')
+      .then(function(r) { return r.json(); })
+      .then(function(data) {
+        modules = data || [];
+        loading = false;
+        renderModules();
+      })
+      .catch(function() {
+        loading = false;
+        grid.innerHTML = '';
+        var err = document.createElement('div');
+        err.className = 'mkp-empty';
+        err.textContent = 'Could not load modules. Check your registry URL or try again.';
+        grid.appendChild(err);
+      });
+  }
+
+  function getIcon(mod) {
+    if (mod.icon_url) {
+      return '<img src="' + esc(mod.icon_url) + '" alt="" style="width:24px;height:24px;border-radius:8px;object-fit:cover;" />';
+    }
+    var firstTag = (mod.tags && mod.tags.length) ? mod.tags[0] : '';
+    var icon = '🧩';
+    if (firstTag === 'planner') icon = '📋';
+    else if (firstTag === 'voice') icon = '🎙️';
+    else if (firstTag === 'productivity') icon = '⚙️';
+    return '<span>' + icon + '</span>';
+  }
+
+  function statusInfo(mod) {
+    if (mod.enabled) return { cls: 'enabled', label: 'Enabled' };
+    if (mod.installed) return { cls: 'installed', label: 'Installed' };
+    return { cls: 'not-installed', label: 'Not installed' };
+  }
+
+  function renderModules() {
+    var grid = document.getElementById('mkp-grid');
+    var empty = document.getElementById('mkp-empty');
+    grid.innerHTML = '';
+
+    var q = (document.getElementById('mkp-search').value || '').toLowerCase();
+    var filter = document.getElementById('mkp-filter').value;
+
+    var filtered = modules.filter(function(m) {
+      if (filter === 'enabled' && !m.enabled) return false;
+      if (filter === 'installed' && !m.installed) return false;
+      if (filter === 'not-installed' && m.installed) return false;
+      if (q) {
+        var hay = (m.slug + ' ' + (m.name || '') + ' ' + (m.summary || '') + ' ' + (m.tags || []).join(' ')).toLowerCase();
+        if (hay.indexOf(q) === -1) return false;
+      }
+      return true;
+    });
+
+    if (!filtered.length) {
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+
+    filtered.forEach(function(m) {
+      var card = document.createElement('div');
+      card.className = 'mkp-card';
+      var st = statusInfo(m);
+      var tagsHtml = '';
+      (m.tags || []).slice(0, 3).forEach(function(t) {
+        tagsHtml += '<span class="mkp-tag-pill">' + esc(t) + '</span>';
+      });
+
+      card.innerHTML =
+        '<div class="mkp-card-header">' +
+          '<div class="mkp-icon">' + getIcon(m) + '</div>' +
+          '<div style="flex:1;min-width:0;">' +
+            '<div class="mkp-card-title">' + esc(m.name || m.slug) + '</div>' +
+            '<div class="mkp-card-version">v' + esc(m.version || m.installed_version || '') + ' · ' + esc(m.slug) + '</div>' +
+          '</div>' +
+        '</div>' +
+        '<div class="mkp-card-summary">' + esc(m.summary || '') + '</div>' +
+        (tagsHtml ? '<div style="margin-top:4px;">' + tagsHtml + '</div>' : '') +
+        '<div class="mkp-card-footer">' +
+          '<span class="mkp-status-pill ' + st.cls + '">' + st.label + '</span>' +
+          '<div class="mkp-card-actions">' +
+            buildActionsHtml(m) +
+          '</div>' +
+        '</div>';
+
+      attachActionHandlers(card, m);
+      grid.appendChild(card);
+    });
+  }
+
+  function buildActionsHtml(m) {
+    var html = '';
+    if (!m.installed) {
+      html += '<button class="mkp-btn primary" data-act="install" data-slug="' + esc(m.slug) + '">Install</button>';
+    } else {
+      if (m.enabled) {
+        html += '<button class="mkp-btn secondary" data-act="disable" data-slug="' + esc(m.slug) + '">Disable</button>';
+      } else {
+        html += '<button class="mkp-btn primary" data-act="enable" data-slug="' + esc(m.slug) + '">Enable</button>';
+      }
+      html += '<button class="mkp-btn danger" data-act="uninstall" data-slug="' + esc(m.slug) + '">Uninstall</button>';
+    }
+    return html;
+  }
+
+  function attachActionHandlers(card, m) {
+    card.querySelectorAll('[data-act]').forEach(function(btn) {
+      btn.addEventListener('click', function(ev) {
+        ev.preventDefault();
+        var act = btn.getAttribute('data-act');
+        var slug = btn.getAttribute('data-slug');
+        if (!act || !slug) return;
+        if (act === 'uninstall' && !confirm('Uninstall "' + (m.name || m.slug) + '"?')) {
+          return;
+        }
+        btn.disabled = true;
+        if (act === 'install') {
+          actionInstall(slug, btn);
+        } else if (act === 'enable') {
+          actionToggle(slug, true, btn);
+        } else if (act === 'disable') {
+          actionToggle(slug, false, btn);
+        } else if (act === 'uninstall') {
+          actionUninstall(slug, btn);
+        }
+      });
+    });
+  }
+
+  function actionInstall(slug, btn) {
+    fetch('/api/marketplace/install', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: slug })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function() { fetchModules(); })
+      .catch(function() { btn.disabled = false; });
+  }
+
+  function actionToggle(slug, enabled, btn) {
+    fetch(enabled ? '/api/marketplace/enable' : '/api/marketplace/disable', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slug: slug })
+    })
+      .then(function(r) { return r.json(); })
+      .then(function() { fetchModules(); })
+      .catch(function() { btn.disabled = false; });
+  }
+
+  function actionUninstall(slug, btn) {
+    fetch('/api/marketplace/modules/' + encodeURIComponent(slug), {
+      method: 'DELETE'
+    })
+      .then(function() { fetchModules(); })
+      .catch(function() { btn.disabled = false; });
+  }
+
+  document.getElementById('mkp-search').addEventListener('input', function() {
+    if (!loading) renderModules();
+  });
+  document.getElementById('mkp-filter').addEventListener('change', function() {
+    if (!loading) renderModules();
+  });
+
+  fetchModules();
+})();
+</script>
+{% endblock %}
+

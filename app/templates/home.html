@@ -322,11 +322,18 @@
     <div class="subtitle" id="greeting">{{ greeting }}, {{ user_name }}</div>
     <nav>
       <a href="/chat">Chat</a>
-      <a href="/intercom">Intercom</a>
-      {% if not is_guest %}<a href="/planner">Planner</a>{% endif %}
-      {% if not is_guest %}<a href="/profile">Profile</a>{% endif %}
-      {% if not is_guest %}<a href="/admin">Admin</a>{% endif %}
-      {% if not is_guest %}<a href="/metrics">Metrics</a>{% endif %}
+      {% if not is_guest %}
+        <a href="/marketplace">Marketplace</a>
+        {# optional modules contributed via app.state.nav_modules #}
+        {% for m in request.app.state.nav_modules %}
+          <a href="{{ m.path }}">{{ m.label }}</a>
+        {% endfor %}
+        <a href="/profile">Profile</a>
+        <a href="/admin">Admin</a>
+        <a href="/metrics">Metrics</a>
+      {% else %}
+        <a href="/pair">Pair</a>
+      {% endif %}
     </nav>
   </div>
   <div class="header-actions">
@@ -425,15 +432,19 @@
           <span class="qa-icon">&#128172;</span>
           <span class="qa-label">Chat</span>
         </a>
-        <a class="qa-tile" href="/intercom">
-          <span class="qa-icon">&#128266;</span>
-          <span class="qa-label">Intercom</span>
+        {% if not is_guest %}
+        <a class="qa-tile" href="/marketplace">
+          <span class="qa-icon">&#129472;</span>
+          <span class="qa-label">Marketplace</span>
         </a>
         {% if not is_guest %}
-        <a class="qa-tile" href="/planner">
-          <span class="qa-icon">&#128203;</span>
-          <span class="qa-label">Planner</span>
+        {# Quick tiles for enabled modules #}
+        {% for m in request.app.state.nav_modules %}
+        <a class="qa-tile" href="{{ m.path }}">
+          <span class="qa-icon">{% if m.icon %}{{ m.icon }}{% else %}&#128203;{% endif %}</span>
+          <span class="qa-label">{{ m.label }}</span>
         </a>
+        {% endfor %}
         <a class="qa-tile" href="/profile">
           <span class="qa-icon">&#128100;</span>
           <span class="qa-label">Profile</span>
@@ -443,6 +454,7 @@
           <span class="qa-label">Admin</span>
         </a>
         {% else %}
+        {% endif %}
         <a class="qa-tile" href="/pair">
           <span class="qa-icon">&#128279;</span>
           <span class="qa-label">Pair Device</span>

@@ -1,0 +1,7 @@
+When the **Project Planner** module is enabled, you can also use these actions:
+
+- add_plan_project: {"name": str}  -- use when the user wants to create a new project ONLY (no tasks listed). Name is the project name.
+- add_plan_project_with_tasks: {"name": str, "description": str (optional), "tasks": [{"title": str, "description": str}, ...]}  -- use when the user wants to create a project AND add tasks. "name" is project name. "tasks" MUST be an array of objects: each object has "title" (short task name) and "description" (must include "Complexity: Low|Medium|High", "Duration: ...", and "Reasoning: ..." when the user asked what to do or for suggestions). Extract 6-15 tasks; make each task's description specific so the plan is credible and doable.
+- add_plan_task: {"project_name": str, "title": str}  -- use when the user wants to add a single task to an existing project.
+- list_plan_projects: {}  -- use when the user asks to see their projects, project status, or what they're working on.
+

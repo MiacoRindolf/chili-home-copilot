@@ -14,6 +14,7 @@ from .. import vision as vision_module
 from .. import wellness
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
+from ..schemas.chat import MobileChatRequest, MobileChatResponse
 from ..services.chat_service import (
     execute_tool,
     init_chat,
@@ -386,6 +387,257 @@ async def chat_api(
         "rag_sources": rag_sources,
         "personality_used": personality_used,
     }
+
+
+def _get_token_from_request(request: Request) -> str | None:
+    """Extract a device/auth token from Authorization header or cookie.
+
+    Mobile clients can send `Authorization: Bearer <token>` while web clients
+    continue to rely on the chili_device_token cookie.
+    """
+    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    if auth and auth.lower().startswith("bearer "):
+        return auth.split(" ", 1)[1].strip() or None
+    return request.cookies.get(DEVICE_COOKIE_NAME)
+
+
+@router.post("/api/mobile/chat", response_model=MobileChatResponse)
+async def mobile_chat_api(
+    body: MobileChatRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """JSON-based chat endpoint for native/mobile clients.
+
+    This mirrors the behavior of /api/chat but:
+    - accepts a JSON body instead of form data
+    - does not handle file uploads (text-only for now)
+    - allows auth via Bearer token in the Authorization header
+    """
+    trace_id = new_trace_id()
+    t0 = time.time()
+
+    client_ip = request.client.host
+    device_token = _get_token_from_request(request)
+    identity = get_identity_record(db, device_token)
+    convo_key = get_convo_key(identity, device_token, client_ip)
+    user_name = identity["user_name"]
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+
+    message = (body.message or "").strip()
+    if not message:
+        return JSONResponse({"error": "Message is required"}, status_code=400)
+
+    log_info(
+        trace_id,
+        f"mobile_chat client_ip={client_ip} user={user_name} guest={is_guest} "
+        f"convo={convo_key} conversation_id={body.conversation_id}",
+    )
+    log_info(trace_id, f"chat_message={message!r}")
+
+    chat_init = init_chat(
+        db,
+        convo_key,
+        body.conversation_id,
+        message,
+        identity,
+        trace_id,
+        image_path=None,
+    )
+    conversation_id = chat_init["conversation_id"]
+    recent = chat_init["recent"]
+
+    # --- Wellness detection (same as HTML/chat endpoint) ---
+    if wellness.detect_crisis(message):
+        log_info(trace_id, "crisis_detected (mobile)")
+        llm_reply = wellness.CRISIS_RESPONSE
+        action_type = "crisis_support"
+        model_used = "crisis-detector"
+        db.add(
+            ChatMessage(
+                convo_key=convo_key,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=llm_reply,
+                trace_id=trace_id,
+                action_type=action_type,
+                model_used=model_used,
+            )
+        )
+        db.commit()
+        db.add(
+            ChatLog(
+                client_ip=client_ip,
+                trace_id=trace_id,
+                message=message,
+                action_type=action_type,
+            )
+        )
+        db.commit()
+        ms = int((time.time() - t0) * 1000)
+        record_latency(ms)
+        return MobileChatResponse(
+            trace_id=trace_id,
+            user=user_name,
+            is_guest=is_guest,
+            action_type=action_type,
+            executed=True,
+            reply=llm_reply,
+            model_used=model_used,
+            conversation_id=conversation_id,
+            rag_sources=[],
+            personality_used=False,
+        )
+
+    if wellness.detect_wellness_topic(message):
+        log_info(trace_id, "wellness_topic_detected (mobile)")
+        wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+        result = wellness.wellness_chat(
+            messages=wellness_msgs, user_name=user_name, trace_id=trace_id
+        )
+        llm_reply = result["reply"]
+        action_type = "wellness_support"
+        model_used = result["model"]
+        db.add(
+            ChatMessage(
+                convo_key=convo_key,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=llm_reply,
+                trace_id=trace_id,
+                action_type=action_type,
+                model_used=model_used,
+            )
+        )
+        db.commit()
+        db.add(
+            ChatLog(
+                client_ip=client_ip,
+                trace_id=trace_id,
+                message=message,
+                action_type=action_type,
+            )
+        )
+        db.commit()
+        ms = int((time.time() - t0) * 1000)
+        record_latency(ms)
+        return MobileChatResponse(
+            trace_id=trace_id,
+            user=user_name,
+            is_guest=is_guest,
+            action_type=action_type,
+            executed=True,
+            reply=llm_reply,
+            model_used=model_used,
+            conversation_id=conversation_id,
+            rag_sources=[],
+            personality_used=False,
+        )
+
+    # Resolve project_id from the conversation for project-scoped RAG
+    _project_id = None
+    if conversation_id:
+        _convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if _convo_obj:
+            _project_id = _convo_obj.project_id
+
+    planner_current = None
+    if body.planner_project_id is not None and body.planner_project_name:
+        planner_current = {
+            "id": body.planner_project_id,
+            "name": body.planner_project_name.strip(),
+        }
+    on_planner_page = planner_current is not None
+
+    try:
+        ctx = plan_and_enrich(
+            db,
+            message,
+            identity,
+            recent,
+            trace_id,
+            project_id=_project_id,
+            planner_current_project=planner_current,
+        )
+    except Exception as e:
+        log_info(trace_id, f"llm_error={e}, trying NLU fallback (mobile)")
+        ctx = None
+
+    result = resolve_response(
+        db,
+        message,
+        recent,
+        identity,
+        ctx,
+        on_planner_page,
+        trace_id,
+        stream=False,
+    )
+
+    llm_reply = result["reply"]
+    action_type = result["action_type"]
+    executed = result["executed"]
+    model_used = result["model_used"]
+    rag_sources = result["rag_sources"]
+    personality_used = result["personality_used"]
+
+    db.add(
+        ChatMessage(
+            convo_key=convo_key,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=llm_reply,
+            trace_id=trace_id,
+            action_type=action_type,
+            model_used=model_used,
+        )
+    )
+    db.commit()
+
+    if conversation_id:
+        convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if convo_obj and convo_obj.title == "New Chat":
+            convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
+            db.commit()
+
+    db.add(
+        ChatLog(
+            client_ip=client_ip,
+            trace_id=trace_id,
+            message=message,
+            action_type=action_type,
+        )
+    )
+    db.commit()
+
+    try_personality_update(user_id, is_guest, db, trace_id)
+    try_memory_extraction(
+        user_id,
+        is_guest,
+        message,
+        llm_reply,
+        action_type,
+        db,
+        trace_id,
+    )
+
+    ms = int((time.time() - t0) * 1000)
+    record_latency(ms)
+    log_info(trace_id, f"latency_ms={ms} action={action_type} executed={executed} client_type=mobile")
+
+    return MobileChatResponse(
+        trace_id=trace_id,
+        user=user_name,
+        is_guest=is_guest,
+        action_type=action_type,
+        executed=executed,
+        reply=llm_reply,
+        model_used=model_used,
+        conversation_id=conversation_id,
+        rag_sources=rag_sources,
+        personality_used=personality_used,
+    )
 
 
 @router.post("/api/chat/stream")

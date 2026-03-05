@@ -1,19 +1,21 @@
 """SQLAlchemy models. Re-export all for backward compatibility: from app.models import User, Chore, ..."""
-from .core import User, Device, PairCode
+
+from .core import Device, PairCode, User
 from .projects import Project, ProjectFile
-from .chat import ChatLog, Conversation, ChatMessage
-from .household import Chore, Birthday, ActivityLog, HousemateProfile, UserMemory, UserStatus
-from .intercom import IntercomMessage, IntercomConsent
+from .chat import ChatLog, ChatMessage, Conversation
+from .household import ActivityLog, Birthday, Chore, HousemateProfile, UserMemory, UserStatus
+from .intercom import IntercomConsent, IntercomMessage
 from .planner import (
+    PlanLabel,
     PlanProject,
     PlanTask,
     ProjectMember,
-    TaskComment,
     TaskActivity,
-    PlanLabel,
+    TaskComment,
     TaskLabel,
     TaskWatcher,
 )
+from .marketplace import MarketplaceModule
 
 __all__ = [
     "User",
@@ -40,4 +42,6 @@ __all__ = [
     "PlanLabel",
     "TaskLabel",
     "TaskWatcher",
+    "MarketplaceModule",
 ]
+

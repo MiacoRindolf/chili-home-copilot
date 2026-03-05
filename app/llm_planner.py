@@ -4,6 +4,7 @@ import requests
 from .config import settings
 from .schemas import validate_plan
 from .prompts import load_prompt
+from .modules import load_enabled_modules
 
 OLLAMA_URL = f"{settings.ollama_host}/api/chat"
 MODEL = settings.ollama_model
@@ -42,6 +43,13 @@ def _build_system_prompt(
     project_context: str | None = None,
 ) -> str:
     prompt = SYSTEM_BASE
+
+    # Allow optional modules (e.g. planner) to extend the base planner
+    # instructions with their own action blocks.
+    for mod in load_enabled_modules():
+        if mod.planner_actions:
+            prompt += "\n" + mod.planner_actions
+
     if rag_context:
         prompt += RAG_CONTEXT_TEMPLATE.format(context=rag_context)
     if personality_context:

@@ -6,21 +6,33 @@ from typing import Callable
 
 from sqlalchemy.orm import Session
 
-from ..models import Chore, Birthday, PlanProject, ProjectMember
+from ..models import Birthday, Chore, PlanProject, ProjectMember
 from .. import web_search as web_search_module
-from . import planner_service
+from . import marketplace_service, planner_service
+from ..modules import is_module_enabled
 
 _HANDLERS: dict[str, Callable[..., tuple[str, bool, str]]] = {}
 
 WRITE_ACTIONS = {
-    "add_chore", "mark_chore_done", "add_birthday",
-    "add_plan_project", "add_plan_project_with_tasks", "add_plan_task",
+    "add_chore",
+    "mark_chore_done",
+    "add_birthday",
+    # Planner write actions are only effective when the planner module is enabled.
+    "add_plan_project",
+    "add_plan_project_with_tasks",
+    "add_plan_task",
+    # Module install is a write action that can change server state.
+    "install_module",
 }
 
 
-def register(action_type: str):
+def register(action_type: str, module: str | None = None):
     def decorator(fn: Callable[..., tuple[str, bool, str]]):
-        _HANDLERS[action_type] = fn
+        # Core handlers (no module) are always registered.
+        # Module-scoped handlers (e.g. planner, intercom) only register when the
+        # corresponding module is enabled via CHILI_MODULES.
+        if module is None or is_module_enabled(module):
+            _HANDLERS[action_type] = fn
         return fn
     return decorator
 
@@ -118,7 +130,7 @@ def _handle_pair_device(db: Session, action_data: dict, llm_reply: str, is_guest
     return llm_reply, True, "pair_device"
 
 
-@register("intercom_broadcast")
+@register("intercom_broadcast", module="intercom")
 def _handle_intercom_broadcast(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     broadcast_text = action_data.get("text", "")
     if is_guest:
@@ -149,7 +161,7 @@ def _handle_web_search(db: Session, action_data: dict, llm_reply: str, is_guest:
     return llm_reply, False, "web_search"
 
 
-@register("add_plan_project")
+@register("add_plan_project", module="planner")
 def _handle_add_plan_project(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     name = action_data.get("name", "")
     if name and not is_guest and user_id:
@@ -165,7 +177,7 @@ def _handle_add_plan_project(db: Session, action_data: dict, llm_reply: str, is_
     return llm_reply, False, "add_plan_project"
 
 
-@register("add_plan_project_with_tasks")
+@register("add_plan_project_with_tasks", module="planner")
 def _handle_add_plan_project_with_tasks(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     name = (action_data.get("name") or "").strip()
     description = (action_data.get("description") or "").strip()
@@ -204,7 +216,7 @@ def _handle_add_plan_project_with_tasks(db: Session, action_data: dict, llm_repl
     return llm_reply, False, "add_plan_project_with_tasks"
 
 
-@register("add_plan_task")
+@register("add_plan_task", module="planner")
 def _handle_add_plan_task(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     project_name = action_data.get("project_name", "")
     title = action_data.get("title", "")
@@ -227,7 +239,7 @@ def _handle_add_plan_task(db: Session, action_data: dict, llm_reply: str, is_gue
     return llm_reply, False, "add_plan_task"
 
 
-@register("list_plan_projects")
+@register("list_plan_projects", module="planner")
 def _handle_list_plan_projects(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     if is_guest or not user_id:
         llm_reply = "Project management is only available for paired housemates."
@@ -242,6 +254,34 @@ def _handle_list_plan_projects(db: Session, action_data: dict, llm_reply: str, i
         else:
             llm_reply = "You don't have any projects yet. Create one in the [Project Planner](/planner) or say \"create project [name]\"."
     return llm_reply, True, "list_plan_projects"
+
+
+@register("install_module")
+def _handle_install_module(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    slug_raw = action_data.get("slug")
+    slug = (str(slug_raw or "")).strip()
+    if not slug:
+        return "Which module would you like to install or enable?", False, "install_module"
+
+    trace_id = "install_module_tool"
+    try:
+        mod, installed_now = marketplace_service.install_from_registry(db, slug, trace_id)
+    except Exception as exc:
+        # Surface a friendly error but avoid leaking internal details.
+        return f"I couldn't install the module \"{slug}\": {exc}", False, "install_module"
+
+    if installed_now:
+        reply = (
+            f'Installed and enabled module **"{mod.name}"** (slug: `{mod.slug}`). '
+            "You may need to refresh this page to see its navigation link."
+        )
+    else:
+        reply = (
+            f'Module **"{mod.name}"** is now enabled. '
+            "If it exposes a page, you should see it in the navigation."
+        )
+
+    return reply, True, "install_module"
 
 
 def execute_tool(

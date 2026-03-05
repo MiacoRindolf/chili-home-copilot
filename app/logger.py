@@ -19,3 +19,7 @@ def new_trace_id() -> str:
 
 def log_info(trace_id: str, message: str):
     logger.info(message, extra={"trace_id": trace_id})
+
+
+def log_error(trace_id: str, message: str):
+    logger.error(message, extra={"trace_id": trace_id})
