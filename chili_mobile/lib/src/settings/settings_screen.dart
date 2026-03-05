@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../config/app_config.dart';
 import '../network/chili_api_client.dart';
 
 class SettingsScreen extends StatefulWidget {
@@ -11,17 +12,43 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _urlController;
+  late TextEditingController _wakeWordController;
+  bool _alwaysListening = true;
 
   @override
   void initState() {
     super.initState();
     _urlController = TextEditingController(text: ChiliApiClient.baseUrl);
+    _wakeWordController = TextEditingController(text: 'chili');
+    _loadConfig();
+  }
+
+  Future<void> _loadConfig() async {
+    await AppConfig.instance.load();
+    if (mounted) {
+      setState(() {
+        _wakeWordController.text = AppConfig.instance.wakeWord;
+        _alwaysListening = AppConfig.instance.alwaysListening;
+      });
+    }
   }
 
   @override
   void dispose() {
     _urlController.dispose();
+    _wakeWordController.dispose();
     super.dispose();
+  }
+
+  Future<void> _saveWakeWord() async {
+    final word = _wakeWordController.text.trim();
+    if (word.isEmpty) return;
+    await AppConfig.instance.setWakeWord(word);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Wake word saved')),
+      );
+    }
   }
 
   @override
@@ -71,6 +98,60 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
 
+          // Wake word
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Wake Word',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _wakeWordController,
+                    decoration: const InputDecoration(
+                      labelText: 'Wake word',
+                      hintText: 'Chili',
+                      helperText:
+                          'Say this word then your question for hands-free voice (e.g. "Chili, what\'s the weather?")',
+                    ),
+                    textCapitalization: TextCapitalization.words,
+                    onSubmitted: (_) => _saveWakeWord(),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Always listening for wake word',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        value: _alwaysListening,
+                        onChanged: (value) async {
+                          await AppConfig.instance.setAlwaysListening(value);
+                          if (mounted) setState(() => _alwaysListening = value);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  ElevatedButton.icon(
+                    onPressed: _saveWakeWord,
+                    icon: const Icon(Icons.save),
+                    label: const Text('Save wake word'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Keyboard shortcuts reference
           Card(
             child: Padding(
@@ -89,6 +170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _shortcutRow('Long-press mic button', 'Record voice message'),
                   _shortcutRow('Drop files on avatar', 'Send files to CHILI'),
                   _shortcutRow('System tray icon', 'Click to show, right-click for menu'),
+                  _shortcutRow('Wake word', 'Say "[your word], [question]" for hands-free (e.g. "Chili, what time is it?")'),
                 ],
               ),
             ),

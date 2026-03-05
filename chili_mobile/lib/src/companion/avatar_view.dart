@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
-import 'package:lottie/lottie.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 
 import '../network/chili_api_client.dart';
 import '../voice/voice_input.dart';
+import '../widgets/chili_avatar.dart';
 
 /// The small floating avatar with an expandable chat bubble.
 ///
@@ -12,10 +12,19 @@ import '../voice/voice_input.dart';
 /// - Single tap to toggle the chat bubble.
 /// - Double-tap to open the full app.
 /// - Long-press the mic button to record voice.
+/// - Say the wake word (e.g. "Chili") then your question for hands-free.
 /// - Drop files onto the avatar to send them to CHILI.
 class AvatarView extends StatefulWidget {
+  const AvatarView({
+    super.key,
+    required this.onOpenFullApp,
+    this.pauseWakeWord,
+    this.wakeWordReply,
+  });
+
   final VoidCallback onOpenFullApp;
-  const AvatarView({super.key, required this.onOpenFullApp});
+  final ValueNotifier<bool>? pauseWakeWord;
+  final ValueNotifier<String?>? wakeWordReply;
 
   @override
   State<AvatarView> createState() => _AvatarViewState();
@@ -28,12 +37,34 @@ class _AvatarViewState extends State<AvatarView> {
   String? _reply;
   bool _showChat = false;
   bool _isDraggingFile = false;
-  String _avatarAnim = 'assets/animations/chili_idle.json';
+  AvatarState _avatarState = AvatarState.idle;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.wakeWordReply?.addListener(_onWakeWordReply);
+  }
 
   @override
   void dispose() {
+    widget.wakeWordReply?.removeListener(_onWakeWordReply);
     _controller.dispose();
     super.dispose();
+  }
+
+  void _onWakeWordReply() {
+    final reply = widget.wakeWordReply?.value;
+    if (reply == null || !mounted) return;
+    widget.wakeWordReply!.value = null;
+    setState(() {
+      _reply = reply;
+      _avatarState = AvatarState.speaking;
+      _showChat = true;
+    });
+    windowManager.setSize(const Size(300, 480));
+    Future.delayed(const Duration(seconds: 2), () {
+      if (mounted) setState(() => _avatarState = AvatarState.idle);
+    });
   }
 
   Future<void> _toggleChat() async {
@@ -53,7 +84,7 @@ class _AvatarViewState extends State<AvatarView> {
     setState(() {
       _isSending = true;
       _reply = null;
-      _avatarAnim = 'assets/animations/chili_thinking.json';
+      _avatarState = AvatarState.thinking;
     });
 
     try {
@@ -61,17 +92,17 @@ class _AvatarViewState extends State<AvatarView> {
       if (!mounted) return;
       setState(() {
         _reply = reply;
-        _avatarAnim = 'assets/animations/chili_speaking.json';
+        _avatarState = AvatarState.speaking;
       });
       await Future.delayed(const Duration(seconds: 2));
       if (mounted) {
-        setState(() => _avatarAnim = 'assets/animations/chili_idle.json');
+        setState(() => _avatarState = AvatarState.idle);
       }
     } catch (e) {
       if (!mounted) return;
       setState(() {
         _reply = 'Could not reach CHILI. Is the server running?';
-        _avatarAnim = 'assets/animations/chili_idle.json';
+        _avatarState = AvatarState.idle;
       });
     } finally {
       if (mounted) {
@@ -139,11 +170,7 @@ class _AvatarViewState extends State<AvatarView> {
                         child: _isDraggingFile
                             ? const Icon(Icons.file_present,
                                 size: 60, color: Colors.white)
-                            : Lottie.asset(
-                                _avatarAnim,
-                                repeat: true,
-                                fit: BoxFit.contain,
-                              ),
+                            : ChiliAvatar(state: _avatarState),
                       ),
                     ),
                   ),
@@ -192,16 +219,17 @@ class _AvatarViewState extends State<AvatarView> {
                     if (mounted) {
                       setState(() {
                         _reply = text;
-                        _avatarAnim = 'assets/animations/chili_idle.json';
+                        _avatarState = AvatarState.idle;
                       });
                     }
                   },
                   onRecordingStateChanged: (recording) {
+                    widget.pauseWakeWord?.value = recording;
                     if (mounted) {
                       setState(() {
-                        _avatarAnim = recording
-                            ? 'assets/animations/chili_listening.json'
-                            : 'assets/animations/chili_idle.json';
+                        _avatarState = recording
+                            ? AvatarState.listening
+                            : AvatarState.idle;
                       });
                     }
                   },
