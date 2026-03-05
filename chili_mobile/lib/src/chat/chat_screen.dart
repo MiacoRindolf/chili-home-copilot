@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../network/chili_api_client.dart';
+import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -71,6 +72,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  void _handleVoiceResult(String text) {
+    setState(() {
+      _messages.add(ChatMessage(role: ChatRole.assistant, content: text));
+    });
+    _scrollController.animateTo(
+      _scrollController.position.maxScrollExtent + 80,
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -124,6 +136,17 @@ class _ChatScreenState extends State<ChatScreen> {
               padding: const EdgeInsets.all(8.0),
               child: Row(
                 children: [
+                  VoiceInputButton(
+                    onResult: _handleVoiceResult,
+                    onRecordingStateChanged: (recording) {
+                      setState(() {
+                        _avatarState = recording
+                            ? AvatarState.listening
+                            : AvatarState.idle;
+                      });
+                    },
+                  ),
+                  const SizedBox(width: 8),
                   Expanded(
                     child: TextField(
                       controller: _controller,
@@ -162,4 +185,3 @@ class ChatMessage {
   final ChatRole role;
   final String content;
 }
-

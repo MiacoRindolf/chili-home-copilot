@@ -7,6 +7,7 @@ import 'package:screen_retriever/screen_retriever.dart';
 
 import 'src/app_theme.dart';
 import 'src/companion/companion_shell.dart';
+import 'src/companion/desktop_powers.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,6 +35,18 @@ Future<void> main() async {
       await windowManager.show();
       await windowManager.focus();
     });
+
+    // Initialize desktop powers (tray, hotkey, notifications).
+    await DesktopPowers.instance.init(
+      onShowApp: () async {
+        await windowManager.show();
+        await windowManager.focus();
+      },
+      onQuit: () async {
+        await DesktopPowers.instance.dispose();
+        exit(0);
+      },
+    );
   }
 
   runApp(const ChiliDesktopCompanion());

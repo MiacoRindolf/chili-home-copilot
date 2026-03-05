@@ -1,14 +1,18 @@
 import 'package:flutter/material.dart';
 import 'package:lottie/lottie.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:desktop_drop/desktop_drop.dart';
 
 import '../network/chili_api_client.dart';
+import '../voice/voice_input.dart';
 
 /// The small floating avatar with an expandable chat bubble.
 ///
 /// - Drag the red circle to move the window.
 /// - Single tap to toggle the chat bubble.
 /// - Double-tap to open the full app.
+/// - Long-press the mic button to record voice.
+/// - Drop files onto the avatar to send them to CHILI.
 class AvatarView extends StatefulWidget {
   final VoidCallback onOpenFullApp;
   const AvatarView({super.key, required this.onOpenFullApp});
@@ -23,6 +27,7 @@ class _AvatarViewState extends State<AvatarView> {
   bool _isSending = false;
   String? _reply;
   bool _showChat = false;
+  bool _isDraggingFile = false;
   String _avatarAnim = 'assets/animations/chili_idle.json';
 
   @override
@@ -34,7 +39,7 @@ class _AvatarViewState extends State<AvatarView> {
   Future<void> _toggleChat() async {
     final willShow = !_showChat;
     if (willShow) {
-      await windowManager.setSize(const Size(300, 440));
+      await windowManager.setSize(const Size(300, 480));
     } else {
       await windowManager.setSize(const Size(200, 200));
     }
@@ -78,53 +83,78 @@ class _AvatarViewState extends State<AvatarView> {
     }
   }
 
+  void _onFilesDropped(DropDoneDetails details) {
+    if (details.files.isEmpty) return;
+    final names = details.files.map((f) => f.name).join(', ');
+    setState(() {
+      _isDraggingFile = false;
+      _reply = 'Received files: $names\n(File analysis coming soon!)';
+      if (!_showChat) _showChat = true;
+    });
+    // Expand window to show the reply if collapsed.
+    windowManager.setSize(const Size(300, 480));
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: SingleChildScrollView(
-        child: Center(
-          child: Padding(
-            padding: const EdgeInsets.only(top: 10),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                // ── Avatar circle ──
-                GestureDetector(
-                  onPanStart: (_) => windowManager.startDragging(),
-                  onTap: _toggleChat,
-                  onDoubleTap: widget.onOpenFullApp,
-                  child: Container(
-                    height: 150,
-                    width: 150,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: const Color(0xFFEF5350),
-                      boxShadow: [
-                        BoxShadow(
-                          color: Colors.black.withOpacity(0.4),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(10),
-                      child: Lottie.asset(
-                        _avatarAnim,
-                        repeat: true,
-                        fit: BoxFit.contain,
+      body: DropTarget(
+        onDragEntered: (_) => setState(() => _isDraggingFile = true),
+        onDragExited: (_) => setState(() => _isDraggingFile = false),
+        onDragDone: _onFilesDropped,
+        child: SingleChildScrollView(
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.only(top: 10),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  // ── Avatar circle ──
+                  GestureDetector(
+                    onPanStart: (_) => windowManager.startDragging(),
+                    onTap: _toggleChat,
+                    onDoubleTap: widget.onOpenFullApp,
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      height: 150,
+                      width: 150,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: _isDraggingFile
+                            ? const Color(0xFF42A5F5)
+                            : const Color(0xFFEF5350),
+                        boxShadow: [
+                          BoxShadow(
+                            color: _isDraggingFile
+                                ? Colors.blue.withOpacity(0.6)
+                                : Colors.black.withOpacity(0.4),
+                            blurRadius: _isDraggingFile ? 20 : 12,
+                            offset: const Offset(0, 4),
+                          ),
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.all(10),
+                        child: _isDraggingFile
+                            ? const Icon(Icons.file_present,
+                                size: 60, color: Colors.white)
+                            : Lottie.asset(
+                                _avatarAnim,
+                                repeat: true,
+                                fit: BoxFit.contain,
+                              ),
                       ),
                     ),
                   ),
-                ),
 
-                // ── Chat bubble ──
-                if (_showChat) ...[
-                  const SizedBox(height: 10),
-                  _buildChatBubble(),
+                  // ── Chat bubble ──
+                  if (_showChat) ...[
+                    const SizedBox(height: 10),
+                    _buildChatBubble(),
+                  ],
                 ],
-              ],
+              ),
             ),
           ),
         ),
@@ -153,9 +183,30 @@ class _AvatarViewState extends State<AvatarView> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Input row
+            // Input row with mic + text + send
             Row(
               children: [
+                // Mic button (hold to record)
+                VoiceInputButton(
+                  onResult: (text) {
+                    if (mounted) {
+                      setState(() {
+                        _reply = text;
+                        _avatarAnim = 'assets/animations/chili_idle.json';
+                      });
+                    }
+                  },
+                  onRecordingStateChanged: (recording) {
+                    if (mounted) {
+                      setState(() {
+                        _avatarAnim = recording
+                            ? 'assets/animations/chili_listening.json'
+                            : 'assets/animations/chili_idle.json';
+                      });
+                    }
+                  },
+                ),
+                const SizedBox(width: 6),
                 Expanded(
                   child: TextField(
                     controller: _controller,

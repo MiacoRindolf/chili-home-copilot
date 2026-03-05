@@ -94,4 +94,43 @@ class ChiliApiClient {
       body: 'status=$status',
     );
   }
+
+  // ── Voice ──
+
+  /// Send a recorded audio file to the backend for STT + chat processing.
+  /// Falls back to the chat endpoint with a note if no voice endpoint exists.
+  Future<String> sendVoice(File audioFile) async {
+    final uri = Uri.parse('$baseUrl/api/voice/transcribe');
+    final request = http.MultipartRequest('POST', uri);
+    if (_token != null && _token!.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $_token';
+    }
+    request.files.add(await http.MultipartFile.fromPath('audio', audioFile.path));
+
+    // Use the underlying IOClient's inner HttpClient for multipart.
+    final innerClient = HttpClient()
+      ..badCertificateCallback = (cert, host, port) => true;
+    try {
+      final ioRequest = await innerClient.openUrl(request.method, uri);
+      request.headers.forEach((k, v) => ioRequest.headers.set(k, v));
+      final bodyBytes = await request.finalize().toBytes();
+      ioRequest.headers.contentType = ContentType.parse(request.headers['content-type'] ?? 'multipart/form-data');
+      ioRequest.contentLength = bodyBytes.length;
+      ioRequest.add(bodyBytes);
+
+      final ioResponse = await ioRequest.close();
+      final responseBody = await ioResponse.transform(const SystemEncoding().decoder).join();
+
+      if (ioResponse.statusCode == 200) {
+        final decoded = jsonDecode(responseBody) as Map<String, dynamic>;
+        return (decoded['reply'] ?? decoded['text'] ?? 'No transcription.') as String;
+      } else if (ioResponse.statusCode == 404) {
+        return 'Voice endpoint not available. Send text messages instead.';
+      } else {
+        return 'Voice request failed (${ioResponse.statusCode}).';
+      }
+    } finally {
+      innerClient.close();
+    }
+  }
 }

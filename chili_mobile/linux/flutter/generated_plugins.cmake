@@ -3,7 +3,12 @@
 #
 
 list(APPEND FLUTTER_PLUGIN_LIST
+  desktop_drop
+  hotkey_manager_linux
+  local_notifier
+  record_linux
   screen_retriever
+  tray_manager
   window_manager
 )
 
