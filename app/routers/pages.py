@@ -1,15 +1,14 @@
 """Page routes: home, profile, pair, chores, birthdays form handlers."""
 from fastapi import APIRouter, Depends, Form, Request, Query
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 from datetime import date, datetime, timedelta
-from pydantic import BaseModel
 from typing import Optional
 import json as json_mod
 
 from ..deps import get_db
 from ..models import Chore, Birthday, HousemateProfile, User, UserStatus, UserMemory
+from ..schemas import AddChoreBody, UpdateChoreBody, AddBirthdayBody, PairRequestBody, PairVerifyBody
 from ..pairing import (
     DEVICE_COOKIE_NAME, redeem_pair_code, register_device,
     get_identity_record, generate_pair_code,
@@ -18,12 +17,6 @@ from .. import email_service
 from ..services import home_service
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 def _days_until(bday_date: date) -> int:
@@ -50,7 +43,7 @@ def home(request: Request, db: Session = Depends(get_db)):
     identity = get_identity_record(db, device_token)
     dashboard = home_service.get_dashboard_data(db, identity)
 
-    return templates.TemplateResponse(request, "home.html", {
+    return request.app.state.templates.TemplateResponse(request, "home.html", {
         "greeting": _greeting(),
         "user_name": identity["user_name"],
         "is_guest": identity["is_guest"],
@@ -88,25 +81,6 @@ def add_birthday_form(
 # ---------------------------------------------------------------------------
 # JSON API for AJAX home page interactions
 # ---------------------------------------------------------------------------
-
-class AddChoreBody(BaseModel):
-    title: str
-    priority: str = "medium"
-    due_date: Optional[str] = None
-    recurrence: str = "none"
-    assigned_to: Optional[int] = None
-
-class UpdateChoreBody(BaseModel):
-    title: Optional[str] = None
-    priority: Optional[str] = None
-    due_date: Optional[str] = None
-    recurrence: Optional[str] = None
-    assigned_to: Optional[int] = None
-
-class AddBirthdayBody(BaseModel):
-    name: str
-    date: str
-
 
 def _chore_dict(c: Chore) -> dict:
     return {
@@ -303,7 +277,7 @@ def profile_page(request: Request, db: Session = Depends(get_db)):
             "</body></html>"
         )
 
-    return templates.TemplateResponse(request, "profile.html", {
+    return request.app.state.templates.TemplateResponse(request, "profile.html", {
         "user_name": identity["user_name"],
     })
 
@@ -450,7 +424,7 @@ def profile_interests(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/pair", response_class=HTMLResponse)
 def pair_page(request: Request):
-    return templates.TemplateResponse(request, "pair.html")
+    return request.app.state.templates.TemplateResponse(request, "pair.html")
 
 
 @router.post("/pair")
@@ -477,14 +451,6 @@ def pair_submit(
 # ---------------------------------------------------------------------------
 # Self-service email pairing API
 # ---------------------------------------------------------------------------
-
-class PairRequestBody(BaseModel):
-    email: str
-
-class PairVerifyBody(BaseModel):
-    code: str
-    label: str = "Unknown Device"
-
 
 @router.post("/api/pair/request")
 def pair_request(body: PairRequestBody, db: Session = Depends(get_db)):

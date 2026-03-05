@@ -3,7 +3,7 @@
 These verify that the strict discriminated-union schemas correctly
 accept valid LLM plans and reject malformed / dangerous ones.
 """
-from app.planner_schema import validate_plan
+from app.schemas import validate_plan
 
 
 class TestValidPlans:

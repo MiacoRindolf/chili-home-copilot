@@ -14,49 +14,24 @@ Configure via env vars:
   PREMIUM_MODEL                      — Premium model (default: gpt-5.2)
   PREMIUM_BASE_URL                   — Premium base URL (default: OpenAI)
 """
-import os
 import re
 from openai import OpenAI
-from dotenv import load_dotenv
 
+from .config import settings
 from .logger import log_info
+from .prompts import load_prompt
 
-load_dotenv()
+# Backward compat aliases for code that imports these
+OPENAI_API_KEY = settings.primary_api_key
+OPENAI_MODEL = settings.llm_model
+LLM_API_KEY = settings.primary_api_key
+LLM_MODEL = settings.llm_model
+LLM_BASE_URL = settings.llm_base_url
+PREMIUM_API_KEY = settings.premium_api_key
+PREMIUM_MODEL = settings.premium_model
+PREMIUM_BASE_URL = settings.premium_base_url
 
-# --- Primary (free) provider ---
-LLM_API_KEY = os.getenv("LLM_API_KEY") or os.getenv("OPENAI_API_KEY", "")
-LLM_MODEL = os.getenv("LLM_MODEL") or os.getenv("OPENAI_MODEL", "llama-3.3-70b-versatile")
-LLM_BASE_URL = os.getenv("LLM_BASE_URL") or os.getenv("OPENAI_BASE_URL", "https://api.groq.com/openai/v1")
-
-# --- Premium (paid) provider ---
-PREMIUM_API_KEY = os.getenv("PREMIUM_API_KEY", "")
-PREMIUM_MODEL = os.getenv("PREMIUM_MODEL", "gpt-5.2")
-PREMIUM_BASE_URL = os.getenv("PREMIUM_BASE_URL", "https://api.openai.com/v1")
-
-# Backward compat aliases
-OPENAI_API_KEY = LLM_API_KEY
-OPENAI_MODEL = LLM_MODEL
-
-SYSTEM_PROMPT = """You are CHILI (Conversational Home Interface & Life Intelligence), a friendly household assistant for a shared living space.
-
-Your personality:
-- Warm, approachable, and slightly witty -- like a helpful housemate who's really good at Google
-- Use the housemate's name when you know it
-- Keep responses clear and well-formatted -- use markdown: headers, bullet points, code blocks when appropriate
-- Be concise for simple questions, thorough for complex ones
-- If you know the housemate's preferences (dietary, interests, tone), adapt your responses accordingly
-
-CONTEXT & MEMORY:
-- Use the full conversation history in this chat. Refer back to what the user said earlier when relevant.
-- If "Things I remember about this person" (or similar) is provided, use those facts to personalize answers and avoid asking again for info you already have.
-- When you need more information to give an accurate or helpful response, ask the user one or two short, specific questions. Do not guess or assume.
-
-IMPORTANT RULES:
-- You are NOT a generic AI chatbot. You are CHILI, the household's personal assistant.
-- When a housemate asks you anything -- from cooking tips to coding help to life advice -- answer as CHILI would: knowledgeable, personalized, and conversational.
-- NEVER volunteer sensitive household information (WiFi passwords, phone numbers, addresses) unless the user explicitly asks for it.
-- If household document context is provided, use it ONLY when the user's question is clearly about that topic. Do not bring it up unprompted.
-- For casual conversation (greetings, "how are you", etc.), just be friendly and natural. Do not dump unrelated info."""
+SYSTEM_PROMPT = load_prompt("system_base")
 
 _REFUSAL_PATTERNS = re.compile(
     r"(?i)(i\s+can(?:'?t| ?not)\s+(?:help|assist|provide|answer|do that))"
@@ -78,11 +53,11 @@ def _is_weak_response(reply: str, user_message: str) -> bool:
 
 
 def is_configured() -> bool:
-    return bool(LLM_API_KEY and LLM_API_KEY.strip())
+    return bool(settings.primary_api_key and settings.primary_api_key.strip())
 
 
 def _premium_configured() -> bool:
-    return bool(PREMIUM_API_KEY and PREMIUM_API_KEY.strip())
+    return bool(settings.premium_api_key and settings.premium_api_key.strip())
 
 
 def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict],
@@ -135,19 +110,19 @@ def chat(
     if not is_configured():
         if _premium_configured():
             try:
-                return _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                       messages, prompt, trace_id)
             except Exception as e:
                 log_info(trace_id, f"premium_error={e}")
         return {"reply": "", "tokens_used": 0, "model": "none"}
 
     try:
-        result = _call_provider(LLM_API_KEY, LLM_BASE_URL, LLM_MODEL, messages, prompt, trace_id)
+        result = _call_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model, messages, prompt, trace_id)
 
         if _is_weak_response(result["reply"], user_message) and _premium_configured():
             log_info(trace_id, f"escalating to premium: primary reply was weak ({len(result['reply'])} chars)")
             try:
-                premium_result = _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                premium_result = _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                                 messages, prompt, trace_id)
                 if premium_result["reply"]:
                     return premium_result
@@ -161,7 +136,7 @@ def chat(
         if _premium_configured():
             try:
                 log_info(trace_id, "primary failed, falling back to premium")
-                return _call_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                       messages, prompt, trace_id)
             except Exception as e2:
                 log_info(trace_id, f"premium_fallback_error={e2}")
@@ -184,7 +159,7 @@ def chat_stream(
     if not is_configured():
         if _premium_configured():
             try:
-                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                                    messages, prompt, trace_id):
                     yield tok, model
             except Exception as e:
@@ -193,7 +168,7 @@ def chat_stream(
 
     try:
         primary_tokens = []
-        for tok, model in _stream_provider(LLM_API_KEY, LLM_BASE_URL, LLM_MODEL,
+        for tok, model in _stream_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
                                            messages, prompt, trace_id):
             primary_tokens.append((tok, model))
 
@@ -202,7 +177,7 @@ def chat_stream(
         if _is_weak_response(full_reply, user_message) and _premium_configured():
             log_info(trace_id, f"stream escalating to premium: primary reply was weak ({len(full_reply)} chars)")
             try:
-                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                                    messages, prompt, trace_id):
                     yield tok, model
                 return
@@ -217,7 +192,7 @@ def chat_stream(
         if _premium_configured():
             try:
                 log_info(trace_id, "primary stream failed, falling back to premium")
-                for tok, model in _stream_provider(PREMIUM_API_KEY, PREMIUM_BASE_URL, PREMIUM_MODEL,
+                for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                                    messages, prompt, trace_id):
                     yield tok, model
             except Exception as e2:

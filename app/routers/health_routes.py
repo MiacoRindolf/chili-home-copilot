@@ -1,7 +1,6 @@
 """Health and metrics routes."""
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, HTMLResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from ..deps import get_db
@@ -15,12 +14,6 @@ from ..metrics import (
 from .. import openai_client
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 @router.get("/health", response_class=JSONResponse)
@@ -34,7 +27,7 @@ def health(db: Session = Depends(get_db)):
 @router.get("/metrics", response_class=HTMLResponse)
 def metrics_page(request: Request, db: Session = Depends(get_db)):
     """Serve the metrics dashboard."""
-    return templates.TemplateResponse(request, "metrics.html", {})
+    return request.app.state.templates.TemplateResponse(request, "metrics.html", {})
 
 
 @router.get("/api/metrics", response_class=JSONResponse)

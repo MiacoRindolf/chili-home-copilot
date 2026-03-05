@@ -9,11 +9,10 @@ from pathlib import Path
 
 import requests
 from openai import OpenAI
-from dotenv import load_dotenv
 
+from .config import settings
 from .logger import log_info
-
-load_dotenv()
+from .prompts import load_prompt
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent / "data" / "uploads"
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
@@ -22,30 +21,11 @@ ALLOWED_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
 ALLOWED_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
 MAX_SIZE_BYTES = 10 * 1024 * 1024  # 10 MB
 
-_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-OLLAMA_VISION_URL = f"{_OLLAMA_HOST}/api/chat"
-OLLAMA_VISION_MODEL = os.getenv("OLLAMA_VISION_MODEL", "llama3.2-vision")
+OLLAMA_VISION_URL = f"{settings.ollama_host}/api/chat"
+OLLAMA_VISION_MODEL = settings.ollama_vision_model
+OPENAI_VISION_MODEL = settings.openai_vision_model
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("PREMIUM_API_KEY", "")
-OPENAI_VISION_MODEL = os.getenv("OPENAI_VISION_MODEL") or os.getenv("PREMIUM_MODEL", "gpt-4o-mini")
-
-VISION_SYSTEM_PROMPT = """You are CHILI (Conversational Home Interface & Life Intelligence), a household assistant with advanced vision capabilities.
-
-When analyzing an image, provide a **thorough and detailed** response:
-
-1. **Start with a clear overview** of what the image shows — identify the subject, scene, or content immediately.
-2. **Go deeper**: describe key details, colors, text, labels, objects, people, layout, or anything notable. Don't skip over important elements.
-3. **If the user asks a specific question**, answer it directly and completely — but also provide useful context from the image they might find helpful.
-4. **For text/documents/screenshots**: transcribe or summarize all visible text. Identify the app, website, or context.
-5. **For food/recipes**: identify dishes, ingredients you can spot, and suggest what it might be.
-6. **For errors/code/tech screenshots**: explain what the error means, what likely caused it, and how to fix it.
-7. **For household items**: identify them and offer practical information (usage tips, brand, condition).
-
-Formatting rules:
-- Use **markdown**: headers, bullet points, bold for emphasis, code blocks for code/errors.
-- Write at least 3-5 sentences minimum — be generous with detail.
-- Be conversational and helpful, not robotic.
-- Address the user by name when known."""
+VISION_SYSTEM_PROMPT = load_prompt("vision_system")
 
 
 def save_upload(file_bytes: bytes, filename: str, content_type: str) -> str | None:
@@ -161,7 +141,7 @@ def call_ollama_vision_stream(image_paths: list[str], user_text: str, system_pro
 
 def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision") -> str | None:
     """Call OpenAI with one or more images. Returns response text or None."""
-    if not OPENAI_API_KEY:
+    if not settings.premium_api_key_resolved():
         return None
 
     try:
@@ -169,7 +149,7 @@ def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: st
         user_content: list[dict] = [{"type": "text", "text": prompt}]
         user_content.extend(_build_openai_image_parts(image_paths))
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=settings.premium_api_key_resolved())
         response = client.chat.completions.create(
             model=OPENAI_VISION_MODEL,
             messages=[
@@ -191,7 +171,7 @@ def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: st
 
 def call_openai_vision_stream(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision"):
     """Stream response from OpenAI vision. Yields token strings."""
-    if not OPENAI_API_KEY:
+    if not settings.premium_api_key_resolved():
         return
 
     try:
@@ -199,7 +179,7 @@ def call_openai_vision_stream(image_paths: list[str], user_text: str, system_pro
         user_content: list[dict] = [{"type": "text", "text": prompt}]
         user_content.extend(_build_openai_image_parts(image_paths))
 
-        client = OpenAI(api_key=OPENAI_API_KEY)
+        client = OpenAI(api_key=settings.premium_api_key_resolved())
         stream = client.chat.completions.create(
             model=OPENAI_VISION_MODEL,
             messages=[

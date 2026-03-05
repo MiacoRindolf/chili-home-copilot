@@ -1,7 +1,6 @@
 """Admin routes: dashboard, user management, pairing, exports."""
 from fastapi import APIRouter, Depends, Form, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response, JSONResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 import csv
 import io
@@ -20,12 +19,6 @@ from .. import openai_client
 from ..pairing import generate_pair_code
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 def _guard(ctx):
@@ -61,7 +54,7 @@ def admin_dashboard(request: Request, ctx=Depends(require_paired)):
     ]
     action_types = sorted(set(r["action"] for r in log_rows))
 
-    return templates.TemplateResponse(request, "admin.html", {
+    return request.app.state.templates.TemplateResponse(request, "admin.html", {
         "user_name": ctx["user_name"],
         "dashboard_json": json.dumps(dashboard),
         "log_rows": log_rows,
@@ -120,7 +113,7 @@ def admin_users_page(request: Request, ctx=Depends(require_paired)):
     users = user_stats(db)
     all_users = db.query(User).order_by(User.name.asc()).all()
 
-    return templates.TemplateResponse(request, "admin_users.html", {
+    return request.app.state.templates.TemplateResponse(request, "admin_users.html", {
         "user_name": ctx["user_name"],
         "users": users,
         "all_users": all_users,

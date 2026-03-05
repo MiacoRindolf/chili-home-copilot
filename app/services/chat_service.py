@@ -7,7 +7,7 @@ from math import ceil
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
-from ..models import Chore, Birthday, ChatLog, ChatMessage, Conversation, PlanProject, PlanTask, ProjectMember
+from ..models import ChatLog, ChatMessage, Conversation
 from ..llm_planner import plan_action
 from ..chili_nlu import parse_message as nlu_parse
 from ..logger import log_info
@@ -18,6 +18,7 @@ from .. import memory as memory_module
 from .. import openai_client
 from . import project_file_service as pfs_module
 from . import planner_service
+from .tool_handlers import execute_tool
 
 
 def nlu_fallback(message: str) -> dict | None:
@@ -132,205 +133,131 @@ def generate_tasks_for_project(
     return added
 
 
-def execute_tool(db: Session, action_type: str, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None = None):
-    """Execute a tool action and return (reply, executed, action_type)."""
-    WRITE_ACTIONS = {"add_chore", "mark_chore_done", "add_birthday", "add_plan_project", "add_plan_project_with_tasks", "add_plan_task"}
-    if is_guest and action_type in WRITE_ACTIONS:
-        return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked"
+def resolve_response(
+    db: Session,
+    message: str,
+    recent: list,
+    identity: dict,
+    ctx: dict | None,
+    on_planner_page: bool,
+    trace_id: str,
+    stream: bool = False,
+) -> dict:
+    """Compute reply, action_type, executed, model_used, rag_sources, personality_used.
+    When ctx is None (plan_and_enrich failed), runs fallback (create project, NLU, or OpenAI).
+    When stream=True and response would be from OpenAI, returns continue_stream=True so router can call chat_stream."""
+    user_name = identity["user_name"]
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+    rag_sources = []
+    personality_used = False
 
-    executed = False
+    if ctx is None:
+        # Exception path: Ollama failed
+        if not is_guest and user_id:
+            ok, project_name = detect_create_project_with_tasks_intent(message)
+            if ok and project_name:
+                llm_reply, executed, action_type = execute_tool(
+                    db, "add_plan_project_with_tasks",
+                    {"name": project_name, "description": "", "tasks": []},
+                    "", is_guest, user_id=user_id,
+                )
+                if executed and openai_client.is_configured():
+                    projects = planner_service.list_projects(db, user_id)
+                    proj = next((p for p in projects if p["name"] == project_name), None)
+                    if proj:
+                        added = generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
+                        if added:
+                            llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
+                return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "fallback", "rag_sources": [], "personality_used": False}
 
-    if action_type == "add_chore":
-        title = action_data["title"]
-        db.add(Chore(title=title, done=False))
-        db.commit()
-        executed = True
-        if not llm_reply:
-            llm_reply = f"Added chore: {title}"
+        nlu_result = nlu_fallback(message)
+        if nlu_result:
+            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
+            return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "nlu-fallback", "rag_sources": [], "personality_used": False}
 
-    elif action_type == "list_chores":
-        chores = db.query(Chore).order_by(Chore.id.desc()).all()
-        executed = True
-        if not llm_reply:
-            if chores:
-                lines = [f"#{c.id} {'[done]' if c.done else '[todo]'} {c.title}" for c in chores]
-                llm_reply = "Chores:\n" + "\n".join(lines)
-            else:
-                llm_reply = "No chores yet."
+        if openai_client.is_configured():
+            openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
+            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
+            if result.get("reply"):
+                return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False}
 
-    elif action_type == "list_chores_pending":
-        chores = db.query(Chore).filter(Chore.done == False).order_by(Chore.id.desc()).all()
-        executed = True
-        if not llm_reply:
-            if chores:
-                lines = [f"#{c.id} {c.title}" for c in chores]
-                llm_reply = "Pending chores:\n" + "\n".join(lines)
-            else:
-                llm_reply = "No pending chores. Nice!"
+        return {"reply": "CHILI's brain is offline. Start Ollama to use chat: ollama serve", "action_type": "llm_offline", "executed": False, "model_used": "offline", "rag_sources": [], "personality_used": False}
 
-    elif action_type == "mark_chore_done":
-        chore_id = action_data["id"]
-        chore = db.query(Chore).filter(Chore.id == chore_id).first()
-        if chore:
-            chore.done = True
-            db.commit()
-            executed = True
-            if not llm_reply:
-                llm_reply = f"Marked chore #{chore_id} as done."
-        else:
-            if not llm_reply:
-                llm_reply = f"Couldn't find chore #{chore_id}."
+    planned = ctx["planned"]
+    if ctx.get("rag_context"):
+        rag_sources = [h["source"] for h in (ctx.get("rag_hits") or [])]
+    personality_used = bool(ctx.get("personality_context"))
 
-    elif action_type == "add_birthday":
-        name = action_data["name"]
-        bday = date.fromisoformat(action_data["date"])
-        db.add(Birthday(name=name, date=bday))
-        db.commit()
-        executed = True
-        if not llm_reply:
-            llm_reply = f"Added birthday: {name} on {bday.isoformat()}"
+    action_type = planned.get("type", "unknown")
+    action_data = planned.get("data", {})
+    llm_reply = planned.get("reply") or ""
 
-    elif action_type == "list_birthdays":
-        birthdays = db.query(Birthday).order_by(Birthday.date.asc()).all()
-        executed = True
-        if not llm_reply:
-            if birthdays:
-                lines = [f"{b.name} - {b.date.isoformat()}" for b in birthdays]
-                llm_reply = "Birthdays:\n" + "\n".join(lines)
-            else:
-                llm_reply = "No birthdays yet."
+    if action_type == "unknown" and web_search_module.detect_search_intent(message):
+        search_query = web_search_module.extract_search_query(message)
+        action_data = {"query": search_query}
+        action_type = "web_search"
+        llm_reply = ""
 
-    elif action_type == "answer_from_docs":
-        executed = True
-        source = action_data.get("source", "")
-        if source and llm_reply:
-            llm_reply = f"{llm_reply}\n(source: {source})"
+    fallback_project_name = None
+    if action_type == "unknown" and not is_guest and user_id:
+        ok, project_name = detect_create_project_with_tasks_intent(message)
+        if ok and project_name:
+            fallback_project_name = project_name
+            action_type = "add_plan_project_with_tasks"
+            action_data = {"name": project_name, "description": "", "tasks": []}
+            llm_reply = ""
+            log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
 
-    elif action_type == "pair_device":
-        executed = True
-        if is_guest:
-            llm_reply = (
-                "To pair your device, click the **Link your device** banner at the top of this page. "
-                "You'll enter the email your admin registered for you, receive a verification code, "
-                "and you're in! You can also go to `/pair` for manual pairing."
-            )
-        else:
-            llm_reply = "Your device is already paired! You're all set."
+    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
-    elif action_type == "intercom_broadcast":
-        executed = True
-        broadcast_text = action_data.get("text", "")
-        if is_guest:
-            llm_reply = "Intercom broadcast is only available for paired housemates."
-        elif broadcast_text:
-            llm_reply = (
-                f'Broadcast queued: **"{broadcast_text}"**\n\n'
-                "Open the [Intercom page](/intercom) to send voice broadcasts, "
-                "or your housemates will hear this as a text notification."
-            )
-        else:
-            llm_reply = "What would you like to announce? Try: `announce dinner is ready`"
-
-    elif action_type == "web_search":
-        query = action_data.get("query", "")
-        if query:
-            results = web_search_module.search(query)
-            executed = True
-            if results:
-                formatted = web_search_module.format_results(results)
-                llm_reply = f"Here's what I found for **\"{query}\"**:\n\n{formatted}"
-            else:
-                llm_reply = f"I searched for \"{query}\" but couldn't find any results. Try rephrasing your query."
-        else:
-            llm_reply = "What would you like me to search for?"
-
-    elif action_type == "add_plan_project":
-        name = action_data.get("name", "")
-        if name and not is_guest and user_id:
-            p = planner_service.create_project(db, user_id, name)
-            executed = True
-            llm_reply = llm_reply or f'Created project **"{name}"**! View it in the [Project Planner](/planner).'
-        elif is_guest:
-            llm_reply = "Project management is only available for paired housemates."
-        elif not user_id:
-            llm_reply = "You need to be a paired housemate to create projects."
-        else:
-            llm_reply = "What would you like to name the project?"
-
-    elif action_type == "add_plan_project_with_tasks":
-        name = (action_data.get("name") or "").strip()
-        description = (action_data.get("description") or "").strip()
-        raw_tasks = action_data.get("tasks") or []
-        if not isinstance(raw_tasks, list):
-            raw_tasks = []
-        # Each task can be str (title only) or dict with title + description (complexity, duration, reasoning)
-        task_specs = []
-        for t in raw_tasks[:30]:
-            if isinstance(t, str) and t.strip():
-                task_specs.append({"title": t.strip(), "description": ""})
-            elif isinstance(t, dict) and (t.get("title") or t.get("description")):
-                task_specs.append({
-                    "title": (str(t.get("title", "")).strip() or "Task"),
-                    "description": str(t.get("description", "")).strip(),
-                })
-        if name and not is_guest and user_id:
-            p = planner_service.create_project(db, user_id, name, description=description)
-            executed = True
-            added = 0
-            for spec in task_specs:
-                title = spec.get("title", "").strip()
-                desc = (spec.get("description") or "").strip()
-                if title:
-                    planner_service.create_task(db, p["id"], user_id, title, description=desc)
-                    added += 1
+    if action_type == "add_plan_project_with_tasks" and executed and fallback_project_name and openai_client.is_configured():
+        projects = planner_service.list_projects(db, user_id)
+        proj = next((p for p in projects if p["name"] == fallback_project_name), None)
+        if proj:
+            added = generate_tasks_for_project(db, proj["id"], fallback_project_name, user_id, trace_id)
             if added:
-                llm_reply = llm_reply or f'Created project **"{name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
-            else:
-                llm_reply = llm_reply or f'Created project **"{name}"**! View it in the [Project Planner](/planner).'
-        elif is_guest:
-            llm_reply = "Project management is only available for paired housemates."
-        elif not user_id:
-            llm_reply = "You need to be a paired housemate to create projects."
-        else:
-            llm_reply = "What would you like to name the project?"
+                llm_reply = f'Created project **"{fallback_project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
 
-    elif action_type == "add_plan_task":
-        project_name = action_data.get("project_name", "")
-        title = action_data.get("title", "")
-        if project_name and title and not is_guest and user_id:
-            project = (
-                db.query(PlanProject)
-                .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
-                .filter(ProjectMember.user_id == user_id, PlanProject.name.ilike(f"%{project_name}%"))
-                .first()
-            )
-            if project:
-                t = planner_service.create_task(db, project.id, user_id, title)
-                executed = True
-                llm_reply = llm_reply or f'Added task **"{title}"** to project **{project.name}**. View in [Project Planner](/planner).'
-            else:
-                llm_reply = f'I couldn\'t find a project matching "{project_name}". Check your [Project Planner](/planner) or create one first.'
-        elif is_guest:
-            llm_reply = "Project management is only available for paired housemates."
-        else:
-            llm_reply = "Please specify both the task title and which project to add it to."
+    model_used = "llama3"
+    if action_type == "web_search" and executed and openai_client.is_configured():
+        search_context = llm_reply
+        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+        search_system = (
+            openai_client.SYSTEM_PROMPT +
+            f"\n\nThe user asked to search the web. Here are the search results:\n\n{search_context}\n\n"
+            "Using these search results, provide a helpful, well-formatted answer. "
+            "Include relevant links from the results. Be specific and actionable."
+        )
+        if stream:
+            return {"continue_stream": True, "messages": openai_messages, "system_prompt": search_system, "action_type": "web_search", "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": llm_reply}
+        result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
+        if result.get("reply"):
+            llm_reply = result["reply"]
+            model_used = result["model"]
+            log_info(trace_id, f"web_search_synthesized model={model_used}")
 
-    elif action_type == "list_plan_projects":
-        executed = True
-        if is_guest or not user_id:
-            llm_reply = "Project management is only available for paired housemates."
-        else:
-            projects = planner_service.list_projects(db, user_id)
-            if projects:
-                lines = []
-                for p in projects:
-                    pct = round(p["done_count"] / p["task_count"] * 100) if p["task_count"] else 0
-                    lines.append(f"- **{p['name']}** ({p['done_count']}/{p['task_count']} tasks, {pct}% done)")
-                llm_reply = "Your projects:\n" + "\n".join(lines) + "\n\nView details in the [Project Planner](/planner)."
-            else:
-                llm_reply = "You don't have any projects yet. Create one in the [Project Planner](/planner) or say \"create project [name]\"."
+    elif action_type == "unknown" and openai_client.is_configured():
+        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
+        openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
+        if llm_reply and llm_reply.strip():
+            openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
+        if stream:
+            return {"continue_stream": True, "messages": openai_messages, "system_prompt": openai_system, "action_type": "general_chat", "model_used": "openai", "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": "I'm not sure what to do with that."}
+        result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
+        if result.get("reply"):
+            llm_reply = result["reply"]
+            action_type = "general_chat"
+            model_used = result["model"]
+            executed = True
+            log_info(trace_id, f"llm_fallback tokens={result['tokens_used']} model={model_used}")
 
-    return llm_reply, executed, action_type
+    if not llm_reply:
+        llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
+    if action_type == "web_search" and not model_used:
+        model_used = "duckduckgo"
+    return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used}
 
 
 def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None, project_id: int | None = None):
@@ -432,19 +359,9 @@ def plan_and_enrich(
     }
 
 
-PLANNER_PAGE_CONTEXT = """
-LOCATION: The user is chatting from the **Project Planner** page (the right-hand CHILI panel on the planner).
-
-When they ask what you can do, what you can help with, what your capabilities are, or what you can do "here" / "on this page", **lead with your planner-related capabilities**:
-- **Create projects** (e.g. "create a project for kitchen reno")
-- **Add tasks** to the current project or a named one (e.g. "add task buy paint", "add task call contractor to Kitchen")
-- **List projects and tasks** (e.g. "what are my projects?", "what's left to do?")
-- **Assign tasks** to housemates, **set due dates**, and **manage the plan from chat**
-
-Then mention you can also help with general household stuff (chores, birthdays, recipes, research, etc.). Keep the reply focused and scannable (bullets or short list). Do NOT give a long generic list that ignores the planner.
-
-When you need more info to act (e.g. project name, task details, timeline), ask one short clarifying question instead of guessing.
-"""
+def _get_planner_page_context() -> str:
+    from ..prompts import load_prompt
+    return load_prompt("planner_page_context")
 
 
 def build_openai_prompt(
@@ -462,7 +379,7 @@ def build_openai_prompt(
     if rag_context:
         openai_system += f"\n\nHousehold document context (use ONLY if the user asks about these topics -- do NOT volunteer this info unprompted):\n{rag_context}"
     if planner_context:
-        openai_system += "\n\n" + PLANNER_PAGE_CONTEXT
+        openai_system += "\n\n" + _get_planner_page_context()
     return openai_system
 
 

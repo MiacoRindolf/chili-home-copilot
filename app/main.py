@@ -1,76 +1,16 @@
 """CHILI Home Copilot - FastAPI application entry point."""
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from pathlib import Path
 
 from .db import Base, engine
+from .migrations import run_migrations
 from .routers import chat, admin, pages, health_routes, intercom, projects, voice, planner
 
 Base.metadata.create_all(bind=engine)
-
-# Lightweight migration: add columns that may be missing on existing DBs
-from sqlalchemy import inspect as sa_inspect, text
-with engine.connect() as conn:
-    user_cols = {c["name"] for c in sa_inspect(engine).get_columns("users")}
-    if "email" not in user_cols:
-        conn.execute(text("ALTER TABLE users ADD COLUMN email TEXT"))
-        conn.commit()
-
-    msg_cols = {c["name"] for c in sa_inspect(engine).get_columns("chat_messages")}
-    if "image_path" not in msg_cols:
-        conn.execute(text("ALTER TABLE chat_messages ADD COLUMN image_path TEXT"))
-        conn.commit()
-
-    existing_tables = set(sa_inspect(engine).get_table_names())
-    if "conversations" in existing_tables:
-        convo_cols = {c["name"] for c in sa_inspect(engine).get_columns("conversations")}
-        if "project_id" not in convo_cols:
-            conn.execute(text("ALTER TABLE conversations ADD COLUMN project_id INTEGER REFERENCES projects(id)"))
-            conn.commit()
-
-    if "chores" in existing_tables:
-        chore_cols = {c["name"] for c in sa_inspect(engine).get_columns("chores")}
-        new_chore_cols = {
-            "priority": "TEXT DEFAULT 'medium'",
-            "due_date": "DATE",
-            "recurrence": "TEXT DEFAULT 'none'",
-            "assigned_to": "INTEGER REFERENCES users(id)",
-            "created_at": "DATETIME",
-            "completed_at": "DATETIME",
-        }
-        for col_name, col_def in new_chore_cols.items():
-            if col_name not in chore_cols:
-                conn.execute(text(f"ALTER TABLE chores ADD COLUMN {col_name} {col_def}"))
-                conn.commit()
-
-    if "plan_projects" in existing_tables:
-        pp_cols = {c["name"] for c in sa_inspect(engine).get_columns("plan_projects")}
-        if "key" not in pp_cols:
-            conn.execute(text("ALTER TABLE plan_projects ADD COLUMN key TEXT"))
-            conn.commit()
-
-    if "plan_tasks" in existing_tables:
-        pt_cols = {c["name"] for c in sa_inspect(engine).get_columns("plan_tasks")}
-        if "parent_id" not in pt_cols:
-            conn.execute(text("ALTER TABLE plan_tasks ADD COLUMN parent_id INTEGER REFERENCES plan_tasks(id)"))
-            conn.commit()
-        if "reporter_id" not in pt_cols:
-            conn.execute(text("ALTER TABLE plan_tasks ADD COLUMN reporter_id INTEGER REFERENCES users(id)"))
-            conn.commit()
-
-    # Backfill: ensure existing plan_project owners have a ProjectMember row
-    if "plan_projects" in existing_tables and "project_members" in existing_tables:
-        rows = conn.execute(text(
-            "SELECT pp.id, pp.user_id FROM plan_projects pp "
-            "WHERE NOT EXISTS (SELECT 1 FROM project_members pm WHERE pm.project_id = pp.id AND pm.user_id = pp.user_id)"
-        )).fetchall()
-        for row in rows:
-            conn.execute(text(
-                "INSERT INTO project_members (project_id, user_id, role, joined_at) VALUES (:pid, :uid, 'owner', datetime('now'))"
-            ), {"pid": row[0], "uid": row[1]})
-        if rows:
-            conn.commit()
+run_migrations(engine)
 
 app = FastAPI(title="CHILI Home Copilot")
 
@@ -88,15 +28,7 @@ _voice_dir = Path(__file__).resolve().parent.parent / "data" / "voice"
 _voice_dir.mkdir(parents=True, exist_ok=True)
 app.mount("/voice-files", StaticFiles(directory=_voice_dir), name="voice-files")
 
-templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
-
-chat.init_templates(templates)
-admin.init_templates(templates)
-pages.init_templates(templates)
-health_routes.init_templates(templates)
-intercom.init_templates(templates)
-voice.init_templates(templates)
-planner.init_templates(templates)
+app.state.templates = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
 app.include_router(chat.router)
 app.include_router(admin.router)

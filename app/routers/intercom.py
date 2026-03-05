@@ -4,7 +4,6 @@ import asyncio
 from collections import defaultdict
 from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, Form, Query
 from fastapi.responses import JSONResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
 
 from ..deps import get_db
@@ -13,12 +12,6 @@ from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..services import intercom_service as svc
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +30,7 @@ def _online_user_ids() -> set[int]:
 # ---------------------------------------------------------------------------
 @router.get("/intercom")
 def intercom_page(request: Request):
-    return templates.TemplateResponse(
+    return request.app.state.templates.TemplateResponse(
         request, "intercom.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )

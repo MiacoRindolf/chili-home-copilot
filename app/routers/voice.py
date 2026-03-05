@@ -12,10 +12,6 @@ from ..services import voice_service
 router = APIRouter()
 
 
-def init_templates(t):
-    pass
-
-
 @router.post("/api/voice/transcribe")
 async def voice_transcribe(
     audio: UploadFile = File(...),

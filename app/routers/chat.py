@@ -1,7 +1,6 @@
 """Chat routes: chat page, API chat, streaming, history, conversations."""
 from fastapi import APIRouter, Depends, Form, Request, Query, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
-from fastapi.templating import Jinja2Templates
 from typing import Optional
 from sqlalchemy.orm import Session
 import json as json_stdlib
@@ -13,18 +12,14 @@ from ..logger import new_trace_id, log_info
 from .. import openai_client
 from .. import vision as vision_module
 from .. import wellness
-from .. import web_search as web_search_module
 from ..metrics import record_latency
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
-from ..services import planner_service
 from ..services.chat_service import (
     execute_tool,
-    nlu_fallback,
     init_chat,
     plan_and_enrich,
     build_openai_prompt,
-    detect_create_project_with_tasks_intent,
-    generate_tasks_for_project,
+    resolve_response,
     sse_event,
     store_and_title,
     store_and_title_with_memory,
@@ -33,17 +28,11 @@ from ..services.chat_service import (
 )
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 @router.get("/chat")
 def chat_page(request: Request):
-    return templates.TemplateResponse(
+    return request.app.state.templates.TemplateResponse(
         request, "chat.html",
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
@@ -353,134 +342,14 @@ async def chat_api(
         log_info(trace_id, f"llm_error={e}, trying NLU fallback")
         ctx = None
 
-        # When Ollama fails, still try to create the project if user clearly asked for "create project X and add tasks"
-        if not is_guest and user_id:
-            ok, project_name = detect_create_project_with_tasks_intent(message)
-            if ok and project_name:
-                llm_reply, executed, action_type = execute_tool(
-                    db, "add_plan_project_with_tasks",
-                    {"name": project_name, "description": "", "tasks": []},
-                    "", is_guest, user_id=user_id,
-                )
-                if executed and openai_client.is_configured():
-                    projects = planner_service.list_projects(db, user_id)
-                    proj = next((p for p in projects if p["name"] == project_name), None)
-                    if proj:
-                        added = generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
-                        if added:
-                            llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
-                log_info(trace_id, f"create_project_with_tasks_after_ollama_error name={project_name!r}")
-                db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used="fallback"))
-                db.commit()
-                db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
-                db.commit()
-                ms = int((time.time() - t0) * 1000)
-                record_latency(ms)
-                return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": "fallback", "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
+    result = resolve_response(db, message, recent, identity, ctx, on_planner_page, trace_id, stream=False)
 
-        nlu_result = nlu_fallback(message)
-        if nlu_result:
-            log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
-            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
-            model_used = "nlu-fallback"
-        elif openai_client.is_configured():
-            log_info(trace_id, "nlu_fallback_miss, trying OpenAI")
-            openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
-            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
-            if result["reply"]:
-                llm_reply = result["reply"]
-                action_type = "general_chat"
-                model_used = result["model"]
-                executed = True
-            else:
-                llm_reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
-                action_type = "llm_offline"
-                model_used = "offline"
-                executed = False
-        else:
-            llm_reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
-            action_type = "llm_offline"
-            model_used = "offline"
-            executed = False
-
-        db.add(ChatMessage(convo_key=convo_key, conversation_id=conversation_id, role="assistant", content=llm_reply, trace_id=trace_id, action_type=action_type, model_used=model_used))
-        db.commit()
-        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
-        db.commit()
-        ms = int((time.time() - t0) * 1000)
-        record_latency(ms)
-        return {"trace_id": trace_id, "user": user_name, "is_guest": is_guest, "action_type": action_type, "executed": executed, "reply": llm_reply, "model_used": model_used, "conversation_id": conversation_id, "rag_sources": [], "personality_used": False}
-
-    planned = ctx["planned"]
-    if ctx.get("rag_context"):
-        rag_sources = [h["source"] for h in (ctx.get("rag_hits") or [])]
-    personality_used = bool(ctx.get("personality_context"))
-
-    action_type = planned.get("type", "unknown")
-    action_data = planned.get("data", {})
-    llm_reply = planned.get("reply") or ""
-
-    if action_type == "unknown" and web_search_module.detect_search_intent(message):
-        search_query = web_search_module.extract_search_query(message)
-        action_data = {"query": search_query}
-        action_type = "web_search"
-        llm_reply = ""
-
-    # Fallback: user said "create project X and add tasks" but planner returned unknown — create the project so it appears in the Planner
-    fallback_project_name = None
-    if action_type == "unknown" and not is_guest and user_id:
-        ok, project_name = detect_create_project_with_tasks_intent(message)
-        if ok and project_name:
-            fallback_project_name = project_name
-            action_type = "add_plan_project_with_tasks"
-            action_data = {"name": project_name, "description": "", "tasks": []}
-            llm_reply = ""
-            log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
-
-    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
-
-    # When we created a project via fallback with no tasks, generate tasks via cloud LLM so the project has content
-    if action_type == "add_plan_project_with_tasks" and executed and fallback_project_name and openai_client.is_configured():
-        projects = planner_service.list_projects(db, user_id)
-        proj = next((p for p in projects if p["name"] == fallback_project_name), None)
-        if proj:
-            added = generate_tasks_for_project(db, proj["id"], fallback_project_name, user_id, trace_id)
-            if added:
-                llm_reply = f'Created project **"{fallback_project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
-
-    model_used = "llama3"
-    if action_type == "web_search" and executed and openai_client.is_configured():
-        search_context = llm_reply
-        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        search_system = (
-            openai_client.SYSTEM_PROMPT +
-            f"\n\nThe user asked to search the web. Here are the search results:\n\n{search_context}\n\n"
-            "Using these search results, provide a helpful, well-formatted answer. "
-            "Include relevant links from the results. Be specific and actionable."
-        )
-        result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
-        if result["reply"]:
-            llm_reply = result["reply"]
-            model_used = result["model"]
-            log_info(trace_id, f"web_search_synthesized model={model_used}")
-
-    elif action_type == "unknown" and openai_client.is_configured():
-        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
-        # If the planner suggested a clarifying question, pass it so the conversational AI can use or expand it
-        if llm_reply and llm_reply.strip():
-            openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
-        result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
-        if result["reply"]:
-            llm_reply = result["reply"]
-            action_type = "general_chat"
-            model_used = result["model"]
-            executed = True
-            log_info(trace_id, f"llm_fallback tokens={result['tokens_used']} model={model_used}")
-
-    if not llm_reply:
-        llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
+    llm_reply = result["reply"]
+    action_type = result["action_type"]
+    executed = result["executed"]
+    model_used = result["model_used"]
+    rag_sources = result["rag_sources"]
+    personality_used = result["personality_used"]
 
     db.add(ChatMessage(
         convo_key=convo_key, conversation_id=conversation_id,
@@ -615,150 +484,46 @@ async def chat_stream_api(
         ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream, planner_current_project=planner_current_stream)
     except Exception as e:
         log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
+        ctx = None
 
-        # When Ollama fails, still create the project if user asked for "create project X and add tasks"
-        if not is_guest and user_id:
-            ok, project_name = detect_create_project_with_tasks_intent(message)
-            if ok and project_name:
-                llm_reply, _exec, act_type = execute_tool(
-                    db, "add_plan_project_with_tasks",
-                    {"name": project_name, "description": "", "tasks": []},
-                    "", is_guest, user_id=user_id,
-                )
-                if _exec and openai_client.is_configured():
-                    projects = planner_service.list_projects(db, user_id)
-                    proj = next((p for p in projects if p["name"] == project_name), None)
-                    if proj:
-                        added = generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
-                        if added:
-                            llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
-                log_info(trace_id, f"create_project_with_tasks_after_ollama_error name={project_name!r}")
-                def fallback_create_gen():
-                    yield sse_event({"token": llm_reply, "done": False})
-                    yield sse_event({"token": "", "done": True, "action_type": act_type, "model_used": "fallback", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                    store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, act_type, "fallback", client_ip, message, user_id=user_id, is_guest=is_guest)
-                return StreamingResponse(fallback_create_gen(), media_type="text/event-stream")
+    result = resolve_response(db, message, recent, identity, ctx, on_planner_page_stream, trace_id, stream=True)
 
-        nlu_result = nlu_fallback(message)
-        if nlu_result:
-            log_info(trace_id, f"nlu_fallback_matched type={nlu_result['type']}")
-            reply, _exec, act_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
-            model = "nlu-fallback"
-            def nlu_gen():
-                yield sse_event({"token": reply, "done": False})
-                yield sse_event({"token": "", "done": True, "action_type": act_type, "model_used": model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                store_and_title_with_memory(convo_key, conversation_id, reply, trace_id, act_type, model, client_ip, message, user_id=user_id, is_guest=is_guest)
-            return StreamingResponse(nlu_gen(), media_type="text/event-stream")
+    if result.get("continue_stream"):
+        messages = result["messages"]
+        system_prompt = result["system_prompt"]
+        action_type = result["action_type"]
+        model_used = result.get("model_used", openai_client.LLM_MODEL)
+        rag_sources = result.get("rag_sources", [])
+        personality_used = result.get("personality_used", False)
+        fallback_reply = result.get("fallback_reply", "I'm not sure what to do with that.")
 
-        if openai_client.is_configured():
-            log_info(trace_id, "nlu_fallback_miss, trying LLM (stream)")
-            openai_msgs = [{"role": m.role, "content": m.content} for m in recent]
-            openai_sys = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT)
-            def openai_fb_gen():
-                full = []
-                used_model = openai_client.LLM_MODEL
-                for tok, model in openai_client.chat_stream(messages=openai_msgs, system_prompt=openai_sys, trace_id=trace_id, user_message=message):
-                    full.append(tok)
-                    used_model = model
-                    yield sse_event({"token": tok, "done": False})
-                complete = "".join(full) or "I'm not sure what to do with that."
-                if not full:
-                    yield sse_event({"token": complete, "done": False})
-                yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-                store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
-            return StreamingResponse(openai_fb_gen(), media_type="text/event-stream")
-
-        reply = "CHILI's brain is offline. Start Ollama to use chat: ollama serve"
-        def offline_gen():
-            yield sse_event({"token": reply, "done": False})
-            yield sse_event({"token": "", "done": True, "action_type": "llm_offline", "model_used": "offline", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title_with_memory(convo_key, conversation_id, reply, trace_id, "llm_offline", "offline", client_ip, message, user_id=user_id, is_guest=is_guest)
-        return StreamingResponse(offline_gen(), media_type="text/event-stream")
-
-    planned = ctx["planned"]
-    if ctx.get("rag_context"):
-        rag_sources = [h["source"] for h in (ctx.get("rag_hits") or [])]
-    personality_used = bool(ctx.get("personality_context"))
-
-    action_type = planned.get("type", "unknown")
-    action_data = planned.get("data", {})
-    llm_reply = planned.get("reply") or ""
-
-    if action_type == "unknown" and web_search_module.detect_search_intent(message):
-        search_query = web_search_module.extract_search_query(message)
-        action_data = {"query": search_query}
-        action_type = "web_search"
-        llm_reply = ""
-
-    # Fallback: create project when user said "create project X and add tasks" but planner returned unknown
-    if action_type == "unknown" and not is_guest and user_id:
-        ok, project_name = detect_create_project_with_tasks_intent(message)
-        if ok and project_name:
-            action_type = "add_plan_project_with_tasks"
-            action_data = {"name": project_name, "description": "", "tasks": []}
-            llm_reply = ""
-            log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
-
-    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
-
-    if action_type == "web_search" and executed and openai_client.is_configured():
-        search_context = llm_reply
-        openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        search_system = (
-            openai_client.SYSTEM_PROMPT +
-            f"\n\nThe user asked to search the web. Here are the search results:\n\n{search_context}\n\n"
-            "Using these search results, provide a helpful, well-formatted answer. "
-            "Include relevant links from the results. Be specific and actionable."
-        )
-        def search_stream_gen():
+        def stream_openai_gen():
             full = []
-            used_model = openai_client.LLM_MODEL
-            for tok, model in openai_client.chat_stream(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message):
+            used_model = model_used
+            for tok, model in openai_client.chat_stream(messages=messages, system_prompt=system_prompt, trace_id=trace_id, user_message=message):
                 full.append(tok)
                 used_model = model
                 yield sse_event({"token": tok, "done": False})
-            complete = "".join(full) or llm_reply
+            complete = "".join(full) or fallback_reply
             if not full:
                 yield sse_event({"token": complete, "done": False})
-            yield sse_event({"token": "", "done": True, "action_type": "web_search", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "web_search", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
-        return StreamingResponse(search_stream_gen(), media_type="text/event-stream")
+            yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
+            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, action_type, used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
 
-    if action_type not in ("unknown", "web_search") or not openai_client.is_configured():
-        if not llm_reply:
-            llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
-        model_used = "llama3"
-        if action_type == "web_search":
-            model_used = "duckduckgo"
+        return StreamingResponse(stream_openai_gen(), media_type="text/event-stream")
 
-        def tool_gen():
-            yield sse_event({"token": llm_reply, "done": False})
-            yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-            store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message, user_id=user_id, is_guest=is_guest)
-        return StreamingResponse(tool_gen(), media_type="text/event-stream")
+    llm_reply = result["reply"]
+    action_type = result["action_type"]
+    model_used = result["model_used"]
+    rag_sources = result["rag_sources"]
+    personality_used = result["personality_used"]
 
-    openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-    openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page_stream)
-    if action_type == "unknown" and llm_reply and llm_reply.strip():
-        openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
+    def tool_result_gen():
+        yield sse_event({"token": llm_reply, "done": False})
+        yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
+        store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message, user_id=user_id, is_guest=is_guest)
 
-    def stream_gen():
-        full_reply = []
-        used_model = openai_client.LLM_MODEL
-        for token, model in openai_client.chat_stream(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message):
-            full_reply.append(token)
-            used_model = model
-            yield sse_event({"token": token, "done": False})
-
-        complete = "".join(full_reply)
-        if not complete:
-            complete = "I'm not sure what to do with that."
-            yield sse_event({"token": complete, "done": False})
-
-        yield sse_event({"token": "", "done": True, "action_type": "general_chat", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-        store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "general_chat", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
-
-    return StreamingResponse(stream_gen(), media_type="text/event-stream")
+    return StreamingResponse(tool_result_gen(), media_type="text/event-stream")
 
 
 # --- Conversation export ---

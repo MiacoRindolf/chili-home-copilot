@@ -18,6 +18,11 @@ data/uploads/*
 data/voice/*
 !data/voice/.gitkeep
 
-# HTTPS certificates
+# HTTPS certificates (local dev)
 *.pem
 mkcert.exe
+localhost+2.pem
+localhost+2-key.pem
+
+# pytest
+.pytest_cache/

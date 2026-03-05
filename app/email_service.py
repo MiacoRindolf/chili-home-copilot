@@ -1,17 +1,13 @@
 """Email service for sending pairing codes via Gmail SMTP."""
-import os
 import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 
-EMAIL_USER = os.getenv("EMAIL_USER", "")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD", "")
-SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+from .config import settings
 
 
 def is_configured() -> bool:
-    return bool(EMAIL_USER and EMAIL_PASSWORD)
+    return bool(settings.email_user and settings.email_password)
 
 
 def send_pairing_code(to_email: str, code: str, user_name: str) -> bool:
@@ -37,16 +33,16 @@ def send_pairing_code(to_email: str, code: str, user_name: str) -> bool:
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = EMAIL_USER
+    msg["From"] = settings.email_user
     msg["To"] = to_email
     msg.attach(MIMEText(f"Your CHILI pairing code is: {code}\nValid for 10 minutes.", "plain"))
     msg.attach(MIMEText(html, "html"))
 
     try:
-        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as server:
             server.starttls()
-            server.login(EMAIL_USER, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_USER, to_email, msg.as_string())
+            server.login(settings.email_user, settings.email_password)
+            server.sendmail(settings.email_user, to_email, msg.as_string())
         return True
     except Exception as e:
         from .logger import log_info

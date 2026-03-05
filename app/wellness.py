@@ -7,15 +7,14 @@ Two-layer detection:
 All mental health conversations stay on-device when Ollama is running.
 Groq is the fallback only if Ollama is offline.
 """
-import os
 import re
 import requests
 
+from .config import settings
 from .logger import log_info
 
-_OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://127.0.0.1:11434")
-_OLLAMA_CHAT_URL = f"{_OLLAMA_HOST}/api/chat"
-_OLLAMA_MODEL = os.getenv("WELLNESS_MODEL", "llama3")
+_OLLAMA_CHAT_URL = f"{settings.ollama_host}/api/chat"
+_OLLAMA_MODEL = settings.wellness_model
 
 # ---------------------------------------------------------------------------
 # Crisis detection (layer 1) — pure regex, never depends on an LLM

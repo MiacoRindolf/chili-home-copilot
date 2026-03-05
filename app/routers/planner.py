@@ -1,24 +1,17 @@
 """Project planner routes: page + JSON API for collaborative projects & tasks."""
 from fastapi import APIRouter, Depends, Request, Query
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
-from pydantic import BaseModel
 from typing import Optional
 import json as json_mod
 
 from ..deps import get_db
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
+from ..schemas import ProjectBody, MemberBody, RoleBody, TaskBody, CommentBody, LabelBody
 from ..services import planner_service
 from ..models import User
 
 router = APIRouter()
-templates = None
-
-
-def init_templates(t: Jinja2Templates):
-    global templates
-    templates = t
 
 
 def _require_user(request: Request, db: Session) -> dict | None:
@@ -46,7 +39,7 @@ def planner_page(request: Request, db: Session = Depends(get_db)):
     users = [{"id": u.id, "name": u.name} for u in db.query(User).all()]
     user_summaries = planner_service.get_all_users_task_summary(db)
 
-    return templates.TemplateResponse(request, "planner.html", {
+    return request.app.state.templates.TemplateResponse(request, "planner.html", {
         "user_name": identity["user_name"],
         "user_id": user_id,
         "is_guest": False,
@@ -59,16 +52,6 @@ def planner_page(request: Request, db: Session = Depends(get_db)):
 
 
 # ── Project API ─────────────────────────────────────────────────────────────
-
-class ProjectBody(BaseModel):
-    name: str
-    description: Optional[str] = ""
-    color: Optional[str] = "#6366f1"
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    status: Optional[str] = None
-    key: Optional[str] = None
-
 
 @router.get("/api/planner/projects", response_class=JSONResponse)
 def api_list_projects(request: Request, db: Session = Depends(get_db)):
@@ -137,11 +120,6 @@ def api_delete_project(project_id: int, request: Request, db: Session = Depends(
 
 # ── Members API ─────────────────────────────────────────────────────────────
 
-class MemberBody(BaseModel):
-    user_id: int
-    role: Optional[str] = "editor"
-
-
 @router.get("/api/planner/projects/{project_id}/members", response_class=JSONResponse)
 def api_list_members(project_id: int, request: Request, db: Session = Depends(get_db)):
     identity = _require_user(request, db)
@@ -175,10 +153,6 @@ def api_remove_member(project_id: int, target_user_id: int, request: Request, db
     return {"ok": True}
 
 
-class RoleBody(BaseModel):
-    role: str
-
-
 @router.put("/api/planner/projects/{project_id}/members/{target_user_id}", response_class=JSONResponse)
 def api_update_member_role(project_id: int, target_user_id: int, body: RoleBody, request: Request, db: Session = Depends(get_db)):
     identity = _require_user(request, db)
@@ -191,20 +165,6 @@ def api_update_member_role(project_id: int, target_user_id: int, body: RoleBody,
 
 
 # ── Task API ────────────────────────────────────────────────────────────────
-
-class TaskBody(BaseModel):
-    title: str
-    description: Optional[str] = ""
-    priority: Optional[str] = "medium"
-    status: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    assigned_to: Optional[int] = None
-    depends_on: Optional[int] = None
-    progress: Optional[int] = None
-    sort_order: Optional[int] = None
-    parent_id: Optional[int] = None
-
 
 @router.get("/api/planner/projects/{project_id}/tasks", response_class=JSONResponse)
 def api_list_tasks(
@@ -288,10 +248,6 @@ def api_delete_task(task_id: int, request: Request, db: Session = Depends(get_db
 
 # ── Comments API ────────────────────────────────────────────────────────────
 
-class CommentBody(BaseModel):
-    content: str
-
-
 @router.get("/api/planner/tasks/{task_id}/comments", response_class=JSONResponse)
 def api_list_comments(task_id: int, request: Request, db: Session = Depends(get_db)):
     identity = _require_user(request, db)
@@ -350,11 +306,6 @@ def api_task_activity(task_id: int, request: Request, db: Session = Depends(get_
 
 
 # ── Labels API ──────────────────────────────────────────────────────────────
-
-class LabelBody(BaseModel):
-    name: str
-    color: Optional[str] = "#6366f1"
-
 
 @router.get("/api/planner/projects/{project_id}/labels", response_class=JSONResponse)
 def api_list_labels(project_id: int, request: Request, db: Session = Depends(get_db)):

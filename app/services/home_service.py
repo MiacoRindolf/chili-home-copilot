@@ -1,5 +1,4 @@
 """Home dashboard service: aggregation, weather, activity feed, insights, calendar."""
-import os
 import logging
 from datetime import date, datetime, timedelta
 from typing import Optional
@@ -8,6 +7,7 @@ import requests
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 
+from ..config import settings
 from ..models import (
     Chore, Birthday, User, UserStatus, ChatMessage,
     Conversation, ActivityLog, UserMemory,
@@ -18,11 +18,10 @@ log = logging.getLogger(__name__)
 # ── Weather (free wttr.in API, no key needed) ────────────────────────────────
 
 _WEATHER_CACHE: dict = {"data": None, "expires": 0.0}
-WEATHER_LOCATION = os.getenv("WEATHER_LOCATION", "")
 
 
 def get_weather(location: str | None = None) -> dict | None:
-    loc = location or WEATHER_LOCATION
+    loc = location or settings.weather_location
     if not loc:
         return None
 

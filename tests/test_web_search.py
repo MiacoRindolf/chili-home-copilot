@@ -132,7 +132,7 @@ class TestFormatResults:
 
 class TestPlannerSchema:
     def test_web_search_plan_valid(self):
-        from app.planner_schema import validate_plan
+        from app.schemas import validate_plan
         plan = {
             "type": "web_search",
             "data": {"query": "python tutorials"},
@@ -144,7 +144,7 @@ class TestPlannerSchema:
         assert result["data"]["query"] == "python tutorials"
 
     def test_web_search_plan_empty_query_rejected(self):
-        from app.planner_schema import validate_plan
+        from app.schemas import validate_plan
         plan = {
             "type": "web_search",
             "data": {"query": ""},

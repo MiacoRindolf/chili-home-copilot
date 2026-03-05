@@ -34,6 +34,7 @@ All planner outputs must match:
   "data": { },
   "reply": "<short sentence>"
 }
+```
 
 Supported actions:
 
