@@ -72,17 +72,6 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  void _handleVoiceResult(String text) {
-    setState(() {
-      _messages.add(ChatMessage(role: ChatRole.assistant, content: text));
-    });
-    _scrollController.animateTo(
-      _scrollController.position.maxScrollExtent + 80,
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -137,13 +126,26 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(
                 children: [
                   VoiceInputButton(
-                    onResult: _handleVoiceResult,
+                    onTranscription: (text) {
+                      if (mounted && text != null && text.isNotEmpty) {
+                        setState(() => _controller.text = text);
+                      }
+                    },
                     onRecordingStateChanged: (recording) {
                       setState(() {
                         _avatarState = recording
                             ? AvatarState.listening
                             : AvatarState.idle;
                       });
+                    },
+                    onTranscribing: (transcribing) {
+                      if (mounted) {
+                        setState(() {
+                          _avatarState = transcribing
+                              ? AvatarState.thinking
+                              : AvatarState.idle;
+                        });
+                      }
                     },
                   ),
                   const SizedBox(width: 8),

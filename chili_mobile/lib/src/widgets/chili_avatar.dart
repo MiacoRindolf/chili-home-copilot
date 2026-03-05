@@ -1,11 +1,12 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
 enum AvatarState { idle, listening, thinking, speaking }
 
 /// Animated chili mascot avatar with state-specific animations.
-/// Uses the chili_mascot.png image with Flutter animations.
+/// Uses a CustomPainter-drawn chili pepper for guaranteed transparency.
 class ChiliAvatar extends StatefulWidget {
   const ChiliAvatar({super.key, required this.state});
 
@@ -73,8 +74,8 @@ class _ChiliAvatarState extends State<ChiliAvatar>
   @override
   Widget build(BuildContext context) {
     return SizedBox(
-      height: 120,
-      width: 120,
+      height: 160,
+      width: 160,
       child: AnimatedBuilder(
         animation: Listenable.merge([
           _bobController,
@@ -84,20 +85,25 @@ class _ChiliAvatarState extends State<ChiliAvatar>
           _breathController,
         ]),
         builder: (context, child) {
-          final bob = Tween<double>(begin: 0, end: 6)
-              .animate(CurvedAnimation(parent: _bobController, curve: Curves.easeInOut));
-          final pulse = Tween<double>(begin: 0.92, end: 1.08)
-              .animate(CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut));
-          final ring = Tween<double>(begin: 0.8, end: 1.3)
-              .animate(CurvedAnimation(parent: _ringController, curve: Curves.easeInOut));
-          final breath = Tween<double>(begin: 0.95, end: 1.08)
-              .animate(CurvedAnimation(parent: _breathController, curve: Curves.easeInOut));
+          final bob = Tween<double>(begin: 0, end: 6).animate(
+            CurvedAnimation(parent: _bobController, curve: Curves.easeInOut),
+          );
+          final pulse = Tween<double>(begin: 0.92, end: 1.08).animate(
+            CurvedAnimation(parent: _pulseController, curve: Curves.easeInOut),
+          );
+          final ring = Tween<double>(begin: 0.8, end: 1.3).animate(
+            CurvedAnimation(parent: _ringController, curve: Curves.easeInOut),
+          );
+          final breath = Tween<double>(begin: 0.88, end: 1.15).animate(
+            CurvedAnimation(
+                parent: _breathController, curve: Curves.easeInOut),
+          );
 
           double scale = 1.0;
           double translateY = 0.0;
           bool showRing = false;
           bool showDots = false;
-          double? glowOpacity;
+          double glowOpacity = 0.0;
 
           switch (widget.state) {
             case AvatarState.idle:
@@ -124,19 +130,28 @@ class _ChiliAvatarState extends State<ChiliAvatar>
               break;
           }
 
+          Color tintColor = const Color(0xFFEF5350);
+          if (widget.state == AvatarState.listening) {
+            tintColor = const Color(0xFF4CAF50);
+          } else if (widget.state == AvatarState.thinking) {
+            tintColor = const Color(0xFFFFC107);
+          } else if (widget.state == AvatarState.speaking) {
+            tintColor = const Color(0xFF2196F3);
+          }
+
           return Stack(
             alignment: Alignment.center,
             clipBehavior: Clip.none,
             children: [
-              if (glowOpacity != null)
+              if (glowOpacity > 0)
                 Container(
-                  width: 100,
-                  height: 100,
+                  width: 120,
+                  height: 120,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     boxShadow: [
                       BoxShadow(
-                        color: const Color(0xFFEF5350).withOpacity(glowOpacity),
+                        color: tintColor.withValues(alpha: glowOpacity),
                         blurRadius: 24,
                         spreadRadius: 2,
                       ),
@@ -145,13 +160,13 @@ class _ChiliAvatarState extends State<ChiliAvatar>
                 ),
               if (showRing)
                 Container(
-                  width: 100 * ring.value,
-                  height: 100 * ring.value,
+                  width: 120 * ring.value,
+                  height: 120 * ring.value,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(
-                      color: const Color(0xFFEF5350).withOpacity(0.6),
-                      width: 3,
+                      color: tintColor.withValues(alpha: 0.85),
+                      width: 4,
                     ),
                   ),
                 ),
@@ -160,15 +175,12 @@ class _ChiliAvatarState extends State<ChiliAvatar>
                 offset: Offset(0, translateY),
                 child: Transform.scale(
                   scale: scale,
-                  child: Image.asset(
-                    'assets/chili_mascot.png',
-                    width: 100,
-                    height: 100,
-                    fit: BoxFit.contain,
-                    errorBuilder: (_, __, ___) => Icon(
-                      Icons.local_fire_department,
-                      size: 80,
-                      color: Colors.red.shade400,
+                  child: CustomPaint(
+                    size: const Size(100, 120),
+                    painter: _ChiliMascotPainter(
+                      tintColor: widget.state != AvatarState.idle
+                          ? tintColor
+                          : null,
                     ),
                   ),
                 ),
@@ -183,18 +195,143 @@ class _ChiliAvatarState extends State<ChiliAvatar>
   Widget _buildOrbitingDots() {
     const dotCount = 3;
     final angle = _dotsController.value * 2 * math.pi;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-          return CustomPaint(
-          size: const Size(120, 120),
-          painter: _OrbitDotsPainter(
-            progress: angle,
-            dotCount: dotCount,
-            color: const Color(0xFFEF5350),
-          ),
-        );
-      },
+    return CustomPaint(
+      size: const Size(160, 160),
+      painter: _OrbitDotsPainter(
+        progress: angle,
+        dotCount: dotCount,
+        color: const Color(0xFFEF5350),
+      ),
     );
+  }
+}
+
+/// Draws a cute chili pepper mascot entirely in code -- no PNG needed.
+class _ChiliMascotPainter extends CustomPainter {
+  _ChiliMascotPainter({this.tintColor});
+
+  final Color? tintColor;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final w = size.width;
+    final h = size.height;
+
+    // Stem
+    final stemPaint = Paint()
+      ..color = const Color(0xFF4CAF50)
+      ..style = PaintingStyle.fill;
+    final stemPath = Path()
+      ..moveTo(w * 0.42, h * 0.18)
+      ..cubicTo(w * 0.40, h * 0.08, w * 0.48, h * 0.0, w * 0.55, h * 0.02)
+      ..cubicTo(w * 0.62, h * 0.04, w * 0.58, h * 0.12, w * 0.55, h * 0.18)
+      ..close();
+    canvas.drawPath(stemPath, stemPaint);
+
+    // Small leaf on the stem
+    final leafPaint = Paint()
+      ..color = const Color(0xFF66BB6A)
+      ..style = PaintingStyle.fill;
+    final leafPath = Path()
+      ..moveTo(w * 0.52, h * 0.10)
+      ..cubicTo(w * 0.62, h * 0.04, w * 0.72, h * 0.06, w * 0.68, h * 0.12)
+      ..cubicTo(w * 0.64, h * 0.16, w * 0.56, h * 0.14, w * 0.52, h * 0.10)
+      ..close();
+    canvas.drawPath(leafPath, leafPaint);
+
+    // Body: a plump curved chili pepper shape
+    const bodyColor = Color(0xFFE53935);
+    final bodyPaint = Paint()
+      ..color = bodyColor
+      ..style = PaintingStyle.fill;
+
+    final bodyPath = Path()
+      ..moveTo(w * 0.35, h * 0.20)
+      ..cubicTo(w * 0.15, h * 0.30, w * 0.08, h * 0.55, w * 0.22, h * 0.78)
+      ..cubicTo(w * 0.30, h * 0.88, w * 0.38, h * 0.95, w * 0.48, h * 0.98)
+      ..cubicTo(w * 0.55, h * 1.0, w * 0.58, h * 0.96, w * 0.55, h * 0.90)
+      ..cubicTo(w * 0.80, h * 0.70, w * 0.85, h * 0.42, w * 0.65, h * 0.22)
+      ..cubicTo(w * 0.58, h * 0.16, w * 0.45, h * 0.15, w * 0.35, h * 0.20)
+      ..close();
+    canvas.drawPath(bodyPath, bodyPaint);
+
+    // Highlight on body for glossy look
+    final highlightPaint = Paint()
+      ..shader = ui.Gradient.linear(
+        Offset(w * 0.30, h * 0.25),
+        Offset(w * 0.55, h * 0.60),
+        [
+          Colors.white.withValues(alpha: 0.35),
+          Colors.white.withValues(alpha: 0.0),
+        ],
+      )
+      ..style = PaintingStyle.fill;
+    final highlightPath = Path()
+      ..moveTo(w * 0.38, h * 0.24)
+      ..cubicTo(w * 0.25, h * 0.32, w * 0.20, h * 0.50, w * 0.30, h * 0.62)
+      ..cubicTo(w * 0.35, h * 0.55, w * 0.35, h * 0.40, w * 0.38, h * 0.24)
+      ..close();
+    canvas.drawPath(highlightPath, highlightPaint);
+
+    // Eyes - white circles with dark pupils
+    final eyeWhitePaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+    final pupilPaint = Paint()
+      ..color = const Color(0xFF3E2723)
+      ..style = PaintingStyle.fill;
+    final eyeGlintPaint = Paint()
+      ..color = Colors.white
+      ..style = PaintingStyle.fill;
+
+    // Left eye
+    canvas.drawCircle(Offset(w * 0.37, h * 0.42), w * 0.09, eyeWhitePaint);
+    canvas.drawCircle(Offset(w * 0.38, h * 0.43), w * 0.055, pupilPaint);
+    canvas.drawCircle(Offset(w * 0.36, h * 0.41), w * 0.025, eyeGlintPaint);
+
+    // Right eye
+    canvas.drawCircle(Offset(w * 0.57, h * 0.38), w * 0.09, eyeWhitePaint);
+    canvas.drawCircle(Offset(w * 0.58, h * 0.39), w * 0.055, pupilPaint);
+    canvas.drawCircle(Offset(w * 0.56, h * 0.37), w * 0.025, eyeGlintPaint);
+
+    // Rosy cheeks
+    final cheekPaint = Paint()
+      ..color = const Color(0xFFFF8A80).withValues(alpha: 0.5)
+      ..style = PaintingStyle.fill;
+    canvas.drawOval(
+      Rect.fromCenter(
+          center: Offset(w * 0.28, h * 0.52), width: w * 0.12, height: h * 0.06),
+      cheekPaint,
+    );
+    canvas.drawOval(
+      Rect.fromCenter(
+          center: Offset(w * 0.64, h * 0.48), width: w * 0.12, height: h * 0.06),
+      cheekPaint,
+    );
+
+    // Smile
+    final smilePaint = Paint()
+      ..color = const Color(0xFF3E2723)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2.5
+      ..strokeCap = StrokeCap.round;
+    final smilePath = Path()
+      ..moveTo(w * 0.38, h * 0.53)
+      ..cubicTo(w * 0.42, h * 0.60, w * 0.52, h * 0.60, w * 0.56, h * 0.52);
+    canvas.drawPath(smilePath, smilePaint);
+
+    // Tint overlay for non-idle states
+    if (tintColor != null) {
+      final tintPaint = Paint()
+        ..color = tintColor!.withValues(alpha: 0.18)
+        ..style = PaintingStyle.fill;
+      canvas.drawPath(bodyPath, tintPaint);
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _ChiliMascotPainter oldDelegate) {
+    return oldDelegate.tintColor != tintColor;
   }
 }
 
@@ -212,8 +349,8 @@ class _OrbitDotsPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    const radius = 52.0;
-    const dotRadius = 4.0;
+    const radius = 65.0;
+    const dotRadius = 5.0;
 
     for (var i = 0; i < dotCount; i++) {
       final angle = progress + (2 * math.pi * i / dotCount);
@@ -222,7 +359,7 @@ class _OrbitDotsPainter extends CustomPainter {
       canvas.drawCircle(
         Offset(x, y),
         dotRadius,
-        Paint()..color = color.withOpacity(0.8),
+        Paint()..color = color.withValues(alpha: 0.8),
       );
     }
   }

@@ -42,11 +42,15 @@ class ChiliApiClient {
       headers: _headers(),
       body: jsonEncode({'message': message}),
     );
+    Map<String, dynamic>? decoded;
+    try {
+      decoded = jsonDecode(response.body) as Map<String, dynamic>?;
+    } catch (_) {}
     if (response.statusCode != 200) {
-      throw Exception('Chat request failed with ${response.statusCode}');
+      final err = decoded?['error'] ?? decoded?['detail'] ?? response.body;
+      throw Exception(err is String ? err : 'HTTP ${response.statusCode}');
     }
-    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
-    return (decoded['reply'] as String?) ?? 'CHILI did not send a reply.';
+    return (decoded?['reply'] as String?) ?? 'CHILI did not send a reply.';
   }
 
   // ── Dashboard helpers ──
@@ -96,6 +100,29 @@ class ChiliApiClient {
   }
 
   // ── Voice ──
+
+  /// Request TTS audio for [text]. Returns raw MP3 bytes, or null on failure.
+  Future<List<int>?> fetchTts(String text) async {
+    if (text.trim().isEmpty) return null;
+    final uri = Uri.parse('$baseUrl/api/voice/tts');
+    final response = await _client
+        .post(
+          uri,
+          headers: {
+            'Content-Type': 'application/x-www-form-urlencoded',
+            if (_token != null && _token!.isNotEmpty)
+              'Authorization': 'Bearer $_token',
+          },
+          body: 'text=${Uri.encodeComponent(text)}',
+        )
+        .timeout(const Duration(seconds: 30));
+    if (response.statusCode != 200) return null;
+    final bytes = response.bodyBytes;
+    final contentType = response.headers['content-type'] ?? '';
+    if (contentType.contains('json')) return null;
+    if (bytes.length < 100) return null;
+    return bytes;
+  }
 
   /// Transcribe audio only; returns transcribed text or null on failure.
   Future<String?> transcribe(File audioFile) async {

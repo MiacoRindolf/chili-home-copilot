@@ -114,7 +114,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       labelText: 'Wake word',
                       hintText: 'Chili',
                       helperText:
-                          'Say this word then your question for hands-free voice (e.g. "Chili, what\'s the weather?")',
+                          'Say "Chili" or "Hey Chili" then your question (e.g. "Chili, what\'s the weather?")',
                     ),
                     textCapitalization: TextCapitalization.words,
                     onSubmitted: (_) => _saveWakeWord(),
@@ -170,7 +170,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   _shortcutRow('Long-press mic button', 'Record voice message'),
                   _shortcutRow('Drop files on avatar', 'Send files to CHILI'),
                   _shortcutRow('System tray icon', 'Click to show, right-click for menu'),
-                  _shortcutRow('Wake word', 'Say "[your word], [question]" for hands-free (e.g. "Chili, what time is it?")'),
+                  _shortcutRow('Wake word', 'Say "Chili" or "Hey Chili" then your question for hands-free'),
                 ],
               ),
             ),

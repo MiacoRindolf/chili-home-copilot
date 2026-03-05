@@ -20,20 +20,33 @@ class CompanionShell extends StatefulWidget {
 class _CompanionShellState extends State<CompanionShell> {
   CompanionMode _mode = CompanionMode.avatar;
   final _pauseWakeWord = ValueNotifier<bool>(false);
+  final _wakeWordCommand = ValueNotifier<String?>(null);
   final _wakeWordReply = ValueNotifier<String?>(null);
+  final _wakeWordStatus = ValueNotifier<String?>(null);
+  final _wakeWordPartial = ValueNotifier<String?>(null);
+  final _followUpActive = ValueNotifier<bool>(false);
   late final WakeWordListener _wakeWordListener;
-  bool _wakeWordListening = false;
 
   @override
   void initState() {
     super.initState();
     _wakeWordListener = WakeWordListener(
       pauseListening: _pauseWakeWord,
-      onReply: (reply) {
+      onReply: (command, reply) {
+        _wakeWordCommand.value = command;
         _wakeWordReply.value = reply;
       },
       onListeningChanged: (listening) {
-        if (mounted) setState(() => _wakeWordListening = listening);
+        if (mounted) setState(() {});
+      },
+      onStatus: (status) {
+        _wakeWordStatus.value = status.isEmpty ? null : status;
+      },
+      onFollowUpActive: (active) {
+        _followUpActive.value = active;
+      },
+      onPartial: (partial) {
+        _wakeWordPartial.value = partial.isEmpty ? null : partial;
       },
     );
     _startWakeWordIfEnabled();
@@ -50,7 +63,11 @@ class _CompanionShellState extends State<CompanionShell> {
   void dispose() {
     _wakeWordListener.dispose();
     _pauseWakeWord.dispose();
+    _wakeWordCommand.dispose();
     _wakeWordReply.dispose();
+    _wakeWordStatus.dispose();
+    _wakeWordPartial.dispose();
+    _followUpActive.dispose();
     super.dispose();
   }
 
@@ -82,7 +99,11 @@ class _CompanionShellState extends State<CompanionShell> {
         ? AvatarView(
             onOpenFullApp: _switchToFullApp,
             pauseWakeWord: _pauseWakeWord,
+            wakeWordCommand: _wakeWordCommand,
             wakeWordReply: _wakeWordReply,
+            wakeWordStatus: _wakeWordStatus,
+            wakeWordPartial: _wakeWordPartial,
+            wakeWordFollowUpActive: _followUpActive,
           )
         : AppShell(onBackToAvatar: _switchToAvatar);
   }

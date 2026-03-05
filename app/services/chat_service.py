@@ -408,3 +408,111 @@ def store_and_title_with_memory(
                 log_info(trace_id, f"personality_extraction_error={e}")
     finally:
         s.close()
+
+
+def process_message_get_reply(
+    db: Session,
+    convo_key: str,
+    identity: dict,
+    client_ip: str,
+    message: str,
+    trace_id: str,
+    conversation_id=None,
+):
+    """Run full chat pipeline (init, wellness, plan, resolve, store) and return (reply, conversation_id)."""
+    from .. import wellness
+
+    user_name = identity["user_name"]
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+
+    chat_init = init_chat(
+        db, convo_key, conversation_id, message, identity, trace_id, image_path=None
+    )
+    conversation_id = chat_init["conversation_id"]
+    recent = chat_init["recent"]
+
+    if wellness.detect_crisis(message):
+        llm_reply = wellness.CRISIS_RESPONSE
+        action_type = "crisis_support"
+        model_used = "crisis-detector"
+        db.add(
+            ChatMessage(
+                convo_key=convo_key,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=llm_reply,
+                trace_id=trace_id,
+                action_type=action_type,
+                model_used=model_used,
+            )
+        )
+        db.commit()
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        db.commit()
+        try_personality_update(user_id, is_guest, db, trace_id)
+        return llm_reply, conversation_id
+
+    if wellness.detect_wellness_topic(message):
+        wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+        result = wellness.wellness_chat(
+            messages=wellness_msgs, user_name=user_name, trace_id=trace_id
+        )
+        llm_reply = result["reply"]
+        action_type = "wellness_support"
+        model_used = result["model"]
+        db.add(
+            ChatMessage(
+                convo_key=convo_key,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=llm_reply,
+                trace_id=trace_id,
+                action_type=action_type,
+                model_used=model_used,
+            )
+        )
+        db.commit()
+        db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        db.commit()
+        try_personality_update(user_id, is_guest, db, trace_id)
+        return llm_reply, conversation_id
+
+    try:
+        ctx = plan_and_enrich(db, message, identity, recent, trace_id)
+    except Exception as e:
+        log_info(trace_id, f"plan_and_enrich_error={e}, using fallback")
+        ctx = None
+
+    result = resolve_response(
+        db, message, recent, identity, ctx, on_planner_page=False, trace_id=trace_id, stream=False
+    )
+    llm_reply = result["reply"]
+    action_type = result["action_type"]
+    executed = result["executed"]
+    model_used = result["model_used"]
+
+    db.add(
+        ChatMessage(
+            convo_key=convo_key,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=llm_reply,
+            trace_id=trace_id,
+            action_type=action_type,
+            model_used=model_used,
+        )
+    )
+    db.commit()
+    if conversation_id:
+        convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if convo_obj and convo_obj.title == "New Chat":
+            convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
+            db.commit()
+    db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+    db.commit()
+    try_personality_update(user_id, is_guest, db, trace_id)
+    try_memory_extraction(
+        user_id, is_guest, message, llm_reply, action_type, db, trace_id
+    )
+    return llm_reply, conversation_id

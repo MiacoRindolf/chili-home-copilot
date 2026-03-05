@@ -10,20 +10,24 @@ import '../network/chili_api_client.dart';
 
 /// A hold-to-record microphone button.
 ///
-/// While held, it records audio via the `record` package.
-/// On release, the recording is sent to the backend for
-/// speech-to-text and then processed as a chat message.
+/// While held, it records audio. On release, the recording is sent to the
+/// backend for transcription only; the text is passed to [onTranscription]
+/// so the parent can show it in the text field. User reviews and presses send.
 class VoiceInputButton extends StatefulWidget {
-  /// Called with the transcribed text (or CHILI's reply) after recording.
-  final ValueChanged<String> onResult;
+  /// Called with the transcribed text after recording (null if failed or no speech).
+  final ValueChanged<String?> onTranscription;
 
   /// Called when recording starts/stops so the parent can update avatar state.
   final ValueChanged<bool> onRecordingStateChanged;
 
+  /// Called while transcription is in progress (after recording stops).
+  final ValueChanged<bool>? onTranscribing;
+
   const VoiceInputButton({
     super.key,
-    required this.onResult,
+    required this.onTranscription,
     required this.onRecordingStateChanged,
+    this.onTranscribing,
   });
 
   @override
@@ -46,7 +50,7 @@ class _VoiceInputButtonState extends State<VoiceInputButton> {
 
     final hasPermission = await _recorder.hasPermission();
     if (!hasPermission) {
-      widget.onResult('Microphone permission denied.');
+      widget.onTranscription('Microphone permission denied.');
       return;
     }
 
@@ -73,19 +77,19 @@ class _VoiceInputButtonState extends State<VoiceInputButton> {
     widget.onRecordingStateChanged(false);
 
     if (path == null || path.isEmpty) {
-      widget.onResult('Recording failed.');
+      widget.onTranscription('Recording failed.');
       return;
     }
 
-    // Send the audio file to the backend voice endpoint for STT + chat.
+    widget.onTranscribing?.call(true);
     try {
       final client = ChiliApiClient();
-      final reply = await client.sendVoice(File(path));
-      widget.onResult(reply);
+      final text = await client.transcribe(File(path));
+      widget.onTranscription(text ?? 'No speech detected.');
     } catch (e) {
-      widget.onResult('Voice processing failed: $e');
+      widget.onTranscription('Transcription failed: $e');
     } finally {
-      // Clean up temp file.
+      widget.onTranscribing?.call(false);
       try {
         final f = File(path);
         if (await f.exists()) await f.delete();
