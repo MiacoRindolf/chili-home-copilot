@@ -63,7 +63,6 @@ class _AvatarViewState extends State<AvatarView> {
   bool _isSending = false;
   bool _showChat = false;
   bool _isDraggingFile = false;
-  bool _partialIsPopulatingField = false;
   AvatarState _avatarState = AvatarState.idle;
 
   @override
@@ -71,7 +70,7 @@ class _AvatarViewState extends State<AvatarView> {
     super.initState();
     widget.wakeWordReply?.addListener(_onWakeWordReply);
     widget.wakeWordStatus?.addListener(_onStatusChanged);
-    widget.wakeWordPartial?.addListener(_onPartialChanged);
+    widget.wakeWordPartial?.addListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.addListener(_onStatusChanged);
   }
 
@@ -79,7 +78,7 @@ class _AvatarViewState extends State<AvatarView> {
   void dispose() {
     widget.wakeWordReply?.removeListener(_onWakeWordReply);
     widget.wakeWordStatus?.removeListener(_onStatusChanged);
-    widget.wakeWordPartial?.removeListener(_onPartialChanged);
+    widget.wakeWordPartial?.removeListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.removeListener(_onStatusChanged);
     _ttsCompleteSub?.cancel();
     _controller.dispose();
@@ -92,25 +91,12 @@ class _AvatarViewState extends State<AvatarView> {
     if (mounted) setState(() {});
   }
 
-  void _onPartialChanged() {
-    if (!mounted) return;
-    final partial = widget.wakeWordPartial?.value ?? '';
-    if (partial.isNotEmpty) {
-      _partialIsPopulatingField = true;
-      _controller.text = partial;
-      _controller.selection = TextSelection.collapsed(offset: partial.length);
-    } else if (_partialIsPopulatingField) {
-      _partialIsPopulatingField = false;
-    }
-  }
-
   void _onWakeWordReply() {
     final reply = widget.wakeWordReply?.value;
     if (reply == null || !mounted) return;
     final command = widget.wakeWordCommand?.value;
     widget.wakeWordCommand?.value = null;
     widget.wakeWordReply!.value = null;
-    _partialIsPopulatingField = false;
     _controller.clear();
     setState(() {
       if (command != null && command.isNotEmpty) {
@@ -130,6 +116,7 @@ class _AvatarViewState extends State<AvatarView> {
       _finishSpeaking();
       return;
     }
+    widget.pauseWakeWord?.value = true;
     try {
       final audioBytes = await _client.fetchTts(text);
       if (audioBytes == null || audioBytes.isEmpty || !mounted) {
@@ -140,7 +127,10 @@ class _AvatarViewState extends State<AvatarView> {
       final dir = await getTemporaryDirectory();
       final file = File(p.join(dir.path, 'chili_tts_${DateTime.now().millisecondsSinceEpoch}.mp3'));
       await file.writeAsBytes(audioBytes);
-      if (!mounted) return;
+      if (!mounted) {
+        _finishSpeaking();
+        return;
+      }
       await _audioPlayer.stop();
       void onDone() {
         _finishSpeaking();
@@ -156,6 +146,7 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   void _finishSpeaking() {
+    widget.pauseWakeWord?.value = false;
     if (mounted) setState(() => _avatarState = AvatarState.idle);
   }
 
@@ -172,7 +163,6 @@ class _AvatarViewState extends State<AvatarView> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
-    _partialIsPopulatingField = false;
 
     setState(() {
       _isSending = true;
@@ -295,31 +285,51 @@ class _AvatarViewState extends State<AvatarView> {
                                   : _avatarState,
                             ),
                           ),
-                        // Status chip overlaid at bottom of avatar area
-                        if (effectiveStatus != null && effectiveStatus.isNotEmpty)
-                          Positioned(
-                            bottom: 4,
-                            left: 10,
-                            right: 10,
-                            child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: _statusColor(effectiveStatus).withValues(alpha: 0.85),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                effectiveStatus,
-                                textAlign: TextAlign.center,
-                                style: const TextStyle(
-                                  fontSize: 10,
-                                  color: Colors.white,
-                                  fontWeight: FontWeight.w500,
+                        // Status chip + partial transcription overlaid at bottom
+                        Positioned(
+                          bottom: 2,
+                          left: 6,
+                          right: 6,
+                          child: Column(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              if ((widget.wakeWordPartial?.value ?? '').isNotEmpty)
+                                Padding(
+                                  padding: const EdgeInsets.only(bottom: 2),
+                                  child: Text(
+                                    widget.wakeWordPartial!.value!,
+                                    textAlign: TextAlign.center,
+                                    style: TextStyle(
+                                      fontSize: 9,
+                                      color: Colors.white.withValues(alpha: 0.85),
+                                      fontStyle: FontStyle.italic,
+                                    ),
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
                                 ),
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ),
+                              if (effectiveStatus != null && effectiveStatus.isNotEmpty)
+                                Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                  decoration: BoxDecoration(
+                                    color: _statusColor(effectiveStatus).withValues(alpha: 0.85),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    effectiveStatus,
+                                    textAlign: TextAlign.center,
+                                    style: const TextStyle(
+                                      fontSize: 10,
+                                      color: Colors.white,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
                           ),
+                        ),
                       ],
                     ),
                   ),

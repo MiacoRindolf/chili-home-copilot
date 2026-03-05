@@ -21,7 +21,7 @@ from sqlalchemy.orm import Session
 from ..logger import log_info, new_trace_id
 
 TTS_VOICE = "aria"
-TTS_VOICE_EDGE = "en-US-AriaNeural"
+TTS_VOICE_EDGE = "en-US-AndrewMultilingualNeural"
 UNCLOSEAI_TTS_URL = "https://speech.ai.unturf.com/v1"
 
 OLLAMA_URL = "http://localhost:11434"
@@ -146,8 +146,8 @@ def get_voice_capabilities() -> dict:
     }
 
 
-def _clean_text_for_tts(text: str, max_sentences: int = 3) -> Optional[str]:
-    """Strip HTML/markdown and keep only the first few sentences for fast TTS."""
+def _clean_text_for_tts(text: str, max_sentences: int = 8) -> Optional[str]:
+    """Strip HTML/markdown and truncate for TTS."""
     clean = re.sub(r'<[^>]*>', '', text)
     clean = re.sub(r'\*\*', '', clean)
     clean = re.sub(r'[#_`\-\[\]]', '', clean)
@@ -161,9 +161,9 @@ def _clean_text_for_tts(text: str, max_sentences: int = 3) -> Optional[str]:
     sentences = re.split(r'(?<=[.!?])\s+', clean)
     truncated = ' '.join(sentences[:max_sentences]).strip()
     if not truncated:
-        truncated = clean[:300]
-    if len(truncated) > 500:
-        truncated = truncated[:500]
+        truncated = clean[:1500]
+    if len(truncated) > 1500:
+        truncated = truncated[:1500]
     return truncated
 
 
