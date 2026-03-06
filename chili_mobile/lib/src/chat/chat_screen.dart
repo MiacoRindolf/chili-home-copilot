@@ -21,24 +21,38 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
+  final _chatFocusNode = FocusNode();
   final _client = ChiliApiClient();
 
   String _streamingReply = '';
   bool _isSending = false;
+  bool _chatInputHasFocus = false;
   AvatarState _avatarState = AvatarState.idle;
 
   @override
   void initState() {
     super.initState();
     widget.sharedHistory.addListener(_onHistoryChanged);
+    _chatFocusNode.addListener(_onChatFocusChange);
   }
 
   @override
   void dispose() {
     widget.sharedHistory.removeListener(_onHistoryChanged);
+    _chatFocusNode.removeListener(_onChatFocusChange);
+    _chatFocusNode.dispose();
     _controller.dispose();
     _scrollController.dispose();
     super.dispose();
+  }
+
+  void _onChatFocusChange() {
+    if (mounted) setState(() => _chatInputHasFocus = _chatFocusNode.hasFocus);
+  }
+
+  AvatarState get _effectiveAvatarState {
+    if (_chatInputHasFocus && _avatarState == AvatarState.idle) return AvatarState.reading;
+    return _avatarState;
   }
 
   void _onHistoryChanged() {
@@ -81,6 +95,9 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         },
       );
+      if (mounted && resp.clientAction != null) {
+        setState(() => _avatarState = AvatarState.actionPerforming);
+      }
       final actionResult = await DesktopActions.execute(resp.clientAction);
       if (mounted && actionResult != null && actionResult.isNotEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -88,22 +105,28 @@ class _ChatScreenState extends State<ChatScreen> {
         );
       }
       widget.sharedHistory.addAssistant(resp.reply);
-      setState(() {
-        _streamingReply = '';
-        _avatarState = AvatarState.speaking;
-      });
+      if (mounted) {
+        setState(() {
+          _streamingReply = '';
+          _avatarState = AvatarState.happy;
+        });
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          if (mounted) setState(() => _avatarState = AvatarState.idle);
+        });
+      }
     } catch (e) {
       widget.sharedHistory.addSystem('Sorry, I could not reach CHILI. Please try again.');
-      setState(() {
-        _streamingReply = '';
-        _avatarState = AvatarState.idle;
-      });
-    } finally {
-      setState(() => _isSending = false);
-      await Future.delayed(const Duration(milliseconds: 800));
       if (mounted) {
-        setState(() => _avatarState = AvatarState.idle);
+        setState(() {
+          _streamingReply = '';
+          _avatarState = AvatarState.error;
+        });
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _avatarState = AvatarState.idle);
+        });
       }
+    } finally {
+      if (mounted) setState(() => _isSending = false);
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
           _scrollController.position.maxScrollExtent + 80,
@@ -126,7 +149,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Padding(
               padding: const EdgeInsets.only(top: 8.0),
               child: ChiliAvatar(
-                state: _avatarState,
+                state: _effectiveAvatarState,
                 reduceMotion: AppConfig.instance.reduceMotion,
               ),
             ),
@@ -251,6 +274,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Expanded(
                     child: TextField(
                       controller: _controller,
+                      focusNode: _chatFocusNode,
                       onSubmitted: (_) => _sendMessage(),
                       decoration: const InputDecoration(
                         hintText: 'Talk to CHILI…',

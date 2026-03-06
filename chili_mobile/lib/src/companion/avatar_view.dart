@@ -59,6 +59,7 @@ class _AvatarViewState extends State<AvatarView> {
   final _client = ChiliApiClient();
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
+  final _chatFocusNode = FocusNode();
   final _audioPlayer = AudioPlayer();
   StreamSubscription<void>? _ttsCompleteSub;
   String _streamingReply = '';
@@ -71,6 +72,11 @@ class _AvatarViewState extends State<AvatarView> {
   int _onboardingStep = 0;
   bool _userMuted = false;
   bool _recording = false;
+  bool _chatInputHasFocus = false;
+  bool _showHappyBriefly = false;
+  bool _showWakeDetectedBriefly = false;
+  String? _prevWakeWordStatus;
+  bool _actionPerforming = false;
 
   @override
   void initState() {
@@ -82,6 +88,7 @@ class _AvatarViewState extends State<AvatarView> {
     widget.wakeWordPartial?.addListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.addListener(_onStatusChanged);
     widget.ttsInterruptRequested?.addListener(_onTtsInterrupt);
+    _chatFocusNode.addListener(_onChatFocusChange);
   }
 
   @override
@@ -92,11 +99,17 @@ class _AvatarViewState extends State<AvatarView> {
     widget.wakeWordPartial?.removeListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.removeListener(_onStatusChanged);
     widget.ttsInterruptRequested?.removeListener(_onTtsInterrupt);
+    _chatFocusNode.removeListener(_onChatFocusChange);
+    _chatFocusNode.dispose();
     _ttsCompleteSub?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     _audioPlayer.dispose();
     super.dispose();
+  }
+
+  void _onChatFocusChange() {
+    if (mounted) setState(() => _chatInputHasFocus = _chatFocusNode.hasFocus);
   }
 
   void _onHistoryChanged() {
@@ -123,7 +136,31 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   void _onStatusChanged() {
+    final status = widget.wakeWordStatus?.value ?? '';
+    final wasTranscribing = _prevWakeWordStatus?.startsWith('Transcribing') ?? false;
+    final nowListening = status.contains('say your command') || status.contains('follow-up');
+    if (wasTranscribing && nowListening && status.isNotEmpty) {
+      if (mounted) {
+        setState(() => _showWakeDetectedBriefly = true);
+        Future.delayed(const Duration(seconds: 1), () {
+          if (mounted) setState(() => _showWakeDetectedBriefly = false);
+        });
+      }
+    }
+    _prevWakeWordStatus = status;
     if (mounted) setState(() {});
+  }
+
+  /// Resolves the avatar state to display from current signals.
+  AvatarState _effectiveAvatarState(bool showListeningState) {
+    if (_showWakeDetectedBriefly) return AvatarState.wakeDetected;
+    if (_lastFailedMessage != null && !_isSending) return AvatarState.error;
+    if (_showHappyBriefly) return AvatarState.happy;
+    if (_actionPerforming) return AvatarState.actionPerforming;
+    if (showListeningState) return AvatarState.listening;
+    if (_userMuted && _avatarState == AvatarState.idle) return AvatarState.muted;
+    if (_chatInputHasFocus && _avatarState == AvatarState.idle && _showChat) return AvatarState.reading;
+    return _avatarState;
   }
 
   void _onWakeWordReply() {
@@ -201,7 +238,15 @@ class _AvatarViewState extends State<AvatarView> {
 
   void _finishSpeaking() {
     widget.ttsPlaying?.value = false;
-    if (mounted) setState(() => _avatarState = AvatarState.idle);
+    if (mounted) {
+      setState(() {
+        _avatarState = AvatarState.idle;
+        _showHappyBriefly = true;
+      });
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _showHappyBriefly = false);
+      });
+    }
   }
 
   Future<void> _toggleChat() async {
@@ -238,7 +283,11 @@ class _AvatarViewState extends State<AvatarView> {
         },
       );
       if (!mounted) return;
+      if (resp.clientAction != null) {
+        setState(() => _actionPerforming = true);
+      }
       final actionResult = await DesktopActions.execute(resp.clientAction);
+      if (mounted) setState(() => _actionPerforming = false);
       if (mounted && actionResult != null && actionResult.isNotEmpty) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text(actionResult), duration: const Duration(seconds: 2)),
@@ -250,8 +299,12 @@ class _AvatarViewState extends State<AvatarView> {
         _streamingReply = '';
         _lastFailedMessage = null;
         _avatarState = AvatarState.idle;
+        _showHappyBriefly = true;
       });
       _scrollToBottom();
+      Future.delayed(const Duration(milliseconds: 1500), () {
+        if (mounted) setState(() => _showHappyBriefly = false);
+      });
     } catch (e) {
       if (!mounted) return;
       widget.sharedHistory.addAssistant('Could not reach CHILI. Is the server running?');
@@ -395,9 +448,7 @@ class _AvatarViewState extends State<AvatarView> {
                           Positioned(
                             top: 0,
                             child: ChiliAvatar(
-                              state: showListeningState
-                                  ? AvatarState.listening
-                                  : _avatarState,
+                              state: _effectiveAvatarState(showListeningState),
                               reduceMotion: AppConfig.instance.reduceMotion,
                             ),
                           ),
@@ -579,6 +630,7 @@ class _AvatarViewState extends State<AvatarView> {
                 Expanded(
                   child: TextField(
                     controller: _controller,
+                    focusNode: _chatFocusNode,
                     onSubmitted: (_) => _sendMessage(),
                     style: const TextStyle(fontSize: 13),
                     decoration: InputDecoration(
