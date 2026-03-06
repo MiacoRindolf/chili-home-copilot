@@ -35,6 +35,7 @@ class DesktopActions {
 
   static const _appAliases = <String, String>{
     'notepad': 'notepad',
+    'notepad++': 'notepad++',
     'calculator': 'calc',
     'calc': 'calc',
     'paint': 'mspaint',
@@ -62,7 +63,10 @@ class DesktopActions {
     'microsoft teams': 'msteams',
     'code': 'code',
     'vs code': 'code',
+    'vscode': 'code',
     'visual studio code': 'code',
+    'visual studio': 'code',
+    'vs': 'code',
     'word': 'winword',
     'microsoft word': 'winword',
     'excel': 'excel',
@@ -78,6 +82,7 @@ class DesktopActions {
 
   static const _processNames = <String, String>{
     'notepad': 'notepad.exe',
+    'notepad++': 'notepad++.exe',
     'calculator': 'CalculatorApp.exe',
     'calc': 'CalculatorApp.exe',
     'paint': 'mspaint.exe',
@@ -95,7 +100,10 @@ class DesktopActions {
     'microsoft teams': 'ms-teams.exe',
     'code': 'Code.exe',
     'vs code': 'Code.exe',
+    'vscode': 'Code.exe',
     'visual studio code': 'Code.exe',
+    'visual studio': 'Code.exe',
+    'vs': 'Code.exe',
     'word': 'WINWORD.EXE',
     'microsoft word': 'WINWORD.EXE',
     'excel': 'EXCEL.EXE',
@@ -115,10 +123,48 @@ class DesktopActions {
     'powershell': 'powershell.exe',
   };
 
+  /// Resolve app name to executable (exact match, then fuzzy: alias contains input or input contains alias).
+  static String _resolveAppToExe(String key) {
+    final k = key.toLowerCase().trim();
+    final exact = _appAliases[k];
+    if (exact != null) return exact;
+    // Fuzzy: longest alias key that is contained in input or contains input
+    String? best;
+    int bestLen = 0;
+    for (final entry in _appAliases.entries) {
+      final aliasKey = entry.key;
+      if (k.contains(aliasKey) || aliasKey.contains(k)) {
+        if (aliasKey.length > bestLen) {
+          bestLen = aliasKey.length;
+          best = entry.value;
+        }
+      }
+    }
+    return best ?? k;
+  }
+
+  /// Resolve app name to process name for close (exact then fuzzy).
+  static String _resolveAppToProcess(String key) {
+    final k = key.toLowerCase().trim();
+    final exact = _processNames[k];
+    if (exact != null) return exact;
+    String? best;
+    int bestLen = 0;
+    for (final entry in _processNames.entries) {
+      final aliasKey = entry.key;
+      if (k.contains(aliasKey) || aliasKey.contains(k)) {
+        if (aliasKey.length > bestLen) {
+          bestLen = aliasKey.length;
+          best = entry.value;
+        }
+      }
+    }
+    return best ?? '$key.exe';
+  }
+
   static Future<String?> _openApp(String appName) async {
     if (appName.isEmpty) return null;
-    final key = appName.toLowerCase().trim();
-    final exe = _appAliases[key] ?? appName;
+    final exe = _resolveAppToExe(appName);
     debugPrint('[DesktopActions] Opening app: $appName -> $exe');
 
     try {
@@ -138,8 +184,7 @@ class DesktopActions {
 
   static Future<String?> _closeApp(String appName) async {
     if (appName.isEmpty) return null;
-    final key = appName.toLowerCase().trim();
-    final proc = _processNames[key] ?? '$appName.exe';
+    final proc = _resolveAppToProcess(appName);
     debugPrint('[DesktopActions] Closing app: $appName -> $proc');
 
     try {

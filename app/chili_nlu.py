@@ -7,6 +7,24 @@ class Action:
     type: str
     data: dict
 
+
+def _strip_desktop_filler(text: str) -> str:
+    """Strip common prefixes/suffixes so 'Um, can you open my notepad for me' -> 'open my notepad'."""
+    t = text.strip()
+    # Leading filler (order matters: longer phrases first); use re.IGNORECASE
+    for prefix in (
+        r"(?i)^(?:um|uh|well|so|like)\s*,?\s*",
+        r"(?i)^(?:can you|could you|would you|will you|please)\s+",
+        r"(?i)^(?:hey\s+)?chili\s*,?\s*",
+        r"(?i)^(?:i need you to|i want you to|i'd like you to)\s+",
+    ):
+        t = re.sub(prefix, "", t)
+    # Trailing filler
+    t = re.sub(r"(?i)\s+(?:for me|for us|please|thanks|thank you|pls)\s*[.!?]*$", "", t)
+    t = re.sub(r"\s*[.!?]+$", "", t)
+    return t.strip()
+
+
 def parse_message(text: str) -> Action:
     t = text.strip()
 
@@ -96,18 +114,28 @@ def parse_message(text: str) -> Action:
         return Action(type="add_plan_task", data={"title": m.group(1).strip(), "project_name": m.group(2).strip()})
 
     # ── Desktop companion actions ──
+    # Normalize conversational phrasing so "can you open my notepad for me" -> "open notepad"
+    t_desktop = _strip_desktop_filler(t)
 
-    # Open app: "open Notepad", "launch Spotify", "start Chrome"
-    m = re.match(r"(?i)^\s*(?:open|launch|start|run)\s+(?:the\s+)?(.+?)(?:\s+app)?$", t)
+    # Open app: "open Notepad", "can you open my notepad for me", "please launch visual studio"
+    m = re.match(
+        r"(?i)^\s*(?:open|launch|start|run)\s+(?:the\s+)?(?:my\s+)?(.+?)(?:\s+app)?\s*$",
+        t_desktop,
+    )
     if m:
-        app = m.group(1).strip()
-        if app.lower() not in ("browser", "url", "link", "a url", "a link"):
+        app = re.sub(r"(?i)^my\s+", "", m.group(1).strip())
+        if app and app.lower() not in ("browser", "url", "link", "a url", "a link"):
             return Action(type="desktop_open_app", data={"app_name": app})
 
-    # Close app: "close Notepad", "quit Spotify", "kill Chrome"
-    m = re.match(r"(?i)^\s*(?:close|quit|kill|exit|stop)\s+(?:the\s+)?(.+?)(?:\s+app)?$", t)
+    # Close app: "close Notepad", "quit Spotify", "could you close chrome for me"
+    m = re.match(
+        r"(?i)^\s*(?:close|quit|kill|exit|stop)\s+(?:the\s+)?(?:my\s+)?(.+?)(?:\s+app)?\s*$",
+        t_desktop,
+    )
     if m:
-        return Action(type="desktop_close_app", data={"app_name": m.group(1).strip()})
+        app = re.sub(r"(?i)^my\s+", "", m.group(1).strip())
+        if app:
+            return Action(type="desktop_close_app", data={"app_name": app})
 
     # Play music: "play jazz on Spotify", "play lofi on YouTube", "play some music"
     m = re.match(r"(?i)^\s*play\s+(.+?)\s+(?:on|in|with|via)\s+(spotify|youtube)\s*$", t)
