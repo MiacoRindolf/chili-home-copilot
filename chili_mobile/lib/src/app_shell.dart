@@ -23,8 +23,6 @@ class AppShell extends StatefulWidget {
 class _AppShellState extends State<AppShell> {
   int _selectedIndex = 0;
 
-  static const _labels = ['Dashboard', 'Chat', 'Intercom', 'Settings'];
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(

@@ -37,7 +37,6 @@ class VoiceInputButton extends StatefulWidget {
 class _VoiceInputButtonState extends State<VoiceInputButton> {
   final _recorder = AudioRecorder();
   bool _isRecording = false;
-  String? _recordingPath;
 
   @override
   void dispose() {
@@ -64,7 +63,6 @@ class _VoiceInputButtonState extends State<VoiceInputButton> {
 
     setState(() {
       _isRecording = true;
-      _recordingPath = filePath;
     });
     widget.onRecordingStateChanged(true);
   }
@@ -110,7 +108,12 @@ class _VoiceInputButtonState extends State<VoiceInputButton> {
           shape: BoxShape.circle,
           color: _isRecording ? Colors.red : const Color(0xFFEF5350),
           boxShadow: _isRecording
-              ? [BoxShadow(color: Colors.red.withOpacity(0.5), blurRadius: 12)]
+              ? [
+                  BoxShadow(
+                    color: Colors.red.withValues(alpha: 0.5),
+                    blurRadius: 12,
+                  )
+                ]
               : [],
         ),
         child: Icon(

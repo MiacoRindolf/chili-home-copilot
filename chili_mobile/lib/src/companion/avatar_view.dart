@@ -120,7 +120,9 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   void _onChatFocusChange() {
-    if (mounted) setState(() => _chatInputHasFocus = _chatFocusNode.hasFocus);
+    if (mounted) {
+      setState(() => _chatInputHasFocus = _chatFocusNode.hasFocus);
+    }
   }
 
   void _onHistoryChanged() {
@@ -137,12 +139,16 @@ class _AvatarViewState extends State<AvatarView> {
   Future<void> _onOnboardingNext() async {
     if (_onboardingStep >= 2) {
       await AppConfig.instance.setOnboardingDone();
-      if (mounted) setState(() {
-        _showOnboarding = false;
-        _onboardingStep = 0;
-      });
+      if (mounted) {
+        setState(() {
+          _showOnboarding = false;
+          _onboardingStep = 0;
+        });
+      }
     } else {
-      if (mounted) setState(() => _onboardingStep++);
+      if (mounted) {
+        setState(() => _onboardingStep++);
+      }
     }
   }
 
