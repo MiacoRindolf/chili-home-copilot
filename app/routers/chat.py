@@ -17,12 +17,15 @@ from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..schemas.chat import MobileChatRequest, MobileChatResponse
 from ..services.chat_service import (
     execute_tool,
+    gather_context_only,
+    get_cached_reply,
     init_chat,
     nlu_fallback,
     plan_and_enrich,
     build_openai_prompt,
     resolve_response,
     run_personality_and_memory_in_background,
+    set_cached_reply,
     sse_event,
     store_and_title,
     store_and_title_with_memory,
@@ -563,6 +566,82 @@ async def mobile_chat_api(
             "rag_hits": [],
             "personality_context": None,
         }
+    elif openai_client.is_configured():
+        cached = get_cached_reply(message)
+        if cached is not None:
+            log_info(trace_id, "mobile_response_cache_hit")
+            result = {
+                "reply": cached,
+                "action_type": "general_chat",
+                "executed": True,
+                "model_used": "cache",
+                "rag_sources": [],
+                "personality_used": False,
+                "client_action": None,
+            }
+            # Skip resolve_response; jump to storing and returning
+            llm_reply = result["reply"]
+            action_type = result["action_type"]
+            executed = result["executed"]
+            model_used = result["model_used"]
+            rag_sources = result["rag_sources"]
+            personality_used = result["personality_used"]
+            client_action = result.get("client_action")
+
+            db.add(
+                ChatMessage(
+                    convo_key=convo_key,
+                    conversation_id=conversation_id,
+                    role="assistant",
+                    content=llm_reply,
+                    trace_id=trace_id,
+                    action_type=action_type,
+                    model_used=model_used,
+                )
+            )
+            db.commit()
+            if conversation_id:
+                convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+                if convo_obj and convo_obj.title == "New Chat":
+                    convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
+                    db.commit()
+            db.add(
+                ChatLog(
+                    client_ip=client_ip,
+                    trace_id=trace_id,
+                    message=message,
+                    action_type=action_type,
+                )
+            )
+            db.commit()
+            background_tasks.add_task(
+                run_personality_and_memory_in_background,
+                user_id,
+                is_guest,
+                message,
+                llm_reply,
+                action_type,
+                trace_id,
+            )
+            ms = int((time.time() - t0) * 1000)
+            record_latency(ms)
+            log_info(trace_id, f"latency_ms={ms} action={action_type} client_type=mobile cache_hit=True")
+            return MobileChatResponse(
+                trace_id=trace_id,
+                user=user_name,
+                is_guest=is_guest,
+                action_type=action_type,
+                executed=executed,
+                reply=llm_reply,
+                model_used=model_used,
+                conversation_id=conversation_id,
+                rag_sources=rag_sources,
+                personality_used=personality_used,
+                client_action=client_action,
+            )
+        # Single-LLM path: skip Ollama, gather context and go straight to Groq
+        log_info(trace_id, "mobile_direct_llm_path skipping Ollama planner")
+        ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id)
     else:
         try:
             ctx = plan_and_enrich(
@@ -596,6 +675,9 @@ async def mobile_chat_api(
     rag_sources = result["rag_sources"]
     personality_used = result["personality_used"]
     client_action = result.get("client_action")
+
+    if action_type == "general_chat" and llm_reply:
+        set_cached_reply(message, llm_reply)
 
     db.add(
         ChatMessage(
@@ -755,6 +837,27 @@ async def mobile_chat_stream_api(
             "rag_hits": [],
             "personality_context": None,
         }
+    elif openai_client.is_configured():
+        cached = get_cached_reply(message)
+        if cached is not None:
+            log_info(trace_id, "mobile_stream_response_cache_hit")
+
+            def cached_gen():
+                yield sse_event({"token": cached, "done": False})
+                yield sse_event({
+                    "token": "", "done": True,
+                    "action_type": "general_chat", "model_used": "cache",
+                    "conversation_id": conversation_id, "trace_id": trace_id,
+                    "rag_sources": [], "personality_used": False, "client_action": None,
+                })
+                store_and_title_with_memory(
+                    convo_key, conversation_id, cached, trace_id,
+                    "general_chat", "cache", client_ip, message,
+                    user_id=user_id, is_guest=is_guest,
+                )
+            return StreamingResponse(cached_gen(), media_type="text/event-stream")
+        log_info(trace_id, "mobile_stream_direct_llm_path skipping Ollama planner")
+        ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id)
     else:
         try:
             ctx = plan_and_enrich(
@@ -792,6 +895,8 @@ async def mobile_chat_stream_api(
             complete = "".join(full) or fallback_reply
             if not full:
                 yield sse_event({"token": complete, "done": False})
+            if action_type == "general_chat" and complete:
+                set_cached_reply(message, complete)
             yield sse_event({
                 "token": "", "done": True,
                 "action_type": action_type, "model_used": used_model,

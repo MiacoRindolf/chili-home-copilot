@@ -149,11 +149,8 @@ def chat_stream(
     trace_id: str = "llm-stream",
     user_message: str = "",
 ):
-    """Stream with auto-escalation, yielding (token, model_name) tuples.
-
-    Groq is fast enough (~500 tok/s) to collect the full response first,
-    evaluate quality, then either yield it or escalate to premium streaming.
-    """
+    """Stream tokens immediately (true streaming). No buffering for quality check;
+    escalation to premium happens only on primary failure, not post-hoc."""
     prompt = system_prompt or SYSTEM_PROMPT
 
     if not is_configured():
@@ -167,26 +164,9 @@ def chat_stream(
         return
 
     try:
-        primary_tokens = []
         for tok, model in _stream_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
                                            messages, prompt, trace_id):
-            primary_tokens.append((tok, model))
-
-        full_reply = "".join(t for t, _ in primary_tokens)
-
-        if _is_weak_response(full_reply, user_message) and _premium_configured():
-            log_info(trace_id, f"stream escalating to premium: primary reply was weak ({len(full_reply)} chars)")
-            try:
-                for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                                   messages, prompt, trace_id):
-                    yield tok, model
-                return
-            except Exception as e:
-                log_info(trace_id, f"premium_stream_escalation_error={e}")
-
-        for tok, model in primary_tokens:
             yield tok, model
-
     except Exception as e:
         log_info(trace_id, f"primary_stream_error={e}")
         if _premium_configured():

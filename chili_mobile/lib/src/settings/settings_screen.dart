@@ -17,6 +17,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
   late TextEditingController _urlController;
   late TextEditingController _wakeWordController;
   bool _alwaysListening = true;
+  bool _soundEffects = true;
 
   @override
   void initState() {
@@ -32,6 +33,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
       setState(() {
         _wakeWordController.text = AppConfig.instance.wakeWord;
         _alwaysListening = AppConfig.instance.alwaysListening;
+        _soundEffects = AppConfig.instance.soundEffects;
       });
     }
   }
@@ -254,6 +256,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
                         onChanged: (value) async {
                           await AppConfig.instance.setLargerTargets(value);
                           if (mounted) setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Sound effects (wake word, reply, buttons)',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        value: _soundEffects,
+                        onChanged: (value) async {
+                          await AppConfig.instance.setSoundEffects(value);
+                          if (mounted) setState(() => _soundEffects = value);
                         },
                       ),
                     ],

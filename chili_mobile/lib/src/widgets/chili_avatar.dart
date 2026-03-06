@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 
@@ -80,6 +81,39 @@ class _ChiliAvatarState extends State<ChiliAvatar>
   late AnimationController _breathController;
   late AnimationController _mouthController;
 
+  DateTime? _idleSleepyUntil;
+  Offset? _idlePupilOffset;
+  Timer? _idleMicroTimer;
+
+  void _scheduleIdleMicro() {
+    _idleMicroTimer?.cancel();
+    if (widget.state != AvatarState.idle || widget.reduceMotion) return;
+    final sec = 8 + math.Random().nextInt(5);
+    _idleMicroTimer = Timer(Duration(seconds: sec), () {
+      if (!mounted || widget.state != AvatarState.idle || widget.reduceMotion) return;
+      final r = math.Random().nextInt(3);
+      if (r == 0) {
+        setState(() => _idleSleepyUntil = DateTime.now().add(const Duration(milliseconds: 220)));
+        Future.delayed(const Duration(milliseconds: 250), () {
+          if (mounted) setState(() => _idleSleepyUntil = null);
+        });
+      } else if (r == 1) {
+        setState(() => _idleSleepyUntil = DateTime.now().add(const Duration(milliseconds: 1000)));
+        Future.delayed(const Duration(milliseconds: 1100), () {
+          if (mounted) setState(() => _idleSleepyUntil = null);
+        });
+      } else {
+        final dx = (math.Random().nextDouble() - 0.5) * 12;
+        final dy = (math.Random().nextDouble() - 0.5) * 8;
+        setState(() => _idlePupilOffset = Offset(dx, dy));
+        Future.delayed(const Duration(seconds: 2), () {
+          if (mounted) setState(() => _idlePupilOffset = null);
+        });
+      }
+      _scheduleIdleMicro();
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -124,6 +158,9 @@ class _ChiliAvatarState extends State<ChiliAvatar>
       _breathController.value = 0.5;
       _mouthController.value = 0.0;
     }
+    if (widget.state == AvatarState.idle && !widget.reduceMotion) {
+      _scheduleIdleMicro();
+    }
   }
 
   @override
@@ -158,11 +195,24 @@ class _ChiliAvatarState extends State<ChiliAvatar>
         _mouthController.stop();
         _mouthController.value = 0.0;
       }
+      if (widget.state != AvatarState.idle) {
+        _idleMicroTimer?.cancel();
+        _idleMicroTimer = null;
+        if (_idleSleepyUntil != null || _idlePupilOffset != null) {
+          setState(() {
+            _idleSleepyUntil = null;
+            _idlePupilOffset = null;
+          });
+        }
+      } else if (!widget.reduceMotion) {
+        _scheduleIdleMicro();
+      }
     }
   }
 
   @override
   void dispose() {
+    _idleMicroTimer?.cancel();
     _bobController.dispose();
     _pulseController.dispose();
     _ringController.dispose();
@@ -188,7 +238,10 @@ class _ChiliAvatarState extends State<ChiliAvatar>
         ]),
         builder: (context, child) {
           final noMotion = widget.reduceMotion;
-          final expression = expressionForState(widget.state);
+          final baseExpression = expressionForState(widget.state);
+          final expression = (_idleSleepyUntil != null && DateTime.now().isBefore(_idleSleepyUntil!))
+              ? AvatarExpression.sleepy
+              : baseExpression;
           final mouthOpen = widget.state == AvatarState.speaking && !noMotion
               ? _mouthController.value
               : 0.0;
@@ -341,6 +394,7 @@ class _ChiliAvatarState extends State<ChiliAvatar>
                       tintColor: widget.state != AvatarState.idle
                           ? tintColor
                           : null,
+                      pupilOffset: _idlePupilOffset,
                     ),
                   ),
                 ),
@@ -368,16 +422,19 @@ class _ChiliAvatarState extends State<ChiliAvatar>
 
 /// Draws a cute chili pepper mascot entirely in code -- no PNG needed.
 /// [expression] and [mouthOpen] control face (eyes, eyebrows, mouth).
+/// [pupilOffset] optionally shifts both pupils (for idle look-around).
 class _ChiliMascotPainter extends CustomPainter {
   _ChiliMascotPainter({
     required this.expression,
     this.mouthOpen = 0.0,
     this.tintColor,
+    this.pupilOffset,
   });
 
   final AvatarExpression expression;
   final double mouthOpen;
   final Color? tintColor;
+  final Offset? pupilOffset;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -641,21 +698,26 @@ class _ChiliMascotPainter extends CustomPainter {
       return;
     }
 
-    // Pupil offset for thinking (look up)
-    double pupilDy = 0;
+    // Pupil offset for thinking (look up) or idle look-around
+    double pupilDx = 0.01 * w;
+    double pupilDy = 0.01 * h;
     if (expression == AvatarExpression.thinking) {
-      pupilDy = -h * 0.03;
+      pupilDy -= h * 0.03;
+    }
+    if (pupilOffset != null) {
+      pupilDx += pupilOffset!.dx;
+      pupilDy += pupilOffset!.dy;
     }
 
     final effectivePupilRadius = expression == AvatarExpression.attentive
         ? pupilRadius * 1.15
         : pupilRadius;
     canvas.drawCircle(leftCenter, radius, eyeWhitePaint);
-    canvas.drawCircle(leftCenter + Offset(0.01 * w, 0.01 * h + pupilDy), effectivePupilRadius, pupilPaint);
+    canvas.drawCircle(leftCenter + Offset(pupilDx, pupilDy), effectivePupilRadius, pupilPaint);
     canvas.drawCircle(leftCenter + Offset(-0.01 * w, -0.01 * h), glintRadius, eyeGlintPaint);
 
     canvas.drawCircle(rightCenter, radius, eyeWhitePaint);
-    canvas.drawCircle(rightCenter + Offset(0.01 * w, 0.01 * h + pupilDy), effectivePupilRadius, pupilPaint);
+    canvas.drawCircle(rightCenter + Offset(pupilDx, pupilDy), effectivePupilRadius, pupilPaint);
     canvas.drawCircle(rightCenter + Offset(-0.01 * w, -0.01 * h), glintRadius, eyeGlintPaint);
   }
 
@@ -744,7 +806,8 @@ class _ChiliMascotPainter extends CustomPainter {
   bool shouldRepaint(covariant _ChiliMascotPainter oldDelegate) {
     return oldDelegate.tintColor != tintColor ||
         oldDelegate.expression != expression ||
-        oldDelegate.mouthOpen != mouthOpen;
+        oldDelegate.mouthOpen != mouthOpen ||
+        oldDelegate.pupilOffset != pupilOffset;
   }
 }
 

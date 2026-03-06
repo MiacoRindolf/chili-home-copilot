@@ -1,10 +1,29 @@
 """Core chat logic shared by /api/chat and /api/chat/stream."""
 import json as json_mod
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, timedelta
 
 from sqlalchemy.orm import Session
 
 from ..db import SessionLocal
+
+# In-memory LRU-style cache for repeated/greeting-like queries (max 100 entries)
+_response_cache: dict[str, str] = {}
+_RESPONSE_CACHE_MAX = 100
+
+
+def get_cached_reply(message: str) -> str | None:
+    """Return cached reply for a normalized message, or None."""
+    key = message.lower().strip()[:200]
+    return _response_cache.get(key)
+
+
+def set_cached_reply(message: str, reply: str) -> None:
+    """Store reply in cache; evict oldest if at capacity."""
+    key = message.lower().strip()[:200]
+    if len(_response_cache) >= _RESPONSE_CACHE_MAX:
+        _response_cache.pop(next(iter(_response_cache)))
+    _response_cache[key] = reply
 from ..models import ChatLog, ChatMessage, Conversation
 from ..llm_planner import plan_action
 from ..chili_nlu import parse_message as nlu_parse
@@ -207,10 +226,109 @@ def init_chat(db: Session, convo_key: str, conversation_id, message: str, identi
 
     mem_filter = ChatMessage.conversation_id == conversation_id if conversation_id else ChatMessage.convo_key == convo_key
     recent = list(reversed(
-        db.query(ChatMessage).filter(mem_filter).order_by(ChatMessage.id.desc()).limit(24).all()
+        db.query(ChatMessage).filter(mem_filter).order_by(ChatMessage.id.desc()).limit(8).all()
     ))
 
     return {"conversation_id": conversation_id, "recent": recent}
+
+
+def _thread_get_personality_memory(user_id: int) -> str | None:
+    """Thread-safe: use own session for personality + memory context."""
+    s = SessionLocal()
+    try:
+        personality = personality_module.get_profile_context(user_id, s)
+        memory = memory_module.get_memory_context(user_id, s)
+        if memory and personality:
+            personality = personality + "\n\n" + memory
+        elif memory:
+            personality = memory
+        return personality
+    finally:
+        s.close()
+
+
+def _thread_get_project_summary(user_id: int) -> str | None:
+    """Thread-safe: use own session for planner project summary."""
+    if not is_module_enabled("planner"):
+        return None
+    s = SessionLocal()
+    try:
+        return planner_service.get_user_project_summary(s, user_id)
+    finally:
+        s.close()
+
+
+def _gather_context_parallel(
+    message: str,
+    identity: dict,
+    trace_id: str,
+    project_id: int | None = None,
+) -> tuple[str | None, list, str | None, str | None]:
+    """Run RAG, project RAG, personality+memory, and project summary in parallel.
+    Returns (rag_context, rag_hits, personality_context, project_context)."""
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+    rag_context = None
+    rag_hits = []
+    personality_context = None
+    project_context = None
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = {}
+        futures["rag"] = executor.submit(rag_module.search, message, 3, trace_id)
+        if project_id:
+            futures["proj_rag"] = executor.submit(
+                pfs_module.search_project, project_id, message, 3, trace_id
+            )
+        if user_id and not is_guest:
+            futures["personality"] = executor.submit(_thread_get_personality_memory, user_id)
+            if is_module_enabled("planner"):
+                futures["project"] = executor.submit(_thread_get_project_summary, user_id)
+
+        rag_hits = futures["rag"].result()
+        if rag_hits and rag_hits[0]["distance"] < 1.0:
+            rag_context = "\n---\n".join(f"[{h['source']}]: {h['text']}" for h in rag_hits)
+            log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
+
+        if project_id and "proj_rag" in futures:
+            proj_hits = futures["proj_rag"].result()
+            if proj_hits:
+                proj_context = "\n---\n".join(f"[project:{h['source']}]: {h['text']}" for h in proj_hits)
+                rag_context = f"{proj_context}\n---\n{rag_context}" if rag_context else proj_context
+                rag_hits = proj_hits + (rag_hits or [])
+                log_info(trace_id, f"project_rag_injected project={project_id}")
+
+        if user_id and not is_guest and "personality" in futures:
+            personality_context = futures["personality"].result()
+            if personality_context:
+                log_info(trace_id, f"personality_injected user_id={user_id}")
+            if "project" in futures:
+                project_context = futures["project"].result()
+                if project_context:
+                    log_info(trace_id, f"project_context_injected user_id={user_id}")
+                    personality_context = (personality_context or "") + "\n\n" + project_context
+
+    return (rag_context, rag_hits, personality_context, project_context)
+
+
+def gather_context_only(
+    db: Session,
+    message: str,
+    identity: dict,
+    trace_id: str,
+    project_id: int | None = None,
+):
+    """Gather RAG, personality, memory, and project context without calling Ollama.
+    Used when Groq is configured to skip the slow local planner and go straight to one LLM call."""
+    rag_context, rag_hits, personality_context, _ = _gather_context_parallel(
+        message, identity, trace_id, project_id
+    )
+    return {
+        "planned": {"type": "unknown", "data": {}, "reply": ""},
+        "rag_context": rag_context,
+        "rag_hits": rag_hits if rag_context else [],
+        "personality_context": personality_context,
+    }
 
 
 def plan_and_enrich(
@@ -224,8 +342,6 @@ def plan_and_enrich(
 ):
     """Run RAG search, personality lookup, and LLM planner. May raise if Ollama is offline.
     planner_current_project: optional {"name": str, "id": int} when user is on planner page with a project selected."""
-    is_guest = identity["is_guest"]
-    user_id = identity.get("user_id")
     context = "\n".join([f"{m.role.upper()}: {m.content}" for m in recent])
 
     if planner_current_project and planner_current_project.get("name"):
@@ -241,39 +357,9 @@ def plan_and_enrich(
         )
         log_info(trace_id, f"planner_current_project_injected name={planner_current_project.get('name')}")
 
-    rag_context = None
-    rag_hits = rag_module.search(message, n_results=3, trace_id=trace_id)
-    if rag_hits and rag_hits[0]["distance"] < 1.0:
-        rag_context = "\n---\n".join(f"[{h['source']}]: {h['text']}" for h in rag_hits)
-        log_info(trace_id, f"rag_context_injected sources={[h['source'] for h in rag_hits]}")
-
-    if project_id:
-        proj_hits = pfs_module.search_project(project_id, message, n_results=3, trace_id=trace_id)
-        if proj_hits:
-            proj_context = "\n---\n".join(f"[project:{h['source']}]: {h['text']}" for h in proj_hits)
-            rag_context = f"{proj_context}\n---\n{rag_context}" if rag_context else proj_context
-            rag_hits = proj_hits + (rag_hits or [])
-            log_info(trace_id, f"project_rag_injected project={project_id} sources={[h['source'] for h in proj_hits]}")
-
-    personality_context = None
-    memory_context = None
-    if user_id and not is_guest:
-        personality_context = personality_module.get_profile_context(user_id, db)
-        if personality_context:
-            log_info(trace_id, f"personality_injected user_id={user_id}")
-        memory_context = memory_module.get_memory_context(user_id, db)
-        if memory_context:
-            log_info(trace_id, f"memory_context_injected user_id={user_id}")
-            if personality_context:
-                personality_context += "\n\n" + memory_context
-            else:
-                personality_context = memory_context
-
-    project_context = None
-    if user_id and not is_guest and is_module_enabled("planner"):
-        project_context = planner_service.get_user_project_summary(db, user_id)
-        if project_context:
-            log_info(trace_id, f"project_context_injected user_id={user_id}")
+    rag_context, rag_hits, personality_context, project_context = _gather_context_parallel(
+        message, identity, trace_id, project_id
+    )
 
     planned = plan_action(
         f"Conversation so far:\n{context}\n\nNew user message: {message}",

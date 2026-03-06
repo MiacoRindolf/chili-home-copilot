@@ -15,6 +15,7 @@ import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
+import 'sound_effects.dart';
 import 'shared_chat_history.dart';
 
 /// The small floating avatar with an expandable chat bubble.
@@ -77,6 +78,15 @@ class _AvatarViewState extends State<AvatarView> {
   bool _showWakeDetectedBriefly = false;
   String? _prevWakeWordStatus;
   bool _actionPerforming = false;
+  int _thinkingIndex = 0;
+  Timer? _thinkingTimer;
+  static const _thinkingMessages = [
+    'Hmm, let me think…',
+    'Cooking up an answer…',
+    'Consulting my spicy brain…',
+    'One moment…',
+    'Almost there…',
+  ];
 
   @override
   void initState() {
@@ -93,6 +103,7 @@ class _AvatarViewState extends State<AvatarView> {
 
   @override
   void dispose() {
+    _thinkingTimer?.cancel();
     widget.sharedHistory.removeListener(_onHistoryChanged);
     widget.wakeWordReply?.removeListener(_onWakeWordReply);
     widget.wakeWordStatus?.removeListener(_onStatusChanged);
@@ -140,10 +151,13 @@ class _AvatarViewState extends State<AvatarView> {
     final wasTranscribing = _prevWakeWordStatus?.startsWith('Transcribing') ?? false;
     final nowListening = status.contains('say your command') || status.contains('follow-up');
     if (wasTranscribing && nowListening && status.isNotEmpty) {
+      SoundEffects.playWakeDetected();
       if (mounted) {
         setState(() => _showWakeDetectedBriefly = true);
         Future.delayed(const Duration(seconds: 1), () {
-          if (mounted) setState(() => _showWakeDetectedBriefly = false);
+          if (mounted) {
+            setState(() => _showWakeDetectedBriefly = false);
+          }
         });
       }
     }
@@ -182,6 +196,7 @@ class _AvatarViewState extends State<AvatarView> {
     }
     windowManager.setSize(const Size(300, 520));
     _scrollToBottom();
+    SoundEffects.playReplyArrived();
     _speakReply(reply);
   }
 
@@ -262,6 +277,7 @@ class _AvatarViewState extends State<AvatarView> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
+    SoundEffects.playButtonClick();
 
     widget.sharedHistory.addUser(text);
     setState(() {
@@ -269,6 +285,12 @@ class _AvatarViewState extends State<AvatarView> {
       _streamingReply = '';
       _avatarState = AvatarState.thinking;
       _controller.clear();
+      _thinkingIndex = 0;
+    });
+    _thinkingTimer?.cancel();
+    _thinkingTimer = Timer.periodic(const Duration(milliseconds: 2500), (_) {
+      if (!mounted || !_isSending) return;
+      setState(() => _thinkingIndex = (_thinkingIndex + 1) % _thinkingMessages.length);
     });
     _scrollToBottom();
 
@@ -294,6 +316,7 @@ class _AvatarViewState extends State<AvatarView> {
         );
       }
       if (!mounted) return;
+      SoundEffects.playReplyArrived();
       widget.sharedHistory.addAssistant(resp.reply);
       setState(() {
         _streamingReply = '';
@@ -315,6 +338,8 @@ class _AvatarViewState extends State<AvatarView> {
       });
       _scrollToBottom();
     } finally {
+      _thinkingTimer?.cancel();
+      _thinkingTimer = null;
       if (mounted) {
         setState(() => _isSending = false);
       }
@@ -354,6 +379,23 @@ class _AvatarViewState extends State<AvatarView> {
 
   Size? get _iconButtonMinSize =>
       AppConfig.instance.largerTargets ? const Size(36, 36) : null;
+
+  List<Widget> _contextAwareSuggestionChips() {
+    final h = DateTime.now().hour;
+    final isWeekend = DateTime.now().weekday >= DateTime.saturday;
+    final labels = <String>[];
+    if (h >= 5 && h < 12) {
+      labels.addAll(["What's the weather?", "List my chores", "What's on my schedule?"]);
+      if (isWeekend) labels.add('Play music');
+    } else if (h >= 12 && h < 17) {
+      labels.addAll(['Search the web', 'Add a chore', 'Open Notepad', "What's the weather?"]);
+    } else if (h >= 17 && h < 21) {
+      labels.addAll(['Play relaxing music', 'List my chores', "What's the weather?", 'Search the web']);
+    } else {
+      labels.addAll(['Play lofi', 'What time is it?', 'Search the web', 'List my chores']);
+    }
+    return labels.map((l) => _suggestionChip(l)).toList();
+  }
 
   Widget _suggestionChip(String label) {
     return ActionChip(
@@ -447,9 +489,15 @@ class _AvatarViewState extends State<AvatarView> {
                         if (!_isDraggingFile)
                           Positioned(
                             top: 0,
-                            child: ChiliAvatar(
-                              state: _effectiveAvatarState(showListeningState),
-                              reduceMotion: AppConfig.instance.reduceMotion,
+                            child: AnimatedSwitcher(
+                              duration: const Duration(milliseconds: 220),
+                              switchInCurve: Curves.easeOut,
+                              switchOutCurve: Curves.easeIn,
+                              child: ChiliAvatar(
+                                key: ValueKey(_effectiveAvatarState(showListeningState).index),
+                                state: _effectiveAvatarState(showListeningState),
+                                reduceMotion: AppConfig.instance.reduceMotion,
+                              ),
                             ),
                           ),
                         // Status chip + partial transcription overlaid at bottom
@@ -561,6 +609,15 @@ class _AvatarViewState extends State<AvatarView> {
     );
   }
 
+  static String _timeAwareGreeting() {
+    final h = DateTime.now().hour;
+    if (h < 5) return "Late night? I'm here if you need me.";
+    if (h < 12) return 'Good morning! What can I help with?';
+    if (h < 17) return 'Good afternoon! What can I do for you?';
+    if (h < 21) return 'Good evening!';
+    return "Late night? I'm here if you need me.";
+  }
+
   Color _statusColor(String status) {
     if (status.startsWith('Heard:')) return const Color(0xFFF57C00);
     if (status.startsWith('Processing') || status.startsWith('Transcribing')) {
@@ -665,20 +722,37 @@ class _AvatarViewState extends State<AvatarView> {
               ],
             ),
 
-            // Quick action suggestion chips (when chat is empty)
+            // Thinking message (rotating) while waiting for response
+            if (_isSending) ...[
+              const SizedBox(height: 6),
+              Text(
+                _thinkingMessages[_thinkingIndex],
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.grey.shade600,
+                  fontStyle: FontStyle.italic,
+                ),
+              ),
+            ],
+
+            // Time-aware greeting when chat is empty
             if (widget.sharedHistory.messages.isEmpty && !_isSending) ...[
               const SizedBox(height: 8),
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: Text(
+                  _timeAwareGreeting(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Colors.grey.shade700,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ),
               Wrap(
                 spacing: 6,
                 runSpacing: 6,
-                children: [
-                  _suggestionChip("What's the weather?"),
-                  _suggestionChip('Open Notepad'),
-                  _suggestionChip('Play music'),
-                  _suggestionChip('Search the web'),
-                  _suggestionChip('Add a chore'),
-                  _suggestionChip('List my chores'),
-                ],
+                children: _contextAwareSuggestionChips(),
               ),
             ],
 

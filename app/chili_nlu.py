@@ -10,6 +10,34 @@ class Action:
 def parse_message(text: str) -> Action:
     t = text.strip()
 
+    # ── Instant replies (no LLM) ──
+
+    # Greetings: hi, hello, hey, good morning/afternoon/evening, howdy
+    if re.match(r"(?i)^\s*(hi|hello|hey|howdy|hi there|hey there|greetings?)\s*[!.]?\s*$", t):
+        return Action(type="instant_greeting", data={})
+    if re.match(r"(?i)^\s*(good\s+)?(morning|afternoon|evening)\s*[!.]?\s*$", t):
+        return Action(type="instant_greeting", data={})
+
+    # Thanks: thanks, thank you
+    if re.match(r"(?i)^\s*(thanks?|thank\s+you)\s*[!.]?\s*$", t):
+        return Action(type="instant_thanks", data={})
+
+    # How are you / how's it going
+    if re.match(r"(?i)^\s*(how\s+are\s+you|how('re|s)\s+it\s+going|how\s+do\s+you\s+do|what('s|s)\s+up)\s*[?.]?\s*$", t):
+        return Action(type="instant_how_are_you", data={})
+
+    # Time: what time is it, what's the time
+    if re.match(r"(?i)^\s*(what('s|s)\s+)?(the\s+)?time\s*(\s+is\s+it)?\s*[?.]?\s*$", t):
+        return Action(type="instant_get_time", data={})
+    if re.match(r"(?i)^\s*time\s*[?.]?\s*$", t):
+        return Action(type="instant_get_time", data={})
+
+    # Weather: what's the weather, weather?
+    if re.match(r"(?i)^\s*(what('s|s)\s+)?(the\s+)?weather\s*[?.]?\s*$", t):
+        return Action(type="instant_get_weather", data={})
+    if re.match(r"(?i)^\s*how('s|s)\s+the\s+weather\s*[?.]?\s*$", t):
+        return Action(type="instant_get_weather", data={})
+
     # Add chore: "add chore take out trash" or "add a chore: take out trash"
     m = re.match(r"(?i)^\s*add\s+(a\s+)?chore\s*:?\s*(.+)$", t)
     if m:

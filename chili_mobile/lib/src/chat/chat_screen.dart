@@ -3,6 +3,7 @@ import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../companion/shared_chat_history.dart';
+import '../companion/sound_effects.dart';
 import '../config/app_config.dart';
 import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
@@ -72,6 +73,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
+    SoundEffects.playButtonClick();
 
     widget.sharedHistory.addUser(text);
     setState(() {

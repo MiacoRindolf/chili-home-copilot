@@ -12,6 +12,7 @@ class AppConfig {
   static const _keyReduceMotion = 'chili_reduce_motion';
   static const _keyFontSize = 'chili_font_size'; // 'small' | 'medium' | 'large'
   static const _keyLargerTargets = 'chili_larger_targets';
+  static const _keySoundEffects = 'chili_sound_effects';
   static const _defaultWakeWord = 'chili';
   static const _defaultAlwaysListening = true;
 
@@ -21,6 +22,7 @@ class AppConfig {
   bool _reduceMotion = false;
   String _fontSize = 'medium';
   bool _largerTargets = false;
+  bool _soundEffects = true;
 
   String get wakeWord => _wakeWord;
   bool get alwaysListening => _alwaysListening;
@@ -28,6 +30,7 @@ class AppConfig {
   bool get reduceMotion => _reduceMotion;
   String get fontSize => _fontSize;
   bool get largerTargets => _largerTargets;
+  bool get soundEffects => _soundEffects;
 
   Future<void> setOnboardingDone() async {
     await _prefs?.setBool(_keyOnboardingDone, true);
@@ -42,6 +45,7 @@ class AppConfig {
     _reduceMotion = _prefs!.getBool(_keyReduceMotion) ?? false;
     _fontSize = _prefs!.getString(_keyFontSize) ?? 'medium';
     _largerTargets = _prefs!.getBool(_keyLargerTargets) ?? false;
+    _soundEffects = _prefs!.getBool(_keySoundEffects) ?? true;
   }
 
   Future<void> setReduceMotion(bool value) async {
@@ -58,6 +62,11 @@ class AppConfig {
   Future<void> setLargerTargets(bool value) async {
     _largerTargets = value;
     await _prefs?.setBool(_keyLargerTargets, value);
+  }
+
+  Future<void> setSoundEffects(bool value) async {
+    _soundEffects = value;
+    await _prefs?.setBool(_keySoundEffects, value);
   }
 
   Future<void> setWakeWord(String word) async {

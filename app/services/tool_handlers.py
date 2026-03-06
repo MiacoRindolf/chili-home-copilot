@@ -6,7 +6,8 @@ the desktop app should execute locally (open app, open URL, etc.).
 """
 from __future__ import annotations
 
-from datetime import date
+import random
+from datetime import date, datetime
 from typing import Any, Callable
 from urllib.parse import quote_plus
 
@@ -41,6 +42,53 @@ def register(action_type: str, module: str | None = None):
             _HANDLERS[action_type] = fn
         return fn
     return decorator
+
+
+# ── Instant NLU replies (no LLM) ──
+
+_GREETINGS = (
+    "Hi! How can I help?",
+    "Hey! What can I do for you?",
+    "Hello! Ready when you are.",
+    "Hi there! Need anything?",
+)
+
+
+@register("instant_greeting")
+def _handle_instant_greeting(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    return random.choice(_GREETINGS), True, "instant_greeting"
+
+
+@register("instant_thanks")
+def _handle_instant_thanks(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    return "You're welcome! Anything else?", True, "instant_thanks"
+
+
+@register("instant_how_are_you")
+def _handle_instant_how_are_you(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    return "Doing great, thanks! How can I help you today?", True, "instant_how_are_you"
+
+
+@register("instant_get_time")
+def _handle_instant_get_time(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    now = datetime.now()
+    return f"It's {now.strftime('%I:%M %p')}.", True, "instant_get_time"
+
+
+@register("instant_get_weather")
+def _handle_instant_get_weather(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    try:
+        from .home_service import get_weather
+        from ..config import settings
+        w = get_weather(settings.weather_location or None)
+        if w:
+            desc = w.get("description", "") or "Clear"
+            temp = w.get("temp_f", "")
+            loc = w.get("location", "your area")
+            return f"{desc}, {temp}°F in {loc}.", True, "instant_get_weather"
+    except Exception:
+        pass
+    return "Set a default location in settings for quick weather, or ask \"what's the weather in Boston?\" and I'll look it up.", True, "instant_get_weather"
 
 
 @register("add_chore")
