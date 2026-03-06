@@ -1,8 +1,17 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+
+/// Structured response from the chat endpoint.
+class ChatResponse {
+  ChatResponse({required this.reply, this.clientAction});
+
+  final String reply;
+  final Map<String, dynamic>? clientAction;
+}
 
 /// API client for the CHILI backend.
 ///
@@ -35,7 +44,7 @@ class ChiliApiClient {
 
   // ── Chat ──
 
-  Future<String> sendMessage(String message) async {
+  Future<ChatResponse> sendMessage(String message) async {
     final uri = Uri.parse('$baseUrl/api/mobile/chat');
     final response = await _client.post(
       uri,
@@ -50,7 +59,63 @@ class ChiliApiClient {
       final err = decoded?['error'] ?? decoded?['detail'] ?? response.body;
       throw Exception(err is String ? err : 'HTTP ${response.statusCode}');
     }
-    return (decoded?['reply'] as String?) ?? 'CHILI did not send a reply.';
+    final reply = (decoded?['reply'] as String?) ?? 'CHILI did not send a reply.';
+    final clientAction = decoded?['client_action'] as Map<String, dynamic>?;
+    return ChatResponse(reply: reply, clientAction: clientAction);
+  }
+
+  /// Stream chat from SSE; [onToken] is called with each token as it arrives.
+  /// Returns the final [ChatResponse] when the stream completes.
+  Future<ChatResponse> sendMessageStream(
+    String message, {
+    void Function(String token)? onToken,
+  }) async {
+    final uri = Uri.parse('$baseUrl/api/mobile/chat/stream');
+    final request = http.Request('POST', uri);
+    request.headers.addAll(_headers());
+    request.body = jsonEncode({'message': message});
+
+    final streamedResponse = await _client.send(request);
+    if (streamedResponse.statusCode != 200) {
+      final body = await streamedResponse.stream.bytesToString();
+      Map<String, dynamic>? decoded;
+      try {
+        decoded = jsonDecode(body) as Map<String, dynamic>?;
+      } catch (_) {}
+      final err = decoded?['error'] ?? decoded?['detail'] ?? body;
+      throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
+    }
+
+    final buffer = StringBuffer();
+    Map<String, dynamic>? clientAction;
+    final lines = streamedResponse.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+
+    await for (final line in lines) {
+      if (line.startsWith('data: ')) {
+        final payload = line.substring(6).trim();
+        if (payload == '[DONE]' || payload.isEmpty) continue;
+        try {
+          final data = jsonDecode(payload) as Map<String, dynamic>?;
+          if (data == null) continue;
+          final token = (data['token'] as String?) ?? '';
+          if (token.isNotEmpty) {
+            buffer.write(token);
+            onToken?.call(token);
+          }
+          if (data['done'] == true) {
+            clientAction = data['client_action'] as Map<String, dynamic>?;
+          }
+        } catch (_) {}
+      }
+    }
+
+    final reply = buffer.toString().trim();
+    return ChatResponse(
+      reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
+      clientAction: clientAction,
+    );
   }
 
   // ── Dashboard helpers ──
@@ -124,6 +189,31 @@ class ChiliApiClient {
     return bytes;
   }
 
+  /// Transcribe raw WAV bytes via backend Whisper. Returns text or null.
+  Future<String?> transcribeAudioBytes(Uint8List wavBytes) async {
+    final uri = Uri.parse('$baseUrl/api/voice/transcribe');
+    final request = http.MultipartRequest('POST', uri);
+    if (_token != null && _token!.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $_token';
+    }
+    request.files.add(http.MultipartFile.fromBytes(
+      'audio',
+      wavBytes,
+      filename: 'command.wav',
+    ));
+    request.fields['mime_type'] = 'audio/wav';
+
+    final streamedResponse = await _client.send(request);
+    final response = await http.Response.fromStream(streamedResponse);
+    if (response.statusCode != 200) return null;
+
+    final decoded = jsonDecode(response.body) as Map<String, dynamic>;
+    final ok = decoded['ok'] as bool? ?? false;
+    final text = (decoded['text'] as String?)?.trim();
+    if (!ok || text == null || text.isEmpty) return null;
+    return text;
+  }
+
   /// Transcribe audio only; returns transcribed text or null on failure.
   Future<String?> transcribe(File audioFile) async {
     final uri = Uri.parse('$baseUrl/api/voice/transcribe');
@@ -146,12 +236,15 @@ class ChiliApiClient {
   }
 
   /// Send a recorded audio file: transcribe, then send text to chat and return reply.
-  Future<String> sendVoice(File audioFile) async {
+  Future<ChatResponse> sendVoice(File audioFile) async {
     final text = await transcribe(audioFile);
     if (text == null || text.isEmpty) {
-      return 'No speech detected. Try again.';
+      return ChatResponse(reply: 'No speech detected. Try again.');
     }
-    final reply = await sendMessage(text);
-    return 'You said: $text\n\n$reply';
+    final resp = await sendMessage(text);
+    return ChatResponse(
+      reply: 'You said: $text\n\n${resp.reply}',
+      clientAction: resp.clientAction,
+    );
   }
 }

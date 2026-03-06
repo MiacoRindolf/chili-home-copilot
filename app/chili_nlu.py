@@ -67,5 +67,34 @@ def parse_message(text: str) -> Action:
     if m:
         return Action(type="add_plan_task", data={"title": m.group(1).strip(), "project_name": m.group(2).strip()})
 
+    # ── Desktop companion actions ──
+
+    # Open app: "open Notepad", "launch Spotify", "start Chrome"
+    m = re.match(r"(?i)^\s*(?:open|launch|start|run)\s+(?:the\s+)?(.+?)(?:\s+app)?$", t)
+    if m:
+        app = m.group(1).strip()
+        if app.lower() not in ("browser", "url", "link", "a url", "a link"):
+            return Action(type="desktop_open_app", data={"app_name": app})
+
+    # Close app: "close Notepad", "quit Spotify", "kill Chrome"
+    m = re.match(r"(?i)^\s*(?:close|quit|kill|exit|stop)\s+(?:the\s+)?(.+?)(?:\s+app)?$", t)
+    if m:
+        return Action(type="desktop_close_app", data={"app_name": m.group(1).strip()})
+
+    # Play music: "play jazz on Spotify", "play lofi on YouTube", "play some music"
+    m = re.match(r"(?i)^\s*play\s+(.+?)\s+(?:on|in|with|via)\s+(spotify|youtube)\s*$", t)
+    if m:
+        return Action(type="desktop_play_music", data={"query": m.group(1).strip(), "service": m.group(2).strip().lower()})
+    m = re.match(r"(?i)^\s*play\s+(.+)$", t)
+    if m:
+        return Action(type="desktop_play_music", data={"query": m.group(1).strip(), "service": "spotify"})
+
+    # Browser search: "search for weather", "google best pizza recipe"
+    # (Note: the simpler web_search rule above catches "search for ..." already;
+    #  these desktop variants target browser-based search specifically.)
+    m = re.match(r"(?i)^\s*(?:browser\s+search|search\s+(?:in\s+)?(?:the\s+)?browser\s+(?:for\s+)?|google\s+in\s+browser\s+)(.+)$", t)
+    if m:
+        return Action(type="desktop_browser_search", data={"query": m.group(1).strip()})
+
     # Default
     return Action(type="unknown", data={"text": t})

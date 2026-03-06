@@ -1,10 +1,13 @@
 import 'package:flutter/material.dart';
 
+import '../companion/shared_chat_history.dart';
 import '../config/app_config.dart';
 import '../network/chili_api_client.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key});
+  const SettingsScreen({super.key, required this.sharedHistory});
+
+  final SharedChatHistory sharedHistory;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -98,6 +101,39 @@ class _SettingsScreenState extends State<SettingsScreen> {
           ),
           const SizedBox(height: 16),
 
+          // Privacy
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Privacy',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  const Text(
+                    'Clear conversation history from the quick chat and full app. This does not affect the server.',
+                    style: TextStyle(fontSize: 13, color: Colors.grey),
+                  ),
+                  const SizedBox(height: 12),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      widget.sharedHistory.clear();
+                      if (mounted) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Conversation history cleared')),
+                        );
+                      }
+                    },
+                    icon: const Icon(Icons.delete_outline, size: 18),
+                    label: const Text('Clear conversation history'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
           // Wake word
           Card(
             child: Padding(
@@ -145,6 +181,82 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     onPressed: _saveWakeWord,
                     icon: const Icon(Icons.save),
                     label: const Text('Save wake word'),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+
+          // Accessibility
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(20),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('Accessibility',
+                      style: Theme.of(context).textTheme.titleMedium),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Reduce motion (disable avatar animations)',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        value: AppConfig.instance.reduceMotion,
+                        onChanged: (value) async {
+                          await AppConfig.instance.setReduceMotion(value);
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Chat font size',
+                    style: Theme.of(context).textTheme.bodyMedium,
+                  ),
+                  const SizedBox(height: 4),
+                  SegmentedButton<String>(
+                    segments: const [
+                      ButtonSegment(value: 'small', label: Text('Small')),
+                      ButtonSegment(value: 'medium', label: Text('Medium')),
+                      ButtonSegment(value: 'large', label: Text('Large')),
+                    ],
+                    selected: {AppConfig.instance.fontSize},
+                    onSelectionChanged: (Set<String> selected) async {
+                      final value = selected.first;
+                      await AppConfig.instance.setFontSize(value);
+                      if (mounted) setState(() {});
+                    },
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          'Larger touch targets',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.grey.shade700,
+                          ),
+                        ),
+                      ),
+                      Switch(
+                        value: AppConfig.instance.largerTargets,
+                        onChanged: (value) async {
+                          await AppConfig.instance.setLargerTargets(value);
+                          if (mounted) setState(() {});
+                        },
+                      ),
+                    ],
                   ),
                 ],
               ),

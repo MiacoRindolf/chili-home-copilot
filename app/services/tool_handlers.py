@@ -1,8 +1,14 @@
-"""Registry of tool action handlers. Each action type has a handler(db, data, reply, is_guest, user_id) -> (reply, executed, action_type)."""
+"""Registry of tool action handlers.
+
+Each handler returns (reply, executed, action_type) or optionally
+(reply, executed, action_type, client_action) where client_action is a dict
+the desktop app should execute locally (open app, open URL, etc.).
+"""
 from __future__ import annotations
 
 from datetime import date
-from typing import Callable
+from typing import Any, Callable
+from urllib.parse import quote_plus
 
 from sqlalchemy.orm import Session
 
@@ -11,7 +17,7 @@ from .. import web_search as web_search_module
 from . import marketplace_service, planner_service
 from ..modules import is_module_enabled
 
-_HANDLERS: dict[str, Callable[..., tuple[str, bool, str]]] = {}
+_HANDLERS: dict[str, Callable[..., tuple]] = {}
 
 WRITE_ACTIONS = {
     "add_chore",
@@ -284,6 +290,64 @@ def _handle_install_module(db: Session, action_data: dict, llm_reply: str, is_gu
     return reply, True, "install_module"
 
 
+# ── Desktop companion actions ────────────────────────────────────────────
+# These return a 4th element: client_action dict for the desktop app.
+
+@register("desktop_open_app")
+def _handle_desktop_open_app(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None):
+    app_name = (action_data.get("app_name") or "").strip()
+    if not app_name:
+        return "Which app would you like me to open?", False, "desktop_open_app", None
+    reply = llm_reply or f"Opening **{app_name}**."
+    return reply, True, "desktop_open_app", {"type": "open_app", "app_name": app_name}
+
+
+@register("desktop_close_app")
+def _handle_desktop_close_app(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None):
+    app_name = (action_data.get("app_name") or "").strip()
+    if not app_name:
+        return "Which app would you like me to close?", False, "desktop_close_app", None
+    reply = llm_reply or f"Closing **{app_name}**."
+    return reply, True, "desktop_close_app", {"type": "close_app", "app_name": app_name}
+
+
+@register("desktop_browser_search")
+def _handle_desktop_browser_search(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None):
+    query = (action_data.get("query") or "").strip()
+    if not query:
+        return "What would you like me to search for?", False, "desktop_browser_search", None
+    url = f"https://www.google.com/search?q={quote_plus(query)}"
+    reply = llm_reply or f"Searching for **\"{query}\"** in your browser."
+    return reply, True, "desktop_browser_search", {"type": "open_url", "url": url}
+
+
+@register("desktop_open_url")
+def _handle_desktop_open_url(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None):
+    url = (action_data.get("url") or "").strip()
+    if not url:
+        return "Which URL would you like me to open?", False, "desktop_open_url", None
+    if not url.startswith(("http://", "https://")):
+        url = "https://" + url
+    reply = llm_reply or f"Opening **{url}** in your browser."
+    return reply, True, "desktop_open_url", {"type": "open_url", "url": url}
+
+
+@register("desktop_play_music")
+def _handle_desktop_play_music(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None):
+    query = (action_data.get("query") or "").strip()
+    service = (action_data.get("service") or "spotify").strip().lower()
+    if not query:
+        return "What would you like me to play?", False, "desktop_play_music", None
+    encoded = quote_plus(query)
+    if service == "youtube":
+        url = f"https://www.youtube.com/results?search_query={encoded}"
+        reply = llm_reply or f"Searching YouTube for **\"{query}\"**."
+    else:
+        url = f"https://open.spotify.com/search/{encoded}"
+        reply = llm_reply or f"Searching Spotify for **\"{query}\"**."
+    return reply, True, "desktop_play_music", {"type": "open_url", "url": url}
+
+
 def execute_tool(
     db: Session,
     action_type: str,
@@ -291,12 +355,20 @@ def execute_tool(
     llm_reply: str,
     is_guest: bool,
     user_id: int | None = None,
-) -> tuple[str, bool, str]:
-    """Execute a tool action via registry. Returns (reply, executed, action_type)."""
+) -> tuple[str, bool, str, dict | None]:
+    """Execute a tool action via registry.
+
+    Returns (reply, executed, action_type, client_action).
+    client_action is None for most actions; desktop_* handlers populate it
+    so the Flutter desktop client can execute OS-level commands locally.
+    """
     if is_guest and action_type in WRITE_ACTIONS:
-        return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked"
+        return "Guest mode is read-only. Click **Link your device** at the top to pair, or ask the admin to add you.", False, "guest_blocked", None
 
     handler = _HANDLERS.get(action_type)
     if handler:
-        return handler(db, action_data, llm_reply, is_guest, user_id)
-    return llm_reply, False, action_type
+        result = handler(db, action_data, llm_reply, is_guest, user_id)
+        if len(result) == 4:
+            return result
+        return result[0], result[1], result[2], None
+    return llm_reply, False, action_type, None

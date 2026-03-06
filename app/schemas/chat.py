@@ -1,4 +1,4 @@
-from typing import Optional, Literal, List
+from typing import Any, Optional, Literal, List, Dict
 
 from pydantic import BaseModel
 
@@ -28,6 +28,7 @@ class MobileChatResponse(BaseModel):
     conversation_id: Optional[int] = None
     rag_sources: List[str] = []
     personality_used: bool = False
+    client_action: Optional[Dict[str, Any]] = None
 
 
 class MobileChatMessage(BaseModel):

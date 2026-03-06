@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import 'chat/chat_screen.dart';
+import 'companion/shared_chat_history.dart';
 import 'dashboard/dashboard_screen.dart';
 import 'intercom/intercom_screen.dart';
 import 'settings/settings_screen.dart';
@@ -8,7 +9,12 @@ import 'settings/settings_screen.dart';
 /// Full application window with a navigation rail.
 class AppShell extends StatefulWidget {
   final VoidCallback onBackToAvatar;
-  const AppShell({super.key, required this.onBackToAvatar});
+  final SharedChatHistory sharedHistory;
+  const AppShell({
+    super.key,
+    required this.onBackToAvatar,
+    required this.sharedHistory,
+  });
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -77,16 +83,24 @@ class _AppShellState extends State<AppShell> {
             ],
           ),
           const VerticalDivider(thickness: 1, width: 1),
-          Expanded(child: _pages[_selectedIndex]),
+          Expanded(child: _pageAt(_selectedIndex)),
         ],
       ),
     );
   }
 
-  List<Widget> get _pages => const [
-        DashboardScreen(),
-        ChatScreen(),
-        IntercomScreen(),
-        SettingsScreen(),
-      ];
+  Widget _pageAt(int index) {
+    switch (index) {
+      case 0:
+        return const DashboardScreen();
+      case 1:
+        return ChatScreen(sharedHistory: widget.sharedHistory);
+      case 2:
+        return const IntercomScreen();
+      case 3:
+        return SettingsScreen(sharedHistory: widget.sharedHistory);
+      default:
+        return const SizedBox.shrink();
+    }
+  }
 }

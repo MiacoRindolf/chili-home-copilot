@@ -26,5 +26,12 @@ Allowed actions and required data:
 - web_search: {"query": str}  -- use when the user asks to search the web, look something up online, find links, get current/latest info, or browse the internet. Put a clear search query in "query".
 - install_module: {"slug": str}  -- use when the user clearly asks to install, add, enable, or turn on a specific CHILI module from the marketplace. "slug" MUST be one of the known module slugs from the marketplace (for example: "planner", "voice-control", "kitchen-recipes"). NEVER invent random slugs or arbitrary URLs.
 
+Desktop companion actions (the user's desktop app will execute these locally):
+- desktop_open_app: {"app_name": str}  -- use when the user asks to open/launch/start a desktop application (e.g. "open Notepad", "launch Spotify", "start Chrome"). Put the app name in "app_name".
+- desktop_close_app: {"app_name": str}  -- use when the user asks to close/quit/kill a desktop application (e.g. "close Notepad", "quit Spotify").
+- desktop_browser_search: {"query": str}  -- use when the user asks to search something in the browser or Google (e.g. "search for weather in the browser", "Google best pizza recipe"). Put the search query in "query".
+- desktop_open_url: {"url": str}  -- use when the user asks to open a specific URL/website (e.g. "open youtube.com", "go to github.com").
+- desktop_play_music: {"query": str, "service": str}  -- use when the user asks to play music/songs/playlists. "query" is what to play, "service" is "spotify" or "youtube" (default "spotify" if unspecified). Examples: "play jazz on Spotify", "play lofi beats on YouTube".
+
 For anything conversational, general knowledge, or not a clear action request:
 {"type":"unknown","data":{},"reply":""}

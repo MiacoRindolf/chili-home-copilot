@@ -61,7 +61,7 @@ def resolve_response(
         if planner_hooks and not is_guest and user_id and is_module_enabled("planner"):
             ok, project_name = planner_hooks.detect_create_project_with_tasks_intent(message)
             if ok and project_name:
-                llm_reply, executed, action_type = execute_tool(
+                llm_reply, executed, action_type, client_action = execute_tool(
                     db, "add_plan_project_with_tasks",
                     {"name": project_name, "description": "", "tasks": []},
                     "", is_guest, user_id=user_id,
@@ -73,21 +73,21 @@ def resolve_response(
                         added = planner_hooks.generate_tasks_for_project(db, proj["id"], project_name, user_id, trace_id)
                         if added:
                             llm_reply = f'Created project **"{project_name}"** with {added} task(s). Open each task in the Planner to see complexity, duration, and reasoning. [Project Planner](/planner).'
-                return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "fallback", "rag_sources": [], "personality_used": False}
+                return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "fallback", "rag_sources": [], "personality_used": False, "client_action": client_action}
 
         nlu_result = nlu_fallback(message)
         if nlu_result:
-            llm_reply, executed, action_type = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
-            return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "nlu-fallback", "rag_sources": [], "personality_used": False}
+            llm_reply, executed, action_type, client_action = execute_tool(db, nlu_result["type"], nlu_result["data"], "", is_guest, user_id=user_id)
+            return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": "nlu-fallback", "rag_sources": [], "personality_used": False, "client_action": client_action}
 
         if openai_client.is_configured():
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
             openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
             result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
             if result.get("reply"):
-                return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False}
+                return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False, "client_action": None}
 
-        return {"reply": "CHILI's brain is offline. Start Ollama to use chat: ollama serve", "action_type": "llm_offline", "executed": False, "model_used": "offline", "rag_sources": [], "personality_used": False}
+        return {"reply": "CHILI's brain is offline. Start Ollama to use chat: ollama serve", "action_type": "llm_offline", "executed": False, "model_used": "offline", "rag_sources": [], "personality_used": False, "client_action": None}
 
     planned = ctx["planned"]
     if ctx.get("rag_context"):
@@ -134,7 +134,7 @@ def resolve_response(
             llm_reply = ""
             log_info(trace_id, f"create_project_with_tasks_fallback name={project_name!r}")
 
-    llm_reply, executed, action_type = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
+    llm_reply, executed, action_type, client_action = execute_tool(db, action_type, action_data, llm_reply, is_guest, user_id=user_id)
 
     if (
         planner_hooks
@@ -162,7 +162,7 @@ def resolve_response(
             "Include relevant links from the results. Be specific and actionable."
         )
         if stream:
-            return {"continue_stream": True, "messages": openai_messages, "system_prompt": search_system, "action_type": "web_search", "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": llm_reply}
+            return {"continue_stream": True, "messages": openai_messages, "system_prompt": search_system, "action_type": "web_search", "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": llm_reply, "client_action": client_action}
         result = openai_client.chat(messages=openai_messages, system_prompt=search_system, trace_id=trace_id, user_message=message)
         if result.get("reply"):
             llm_reply = result["reply"]
@@ -175,7 +175,7 @@ def resolve_response(
         if llm_reply and llm_reply.strip():
             openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
         if stream:
-            return {"continue_stream": True, "messages": openai_messages, "system_prompt": openai_system, "action_type": "general_chat", "model_used": "openai", "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": "I'm not sure what to do with that."}
+            return {"continue_stream": True, "messages": openai_messages, "system_prompt": openai_system, "action_type": "general_chat", "model_used": "openai", "rag_sources": rag_sources, "personality_used": personality_used, "fallback_reply": "I'm not sure what to do with that.", "client_action": client_action}
         result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
         if result.get("reply"):
             llm_reply = result["reply"]
@@ -188,7 +188,7 @@ def resolve_response(
         llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
     if action_type == "web_search" and not model_used:
         model_used = "duckduckgo"
-    return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used}
+    return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "client_action": client_action}
 
 
 def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None, project_id: int | None = None):
@@ -367,6 +367,22 @@ def try_memory_extraction(
         )
     except Exception as e:
         log_info(trace_id, f"memory_extraction_error={e}")
+
+
+def run_personality_and_memory_in_background(
+    user_id, is_guest, message, llm_reply, action_type, trace_id,
+):
+    """Run personality update and memory extraction in a background task (uses own DB session)."""
+    if not user_id or is_guest:
+        return
+    db = SessionLocal()
+    try:
+        try_personality_update(user_id, is_guest, db, trace_id)
+        try_memory_extraction(
+            user_id, is_guest, message, llm_reply, action_type, db, trace_id,
+        )
+    finally:
+        db.close()
 
 
 def store_and_title_with_memory(

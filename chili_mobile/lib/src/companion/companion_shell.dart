@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:window_manager/window_manager.dart';
 
 import 'avatar_view.dart';
+import 'shared_chat_history.dart';
 import '../app_shell.dart';
 import '../config/app_config.dart';
 import '../voice/wake_word_listener.dart';
@@ -19,12 +20,15 @@ class CompanionShell extends StatefulWidget {
 
 class _CompanionShellState extends State<CompanionShell> {
   CompanionMode _mode = CompanionMode.avatar;
+  final _sharedHistory = SharedChatHistory();
   final _pauseWakeWord = ValueNotifier<bool>(false);
   final _wakeWordCommand = ValueNotifier<String?>(null);
   final _wakeWordReply = ValueNotifier<String?>(null);
   final _wakeWordStatus = ValueNotifier<String?>(null);
   final _wakeWordPartial = ValueNotifier<String?>(null);
   final _followUpActive = ValueNotifier<bool>(false);
+  final _ttsPlaying = ValueNotifier<bool>(false);
+  final _ttsInterruptRequested = ValueNotifier<bool>(false);
   late final WakeWordListener _wakeWordListener;
 
   @override
@@ -32,6 +36,7 @@ class _CompanionShellState extends State<CompanionShell> {
     super.initState();
     _wakeWordListener = WakeWordListener(
       pauseListening: _pauseWakeWord,
+      ttsPlaying: _ttsPlaying,
       onReply: (command, reply) {
         _wakeWordCommand.value = command;
         _wakeWordReply.value = reply;
@@ -47,6 +52,9 @@ class _CompanionShellState extends State<CompanionShell> {
       },
       onPartial: (partial) {
         _wakeWordPartial.value = partial.isEmpty ? null : partial;
+      },
+      onTtsInterruptRequested: () {
+        _ttsInterruptRequested.value = true;
       },
     );
     _startWakeWordIfEnabled();
@@ -68,6 +76,8 @@ class _CompanionShellState extends State<CompanionShell> {
     _wakeWordStatus.dispose();
     _wakeWordPartial.dispose();
     _followUpActive.dispose();
+    _ttsPlaying.dispose();
+    _ttsInterruptRequested.dispose();
     super.dispose();
   }
 
@@ -97,14 +107,20 @@ class _CompanionShellState extends State<CompanionShell> {
   Widget build(BuildContext context) {
     return _mode == CompanionMode.avatar
         ? AvatarView(
+            sharedHistory: _sharedHistory,
             onOpenFullApp: _switchToFullApp,
             pauseWakeWord: _pauseWakeWord,
+            ttsPlaying: _ttsPlaying,
+            ttsInterruptRequested: _ttsInterruptRequested,
             wakeWordCommand: _wakeWordCommand,
             wakeWordReply: _wakeWordReply,
             wakeWordStatus: _wakeWordStatus,
             wakeWordPartial: _wakeWordPartial,
             wakeWordFollowUpActive: _followUpActive,
           )
-        : AppShell(onBackToAvatar: _switchToAvatar);
+        : AppShell(
+            sharedHistory: _sharedHistory,
+            onBackToAvatar: _switchToAvatar,
+          );
   }
 }

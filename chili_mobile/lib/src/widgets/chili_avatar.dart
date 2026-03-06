@@ -7,10 +7,12 @@ enum AvatarState { idle, listening, thinking, speaking }
 
 /// Animated chili mascot avatar with state-specific animations.
 /// Uses a CustomPainter-drawn chili pepper for guaranteed transparency.
+/// When [reduceMotion] is true, animations are disabled.
 class ChiliAvatar extends StatefulWidget {
-  const ChiliAvatar({super.key, required this.state});
+  const ChiliAvatar({super.key, required this.state, this.reduceMotion = false});
 
   final AvatarState state;
+  final bool reduceMotion;
 
   @override
   State<ChiliAvatar> createState() => _ChiliAvatarState();
@@ -30,34 +32,60 @@ class _ChiliAvatarState extends State<ChiliAvatar>
     _bobController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat(reverse: true);
-
+    );
     _pulseController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1500),
-    )..repeat(reverse: true);
-
+    );
     _ringController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 800),
-    )..repeat();
-
+    );
     _dotsController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 2000),
-    )..repeat();
-
+    );
     _breathController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1200),
-    )..repeat(reverse: true);
+    );
+    if (!widget.reduceMotion) {
+      _bobController.repeat(reverse: true);
+      _pulseController.repeat(reverse: true);
+      _ringController.repeat();
+      _dotsController.repeat();
+      _breathController.repeat(reverse: true);
+    } else {
+      _bobController.value = 0.5;
+      _pulseController.value = 0.5;
+      _ringController.value = 1.0;
+      _dotsController.value = 0.0;
+      _breathController.value = 0.5;
+    }
   }
 
   @override
   void didUpdateWidget(ChiliAvatar oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.state != widget.state) {
-      setState(() {});
+    if (oldWidget.reduceMotion != widget.reduceMotion) {
+      if (widget.reduceMotion) {
+        _bobController.stop();
+        _pulseController.stop();
+        _ringController.stop();
+        _dotsController.stop();
+        _breathController.stop();
+        _bobController.value = 0.5;
+        _pulseController.value = 0.5;
+        _ringController.value = 1.0;
+        _dotsController.value = 0.0;
+        _breathController.value = 0.5;
+      } else {
+        _bobController.repeat(reverse: true);
+        _pulseController.repeat(reverse: true);
+        _ringController.repeat();
+        _dotsController.repeat();
+        _breathController.repeat(reverse: true);
+      }
     }
   }
 
@@ -85,6 +113,7 @@ class _ChiliAvatarState extends State<ChiliAvatar>
           _breathController,
         ]),
         builder: (context, child) {
+          final noMotion = widget.reduceMotion;
           final bob = Tween<double>(begin: 0, end: 6).animate(
             CurvedAnimation(parent: _bobController, curve: Curves.easeInOut),
           );
@@ -104,15 +133,16 @@ class _ChiliAvatarState extends State<ChiliAvatar>
           bool showRing = false;
           bool showDots = false;
           double glowOpacity = 0.0;
+          final ringValue = noMotion ? 1.0 : ring.value;
 
           switch (widget.state) {
             case AvatarState.idle:
-              translateY = bob.value;
-              scale = pulse.value;
-              glowOpacity = 0.15 + 0.1 * _pulseController.value;
+              translateY = noMotion ? 0 : bob.value;
+              scale = noMotion ? 1.0 : pulse.value;
+              glowOpacity = noMotion ? 0.2 : (0.15 + 0.1 * _pulseController.value);
               break;
             case AvatarState.listening:
-              translateY = bob.value * 0.5;
+              translateY = noMotion ? 0 : bob.value * 0.5;
               scale = 1.0;
               showRing = true;
               glowOpacity = 0.25;
@@ -120,12 +150,12 @@ class _ChiliAvatarState extends State<ChiliAvatar>
             case AvatarState.thinking:
               translateY = 0;
               scale = 1.0;
-              showDots = true;
+              showDots = !noMotion;
               glowOpacity = 0.2;
               break;
             case AvatarState.speaking:
               translateY = 0;
-              scale = breath.value;
+              scale = noMotion ? 1.0 : breath.value;
               glowOpacity = 0.2;
               break;
           }
@@ -160,8 +190,8 @@ class _ChiliAvatarState extends State<ChiliAvatar>
                 ),
               if (showRing)
                 Container(
-                  width: 120 * ring.value,
-                  height: 120 * ring.value,
+                  width: 120 * ringValue,
+                  height: 120 * ringValue,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     border: Border.all(

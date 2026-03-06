@@ -8,15 +8,30 @@ class AppConfig {
 
   static const _keyWakeWord = 'chili_wake_word';
   static const _keyAlwaysListening = 'chili_always_listening';
+  static const _keyOnboardingDone = 'chili_onboarding_done';
+  static const _keyReduceMotion = 'chili_reduce_motion';
+  static const _keyFontSize = 'chili_font_size'; // 'small' | 'medium' | 'large'
+  static const _keyLargerTargets = 'chili_larger_targets';
   static const _defaultWakeWord = 'chili';
   static const _defaultAlwaysListening = true;
 
   SharedPreferences? _prefs;
   String _wakeWord = _defaultWakeWord;
   bool _alwaysListening = _defaultAlwaysListening;
+  bool _reduceMotion = false;
+  String _fontSize = 'medium';
+  bool _largerTargets = false;
 
   String get wakeWord => _wakeWord;
   bool get alwaysListening => _alwaysListening;
+  bool get onboardingDone => _prefs?.getBool(_keyOnboardingDone) ?? false;
+  bool get reduceMotion => _reduceMotion;
+  String get fontSize => _fontSize;
+  bool get largerTargets => _largerTargets;
+
+  Future<void> setOnboardingDone() async {
+    await _prefs?.setBool(_keyOnboardingDone, true);
+  }
 
   bool get isLoaded => _prefs != null;
 
@@ -24,6 +39,25 @@ class AppConfig {
     _prefs = await SharedPreferences.getInstance();
     _wakeWord = _prefs!.getString(_keyWakeWord) ?? _defaultWakeWord;
     _alwaysListening = _prefs!.getBool(_keyAlwaysListening) ?? _defaultAlwaysListening;
+    _reduceMotion = _prefs!.getBool(_keyReduceMotion) ?? false;
+    _fontSize = _prefs!.getString(_keyFontSize) ?? 'medium';
+    _largerTargets = _prefs!.getBool(_keyLargerTargets) ?? false;
+  }
+
+  Future<void> setReduceMotion(bool value) async {
+    _reduceMotion = value;
+    await _prefs?.setBool(_keyReduceMotion, value);
+  }
+
+  Future<void> setFontSize(String value) async {
+    if (value != 'small' && value != 'medium' && value != 'large') return;
+    _fontSize = value;
+    await _prefs?.setString(_keyFontSize, value);
+  }
+
+  Future<void> setLargerTargets(bool value) async {
+    _largerTargets = value;
+    await _prefs?.setBool(_keyLargerTargets, value);
   }
 
   Future<void> setWakeWord(String word) async {

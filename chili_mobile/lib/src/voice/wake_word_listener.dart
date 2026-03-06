@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
 
 import '../config/app_config.dart';
+import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
 import 'vosk_ffi.dart';
 import 'vosk_setup.dart';
@@ -17,6 +18,9 @@ import 'vosk_setup.dart';
 /// mono) and fed directly to a Vosk recognizer through dart:ffi.  Each
 /// finalized utterance is checked for the wake phrase ("Chili" / "Hey Chili");
 /// when matched the remaining command text is sent to the CHILI backend.
+///
+/// For command transcription accuracy, audio is buffered and sent to the
+/// backend Whisper API, falling back to Vosk text when unavailable.
 class WakeWordListener {
   WakeWordListener({
     required this.onReply,
@@ -24,33 +28,42 @@ class WakeWordListener {
     required this.onStatus,
     this.onFollowUpActive,
     this.onPartial,
+    this.onTtsInterruptRequested,
     ValueNotifier<bool>? pauseListening,
-  }) : _pauseListening = pauseListening ?? ValueNotifier<bool>(false) {
+    ValueNotifier<bool>? ttsPlaying,
+  })  : _pauseListening = pauseListening ?? ValueNotifier<bool>(false),
+        _ttsPlaying = ttsPlaying {
     _pauseListening?.addListener(_onPauseChanged);
   }
 
   final ValueNotifier<bool>? _pauseListening;
+  final ValueNotifier<bool>? _ttsPlaying;
 
-  /// Called with `(command, reply)` when a wake-word command is answered.
   final void Function(String command, String reply) onReply;
   final void Function(bool isListening) onListeningChanged;
   final void Function(String status) onStatus;
-  /// Called when follow-up mode is active (user can speak without wake word).
   final void Function(bool active)? onFollowUpActive;
-  /// Called with live partial transcription (what Vosk is hearing so far).
   final void Function(String partial)? onPartial;
+  /// Called when a TTS-interrupt phrase is detected during playback.
+  final void Function()? onTtsInterruptRequested;
+
+  static const Set<String> _stopPhrases = {
+    'stop', 'cancel', 'enough', 'never mind', 'nevermind',
+    'chili stop', 'chile stop', 'chilly stop',
+    'quiet', 'hush', 'stop talking', 'shut up',
+    'okay stop', 'ok stop',
+  };
 
   final _recorder = AudioRecorder();
+  final _client = ChiliApiClient();
   bool _running = false;
   bool _streamingActive = false;
   bool _handlingCommand = false;
+  bool _queueProcessorRunning = false;
 
-  /// When set, the next non-wake-word utterance is treated as the command
-  /// (Vosk often splits "Hey Chili, what time" into two separate results).
   DateTime? _awaitingCommandUntil;
   static const _commandWindowSeconds = 8;
 
-  /// Continued conversation: after a reply, user can speak again without wake word for 8s.
   DateTime? _followUpUntil;
   static const _followUpSeconds = 8;
 
@@ -58,23 +71,35 @@ class WakeWordListener {
   Pointer<Void>? _model;
   Pointer<Void>? _recognizer;
 
-  /// Queued finalized utterances waiting to be processed.  We use a queue so
-  /// that the FFI acceptWaveform calls (synchronous) are never blocked by
-  /// async HTTP calls.
+  /// Single-subscription queue; one long-lived consumer started in [start].
   final _utteranceQueue = StreamController<String>();
 
+  // Rolling PCM buffer: accumulates audio for the current utterance (since
+  // the last Vosk final).  On each Vosk final the buffer is snapshotted into
+  // [_lastFinalizedPcm] so that [_sendCommand] can forward it to Whisper.
+  final List<Uint8List> _currentPcmBuffer = [];
+  List<Uint8List>? _lastFinalizedPcm;
+
   bool get isRunning => _running;
+
+  // ── Lifecycle ──────────────────────────────────────────────────────────
 
   void start() {
     if (_running) return;
     _running = true;
     onListeningChanged(true);
+    if (!_queueProcessorRunning) {
+      _queueProcessorRunning = true;
+      _processUtteranceQueue();
+    }
     _startStreamingLoop();
   }
 
   void stop() {
     if (!_running) return;
     _running = false;
+    _currentPcmBuffer.clear();
+    _lastFinalizedPcm = null;
     _clearFollowUp();
     onListeningChanged(false);
     _stopRecorder();
@@ -166,12 +191,6 @@ class WakeWordListener {
     onStatus('Say "Chili" or "Hey Chili"...');
     debugPrint('[WakeWord] Streaming started');
 
-    final client = ChiliApiClient();
-
-    // Start the utterance processor in parallel -- it awaits each HTTP call
-    // sequentially so we never drop replies.
-    _processUtteranceQueue(client);
-
     try {
       final stream = await _recorder.startStream(
         const RecordConfig(
@@ -193,12 +212,22 @@ class WakeWordListener {
     }
   }
 
-  // ── Audio → Vosk (synchronous, never blocks on HTTP) ───────────────────
+  // ── Audio -> Vosk (synchronous, never blocks on HTTP) ──────────────────
 
   void _feedChunk(Uint8List chunk) {
     final vosk = _vosk;
     final rec = _recognizer;
     if (vosk == null || rec == null) return;
+
+    _currentPcmBuffer.add(Uint8List.fromList(chunk));
+    // Cap buffer at ~15 s of 16 kHz 16-bit mono (480 000 bytes).
+    int total = 0;
+    for (final c in _currentPcmBuffer) {
+      total += c.length;
+    }
+    while (total > 480000 && _currentPcmBuffer.isNotEmpty) {
+      total -= _currentPcmBuffer.removeAt(0).length;
+    }
 
     try {
       final hasResult = vosk.acceptWaveform(rec, chunk);
@@ -207,6 +236,11 @@ class WakeWordListener {
         onPartial?.call('');
         final json = vosk.getResult(rec);
         final text = _extractText(json);
+
+        // Snapshot the PCM for this finalized utterance.
+        _lastFinalizedPcm = List<Uint8List>.from(_currentPcmBuffer);
+        _currentPcmBuffer.clear();
+
         if (text.isEmpty) return;
 
         debugPrint('[WakeWord] Heard: "$text"');
@@ -225,25 +259,35 @@ class WakeWordListener {
     }
   }
 
-  // ── Utterance queue processor (awaits HTTP properly) ───────────────────
+  // ── Utterance queue processor (single long-lived consumer) ─────────────
 
-  Future<void> _processUtteranceQueue(ChiliApiClient client) async {
+  Future<void> _processUtteranceQueue() async {
     await for (final text in _utteranceQueue.stream) {
-      if (!_running) break;
+      if (!_running) continue;
       try {
-        await _handleUtterance(text, client);
+        await _handleUtterance(text);
       } catch (e) {
         debugPrint('[WakeWord] Utterance handler error: $e');
       }
     }
+    _queueProcessorRunning = false;
   }
 
-  Future<void> _handleUtterance(String text, ChiliApiClient client) async {
+  Future<void> _handleUtterance(String text) async {
+    // During TTS playback only stop phrases are honoured (ignore echo).
+    if (_ttsPlaying?.value ?? false) {
+      if (_isStopPhrase(text)) {
+        debugPrint('[WakeWord] Stop phrase during TTS: "$text"');
+        onTtsInterruptRequested?.call();
+      }
+      return;
+    }
+
     final config = AppConfig.instance;
     await config.load();
     final now = DateTime.now();
 
-    // Continued conversation: within follow-up window, any non-empty utterance is a command.
+    // Continued conversation: within follow-up window any utterance is a command.
     if (_followUpUntil != null) {
       if (now.isAfter(_followUpUntil!)) {
         _followUpUntil = null;
@@ -253,25 +297,23 @@ class WakeWordListener {
         final command = text.trim();
         _followUpUntil = now.add(const Duration(seconds: _followUpSeconds));
         onFollowUpActive?.call(true);
-        await _sendCommand(command, client, config);
+        await _sendCommand(command, config);
         return;
       }
     }
 
-    // Check if we're in a "say your command" window from a previous wake word.
+    // "Say your command" window from a previous wake-word-only utterance.
     if (_awaitingCommandUntil != null) {
       if (now.isAfter(_awaitingCommandUntil!)) {
         debugPrint('[WakeWord] Command window expired');
         _awaitingCommandUntil = null;
       } else if (text.isNotEmpty) {
-        // Accept ANYTHING in the window as the command (even if it contains
-        // the wake word again -- user might say "Chili, what time is it").
         final stripped = config.isWakeWordMatch(text)
             ? config.stripWakeWord(text)
             : text.trim();
         if (stripped.isNotEmpty) {
           _awaitingCommandUntil = null;
-          await _sendCommand(stripped, client, config);
+          await _sendCommand(stripped, config);
           return;
         }
       }
@@ -285,44 +327,77 @@ class WakeWordListener {
 
     final command = config.stripWakeWord(text);
     if (command.isEmpty) {
-      debugPrint('[WakeWord] Wake word only -- opening ${_commandWindowSeconds}s command window');
+      debugPrint(
+          '[WakeWord] Wake word only -- opening ${_commandWindowSeconds}s command window');
       onStatus('Listening... say your command');
       _awaitingCommandUntil =
           now.add(const Duration(seconds: _commandWindowSeconds));
       return;
     }
 
-    await _sendCommand(command, client, config);
+    await _sendCommand(command, config);
   }
 
-  Future<void> _sendCommand(
-    String command,
-    ChiliApiClient client,
-    AppConfig config,
-  ) async {
+  // ── Send command (Whisper-first, Vosk fallback) ────────────────────────
+
+  Future<void> _sendCommand(String voskCommand, AppConfig config) async {
     if (_handlingCommand) {
-      debugPrint('[WakeWord] Already handling a command, queued: "$command"');
+      debugPrint('[WakeWord] Already handling a command, skipped: "$voskCommand"');
       return;
     }
     _handlingCommand = true;
-    debugPrint('[WakeWord] >>> Sending command: "$command"');
-    onStatus('Processing: "$command"');
+
+    String finalCommand = voskCommand;
+
+    // Try backend Whisper for higher accuracy.
+    final pcm = _lastFinalizedPcm;
+    _lastFinalizedPcm = null;
+    if (pcm != null && pcm.isNotEmpty) {
+      final wavBytes = _buildWav(pcm);
+      debugPrint(
+          '[WakeWord] Sending ${wavBytes.length} bytes to Whisper...');
+      onStatus('Transcribing...');
+      try {
+        final whisperText =
+            await _client.transcribeAudioBytes(wavBytes).timeout(
+                  const Duration(seconds: 10),
+                );
+        if (whisperText != null && whisperText.trim().isNotEmpty) {
+          final stripped = config.isWakeWordMatch(whisperText)
+              ? config.stripWakeWord(whisperText)
+              : whisperText.trim();
+          if (stripped.isNotEmpty) {
+            finalCommand = stripped;
+            debugPrint(
+                '[WakeWord] Whisper: "$finalCommand" (Vosk had: "$voskCommand")');
+          }
+        }
+      } catch (e) {
+        debugPrint('[WakeWord] Whisper failed, using Vosk text: $e');
+      }
+    }
+
+    debugPrint('[WakeWord] >>> Sending command: "$finalCommand"');
+    onStatus('Processing: "$finalCommand"');
     try {
-      final reply = await client.sendMessage(command).timeout(
-        const Duration(seconds: 15),
-        onTimeout: () => 'CHILI took too long to respond. Please try again.',
-      );
-      debugPrint('[WakeWord] <<< Reply received (${reply.length} chars)');
-      onReply(command, reply);
-      _followUpUntil = DateTime.now().add(const Duration(seconds: _followUpSeconds));
+      final resp = await _client.sendMessage(finalCommand).timeout(
+            const Duration(seconds: 15),
+            onTimeout: () => ChatResponse(
+                reply: 'CHILI took too long to respond. Please try again.'),
+          );
+      debugPrint('[WakeWord] <<< Reply received (${resp.reply.length} chars)');
+      DesktopActions.execute(resp.clientAction);
+      onReply(finalCommand, resp.reply);
+      _followUpUntil =
+          DateTime.now().add(const Duration(seconds: _followUpSeconds));
       onFollowUpActive?.call(true);
       onStatus('Listening... (follow-up)');
     } catch (e) {
       debugPrint('[WakeWord] !!! sendMessage error: $e');
       final errMsg =
           e.toString().replaceFirst(RegExp(r'^Exception:?\s*'), '');
-      onReply(command, 'Could not reach CHILI. $errMsg');
-      onStatus('Error – check server');
+      onReply(finalCommand, 'Could not reach CHILI. $errMsg');
+      onStatus('Error -- check server');
       _followUpUntil = null;
       onFollowUpActive?.call(false);
     } finally {
@@ -330,9 +405,59 @@ class WakeWordListener {
     }
   }
 
+  // ── Stop-phrase detection ──────────────────────────────────────────────
+
+  bool _isStopPhrase(String text) {
+    final normalized = text.trim().toLowerCase();
+    if (normalized.isEmpty) return false;
+    return _stopPhrases.contains(normalized);
+  }
+
   void _clearFollowUp() {
     _followUpUntil = null;
     onFollowUpActive?.call(false);
+  }
+
+  // ── WAV builder (16-bit, 16 kHz, mono) ─────────────────────────────────
+
+  static Uint8List _buildWav(List<Uint8List> pcmChunks) {
+    int totalLen = 0;
+    for (final c in pcmChunks) {
+      totalLen += c.length;
+    }
+    final header = ByteData(44);
+    header.setUint8(0, 0x52); // R
+    header.setUint8(1, 0x49); // I
+    header.setUint8(2, 0x46); // F
+    header.setUint8(3, 0x46); // F
+    header.setUint32(4, 36 + totalLen, Endian.little);
+    header.setUint8(8, 0x57);  // W
+    header.setUint8(9, 0x41);  // A
+    header.setUint8(10, 0x56); // V
+    header.setUint8(11, 0x45); // E
+    header.setUint8(12, 0x66); // f
+    header.setUint8(13, 0x6D); // m
+    header.setUint8(14, 0x74); // t
+    header.setUint8(15, 0x20); // (space)
+    header.setUint32(16, 16, Endian.little);
+    header.setUint16(20, 1, Endian.little);     // PCM
+    header.setUint16(22, 1, Endian.little);     // mono
+    header.setUint32(24, 16000, Endian.little); // sample rate
+    header.setUint32(28, 32000, Endian.little); // byte rate
+    header.setUint16(32, 2, Endian.little);     // block align
+    header.setUint16(34, 16, Endian.little);    // bits per sample
+    header.setUint8(36, 0x64); // d
+    header.setUint8(37, 0x61); // a
+    header.setUint8(38, 0x74); // t
+    header.setUint8(39, 0x61); // a
+    header.setUint32(40, totalLen, Endian.little);
+
+    final wav = BytesBuilder();
+    wav.add(header.buffer.asUint8List());
+    for (final c in pcmChunks) {
+      wav.add(c);
+    }
+    return wav.toBytes();
   }
 
   // ── Helpers ────────────────────────────────────────────────────────────

@@ -1,25 +1,21 @@
 import 'dart:async';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 
+import '../config/app_config.dart';
+import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
-
-enum _ChatRole { user, assistant }
-
-class _QuickChatMessage {
-  _QuickChatMessage({required this.role, required this.content});
-  final _ChatRole role;
-  final String content;
-}
+import 'shared_chat_history.dart';
 
 /// The small floating avatar with an expandable chat bubble.
 ///
@@ -32,8 +28,11 @@ class _QuickChatMessage {
 class AvatarView extends StatefulWidget {
   const AvatarView({
     super.key,
+    required this.sharedHistory,
     required this.onOpenFullApp,
     this.pauseWakeWord,
+    this.ttsPlaying,
+    this.ttsInterruptRequested,
     this.wakeWordCommand,
     this.wakeWordReply,
     this.wakeWordStatus,
@@ -41,8 +40,11 @@ class AvatarView extends StatefulWidget {
     this.wakeWordFollowUpActive,
   });
 
+  final SharedChatHistory sharedHistory;
   final VoidCallback onOpenFullApp;
   final ValueNotifier<bool>? pauseWakeWord;
+  final ValueNotifier<bool>? ttsPlaying;
+  final ValueNotifier<bool>? ttsInterruptRequested;
   final ValueNotifier<String?>? wakeWordCommand;
   final ValueNotifier<String?>? wakeWordReply;
   final ValueNotifier<String?>? wakeWordStatus;
@@ -59,32 +61,65 @@ class _AvatarViewState extends State<AvatarView> {
   final _scrollController = ScrollController();
   final _audioPlayer = AudioPlayer();
   StreamSubscription<void>? _ttsCompleteSub;
-  final _messages = <_QuickChatMessage>[];
+  String _streamingReply = '';
+  String? _lastFailedMessage;
   bool _isSending = false;
   bool _showChat = false;
   bool _isDraggingFile = false;
   AvatarState _avatarState = AvatarState.idle;
+  bool _showOnboarding = false;
+  int _onboardingStep = 0;
+  bool _userMuted = false;
+  bool _recording = false;
 
   @override
   void initState() {
     super.initState();
+    _loadOnboardingState();
+    widget.sharedHistory.addListener(_onHistoryChanged);
     widget.wakeWordReply?.addListener(_onWakeWordReply);
     widget.wakeWordStatus?.addListener(_onStatusChanged);
     widget.wakeWordPartial?.addListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.addListener(_onStatusChanged);
+    widget.ttsInterruptRequested?.addListener(_onTtsInterrupt);
   }
 
   @override
   void dispose() {
+    widget.sharedHistory.removeListener(_onHistoryChanged);
     widget.wakeWordReply?.removeListener(_onWakeWordReply);
     widget.wakeWordStatus?.removeListener(_onStatusChanged);
     widget.wakeWordPartial?.removeListener(_onStatusChanged);
     widget.wakeWordFollowUpActive?.removeListener(_onStatusChanged);
+    widget.ttsInterruptRequested?.removeListener(_onTtsInterrupt);
     _ttsCompleteSub?.cancel();
     _controller.dispose();
     _scrollController.dispose();
     _audioPlayer.dispose();
     super.dispose();
+  }
+
+  void _onHistoryChanged() {
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _loadOnboardingState() async {
+    await AppConfig.instance.load();
+    if (mounted) {
+      setState(() => _showOnboarding = !AppConfig.instance.onboardingDone);
+    }
+  }
+
+  Future<void> _onOnboardingNext() async {
+    if (_onboardingStep >= 2) {
+      await AppConfig.instance.setOnboardingDone();
+      if (mounted) setState(() {
+        _showOnboarding = false;
+        _onboardingStep = 0;
+      });
+    } else {
+      if (mounted) setState(() => _onboardingStep++);
+    }
   }
 
   void _onStatusChanged() {
@@ -98,17 +133,34 @@ class _AvatarViewState extends State<AvatarView> {
     widget.wakeWordCommand?.value = null;
     widget.wakeWordReply!.value = null;
     _controller.clear();
-    setState(() {
-      if (command != null && command.isNotEmpty) {
-        _messages.add(_QuickChatMessage(role: _ChatRole.user, content: command));
-      }
-      _messages.add(_QuickChatMessage(role: _ChatRole.assistant, content: reply));
-      _avatarState = AvatarState.speaking;
-      _showChat = true;
-    });
+    if (command != null && command.isNotEmpty) {
+      widget.sharedHistory.addUser(command);
+    }
+    widget.sharedHistory.addAssistant(reply);
+    if (mounted) {
+      setState(() {
+        _avatarState = AvatarState.speaking;
+        _showChat = true;
+      });
+    }
     windowManager.setSize(const Size(300, 520));
     _scrollToBottom();
     _speakReply(reply);
+  }
+
+  void _onTtsInterrupt() {
+    if (widget.ttsInterruptRequested?.value != true) return;
+    widget.ttsInterruptRequested?.value = false;
+    _stopTts();
+  }
+
+  Future<void> _stopTts() async {
+    _ttsCompleteSub?.cancel();
+    _ttsCompleteSub = null;
+    try {
+      await _audioPlayer.stop();
+    } catch (_) {}
+    _finishSpeaking();
   }
 
   Future<void> _speakReply(String text) async {
@@ -116,7 +168,7 @@ class _AvatarViewState extends State<AvatarView> {
       _finishSpeaking();
       return;
     }
-    widget.pauseWakeWord?.value = true;
+    widget.ttsPlaying?.value = true;
     try {
       final audioBytes = await _client.fetchTts(text);
       if (audioBytes == null || audioBytes.isEmpty || !mounted) {
@@ -133,7 +185,9 @@ class _AvatarViewState extends State<AvatarView> {
       }
       await _audioPlayer.stop();
       void onDone() {
-        _finishSpeaking();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          _finishSpeaking();
+        });
         try { file.deleteSync(); } catch (_) {}
       }
       _ttsCompleteSub?.cancel();
@@ -146,7 +200,7 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   void _finishSpeaking() {
-    widget.pauseWakeWord?.value = false;
+    widget.ttsPlaying?.value = false;
     if (mounted) setState(() => _avatarState = AvatarState.idle);
   }
 
@@ -164,33 +218,46 @@ class _AvatarViewState extends State<AvatarView> {
     final text = _controller.text.trim();
     if (text.isEmpty || _isSending) return;
 
+    widget.sharedHistory.addUser(text);
     setState(() {
       _isSending = true;
-      _messages.add(_QuickChatMessage(role: _ChatRole.user, content: text));
+      _streamingReply = '';
       _avatarState = AvatarState.thinking;
       _controller.clear();
     });
     _scrollToBottom();
 
     try {
-      final reply = await _client.sendMessage(text);
+      final resp = await _client.sendMessageStream(
+        text,
+        onToken: (token) {
+          if (mounted) {
+            setState(() => _streamingReply += token);
+            _scrollToBottom();
+          }
+        },
+      );
       if (!mounted) return;
+      final actionResult = await DesktopActions.execute(resp.clientAction);
+      if (mounted && actionResult != null && actionResult.isNotEmpty) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(actionResult), duration: const Duration(seconds: 2)),
+        );
+      }
+      if (!mounted) return;
+      widget.sharedHistory.addAssistant(resp.reply);
       setState(() {
-        _messages.add(_QuickChatMessage(role: _ChatRole.assistant, content: reply));
-        _avatarState = AvatarState.speaking;
+        _streamingReply = '';
+        _lastFailedMessage = null;
+        _avatarState = AvatarState.idle;
       });
       _scrollToBottom();
-      await Future.delayed(const Duration(seconds: 2));
-      if (mounted) {
-        setState(() => _avatarState = AvatarState.idle);
-      }
     } catch (e) {
       if (!mounted) return;
+      widget.sharedHistory.addAssistant('Could not reach CHILI. Is the server running?');
       setState(() {
-        _messages.add(_QuickChatMessage(
-          role: _ChatRole.assistant,
-          content: 'Could not reach CHILI. Is the server running?',
-        ));
+        _streamingReply = '';
+        _lastFailedMessage = text;
         _avatarState = AvatarState.idle;
       });
       _scrollToBottom();
@@ -204,12 +271,9 @@ class _AvatarViewState extends State<AvatarView> {
   void _onFilesDropped(DropDoneDetails details) {
     if (details.files.isEmpty) return;
     final names = details.files.map((f) => f.name).join(', ');
+    widget.sharedHistory.addAssistant('Received files: $names\n(File analysis coming soon!)');
     setState(() {
       _isDraggingFile = false;
-      _messages.add(_QuickChatMessage(
-        role: _ChatRole.assistant,
-        content: 'Received files: $names\n(File analysis coming soon!)',
-      ));
       if (!_showChat) _showChat = true;
     });
     windowManager.setSize(const Size(300, 520));
@@ -228,6 +292,31 @@ class _AvatarViewState extends State<AvatarView> {
     });
   }
 
+  double get _chatFontSize {
+    final size = AppConfig.instance.fontSize;
+    if (size == 'small') return 11;
+    if (size == 'large') return 14;
+    return 12;
+  }
+
+  Size? get _iconButtonMinSize =>
+      AppConfig.instance.largerTargets ? const Size(36, 36) : null;
+
+  Widget _suggestionChip(String label) {
+    return ActionChip(
+      label: Text(label, style: TextStyle(fontSize: _chatFontSize - 1)),
+      onPressed: () {
+        _controller.text = label;
+        _sendMessage();
+      },
+      backgroundColor: Colors.grey.shade100,
+      padding: EdgeInsets.symmetric(
+        horizontal: AppConfig.instance.largerTargets ? 12 : 8,
+        vertical: AppConfig.instance.largerTargets ? 6 : 4,
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final status = widget.wakeWordStatus?.value;
@@ -238,11 +327,13 @@ class _AvatarViewState extends State<AvatarView> {
     final showListeningState = followUpActive && _avatarState != AvatarState.speaking && _avatarState != AvatarState.thinking;
     return Scaffold(
       backgroundColor: Colors.transparent,
-      body: DropTarget(
-        onDragEntered: (_) => setState(() => _isDraggingFile = true),
-        onDragExited: (_) => setState(() => _isDraggingFile = false),
-        onDragDone: _onFilesDropped,
-        child: SingleChildScrollView(
+      body: Stack(
+        children: [
+          DropTarget(
+            onDragEntered: (_) => setState(() => _isDraggingFile = true),
+            onDragExited: (_) => setState(() => _isDraggingFile = false),
+            onDragDone: _onFilesDropped,
+            child: SingleChildScrollView(
           child: Center(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -258,6 +349,30 @@ class _AvatarViewState extends State<AvatarView> {
                     child: Stack(
                       alignment: Alignment.center,
                       children: [
+                        // Mic mute toggle (pause/resume wake word)
+                        Positioned(
+                          top: 4,
+                          right: 4,
+                          child: Material(
+                            color: Colors.transparent,
+                            child: IconButton(
+                              icon: Icon(
+                                _userMuted ? Icons.mic_off : Icons.mic_none,
+                                size: 18,
+                                color: Colors.white70,
+                              ),
+                              onPressed: () {
+                                setState(() {
+                                  _userMuted = !_userMuted;
+                                  widget.pauseWakeWord?.value = _recording || _userMuted;
+                                });
+                              },
+                              tooltip: _userMuted ? 'Resume listening' : 'Pause listening',
+                              padding: const EdgeInsets.all(4),
+                              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
+                            ),
+                          ),
+                        ),
                         if (_isDraggingFile)
                           Container(
                             height: 160,
@@ -283,6 +398,7 @@ class _AvatarViewState extends State<AvatarView> {
                               state: showListeningState
                                   ? AvatarState.listening
                                   : _avatarState,
+                              reduceMotion: AppConfig.instance.reduceMotion,
                             ),
                           ),
                         // Status chip + partial transcription overlaid at bottom
@@ -345,12 +461,60 @@ class _AvatarViewState extends State<AvatarView> {
           ),
         ),
       ),
+          if (_showOnboarding) _buildOnboardingOverlay(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildOnboardingOverlay() {
+    const steps = [
+      "Say 'Chili' to start a conversation",
+      "Drag me to move",
+      "Tap to chat, double-tap for full app",
+    ];
+    final text = steps[_onboardingStep.clamp(0, steps.length - 1)];
+    return Positioned.fill(
+      child: Material(
+        color: Colors.black54,
+        child: SafeArea(
+          child: Center(
+            child: SingleChildScrollView(
+              child: Padding(
+                padding: const EdgeInsets.all(20),
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          text,
+                          textAlign: TextAlign.center,
+                          style: const TextStyle(fontSize: 13, height: 1.4),
+                        ),
+                        const SizedBox(height: 12),
+                        FilledButton(
+                          onPressed: _onOnboardingNext,
+                          child: const Text('Got it'),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 
   Color _statusColor(String status) {
     if (status.startsWith('Heard:')) return const Color(0xFFF57C00);
-    if (status.startsWith('Processing')) return const Color(0xFF388E3C);
+    if (status.startsWith('Processing') || status.startsWith('Transcribing')) {
+      return const Color(0xFF388E3C);
+    }
     if (status.contains('follow-up')) return const Color(0xFF1976D2);
     if (status.startsWith('Error') || status.startsWith('No mic')) {
       return const Color(0xFFD32F2F);
@@ -392,7 +556,8 @@ class _AvatarViewState extends State<AvatarView> {
                     }
                   },
                   onRecordingStateChanged: (recording) {
-                    widget.pauseWakeWord?.value = recording;
+                    _recording = recording;
+                    widget.pauseWakeWord?.value = recording || _userMuted;
                     if (mounted) {
                       setState(() {
                         _avatarState = recording
@@ -433,33 +598,97 @@ class _AvatarViewState extends State<AvatarView> {
                 IconButton(
                   onPressed: _isSending ? null : _sendMessage,
                   icon: _isSending
-                      ? const SizedBox(
-                          width: 18,
-                          height: 18,
-                          child: CircularProgressIndicator(strokeWidth: 2),
+                      ? SizedBox(
+                          width: _iconButtonMinSize != null ? 24 : 18,
+                          height: _iconButtonMinSize != null ? 24 : 18,
+                          child: const CircularProgressIndicator(strokeWidth: 2),
                         )
-                      : const Icon(Icons.send, size: 20),
+                      : Icon(Icons.send, size: _iconButtonMinSize != null ? 24 : 20),
                   style: IconButton.styleFrom(
                     backgroundColor: const Color(0xFFEF5350),
                     foregroundColor: Colors.white,
+                    minimumSize: _iconButtonMinSize,
                   ),
                 ),
               ],
             ),
 
-            // Scrollable message history
-            if (_messages.isNotEmpty) ...[
+            // Quick action suggestion chips (when chat is empty)
+            if (widget.sharedHistory.messages.isEmpty && !_isSending) ...[
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  _suggestionChip("What's the weather?"),
+                  _suggestionChip('Open Notepad'),
+                  _suggestionChip('Play music'),
+                  _suggestionChip('Search the web'),
+                  _suggestionChip('Add a chore'),
+                  _suggestionChip('List my chores'),
+                ],
+              ),
+            ],
+
+            // TTS progress and Stop button
+            if (_avatarState == AvatarState.speaking) ...[
+              const SizedBox(height: 6),
+              const LinearProgressIndicator(),
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: SizedBox(
+                  height: 28,
+                  child: TextButton.icon(
+                    onPressed: _stopTts,
+                    icon: const Icon(Icons.stop_circle_outlined, size: 16),
+                    label: const Text('Stop speaking',
+                        style: TextStyle(fontSize: 11)),
+                    style: TextButton.styleFrom(
+                      foregroundColor: const Color(0xFFD32F2F),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+
+            // Scrollable message history (includes streaming reply when present)
+            if (widget.sharedHistory.messages.isNotEmpty || _streamingReply.isNotEmpty) ...[
               const SizedBox(height: 8),
               ConstrainedBox(
                 constraints: const BoxConstraints(maxHeight: 200),
                 child: ListView.builder(
                   controller: _scrollController,
                   shrinkWrap: true,
-                  itemCount: _messages.length,
+                  itemCount: widget.sharedHistory.messages.length + (_streamingReply.isNotEmpty ? 1 : 0),
                   padding: EdgeInsets.zero,
                   itemBuilder: (context, index) {
-                    final msg = _messages[index];
-                    final isUser = msg.role == _ChatRole.user;
+                    final history = widget.sharedHistory.messages;
+                    if (index == history.length) {
+                      return Align(
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          margin: const EdgeInsets.symmetric(vertical: 3),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 7),
+                          constraints: const BoxConstraints(maxWidth: 220),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF5F5F5),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '$_streamingReply\u200B',
+                            style: TextStyle(
+                              fontSize: _chatFontSize,
+                              height: 1.4,
+                              color: Colors.black87,
+                            ),
+                          ),
+                        ),
+                      );
+                    }
+                    final msg = history[index];
+                    final isUser = msg.role == 'user';
                     return Align(
                       alignment:
                           isUser ? Alignment.centerRight : Alignment.centerLeft,
@@ -474,17 +703,59 @@ class _AvatarViewState extends State<AvatarView> {
                               : const Color(0xFFF5F5F5),
                           borderRadius: BorderRadius.circular(12),
                         ),
-                        child: Text(
-                          msg.content,
-                          style: TextStyle(
-                            fontSize: 12,
-                            height: 1.4,
-                            color: isUser ? Colors.white : Colors.black87,
-                          ),
-                        ),
+                        child: isUser
+                            ? Text(
+                                msg.content,
+                                style: TextStyle(
+                                  fontSize: _chatFontSize,
+                                  height: 1.4,
+                                  color: Colors.white,
+                                ),
+                              )
+                            : MarkdownBody(
+                                data: msg.content,
+                                shrinkWrap: true,
+                                onTapLink: (text, href, title) {
+                                  if (href != null) launchUrl(Uri.parse(href));
+                                },
+                                styleSheet: MarkdownStyleSheet(
+                                  p: TextStyle(fontSize: _chatFontSize, height: 1.4, color: Colors.black87),
+                                  strong: TextStyle(fontSize: _chatFontSize, fontWeight: FontWeight.bold, color: Colors.black87),
+                                  code: TextStyle(fontSize: _chatFontSize - 1, backgroundColor: Colors.grey.shade200, color: Colors.black87),
+                                  listBullet: TextStyle(fontSize: _chatFontSize, color: Colors.black87),
+                                ),
+                              ),
                       ),
                     );
                   },
+                ),
+              ),
+            ],
+
+            // Retry button when last message is the connection error
+            if (_lastFailedMessage != null &&
+                widget.sharedHistory.messages.length >= 2 &&
+                widget.sharedHistory.messages.last.role == 'assistant' &&
+                widget.sharedHistory.messages.last.content == 'Could not reach CHILI. Is the server running?') ...[
+              const SizedBox(height: 6),
+              SizedBox(
+                height: 28,
+                child: TextButton.icon(
+                  onPressed: _isSending
+                      ? null
+                      : () {
+                          final msg = _lastFailedMessage!;
+                          widget.sharedHistory.removeLastTwo();
+                          setState(() => _lastFailedMessage = null);
+                          _controller.text = msg;
+                          _sendMessage();
+                        },
+                  icon: const Icon(Icons.refresh, size: 14),
+                  label: const Text('Retry', style: TextStyle(fontSize: 11)),
+                  style: TextButton.styleFrom(
+                    foregroundColor: const Color(0xFF388E3C),
+                    padding: const EdgeInsets.symmetric(horizontal: 8),
+                  ),
                 ),
               ),
             ],

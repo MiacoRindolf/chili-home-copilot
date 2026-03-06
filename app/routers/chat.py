@@ -1,5 +1,5 @@
 """Chat routes: chat page, API chat, streaming, history, conversations."""
-from fastapi import APIRouter, Depends, Form, Request, Query, File, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request, Query, File, UploadFile
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from typing import Optional
 from sqlalchemy.orm import Session
@@ -18,9 +18,11 @@ from ..schemas.chat import MobileChatRequest, MobileChatResponse
 from ..services.chat_service import (
     execute_tool,
     init_chat,
+    nlu_fallback,
     plan_and_enrich,
     build_openai_prompt,
     resolve_response,
+    run_personality_and_memory_in_background,
     sse_event,
     store_and_title,
     store_and_title_with_memory,
@@ -405,6 +407,7 @@ def _get_token_from_request(request: Request) -> str | None:
 async def mobile_chat_api(
     body: MobileChatRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
     """JSON-based chat endpoint for native/mobile clients.
@@ -550,19 +553,30 @@ async def mobile_chat_api(
         }
     on_planner_page = planner_current is not None
 
-    try:
-        ctx = plan_and_enrich(
-            db,
-            message,
-            identity,
-            recent,
-            trace_id,
-            project_id=_project_id,
-            planner_current_project=planner_current,
-        )
-    except Exception as e:
-        log_info(trace_id, f"llm_error={e}, trying NLU fallback (mobile)")
-        ctx = None
+    # NLU fast-path: skip expensive Ollama planner for known desktop/chore/birthday patterns
+    nlu_result = nlu_fallback(message)
+    if nlu_result is not None:
+        log_info(trace_id, f"mobile_nlu_fast_path type={nlu_result['type']}")
+        ctx = {
+            "planned": nlu_result,
+            "rag_context": None,
+            "rag_hits": [],
+            "personality_context": None,
+        }
+    else:
+        try:
+            ctx = plan_and_enrich(
+                db,
+                message,
+                identity,
+                recent,
+                trace_id,
+                project_id=_project_id,
+                planner_current_project=planner_current,
+            )
+        except Exception as e:
+            log_info(trace_id, f"llm_error={e}, trying NLU fallback (mobile)")
+            ctx = None
 
     result = resolve_response(
         db,
@@ -581,6 +595,7 @@ async def mobile_chat_api(
     model_used = result["model_used"]
     rag_sources = result["rag_sources"]
     personality_used = result["personality_used"]
+    client_action = result.get("client_action")
 
     db.add(
         ChatMessage(
@@ -611,14 +626,13 @@ async def mobile_chat_api(
     )
     db.commit()
 
-    try_personality_update(user_id, is_guest, db, trace_id)
-    try_memory_extraction(
+    background_tasks.add_task(
+        run_personality_and_memory_in_background,
         user_id,
         is_guest,
         message,
         llm_reply,
         action_type,
-        db,
         trace_id,
     )
 
@@ -637,7 +651,188 @@ async def mobile_chat_api(
         conversation_id=conversation_id,
         rag_sources=rag_sources,
         personality_used=personality_used,
+        client_action=client_action,
     )
+
+
+@router.post("/api/mobile/chat/stream")
+async def mobile_chat_stream_api(
+    body: MobileChatRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """SSE streaming chat for mobile/desktop clients. JSON body, SSE response."""
+    trace_id = new_trace_id()
+    t0 = time.time()
+
+    client_ip = request.client.host
+    device_token = _get_token_from_request(request)
+    identity = get_identity_record(db, device_token)
+    convo_key = get_convo_key(identity, device_token, client_ip)
+    user_name = identity["user_name"]
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+
+    message = (body.message or "").strip()
+    if not message:
+        return JSONResponse({"error": "Message is required"}, status_code=400)
+
+    log_info(trace_id, f"mobile_chat_stream client_ip={client_ip} user={user_name}")
+
+    chat_init = init_chat(
+        db, convo_key, body.conversation_id, message, identity, trace_id, image_path=None
+    )
+    conversation_id = chat_init["conversation_id"]
+    recent = chat_init["recent"]
+
+    if wellness.detect_crisis(message):
+        log_info(trace_id, "crisis_detected (mobile stream)")
+
+        def crisis_gen():
+            yield sse_event({"token": wellness.CRISIS_RESPONSE, "done": False})
+            yield sse_event({
+                "token": "", "done": True,
+                "action_type": "crisis_support", "model_used": "crisis-detector",
+                "conversation_id": conversation_id, "trace_id": trace_id,
+                "rag_sources": [], "personality_used": False, "client_action": None,
+            })
+            store_and_title_with_memory(
+                convo_key, conversation_id, wellness.CRISIS_RESPONSE,
+                trace_id, "crisis_support", "crisis-detector", client_ip, message,
+                user_id=user_id, is_guest=is_guest,
+            )
+        return StreamingResponse(crisis_gen(), media_type="text/event-stream")
+
+    if wellness.detect_wellness_topic(message):
+        log_info(trace_id, "wellness_topic_detected (mobile stream)")
+        wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+
+        def wellness_gen():
+            full = []
+            used_model = "llama3-wellness"
+            for tok, model in wellness.wellness_chat_stream(
+                messages=wellness_msgs, user_name=user_name, trace_id=trace_id
+            ):
+                full.append(tok)
+                used_model = model
+                yield sse_event({"token": tok, "done": False})
+            complete = "".join(full) or "I'm here for you. Tell me more about what you're feeling."
+            if not full:
+                yield sse_event({"token": complete, "done": False})
+            yield sse_event({
+                "token": "", "done": True,
+                "action_type": "wellness_support", "model_used": used_model,
+                "conversation_id": conversation_id, "trace_id": trace_id,
+                "rag_sources": [], "personality_used": False, "client_action": None,
+            })
+            store_and_title_with_memory(
+                convo_key, conversation_id, complete, trace_id,
+                "wellness_support", used_model, client_ip, message,
+                user_id=user_id, is_guest=is_guest,
+            )
+        return StreamingResponse(wellness_gen(), media_type="text/event-stream")
+
+    _project_id = None
+    if conversation_id:
+        _convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if _convo_obj:
+            _project_id = _convo_obj.project_id
+
+    planner_current = None
+    if body.planner_project_id is not None and body.planner_project_name:
+        planner_current = {
+            "id": body.planner_project_id,
+            "name": body.planner_project_name.strip(),
+        }
+    on_planner_page = planner_current is not None
+
+    nlu_result = nlu_fallback(message)
+    if nlu_result is not None:
+        log_info(trace_id, f"mobile_stream_nlu_fast_path type={nlu_result['type']}")
+        ctx = {
+            "planned": nlu_result,
+            "rag_context": None,
+            "rag_hits": [],
+            "personality_context": None,
+        }
+    else:
+        try:
+            ctx = plan_and_enrich(
+                db, message, identity, recent, trace_id,
+                project_id=_project_id, planner_current_project=planner_current,
+            )
+        except Exception as e:
+            log_info(trace_id, f"llm_error={e}, trying NLU fallback (mobile stream)")
+            ctx = None
+
+    result = resolve_response(
+        db, message, recent, identity, ctx, on_planner_page, trace_id, stream=True
+    )
+
+    if result.get("continue_stream"):
+        messages = result["messages"]
+        system_prompt = result["system_prompt"]
+        action_type = result["action_type"]
+        model_used = result.get("model_used", openai_client.LLM_MODEL)
+        rag_sources = result.get("rag_sources", [])
+        personality_used = result.get("personality_used", False)
+        fallback_reply = result.get("fallback_reply", "I'm not sure what to do with that.")
+        client_action = result.get("client_action")
+
+        def stream_openai_gen():
+            full = []
+            used_model = model_used
+            for tok, model in openai_client.chat_stream(
+                messages=messages, system_prompt=system_prompt,
+                trace_id=trace_id, user_message=message,
+            ):
+                full.append(tok)
+                used_model = model
+                yield sse_event({"token": tok, "done": False})
+            complete = "".join(full) or fallback_reply
+            if not full:
+                yield sse_event({"token": complete, "done": False})
+            yield sse_event({
+                "token": "", "done": True,
+                "action_type": action_type, "model_used": used_model,
+                "conversation_id": conversation_id, "trace_id": trace_id,
+                "rag_sources": rag_sources, "personality_used": personality_used,
+                "client_action": client_action,
+            })
+            store_and_title_with_memory(
+                convo_key, conversation_id, complete, trace_id,
+                action_type, used_model, client_ip, message,
+                user_id=user_id, is_guest=is_guest,
+            )
+        return StreamingResponse(stream_openai_gen(), media_type="text/event-stream")
+
+    llm_reply = result["reply"]
+    action_type = result["action_type"]
+    model_used = result["model_used"]
+    rag_sources = result.get("rag_sources", [])
+    personality_used = result.get("personality_used", False)
+    client_action = result.get("client_action")
+
+    def tool_result_gen():
+        yield sse_event({"token": llm_reply, "done": False})
+        yield sse_event({
+            "token": "", "done": True,
+            "action_type": action_type, "model_used": model_used,
+            "conversation_id": conversation_id, "trace_id": trace_id,
+            "rag_sources": rag_sources, "personality_used": personality_used,
+            "client_action": client_action,
+        })
+        store_and_title_with_memory(
+            convo_key, conversation_id, llm_reply, trace_id,
+            action_type, model_used, client_ip, message,
+            user_id=user_id, is_guest=is_guest,
+        )
+
+    ms = int((time.time() - t0) * 1000)
+    record_latency(ms)
+    log_info(trace_id, f"mobile_stream_latency_ms={ms} action={action_type}")
+
+    return StreamingResponse(tool_result_gen(), media_type="text/event-stream")
 
 
 @router.post("/api/chat/stream")
