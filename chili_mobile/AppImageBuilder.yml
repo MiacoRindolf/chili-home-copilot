@@ -1,0 +1,36 @@
+# appimage-builder recipe for CHILI desktop app (Flutter Linux).
+# Prereqs: flutter build linux --release, then: appimage-builder --recipe AppImageBuilder.yml
+# See https://appimage-builder.readthedocs.io/en/latest/reference/recipe.html
+version: 1
+script:
+  - rm -rf AppDir || true
+  - cp -r build/linux/x64/release/bundle AppDir
+AppDir:
+  path: ./AppDir
+  app_info:
+    id: com.chili.homecopilot
+    name: CHILI
+    icon: chili
+    version: "1.0.0"
+    exec: chili_mobile
+    exec_args: "$@"
+  apt:
+    arch: amd64
+    allow_unauthenticated: true
+    sources:
+      - sourceline: deb http://archive.ubuntu.com/ubuntu/ jammy main restricted universe multiverse
+      - sourceline: deb http://archive.ubuntu.com/ubuntu/ jammy-updates main restricted universe multiverse
+      - sourceline: deb http://security.ubuntu.com/ubuntu jammy-security main restricted universe multiverse
+    include:
+      - libgtk-3-0
+      - liblzo2-2
+      - libxkbcommon0
+    exclude: []
+  files:
+    exclude:
+      - usr/share/man
+      - usr/share/doc
+AppImage:
+  arch: x86_64
+  update-information: None
+  sign-key: None

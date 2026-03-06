@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=CHILI
+Comment=CHILI Home Copilot - desktop companion
+Exec=chili_mobile
+Icon=chili
+Categories=Utility;

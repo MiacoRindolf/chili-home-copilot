@@ -31,6 +31,12 @@ dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^4.0.0
+  inno_build: ^0.4.0
+
+# inno_build: app_id used for Windows installer (Add/Remove Programs).
+# Generate a new one with: dart run inno_build --app-id
+inno_build:
+  app_id: "B7E3A1C9-4D2F-4E8A-9B1C-0F3D5E7A9B2C"
 
 flutter:
   uses-material-design: true
