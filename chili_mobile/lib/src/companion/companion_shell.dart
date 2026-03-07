@@ -29,6 +29,7 @@ class _CompanionShellState extends State<CompanionShell> {
   final _followUpActive = ValueNotifier<bool>(false);
   final _ttsPlaying = ValueNotifier<bool>(false);
   final _ttsInterruptRequested = ValueNotifier<bool>(false);
+  final _lastTtsText = ValueNotifier<String?>(null);
   late final WakeWordListener _wakeWordListener;
 
   @override
@@ -37,6 +38,7 @@ class _CompanionShellState extends State<CompanionShell> {
     _wakeWordListener = WakeWordListener(
       pauseListening: _pauseWakeWord,
       ttsPlaying: _ttsPlaying,
+      lastTtsText: _lastTtsText,
       onReply: (command, reply) {
         _wakeWordCommand.value = command;
         _wakeWordReply.value = reply;
@@ -78,6 +80,7 @@ class _CompanionShellState extends State<CompanionShell> {
     _followUpActive.dispose();
     _ttsPlaying.dispose();
     _ttsInterruptRequested.dispose();
+    _lastTtsText.dispose();
     super.dispose();
   }
 
@@ -112,6 +115,7 @@ class _CompanionShellState extends State<CompanionShell> {
             pauseWakeWord: _pauseWakeWord,
             ttsPlaying: _ttsPlaying,
             ttsInterruptRequested: _ttsInterruptRequested,
+            lastTtsText: _lastTtsText,
             wakeWordCommand: _wakeWordCommand,
             wakeWordReply: _wakeWordReply,
             wakeWordStatus: _wakeWordStatus,

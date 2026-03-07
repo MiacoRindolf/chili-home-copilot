@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:ffi';
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart';
@@ -21,6 +22,11 @@ import 'vosk_setup.dart';
 ///
 /// For command transcription accuracy, audio is buffered and sent to the
 /// backend Whisper API, falling back to Vosk text when unavailable.
+///
+/// Echo suppression layers:
+/// 1. **Barge-in**: RMS energy threshold detects user speaking over TTS.
+/// 2. **Cooldown**: 1.5 s dead period after TTS ends; Vosk is reset.
+/// 3. **Textual echo cancellation**: utterances matching TTS text are discarded.
 class WakeWordListener {
   WakeWordListener({
     required this.onReply,
@@ -31,13 +37,17 @@ class WakeWordListener {
     this.onTtsInterruptRequested,
     ValueNotifier<bool>? pauseListening,
     ValueNotifier<bool>? ttsPlaying,
+    ValueNotifier<String?>? lastTtsText,
   })  : _pauseListening = pauseListening ?? ValueNotifier<bool>(false),
-        _ttsPlaying = ttsPlaying {
+        _ttsPlaying = ttsPlaying,
+        _lastTtsText = lastTtsText {
     _pauseListening?.addListener(_onPauseChanged);
+    _ttsPlaying?.addListener(_onTtsPlayingChanged);
   }
 
   final ValueNotifier<bool>? _pauseListening;
   final ValueNotifier<bool>? _ttsPlaying;
+  final ValueNotifier<String?>? _lastTtsText;
 
   final void Function(String command, String reply) onReply;
   final void Function(bool isListening) onListeningChanged;
@@ -66,6 +76,19 @@ class WakeWordListener {
 
   DateTime? _followUpUntil;
   static const _followUpSeconds = 8;
+
+  // Post-TTS cooldown: ignore utterances for this duration after TTS ends.
+  DateTime? _ttsCooldownUntil;
+  static const _ttsCooldownMs = 1500;
+
+  // Track whether TTS was playing in previous listener tick (for edge detect).
+  bool _wasTtsPlaying = false;
+
+  // Barge-in: consecutive high-energy chunks during TTS.
+  int _bargeInCounter = 0;
+  static const _bargeInThreshold = 2000; // RMS for 16-bit PCM
+  static const _bargeInChunksNeeded = 3;
+  bool _bargeInTriggered = false;
 
   VoskFfi? _vosk;
   Pointer<Void>? _model;
@@ -109,6 +132,7 @@ class WakeWordListener {
   void dispose() {
     stop();
     _pauseListening?.removeListener(_onPauseChanged);
+    _ttsPlaying?.removeListener(_onTtsPlayingChanged);
     _utteranceQueue.close();
     _freeVosk();
     _recorder.dispose();
@@ -214,13 +238,49 @@ class WakeWordListener {
 
   // ── Audio -> Vosk (synchronous, never blocks on HTTP) ──────────────────
 
+  /// Calculate RMS energy of a PCM-16 LE mono chunk.
+  static double _rms(Uint8List chunk) {
+    if (chunk.length < 2) return 0;
+    // Copy to a fresh buffer so the offset is always 0-aligned for Int16List.
+    final aligned = Uint8List.fromList(chunk);
+    final samples = aligned.buffer.asInt16List(0, aligned.length ~/ 2);
+    double sum = 0;
+    for (final s in samples) {
+      sum += s * s;
+    }
+    return math.sqrt(sum / samples.length);
+  }
+
   void _feedChunk(Uint8List chunk) {
     final vosk = _vosk;
     final rec = _recognizer;
     if (vosk == null || rec == null) return;
 
+    // ── Layer 1: Barge-in detection during TTS ──
+    if (_ttsPlaying?.value ?? false) {
+      final rms = _rms(chunk);
+      if (rms > _bargeInThreshold) {
+        _bargeInCounter++;
+        if (_bargeInCounter >= _bargeInChunksNeeded && !_bargeInTriggered) {
+          _bargeInTriggered = true;
+          debugPrint('[WakeWord] Barge-in detected (RMS=$rms, chunks=$_bargeInCounter)');
+          onTtsInterruptRequested?.call();
+          _resetVoskState();
+          _awaitingCommandUntil =
+              DateTime.now().add(const Duration(seconds: _commandWindowSeconds));
+          onStatus('Listening... say your command');
+        }
+      } else {
+        _bargeInCounter = 0;
+      }
+      return;
+    }
+
+    // Normal (non-TTS) path: feed audio to Vosk.
+    _bargeInCounter = 0;
+    _bargeInTriggered = false;
+
     _currentPcmBuffer.add(Uint8List.fromList(chunk));
-    // Cap buffer at ~15 s of 16 kHz 16-bit mono (480 000 bytes).
     int total = 0;
     for (final c in _currentPcmBuffer) {
       total += c.length;
@@ -237,7 +297,6 @@ class WakeWordListener {
         final json = vosk.getResult(rec);
         final text = _extractText(json);
 
-        // Snapshot the PCM for this finalized utterance.
         _lastFinalizedPcm = List<Uint8List>.from(_currentPcmBuffer);
         _currentPcmBuffer.clear();
 
@@ -283,9 +342,25 @@ class WakeWordListener {
       return;
     }
 
+    final now = DateTime.now();
+
+    // Layer 2: Post-TTS cooldown -- discard utterances that are residual echo.
+    if (_ttsCooldownUntil != null) {
+      if (now.isBefore(_ttsCooldownUntil!)) {
+        debugPrint('[WakeWord] Cooldown: discarding "$text"');
+        return;
+      }
+      _ttsCooldownUntil = null;
+    }
+
+    // Layer 3: Textual echo cancellation.
+    if (_isTextualEcho(text)) {
+      debugPrint('[WakeWord] Textual echo: discarding "$text"');
+      return;
+    }
+
     final config = AppConfig.instance;
     await config.load();
-    final now = DateTime.now();
 
     // Continued conversation: within follow-up window any utterance is a command.
     if (_followUpUntil != null) {
@@ -403,6 +478,59 @@ class WakeWordListener {
     } finally {
       _handlingCommand = false;
     }
+  }
+
+  // ── TTS state change handler (cooldown + auto follow-up) ───────────────
+
+  void _onTtsPlayingChanged() {
+    final playing = _ttsPlaying?.value ?? false;
+    if (_wasTtsPlaying && !playing) {
+      // TTS just finished → start cooldown and reset Vosk.
+      debugPrint('[WakeWord] TTS ended → ${_ttsCooldownMs}ms cooldown');
+      _ttsCooldownUntil =
+          DateTime.now().add(const Duration(milliseconds: _ttsCooldownMs));
+      _resetVoskState();
+
+      // Auto follow-up: keep listening for the user's reply without wake word.
+      _followUpUntil =
+          DateTime.now().add(const Duration(seconds: _followUpSeconds + _ttsCooldownMs ~/ 1000));
+      onFollowUpActive?.call(true);
+      onStatus('Listening... (follow-up)');
+    }
+    _wasTtsPlaying = playing;
+  }
+
+  /// Reset Vosk recognizer and clear all audio buffers to flush echo residue.
+  void _resetVoskState() {
+    final vosk = _vosk;
+    final rec = _recognizer;
+    if (vosk != null && rec != null) {
+      vosk.resetRecognizer(rec);
+    }
+    _currentPcmBuffer.clear();
+    _lastFinalizedPcm = null;
+    onPartial?.call('');
+  }
+
+  // ── Textual echo cancellation ────────────────────────────────────────
+
+  /// Returns true if [text] is an echo of the last TTS output (>50% word overlap).
+  bool _isTextualEcho(String text) {
+    final ttsText = _lastTtsText?.value;
+    if (ttsText == null || ttsText.isEmpty) return false;
+
+    final heardWords = text.toLowerCase().split(RegExp(r'\s+')).toSet();
+    final ttsWords = ttsText.toLowerCase().split(RegExp(r'\s+')).toSet();
+    if (heardWords.isEmpty || ttsWords.isEmpty) return false;
+
+    final overlap = heardWords.intersection(ttsWords).length;
+    final ratio = overlap / heardWords.length;
+    if (ratio > 0.5) {
+      debugPrint('[WakeWord] Echo ratio=${ratio.toStringAsFixed(2)} '
+          '(heard=${heardWords.length}, overlap=$overlap)');
+      return true;
+    }
+    return false;
   }
 
   // ── Stop-phrase detection ──────────────────────────────────────────────

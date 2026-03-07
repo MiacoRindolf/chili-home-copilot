@@ -15,17 +15,22 @@ class TtsController {
     required ChiliApiClient client,
     required ValueNotifier<bool>? ttsPlaying,
     required VoidCallback onFinish,
+    ValueNotifier<String?>? lastTtsText,
   })  : _client = client,
         _ttsPlaying = ttsPlaying,
-        _onFinish = onFinish;
+        _onFinish = onFinish,
+        _lastTtsText = lastTtsText;
 
   final ChiliApiClient _client;
   final ValueNotifier<bool>? _ttsPlaying;
   final VoidCallback _onFinish;
+  final ValueNotifier<String?>? _lastTtsText;
 
   final AudioPlayer _audioPlayer = AudioPlayer();
   StreamSubscription<void>? _ttsCompleteSub;
   bool _disposed = false;
+
+  Timer? _echoTextTimer;
 
   Future<void> speak(String text) async {
     if (_disposed) return;
@@ -34,6 +39,12 @@ class TtsController {
       _finish();
       return;
     }
+    // Store what we're about to say for textual echo cancellation.
+    _lastTtsText?.value = trimmed;
+    _echoTextTimer?.cancel();
+    _echoTextTimer = Timer(const Duration(seconds: 10), () {
+      _lastTtsText?.value = null;
+    });
     _ttsPlaying?.value = true;
     try {
       final audioBytes = await _client.fetchTts(trimmed);
@@ -100,6 +111,7 @@ class TtsController {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _echoTextTimer?.cancel();
     _ttsCompleteSub?.cancel();
     _ttsCompleteSub = null;
     try {

@@ -75,6 +75,10 @@ class VoskFfi {
       Void Function(Pointer<Void>),
       void Function(Pointer<Void>)>('vosk_recognizer_free');
 
+  late final _recReset = _lib.lookupFunction<
+      Void Function(Pointer<Void>),
+      void Function(Pointer<Void>)>('vosk_recognizer_reset');
+
   late final _accept = _lib.lookupFunction<
       Int32 Function(Pointer<Void>, Pointer<Uint8>, Int32),
       int Function(
@@ -100,6 +104,10 @@ class VoskFfi {
   }
 
   void freeRecognizer(Pointer<Void> rec) => _recFree(rec);
+
+  /// Flush the recognizer's internal buffers, discarding any accumulated
+  /// partial result.  Useful after TTS playback to prevent echo.
+  void resetRecognizer(Pointer<Void> rec) => _recReset(rec);
 
   /// Feed raw PCM-16 LE mono audio bytes to the recognizer.
   /// Returns `true` when Vosk considers the current utterance complete

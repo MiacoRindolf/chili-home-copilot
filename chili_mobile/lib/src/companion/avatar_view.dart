@@ -32,6 +32,7 @@ class AvatarView extends StatefulWidget {
     this.pauseWakeWord,
     this.ttsPlaying,
     this.ttsInterruptRequested,
+    this.lastTtsText,
     this.wakeWordCommand,
     this.wakeWordReply,
     this.wakeWordStatus,
@@ -44,6 +45,7 @@ class AvatarView extends StatefulWidget {
   final ValueNotifier<bool>? pauseWakeWord;
   final ValueNotifier<bool>? ttsPlaying;
   final ValueNotifier<bool>? ttsInterruptRequested;
+  final ValueNotifier<String?>? lastTtsText;
   final ValueNotifier<String?>? wakeWordCommand;
   final ValueNotifier<String?>? wakeWordReply;
   final ValueNotifier<String?>? wakeWordStatus;
@@ -93,6 +95,7 @@ class _AvatarViewState extends State<AvatarView> {
       client: _client,
       ttsPlaying: widget.ttsPlaying,
       onFinish: _finishSpeaking,
+      lastTtsText: widget.lastTtsText,
     );
     _chatSender = ChatSendController(_client);
     _loadOnboardingState();
