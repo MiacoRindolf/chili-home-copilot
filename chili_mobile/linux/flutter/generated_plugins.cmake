@@ -5,11 +5,12 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_linux
   desktop_drop
+  flutter_screen_capture
   hotkey_manager_linux
   local_notifier
   pasteboard
   record_linux
-  screen_retriever
+  screen_retriever_linux
   tray_manager
   url_launcher_linux
   window_manager

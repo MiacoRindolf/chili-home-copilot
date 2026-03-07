@@ -87,7 +87,7 @@ def _call_ollama_vision_single(b64_image: str, prompt: str, system_prompt: str, 
             {"role": "user", "content": prompt, "images": [b64_image]},
         ],
         "stream": False,
-        "options": {"temperature": 0.6, "num_predict": 1024},
+        "options": {"temperature": 0.6, "num_predict": 1024, "num_gpu": 99},
     }
     r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120)
     r.raise_for_status()
@@ -138,7 +138,7 @@ def _stream_ollama_vision_single(b64_image: str, prompt: str, system_prompt: str
             {"role": "user", "content": prompt, "images": [b64_image]},
         ],
         "stream": True,
-        "options": {"temperature": 0.6, "num_predict": 1024},
+        "options": {"temperature": 0.6, "num_predict": 1024, "num_gpu": 99},
     }
     r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120, stream=True)
     r.raise_for_status()
@@ -182,7 +182,7 @@ def call_ollama_vision_stream(image_paths: list[str], user_text: str, system_pro
 
 def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision") -> str | None:
     """Call OpenAI with one or more images. Returns response text or None."""
-    if not settings.premium_api_key_resolved():
+    if not settings.premium_api_key_resolved:
         return None
 
     try:
@@ -190,7 +190,7 @@ def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: st
         user_content: list[dict] = [{"type": "text", "text": prompt}]
         user_content.extend(_build_openai_image_parts(image_paths))
 
-        client = OpenAI(api_key=settings.premium_api_key_resolved())
+        client = OpenAI(api_key=settings.premium_api_key_resolved)
         response = client.chat.completions.create(
             model=OPENAI_VISION_MODEL,
             messages=[
@@ -212,7 +212,7 @@ def call_openai_vision(image_paths: list[str], user_text: str, system_prompt: st
 
 def call_openai_vision_stream(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision"):
     """Stream response from OpenAI vision. Yields token strings."""
-    if not settings.premium_api_key_resolved():
+    if not settings.premium_api_key_resolved:
         return
 
     try:
@@ -220,7 +220,7 @@ def call_openai_vision_stream(image_paths: list[str], user_text: str, system_pro
         user_content: list[dict] = [{"type": "text", "text": prompt}]
         user_content.extend(_build_openai_image_parts(image_paths))
 
-        client = OpenAI(api_key=settings.premium_api_key_resolved())
+        client = OpenAI(api_key=settings.premium_api_key_resolved)
         stream = client.chat.completions.create(
             model=OPENAI_VISION_MODEL,
             messages=[
@@ -242,30 +242,89 @@ def call_openai_vision_stream(image_paths: list[str], user_text: str, system_pro
         log_info(trace_id, f"openai_vision_stream_error={e}")
 
 
-def describe_image(image_paths: list[str], user_text: str = "", system_prompt: str = "", trace_id: str = "vision") -> tuple[str, str]:
-    """Try local vision first, fall back to OpenAI. Returns (reply, model_used)."""
-    reply = call_ollama_vision(image_paths, user_text, system_prompt, trace_id)
-    if reply:
-        return reply, OLLAMA_VISION_MODEL
+FOCUS_MODE_SYSTEM_ADDENDUM = (
+    "\n\nThe user has shared a screenshot of their screen for context. "
+    "Your PRIMARY job is to answer the user's question or follow their instruction. "
+    "Use the screenshot as visual context to inform your answer. "
+    "Do NOT start by describing the image unless the user explicitly asks you to. "
+    "Respond conversationally — treat this like a normal chat where you can also see their screen."
+)
 
+
+def focus_mode_stream(
+    image_paths: list[str],
+    user_text: str,
+    recent_messages: list[dict],
+    system_prompt: str = "",
+    trace_id: str = "vision",
+):
+    """Stream a Focus Mode response: conversation with visual context.
+
+    Unlike describe_image_stream which treats the image as the subject, this
+    treats the image as background context and prioritises the user's question.
+    Includes recent conversation history for continuity.
+    """
+    if not settings.premium_api_key_resolved:
+        yield from describe_image_stream(image_paths, user_text, system_prompt, trace_id)
+        return
+
+    try:
+        prompt = user_text or "What do you see on my screen?"
+        sys_prompt = (system_prompt or VISION_SYSTEM_PROMPT) + FOCUS_MODE_SYSTEM_ADDENDUM
+
+        messages: list[dict] = [{"role": "system", "content": sys_prompt}]
+        for msg in recent_messages[-10:]:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+        user_content: list[dict] = [{"type": "text", "text": prompt}]
+        user_content.extend(_build_openai_image_parts(image_paths))
+        messages.append({"role": "user", "content": user_content})
+
+        client = OpenAI(api_key=settings.premium_api_key_resolved)
+        stream = client.chat.completions.create(
+            model=OPENAI_VISION_MODEL,
+            messages=messages,
+            temperature=0.7,
+            max_completion_tokens=1024,
+            stream=True,
+        )
+
+        tokens = []
+        for chunk in stream:
+            delta = chunk.choices[0].delta if chunk.choices else None
+            if delta and delta.content:
+                tokens.append(delta.content)
+                yield delta.content, OPENAI_VISION_MODEL
+
+        if tokens:
+            log_info(trace_id, f"focus_mode_stream_ok model={OPENAI_VISION_MODEL} images={len(image_paths)}")
+            yield "", OPENAI_VISION_MODEL
+        else:
+            yield from describe_image_stream(image_paths, user_text, system_prompt, trace_id)
+    except Exception as e:
+        log_info(trace_id, f"focus_mode_stream_error={e}")
+        yield from describe_image_stream(image_paths, user_text, system_prompt, trace_id)
+
+
+def describe_image(image_paths: list[str], user_text: str = "", system_prompt: str = "", trace_id: str = "vision") -> tuple[str, str]:
+    """Try cloud vision first (fast), fall back to local Ollama. Returns (reply, model_used)."""
     reply = call_openai_vision(image_paths, user_text, system_prompt, trace_id)
     if reply:
         return reply, OPENAI_VISION_MODEL
 
-    return "I couldn't analyze this image right now. Make sure Ollama is running with llava-llama3, or configure an OpenAI API key.", "none"
+    reply = call_ollama_vision(image_paths, user_text, system_prompt, trace_id)
+    if reply:
+        return reply, OLLAMA_VISION_MODEL
+
+    return "I couldn't analyze this image right now. Configure an OpenAI/premium API key or make sure Ollama is running with a vision model.", "none"
 
 
 def describe_image_stream(image_paths: list[str], user_text: str = "", system_prompt: str = "", trace_id: str = "vision"):
-    """Stream vision response. Yields (token, model_used) tuples; final yield has empty token."""
+    """Stream vision response. Yields (token, model_used) tuples; final yield has empty token.
+
+    Tries cloud vision (OpenAI) first for speed; falls back to local Ollama.
+    """
     tokens = []
-    for tok in call_ollama_vision_stream(image_paths, user_text, system_prompt, trace_id):
-        tokens.append(tok)
-        yield tok, OLLAMA_VISION_MODEL
-
-    if tokens:
-        yield "", OLLAMA_VISION_MODEL
-        return
-
     for tok in call_openai_vision_stream(image_paths, user_text, system_prompt, trace_id):
         tokens.append(tok)
         yield tok, OPENAI_VISION_MODEL
@@ -274,5 +333,13 @@ def describe_image_stream(image_paths: list[str], user_text: str = "", system_pr
         yield "", OPENAI_VISION_MODEL
         return
 
-    yield "I couldn't analyze this image right now. Make sure Ollama is running with llava-llama3, or configure an OpenAI API key.", "none"
+    for tok in call_ollama_vision_stream(image_paths, user_text, system_prompt, trace_id):
+        tokens.append(tok)
+        yield tok, OLLAMA_VISION_MODEL
+
+    if tokens:
+        yield "", OLLAMA_VISION_MODEL
+        return
+
+    yield "I couldn't analyze this image right now. Configure an OpenAI/premium API key or make sure Ollama is running with a vision model.", "none"
     yield "", "none"

@@ -1006,7 +1006,41 @@ async def chat_stream_api(
     recent = chat_init["recent"]
 
     if saved_images:
+        is_focus_mode = message.strip().startswith("[User has Focus Mode active")
         system = build_openai_prompt(user_name, None, None, vision_module.VISION_SYSTEM_PROMPT)
+
+        if is_focus_mode:
+            recent_dicts = [{"role": m.role, "content": m.content} for m in recent]
+
+            def focus_gen():
+                full = []
+                model_used = "none"
+                for tok, model in vision_module.focus_mode_stream(
+                    saved_images, message.strip(), recent_dicts, system, trace_id
+                ):
+                    model_used = model
+                    if tok:
+                        full.append(tok)
+                        yield sse_event({"token": tok, "done": False})
+                complete = "".join(full) or "Could not analyze the image."
+                if not full:
+                    yield sse_event({"token": complete, "done": False})
+                yield sse_event({"token": "", "done": True, "action_type": "focus_vision", "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
+                store_and_title(
+                    convo_key,
+                    conversation_id,
+                    complete,
+                    trace_id,
+                    "focus_vision",
+                    model_used,
+                    client_ip,
+                    display_message,
+                    user_id=user_id,
+                    is_guest=is_guest,
+                    extract_memory=True,
+                )
+
+            return StreamingResponse(focus_gen(), media_type="text/event-stream")
 
         def vision_gen():
             full = []

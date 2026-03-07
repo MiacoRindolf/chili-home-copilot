@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -9,10 +10,22 @@ import 'package:path/path.dart' as p;
 
 /// Structured response from the chat endpoint.
 class ChatResponse {
-  ChatResponse({required this.reply, this.clientAction});
+  ChatResponse({required this.reply, this.clientAction, this.wasCancelled = false});
 
   final String reply;
   final Map<String, dynamic>? clientAction;
+
+  /// True when the user cancelled the stream mid-generation.
+  final bool wasCancelled;
+}
+
+/// Lightweight token that allows callers to cancel an in-flight streaming
+/// request.  Call [cancel] to stop consuming the SSE stream; the partial
+/// reply collected so far will be returned as the final response.
+class CancelToken {
+  bool _cancelled = false;
+  bool get isCancelled => _cancelled;
+  void cancel() => _cancelled = true;
 }
 
 /// API client for the CHILI backend.
@@ -67,10 +80,12 @@ class ChiliApiClient {
   }
 
   /// Stream chat from SSE; [onToken] is called with each token as it arrives.
-  /// Returns the final [ChatResponse] when the stream completes.
+  /// Returns the final [ChatResponse] when the stream completes or is
+  /// cancelled via [cancelToken].
   Future<ChatResponse> sendMessageStream(
     String message, {
     void Function(String token)? onToken,
+    CancelToken? cancelToken,
   }) async {
     final uri = Uri.parse('$baseUrl/api/mobile/chat/stream');
     final request = http.Request('POST', uri);
@@ -88,36 +103,7 @@ class ChiliApiClient {
       throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
     }
 
-    final buffer = StringBuffer();
-    Map<String, dynamic>? clientAction;
-    final lines = streamedResponse.stream
-        .transform(utf8.decoder)
-        .transform(const LineSplitter());
-
-    await for (final line in lines) {
-      if (line.startsWith('data: ')) {
-        final payload = line.substring(6).trim();
-        if (payload == '[DONE]' || payload.isEmpty) continue;
-        try {
-          final data = jsonDecode(payload) as Map<String, dynamic>?;
-          if (data == null) continue;
-          final token = (data['token'] as String?) ?? '';
-          if (token.isNotEmpty) {
-            buffer.write(token);
-            onToken?.call(token);
-          }
-          if (data['done'] == true) {
-            clientAction = data['client_action'] as Map<String, dynamic>?;
-          }
-        } catch (_) {}
-      }
-    }
-
-    final reply = buffer.toString().trim();
-    return ChatResponse(
-      reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
-      clientAction: clientAction,
-    );
+    return _consumeSseStream(streamedResponse, onToken: onToken, cancelToken: cancelToken);
   }
 
   /// Stream chat with image attachments via multipart form data.
@@ -129,9 +115,10 @@ class ChiliApiClient {
     String message, {
     required List<String> imagePaths,
     void Function(String token)? onToken,
+    CancelToken? cancelToken,
   }) async {
     if (imagePaths.isEmpty) {
-      return sendMessageStream(message, onToken: onToken);
+      return sendMessageStream(message, onToken: onToken, cancelToken: cancelToken);
     }
 
     final uri = Uri.parse('$baseUrl/api/chat/stream');
@@ -170,19 +157,48 @@ class ChiliApiClient {
       throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
     }
 
+    return _consumeSseStream(streamedResponse, onToken: onToken, cancelToken: cancelToken);
+  }
+
+  /// Shared SSE consumer used by both text and image streaming methods.
+  ///
+  /// Uses [StreamSubscription] so the stream can be cancelled mid-flight
+  /// via [cancelToken]. Whatever has been collected is returned as the reply.
+  Future<ChatResponse> _consumeSseStream(
+    http.StreamedResponse streamedResponse, {
+    void Function(String token)? onToken,
+    CancelToken? cancelToken,
+  }) {
+    final completer = Completer<ChatResponse>();
     final buffer = StringBuffer();
     Map<String, dynamic>? clientAction;
+    bool cancelled = false;
+
     final lines = streamedResponse.stream
         .transform(utf8.decoder)
         .transform(const LineSplitter());
 
-    await for (final line in lines) {
-      if (line.startsWith('data: ')) {
+    late StreamSubscription<String> sub;
+    sub = lines.listen(
+      (line) {
+        if (cancelToken != null && cancelToken.isCancelled && !cancelled) {
+          cancelled = true;
+          sub.cancel();
+          final reply = buffer.toString().trim();
+          completer.complete(ChatResponse(
+            reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
+            clientAction: clientAction,
+            wasCancelled: true,
+          ));
+          return;
+        }
+
+        if (!line.startsWith('data: ')) return;
         final payload = line.substring(6).trim();
-        if (payload == '[DONE]' || payload.isEmpty) continue;
+        if (payload == '[DONE]' || payload.isEmpty) return;
         try {
           final data = jsonDecode(payload) as Map<String, dynamic>?;
-          if (data == null) continue;
+          if (data == null) return;
           final token = (data['token'] as String?) ?? '';
           if (token.isNotEmpty) {
             buffer.write(token);
@@ -192,14 +208,25 @@ class ChiliApiClient {
             clientAction = data['client_action'] as Map<String, dynamic>?;
           }
         } catch (_) {}
-      }
-    }
-
-    final reply = buffer.toString().trim();
-    return ChatResponse(
-      reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
-      clientAction: clientAction,
+      },
+      onDone: () {
+        if (!completer.isCompleted) {
+          final reply = buffer.toString().trim();
+          completer.complete(ChatResponse(
+            reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
+            clientAction: clientAction,
+          ));
+        }
+      },
+      onError: (Object error) {
+        if (!completer.isCompleted) {
+          completer.completeError(error);
+        }
+      },
+      cancelOnError: true,
     );
+
+    return completer.future;
   }
 
   // ── Dashboard helpers ──

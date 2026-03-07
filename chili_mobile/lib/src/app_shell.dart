@@ -4,6 +4,7 @@ import 'chat/chat_screen.dart';
 import 'companion/shared_chat_history.dart';
 import 'dashboard/dashboard_screen.dart';
 import 'intercom/intercom_screen.dart';
+import 'screen/focus_controller.dart';
 import 'settings/settings_screen.dart';
 
 /// Full application window with a navigation rail.
@@ -11,10 +12,12 @@ class AppShell extends StatefulWidget {
   final VoidCallback onBackToAvatar;
   final SharedChatHistory sharedHistory;
   final ValueNotifier<bool>? pauseListening;
+  final FocusController focusController;
   const AppShell({
     super.key,
     required this.onBackToAvatar,
     required this.sharedHistory,
+    required this.focusController,
     this.pauseListening,
   });
 
@@ -94,7 +97,10 @@ class _AppShellState extends State<AppShell> {
       case 0:
         return const DashboardScreen();
       case 1:
-        return ChatScreen(sharedHistory: widget.sharedHistory);
+        return ChatScreen(
+          sharedHistory: widget.sharedHistory,
+          focusController: widget.focusController,
+        );
       case 2:
         return const IntercomScreen();
       case 3:

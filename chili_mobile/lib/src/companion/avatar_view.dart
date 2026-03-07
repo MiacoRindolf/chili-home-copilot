@@ -11,6 +11,9 @@ import 'package:desktop_drop/desktop_drop.dart';
 import '../config/app_config.dart';
 import '../config/layout_constants.dart';
 import '../network/chili_api_client.dart';
+import '../screen/focus_controller.dart';
+import '../screen/focus_target.dart';
+import '../screen/region_selector.dart';
 import '../voice/tts_controller.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
@@ -33,6 +36,7 @@ class AvatarView extends StatefulWidget {
     super.key,
     required this.sharedHistory,
     required this.onOpenFullApp,
+    required this.focusController,
     this.pauseWakeWord,
     this.ttsPlaying,
     this.ttsInterruptRequested,
@@ -46,6 +50,7 @@ class AvatarView extends StatefulWidget {
 
   final SharedChatHistory sharedHistory;
   final VoidCallback onOpenFullApp;
+  final FocusController focusController;
   final ValueNotifier<bool>? pauseWakeWord;
   final ValueNotifier<bool>? ttsPlaying;
   final ValueNotifier<bool>? ttsInterruptRequested;
@@ -67,6 +72,7 @@ class _AvatarViewState extends State<AvatarView> {
   final _chatFocusNode = FocusNode();
   late final TtsController _ttsController;
   late final ChatSendController _chatSender;
+  FocusController get _focus => widget.focusController;
   String _streamingReply = '';
   String? _lastFailedMessage;
   bool _isSending = false;
@@ -78,10 +84,12 @@ class _AvatarViewState extends State<AvatarView> {
   bool _userMuted = false;
   bool _recording = false;
   bool _chatInputHasFocus = false;
+  CancelToken? _activeCancelToken;
   final List<String> _pendingImages = [];
   static const _allowedImageExts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
   bool _showHappyBriefly = false;
   bool _showWakeDetectedBriefly = false;
+  Size _lastChatWindowSize = LayoutConstants.avatarWindowLarge;
   String? _prevWakeWordStatus;
   bool _actionPerforming = false;
   int _thinkingIndex = 0;
@@ -192,10 +200,13 @@ class _AvatarViewState extends State<AvatarView> {
     if (showListeningState) return AvatarState.listening;
     if (_userMuted && _avatarState == AvatarState.idle) return AvatarState.muted;
     if (_chatInputHasFocus && _avatarState == AvatarState.idle && _showChat) return AvatarState.reading;
+    if (_focus.isFocused.value && _avatarState == AvatarState.idle) {
+      return AvatarState.focused;
+    }
     return _avatarState;
   }
 
-  void _onWakeWordReply() {
+  Future<void> _onWakeWordReply() async {
     final reply = widget.wakeWordReply?.value;
     if (reply == null || !mounted) return;
     final command = widget.wakeWordCommand?.value;
@@ -207,12 +218,9 @@ class _AvatarViewState extends State<AvatarView> {
     }
     widget.sharedHistory.addAssistant(reply);
     if (mounted) {
-      setState(() {
-        _avatarState = AvatarState.speaking;
-        _showChat = true;
-      });
+      setState(() => _avatarState = AvatarState.speaking);
     }
-    windowManager.setSize(LayoutConstants.avatarWindowLarge);
+    await _openChatWindow();
     _scrollToBottom();
     SoundEffects.playReplyArrived();
     _ttsController.speak(reply);
@@ -237,13 +245,32 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   Future<void> _toggleChat() async {
-    final willShow = !_showChat;
-    if (willShow) {
-      await windowManager.setSize(LayoutConstants.avatarWindowLarge);
+    if (_showChat) {
+      await _closeChatWindow();
     } else {
-      await windowManager.setSize(LayoutConstants.avatarWindowSmall);
+      await _openChatWindow();
     }
-    if (mounted) setState(() => _showChat = willShow);
+  }
+
+  Future<void> _openChatWindow() async {
+    if (_showChat) return;
+    final pos = await windowManager.getPosition();
+    final oldSize = await windowManager.getSize();
+    final newSize = _lastChatWindowSize;
+    await windowManager.setSize(newSize);
+    final dx = (newSize.width - oldSize.width) / 2;
+    await windowManager.setPosition(Offset(pos.dx - dx, pos.dy));
+    if (mounted) setState(() => _showChat = true);
+  }
+
+  Future<void> _closeChatWindow() async {
+    if (!_showChat) return;
+    _lastChatWindowSize = await windowManager.getSize();
+    final pos = await windowManager.getPosition();
+    final dx = (_lastChatWindowSize.width - LayoutConstants.avatarWindowSmall.width) / 2;
+    await windowManager.setSize(LayoutConstants.avatarWindowSmall);
+    await windowManager.setPosition(Offset(pos.dx + dx, pos.dy));
+    if (mounted) setState(() => _showChat = false);
   }
 
   bool _isImageFile(String path) {
@@ -255,8 +282,7 @@ class _AvatarViewState extends State<AvatarView> {
     if (_pendingImages.length >= 5) return;
     if (!_isImageFile(path)) return;
     setState(() => _pendingImages.add(path));
-    if (!_showChat) setState(() => _showChat = true);
-    windowManager.setSize(LayoutConstants.avatarWindowLarge);
+    if (!_showChat) _openChatWindow();
   }
 
   void _removePendingImage(int index) {
@@ -299,14 +325,52 @@ class _AvatarViewState extends State<AvatarView> {
     } catch (_) {}
   }
 
+  void _stopGenerating() {
+    _activeCancelToken?.cancel();
+  }
+
+  Future<void> _toggleFocus() async {
+    if (_focus.isFocused.value) {
+      _focus.stop();
+      setState(() => _avatarState = AvatarState.idle);
+      return;
+    }
+
+    final target = await Navigator.push<FocusTarget>(
+      context,
+      MaterialPageRoute(builder: (_) => const FocusSelectorScreen()),
+    );
+    if (target == null || !mounted) return;
+
+    _focus.start(target);
+    if (mounted) setState(() => _avatarState = AvatarState.focused);
+  }
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     final images = List<String>.from(_pendingImages);
-    if (text.isEmpty && images.isEmpty) return;
+
+    if (text.isEmpty && images.isEmpty && !_focus.isFocused.value) return;
     if (_isSending) return;
     SoundEffects.playButtonClick();
 
+    // Capture a fresh screenshot on-demand when Focus Mode is active.
+    if (_focus.isFocused.value) {
+      final shotPath = await _focus.captureNow();
+      if (shotPath != null && !images.contains(shotPath)) {
+        images.add(shotPath);
+      }
+    }
+
+    if (text.isEmpty && images.isEmpty) return;
+
+    final cancelToken = CancelToken();
+    _activeCancelToken = cancelToken;
+
     final displayText = text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
+    final messageToSend = _focus.isFocused.value
+        ? '[User has Focus Mode active on ${_focus.target?.label ?? 'screen'}. The attached image shows their current view.] $displayText'
+        : displayText;
     widget.sharedHistory.addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
     setState(() {
       _isSending = true;
@@ -325,21 +389,25 @@ class _AvatarViewState extends State<AvatarView> {
 
     try {
       final resp = await _chatSender.send(
-        displayText,
+        messageToSend,
         imagePaths: images.isNotEmpty ? images : null,
+        cancelToken: cancelToken,
         onToken: (token) {
           if (mounted) {
-            setState(() => _streamingReply += token);
+            setState(() {
+              _streamingReply += token;
+              _avatarState = AvatarState.speaking;
+            });
             _scrollToBottom();
           }
         },
       );
       if (!mounted) return;
-      if (resp.clientAction != null) {
+      if (!resp.wasCancelled && resp.clientAction != null) {
         setState(() => _actionPerforming = true);
+        await _chatSender.handleClientAction(context, resp.clientAction);
+        if (mounted) setState(() => _actionPerforming = false);
       }
-      await _chatSender.handleClientAction(context, resp.clientAction);
-      if (mounted) setState(() => _actionPerforming = false);
       if (!mounted) return;
       SoundEffects.playReplyArrived();
       widget.sharedHistory.addAssistant(resp.reply);
@@ -347,22 +415,25 @@ class _AvatarViewState extends State<AvatarView> {
         _streamingReply = '';
         _lastFailedMessage = null;
         _avatarState = AvatarState.idle;
-        _showHappyBriefly = true;
+        _showHappyBriefly = !resp.wasCancelled;
       });
       _scrollToBottom();
-      Future.delayed(const Duration(milliseconds: 1500), () {
-        if (mounted) setState(() => _showHappyBriefly = false);
-      });
+      if (!resp.wasCancelled) {
+        Future.delayed(const Duration(milliseconds: 1500), () {
+          if (mounted) setState(() => _showHappyBriefly = false);
+        });
+      }
     } catch (e) {
       if (!mounted) return;
       widget.sharedHistory.addAssistant('Could not reach CHILI. Is the server running?');
       setState(() {
         _streamingReply = '';
-        _lastFailedMessage = text;
+        _lastFailedMessage = displayText;
         _avatarState = AvatarState.idle;
       });
       _scrollToBottom();
     } finally {
+      _activeCancelToken = null;
       _thinkingTimer?.cancel();
       _thinkingTimer = null;
       if (mounted) {
@@ -386,8 +457,7 @@ class _AvatarViewState extends State<AvatarView> {
       widget.sharedHistory.addAssistant(
         'Received files: $names\nOnly images (jpg, png, gif, webp) are supported right now.',
       );
-      if (!_showChat) setState(() => _showChat = true);
-      windowManager.setSize(LayoutConstants.avatarWindowLarge);
+      _openChatWindow();
       _scrollToBottom();
     }
   }
@@ -462,48 +532,79 @@ class _AvatarViewState extends State<AvatarView> {
             onDragEntered: (_) => setState(() => _isDraggingFile = true),
             onDragExited: (_) => setState(() => _isDraggingFile = false),
             onDragDone: _onFilesDropped,
-            child: SingleChildScrollView(
-          child: Center(
             child: Column(
-              mainAxisSize: MainAxisSize.min,
               children: [
                 // ── Avatar + overlaid status chip ──
-                GestureDetector(
-                  onPanStart: (_) => windowManager.startDragging(),
-                  onTap: _toggleChat,
-                  onDoubleTap: widget.onOpenFullApp,
-                  child: SizedBox(
-                    height: 200,
-                    width: 200,
-                    child: Stack(
-                      alignment: Alignment.center,
-                      children: [
-                        // Mic mute toggle (pause/resume wake word)
-                        Positioned(
-                          top: 4,
-                          right: 4,
-                          child: Material(
-                            color: Colors.transparent,
-                            child: IconButton(
-                              icon: Icon(
-                                _userMuted ? Icons.mic_off : Icons.mic_none,
-                                size: 18,
-                                color: Colors.white70,
+                SizedBox(
+                  height: 200,
+                  width: 200,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      // Draggable / tappable background area
+                      GestureDetector(
+                        onPanStart: (_) => windowManager.startDragging(),
+                        onTap: _toggleChat,
+                        onDoubleTap: widget.onOpenFullApp,
+                        behavior: HitTestBehavior.translucent,
+                        child: const SizedBox.expand(),
+                      ),
+                      // Focus + mic mute toggles (outside GestureDetector)
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: Material(
+                          color: Colors.transparent,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              ValueListenableBuilder<bool>(
+                                valueListenable: _focus.isFocused,
+                                builder: (_, focused, __) => IconButton(
+                                  icon: Icon(
+                                    focused ? Icons.center_focus_strong : Icons.center_focus_weak,
+                                    size: 18,
+                                    color: focused
+                                        ? const Color(0xFF7E57C2)
+                                        : Colors.white70,
+                                  ),
+                                  onPressed: _toggleFocus,
+                                  tooltip: focused
+                                      ? 'Stop Focus Mode'
+                                      : 'Focus Mode',
+                                  padding: const EdgeInsets.all(4),
+                                  constraints: const BoxConstraints(
+                                      minWidth: 28, minHeight: 28),
+                                ),
                               ),
-                              onPressed: () {
-                                setState(() {
-                                  _userMuted = !_userMuted;
-                                  widget.pauseWakeWord?.value = _recording || _userMuted;
-                                });
-                              },
-                              tooltip: _userMuted ? 'Resume listening' : 'Pause listening',
-                              padding: const EdgeInsets.all(4),
-                              constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-                            ),
+                              IconButton(
+                                icon: Icon(
+                                  _userMuted ? Icons.mic_off : Icons.mic_none,
+                                  size: 18,
+                                  color: Colors.white70,
+                                ),
+                                onPressed: () {
+                                  setState(() {
+                                    _userMuted = !_userMuted;
+                                    widget.pauseWakeWord?.value =
+                                        _recording || _userMuted;
+                                  });
+                                },
+                                tooltip: _userMuted
+                                    ? 'Resume listening'
+                                    : 'Pause listening',
+                                padding: const EdgeInsets.all(4),
+                                constraints: const BoxConstraints(
+                                    minWidth: 28, minHeight: 28),
+                              ),
+                            ],
                           ),
                         ),
-                        if (_isDraggingFile)
-                          Container(
+                      ),
+                      // Avatar & drag indicator (non-interactive — pass through to drag handler)
+                      if (_isDraggingFile)
+                        IgnorePointer(
+                          child: Container(
                             height: 160,
                             width: 160,
                             decoration: BoxDecoration(
@@ -520,9 +621,11 @@ class _AvatarViewState extends State<AvatarView> {
                               color: Colors.white70,
                             ),
                           ),
-                        if (!_isDraggingFile)
-                          Positioned(
-                            top: 0,
+                        ),
+                      if (!_isDraggingFile)
+                        Positioned(
+                          top: 0,
+                          child: IgnorePointer(
                             child: AnimatedSwitcher(
                               duration: const Duration(milliseconds: 220),
                               switchInCurve: Curves.easeOut,
@@ -534,11 +637,13 @@ class _AvatarViewState extends State<AvatarView> {
                               ),
                             ),
                           ),
-                        // Status chip + partial transcription overlaid at bottom
-                        Positioned(
-                          bottom: 2,
-                          left: 6,
-                          right: 6,
+                        ),
+                      // Status chip + partial transcription (non-interactive)
+                      Positioned(
+                        bottom: 2,
+                        left: 6,
+                        right: 6,
+                        child: IgnorePointer(
                           child: Column(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -576,24 +681,51 @@ class _AvatarViewState extends State<AvatarView> {
                                     overflow: TextOverflow.ellipsis,
                                   ),
                                 ),
+                              ValueListenableBuilder<bool>(
+                                valueListenable: _focus.isFocused,
+                                builder: (_, focused, __) {
+                                  if (!focused) return const SizedBox.shrink();
+                                  return Container(
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFF7E57C2).withValues(alpha: 0.85),
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        const Icon(Icons.center_focus_strong, size: 12, color: Colors.white),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Focus: ${_focus.target?.label ?? 'Screen'}',
+                                          style: const TextStyle(
+                                            fontSize: 10,
+                                            color: Colors.white,
+                                            fontWeight: FontWeight.w500,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  );
+                                },
+                              ),
                             ],
                           ),
+                        ),
                         ),
                       ],
                     ),
                   ),
-                ),
 
-                // ── Chat bubble ──
+                // ── Focus status chip (below avatar, outside Stack) ──
                 if (_showChat) ...[
                   const SizedBox(height: 6),
-                  _buildChatBubble(),
+                  Expanded(child: _buildChatBubble()),
+                  _buildResizeHandle(),
                 ],
               ],
             ),
           ),
-        ),
-      ),
           if (_showOnboarding) _buildOnboardingOverlay(),
         ],
       ),
@@ -628,6 +760,32 @@ class _AvatarViewState extends State<AvatarView> {
     return const Color(0xFF616161);
   }
 
+  Widget _buildResizeHandle() {
+    return GestureDetector(
+      onPanStart: (_) => windowManager.startResizing(ResizeEdge.bottom),
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeUpDown,
+        child: Center(
+          child: Container(
+            height: 14,
+            width: 40,
+            margin: const EdgeInsets.only(bottom: 2),
+            child: Center(
+              child: Container(
+                height: 4,
+                width: 30,
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade400,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget _buildChatBubble() {
     return Container(
       width: 275,
@@ -646,7 +804,6 @@ class _AvatarViewState extends State<AvatarView> {
       child: Material(
         color: Colors.transparent,
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             // Pending image previews
@@ -696,10 +853,12 @@ class _AvatarViewState extends State<AvatarView> {
                 VoiceInputButton(
                   onTranscription: (text) {
                     if (mounted && text != null && text.isNotEmpty) {
-                      setState(() {
-                        _controller.text = text;
-                        _avatarState = AvatarState.idle;
-                      });
+                      _controller.text = text;
+                      if (_focus.isFocused.value) {
+                        _sendMessage();
+                      } else {
+                        setState(() => _avatarState = AvatarState.idle);
+                      }
                     }
                   },
                   onRecordingStateChanged: (recording) {
@@ -784,21 +943,28 @@ class _AvatarViewState extends State<AvatarView> {
                   ),
                 ),
                 const SizedBox(width: 6),
-                IconButton(
-                  onPressed: _isSending ? null : _sendMessage,
-                  icon: _isSending
-                      ? SizedBox(
-                          width: _iconButtonMinSize != null ? 24 : 18,
-                          height: _iconButtonMinSize != null ? 24 : 18,
-                          child: const CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : Icon(Icons.send, size: _iconButtonMinSize != null ? 24 : 20),
-                  style: IconButton.styleFrom(
-                    backgroundColor: const Color(0xFFEF5350),
-                    foregroundColor: Colors.white,
-                    minimumSize: _iconButtonMinSize,
-                  ),
-                ),
+                _isSending
+                    ? IconButton(
+                        onPressed: _stopGenerating,
+                        icon: Icon(Icons.stop_circle,
+                            size: _iconButtonMinSize != null ? 24 : 20),
+                        tooltip: 'Stop generating',
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xFFD32F2F),
+                          foregroundColor: Colors.white,
+                          minimumSize: _iconButtonMinSize,
+                        ),
+                      )
+                    : IconButton(
+                        onPressed: _sendMessage,
+                        icon: Icon(Icons.send,
+                            size: _iconButtonMinSize != null ? 24 : 20),
+                        style: IconButton.styleFrom(
+                          backgroundColor: const Color(0xFFEF5350),
+                          foregroundColor: Colors.white,
+                          minimumSize: _iconButtonMinSize,
+                        ),
+                      ),
               ],
             ),
 
@@ -836,8 +1002,8 @@ class _AvatarViewState extends State<AvatarView> {
               ),
             ],
 
-            // TTS progress and Stop button
-            if (_avatarState == AvatarState.speaking) ...[
+            // TTS progress and Stop button (only when audio is actually playing)
+            if (widget.ttsPlaying?.value == true) ...[
               const SizedBox(height: 6),
               const LinearProgressIndicator(),
               Padding(
@@ -861,11 +1027,9 @@ class _AvatarViewState extends State<AvatarView> {
             // Scrollable message history (includes streaming reply when present)
             if (widget.sharedHistory.messages.isNotEmpty || _streamingReply.isNotEmpty) ...[
               const SizedBox(height: 8),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxHeight: 200),
+              Expanded(
                 child: ListView.builder(
                   controller: _scrollController,
-                  shrinkWrap: true,
                   itemCount: widget.sharedHistory.messages.length + (_streamingReply.isNotEmpty ? 1 : 0),
                   padding: EdgeInsets.zero,
                   itemBuilder: (context, index) {

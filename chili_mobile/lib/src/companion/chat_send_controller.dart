@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../desktop/desktop_actions.dart';
-import '../network/chili_api_client.dart';
+import '../network/chili_api_client.dart' show ChatResponse, CancelToken, ChiliApiClient;
 
 /// Shared helper for sending chat messages and handling desktop client actions.
 class ChatSendController {
@@ -13,17 +13,20 @@ class ChatSendController {
     String message, {
     List<String>? imagePaths,
     void Function(String token)? onToken,
+    CancelToken? cancelToken,
   }) {
     if (imagePaths != null && imagePaths.isNotEmpty) {
       return _client.sendMessageStreamWithImages(
         message,
         imagePaths: imagePaths,
         onToken: onToken,
+        cancelToken: cancelToken,
       );
     }
     return _client.sendMessageStream(
       message,
       onToken: onToken,
+      cancelToken: cancelToken,
     );
   }
 

@@ -19,7 +19,9 @@ data/voice/*
 !data/voice/.gitkeep
 
 # HTTPS certificates (local dev)
+certs/
 *.pem
+*.key
 mkcert.exe
 localhost+2.pem
 localhost+2-key.pem

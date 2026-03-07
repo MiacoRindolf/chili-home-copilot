@@ -145,7 +145,7 @@ def wellness_chat(
             "model": _OLLAMA_MODEL,
             "messages": [{"role": "system", "content": system}] + messages,
             "stream": False,
-            "options": {"temperature": 0.7},
+            "options": {"temperature": 0.7, "num_gpu": 99},
         }
         r = requests.post(_OLLAMA_CHAT_URL, json=payload, timeout=60)
         r.raise_for_status()
@@ -193,7 +193,7 @@ def wellness_chat_stream(
             "model": _OLLAMA_MODEL,
             "messages": [{"role": "system", "content": system}] + messages,
             "stream": True,
-            "options": {"temperature": 0.7},
+            "options": {"temperature": 0.7, "num_gpu": 99},
         }
         r = requests.post(_OLLAMA_CHAT_URL, json=payload, timeout=60, stream=True)
         r.raise_for_status()

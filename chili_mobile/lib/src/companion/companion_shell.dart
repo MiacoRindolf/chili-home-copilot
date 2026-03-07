@@ -5,6 +5,7 @@ import 'avatar_view.dart';
 import 'shared_chat_history.dart';
 import '../app_shell.dart';
 import '../config/app_config.dart';
+import '../screen/focus_controller.dart';
 import '../voice/calibration_dialog.dart';
 import '../voice/wake_word_listener.dart';
 
@@ -22,6 +23,7 @@ class CompanionShell extends StatefulWidget {
 class _CompanionShellState extends State<CompanionShell> {
   CompanionMode _mode = CompanionMode.avatar;
   final _sharedHistory = SharedChatHistory();
+  final _focusController = FocusController();
   final _pauseWakeWord = ValueNotifier<bool>(false);
   final _wakeWordCommand = ValueNotifier<String?>(null);
   final _wakeWordReply = ValueNotifier<String?>(null);
@@ -40,6 +42,7 @@ class _CompanionShellState extends State<CompanionShell> {
       pauseListening: _pauseWakeWord,
       ttsPlaying: _ttsPlaying,
       lastTtsText: _lastTtsText,
+      focusController: _focusController,
       onReply: (command, reply) {
         _wakeWordCommand.value = command;
         _wakeWordReply.value = reply;
@@ -97,6 +100,7 @@ class _CompanionShellState extends State<CompanionShell> {
   @override
   void dispose() {
     _wakeWordListener.dispose();
+    _focusController.dispose();
     _pauseWakeWord.dispose();
     _wakeWordCommand.dispose();
     _wakeWordReply.dispose();
@@ -137,6 +141,7 @@ class _CompanionShellState extends State<CompanionShell> {
         ? AvatarView(
             sharedHistory: _sharedHistory,
             onOpenFullApp: _switchToFullApp,
+            focusController: _focusController,
             pauseWakeWord: _pauseWakeWord,
             ttsPlaying: _ttsPlaying,
             ttsInterruptRequested: _ttsInterruptRequested,
@@ -151,6 +156,7 @@ class _CompanionShellState extends State<CompanionShell> {
             sharedHistory: _sharedHistory,
             onBackToAvatar: _switchToAvatar,
             pauseListening: _pauseWakeWord,
+            focusController: _focusController,
           );
   }
 }

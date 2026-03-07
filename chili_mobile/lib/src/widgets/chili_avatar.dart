@@ -17,6 +17,7 @@ enum AvatarState {
   error,
   wakeDetected,
   actionPerforming,
+  focused,
 }
 
 /// Expression drawn on the mascot face (eyes, mouth, eyebrows).
@@ -29,6 +30,7 @@ enum AvatarExpression {
   confused,
   error,
   talking,
+  focused,
 }
 
 /// Maps [AvatarState] to the face [AvatarExpression] to draw.
@@ -55,6 +57,8 @@ AvatarExpression expressionForState(AvatarState state) {
       return AvatarExpression.error;
     case AvatarState.actionPerforming:
       return AvatarExpression.attentive;
+    case AvatarState.focused:
+      return AvatarExpression.focused;
   }
 }
 
@@ -318,6 +322,13 @@ class _ChiliAvatarState extends State<ChiliAvatar>
               showRing = true;
               glowOpacity = 0.22;
               break;
+            case AvatarState.focused:
+              translateY = 0;
+              scale = 1.0;
+              showRing = true;
+              showDots = !noMotion;
+              glowOpacity = 0.3;
+              break;
           }
 
           Color tintColor = const Color(0xFFEF5350);
@@ -337,6 +348,8 @@ class _ChiliAvatarState extends State<ChiliAvatar>
             tintColor = const Color(0xFFD32F2F);
           } else if (widget.state == AvatarState.actionPerforming) {
             tintColor = const Color(0xFF5C6BC0);
+          } else if (widget.state == AvatarState.focused) {
+            tintColor = const Color(0xFF7E57C2);
           }
 
           _AuraType auraType = _AuraType.glow;

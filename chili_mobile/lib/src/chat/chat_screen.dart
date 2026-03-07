@@ -10,14 +10,22 @@ import '../companion/sound_effects.dart';
 import '../companion/chat_send_controller.dart';
 import '../config/app_config.dart';
 import '../network/chili_api_client.dart';
+import '../screen/focus_controller.dart';
+import '../screen/focus_target.dart';
+import '../screen/region_selector.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
 import '../widgets/chat_message_bubble.dart';
 
 class ChatScreen extends StatefulWidget {
-  const ChatScreen({super.key, required this.sharedHistory});
+  const ChatScreen({
+    super.key,
+    required this.sharedHistory,
+    required this.focusController,
+  });
 
   final SharedChatHistory sharedHistory;
+  final FocusController focusController;
 
   @override
   State<ChatScreen> createState() => _ChatScreenState();
@@ -29,11 +37,13 @@ class _ChatScreenState extends State<ChatScreen> {
   final _chatFocusNode = FocusNode();
   final _client = ChiliApiClient();
   late final ChatSendController _chatSender;
+  FocusController get _focus => widget.focusController;
 
   String _streamingReply = '';
   bool _isSending = false;
   bool _chatInputHasFocus = false;
   AvatarState _avatarState = AvatarState.idle;
+  CancelToken? _activeCancelToken;
 
   final List<String> _pendingImages = [];
   static const _allowedImageExts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
@@ -62,6 +72,9 @@ class _ChatScreenState extends State<ChatScreen> {
 
   AvatarState get _effectiveAvatarState {
     if (_chatInputHasFocus && _avatarState == AvatarState.idle) return AvatarState.reading;
+    if (_focus.isFocused.value && _avatarState == AvatarState.idle) {
+      return AvatarState.focused;
+    }
     return _avatarState;
   }
 
@@ -121,14 +134,52 @@ class _ChatScreenState extends State<ChatScreen> {
 
   // ── Send ──
 
+  void _stopGenerating() {
+    _activeCancelToken?.cancel();
+  }
+
+  Future<void> _toggleFocus() async {
+    if (_focus.isFocused.value) {
+      _focus.stop();
+      setState(() => _avatarState = AvatarState.idle);
+      return;
+    }
+
+    final target = await Navigator.push<FocusTarget>(
+      context,
+      MaterialPageRoute(builder: (_) => const FocusSelectorScreen()),
+    );
+    if (target == null || !mounted) return;
+
+    _focus.start(target);
+    if (mounted) setState(() => _avatarState = AvatarState.focused);
+  }
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
     final images = List<String>.from(_pendingImages);
-    if (text.isEmpty && images.isEmpty) return;
+
+    if (text.isEmpty && images.isEmpty && !_focus.isFocused.value) return;
     if (_isSending) return;
     SoundEffects.playButtonClick();
 
+    // Capture a fresh screenshot on-demand when Focus Mode is active.
+    if (_focus.isFocused.value) {
+      final shotPath = await _focus.captureNow();
+      if (shotPath != null && !images.contains(shotPath)) {
+        images.add(shotPath);
+      }
+    }
+
+    if (text.isEmpty && images.isEmpty) return;
+
+    final cancelToken = CancelToken();
+    _activeCancelToken = cancelToken;
+
     final displayText = text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
+    final messageToSend = _focus.isFocused.value
+        ? '[User has Focus Mode active on ${_focus.target?.label ?? 'screen'}. The attached image shows their current view.] $displayText'
+        : displayText;
     widget.sharedHistory.addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
     setState(() {
       _isSending = true;
@@ -140,11 +191,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
     try {
       final resp = await _chatSender.send(
-        displayText,
+        messageToSend,
         imagePaths: images.isNotEmpty ? images : null,
+        cancelToken: cancelToken,
         onToken: (token) {
           if (mounted) {
-            setState(() => _streamingReply += token);
+            setState(() {
+              _streamingReply += token;
+              _avatarState = AvatarState.speaking;
+            });
             _scrollController.animateTo(
               _scrollController.position.maxScrollExtent + 80,
               duration: const Duration(milliseconds: 100),
@@ -153,20 +208,22 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         },
       );
-      if (mounted && resp.clientAction != null) {
-        setState(() => _avatarState = AvatarState.actionPerforming);
-      }
       if (!mounted) return;
-      await _chatSender.handleClientAction(context, resp.clientAction);
+      if (!resp.wasCancelled && resp.clientAction != null) {
+        setState(() => _avatarState = AvatarState.actionPerforming);
+        await _chatSender.handleClientAction(context, resp.clientAction);
+      }
       widget.sharedHistory.addAssistant(resp.reply);
       if (mounted) {
         setState(() {
           _streamingReply = '';
-          _avatarState = AvatarState.happy;
+          _avatarState = resp.wasCancelled ? AvatarState.idle : AvatarState.happy;
         });
-        Future.delayed(const Duration(milliseconds: 1500), () {
-          if (mounted) setState(() => _avatarState = AvatarState.idle);
-        });
+        if (!resp.wasCancelled) {
+          Future.delayed(const Duration(milliseconds: 1500), () {
+            if (mounted) setState(() => _avatarState = AvatarState.idle);
+          });
+        }
       }
     } catch (e) {
       widget.sharedHistory.addSystem('Sorry, I could not reach CHILI. Please try again.');
@@ -180,6 +237,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       }
     } finally {
+      _activeCancelToken = null;
       if (mounted) setState(() => _isSending = false);
       if (_scrollController.hasClients) {
         _scrollController.animateTo(
@@ -196,6 +254,19 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('CHILI'),
+        actions: [
+          ValueListenableBuilder<bool>(
+            valueListenable: _focus.isFocused,
+            builder: (_, focused, __) => IconButton(
+              icon: Icon(
+                focused ? Icons.center_focus_strong : Icons.center_focus_weak,
+                color: focused ? const Color(0xFF7E57C2) : null,
+              ),
+              onPressed: _toggleFocus,
+              tooltip: focused ? 'Stop Focus Mode' : 'Focus Mode',
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Column(
@@ -314,7 +385,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   VoiceInputButton(
                     onTranscription: (text) {
                       if (mounted && text != null && text.isNotEmpty) {
-                        setState(() => _controller.text = text);
+                        _controller.text = text;
+                        if (_focus.isFocused.value) {
+                          _sendMessage();
+                        } else {
+                          setState(() {});
+                        }
                       }
                     },
                     onRecordingStateChanged: (recording) {
@@ -368,17 +444,24 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   const SizedBox(width: 8),
-                  IconButton(
-                    icon: _isSending
-                        ? SizedBox(
-                            width: _iconButtonMinSize != null ? 24 : 20,
-                            height: _iconButtonMinSize != null ? 24 : 20,
-                            child: const CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : Icon(Icons.send, size: _iconButtonMinSize != null ? 24 : null),
-                    onPressed: _isSending ? null : _sendMessage,
-                    style: IconButton.styleFrom(minimumSize: _iconButtonMinSize),
-                  ),
+                  _isSending
+                      ? IconButton(
+                          onPressed: _stopGenerating,
+                          icon: Icon(Icons.stop_circle,
+                              size: _iconButtonMinSize != null ? 24 : null),
+                          tooltip: 'Stop generating',
+                          style: IconButton.styleFrom(
+                            foregroundColor: const Color(0xFFD32F2F),
+                            minimumSize: _iconButtonMinSize,
+                          ),
+                        )
+                      : IconButton(
+                          onPressed: _sendMessage,
+                          icon: Icon(Icons.send,
+                              size: _iconButtonMinSize != null ? 24 : null),
+                          style: IconButton.styleFrom(
+                              minimumSize: _iconButtonMinSize),
+                        ),
                 ],
               ),
             ),

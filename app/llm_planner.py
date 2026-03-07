@@ -73,7 +73,7 @@ def plan_action(
             {"role": "user", "content": user_message},
         ],
         "stream": False,
-        "options": {"temperature": 0},
+        "options": {"temperature": 0, "num_gpu": 99},
     }
 
     r = requests.post(OLLAMA_URL, json=payload, timeout=60)

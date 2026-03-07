@@ -7,15 +7,16 @@ class Settings(BaseSettings):
 
     # Ollama (local planner, wellness, RAG, vision)
     ollama_host: str = "http://127.0.0.1:11434"
-    ollama_model: str = "llama3"
-    wellness_model: str = "llama3"
+    ollama_model: str = "phi4-mini"
+    wellness_model: str = "phi4-mini"
     ollama_vision_model: str = "llama3.2-vision"
 
-    # Primary LLM (Groq / OpenAI-compatible). Set LLM_API_KEY or OPENAI_API_KEY.
-    llm_api_key: str = ""
+    # Primary LLM — defaults to local Ollama via its OpenAI-compatible API.
+    # Override with Groq/OpenAI keys + base URL for cloud inference.
+    llm_api_key: str = "ollama"
     openai_api_key: str = ""  # backward compat; used as primary if llm_api_key empty
-    llm_model: str = "llama-3.3-70b-versatile"
-    llm_base_url: str = "https://api.groq.com/openai/v1"
+    llm_model: str = "phi4-mini"
+    llm_base_url: str = "http://127.0.0.1:11434/v1"
 
     # Premium LLM (e.g. OpenAI)
     premium_api_key: str = ""

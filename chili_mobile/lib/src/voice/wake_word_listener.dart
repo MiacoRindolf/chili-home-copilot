@@ -10,6 +10,7 @@ import 'package:record/record.dart';
 import '../config/app_config.dart';
 import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
+import '../screen/focus_controller.dart';
 import 'vosk_ffi.dart';
 import 'vosk_setup.dart';
 
@@ -35,6 +36,7 @@ class WakeWordListener {
     this.onFollowUpActive,
     this.onPartial,
     this.onTtsInterruptRequested,
+    this.focusController,
     ValueNotifier<bool>? pauseListening,
     ValueNotifier<bool>? ttsPlaying,
     ValueNotifier<String?>? lastTtsText,
@@ -56,6 +58,10 @@ class WakeWordListener {
   final void Function(String partial)? onPartial;
   /// Called when a TTS-interrupt phrase is detected during playback.
   final void Function()? onTtsInterruptRequested;
+
+  /// When non-null and focused, a screenshot is captured and attached to every
+  /// hands-free command so the LLM receives visual context.
+  final FocusController? focusController;
 
   static const Set<String> _stopPhrases = {
     'stop', 'cancel', 'enough', 'never mind', 'nevermind',
@@ -494,14 +500,44 @@ class WakeWordListener {
       }
     }
 
+    // Capture a Focus Mode screenshot if active.
+    String? focusImagePath;
+    final fc = focusController;
+    if (fc != null && fc.isFocused.value) {
+      debugPrint('[WakeWord] Focus Mode active – capturing screenshot…');
+      focusImagePath = await fc.captureNow();
+    }
+
+    final messageToSend = focusImagePath != null
+        ? '[User has Focus Mode active on ${fc?.target?.label ?? 'screen'}. '
+          'The attached image shows their current view.] $finalCommand'
+        : finalCommand;
+
     debugPrint('[WakeWord] >>> Sending command: "$finalCommand"');
-    onStatus('Processing: "$finalCommand"');
+    onStatus(focusImagePath != null
+        ? 'Analyzing screenshot…'
+        : 'Processing: "$finalCommand"');
     try {
-      final resp = await _client.sendMessage(finalCommand).timeout(
-            const Duration(seconds: 15),
-            onTimeout: () => ChatResponse(
-                reply: 'CHILI took too long to respond. Please try again.'),
-          );
+      final ChatResponse resp;
+      if (focusImagePath != null) {
+        resp = await _client
+            .sendMessageStreamWithImages(
+              messageToSend,
+              imagePaths: [focusImagePath],
+            )
+            .timeout(
+              const Duration(seconds: 90),
+              onTimeout: () => ChatResponse(
+                  reply: 'Vision processing took too long. Try a smaller '
+                      'region or ask again.'),
+            );
+      } else {
+        resp = await _client.sendMessage(messageToSend).timeout(
+              const Duration(seconds: 15),
+              onTimeout: () => ChatResponse(
+                  reply: 'CHILI took too long to respond. Please try again.'),
+            );
+      }
       debugPrint('[WakeWord] <<< Reply received (${resp.reply.length} chars)');
       DesktopActions.execute(resp.clientAction);
       onReply(finalCommand, resp.reply);

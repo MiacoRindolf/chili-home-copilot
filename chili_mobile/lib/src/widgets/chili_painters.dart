@@ -220,6 +220,23 @@ class ChiliMascotPainter extends CustomPainter {
           paint,
         );
         break;
+      case AvatarExpression.focused:
+        // Slightly raised and narrowed -- attentive focus
+        canvas.drawArc(
+          Rect.fromCenter(center: Offset(leftCx, y - 1), width: span * 1.1, height: h * 0.04),
+          -0.2 * math.pi,
+          0.4 * math.pi,
+          false,
+          paint,
+        );
+        canvas.drawArc(
+          Rect.fromCenter(center: Offset(rightCx, y - 1), width: span * 1.1, height: h * 0.04),
+          -0.2 * math.pi,
+          0.4 * math.pi,
+          false,
+          paint,
+        );
+        break;
     }
   }
 
@@ -284,11 +301,13 @@ class ChiliMascotPainter extends CustomPainter {
       return;
     }
 
-    // Pupil offset for thinking (look up) or idle look-around
     double pupilDx = 0.01 * w;
     double pupilDy = 0.01 * h;
     if (expression == AvatarExpression.thinking) {
       pupilDy -= h * 0.03;
+    } else if (expression == AvatarExpression.focused) {
+      pupilDx += w * 0.04;
+      pupilDy -= h * 0.01;
     }
     if (pupilOffset != null) {
       pupilDx += pupilOffset!.dx;
@@ -341,6 +360,7 @@ class ChiliMascotPainter extends CustomPainter {
       case AvatarExpression.attentive:
       case AvatarExpression.thinking:
       case AvatarExpression.talking:
+      case AvatarExpression.focused:
         if (expression == AvatarExpression.talking && mouthOpen > 0.05) {
           final openH = h * 0.06 * (0.3 + mouthOpen * 0.7);
           canvas.drawOval(
