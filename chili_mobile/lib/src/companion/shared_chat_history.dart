@@ -2,9 +2,17 @@ import 'package:flutter/foundation.dart';
 
 /// A single message in the shared chat history.
 class SharedChatMessage {
-  const SharedChatMessage({required this.role, required this.content});
+  const SharedChatMessage({
+    required this.role,
+    required this.content,
+    this.imagePaths,
+  });
+
   final String role; // 'user', 'assistant', 'system'
   final String content;
+
+  /// Local file paths of images attached to this message (user messages only).
+  final List<String>? imagePaths;
 }
 
 /// Shared chat history used by both the avatar quick chat and the full ChatScreen.
@@ -13,8 +21,12 @@ class SharedChatHistory extends ChangeNotifier {
 
   List<SharedChatMessage> get messages => List.unmodifiable(_messages);
 
-  void addUser(String content) {
-    _messages.add(SharedChatMessage(role: 'user', content: content));
+  void addUser(String content, {List<String>? imagePaths}) {
+    _messages.add(SharedChatMessage(
+      role: 'user',
+      content: content,
+      imagePaths: imagePaths,
+    ));
     notifyListeners();
   }
 

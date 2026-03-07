@@ -1,6 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:pasteboard/pasteboard.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 
@@ -74,6 +78,8 @@ class _AvatarViewState extends State<AvatarView> {
   bool _userMuted = false;
   bool _recording = false;
   bool _chatInputHasFocus = false;
+  final List<String> _pendingImages = [];
+  static const _allowedImageExts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
   bool _showHappyBriefly = false;
   bool _showWakeDetectedBriefly = false;
   String? _prevWakeWordStatus;
@@ -240,17 +246,74 @@ class _AvatarViewState extends State<AvatarView> {
     if (mounted) setState(() => _showChat = willShow);
   }
 
+  bool _isImageFile(String path) {
+    final ext = path.toLowerCase();
+    return _allowedImageExts.any((e) => ext.endsWith(e));
+  }
+
+  void _addPendingImage(String path) {
+    if (_pendingImages.length >= 5) return;
+    if (!_isImageFile(path)) return;
+    setState(() => _pendingImages.add(path));
+    if (!_showChat) setState(() => _showChat = true);
+    windowManager.setSize(LayoutConstants.avatarWindowLarge);
+  }
+
+  void _removePendingImage(int index) {
+    setState(() => _pendingImages.removeAt(index));
+  }
+
+  Future<void> _pickImages() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true,
+    );
+    if (result == null) return;
+    for (final file in result.files) {
+      if (file.path != null) _addPendingImage(file.path!);
+    }
+  }
+
+  Future<void> _pasteImage() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes == null || imageBytes.isEmpty) return;
+      final dir = Directory.systemTemp;
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${dir.path}/chili_paste_$ts.png');
+      await tempFile.writeAsBytes(imageBytes);
+      _addPendingImage(tempFile.path);
+    } catch (_) {}
+  }
+
+  Future<void> _takeScreenshot() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes != null && imageBytes.isNotEmpty) {
+        final dir = Directory.systemTemp;
+        final ts = DateTime.now().millisecondsSinceEpoch;
+        final tempFile = File('${dir.path}/chili_screenshot_$ts.png');
+        await tempFile.writeAsBytes(imageBytes);
+        _addPendingImage(tempFile.path);
+      }
+    } catch (_) {}
+  }
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _isSending) return;
+    final images = List<String>.from(_pendingImages);
+    if (text.isEmpty && images.isEmpty) return;
+    if (_isSending) return;
     SoundEffects.playButtonClick();
 
-    widget.sharedHistory.addUser(text);
+    final displayText = text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
+    widget.sharedHistory.addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
     setState(() {
       _isSending = true;
       _streamingReply = '';
       _avatarState = AvatarState.thinking;
       _controller.clear();
+      _pendingImages.clear();
       _thinkingIndex = 0;
     });
     _thinkingTimer?.cancel();
@@ -262,7 +325,8 @@ class _AvatarViewState extends State<AvatarView> {
 
     try {
       final resp = await _chatSender.send(
-        text,
+        displayText,
+        imagePaths: images.isNotEmpty ? images : null,
         onToken: (token) {
           if (mounted) {
             setState(() => _streamingReply += token);
@@ -309,14 +373,23 @@ class _AvatarViewState extends State<AvatarView> {
 
   void _onFilesDropped(DropDoneDetails details) {
     if (details.files.isEmpty) return;
-    final names = details.files.map((f) => f.name).join(', ');
-    widget.sharedHistory.addAssistant('Received files: $names\n(File analysis coming soon!)');
-    setState(() {
-      _isDraggingFile = false;
-      if (!_showChat) _showChat = true;
-    });
-    windowManager.setSize(const Size(300, 520));
-    _scrollToBottom();
+    setState(() => _isDraggingFile = false);
+    int added = 0;
+    for (final xFile in details.files) {
+      if (_isImageFile(xFile.path)) {
+        _addPendingImage(xFile.path);
+        added++;
+      }
+    }
+    if (added == 0) {
+      final names = details.files.map((f) => f.name).join(', ');
+      widget.sharedHistory.addAssistant(
+        'Received files: $names\nOnly images (jpg, png, gif, webp) are supported right now.',
+      );
+      if (!_showChat) setState(() => _showChat = true);
+      windowManager.setSize(LayoutConstants.avatarWindowLarge);
+      _scrollToBottom();
+    }
   }
 
   void _scrollToBottom() {
@@ -576,6 +649,47 @@ class _AvatarViewState extends State<AvatarView> {
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // Pending image previews
+            if (_pendingImages.isNotEmpty) ...[
+              SizedBox(
+                height: 64,
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _pendingImages.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 4),
+                  itemBuilder: (_, i) => Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.file(
+                          File(_pendingImages[i]),
+                          width: 60,
+                          height: 60,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      Positioned(
+                        top: -4,
+                        right: -4,
+                        child: GestureDetector(
+                          onTap: () => _removePendingImage(i),
+                          child: Container(
+                            decoration: const BoxDecoration(
+                              color: Colors.black54,
+                              shape: BoxShape.circle,
+                            ),
+                            padding: const EdgeInsets.all(2),
+                            child: const Icon(Icons.close, size: 12, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(height: 6),
+            ],
+
             // Input row
             Row(
               children: [
@@ -608,22 +722,63 @@ class _AvatarViewState extends State<AvatarView> {
                     }
                   },
                 ),
-                const SizedBox(width: 6),
+                // Image attach button
+                SizedBox(
+                  width: 28,
+                  height: 28,
+                  child: PopupMenuButton<String>(
+                    padding: EdgeInsets.zero,
+                    iconSize: 18,
+                    icon: Icon(
+                      _pendingImages.isNotEmpty ? Icons.collections : Icons.attach_file,
+                      size: 18,
+                      color: _pendingImages.isNotEmpty ? const Color(0xFFEF5350) : null,
+                    ),
+                    tooltip: 'Attach images',
+                    onSelected: (value) async {
+                      if (value == 'pick') {
+                        await _pickImages();
+                      } else if (value == 'paste') {
+                        await _pasteImage();
+                      } else if (value == 'screenshot') {
+                        await _takeScreenshot();
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(value: 'pick', child: Text('Browse files…')),
+                      PopupMenuItem(value: 'paste', child: Text('Paste from clipboard')),
+                      PopupMenuItem(value: 'screenshot', child: Text('Paste screenshot')),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 4),
                 Expanded(
-                  child: TextField(
-                    controller: _controller,
-                    focusNode: _chatFocusNode,
-                    onSubmitted: (_) => _sendMessage(),
-                    style: const TextStyle(fontSize: 13),
-                    decoration: InputDecoration(
-                      isDense: true,
-                      contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 10,
-                      ),
-                      hintText: 'Ask CHILI…',
-                      border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(20),
+                  child: KeyboardListener(
+                    focusNode: FocusNode(),
+                    onKeyEvent: (event) async {
+                      if (event is KeyDownEvent &&
+                          event.logicalKey == LogicalKeyboardKey.keyV &&
+                          HardwareKeyboard.instance.isControlPressed) {
+                        await _pasteImage();
+                      }
+                    },
+                    child: TextField(
+                      controller: _controller,
+                      focusNode: _chatFocusNode,
+                      onSubmitted: (_) => _sendMessage(),
+                      style: const TextStyle(fontSize: 13),
+                      decoration: InputDecoration(
+                        isDense: true,
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        hintText: _pendingImages.isNotEmpty
+                            ? 'Describe the image(s)…'
+                            : 'Ask CHILI…',
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                       ),
                     ),
                   ),
@@ -758,6 +913,7 @@ class _AvatarViewState extends State<AvatarView> {
                         userColor: const Color(0xFFEF5350),
                         assistantColor: const Color(0xFFF5F5F5),
                         systemColor: Colors.amber.shade100,
+                        imagePaths: msg.imagePaths,
                       ),
                     );
                   },

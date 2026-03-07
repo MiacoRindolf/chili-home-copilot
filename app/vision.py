@@ -78,63 +78,104 @@ _DEFAULT_VISION_PROMPT = (
 )
 
 
+def _call_ollama_vision_single(b64_image: str, prompt: str, system_prompt: str, trace_id: str) -> str | None:
+    """Call Ollama vision model with exactly one image."""
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt or VISION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt, "images": [b64_image]},
+        ],
+        "stream": False,
+        "options": {"temperature": 0.6, "num_predict": 1024},
+    }
+    r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120)
+    r.raise_for_status()
+    return r.json()["message"]["content"].strip()
+
+
 def call_ollama_vision(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision") -> str | None:
-    """Call Ollama llava model with one or more images. Returns response text or None on failure."""
+    """Call Ollama llava model with one or more images.
+
+    Most Ollama vision models (llava, llava-llama3, etc.) only accept one image
+    per request. When multiple images are provided, each is analysed separately
+    and the results are combined.
+    """
     try:
         b64_list = _build_ollama_images(image_paths)
         prompt = user_text or _DEFAULT_VISION_PROMPT
 
-        payload = {
-            "model": OLLAMA_VISION_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt or VISION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt, "images": b64_list},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.6, "num_predict": 1024},
-        }
+        if len(b64_list) == 1:
+            content = _call_ollama_vision_single(b64_list[0], prompt, system_prompt, trace_id)
+            log_info(trace_id, f"ollama_vision_ok model={OLLAMA_VISION_MODEL} images=1")
+            return content
 
-        r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120)
-        r.raise_for_status()
-        content = r.json()["message"]["content"]
-        log_info(trace_id, f"ollama_vision_ok model={OLLAMA_VISION_MODEL} images={len(image_paths)}")
-        return content.strip()
+        parts: list[str] = []
+        for i, b64 in enumerate(b64_list, 1):
+            img_prompt = f"[Image {i} of {len(b64_list)}] {prompt}"
+            result = _call_ollama_vision_single(b64, img_prompt, system_prompt, trace_id)
+            if result:
+                parts.append(f"**Image {i}:** {result}")
+
+        if not parts:
+            return None
+
+        log_info(trace_id, f"ollama_vision_ok model={OLLAMA_VISION_MODEL} images={len(image_paths)} (sequential)")
+        return "\n\n".join(parts)
     except Exception as e:
         log_info(trace_id, f"ollama_vision_error={e}")
         return None
 
 
+def _stream_ollama_vision_single(b64_image: str, prompt: str, system_prompt: str, trace_id: str):
+    """Stream tokens from Ollama for a single image."""
+    import json as _json
+
+    payload = {
+        "model": OLLAMA_VISION_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt or VISION_SYSTEM_PROMPT},
+            {"role": "user", "content": prompt, "images": [b64_image]},
+        ],
+        "stream": True,
+        "options": {"temperature": 0.6, "num_predict": 1024},
+    }
+    r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120, stream=True)
+    r.raise_for_status()
+    for line in r.iter_lines():
+        if not line:
+            continue
+        chunk = _json.loads(line)
+        token = chunk.get("message", {}).get("content", "")
+        if token:
+            yield token
+        if chunk.get("done"):
+            break
+
+
 def call_ollama_vision_stream(image_paths: list[str], user_text: str, system_prompt: str = "", trace_id: str = "vision"):
-    """Stream response from Ollama llava model. Yields token strings."""
+    """Stream response from Ollama llava model.
+
+    Processes images one at a time (Ollama models accept only one image per
+    request) and streams each result with a header separator for multi-image.
+    """
     try:
         b64_list = _build_ollama_images(image_paths)
         prompt = user_text or _DEFAULT_VISION_PROMPT
 
-        payload = {
-            "model": OLLAMA_VISION_MODEL,
-            "messages": [
-                {"role": "system", "content": system_prompt or VISION_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt, "images": b64_list},
-            ],
-            "stream": True,
-            "options": {"temperature": 0.6, "num_predict": 1024},
-        }
+        if len(b64_list) == 1:
+            yield from _stream_ollama_vision_single(b64_list[0], prompt, system_prompt, trace_id)
+            log_info(trace_id, f"ollama_vision_stream_ok model={OLLAMA_VISION_MODEL} images=1")
+            return
 
-        r = requests.post(OLLAMA_VISION_URL, json=payload, timeout=120, stream=True)
-        r.raise_for_status()
+        for i, b64 in enumerate(b64_list, 1):
+            if i > 1:
+                yield "\n\n"
+            yield f"**Image {i}:** "
+            img_prompt = f"[Image {i} of {len(b64_list)}] {prompt}"
+            yield from _stream_ollama_vision_single(b64, img_prompt, system_prompt, trace_id)
 
-        import json
-        for line in r.iter_lines():
-            if not line:
-                continue
-            chunk = json.loads(line)
-            token = chunk.get("message", {}).get("content", "")
-            if token:
-                yield token
-            if chunk.get("done"):
-                break
-
-        log_info(trace_id, f"ollama_vision_stream_ok model={OLLAMA_VISION_MODEL} images={len(image_paths)}")
+        log_info(trace_id, f"ollama_vision_stream_ok model={OLLAMA_VISION_MODEL} images={len(image_paths)} (sequential)")
     except Exception as e:
         log_info(trace_id, f"ollama_vision_stream_error={e}")
 

@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -18,6 +20,7 @@ class ChatMessageBubble extends StatelessWidget {
     required this.userColor,
     required this.assistantColor,
     required this.systemColor,
+    this.imagePaths,
   });
 
   final String content;
@@ -32,15 +35,21 @@ class ChatMessageBubble extends StatelessWidget {
   final Color assistantColor;
   final Color systemColor;
 
+  /// Local file paths of attached images (typically on user messages).
+  final List<String>? imagePaths;
+
   @override
   Widget build(BuildContext context) {
     final bgColor = isUser
         ? userColor
         : (isSystem ? systemColor : assistantColor);
 
-    Widget child;
+    final images = imagePaths;
+    final hasImages = images != null && images.isNotEmpty;
+
+    Widget textChild;
     if (isUser || isSystem) {
-      child = Text(
+      textChild = Text(
         content,
         style: TextStyle(
           fontSize: fontSize,
@@ -49,7 +58,7 @@ class ChatMessageBubble extends StatelessWidget {
         ),
       );
     } else {
-      child = MarkdownBody(
+      textChild = MarkdownBody(
         data: content,
         shrinkWrap: true,
         onTapLink: (text, href, title) {
@@ -81,6 +90,23 @@ class ChatMessageBubble extends StatelessWidget {
       );
     }
 
+    Widget child;
+    if (hasImages) {
+      child = Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _ImageStrip(paths: images, borderRadius: borderRadius),
+          if (content.isNotEmpty && content != '(image)') ...[
+            const SizedBox(height: 6),
+            textChild,
+          ],
+        ],
+      );
+    } else {
+      child = textChild;
+    }
+
     return Container(
       margin: margin,
       padding: padding,
@@ -96,3 +122,57 @@ class ChatMessageBubble extends StatelessWidget {
   }
 }
 
+class _ImageStrip extends StatelessWidget {
+  const _ImageStrip({required this.paths, required this.borderRadius});
+
+  final List<String> paths;
+  final BorderRadius borderRadius;
+
+  @override
+  Widget build(BuildContext context) {
+    if (paths.length == 1) {
+      return ClipRRect(
+        borderRadius: borderRadius,
+        child: Image.file(
+          File(paths.first),
+          width: double.infinity,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const _BrokenImagePlaceholder(),
+        ),
+      );
+    }
+
+    return SizedBox(
+      height: 100,
+      child: ListView.separated(
+        scrollDirection: Axis.horizontal,
+        itemCount: paths.length,
+        separatorBuilder: (_, __) => const SizedBox(width: 4),
+        itemBuilder: (_, i) => ClipRRect(
+          borderRadius: borderRadius,
+          child: Image.file(
+            File(paths[i]),
+            height: 100,
+            width: 100,
+            fit: BoxFit.cover,
+            errorBuilder: (_, __, ___) => const _BrokenImagePlaceholder(),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _BrokenImagePlaceholder extends StatelessWidget {
+  const _BrokenImagePlaceholder();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 80,
+      height: 60,
+      color: Colors.grey.shade300,
+      child: const Icon(Icons.broken_image, color: Colors.grey),
+    );
+  }
+}

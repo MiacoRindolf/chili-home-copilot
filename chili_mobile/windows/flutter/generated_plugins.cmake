@@ -7,6 +7,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
   desktop_drop
   hotkey_manager_windows
   local_notifier
+  pasteboard
   record_windows
   screen_retriever
   tray_manager

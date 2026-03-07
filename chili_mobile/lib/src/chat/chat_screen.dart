@@ -1,6 +1,9 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-// Keep for consistency with ChatMessageBubble usage.
-// Import kept intentionally for consistency with markdown styles used by ChatMessageBubble.
+import 'package:flutter/services.dart';
+import 'package:pasteboard/pasteboard.dart';
 
 import '../companion/shared_chat_history.dart';
 import '../companion/sound_effects.dart';
@@ -31,6 +34,9 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isSending = false;
   bool _chatInputHasFocus = false;
   AvatarState _avatarState = AvatarState.idle;
+
+  final List<String> _pendingImages = [];
+  static const _allowedImageExts = {'.jpg', '.jpeg', '.png', '.gif', '.webp'};
 
   @override
   void initState() {
@@ -73,22 +79,69 @@ class _ChatScreenState extends State<ChatScreen> {
   Size? get _iconButtonMinSize =>
       AppConfig.instance.largerTargets ? const Size(36, 36) : null;
 
+  // ── Image helpers ──
+
+  bool _isImageFile(String path) {
+    final ext = path.toLowerCase();
+    return _allowedImageExts.any((e) => ext.endsWith(e));
+  }
+
+  void _addPendingImage(String path) {
+    if (_pendingImages.length >= 10) return;
+    if (!_isImageFile(path)) return;
+    setState(() => _pendingImages.add(path));
+  }
+
+  void _removePendingImage(int index) {
+    setState(() => _pendingImages.removeAt(index));
+  }
+
+  Future<void> _pickImages() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.image,
+      allowMultiple: true,
+    );
+    if (result == null) return;
+    for (final file in result.files) {
+      if (file.path != null) _addPendingImage(file.path!);
+    }
+  }
+
+  Future<void> _pasteImage() async {
+    try {
+      final imageBytes = await Pasteboard.image;
+      if (imageBytes == null || imageBytes.isEmpty) return;
+      final dir = Directory.systemTemp;
+      final ts = DateTime.now().millisecondsSinceEpoch;
+      final tempFile = File('${dir.path}/chili_paste_$ts.png');
+      await tempFile.writeAsBytes(imageBytes);
+      _addPendingImage(tempFile.path);
+    } catch (_) {}
+  }
+
+  // ── Send ──
+
   Future<void> _sendMessage() async {
     final text = _controller.text.trim();
-    if (text.isEmpty || _isSending) return;
+    final images = List<String>.from(_pendingImages);
+    if (text.isEmpty && images.isEmpty) return;
+    if (_isSending) return;
     SoundEffects.playButtonClick();
 
-    widget.sharedHistory.addUser(text);
+    final displayText = text.isNotEmpty ? text : (images.isNotEmpty ? '(image)' : '');
+    widget.sharedHistory.addUser(displayText, imagePaths: images.isNotEmpty ? images : null);
     setState(() {
       _isSending = true;
       _streamingReply = '';
       _avatarState = AvatarState.thinking;
       _controller.clear();
+      _pendingImages.clear();
     });
 
     try {
       final resp = await _chatSender.send(
-        text,
+        displayText,
+        imagePaths: images.isNotEmpty ? images : null,
         onToken: (token) {
           if (mounted) {
             setState(() => _streamingReply += token);
@@ -103,6 +156,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted && resp.clientAction != null) {
         setState(() => _avatarState = AvatarState.actionPerforming);
       }
+      if (!mounted) return;
       await _chatSender.handleClientAction(context, resp.clientAction);
       widget.sharedHistory.addAssistant(resp.reply);
       if (mounted) {
@@ -205,12 +259,54 @@ class _ChatScreenState extends State<ChatScreen> {
                       userColor: Theme.of(context).colorScheme.primary,
                       assistantColor: Colors.white,
                       systemColor: Colors.amber.shade100,
+                      imagePaths: m.imagePaths,
                     ),
                   );
                 },
               ),
             ),
             const Divider(height: 1),
+
+            // Pending image preview strip
+            if (_pendingImages.isNotEmpty)
+              Container(
+                height: 72,
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: ListView.separated(
+                  scrollDirection: Axis.horizontal,
+                  itemCount: _pendingImages.length,
+                  separatorBuilder: (_, __) => const SizedBox(width: 6),
+                  itemBuilder: (_, i) => Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(8),
+                        child: Image.file(
+                          File(_pendingImages[i]),
+                          width: 64,
+                          height: 64,
+                          fit: BoxFit.cover,
+                        ),
+                      ),
+                      Positioned(
+                        top: -2,
+                        right: -2,
+                        child: GestureDetector(
+                          onTap: () => _removePendingImage(i),
+                          child: Container(
+                            decoration: const BoxDecoration(
+                              color: Colors.black54,
+                              shape: BoxShape.circle,
+                            ),
+                            padding: const EdgeInsets.all(2),
+                            child: const Icon(Icons.close, size: 14, color: Colors.white),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
             Padding(
               padding: const EdgeInsets.all(8.0),
               child: Row(
@@ -238,14 +334,36 @@ class _ChatScreenState extends State<ChatScreen> {
                       }
                     },
                   ),
-                  const SizedBox(width: 8),
+                  // Attach images button
+                  IconButton(
+                    icon: Icon(
+                      _pendingImages.isNotEmpty ? Icons.collections : Icons.attach_file,
+                      color: _pendingImages.isNotEmpty ? Theme.of(context).colorScheme.primary : null,
+                    ),
+                    onPressed: _pickImages,
+                    tooltip: 'Attach images',
+                    style: IconButton.styleFrom(minimumSize: _iconButtonMinSize),
+                  ),
+                  const SizedBox(width: 4),
                   Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      focusNode: _chatFocusNode,
-                      onSubmitted: (_) => _sendMessage(),
-                      decoration: const InputDecoration(
-                        hintText: 'Talk to CHILI…',
+                    child: KeyboardListener(
+                      focusNode: FocusNode(),
+                      onKeyEvent: (event) async {
+                        if (event is KeyDownEvent &&
+                            event.logicalKey == LogicalKeyboardKey.keyV &&
+                            HardwareKeyboard.instance.isControlPressed) {
+                          await _pasteImage();
+                        }
+                      },
+                      child: TextField(
+                        controller: _controller,
+                        focusNode: _chatFocusNode,
+                        onSubmitted: (_) => _sendMessage(),
+                        decoration: InputDecoration(
+                          hintText: _pendingImages.isNotEmpty
+                              ? 'Describe the image(s)…'
+                              : 'Talk to CHILI…',
+                        ),
                       ),
                     ),
                   ),

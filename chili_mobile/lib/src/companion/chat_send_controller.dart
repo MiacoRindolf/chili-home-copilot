@@ -11,8 +11,16 @@ class ChatSendController {
 
   Future<ChatResponse> send(
     String message, {
+    List<String>? imagePaths,
     void Function(String token)? onToken,
   }) {
+    if (imagePaths != null && imagePaths.isNotEmpty) {
+      return _client.sendMessageStreamWithImages(
+        message,
+        imagePaths: imagePaths,
+        onToken: onToken,
+      );
+    }
     return _client.sendMessageStream(
       message,
       onToken: onToken,

@@ -4,6 +4,8 @@ import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
+import 'package:http_parser/http_parser.dart' show MediaType;
+import 'package:path/path.dart' as p;
 
 /// Structured response from the chat endpoint.
 class ChatResponse {
@@ -74,6 +76,88 @@ class ChiliApiClient {
     final request = http.Request('POST', uri);
     request.headers.addAll(_headers());
     request.body = jsonEncode({'message': message});
+
+    final streamedResponse = await _client.send(request);
+    if (streamedResponse.statusCode != 200) {
+      final body = await streamedResponse.stream.bytesToString();
+      Map<String, dynamic>? decoded;
+      try {
+        decoded = jsonDecode(body) as Map<String, dynamic>?;
+      } catch (_) {}
+      final err = decoded?['error'] ?? decoded?['detail'] ?? body;
+      throw Exception(err is String ? err : 'HTTP ${streamedResponse.statusCode}');
+    }
+
+    final buffer = StringBuffer();
+    Map<String, dynamic>? clientAction;
+    final lines = streamedResponse.stream
+        .transform(utf8.decoder)
+        .transform(const LineSplitter());
+
+    await for (final line in lines) {
+      if (line.startsWith('data: ')) {
+        final payload = line.substring(6).trim();
+        if (payload == '[DONE]' || payload.isEmpty) continue;
+        try {
+          final data = jsonDecode(payload) as Map<String, dynamic>?;
+          if (data == null) continue;
+          final token = (data['token'] as String?) ?? '';
+          if (token.isNotEmpty) {
+            buffer.write(token);
+            onToken?.call(token);
+          }
+          if (data['done'] == true) {
+            clientAction = data['client_action'] as Map<String, dynamic>?;
+          }
+        } catch (_) {}
+      }
+    }
+
+    final reply = buffer.toString().trim();
+    return ChatResponse(
+      reply: reply.isEmpty ? 'CHILI did not send a reply.' : reply,
+      clientAction: clientAction,
+    );
+  }
+
+  /// Stream chat with image attachments via multipart form data.
+  ///
+  /// Uses the web endpoint `/api/chat/stream` which accepts `images` as file
+  /// parts and `message` as a form field. Falls back to text-only streaming
+  /// when [imagePaths] is empty.
+  Future<ChatResponse> sendMessageStreamWithImages(
+    String message, {
+    required List<String> imagePaths,
+    void Function(String token)? onToken,
+  }) async {
+    if (imagePaths.isEmpty) {
+      return sendMessageStream(message, onToken: onToken);
+    }
+
+    final uri = Uri.parse('$baseUrl/api/chat/stream');
+    final request = http.MultipartRequest('POST', uri);
+    if (_token != null && _token!.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $_token';
+    }
+    request.fields['message'] = message;
+
+    for (final path in imagePaths) {
+      final file = File(path);
+      if (!await file.exists()) continue;
+      final ext = p.extension(path).toLowerCase();
+      final mime = switch (ext) {
+        '.png' => 'image/png',
+        '.gif' => 'image/gif',
+        '.webp' => 'image/webp',
+        _ => 'image/jpeg',
+      };
+      request.files.add(await http.MultipartFile.fromPath(
+        'images',
+        path,
+        filename: p.basename(path),
+        contentType: MediaType.parse(mime),
+      ));
+    }
 
     final streamedResponse = await _client.send(request);
     if (streamedResponse.statusCode != 200) {
