@@ -1,20 +1,18 @@
 import 'dart:async';
-import 'dart:io';
 
-import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 
 import '../config/app_config.dart';
-import '../desktop/desktop_actions.dart';
+import '../config/layout_constants.dart';
 import '../network/chili_api_client.dart';
+import '../voice/tts_controller.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
+import '../widgets/chat_message_bubble.dart';
+import 'chat_send_controller.dart';
+import 'onboarding_overlay.dart';
 import 'sound_effects.dart';
 import 'shared_chat_history.dart';
 
@@ -61,8 +59,8 @@ class _AvatarViewState extends State<AvatarView> {
   final _controller = TextEditingController();
   final _scrollController = ScrollController();
   final _chatFocusNode = FocusNode();
-  final _audioPlayer = AudioPlayer();
-  StreamSubscription<void>? _ttsCompleteSub;
+  late final TtsController _ttsController;
+  late final ChatSendController _chatSender;
   String _streamingReply = '';
   String? _lastFailedMessage;
   bool _isSending = false;
@@ -91,6 +89,12 @@ class _AvatarViewState extends State<AvatarView> {
   @override
   void initState() {
     super.initState();
+    _ttsController = TtsController(
+      client: _client,
+      ttsPlaying: widget.ttsPlaying,
+      onFinish: _finishSpeaking,
+    );
+    _chatSender = ChatSendController(_client);
     _loadOnboardingState();
     widget.sharedHistory.addListener(_onHistoryChanged);
     widget.wakeWordReply?.addListener(_onWakeWordReply);
@@ -112,10 +116,9 @@ class _AvatarViewState extends State<AvatarView> {
     widget.ttsInterruptRequested?.removeListener(_onTtsInterrupt);
     _chatFocusNode.removeListener(_onChatFocusChange);
     _chatFocusNode.dispose();
-    _ttsCompleteSub?.cancel();
+    _ttsController.dispose();
     _controller.dispose();
     _scrollController.dispose();
-    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -200,65 +203,19 @@ class _AvatarViewState extends State<AvatarView> {
         _showChat = true;
       });
     }
-    windowManager.setSize(const Size(300, 520));
+    windowManager.setSize(LayoutConstants.avatarWindowLarge);
     _scrollToBottom();
     SoundEffects.playReplyArrived();
-    _speakReply(reply);
+    _ttsController.speak(reply);
   }
 
   void _onTtsInterrupt() {
     if (widget.ttsInterruptRequested?.value != true) return;
     widget.ttsInterruptRequested?.value = false;
-    _stopTts();
-  }
-
-  Future<void> _stopTts() async {
-    _ttsCompleteSub?.cancel();
-    _ttsCompleteSub = null;
-    try {
-      await _audioPlayer.stop();
-    } catch (_) {}
-    _finishSpeaking();
-  }
-
-  Future<void> _speakReply(String text) async {
-    if (text.trim().isEmpty) {
-      _finishSpeaking();
-      return;
-    }
-    widget.ttsPlaying?.value = true;
-    try {
-      final audioBytes = await _client.fetchTts(text);
-      if (audioBytes == null || audioBytes.isEmpty || !mounted) {
-        debugPrint('[AvatarView] TTS: no audio (fetch failed or empty)');
-        _finishSpeaking();
-        return;
-      }
-      final dir = await getTemporaryDirectory();
-      final file = File(p.join(dir.path, 'chili_tts_${DateTime.now().millisecondsSinceEpoch}.mp3'));
-      await file.writeAsBytes(audioBytes);
-      if (!mounted) {
-        _finishSpeaking();
-        return;
-      }
-      await _audioPlayer.stop();
-      void onDone() {
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          _finishSpeaking();
-        });
-        try { file.deleteSync(); } catch (_) {}
-      }
-      _ttsCompleteSub?.cancel();
-      _ttsCompleteSub = _audioPlayer.onPlayerComplete.listen((_) => onDone());
-      await _audioPlayer.play(DeviceFileSource(file.path));
-    } catch (e) {
-      debugPrint('[AvatarView] TTS error: $e');
-      _finishSpeaking();
-    }
+    _ttsController.stop();
   }
 
   void _finishSpeaking() {
-    widget.ttsPlaying?.value = false;
     if (mounted) {
       setState(() {
         _avatarState = AvatarState.idle;
@@ -273,9 +230,9 @@ class _AvatarViewState extends State<AvatarView> {
   Future<void> _toggleChat() async {
     final willShow = !_showChat;
     if (willShow) {
-      await windowManager.setSize(const Size(300, 520));
+      await windowManager.setSize(LayoutConstants.avatarWindowLarge);
     } else {
-      await windowManager.setSize(const Size(200, 200));
+      await windowManager.setSize(LayoutConstants.avatarWindowSmall);
     }
     if (mounted) setState(() => _showChat = willShow);
   }
@@ -301,7 +258,7 @@ class _AvatarViewState extends State<AvatarView> {
     _scrollToBottom();
 
     try {
-      final resp = await _client.sendMessageStream(
+      final resp = await _chatSender.send(
         text,
         onToken: (token) {
           if (mounted) {
@@ -314,13 +271,8 @@ class _AvatarViewState extends State<AvatarView> {
       if (resp.clientAction != null) {
         setState(() => _actionPerforming = true);
       }
-      final actionResult = await DesktopActions.execute(resp.clientAction);
+      await _chatSender.handleClientAction(context, resp.clientAction);
       if (mounted) setState(() => _actionPerforming = false);
-      if (mounted && actionResult != null && actionResult.isNotEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(actionResult), duration: const Duration(seconds: 2)),
-        );
-      }
       if (!mounted) return;
       SoundEffects.playReplyArrived();
       widget.sharedHistory.addAssistant(resp.reply);
@@ -573,45 +525,9 @@ class _AvatarViewState extends State<AvatarView> {
   }
 
   Widget _buildOnboardingOverlay() {
-    const steps = [
-      "Say 'Chili' to start a conversation",
-      "Drag me to move",
-      "Tap to chat, double-tap for full app",
-    ];
-    final text = steps[_onboardingStep.clamp(0, steps.length - 1)];
-    return Positioned.fill(
-      child: Material(
-        color: Colors.black54,
-        child: SafeArea(
-          child: Center(
-            child: SingleChildScrollView(
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Card(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          text,
-                          textAlign: TextAlign.center,
-                          style: const TextStyle(fontSize: 13, height: 1.4),
-                        ),
-                        const SizedBox(height: 12),
-                        FilledButton(
-                          onPressed: _onOnboardingNext,
-                          child: const Text('Got it'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-        ),
-      ),
+    return OnboardingOverlay(
+      step: _onboardingStep,
+      onNext: _onOnboardingNext,
     );
   }
 
@@ -771,7 +687,7 @@ class _AvatarViewState extends State<AvatarView> {
                 child: SizedBox(
                   height: 28,
                   child: TextButton.icon(
-                    onPressed: _stopTts,
+                    onPressed: _ttsController.stop,
                     icon: const Icon(Icons.stop_circle_outlined, size: 16),
                     label: const Text('Stop speaking',
                         style: TextStyle(fontSize: 11)),
@@ -803,7 +719,7 @@ class _AvatarViewState extends State<AvatarView> {
                           margin: const EdgeInsets.symmetric(vertical: 3),
                           padding: const EdgeInsets.symmetric(
                               horizontal: 10, vertical: 7),
-                          constraints: const BoxConstraints(maxWidth: 220),
+                        constraints: const BoxConstraints(maxWidth: 220),
                           decoration: BoxDecoration(
                             color: const Color(0xFFF5F5F5),
                             borderRadius: BorderRadius.circular(12),
@@ -824,39 +740,21 @@ class _AvatarViewState extends State<AvatarView> {
                     return Align(
                       alignment:
                           isUser ? Alignment.centerRight : Alignment.centerLeft,
-                      child: Container(
+                      child: ChatMessageBubble(
+                        content: msg.content,
+                        isUser: isUser,
+                        isSystem: false,
+                        fontSize: _chatFontSize,
                         margin: const EdgeInsets.symmetric(vertical: 3),
                         padding: const EdgeInsets.symmetric(
-                            horizontal: 10, vertical: 7),
-                        constraints: const BoxConstraints(maxWidth: 220),
-                        decoration: BoxDecoration(
-                          color: isUser
-                              ? const Color(0xFFEF5350)
-                              : const Color(0xFFF5F5F5),
-                          borderRadius: BorderRadius.circular(12),
+                          horizontal: 10,
+                          vertical: 7,
                         ),
-                        child: isUser
-                            ? Text(
-                                msg.content,
-                                style: TextStyle(
-                                  fontSize: _chatFontSize,
-                                  height: 1.4,
-                                  color: Colors.white,
-                                ),
-                              )
-                            : MarkdownBody(
-                                data: msg.content,
-                                shrinkWrap: true,
-                                onTapLink: (text, href, title) {
-                                  if (href != null) launchUrl(Uri.parse(href));
-                                },
-                                styleSheet: MarkdownStyleSheet(
-                                  p: TextStyle(fontSize: _chatFontSize, height: 1.4, color: Colors.black87),
-                                  strong: TextStyle(fontSize: _chatFontSize, fontWeight: FontWeight.bold, color: Colors.black87),
-                                  code: TextStyle(fontSize: _chatFontSize - 1, backgroundColor: Colors.grey.shade200, color: Colors.black87),
-                                  listBullet: TextStyle(fontSize: _chatFontSize, color: Colors.black87),
-                                ),
-                              ),
+                        borderRadius: BorderRadius.circular(12),
+                        maxWidth: 220,
+                        userColor: const Color(0xFFEF5350),
+                        assistantColor: const Color(0xFFF5F5F5),
+                        systemColor: Colors.amber.shade100,
                       ),
                     );
                   },

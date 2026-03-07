@@ -8,6 +8,7 @@ import 'package:screen_retriever/screen_retriever.dart';
 import 'src/app_theme.dart';
 import 'src/companion/companion_shell.dart';
 import 'src/companion/desktop_powers.dart';
+import 'src/config/layout_constants.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +17,7 @@ Future<void> main() async {
     await windowManager.ensureInitialized();
 
     const windowOptions = WindowOptions(
-      size: Size(200, 200),
+      size: LayoutConstants.avatarWindowSmall,
       minimumSize: Size(160, 160),
       backgroundColor: Colors.transparent,
       skipTaskbar: false,

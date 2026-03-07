@@ -1,14 +1,15 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
-import 'package:url_launcher/url_launcher.dart';
+// Keep for consistency with ChatMessageBubble usage.
+// Import kept intentionally for consistency with markdown styles used by ChatMessageBubble.
 
 import '../companion/shared_chat_history.dart';
 import '../companion/sound_effects.dart';
+import '../companion/chat_send_controller.dart';
 import '../config/app_config.dart';
-import '../desktop/desktop_actions.dart';
 import '../network/chili_api_client.dart';
 import '../voice/voice_input.dart';
 import '../widgets/chili_avatar.dart';
+import '../widgets/chat_message_bubble.dart';
 
 class ChatScreen extends StatefulWidget {
   const ChatScreen({super.key, required this.sharedHistory});
@@ -24,6 +25,7 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollController = ScrollController();
   final _chatFocusNode = FocusNode();
   final _client = ChiliApiClient();
+  late final ChatSendController _chatSender;
 
   String _streamingReply = '';
   bool _isSending = false;
@@ -35,6 +37,7 @@ class _ChatScreenState extends State<ChatScreen> {
     super.initState();
     widget.sharedHistory.addListener(_onHistoryChanged);
     _chatFocusNode.addListener(_onChatFocusChange);
+    _chatSender = ChatSendController(_client);
   }
 
   @override
@@ -84,7 +87,7 @@ class _ChatScreenState extends State<ChatScreen> {
     });
 
     try {
-      final resp = await _client.sendMessageStream(
+      final resp = await _chatSender.send(
         text,
         onToken: (token) {
           if (mounted) {
@@ -100,12 +103,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (mounted && resp.clientAction != null) {
         setState(() => _avatarState = AvatarState.actionPerforming);
       }
-      final actionResult = await DesktopActions.execute(resp.clientAction);
-      if (mounted && actionResult != null && actionResult.isNotEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(actionResult), duration: const Duration(seconds: 2)),
-        );
-      }
+      await _chatSender.handleClientAction(context, resp.clientAction);
       widget.sharedHistory.addAssistant(resp.reply);
       if (mounted) {
         setState(() {
@@ -192,53 +190,21 @@ class _ChatScreenState extends State<ChatScreen> {
                   return Align(
                     alignment:
                         isUser ? Alignment.centerRight : Alignment.centerLeft,
-                    child: Container(
+                    child: ChatMessageBubble(
+                      content: m.content,
+                      isUser: isUser,
+                      isSystem: isSystem,
+                      fontSize: _chatFontSize,
                       margin: const EdgeInsets.symmetric(vertical: 4),
                       padding: const EdgeInsets.symmetric(
                         horizontal: 12,
                         vertical: 8,
                       ),
-                      decoration: BoxDecoration(
-                        color: isUser
-                            ? Theme.of(context).colorScheme.primary
-                            : isSystem
-                                ? Colors.amber.shade100
-                                : Colors.white,
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                          child: isUser
-                              ? Text(
-                                  m.content,
-                                  style: TextStyle(
-                                    fontSize: _chatFontSize,
-                                    color: Colors.white,
-                                  ),
-                                )
-                              : isSystem
-                                  ? Text(
-                                      m.content,
-                                      style: TextStyle(
-                                        fontSize: _chatFontSize,
-                                        color: Colors.black87,
-                                      ),
-                                    )
-                                  : MarkdownBody(
-                                      data: m.content,
-                                      shrinkWrap: true,
-                                      onTapLink: (text, href, title) {
-                                        if (href != null) launchUrl(Uri.parse(href));
-                                      },
-                                      styleSheet: MarkdownStyleSheet(
-                                        p: TextStyle(fontSize: _chatFontSize, color: Colors.black87),
-                                        strong: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black87),
-                                        code: TextStyle(
-                                          fontSize: _chatFontSize - 1,
-                                          backgroundColor: Colors.grey.shade200,
-                                          color: Colors.black87,
-                                        ),
-                                        listBullet: TextStyle(fontSize: _chatFontSize, color: Colors.black87),
-                                      ),
-                                    ),
+                      borderRadius: BorderRadius.circular(16),
+                      maxWidth: null,
+                      userColor: Theme.of(context).colorScheme.primary,
+                      assistantColor: Colors.white,
+                      systemColor: Colors.amber.shade100,
                     ),
                   );
                 },

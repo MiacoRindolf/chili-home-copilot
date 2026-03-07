@@ -207,10 +207,84 @@ def resolve_response(
         llm_reply = "I'm not sure what to do with that. Try: add chore, list chores, add birthday, list birthdays."
     if action_type == "web_search" and not model_used:
         model_used = "duckduckgo"
-    return {"reply": llm_reply, "action_type": action_type, "executed": executed, "model_used": model_used, "rag_sources": rag_sources, "personality_used": personality_used, "client_action": client_action}
+    return {
+        "reply": llm_reply,
+        "action_type": action_type,
+        "executed": executed,
+        "model_used": model_used,
+        "rag_sources": rag_sources,
+        "personality_used": personality_used,
+        "client_action": client_action,
+    }
 
 
-def init_chat(db: Session, convo_key: str, conversation_id, message: str, identity: dict, trace_id: str, image_path: str | None = None, project_id: int | None = None):
+def persist_chat_reply(
+    db: Session,
+    convo_key: str,
+    conversation_id,
+    identity: dict,
+    message: str,
+    reply: str,
+    action_type: str,
+    model_used: str,
+    trace_id: str,
+    client_ip: str,
+    *,
+    sync_memory: bool = False,
+) -> None:
+    """Store assistant reply + log entry and optionally run personality/memory sync.
+
+    This helper centralizes the common \"store + title + log\" pattern used by
+    /api/chat and /api/mobile/chat so routers only need to worry about building
+    the result dict (resolve_response, caching, etc.).
+    """
+    is_guest = identity["is_guest"]
+    user_id = identity.get("user_id")
+
+    db.add(
+        ChatMessage(
+            convo_key=convo_key,
+            conversation_id=conversation_id,
+            role="assistant",
+            content=reply,
+            trace_id=trace_id,
+            action_type=action_type,
+            model_used=model_used,
+        )
+    )
+    db.commit()
+
+    if conversation_id:
+        convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+        if convo_obj and convo_obj.title == "New Chat":
+            convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
+            db.commit()
+
+    db.add(
+        ChatLog(
+            client_ip=client_ip,
+            trace_id=trace_id,
+            message=message,
+            action_type=action_type,
+        )
+    )
+    db.commit()
+
+    if sync_memory and user_id and not is_guest:
+        try_personality_update(user_id, is_guest, db, trace_id)
+        try_memory_extraction(user_id, is_guest, message, reply, action_type, db, trace_id)
+
+
+def init_chat(
+    db: Session,
+    convo_key: str,
+    conversation_id,
+    message: str,
+    identity: dict,
+    trace_id: str,
+    image_path: str | None = None,
+    project_id: int | None = None,
+):
     """Create conversation if needed, store user message, load memory. Always safe (no LLM call)."""
     is_guest = identity["is_guest"]
 
@@ -405,21 +479,70 @@ def sse_event(data: dict) -> str:
     return f"data: {json_mod.dumps(data)}\n\n"
 
 
-def store_and_title(convo_key, conversation_id, content, trace_id, action_type, model_used, client_ip, message):
-    """Store assistant message and auto-title in a fresh DB session (safe for generators)."""
+def store_and_title(
+    convo_key,
+    conversation_id,
+    content,
+    trace_id,
+    action_type,
+    model_used,
+    client_ip,
+    message,
+    *,
+    user_id=None,
+    is_guest: bool = True,
+    extract_memory: bool = False,
+):
+    """Store assistant message, auto-title, and optionally extract memories.
+
+    This is safe to call from streaming generators since it uses its own
+    SessionLocal instance.
+    """
     s = SessionLocal()
     try:
-        s.add(ChatMessage(
-            convo_key=convo_key, conversation_id=conversation_id,
-            role="assistant", content=content, trace_id=trace_id,
-            action_type=action_type, model_used=model_used,
-        ))
+        s.add(
+            ChatMessage(
+                convo_key=convo_key,
+                conversation_id=conversation_id,
+                role="assistant",
+                content=content,
+                trace_id=trace_id,
+                action_type=action_type,
+                model_used=model_used,
+            )
+        )
         if conversation_id:
             c = s.query(Conversation).filter(Conversation.id == conversation_id).first()
             if c and c.title == "New Chat":
                 c.title = message[:40].strip() + ("..." if len(message) > 40 else "")
-        s.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
+        s.add(
+            ChatLog(
+                client_ip=client_ip,
+                trace_id=trace_id,
+                message=message,
+                action_type=action_type,
+            )
+        )
         s.commit()
+
+        if extract_memory and user_id and not is_guest:
+            try:
+                memory_module.extract_facts(
+                    user_message=message,
+                    assistant_reply=content,
+                    user_id=user_id,
+                    db=s,
+                    action_type=action_type,
+                    trace_id=trace_id,
+                )
+            except Exception as e:
+                log_info(trace_id, f"memory_extraction_error={e}")
+
+            try:
+                if personality_module.should_update(user_id, s):
+                    personality_module.extract_profile(user_id, s, trace_id=trace_id)
+            except Exception as e:
+                log_info(trace_id, f"personality_extraction_error={e}")
     finally:
         s.close()
 
@@ -469,47 +592,6 @@ def run_personality_and_memory_in_background(
         )
     finally:
         db.close()
-
-
-def store_and_title_with_memory(
-    convo_key, conversation_id, content, trace_id, action_type, model_used,
-    client_ip, message, user_id=None, is_guest=True,
-):
-    """Store assistant message, auto-title, and extract memories (for streaming generators)."""
-    s = SessionLocal()
-    try:
-        s.add(ChatMessage(
-            convo_key=convo_key, conversation_id=conversation_id,
-            role="assistant", content=content, trace_id=trace_id,
-            action_type=action_type, model_used=model_used,
-        ))
-        if conversation_id:
-            c = s.query(Conversation).filter(Conversation.id == conversation_id).first()
-            if c and c.title == "New Chat":
-                c.title = message[:40].strip() + ("..." if len(message) > 40 else "")
-        s.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
-        s.commit()
-
-        if user_id and not is_guest:
-            try:
-                memory_module.extract_facts(
-                    user_message=message,
-                    assistant_reply=content,
-                    user_id=user_id,
-                    db=s,
-                    action_type=action_type,
-                    trace_id=trace_id,
-                )
-            except Exception as e:
-                log_info(trace_id, f"memory_extraction_error={e}")
-
-            try:
-                if personality_module.should_update(user_id, s):
-                    personality_module.extract_profile(user_id, s, trace_id=trace_id)
-            except Exception as e:
-                log_info(trace_id, f"personality_extraction_error={e}")
-    finally:
-        s.close()
 
 
 def process_message_get_reply(
