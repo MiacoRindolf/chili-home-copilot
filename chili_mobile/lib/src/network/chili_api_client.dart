@@ -277,7 +277,14 @@ class ChiliApiClient {
 
   // ── Voice ──
 
+  /// Build the URL for the streaming TTS endpoint.  [audioplayers] UrlSource
+  /// will connect directly and start playing as chunks arrive.
+  String getTtsStreamUrl(String text) {
+    return '$baseUrl/api/voice/tts/stream?text=${Uri.encodeComponent(text.trim())}';
+  }
+
   /// Request TTS audio for [text]. Returns raw MP3 bytes, or null on failure.
+  /// Kept as a fallback; prefer [getTtsStreamUrl] for lower latency.
   Future<List<int>?> fetchTts(String text) async {
     if (text.trim().isEmpty) return null;
     final uri = Uri.parse('$baseUrl/api/voice/tts');

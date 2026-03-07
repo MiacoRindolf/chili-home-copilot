@@ -229,3 +229,31 @@ async def text_to_speech(text: str, voice: str = TTS_VOICE) -> Optional[bytes]:
         return result
 
     return await _try_qwen3_tts(clean, voice)
+
+
+async def text_to_speech_stream(text: str):
+    """Yield MP3 chunks as they arrive from Edge TTS.
+
+    Falls back to a single-chunk yield from the buffered pipeline if Edge TTS
+    streaming fails.
+    """
+    clean = _clean_text_for_tts(text)
+    if not clean:
+        return
+
+    try:
+        import edge_tts
+        communicate = edge_tts.Communicate(clean, TTS_VOICE_EDGE)
+        any_yielded = False
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio" and chunk["data"]:
+                any_yielded = True
+                yield chunk["data"]
+        if any_yielded:
+            return
+    except Exception as e:
+        log_info(new_trace_id(), f"[voice] Edge TTS stream failed: {e}")
+
+    fallback = await _try_qwen3_tts(clean, TTS_VOICE)
+    if fallback:
+        yield fallback

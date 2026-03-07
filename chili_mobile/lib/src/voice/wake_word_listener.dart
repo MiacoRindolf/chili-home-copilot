@@ -81,7 +81,11 @@ class WakeWordListener {
   static const _commandWindowSeconds = 8;
 
   DateTime? _followUpUntil;
-  static const _followUpSeconds = 8;
+  static const _followUpSeconds = 6;
+  static const _closingFollowUpSeconds = 3;
+
+  /// Tracks the last reply from Chili so we can detect conversational closings.
+  String _lastReplyText = '';
 
   // Post-TTS cooldown: ignore utterances for this duration after TTS ends.
   DateTime? _ttsCooldownUntil;
@@ -539,6 +543,7 @@ class WakeWordListener {
             );
       }
       debugPrint('[WakeWord] <<< Reply received (${resp.reply.length} chars)');
+      _lastReplyText = resp.reply;
       DesktopActions.execute(resp.clientAction);
       onReply(finalCommand, resp.reply);
       _followUpUntil =
@@ -579,8 +584,14 @@ class WakeWordListener {
       _resetVoskState();
 
       // Auto follow-up: keep listening for the user's reply without wake word.
+      // Use a shorter window when the reply sounded like a conversation closer.
+      const cooldownExtra = _ttsCooldownMs ~/ 1000;
+      final isClosing = _isClosingReply(_lastReplyText);
+      final followUpSecs = isClosing ? _closingFollowUpSeconds : _followUpSeconds;
+      debugPrint('[WakeWord] Follow-up: ${followUpSecs}s '
+          '(closing=$isClosing)');
       _followUpUntil =
-          DateTime.now().add(const Duration(seconds: _followUpSeconds + _ttsCooldownMs ~/ 1000));
+          DateTime.now().add(Duration(seconds: followUpSecs + cooldownExtra));
       onFollowUpActive?.call(true);
       onStatus('Listening... (follow-up)');
     }
@@ -626,6 +637,32 @@ class WakeWordListener {
     final normalized = text.trim().toLowerCase();
     if (normalized.isEmpty) return false;
     return _stopPhrases.contains(normalized);
+  }
+
+  /// Heuristic: does [reply] feel like a natural conversation closer?
+  ///
+  /// If the reply ends with a question or an explicit "anything else?" prompt,
+  /// it's NOT closing — the user likely wants to continue.
+  static bool _isClosingReply(String reply) {
+    final lower = reply.toLowerCase().trim();
+    if (lower.isEmpty) return false;
+
+    // If the reply ends with a question, assume the conversation continues.
+    if (lower.endsWith('?')) return false;
+
+    const closingPhrases = [
+      'goodbye', 'good bye', 'good night', 'goodnight',
+      'see you', 'take care', 'have a great', 'have a good',
+      "you're welcome", 'youre welcome', 'your welcome',
+      'no problem', 'no worries', 'happy to help',
+      'anytime', 'cheers',
+      'all set', 'all done', "that's it", 'thats it',
+    ];
+
+    for (final phrase in closingPhrases) {
+      if (lower.contains(phrase)) return true;
+    }
+    return false;
   }
 
   void _clearFollowUp() {

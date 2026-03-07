@@ -6,8 +6,8 @@ Desktop companion uses /ws/voice/stream for continuous openWakeWord + Whisper fl
 import asyncio
 import json
 
-from fastapi import APIRouter, Depends, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
-from fastapi.responses import JSONResponse, Response
+from fastapi import APIRouter, Depends, Query, Request, UploadFile, File, Form, WebSocket, WebSocketDisconnect
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_convo_key
@@ -66,6 +66,23 @@ async def voice_tts(
         content=audio_bytes,
         media_type="audio/mpeg",
         headers={"Content-Disposition": "inline; filename=speech.mp3"},
+    )
+
+
+@router.get("/api/voice/tts/stream")
+async def voice_tts_stream(text: str = Query(...)):
+    """Stream MP3 audio as Edge TTS generates it — much lower time-to-first-byte
+    than the buffered /api/voice/tts endpoint."""
+    if not text or not text.strip():
+        return JSONResponse({"ok": False, "error": "No text provided"}, status_code=400)
+
+    return StreamingResponse(
+        voice_service.text_to_speech_stream(text.strip()),
+        media_type="audio/mpeg",
+        headers={
+            "Content-Disposition": "inline; filename=speech.mp3",
+            "Cache-Control": "no-cache",
+        },
     )
 
 
