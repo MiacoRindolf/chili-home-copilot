@@ -28,9 +28,13 @@ from ..services.chat_service import (
     set_cached_reply,
     sse_event,
     store_and_title,
-    store_and_title_with_memory,
+    persist_chat_reply,
     try_personality_update,
     try_memory_extraction,
+)
+from ..services.desktop_refinement import (
+    looks_like_desktop_command,
+    refine_desktop_transcription,
 )
 
 router = APIRouter()
@@ -357,24 +361,19 @@ async def chat_api(
     rag_sources = result["rag_sources"]
     personality_used = result["personality_used"]
 
-    db.add(ChatMessage(
-        convo_key=convo_key, conversation_id=conversation_id,
-        role="assistant", content=llm_reply, trace_id=trace_id,
-        action_type=action_type, model_used=model_used,
-    ))
-    db.commit()
-
-    if conversation_id:
-        convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if convo_obj and convo_obj.title == "New Chat":
-            convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
-            db.commit()
-
-    db.add(ChatLog(client_ip=client_ip, trace_id=trace_id, message=message, action_type=action_type))
-    db.commit()
-
-    try_personality_update(user_id, is_guest, db, trace_id)
-    try_memory_extraction(user_id, is_guest, message, llm_reply, action_type, db, trace_id)
+    persist_chat_reply(
+        db=db,
+        convo_key=convo_key,
+        conversation_id=conversation_id,
+        identity=identity,
+        message=message,
+        reply=llm_reply,
+        action_type=action_type,
+        model_used=model_used,
+        trace_id=trace_id,
+        client_ip=client_ip,
+        sync_memory=True,
+    )
 
     ms = int((time.time() - t0) * 1000)
     record_latency(ms)
@@ -556,6 +555,10 @@ async def mobile_chat_api(
         }
     on_planner_page = planner_current is not None
 
+    # Desktop refinement: correct ASR errors before NLU when message looks like a PC command
+    if looks_like_desktop_command(message):
+        message = refine_desktop_transcription(message, trace_id)
+
     # NLU fast-path: skip expensive Ollama planner for known desktop/chore/birthday patterns
     nlu_result = nlu_fallback(message)
     if nlu_result is not None:
@@ -679,34 +682,19 @@ async def mobile_chat_api(
     if action_type == "general_chat" and llm_reply:
         set_cached_reply(message, llm_reply)
 
-    db.add(
-        ChatMessage(
-            convo_key=convo_key,
-            conversation_id=conversation_id,
-            role="assistant",
-            content=llm_reply,
-            trace_id=trace_id,
-            action_type=action_type,
-            model_used=model_used,
-        )
+    persist_chat_reply(
+        db=db,
+        convo_key=convo_key,
+        conversation_id=conversation_id,
+        identity=identity,
+        message=message,
+        reply=llm_reply,
+        action_type=action_type,
+        model_used=model_used,
+        trace_id=trace_id,
+        client_ip=client_ip,
+        sync_memory=False,
     )
-    db.commit()
-
-    if conversation_id:
-        convo_obj = db.query(Conversation).filter(Conversation.id == conversation_id).first()
-        if convo_obj and convo_obj.title == "New Chat":
-            convo_obj.title = message[:40].strip() + ("..." if len(message) > 40 else "")
-            db.commit()
-
-    db.add(
-        ChatLog(
-            client_ip=client_ip,
-            trace_id=trace_id,
-            message=message,
-            action_type=action_type,
-        )
-    )
-    db.commit()
 
     background_tasks.add_task(
         run_personality_and_memory_in_background,
@@ -778,10 +766,18 @@ async def mobile_chat_stream_api(
                 "conversation_id": conversation_id, "trace_id": trace_id,
                 "rag_sources": [], "personality_used": False, "client_action": None,
             })
-            store_and_title_with_memory(
-                convo_key, conversation_id, wellness.CRISIS_RESPONSE,
-                trace_id, "crisis_support", "crisis-detector", client_ip, message,
-                user_id=user_id, is_guest=is_guest,
+            store_and_title(
+                convo_key,
+                conversation_id,
+                wellness.CRISIS_RESPONSE,
+                trace_id,
+                "crisis_support",
+                "crisis-detector",
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
             )
         return StreamingResponse(crisis_gen(), media_type="text/event-stream")
 
@@ -807,10 +803,18 @@ async def mobile_chat_stream_api(
                 "conversation_id": conversation_id, "trace_id": trace_id,
                 "rag_sources": [], "personality_used": False, "client_action": None,
             })
-            store_and_title_with_memory(
-                convo_key, conversation_id, complete, trace_id,
-                "wellness_support", used_model, client_ip, message,
-                user_id=user_id, is_guest=is_guest,
+            store_and_title(
+                convo_key,
+                conversation_id,
+                complete,
+                trace_id,
+                "wellness_support",
+                used_model,
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
             )
         return StreamingResponse(wellness_gen(), media_type="text/event-stream")
 
@@ -827,6 +831,10 @@ async def mobile_chat_stream_api(
             "name": body.planner_project_name.strip(),
         }
     on_planner_page = planner_current is not None
+
+    # Desktop refinement: correct ASR errors before NLU when message looks like a PC command
+    if looks_like_desktop_command(message):
+        message = refine_desktop_transcription(message, trace_id)
 
     nlu_result = nlu_fallback(message)
     if nlu_result is not None:
@@ -850,10 +858,18 @@ async def mobile_chat_stream_api(
                     "conversation_id": conversation_id, "trace_id": trace_id,
                     "rag_sources": [], "personality_used": False, "client_action": None,
                 })
-                store_and_title_with_memory(
-                    convo_key, conversation_id, cached, trace_id,
-                    "general_chat", "cache", client_ip, message,
-                    user_id=user_id, is_guest=is_guest,
+                store_and_title(
+                    convo_key,
+                    conversation_id,
+                    cached,
+                    trace_id,
+                    "general_chat",
+                    "cache",
+                    client_ip,
+                    message,
+                    user_id=user_id,
+                    is_guest=is_guest,
+                    extract_memory=True,
                 )
             return StreamingResponse(cached_gen(), media_type="text/event-stream")
         log_info(trace_id, "mobile_stream_direct_llm_path skipping Ollama planner")
@@ -904,10 +920,18 @@ async def mobile_chat_stream_api(
                 "rag_sources": rag_sources, "personality_used": personality_used,
                 "client_action": client_action,
             })
-            store_and_title_with_memory(
-                convo_key, conversation_id, complete, trace_id,
-                action_type, used_model, client_ip, message,
-                user_id=user_id, is_guest=is_guest,
+            store_and_title(
+                convo_key,
+                conversation_id,
+                complete,
+                trace_id,
+                action_type,
+                used_model,
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
             )
         return StreamingResponse(stream_openai_gen(), media_type="text/event-stream")
 
@@ -927,10 +951,18 @@ async def mobile_chat_stream_api(
             "rag_sources": rag_sources, "personality_used": personality_used,
             "client_action": client_action,
         })
-        store_and_title_with_memory(
-            convo_key, conversation_id, llm_reply, trace_id,
-            action_type, model_used, client_ip, message,
-            user_id=user_id, is_guest=is_guest,
+        store_and_title(
+            convo_key,
+            conversation_id,
+            llm_reply,
+            trace_id,
+            action_type,
+            model_used,
+            client_ip,
+            message,
+            user_id=user_id,
+            is_guest=is_guest,
+            extract_memory=True,
         )
 
     ms = int((time.time() - t0) * 1000)
@@ -988,22 +1020,49 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "vision", "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "vision", model_used, client_ip, display_message, user_id=user_id, is_guest=is_guest)
+            store_and_title(
+                convo_key,
+                conversation_id,
+                complete,
+                trace_id,
+                "vision",
+                model_used,
+                client_ip,
+                display_message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
+            )
 
         return StreamingResponse(vision_gen(), media_type="text/event-stream")
 
     # --- Wellness detection (stream) ---
     if wellness.detect_crisis(message):
         log_info(trace_id, "crisis_detected (stream)")
+
         def crisis_gen():
             yield sse_event({"token": wellness.CRISIS_RESPONSE, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "crisis_support", "model_used": "crisis-detector", "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title_with_memory(convo_key, conversation_id, wellness.CRISIS_RESPONSE, trace_id, "crisis_support", "crisis-detector", client_ip, message, user_id=user_id, is_guest=is_guest)
+            store_and_title(
+                convo_key,
+                conversation_id,
+                wellness.CRISIS_RESPONSE,
+                trace_id,
+                "crisis_support",
+                "crisis-detector",
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
+            )
+
         return StreamingResponse(crisis_gen(), media_type="text/event-stream")
 
     if wellness.detect_wellness_topic(message):
         log_info(trace_id, "wellness_topic_detected (stream)")
         wellness_msgs = [{"role": m.role, "content": m.content} for m in recent]
+
         def wellness_gen():
             full = []
             used_model = "llama3-wellness"
@@ -1015,7 +1074,20 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": "wellness_support", "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": [], "personality_used": False})
-            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, "wellness_support", used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
+            store_and_title(
+                convo_key,
+                conversation_id,
+                complete,
+                trace_id,
+                "wellness_support",
+                used_model,
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
+            )
+
         return StreamingResponse(wellness_gen(), media_type="text/event-stream")
 
     rag_sources = []
@@ -1060,7 +1132,19 @@ async def chat_stream_api(
             if not full:
                 yield sse_event({"token": complete, "done": False})
             yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": used_model, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-            store_and_title_with_memory(convo_key, conversation_id, complete, trace_id, action_type, used_model, client_ip, message, user_id=user_id, is_guest=is_guest)
+            store_and_title(
+                convo_key,
+                conversation_id,
+                complete,
+                trace_id,
+                action_type,
+                used_model,
+                client_ip,
+                message,
+                user_id=user_id,
+                is_guest=is_guest,
+                extract_memory=True,
+            )
 
         return StreamingResponse(stream_openai_gen(), media_type="text/event-stream")
 
@@ -1073,7 +1157,19 @@ async def chat_stream_api(
     def tool_result_gen():
         yield sse_event({"token": llm_reply, "done": False})
         yield sse_event({"token": "", "done": True, "action_type": action_type, "model_used": model_used, "conversation_id": conversation_id, "trace_id": trace_id, "rag_sources": rag_sources, "personality_used": personality_used})
-        store_and_title_with_memory(convo_key, conversation_id, llm_reply, trace_id, action_type, model_used, client_ip, message, user_id=user_id, is_guest=is_guest)
+        store_and_title(
+            convo_key,
+            conversation_id,
+            llm_reply,
+            trace_id,
+            action_type,
+            model_used,
+            client_ip,
+            message,
+            user_id=user_id,
+            is_guest=is_guest,
+            extract_memory=True,
+        )
 
     return StreamingResponse(tool_result_gen(), media_type="text/event-stream")
 

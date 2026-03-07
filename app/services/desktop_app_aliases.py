@@ -1,0 +1,53 @@
+"""Canonical desktop app alias keys for LLM normalization.
+
+Mirrors the keys from the Flutter client's _appAliases in
+chili_mobile/lib/src/desktop/desktop_actions.dart so the backend
+can normalize mistranscribed app names to a form the client can resolve.
+"""
+# Sorted unique alias keys (display/canonical names the client knows)
+DESKTOP_APP_ALIAS_KEYS = (
+    "notepad",
+    "notepad++",
+    "calculator",
+    "calc",
+    "paint",
+    "explorer",
+    "file explorer",
+    "files",
+    "cmd",
+    "command prompt",
+    "terminal",
+    "windows terminal",
+    "powershell",
+    "task manager",
+    "snipping tool",
+    "control panel",
+    "settings",
+    "chrome",
+    "google chrome",
+    "firefox",
+    "edge",
+    "microsoft edge",
+    "spotify",
+    "discord",
+    "slack",
+    "teams",
+    "microsoft teams",
+    "code",
+    "vs code",
+    "vscode",
+    "visual studio code",
+    "visual studio",
+    "vs",
+    "word",
+    "microsoft word",
+    "excel",
+    "microsoft excel",
+    "powerpoint",
+    "outlook",
+    "steam",
+    "vlc",
+    "obs",
+    "obs studio",
+    "zoom",
+)

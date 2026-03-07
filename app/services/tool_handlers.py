@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ..models import Birthday, Chore, PlanProject, ProjectMember
 from .. import web_search as web_search_module
 from . import marketplace_service, planner_service
+from . import desktop_refinement
 from ..modules import is_module_enabled
 
 _HANDLERS: dict[str, Callable[..., tuple]] = {}
@@ -346,6 +347,7 @@ def _handle_desktop_open_app(db: Session, action_data: dict, llm_reply: str, is_
     app_name = (action_data.get("app_name") or "").strip()
     if not app_name:
         return "Which app would you like me to open?", False, "desktop_open_app", None
+    app_name = desktop_refinement.normalize_app_name(app_name, trace_id="desktop_open_app")
     reply = llm_reply or f"Opening **{app_name}**."
     return reply, True, "desktop_open_app", {"type": "open_app", "app_name": app_name}
 
@@ -355,6 +357,7 @@ def _handle_desktop_close_app(db: Session, action_data: dict, llm_reply: str, is
     app_name = (action_data.get("app_name") or "").strip()
     if not app_name:
         return "Which app would you like me to close?", False, "desktop_close_app", None
+    app_name = desktop_refinement.normalize_app_name(app_name, trace_id="desktop_close_app")
     reply = llm_reply or f"Closing **{app_name}**."
     return reply, True, "desktop_close_app", {"type": "close_app", "app_name": app_name}
 

@@ -45,6 +45,9 @@ class Settings(BaseSettings):
     # Empty means: enable all known modules.
     chili_modules: str = "planner,intercom,voice,projects"
 
+    # Desktop command refinement: LLM corrects ASR and normalizes app names (mobile/desktop API).
+    desktop_refinement_enabled: bool = True
+
     @property
     def primary_api_key(self) -> str:
         """Primary LLM key: LLM_API_KEY or OPENAI_API_KEY."""
