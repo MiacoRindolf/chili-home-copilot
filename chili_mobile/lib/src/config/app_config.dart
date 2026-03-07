@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 /// App-wide config persisted via SharedPreferences.
@@ -13,8 +15,12 @@ class AppConfig {
   static const _keyFontSize = 'chili_font_size'; // 'small' | 'medium' | 'large'
   static const _keyLargerTargets = 'chili_larger_targets';
   static const _keySoundEffects = 'chili_sound_effects';
+  static const _keyCalibratedVariants = 'chili_calibrated_variants';
+  static const _keyAmbientRms = 'chili_ambient_rms';
+  static const _keyCalibrationDone = 'chili_calibration_done';
   static const _defaultWakeWord = 'chili';
   static const _defaultAlwaysListening = true;
+  static const _defaultAmbientRms = 200.0;
 
   SharedPreferences? _prefs;
   String _wakeWord = _defaultWakeWord;
@@ -23,6 +29,9 @@ class AppConfig {
   String _fontSize = 'medium';
   bool _largerTargets = false;
   bool _soundEffects = true;
+  List<String> _calibratedVariants = [];
+  double _ambientRms = _defaultAmbientRms;
+  bool _calibrationDone = false;
 
   String get wakeWord => _wakeWord;
   bool get alwaysListening => _alwaysListening;
@@ -31,6 +40,9 @@ class AppConfig {
   String get fontSize => _fontSize;
   bool get largerTargets => _largerTargets;
   bool get soundEffects => _soundEffects;
+  List<String> get calibratedVariants => List.unmodifiable(_calibratedVariants);
+  double get ambientRms => _ambientRms;
+  bool get calibrationDone => _calibrationDone;
 
   Future<void> setOnboardingDone() async {
     await _prefs?.setBool(_keyOnboardingDone, true);
@@ -46,6 +58,20 @@ class AppConfig {
     _fontSize = _prefs!.getString(_keyFontSize) ?? 'medium';
     _largerTargets = _prefs!.getBool(_keyLargerTargets) ?? false;
     _soundEffects = _prefs!.getBool(_keySoundEffects) ?? true;
+    _calibrationDone = _prefs!.getBool(_keyCalibrationDone) ?? false;
+    _ambientRms = _prefs!.getDouble(_keyAmbientRms) ?? _defaultAmbientRms;
+    final variantsJson = _prefs!.getString(_keyCalibratedVariants);
+    if (variantsJson != null) {
+      try {
+        _calibratedVariants = (jsonDecode(variantsJson) as List)
+            .cast<String>()
+            .toList();
+      } catch (_) {
+        _calibratedVariants = [];
+      }
+    } else {
+      _calibratedVariants = [];
+    }
   }
 
   Future<void> setReduceMotion(bool value) async {
@@ -72,8 +98,31 @@ class AppConfig {
   Future<void> setWakeWord(String word) async {
     final trimmed = word.trim().toLowerCase();
     if (trimmed.isEmpty) return;
+    final changed = trimmed != _wakeWord;
     _wakeWord = trimmed;
     await _prefs?.setString(_keyWakeWord, _wakeWord);
+    if (changed) {
+      _calibratedVariants = [];
+      _calibrationDone = false;
+      await _prefs?.remove(_keyCalibratedVariants);
+      await _prefs?.setBool(_keyCalibrationDone, false);
+    }
+  }
+
+  Future<void> setCalibratedVariants(List<String> variants) async {
+    _calibratedVariants = variants.toList();
+    await _prefs?.setString(
+        _keyCalibratedVariants, jsonEncode(_calibratedVariants));
+  }
+
+  Future<void> setAmbientRms(double rms) async {
+    _ambientRms = rms;
+    await _prefs?.setDouble(_keyAmbientRms, rms);
+  }
+
+  Future<void> setCalibrationDone(bool done) async {
+    _calibrationDone = done;
+    await _prefs?.setBool(_keyCalibrationDone, done);
   }
 
   Future<void> setAlwaysListening(bool value) async {
@@ -184,6 +233,7 @@ class AppConfig {
     if (w.isEmpty) return false;
     if (word == w) return true;
     if (_getWakeWordVariants().contains(word)) return true;
+    if (_calibratedVariants.contains(word)) return true;
     return _levenshtein(word, w) <= 2;
   }
 

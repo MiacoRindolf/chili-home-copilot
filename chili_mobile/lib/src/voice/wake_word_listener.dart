@@ -84,11 +84,25 @@ class WakeWordListener {
   // Track whether TTS was playing in previous listener tick (for edge detect).
   bool _wasTtsPlaying = false;
 
-  // Barge-in: consecutive high-energy chunks during TTS.
+  // Barge-in: adaptive echo-baseline approach.
+  //
+  // During TTS the mic picks up speaker output at a roughly constant energy.
+  // We track a running average of that "echo baseline" and only trigger
+  // barge-in when energy spikes well above it — indicating the user is
+  // speaking on top of the TTS output.  This avoids false triggers from the
+  // speaker alone (which a fixed threshold cannot prevent without hardware AEC).
   int _bargeInCounter = 0;
-  static const _bargeInThreshold = 2000; // RMS for 16-bit PCM
-  static const _bargeInChunksNeeded = 3;
+  static const _bargeInChunksNeeded = 5;
+  static const _bargeInSpikeMultiplier = 2.5;
+  static const _bargeInMinAbsoluteThreshold = 3000.0;
   bool _bargeInTriggered = false;
+
+  // Exponential moving average of RMS during TTS (echo baseline).
+  double _ttsEchoBaseline = 0;
+  static const _echoBaselineAlpha = 0.15; // smoothing factor
+  int _ttsBaselineChunkCount = 0;
+  // How many chunks to collect before allowing barge-in detection (warm-up).
+  static const _echoBaselineWarmUp = 10;
 
   VoskFfi? _vosk;
   Pointer<Void>? _model;
@@ -256,22 +270,48 @@ class WakeWordListener {
     final rec = _recognizer;
     if (vosk == null || rec == null) return;
 
-    // ── Layer 1: Barge-in detection during TTS ──
+    // ── Layer 1: Adaptive barge-in detection during TTS ──
+    //
+    // Without hardware AEC the mic hears the speaker output. We track a
+    // running echo-baseline (EMA of RMS) and only trigger barge-in when
+    // energy exceeds baseline * multiplier — meaning the user is speaking
+    // on top of the TTS audio.
     if (_ttsPlaying?.value ?? false) {
       final rms = _rms(chunk);
-      if (rms > _bargeInThreshold) {
-        _bargeInCounter++;
-        if (_bargeInCounter >= _bargeInChunksNeeded && !_bargeInTriggered) {
-          _bargeInTriggered = true;
-          debugPrint('[WakeWord] Barge-in detected (RMS=$rms, chunks=$_bargeInCounter)');
-          onTtsInterruptRequested?.call();
-          _resetVoskState();
-          _awaitingCommandUntil =
-              DateTime.now().add(const Duration(seconds: _commandWindowSeconds));
-          onStatus('Listening... say your command');
-        }
+
+      // Update echo baseline via exponential moving average.
+      if (_ttsBaselineChunkCount == 0) {
+        _ttsEchoBaseline = rms;
       } else {
-        _bargeInCounter = 0;
+        _ttsEchoBaseline = _echoBaselineAlpha * rms +
+            (1 - _echoBaselineAlpha) * _ttsEchoBaseline;
+      }
+      _ttsBaselineChunkCount++;
+
+      // Wait for the baseline to stabilise before checking for spikes.
+      if (_ttsBaselineChunkCount >= _echoBaselineWarmUp && !_bargeInTriggered) {
+        final dynamicThreshold = _ttsEchoBaseline * _bargeInSpikeMultiplier;
+        final effectiveThreshold = dynamicThreshold > _bargeInMinAbsoluteThreshold
+            ? dynamicThreshold
+            : _bargeInMinAbsoluteThreshold;
+
+        if (rms > effectiveThreshold) {
+          _bargeInCounter++;
+          if (_bargeInCounter >= _bargeInChunksNeeded) {
+            _bargeInTriggered = true;
+            debugPrint('[WakeWord] Barge-in detected '
+                '(RMS=${rms.toStringAsFixed(0)}, '
+                'baseline=${_ttsEchoBaseline.toStringAsFixed(0)}, '
+                'threshold=${effectiveThreshold.toStringAsFixed(0)})');
+            onTtsInterruptRequested?.call();
+            _resetVoskState();
+            _awaitingCommandUntil =
+                DateTime.now().add(const Duration(seconds: _commandWindowSeconds));
+            onStatus('Listening... say your command');
+          }
+        } else {
+          _bargeInCounter = 0;
+        }
       }
       return;
     }
@@ -279,6 +319,8 @@ class WakeWordListener {
     // Normal (non-TTS) path: feed audio to Vosk.
     _bargeInCounter = 0;
     _bargeInTriggered = false;
+    _ttsBaselineChunkCount = 0;
+    _ttsEchoBaseline = 0;
 
     _currentPcmBuffer.add(Uint8List.fromList(chunk));
     int total = 0;
@@ -484,6 +526,15 @@ class WakeWordListener {
 
   void _onTtsPlayingChanged() {
     final playing = _ttsPlaying?.value ?? false;
+
+    if (!_wasTtsPlaying && playing) {
+      // TTS just started → reset echo baseline so it adapts to this session.
+      _ttsEchoBaseline = 0;
+      _ttsBaselineChunkCount = 0;
+      _bargeInCounter = 0;
+      _bargeInTriggered = false;
+    }
+
     if (_wasTtsPlaying && !playing) {
       // TTS just finished → start cooldown and reset Vosk.
       debugPrint('[WakeWord] TTS ended → ${_ttsCooldownMs}ms cooldown');

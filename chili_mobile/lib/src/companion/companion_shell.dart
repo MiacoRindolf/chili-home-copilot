@@ -5,6 +5,7 @@ import 'avatar_view.dart';
 import 'shared_chat_history.dart';
 import '../app_shell.dart';
 import '../config/app_config.dart';
+import '../voice/calibration_dialog.dart';
 import '../voice/wake_word_listener.dart';
 
 enum CompanionMode { avatar, fullApp }
@@ -67,6 +68,30 @@ class _CompanionShellState extends State<CompanionShell> {
     if (AppConfig.instance.alwaysListening && _mode == CompanionMode.avatar) {
       _wakeWordListener.start();
     }
+    _checkFirstRunCalibration();
+  }
+
+  Future<void> _checkFirstRunCalibration() async {
+    await AppConfig.instance.load();
+    if (AppConfig.instance.calibrationDone) return;
+    if (!AppConfig.instance.alwaysListening) return;
+
+    // Delay slightly so the app has time to render before showing the dialog.
+    await Future<void>.delayed(const Duration(seconds: 2));
+    if (!mounted || _mode != CompanionMode.avatar) return;
+
+    // Switch to full app mode so the dialog can render properly.
+    await _switchToFullApp();
+    if (!mounted) return;
+
+    await CalibrationDialog.show(
+      context,
+      wakeWord: AppConfig.instance.wakeWord,
+      pauseListening: _pauseWakeWord,
+    );
+
+    // After calibration (or skip), go back to avatar mode.
+    if (mounted) await _switchToAvatar();
   }
 
   @override
@@ -125,6 +150,7 @@ class _CompanionShellState extends State<CompanionShell> {
         : AppShell(
             sharedHistory: _sharedHistory,
             onBackToAvatar: _switchToAvatar,
+            pauseListening: _pauseWakeWord,
           );
   }
 }

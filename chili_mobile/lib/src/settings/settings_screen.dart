@@ -3,11 +3,17 @@ import 'package:flutter/material.dart';
 import '../companion/shared_chat_history.dart';
 import '../config/app_config.dart';
 import '../network/chili_api_client.dart';
+import '../voice/calibration_dialog.dart';
 
 class SettingsScreen extends StatefulWidget {
-  const SettingsScreen({super.key, required this.sharedHistory});
+  const SettingsScreen({
+    super.key,
+    required this.sharedHistory,
+    this.pauseListening,
+  });
 
   final SharedChatHistory sharedHistory;
+  final ValueNotifier<bool>? pauseListening;
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
@@ -48,12 +54,27 @@ class _SettingsScreenState extends State<SettingsScreen> {
   Future<void> _saveWakeWord() async {
     final word = _wakeWordController.text.trim();
     if (word.isEmpty) return;
+    final oldWord = AppConfig.instance.wakeWord;
     await AppConfig.instance.setWakeWord(word);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Wake word saved')),
-      );
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Wake word saved')),
+    );
+
+    if (word.toLowerCase() != oldWord.toLowerCase()) {
+      _promptCalibration();
     }
+  }
+
+  Future<void> _promptCalibration() async {
+    final word = AppConfig.instance.wakeWord;
+    await CalibrationDialog.show(
+      context,
+      wakeWord: word,
+      pauseListening: widget.pauseListening,
+    );
+    if (mounted) setState(() {});
   }
 
   @override
@@ -179,11 +200,36 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ],
                   ),
                   const SizedBox(height: 8),
-                  ElevatedButton.icon(
-                    onPressed: _saveWakeWord,
-                    icon: const Icon(Icons.save),
-                    label: const Text('Save wake word'),
+                  Row(
+                    children: [
+                      ElevatedButton.icon(
+                        onPressed: _saveWakeWord,
+                        icon: const Icon(Icons.save),
+                        label: const Text('Save wake word'),
+                      ),
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        onPressed: _promptCalibration,
+                        icon: const Icon(Icons.tune, size: 18),
+                        label: Text(
+                          AppConfig.instance.calibrationDone
+                              ? 'Re-calibrate'
+                              : 'Calibrate',
+                        ),
+                      ),
+                    ],
                   ),
+                  if (AppConfig.instance.calibrationDone) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      'Calibrated with ${AppConfig.instance.calibratedVariants.length} '
+                      'learned variant${AppConfig.instance.calibratedVariants.length == 1 ? '' : 's'}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.green.shade700,
+                      ),
+                    ),
+                  ],
                 ],
               ),
             ),

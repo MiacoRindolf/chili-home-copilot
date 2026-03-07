@@ -10,10 +10,12 @@ import 'settings/settings_screen.dart';
 class AppShell extends StatefulWidget {
   final VoidCallback onBackToAvatar;
   final SharedChatHistory sharedHistory;
+  final ValueNotifier<bool>? pauseListening;
   const AppShell({
     super.key,
     required this.onBackToAvatar,
     required this.sharedHistory,
+    this.pauseListening,
   });
 
   @override
@@ -96,7 +98,10 @@ class _AppShellState extends State<AppShell> {
       case 2:
         return const IntercomScreen();
       case 3:
-        return SettingsScreen(sharedHistory: widget.sharedHistory);
+        return SettingsScreen(
+          sharedHistory: widget.sharedHistory,
+          pauseListening: widget.pauseListening,
+        );
       default:
         return const SizedBox.shrink();
     }
