@@ -146,8 +146,8 @@ def get_voice_capabilities() -> dict:
     }
 
 
-def _clean_text_for_tts(text: str, max_sentences: int = 8) -> Optional[str]:
-    """Strip HTML/markdown and truncate for TTS."""
+def _clean_text_for_tts(text: str, max_sentences: int = 40, max_chars: int = 5000) -> Optional[str]:
+    """Strip HTML/markdown and cap length for TTS."""
     clean = re.sub(r'<[^>]*>', '', text)
     clean = re.sub(r'\*\*', '', clean)
     clean = re.sub(r'[#_`\-\[\]]', '', clean)
@@ -161,9 +161,9 @@ def _clean_text_for_tts(text: str, max_sentences: int = 8) -> Optional[str]:
     sentences = re.split(r'(?<=[.!?])\s+', clean)
     truncated = ' '.join(sentences[:max_sentences]).strip()
     if not truncated:
-        truncated = clean[:1500]
-    if len(truncated) > 1500:
-        truncated = truncated[:1500]
+        truncated = clean[:max_chars]
+    if len(truncated) > max_chars:
+        truncated = truncated[:max_chars]
     return truncated
 
 

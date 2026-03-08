@@ -106,6 +106,7 @@ class _AvatarViewState extends State<AvatarView> {
   void initState() {
     super.initState();
     _ttsController = TtsController(
+      client: _client,
       ttsPlaying: widget.ttsPlaying,
       onFinish: _finishSpeaking,
       lastTtsText: widget.lastTtsText,

@@ -283,8 +283,35 @@ class ChiliApiClient {
     return '$baseUrl/api/voice/tts/stream?text=${Uri.encodeComponent(text.trim())}';
   }
 
-  /// Request TTS audio for [text]. Returns raw MP3 bytes, or null on failure.
-  /// Kept as a fallback; prefer [getTtsStreamUrl] for lower latency.
+  /// Fetch TTS audio via the streaming endpoint.  Bytes arrive incrementally
+  /// from Edge TTS, reducing time-to-complete vs the buffered POST endpoint.
+  Future<List<int>?> fetchTtsStreaming(String text) async {
+    if (text.trim().isEmpty) return null;
+    final uri = Uri.parse(
+      '$baseUrl/api/voice/tts/stream?text=${Uri.encodeComponent(text.trim())}',
+    );
+    final request = http.Request('GET', uri);
+    if (_token != null && _token!.isNotEmpty) {
+      request.headers['Authorization'] = 'Bearer $_token';
+    }
+
+    try {
+      final streamed = await _client.send(request).timeout(
+            const Duration(seconds: 60),
+          );
+      if (streamed.statusCode != 200) return null;
+
+      final bytes = await streamed.stream.toBytes().timeout(
+            const Duration(seconds: 60),
+          );
+      if (bytes.length < 100) return null;
+      return bytes;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /// Request TTS audio for [text] (buffered). Returns raw MP3 bytes, or null.
   Future<List<int>?> fetchTts(String text) async {
     if (text.trim().isEmpty) return null;
     final uri = Uri.parse('$baseUrl/api/voice/tts');

@@ -9,7 +9,6 @@
 #include <audioplayers_windows/audioplayers_windows_plugin.h>
 #include <desktop_drop/desktop_drop_plugin.h>
 #include <flutter_screen_capture/flutter_screen_capture_plugin_c_api.h>
-#include <flutter_tts/flutter_tts_plugin.h>
 #include <hotkey_manager_windows/hotkey_manager_windows_plugin_c_api.h>
 #include <local_notifier/local_notifier_plugin.h>
 #include <pasteboard/pasteboard_plugin.h>
@@ -26,8 +25,6 @@ void RegisterPlugins(flutter::PluginRegistry* registry) {
       registry->GetRegistrarForPlugin("DesktopDropPlugin"));
   FlutterScreenCapturePluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("FlutterScreenCapturePluginCApi"));
-  FlutterTtsPluginRegisterWithRegistrar(
-      registry->GetRegistrarForPlugin("FlutterTtsPlugin"));
   HotkeyManagerWindowsPluginCApiRegisterWithRegistrar(
       registry->GetRegistrarForPlugin("HotkeyManagerWindowsPluginCApi"));
   LocalNotifierPluginRegisterWithRegistrar(

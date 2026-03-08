@@ -1,98 +1,42 @@
 import 'dart:async';
+import 'dart:typed_data';
 
+import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/widgets.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 
-/// Encapsulates TTS playback for Chili using on-device speech synthesis
-/// (Windows SAPI / macOS NSSpeechSynthesizer / Linux espeak).
+import '../network/chili_api_client.dart';
+
+/// Encapsulates TTS playback for Chili using the backend's Edge TTS neural
+/// voice (en-US-AndrewMultilingualNeural).
 ///
-/// This gives near-instant time-to-first-audio (<100 ms) instead of the
-/// 3-4 second round-trip required by the server-side Edge TTS endpoint.
+/// Audio is fetched via the streaming endpoint and played from memory with
+/// [BytesSource].  [_ttsPlaying] is only set to `true` once actual audio
+/// playback begins — not when the network fetch starts — so the wake-word
+/// listener won't show "follow-up" prematurely.
 class TtsController {
   TtsController({
+    required ChiliApiClient client,
     required ValueNotifier<bool>? ttsPlaying,
     required VoidCallback onFinish,
     ValueNotifier<String?>? lastTtsText,
-  })  : _ttsPlaying = ttsPlaying,
+  })  : _client = client,
+        _ttsPlaying = ttsPlaying,
         _onFinish = onFinish,
         _lastTtsText = lastTtsText {
-    _initFlutterTts();
+    _audioPlayer.onPlayerStateChanged.listen(_onPlayerStateChanged);
   }
 
+  final ChiliApiClient _client;
   final ValueNotifier<bool>? _ttsPlaying;
   final VoidCallback _onFinish;
   final ValueNotifier<String?>? _lastTtsText;
 
-  final FlutterTts _flutterTts = FlutterTts();
+  final AudioPlayer _audioPlayer = AudioPlayer();
+  StreamSubscription<void>? _ttsCompleteSub;
   bool _disposed = false;
+  bool _speaking = false;
 
   Timer? _echoTextTimer;
-
-  void _initFlutterTts() {
-    _flutterTts.setCompletionHandler(() {
-      if (!_disposed) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _finish());
-      }
-    });
-    _flutterTts.setCancelHandler(() {
-      if (!_disposed) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _finish());
-      }
-    });
-    _flutterTts.setErrorHandler((msg) {
-      debugPrint('[TtsController] flutter_tts error: $msg');
-      if (!_disposed) {
-        WidgetsBinding.instance.addPostFrameCallback((_) => _finish());
-      }
-    });
-
-    _flutterTts.setSpeechRate(0.5);
-    _flutterTts.setPitch(1.0);
-    _flutterTts.setVolume(1.0);
-    _setVoice();
-  }
-
-  Future<void> _setVoice() async {
-    try {
-      final voices = await _flutterTts.getVoices as List<dynamic>;
-      final voiceList = voices.cast<Map<dynamic, dynamic>>();
-
-      // Prefer a male English neural voice (Windows 11 ships these).
-      final preferred = [
-        'Microsoft Andrew',
-        'Microsoft Guy',
-        'Microsoft David',
-        'en-us-guynneural',
-        'en-us-andrewneural',
-      ];
-
-      Map<dynamic, dynamic>? best;
-      for (final pref in preferred) {
-        final match = voiceList.where(
-          (v) => (v['name'] ?? '').toString().toLowerCase().contains(pref.toLowerCase()),
-        );
-        if (match.isNotEmpty) {
-          best = match.first;
-          break;
-        }
-      }
-
-      // Fallback: any English voice.
-      best ??= voiceList.where(
-        (v) => (v['locale'] ?? '').toString().startsWith('en'),
-      ).firstOrNull;
-
-      if (best != null) {
-        await _flutterTts.setVoice({
-          'name': best['name'].toString(),
-          'locale': best['locale'].toString(),
-        });
-        debugPrint('[TtsController] Voice: ${best['name']}');
-      }
-    } catch (e) {
-      debugPrint('[TtsController] Voice selection failed: $e');
-    }
-  }
 
   Future<void> speak(String text) async {
     if (_disposed) return;
@@ -102,16 +46,44 @@ class TtsController {
       return;
     }
 
+    _speaking = true;
+
     _lastTtsText?.value = trimmed;
     _echoTextTimer?.cancel();
-    _echoTextTimer = Timer(const Duration(seconds: 10), () {
+    _echoTextTimer = Timer(const Duration(seconds: 15), () {
       _lastTtsText?.value = null;
     });
 
-    _ttsPlaying?.value = true;
-
     try {
-      await _flutterTts.speak(trimmed);
+      // Prefer the streaming endpoint (lower total latency).
+      List<int>? audioBytes = await _client.fetchTtsStreaming(trimmed);
+      audioBytes ??= await _client.fetchTts(trimmed);
+
+      if (_disposed || !_speaking) {
+        _finish();
+        return;
+      }
+      if (audioBytes == null || audioBytes.isEmpty) {
+        debugPrint('[TtsController] TTS: no audio returned');
+        _finish();
+        return;
+      }
+
+      await _audioPlayer.stop();
+
+      _ttsCompleteSub?.cancel();
+      _ttsCompleteSub = _audioPlayer.onPlayerComplete.listen((_) {
+        if (!_disposed) {
+          WidgetsBinding.instance.addPostFrameCallback((_) => _finish());
+        }
+      });
+
+      // Signal "playing" only now — right before actual audio starts.
+      _ttsPlaying?.value = true;
+
+      await _audioPlayer.play(
+        BytesSource(Uint8List.fromList(audioBytes)),
+      );
     } catch (e) {
       debugPrint('[TtsController] TTS error: $e');
       _finish();
@@ -120,19 +92,30 @@ class TtsController {
 
   Future<void> stop() async {
     if (_disposed) return;
+    _speaking = false;
+    _ttsCompleteSub?.cancel();
+    _ttsCompleteSub = null;
     try {
-      await _flutterTts.stop();
+      await _audioPlayer.stop();
     } catch (_) {}
     _finish();
   }
 
+  void _onPlayerStateChanged(PlayerState state) {
+    if (_disposed) return;
+    if (state == PlayerState.completed || state == PlayerState.stopped) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _finish());
+    }
+  }
+
   void _finish() {
     if (_disposed) return;
+    _speaking = false;
     _ttsPlaying?.value = false;
     _onFinish();
   }
 
-  /// Strip markdown/HTML for cleaner speech.
+  /// Strip markdown/HTML so Edge TTS reads clean prose.
   static String _cleanForTts(String text) {
     var clean = text;
     clean = clean.replaceAll(RegExp(r'<[^>]*>'), '');
@@ -147,9 +130,13 @@ class TtsController {
   Future<void> dispose() async {
     if (_disposed) return;
     _disposed = true;
+    _speaking = false;
     _echoTextTimer?.cancel();
+    _ttsCompleteSub?.cancel();
+    _ttsCompleteSub = null;
     try {
-      await _flutterTts.stop();
+      await _audioPlayer.stop();
     } catch (_) {}
+    await _audioPlayer.dispose();
   }
 }

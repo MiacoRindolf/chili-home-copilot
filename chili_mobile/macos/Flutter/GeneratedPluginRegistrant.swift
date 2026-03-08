@@ -9,7 +9,6 @@ import audioplayers_darwin
 import desktop_drop
 import file_picker
 import flutter_screen_capture
-import flutter_tts
 import hotkey_manager_macos
 import local_notifier
 import pasteboard
@@ -25,7 +24,6 @@ func RegisterGeneratedPlugins(registry: FlutterPluginRegistry) {
   DesktopDropPlugin.register(with: registry.registrar(forPlugin: "DesktopDropPlugin"))
   FilePickerPlugin.register(with: registry.registrar(forPlugin: "FilePickerPlugin"))
   FlutterScreenCapturePlugin.register(with: registry.registrar(forPlugin: "FlutterScreenCapturePlugin"))
-  FlutterTtsPlugin.register(with: registry.registrar(forPlugin: "FlutterTtsPlugin"))
   HotkeyManagerMacosPlugin.register(with: registry.registrar(forPlugin: "HotkeyManagerMacosPlugin"))
   LocalNotifierPlugin.register(with: registry.registrar(forPlugin: "LocalNotifierPlugin"))
   PasteboardPlugin.register(with: registry.registrar(forPlugin: "PasteboardPlugin"))

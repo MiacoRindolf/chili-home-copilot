@@ -546,10 +546,10 @@ class WakeWordListener {
       _lastReplyText = resp.reply;
       DesktopActions.execute(resp.clientAction);
       onReply(finalCommand, resp.reply);
-      _followUpUntil =
-          DateTime.now().add(const Duration(seconds: _followUpSeconds));
-      onFollowUpActive?.call(true);
-      onStatus('Listening... (follow-up)');
+      // Follow-up window is set by _onTtsPlayingChanged() when TTS finishes,
+      // NOT here — otherwise the listener shows "follow-up" while TTS is
+      // still loading or playing.
+      onStatus('Speaking...');
     } catch (e) {
       debugPrint('[WakeWord] !!! sendMessage error: $e');
       final errMsg =
