@@ -54,11 +54,11 @@ def fetch_ohlcv(
 
 
 def fetch_quote(ticker: str) -> dict[str, Any] | None:
-    """Current price + basic info for a ticker."""
+    """Current price + enriched info for a ticker."""
     try:
         t = yf.Ticker(ticker)
         info = t.fast_info
-        return {
+        result: dict[str, Any] = {
             "ticker": ticker.upper(),
             "price": round(float(info.last_price), 2) if info.last_price else None,
             "previous_close": round(float(info.previous_close), 2) if info.previous_close else None,
@@ -70,6 +70,16 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
             "market_cap": int(info.market_cap) if info.market_cap else None,
             "currency": info.currency if hasattr(info, "currency") else "USD",
         }
+        try:
+            result["day_high"] = round(float(info.day_high), 2) if info.day_high else None
+            result["day_low"] = round(float(info.day_low), 2) if info.day_low else None
+            result["year_high"] = round(float(info.year_high), 2) if info.year_high else None
+            result["year_low"] = round(float(info.year_low), 2) if info.year_low else None
+            result["volume"] = int(info.last_volume) if info.last_volume else None
+            result["avg_volume"] = int(info.three_month_average_volume) if hasattr(info, "three_month_average_volume") and info.three_month_average_volume else None
+        except Exception:
+            pass
+        return result
     except Exception:
         return None
 
@@ -515,58 +525,128 @@ def save_insight(
 def build_ai_context(
     db: Session, user_id: int | None, ticker: str, interval: str = "1d",
 ) -> str:
-    """Assemble context for the trading AI: current indicators + journal + insights."""
+    """Assemble rich context for the trading AI: full indicators + scanner + backtest + journal."""
     parts: list[str] = []
+    ticker_up = ticker.upper()
 
-    # Current indicator snapshot
+    # ── Full indicator snapshot with ALL indicators ──
     try:
-        snap = get_indicator_snapshot(ticker, interval)
-        parts.append(f"## Current Indicators for {ticker} ({interval})\n{json.dumps(snap, indent=2)}")
-    except Exception:
-        parts.append(f"## Could not fetch indicators for {ticker}")
+        full_indicators = compute_indicators(
+            ticker, interval=interval, period="6mo",
+            indicators=[
+                "rsi", "macd", "sma_20", "sma_50", "ema_20",
+                "bbands", "stoch", "adx", "atr", "obv", "mfi",
+                "vwap", "psar", "cci", "willr",
+            ],
+        )
+        latest_vals: dict[str, Any] = {}
+        for ind_name, records in full_indicators.items():
+            if records:
+                latest = records[-1]
+                latest_vals[ind_name] = {k: v for k, v in latest.items() if k != "time"}
+                # Also grab recent trend for key indicators
+                if len(records) >= 5 and ind_name in ("rsi", "adx", "obv"):
+                    recent_5 = [r.get("value") for r in records[-5:] if r.get("value") is not None]
+                    if recent_5:
+                        direction = "rising" if recent_5[-1] > recent_5[0] else "falling"
+                        latest_vals[ind_name]["5d_direction"] = direction
 
-    # Current price
+        parts.append(f"## LIVE INDICATORS — {ticker_up} ({interval})\n{json.dumps(latest_vals, indent=2)}")
+    except Exception:
+        parts.append(f"## Could not fetch indicators for {ticker_up}")
+
+    # ── Current price + context ──
     quote = fetch_quote(ticker)
     if quote:
-        parts.append(f"## Current Quote\nPrice: ${quote.get('price')}, Change: {quote.get('change_pct')}%")
+        parts.append(
+            f"## CURRENT PRICE\n"
+            f"Price: ${quote.get('price')} | Day change: {quote.get('change_pct')}% (${quote.get('change')})\n"
+            f"Day range: ${quote.get('day_low', 'N/A')} - ${quote.get('day_high', 'N/A')} | "
+            f"52wk range: ${quote.get('year_low', 'N/A')} - ${quote.get('year_high', 'N/A')}\n"
+            f"Volume: {quote.get('volume', 'N/A')} | Avg volume: {quote.get('avg_volume', 'N/A')}\n"
+            f"Market cap: {quote.get('market_cap', 'N/A')}"
+        )
 
-    # Recent trades for this ticker
-    trades = db.query(Trade).filter(
-        Trade.user_id == user_id, Trade.ticker == ticker.upper(),
-    ).order_by(Trade.entry_date.desc()).limit(5).all()
-    if trades:
-        lines = ["## Recent Trades"]
-        for tr in trades:
+    # ── Scanner score if available ──
+    scored = _score_ticker(ticker)
+    if scored:
+        parts.append(
+            f"## AI SCANNER SCORE\n"
+            f"Score: {scored['score']}/10 | Signal: {scored['signal'].upper()}\n"
+            f"Entry: ${scored['entry_price']} | Stop: ${scored['stop_loss']} | Target: ${scored['take_profit']}\n"
+            f"Risk: {scored['risk_level'].upper()}\n"
+            f"Signals: {', '.join(scored['signals']) if scored['signals'] else 'None strong'}"
+        )
+
+    # ── Best backtest results for this ticker ──
+    from ..models.trading import BacktestResult
+    backtests = db.query(BacktestResult).filter(
+        BacktestResult.ticker == ticker_up,
+    ).order_by(BacktestResult.return_pct.desc()).limit(3).all()
+    if backtests:
+        lines = ["## BACKTEST HISTORY (best strategies for this stock)"]
+        for bt in backtests:
             lines.append(
-                f"- {tr.direction.upper()} {tr.quantity}x @ ${tr.entry_price} "
-                f"{'→ $' + str(tr.exit_price) if tr.exit_price else '(open)'} "
-                f"P&L: ${tr.pnl or 'n/a'}"
+                f"- {bt.strategy_name}: {bt.return_pct:+.1f}% return, "
+                f"{bt.win_rate:.0f}% win rate, {bt.trade_count} trades, "
+                f"Sharpe {bt.sharpe or 'N/A'}, Max DD {bt.max_drawdown:.1f}%"
             )
         parts.append("\n".join(lines))
 
-    # Trade stats
+    # ── User's trades on this ticker ──
+    trades = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.ticker == ticker_up,
+    ).order_by(Trade.entry_date.desc()).limit(10).all()
+    if trades:
+        open_trades = [t for t in trades if t.status == "open"]
+        closed_trades = [t for t in trades if t.status == "closed"]
+
+        lines = [f"## USER'S TRADES ON {ticker_up}"]
+        if open_trades:
+            lines.append("OPEN POSITIONS:")
+            for tr in open_trades:
+                lines.append(
+                    f"  - {tr.direction.upper()} {tr.quantity}x @ ${tr.entry_price} (entered {tr.entry_date.strftime('%Y-%m-%d') if tr.entry_date else 'N/A'})"
+                )
+        if closed_trades:
+            lines.append("CLOSED (recent):")
+            for tr in closed_trades[:5]:
+                result = "WIN" if (tr.pnl or 0) > 0 else "LOSS"
+                lines.append(
+                    f"  - {tr.direction.upper()} @ ${tr.entry_price} → ${tr.exit_price} | "
+                    f"P&L: ${tr.pnl} ({result})"
+                )
+        parts.append("\n".join(lines))
+
+    # ── Overall portfolio performance ──
     stats = get_trade_stats(db, user_id)
     if stats.get("total_trades", 0) > 0:
         parts.append(
-            f"## Performance\n"
-            f"Trades: {stats['total_trades']}, Win rate: {stats['win_rate']}%, "
-            f"Total P&L: ${stats['total_pnl']}, Max DD: ${stats['max_drawdown']}"
+            f"## OVERALL TRADING PERFORMANCE\n"
+            f"Total trades: {stats['total_trades']} | Win rate: {stats['win_rate']}%\n"
+            f"Total P&L: ${stats['total_pnl']} | Best: ${stats['best_trade']} | Worst: ${stats['worst_trade']}\n"
+            f"Max drawdown: ${stats['max_drawdown']}"
         )
+    else:
+        parts.append("## TRADING HISTORY\nThis user has no closed trades yet. They are a beginner — guide them carefully with clear, specific first-trade advice.")
 
-    # AI insights
-    insights = get_insights(db, user_id, limit=5)
+    # ── AI learned patterns (your edge) ──
+    insights = get_insights(db, user_id, limit=10)
     if insights:
-        lines = ["## Learned Patterns"]
+        lines = ["## YOUR LEARNED PATTERNS (use these as your edge)"]
         for ins in insights:
-            lines.append(f"- [{ins.confidence:.0%}] {ins.pattern_description}")
+            lines.append(
+                f"- [{ins.confidence:.0%} confidence, {ins.evidence_count} evidence] "
+                f"{ins.pattern_description}"
+            )
         parts.append("\n".join(lines))
 
-    # Recent journal
-    journal = get_journal(db, user_id, limit=3)
+    # ── Recent journal ──
+    journal = get_journal(db, user_id, limit=5)
     if journal:
-        lines = ["## Recent Journal"]
+        lines = ["## RECENT JOURNAL NOTES"]
         for j in journal:
-            lines.append(f"- {j.created_at.strftime('%Y-%m-%d')}: {j.content[:200]}")
+            lines.append(f"- {j.created_at.strftime('%Y-%m-%d')}: {j.content[:300]}")
         parts.append("\n".join(lines))
 
     return "\n\n".join(parts)
