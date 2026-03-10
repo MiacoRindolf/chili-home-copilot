@@ -113,6 +113,7 @@ def api_scan_status():
         "ok": True,
         "scan": ts.get_scan_status(),
         "learning": ts.get_learning_status(),
+        "prescreen": ts.get_prescreen_status(),
         "scheduler": trading_scheduler.get_scheduler_info(),
     })
 

@@ -30,8 +30,13 @@ def signal_shutdown():
 
 # ── Single ticker scoring ─────────────────────────────────────────────
 
-def _score_ticker(ticker: str) -> dict[str, Any] | None:
-    """Score a single ticker using multi-signal confluence (1-10)."""
+def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
+    """Score a single ticker using multi-signal confluence (1-10).
+
+    When *skip_fundamentals* is True the expensive ``get_fundamentals()``
+    call is skipped — used during bulk scans where FinViz already
+    pre-filtered for fundamental quality.
+    """
     try:
         from ta.momentum import RSIIndicator, StochasticOscillator
         from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
@@ -140,7 +145,7 @@ def _score_ticker(ticker: str) -> dict[str, Any] | None:
             signals.append("Volume surge")
 
         is_crypto_ticker = ticker.upper().endswith("-USD")
-        if not is_crypto_ticker:
+        if not is_crypto_ticker and not skip_fundamentals:
             try:
                 fund = get_fundamentals(ticker)
                 if fund:
@@ -313,8 +318,8 @@ def run_custom_screen(
     conditions: list[dict] | None = None,
     tickers: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Run a preset or custom screen against the ticker universe."""
-    from ..ticker_universe import get_full_ticker_universe
+    """Run a preset or custom screen against the pre-filtered candidate pool."""
+    from .prescreener import get_prescreened_candidates
 
     if screen_id and screen_id in PRESET_SCREENS:
         preset = PRESET_SCREENS[screen_id]
@@ -328,8 +333,10 @@ def run_custom_screen(
     else:
         return {"ok": False, "error": "No screen_id or conditions provided"}
 
-    scan_list = tickers or get_full_ticker_universe()
-    scored_all = batch_score_tickers(scan_list, max_workers=_MAX_SCAN_WORKERS)
+    scan_list = tickers or get_prescreened_candidates()
+    scored_all = batch_score_tickers(
+        scan_list, max_workers=_MAX_SCAN_WORKERS, skip_fundamentals=True,
+    )
 
     matches = []
     for scored in scored_all:
@@ -372,14 +379,16 @@ def run_scan(
 
     Uses cached results if the same scan ran within the last 2 hours.
     Pre-warms the OHLCV cache with a batch download before scoring.
+    When *use_full_universe* is True, uses pre-screened candidates instead
+    of the raw 5000+ ticker universe for dramatically faster scans.
     """
     from ...models.trading import ScanResult
-    from ..ticker_universe import get_full_ticker_universe
+    from .prescreener import get_prescreened_candidates
 
     if tickers:
         scan_list = tickers
     elif use_full_universe:
-        scan_list = get_full_ticker_universe()
+        scan_list = get_prescreened_candidates()
     else:
         scan_list = list(ALL_SCAN_TICKERS)
 
@@ -391,14 +400,18 @@ def run_scan(
         logger.info(f"[trading] Returning cached scan ({len(_last_scan_cache['results'])} results)")
         return _last_scan_cache["results"]
 
+    skip_fund = use_full_universe or len(scan_list) > 100
     _prewarm_cache(scan_list)
 
     if len(scan_list) >= 10:
-        results = batch_score_tickers(scan_list, max_workers=_MAX_SCAN_WORKERS)
+        results = batch_score_tickers(
+            scan_list, max_workers=_MAX_SCAN_WORKERS,
+            skip_fundamentals=skip_fund,
+        )
     else:
         results = []
         for ticker in scan_list:
-            scored = _score_ticker(ticker)
+            scored = _score_ticker(ticker, skip_fundamentals=skip_fund)
             if scored is not None:
                 results.append(scored)
         results.sort(key=lambda r: r["score"], reverse=True)
@@ -562,6 +575,7 @@ def batch_score_tickers(
     tickers: list[str],
     max_workers: int = _MAX_SCAN_WORKERS,
     progress_callback: Any = None,
+    skip_fundamentals: bool = False,
 ) -> list[dict[str, Any]]:
     """Score many tickers concurrently using a thread pool."""
     results: list[dict[str, Any]] = []
@@ -571,7 +585,7 @@ def batch_score_tickers(
 
     def _score_one(ticker: str) -> dict[str, Any] | None:
         try:
-            return _score_ticker(ticker)
+            return _score_ticker(ticker, skip_fundamentals=skip_fundamentals)
         except Exception:
             return None
 
@@ -610,16 +624,20 @@ def run_full_market_scan(
     user_id: int | None,
     use_full_universe: bool = True,
 ) -> list[dict[str, Any]]:
-    """Scan the entire ticker universe concurrently, store results, return sorted."""
+    """Scan the market using pre-screened candidates, store results, return sorted.
+
+    Uses the prescreener (FinViz + yfinance server-side screens) to narrow
+    the universe to ~200-400 interesting candidates before deep-scoring.
+    """
     from ...models.trading import ScanResult
-    from ..ticker_universe import get_full_ticker_universe
+    from .prescreener import get_prescreened_candidates
 
     _scan_status["running"] = True
-    _scan_status["phase"] = "scanning"
+    _scan_status["phase"] = "pre-filtering"
     _scan_status["errors"] = 0
 
     if use_full_universe:
-        scan_list = get_full_ticker_universe()
+        scan_list = get_prescreened_candidates()
     else:
         scan_list = list(ALL_SCAN_TICKERS)
 
@@ -640,13 +658,15 @@ def run_full_market_scan(
         _scan_status["errors"] = errs
         _scan_status["progress_pct"] = round(done / total * 100) if total else 0
 
-    logger.info(f"[trading] Full market scan starting: {len(scan_list)} tickers")
+    logger.info(f"[trading] Full market scan starting: {len(scan_list)} pre-screened candidates")
 
     _scan_status["phase"] = "pre-warming cache"
     _prewarm_cache(scan_list)
     _scan_status["phase"] = "scoring"
 
-    results = batch_score_tickers(scan_list, progress_callback=_progress)
+    results = batch_score_tickers(
+        scan_list, progress_callback=_progress, skip_fundamentals=True,
+    )
 
     _scan_status["tickers_scanned"] = len(scan_list)
     _scan_status["tickers_scored"] = len(results)

@@ -92,6 +92,14 @@ from .learning import (
 )
 
 
+# Pre-screener (fast server-side filtering)
+from .prescreener import (
+    get_prescreened_candidates,
+    get_prescreen_status,
+    invalidate_cache as invalidate_prescreen_cache,
+)
+
+
 def signal_shutdown():
     """Propagate shutdown signal to all sub-modules."""
     from . import scanner, learning

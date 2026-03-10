@@ -210,21 +210,82 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
         pass
 
 
+def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None]:
+    """Fetch snapshot data in a thread (no DB access)."""
+    try:
+        snap = get_indicator_snapshot(ticker, "1d")
+        quote = fetch_quote(ticker)
+        return ticker, snap, quote
+    except Exception:
+        return ticker, None, None
+
+
+def take_snapshots_parallel(
+    db: Session,
+    tickers: list[str],
+    max_workers: int = 8,
+) -> int:
+    """Take snapshots for many tickers using a thread pool.
+
+    Data fetching runs in parallel; DB writes happen sequentially on the
+    calling thread to avoid SQLAlchemy session issues.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from ..yf_session import batch_download
+
+    # Pre-warm the OHLCV cache so indicator computation hits cache
+    BATCH = 50
+    for i in range(0, len(tickers), BATCH):
+        try:
+            batch_download(tickers[i:i + BATCH], period="3mo", interval="1d")
+        except Exception:
+            pass
+
+    fetched: list[tuple[str, dict | None, dict | None]] = []
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {executor.submit(_snapshot_data, t): t for t in tickers}
+        for future in as_completed(futures):
+            if _shutting_down.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            try:
+                fetched.append(future.result())
+            except Exception:
+                pass
+
+    count = 0
+    for ticker, snap, quote in fetched:
+        if snap is None:
+            continue
+        try:
+            price = quote.get("price", 0) if quote else 0
+            record = MarketSnapshot(
+                ticker=ticker.upper(),
+                snapshot_date=datetime.utcnow(),
+                close_price=price,
+                indicator_data=json.dumps(snap),
+            )
+            db.add(record)
+            count += 1
+        except Exception:
+            pass
+    if count:
+        db.commit()
+    return count
+
+
 def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] | None = None) -> int:
     if ticker_list:
-        tickers = set(ticker_list)
+        tickers = list(set(ticker_list))
     else:
-        tickers = set(DEFAULT_SCAN_TICKERS[:20] + DEFAULT_CRYPTO_TICKERS[:10])
+        tickers = list(set(DEFAULT_SCAN_TICKERS[:20] + DEFAULT_CRYPTO_TICKERS[:10]))
 
     watchlist = get_watchlist(db, user_id)
     for w in watchlist:
-        tickers.add(w.ticker)
+        if w.ticker not in tickers:
+            tickers.append(w.ticker)
 
-    count = 0
-    for ticker in tickers:
-        take_market_snapshot(db, ticker)
-        count += 1
-    return count
+    return take_snapshots_parallel(db, tickers)
 
 
 def backfill_future_returns(db: Session) -> int:
@@ -267,7 +328,8 @@ def _mine_from_history(ticker: str) -> list[dict]:
     from ta.volatility import BollingerBands, AverageTrueRange
 
     try:
-        df = _yf_history(ticker, period="1y", interval="1d")
+        # Use 6mo to hit the cache populated by the scan phase
+        df = _yf_history(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 60:
             return []
     except Exception:
@@ -822,9 +884,10 @@ _learning_status: dict[str, Any] = {
     "phase": "idle",
     "current_step": "",
     "steps_completed": 0,
-    "total_steps": 8,
+    "total_steps": 9,
     "patterns_found": 0,
     "tickers_processed": 0,
+    "step_timings": {},
 }
 
 
@@ -844,7 +907,12 @@ def run_learning_cycle(
     user_id: int | None,
     full_universe: bool = True,
 ) -> dict[str, Any]:
-    """Complete learning cycle: scan -> snapshot -> backfill -> mine -> journal -> signals."""
+    """Complete learning cycle: pre-filter -> scan -> snapshot -> backfill -> mine -> backtest -> journal -> signals.
+
+    Uses the prescreener to narrow thousands of tickers to ~200-400
+    interesting candidates before deep-scoring, making the cycle 10-30x
+    faster than scanning the raw universe.
+    """
     from .scanner import run_full_market_scan, _scan_status
     from .journal import daily_market_journal, check_signal_events
 
@@ -856,90 +924,129 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
+    _learning_status["total_steps"] = 9
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
+    _learning_status["step_timings"] = {}
     start = time.time()
     report: dict[str, Any] = {}
 
+    def _step_time(name: str, t0: float) -> None:
+        elapsed = round(time.time() - t0, 1)
+        _learning_status["step_timings"][name] = elapsed
+        logger.info(f"[trading] Step '{name}' took {elapsed}s")
+
     try:
+        # Step 1: Pre-filter with FinViz + yfinance screener
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
-        _learning_status["current_step"] = "Full market scan"
+        step_start = time.time()
+        _learning_status["current_step"] = "Pre-filtering market"
+        _learning_status["phase"] = "pre-filtering"
+        from .prescreener import get_prescreened_candidates, get_prescreen_status
+        candidates = get_prescreened_candidates()
+        ps = get_prescreen_status()
+        report["prescreen_candidates"] = len(candidates)
+        report["prescreen_sources"] = ps.get("sources", {})
+        _learning_status["tickers_processed"] = len(candidates)
+        _learning_status["steps_completed"] = 1
+        _step_time("pre-filter", step_start)
+
+        # Step 2: Deep-score candidates
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Scanning market"
         _learning_status["phase"] = "scanning"
         scan_results = run_full_market_scan(db, user_id, use_full_universe=full_universe)
         report["tickers_scanned"] = _scan_status["tickers_total"]
         report["tickers_scored"] = len(scan_results)
         _learning_status["tickers_processed"] = len(scan_results)
-        _learning_status["steps_completed"] = 1
+        _learning_status["steps_completed"] = 2
+        _step_time("scan", step_start)
 
+        # Step 3: Snapshots (parallel, top 100 + watchlist)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
+        step_start = time.time()
         _learning_status["current_step"] = "Taking market snapshots"
         _learning_status["phase"] = "snapshots"
-        top_tickers = [r["ticker"] for r in scan_results[:200]]
+        top_tickers = [r["ticker"] for r in scan_results[:100]]
         watchlist = get_watchlist(db, user_id)
         for w in watchlist:
             if w.ticker not in top_tickers:
                 top_tickers.append(w.ticker)
-        snap_count = 0
-        for ticker in top_tickers:
-            if _shutting_down.is_set():
-                break
-            take_market_snapshot(db, ticker)
-            snap_count += 1
+        snap_count = take_snapshots_parallel(db, top_tickers)
         report["snapshots_taken"] = snap_count
-        _learning_status["steps_completed"] = 2
+        _learning_status["steps_completed"] = 3
+        _step_time("snapshots", step_start)
 
+        # Step 4: Backfill future returns
+        step_start = time.time()
         _learning_status["current_step"] = "Backfilling future returns"
         _learning_status["phase"] = "backfilling"
         filled = backfill_future_returns(db)
         report["returns_backfilled"] = filled
-        _learning_status["steps_completed"] = 3
+        _learning_status["steps_completed"] = 4
+        _step_time("backfill", step_start)
 
+        # Step 5: Mine patterns
         _learning_status["current_step"] = "Mining patterns"
         _learning_status["phase"] = "mining"
+        step_start = time.time()
         discoveries = mine_patterns(db, user_id)
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
-        _learning_status["steps_completed"] = 4
+        _learning_status["steps_completed"] = 5
+        _step_time("mine", step_start)
 
+        # Step 6: Backtest discovered patterns
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
+        step_start = time.time()
         _learning_status["current_step"] = "Backtesting patterns"
         _learning_status["phase"] = "backtesting"
         bt_count = _auto_backtest_patterns(db, user_id)
         report["backtests_run"] = bt_count
-        _learning_status["steps_completed"] = 5
+        _learning_status["steps_completed"] = 6
+        _step_time("backtest", step_start)
 
+        # Step 7: Market journal
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
+        step_start = time.time()
         _learning_status["current_step"] = "Writing market journal"
         _learning_status["phase"] = "journaling"
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
-        _learning_status["steps_completed"] = 6
+        _learning_status["steps_completed"] = 7
+        _step_time("journal", step_start)
 
+        # Step 8: Signal events
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
+        step_start = time.time()
         _learning_status["current_step"] = "Checking signal events"
         _learning_status["phase"] = "signals"
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
-        _learning_status["steps_completed"] = 7
+        _learning_status["steps_completed"] = 8
+        _step_time("signals", step_start)
 
+        # Step 9: Finalize
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start
         log_learning_event(
             db, user_id, "scan",
-            f"Full learning cycle: scanned {report['tickers_scanned']} tickers, "
+            f"Learning cycle: {report.get('prescreen_candidates', 0)} pre-screened, "
             f"scored {report['tickers_scored']}, {report['snapshots_taken']} snapshots, "
-            f"{report['patterns_discovered']} patterns discovered, "
+            f"{report['patterns_discovered']} patterns, "
             f"{report.get('backtests_run', 0)} backtests, "
-            f"{report['signal_events']} signal events — {elapsed:.0f}s",
+            f"{report['signal_events']} signals — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = 8
+        _learning_status["steps_completed"] = 9
 
     except InterruptedError:
         logger.info("[trading] Learning cycle interrupted by shutdown")
@@ -959,6 +1066,7 @@ def run_learning_cycle(
         _learning_status["last_run"] = datetime.utcnow().isoformat()
         _learning_status["last_duration_s"] = round(elapsed, 1)
         report["elapsed_s"] = round(elapsed, 1)
+        report["step_timings"] = dict(_learning_status.get("step_timings", {}))
 
     logger.info(f"[trading] Learning cycle finished in {elapsed:.0f}s: {report}")
     return {"ok": True, **report}

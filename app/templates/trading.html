@@ -1899,14 +1899,15 @@ function filterBrainEvents(filter, btnEl) {
 }
 
 var _PIPELINE_STEPS = [
-  {id: 'scan', label: 'Scan Market', icon: '🔍'},
-  {id: 'snapshot', label: 'Take Snapshots', icon: '📸'},
-  {id: 'backfill', label: 'Check Predictions', icon: '📊'},
-  {id: 'mine', label: 'Discover Patterns', icon: '💡'},
-  {id: 'backtest', label: 'Validate Patterns', icon: '🧪'},
-  {id: 'journal', label: 'Market Journal', icon: '📝'},
-  {id: 'signal', label: 'Check Signals', icon: '📡'},
-  {id: 'final', label: 'Finalize', icon: '✅'},
+  {id: 'pre-filter', label: 'Pre-Filter', icon: '⚡'},
+  {id: 'scan', label: 'Deep Score', icon: '🔍'},
+  {id: 'snapshot', label: 'Snapshots', icon: '📸'},
+  {id: 'backfill', label: 'Predictions', icon: '📊'},
+  {id: 'mine', label: 'Patterns', icon: '💡'},
+  {id: 'backtest', label: 'Validate', icon: '🧪'},
+  {id: 'journal', label: 'Journal', icon: '📝'},
+  {id: 'signal', label: 'Signals', icon: '📡'},
+  {id: 'final', label: 'Done', icon: '✅'},
 ];
 
 function pollLearningStatus() {
@@ -1937,15 +1938,21 @@ function pollLearningStatus() {
       });
       document.getElementById('brain-pipeline-steps').innerHTML = stepsHtml;
       document.getElementById('brain-learning-step').textContent = learning.current_step || '';
-      var pct = scan.tickers_total > 0 ? Math.round(scan.tickers_scanned / scan.tickers_total * 100) : Math.round(learning.steps_completed / learning.total_steps * 100);
+      var pct = scan.tickers_total > 0 && learning.phase === 'scanning'
+        ? Math.round(scan.tickers_scanned / scan.tickers_total * 100)
+        : Math.round(learning.steps_completed / learning.total_steps * 100);
       var progressParts = [];
       progressParts.push('Step ' + learning.steps_completed + '/' + learning.total_steps);
+      var ps = d.prescreen || {};
+      if (ps.candidates > 0 && (learning.phase === 'pre-filtering' || learning.steps_completed >= 1)) {
+        progressParts.push(ps.candidates + ' candidates');
+      }
       if (scan.tickers_total > 0 && learning.phase === 'scanning') {
-        progressParts.push(scan.tickers_scanned.toLocaleString() + '/' + scan.tickers_total.toLocaleString() + ' tickers');
+        progressParts.push(scan.tickers_scanned.toLocaleString() + '/' + scan.tickers_total.toLocaleString() + ' scoring');
       }
       if (learning.tickers_processed > 0) progressParts.push(learning.tickers_processed + ' scored');
-      if (learning.patterns_found > 0) progressParts.push(learning.patterns_found + ' patterns found');
-      if (learning.elapsed_s) progressParts.push(Math.round(learning.elapsed_s) + 's elapsed');
+      if (learning.patterns_found > 0) progressParts.push(learning.patterns_found + ' patterns');
+      if (learning.elapsed_s) progressParts.push(Math.round(learning.elapsed_s) + 's');
       document.getElementById('brain-learning-progress').textContent = progressParts.join(' · ');
       document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
       btn.disabled = true;
