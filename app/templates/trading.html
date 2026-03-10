@@ -88,6 +88,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Chart + indicator sub-panes */
 .t-chart-area { flex: 1; position: relative; min-height: 200px; }
 #main-chart { width: 100%; height: 100%; }
+.chart-loading-overlay {
+  position: absolute; inset: 0; display: flex; flex-direction: column;
+  align-items: center; justify-content: center; background: var(--bg-primary);
+  z-index: 5; transition: opacity .3s;
+}
+.chart-loading-overlay.hidden { opacity: 0; pointer-events: none; }
+.chart-spinner {
+  width: 32px; height: 32px; border: 3px solid var(--border);
+  border-top-color: var(--accent); border-radius: 50%;
+  animation: chartSpin .7s linear infinite;
+}
+@keyframes chartSpin { to { transform: rotate(360deg); } }
+.chart-loading-text { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
 
 /* ── Resize handle ──────────────────────────────── */
 .t-resize-handle {
@@ -121,9 +134,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   border-bottom: 2px solid transparent; color: var(--text-secondary);
   white-space: nowrap; flex-shrink: 0;
 }
+.t-tab { transition: color .2s, border-color .2s; }
+.t-tab:hover { color: var(--text); }
 .t-tab.active { border-color: var(--accent); color: var(--accent); }
 .t-tab-content { flex: 1; overflow-y: auto; padding: 8px 10px; font-size: 13px; display: none; }
-.t-tab-content.active { display: block; }
+.t-tab-content.active { display: block; animation: tabFadeIn .2s ease forwards; }
+@keyframes tabFadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: translateY(0); } }
 
 /* Journal */
 .j-form { display: flex; gap: 6px; margin-bottom: 8px; }
@@ -291,6 +307,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 /* Streaming cursor */
 .streaming-cursor::after { content: '\u258C'; animation: cursorBlink .8s infinite; color: var(--accent); }
 @keyframes cursorBlink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+.streaming-slow { color: var(--text-muted); font-style: italic; font-size: 13px; }
 
 /* Follow-up suggestion chips */
 .followup-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
@@ -335,6 +352,8 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .ai-input input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
 .ai-input button { padding: 9px 18px; border: none; border-radius: 12px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
 .ai-input button:hover { background: var(--accent-hover); }
+.ai-ctx-info { font-size: 10px; color: var(--text-muted); align-self: center; cursor: default; white-space: nowrap; min-width: 0; opacity: 0; transition: opacity .3s; }
+.ai-ctx-info.visible { opacity: 1; }
 
 /* ── Floating AI toggle (mobile) ─────────────────── */
 .fab-ai {
@@ -627,9 +646,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .portfolio-grid { grid-template-columns: 1fr 1fr; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
 
-  /* Hide scrollbar on tabs */
-  .t-tabs { gap: 0; }
-  .t-tab { padding: 5px 8px; font-size: 10px; }
+  /* Snap scroll tabs on mobile */
+  .t-tabs { gap: 0; scroll-snap-type: x mandatory; scroll-behavior: smooth; }
+  .t-tab { padding: 5px 8px; font-size: 10px; scroll-snap-align: start; }
 
   /* Trade form stacks */
   .trade-form { gap: 4px; }
@@ -670,10 +689,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   width: 8px; height: 8px; border-radius: 50%;
   flex-shrink: 0;
 }
-.broker-dot.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+.broker-dot.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e88; animation: pulse-green 2s infinite; }
+@keyframes pulse-green { 0%, 100% { box-shadow: 0 0 6px #22c55e88; } 50% { box-shadow: 0 0 10px #22c55ecc; } }
 .broker-dot.disconnected { background: #6b7280; }
 .broker-label { flex: 1; font-weight: 500; }
 .broker-sub { font-size: 10px; color: var(--text-secondary); }
+.broker-status.compact { padding: 4px 8px; margin: 0 0 2px; }
+.broker-status.compact .broker-sub { display: none; }
 .broker-sync-btn {
   background: none; border: 1px solid var(--border); border-radius: 4px;
   padding: 2px 6px; font-size: 10px; color: var(--text-secondary);
@@ -889,6 +911,10 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
     <div class="t-chart-area">
       <div id="main-chart"></div>
+      <div class="chart-loading-overlay" id="chart-overlay">
+        <div class="chart-spinner"></div>
+        <div class="chart-loading-text">Loading chart data...</div>
+      </div>
     </div>
 
     <!-- Resize handle (between chart and bottom panel) -->
@@ -1123,6 +1149,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <div class="ticker-ac" id="ticker-ac"></div>
       <input type="text" id="ai-input" placeholder="Ask about any $TICKER or strategy..." autocomplete="off" />
       <button onclick="sendAiChat()" id="btn-send">Send</button>
+      <span id="ai-ctx-info" class="ai-ctx-info" title=""></span>
     </div>
   </div>
 
@@ -1256,6 +1283,7 @@ document.addEventListener('DOMContentLoaded', function() {
     if (e.key === 'Enter') addJournal();
   });
   setInterval(refreshPrice, 15000);
+  setTimeout(prefetchWatchlistPrices, 2000);
 });
 
 function initChart() {
@@ -1290,12 +1318,23 @@ function initChart() {
 }
 
 /* ── Chart data ─────────────────────────────────── */
+function _showChartOverlay(msg) {
+  var ov = document.getElementById('chart-overlay');
+  if (ov) { ov.classList.remove('hidden'); ov.querySelector('.chart-loading-text').textContent = msg || 'Loading chart data...'; }
+}
+function _hideChartOverlay() {
+  var ov = document.getElementById('chart-overlay');
+  if (ov) ov.classList.add('hidden');
+}
+
 function loadChart() {
   document.getElementById('ticker-label').textContent = currentTicker;
   document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:var(--text-muted)">Loading...</em>';
+  _showChartOverlay('Loading ' + currentTicker + '...');
   fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod)
     .then(function(r) { return r.json(); })
     .then(function(d) {
+      _hideChartOverlay();
       if (!d.ok || !d.data || !d.data.length) {
         document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">No data for ' + currentTicker + '</em>';
         candleSeries.setData([]);
@@ -1308,6 +1347,7 @@ function loadChart() {
       refreshPrice();
       loadActiveIndicators();
     }).catch(function() {
+      _hideChartOverlay();
       document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">Error loading chart</em>';
     });
 }
@@ -1321,6 +1361,7 @@ function refreshPrice() {
         lbl.innerHTML = '<strong>--</strong>';
         return;
       }
+      _priceCache[currentTicker] = d;
       var cls = (d.change_pct||0) >= 0 ? 'up' : 'down';
       var sign = (d.change_pct||0) >= 0 ? '+' : '';
       lbl.innerHTML = '<strong>$' + d.price + '</strong> <span class="change ' + cls + '">' + sign + (d.change||0) + ' (' + sign + (d.change_pct||0) + '%)</span>';
@@ -1361,11 +1402,50 @@ function changeInterval(v) {
 }
 function changePeriod(v) { currentPeriod = v; loadChart(); }
 
+var _selectDebounce = null;
 function selectTicker(t) {
   currentTicker = t.toUpperCase();
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
-  loadChart();
+  document.getElementById('ticker-label').textContent = currentTicker;
+  // Show cached price instantly if available
+  var cached = _priceCache[currentTicker];
+  if (cached) {
+    var cls = (cached.change_pct||0) >= 0 ? 'up' : 'down';
+    var sign = (cached.change_pct||0) >= 0 ? '+' : '';
+    document.getElementById('price-label').innerHTML = '<strong>$' + cached.price + '</strong> <span class="change ' + cls + '">' + sign + (cached.change||0) + ' (' + sign + (cached.change_pct||0) + '%)</span>';
+  }
+  if (_selectDebounce) clearTimeout(_selectDebounce);
+  _selectDebounce = setTimeout(function() { loadChart(); }, 200);
   if (window.innerWidth <= 768) closeAllDrawers();
+}
+
+var _priceCache = {};
+function prefetchWatchlistPrices() {
+  var items = document.querySelectorAll('.wl-item');
+  var tickers = [];
+  items.forEach(function(el) {
+    var t = el.dataset.ticker;
+    if (t && !_priceCache[t]) tickers.push(t);
+  });
+  if (!tickers.length) return;
+  fetch('/api/trading/quotes/batch?tickers=' + encodeURIComponent(tickers.join(',')))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.quotes) return;
+      Object.keys(d.quotes).forEach(function(ticker) {
+        var q = d.quotes[ticker];
+        _priceCache[ticker] = q;
+        var el = document.querySelector('.wl-item[data-ticker="'+ticker+'"]');
+        if (el) {
+          var priceEl = el.querySelector('.wl-price');
+          if (priceEl) {
+            var cls = (q.change_pct||0) >= 0 ? 'up' : 'down';
+            var sign = (q.change_pct||0) >= 0 ? '+' : '';
+            priceEl.innerHTML = '$' + q.price + ' <small class="' + cls + '">' + sign + (q.change_pct||0) + '%</small>';
+          }
+        }
+      });
+    }).catch(function() {});
 }
 
 /* ── Indicators ─────────────────────────────────── */
@@ -1715,7 +1795,7 @@ function loadBrainDashboard() {
   // Learning status + scheduler info
   pollLearningStatus();
   if (brainPollInterval) clearInterval(brainPollInterval);
-  brainPollInterval = setInterval(pollLearningStatus, 5000);
+  brainPollInterval = setInterval(pollLearningStatus, 3000);
 }
 
 function loadBrainThesis() {
@@ -1823,7 +1903,10 @@ var _PIPELINE_STEPS = [
   {id: 'snapshot', label: 'Take Snapshots', icon: '📸'},
   {id: 'backfill', label: 'Check Predictions', icon: '📊'},
   {id: 'mine', label: 'Discover Patterns', icon: '💡'},
-  {id: 'reflect', label: 'AI Reflection', icon: '🔬'},
+  {id: 'backtest', label: 'Validate Patterns', icon: '🧪'},
+  {id: 'journal', label: 'Market Journal', icon: '📝'},
+  {id: 'signal', label: 'Check Signals', icon: '📡'},
+  {id: 'final', label: 'Finalize', icon: '✅'},
 ];
 
 function pollLearningStatus() {
@@ -1855,9 +1938,15 @@ function pollLearningStatus() {
       document.getElementById('brain-pipeline-steps').innerHTML = stepsHtml;
       document.getElementById('brain-learning-step').textContent = learning.current_step || '';
       var pct = scan.tickers_total > 0 ? Math.round(scan.tickers_scanned / scan.tickers_total * 100) : Math.round(learning.steps_completed / learning.total_steps * 100);
-      document.getElementById('brain-learning-progress').textContent = scan.tickers_total > 0
-        ? scan.tickers_scanned.toLocaleString() + ' / ' + scan.tickers_total.toLocaleString() + ' tickers'
-        : 'Step ' + learning.steps_completed + '/' + learning.total_steps;
+      var progressParts = [];
+      progressParts.push('Step ' + learning.steps_completed + '/' + learning.total_steps);
+      if (scan.tickers_total > 0 && learning.phase === 'scanning') {
+        progressParts.push(scan.tickers_scanned.toLocaleString() + '/' + scan.tickers_total.toLocaleString() + ' tickers');
+      }
+      if (learning.tickers_processed > 0) progressParts.push(learning.tickers_processed + ' scored');
+      if (learning.patterns_found > 0) progressParts.push(learning.patterns_found + ' patterns found');
+      if (learning.elapsed_s) progressParts.push(Math.round(learning.elapsed_s) + 's elapsed');
+      document.getElementById('brain-learning-progress').textContent = progressParts.join(' · ');
       document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
       btn.disabled = true;
       btn.textContent = '⏳ Learning...';
@@ -2272,17 +2361,23 @@ function _streamAnalyze(msg, isSmartPick) {
     _showStopBtn();
     var controller = new AbortController();
     _streamAbort = controller;
+    var _spSlow = setTimeout(function() {
+      var thinkEl = document.querySelector('.ai-thinking');
+      if (thinkEl) thinkEl.textContent = 'Still scanning — this can take a minute for full market analysis...';
+    }, 15000);
     fetch('/api/trading/smart-pick', {
       method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({ message: msg, risk_tolerance: 'medium' }),
       signal: controller.signal
     }).then(function(r){return r.json();}).then(function(d) {
+      clearTimeout(_spSlow);
       removeLastAiMsg();
       _hideStopBtn();
       var prefix = d.picks_scanned ? '*Scanned ' + d.picks_scanned.toLocaleString() + ' tickers, ' + (d.picks_qualified||0) + ' qualified*\n\n' : '';
       appendAiMsg('assistant', prefix + (d.reply || 'No recommendations at this time.'));
       if (d.top_picks && d.top_picks.length) selectTicker(d.top_picks[0].ticker);
     }).catch(function(e) {
+      clearTimeout(_spSlow);
       removeLastAiMsg(); _hideStopBtn();
       if (e.name !== 'AbortError') appendAiMsg('assistant', 'Error running scan.');
     });
@@ -2299,10 +2394,14 @@ function _streamAnalyze(msg, isSmartPick) {
 
   var controller2 = new AbortController();
   _streamAbort = controller2;
+  var _streamStartTime = Date.now();
+  var _slowTimer = null;
+  var _timeoutTimer = null;
 
   fetch('/api/trading/analyze/stream?' + params.toString(), { signal: controller2.signal })
     .then(function(response) {
       if (!response.ok || !response.body) {
+        clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
         return response.json().then(function(d) {
           removeLastAiMsg(); _hideStopBtn();
           appendAiMsg('assistant', d.reply || 'Analysis unavailable.');
@@ -2317,10 +2416,27 @@ function _streamAnalyze(msg, isSmartPick) {
       var bubble = msgs.lastElementChild.querySelector('.bubble');
       var fullText = '';
       var renderTimer = null;
+      var gotFirstToken = false;
 
       var reader = response.body.getReader();
       var decoder = new TextDecoder();
       var buffer = '';
+
+      _slowTimer = setTimeout(function() {
+        if (!gotFirstToken && bubble) {
+          bubble.innerHTML = '<span class="streaming-slow">Analysis is taking longer than expected...</span><span class="streaming-cursor"></span>';
+          msgs.scrollTop = msgs.scrollHeight;
+        }
+      }, 15000);
+
+      _timeoutTimer = setTimeout(function() {
+        if (!gotFirstToken) {
+          controller2.abort();
+          clearInterval(renderTimer);
+          _hideStopBtn();
+          if (bubble) bubble.innerHTML = '<span class="streaming-slow">Analysis timed out. The AI model may be overloaded — please try again.</span>';
+        }
+      }, 45000);
 
       function _renderStream() {
         if (!bubble) return;
@@ -2335,6 +2451,7 @@ function _streamAnalyze(msg, isSmartPick) {
         reader.read().then(function(result) {
           if (result.done) {
             clearInterval(renderTimer);
+            clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
             _hideStopBtn();
             var parsed2 = fullText;
             try { parsed2 = marked.parse(fullText); } catch(e) {}
@@ -2355,6 +2472,11 @@ function _streamAnalyze(msg, isSmartPick) {
             }
             chatHistory.push({ role: 'assistant', text: fullText, time: Date.now() });
             _saveChatHistory();
+            var elapsed = ((Date.now() - _streamStartTime) / 1000).toFixed(1);
+            var ctxEl = document.getElementById('ai-ctx-info');
+            ctxEl.textContent = elapsed + 's';
+            ctxEl.title = 'Response time: ' + elapsed + 's | Ticker: ' + currentTicker + ' | History: ' + chatHistory.length + ' msgs';
+            ctxEl.classList.add('visible');
             return;
           }
           buffer += decoder.decode(result.value, { stream: true });
@@ -2366,9 +2488,16 @@ function _streamAnalyze(msg, isSmartPick) {
               if (payload === '[DONE]') return;
               try {
                 var ev = JSON.parse(payload);
-                if (ev.token) fullText += ev.token;
+                if (ev.token) {
+                  if (!gotFirstToken) {
+                    gotFirstToken = true;
+                    clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
+                  }
+                  fullText += ev.token;
+                }
                 if (ev.suggestions) { /* handled at end */ }
               } catch(e) {
+                if (!gotFirstToken) { gotFirstToken = true; clearTimeout(_slowTimer); clearTimeout(_timeoutTimer); }
                 fullText += payload;
               }
             }
@@ -2376,6 +2505,7 @@ function _streamAnalyze(msg, isSmartPick) {
           pump();
         }).catch(function(e) {
           clearInterval(renderTimer);
+          clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
           _hideStopBtn();
           if (e.name !== 'AbortError') {
             bubble.innerHTML = marked.parse(fullText || 'Stream interrupted.');
@@ -2886,23 +3016,27 @@ function loadBrokerStatus() {
     var sub = document.getElementById('broker-sub');
     var syncBtn = document.getElementById('broker-sync-btn');
 
+    var statusEl = document.getElementById('broker-status');
     if (d.connected) {
       _brokerConnected = true;
       dot.className = 'broker-dot connected';
       label.textContent = 'Robinhood Connected';
       sub.textContent = d.username || 'Linked account';
       syncBtn.style.display = 'inline-block';
+      statusEl.classList.remove('compact');
       loadRhPortfolio();
     } else if (d.configured) {
       dot.className = 'broker-dot disconnected';
       label.textContent = 'Robinhood';
       sub.textContent = 'Click to connect';
       syncBtn.style.display = 'none';
+      statusEl.classList.add('compact');
     } else {
       dot.className = 'broker-dot disconnected';
       label.textContent = 'Robinhood';
       sub.textContent = 'Set credentials in .env';
       syncBtn.style.display = 'none';
+      statusEl.classList.add('compact');
     }
   }).catch(function() {});
 }

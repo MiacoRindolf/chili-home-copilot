@@ -1,8 +1,11 @@
+"""Marketplace service: registry fetch, install, enable/disable, uninstall modules."""
 from __future__ import annotations
 
+import hashlib
 import json
+import shutil
 import zipfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -15,6 +18,8 @@ from ..logger import log_error, log_info
 from ..models import MarketplaceModule
 
 REGISTRY_CACHE_TTL_SECONDS = 300
+
+_registry_cache: Dict[str, Any] = {"data": None, "fetched_at": 0.0}
 
 
 @dataclass
@@ -39,10 +44,19 @@ def _get_modules_root() -> Path:
 
 def _fetch_registry_index(trace_id: str) -> Dict[str, Any]:
     """Fetch registry JSON from the configured URL, or return an empty index."""
+    import time
+
     url = settings.module_registry_url.strip()
     if not url:
         log_info(trace_id, "module_registry_disabled")
         return {"modules": []}
+
+    now = time.time()
+    if (
+        _registry_cache["data"] is not None
+        and (now - _registry_cache["fetched_at"]) < REGISTRY_CACHE_TTL_SECONDS
+    ):
+        return _registry_cache["data"]
 
     try:
         log_info(trace_id, f"fetching_module_registry url={url}")
@@ -52,8 +66,10 @@ def _fetch_registry_index(trace_id: str) -> Dict[str, Any]:
         data = resp.json()
         if not isinstance(data, dict):
             raise ValueError("Registry index must be a JSON object")
+        _registry_cache["data"] = data
+        _registry_cache["fetched_at"] = now
         return data
-    except Exception as exc:  # pragma: no cover - network/IO heavy
+    except Exception as exc:
         log_error(trace_id, f"module_registry_fetch_failed error={exc}")
         return {"modules": []}
 
@@ -80,7 +96,6 @@ def _parse_registry_modules(index: Dict[str, Any]) -> List[RegistryModule]:
                 )
             )
         except Exception:
-            # Skip malformed entries but do not fail the whole registry.
             continue
     return parsed
 
@@ -95,8 +110,15 @@ def list_registry_with_status(db: Session, trace_id: str) -> List[Dict[str, Any]
     }
 
     result: List[Dict[str, Any]] = []
+    seen_slugs: set = set()
+
     for slug, reg in registry.items():
+        seen_slugs.add(slug)
         installed_mod = installed.get(slug)
+        has_update = (
+            installed_mod is not None
+            and installed_mod.version != reg.version
+        )
         result.append(
             {
                 "slug": slug,
@@ -114,12 +136,12 @@ def list_registry_with_status(db: Session, trace_id: str) -> List[Dict[str, Any]
                 "installed": installed_mod is not None,
                 "enabled": bool(installed_mod.enabled) if installed_mod else False,
                 "installed_version": installed_mod.version if installed_mod else None,
+                "has_update": has_update,
             }
         )
 
-    # Also include locally installed modules that are no longer in the registry.
     for slug, mod in installed.items():
-        if slug in registry:
+        if slug in seen_slugs:
             continue
         result.append(
             {
@@ -138,6 +160,7 @@ def list_registry_with_status(db: Session, trace_id: str) -> List[Dict[str, Any]
                 "installed": True,
                 "enabled": bool(mod.enabled),
                 "installed_version": mod.version,
+                "has_update": False,
             }
         )
 
@@ -150,11 +173,9 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> Path:
     Returns the top-level directory for the module.
     """
     with zipfile.ZipFile(zip_path, "r") as zf:
-        top_level_dirs = set()
+        top_level_dirs: set = set()
         for member in zf.infolist():
-            name = member.filename
-            # Normalize separators
-            name = name.replace("\\", "/")
+            name = member.filename.replace("\\", "/")
             if name.endswith("/"):
                 continue
             if name.startswith("/") or ".." in name.split("/"):
@@ -166,7 +187,6 @@ def _safe_extract_zip(zip_path: Path, dest_dir: Path) -> Path:
         if not top_level_dirs:
             raise ValueError("Archive is empty")
         if len(top_level_dirs) > 1:
-            # We expect a single top-level directory per module.
             raise ValueError("Archive must contain a single top-level directory")
 
         top_dir_name = next(iter(top_level_dirs))
@@ -181,7 +201,7 @@ def _download_archive(download_url: str, trace_id: str) -> Path:
     tmp_path = modules_root / "tmp_download.zip"
 
     log_info(trace_id, f"downloading_module url={download_url}")
-    with httpx.Client(timeout=30.0) as client:
+    with httpx.Client(timeout=30.0, follow_redirects=True) as client:
         with client.stream("GET", download_url) as resp:
             resp.raise_for_status()
             with tmp_path.open("wb") as f:
@@ -191,8 +211,19 @@ def _download_archive(download_url: str, trace_id: str) -> Path:
     return tmp_path
 
 
+def _verify_checksum(file_path: Path, expected: str | None) -> bool:
+    """Verify SHA-256 checksum if provided. Returns True if valid or no checksum given."""
+    if not expected:
+        return True
+    sha = hashlib.sha256()
+    with file_path.open("rb") as f:
+        for block in iter(lambda: f.read(8192), b""):
+            sha.update(block)
+    return sha.hexdigest() == expected.lower()
+
+
 def install_from_registry(
-    db: Session, slug: str, trace_id: str
+    db: Session, slug: str, trace_id: str,
 ) -> Tuple[MarketplaceModule, bool]:
     """Install or upgrade a module identified by slug.
 
@@ -201,17 +232,22 @@ def install_from_registry(
     index = _fetch_registry_index(trace_id)
     registry = {m.slug: m for m in _parse_registry_modules(index)}
     reg = registry.get(slug)
-    if not reg or not reg.download_url:
-        raise ValueError(f"Module '{slug}' not found in registry or missing download_url")
+    if not reg:
+        raise ValueError(f"Module '{slug}' not found in registry")
+    if not reg.download_url:
+        raise ValueError(f"Module '{slug}' has no download URL")
 
     archive_path = _download_archive(reg.download_url, trace_id)
+
+    if not _verify_checksum(archive_path, reg.checksum):
+        archive_path.unlink(missing_ok=True)
+        raise ValueError(f"Checksum mismatch for module '{slug}'")
+
     modules_root = _get_modules_root()
     extracted_root = _safe_extract_zip(archive_path, modules_root)
-
     archive_path.unlink(missing_ok=True)
 
     local_path = str(extracted_root.resolve())
-
     existing = db.query(MarketplaceModule).filter(MarketplaceModule.slug == slug).one_or_none()
     now = datetime.utcnow()
 
@@ -277,19 +313,13 @@ def uninstall(db: Session, slug: str) -> None:
     )
     if not mod:
         return
+
     path = mod.local_path_obj()
     try:
         if path.exists() and path.is_dir():
-            # Best-effort removal; errors are logged but not fatal.
-            for child in sorted(path.rglob("*"), reverse=True):
-                if child.is_file():
-                    child.unlink(missing_ok=True)
-                elif child.is_dir():
-                    child.rmdir()
-            path.rmdir()
-    except Exception as exc:  # pragma: no cover - filesystem conditions vary
+            shutil.rmtree(path, ignore_errors=True)
+    except Exception as exc:
         log_error("uninstall_module", f"failed_to_delete_files slug={slug} error={exc}")
 
     db.delete(mod)
     db.commit()
-

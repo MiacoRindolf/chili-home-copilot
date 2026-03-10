@@ -3,163 +3,326 @@
 
 {% block head_extra %}
 <style>
-  .mkp-wrap {
-    max-width: 1100px;
-    margin: 0 auto;
-    padding: 24px 16px 40px;
+  * { box-sizing: border-box; }
+  body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    min-height: 100vh;
   }
-  .mkp-header {
+
+  /* ── Layout ─────────────────────────────────────────────────── */
+  .mkp-wrap {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 0 20px 60px;
+  }
+
+  /* ── Top bar ────────────────────────────────────────────────── */
+  .mkp-topbar {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: var(--bg);
+    border-bottom: 1px solid var(--border);
+    padding: 16px 20px;
+    margin: 0 -20px 24px;
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+  .mkp-topbar-inner {
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  .mkp-nav {
     display: flex;
     align-items: center;
-    justify-content: space-between;
-    margin-bottom: 18px;
+    gap: 12px;
+    margin-bottom: 16px;
   }
-  .mkp-title {
-    font-size: 22px;
+  .mkp-back {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 500;
+    padding: 6px 12px;
+    border-radius: 8px;
+    transition: .15s;
+  }
+  .mkp-back:hover { background: var(--code-bg); color: var(--text); }
+  .mkp-nav-title {
+    font-size: 20px;
     font-weight: 700;
+    color: var(--text);
     display: flex;
     align-items: center;
     gap: 8px;
   }
-  .mkp-subtitle {
-    font-size: 13px;
-    color: var(--text-secondary);
-    margin-top: 4px;
-  }
-  .mkp-badge {
-    font-size: 11px;
+  .mkp-preview-badge {
+    font-size: 10px;
+    font-weight: 600;
     padding: 2px 8px;
     border-radius: 999px;
-    background: var(--code-bg);
-    color: var(--text-muted);
+    background: var(--accent);
+    color: #fff;
+    letter-spacing: .03em;
+    text-transform: uppercase;
   }
-  .mkp-controls {
+  .mkp-search-row {
     display: flex;
-    gap: 8px;
+    gap: 10px;
     align-items: center;
   }
   .mkp-search {
-    padding: 8px 10px;
-    border-radius: 8px;
+    flex: 1;
+    padding: 10px 14px 10px 36px;
+    border-radius: 10px;
     border: 1px solid var(--input-border);
     background: var(--input-bg);
     color: var(--text);
-    font-size: 13px;
-    min-width: 220px;
+    font-size: 14px;
+    outline: none;
+    transition: border-color .15s, box-shadow .15s;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='%239ca3af' viewBox='0 0 16 16'%3E%3Cpath d='M11.742 10.344a6.5 6.5 0 1 0-1.397 1.398h-.001l3.85 3.85a1 1 0 0 0 1.415-1.414l-3.85-3.85zm-5.242.156a5 5 0 1 1 0-10 5 5 0 0 1 0 10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: 12px center;
   }
   .mkp-search:focus {
-    outline: none;
     border-color: var(--accent);
+    box-shadow: 0 0 0 3px rgba(37,99,235,.1);
   }
-  .mkp-filter-select {
-    padding: 7px 10px;
-    border-radius: 8px;
-    border: 1px solid var(--input-border);
-    background: var(--input-bg);
-    color: var(--text);
-    font-size: 13px;
-  }
-  .mkp-tag-pill {
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 999px;
+  .mkp-filter-tabs {
+    display: flex;
+    gap: 4px;
     background: var(--code-bg);
-    color: var(--text-muted);
-    margin-right: 4px;
+    border-radius: 10px;
+    padding: 3px;
   }
+  .mkp-filter-tab {
+    padding: 7px 14px;
+    border-radius: 8px;
+    border: none;
+    background: transparent;
+    color: var(--text-secondary);
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: .15s;
+    white-space: nowrap;
+  }
+  .mkp-filter-tab:hover { color: var(--text); }
+  .mkp-filter-tab.active {
+    background: var(--bg-header);
+    color: var(--text);
+    box-shadow: 0 1px 3px rgba(0,0,0,.08);
+  }
+
+  /* ── Stats row ──────────────────────────────────────────────── */
+  .mkp-stats {
+    display: flex;
+    gap: 12px;
+    margin-bottom: 24px;
+    overflow-x: auto;
+    padding-bottom: 4px;
+  }
+  .mkp-stat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 14px 18px;
+    background: var(--bg-header);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    min-width: 160px;
+    flex-shrink: 0;
+  }
+  .mkp-stat-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 20px;
+    flex-shrink: 0;
+  }
+  .mkp-stat-icon.blue { background: #dbeafe; }
+  [data-theme="dark"] .mkp-stat-icon.blue { background: #1e3a5f; }
+  .mkp-stat-icon.green { background: #dcfce7; }
+  [data-theme="dark"] .mkp-stat-icon.green { background: #14532d; }
+  .mkp-stat-icon.purple { background: #ede9fe; }
+  [data-theme="dark"] .mkp-stat-icon.purple { background: #3b0764; }
+  .mkp-stat-value { font-size: 22px; font-weight: 700; line-height: 1; }
+  .mkp-stat-label { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
+
+  /* ── Grid ───────────────────────────────────────────────────── */
   .mkp-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
-    gap: 14px;
-    margin-top: 16px;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 16px;
   }
+
+  /* ── Card ───────────────────────────────────────────────────── */
   .mkp-card {
     border-radius: 14px;
     border: 1px solid var(--border);
     background: var(--bg-header);
-    padding: 14px 14px 12px;
+    padding: 20px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
-    transition: box-shadow .15s ease, transform .15s ease, border-color .15s ease;
+    gap: 12px;
+    transition: box-shadow .2s ease, transform .2s ease, border-color .2s ease;
+    position: relative;
   }
   .mkp-card:hover {
-    box-shadow: 0 6px 18px rgba(0,0,0,.1);
+    box-shadow: 0 8px 24px rgba(0,0,0,.08);
     transform: translateY(-2px);
     border-color: var(--accent);
   }
   .mkp-card-header {
     display: flex;
-    align-items: center;
-    gap: 10px;
+    align-items: flex-start;
+    gap: 12px;
   }
   .mkp-icon {
-    width: 32px;
-    height: 32px;
-    border-radius: 10px;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: 18px;
+    font-size: 22px;
     background: var(--code-bg);
+    flex-shrink: 0;
+  }
+  .mkp-icon img {
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    object-fit: cover;
+  }
+  .mkp-card-info {
+    flex: 1;
+    min-width: 0;
   }
   .mkp-card-title {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
+    color: var(--text);
+    line-height: 1.3;
+  }
+  .mkp-card-slug {
+    font-size: 11px;
+    color: var(--text-muted);
+    margin-top: 2px;
   }
   .mkp-card-version {
     font-size: 11px;
     color: var(--text-muted);
+    margin-left: auto;
+    padding: 2px 8px;
+    border-radius: 6px;
+    background: var(--code-bg);
+    font-weight: 500;
+    flex-shrink: 0;
+    align-self: flex-start;
   }
   .mkp-card-summary {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--text-secondary);
-    margin-top: 2px;
+    line-height: 1.5;
+    flex: 1;
+  }
+  .mkp-card-tags {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+  .mkp-tag {
+    font-size: 10px;
+    font-weight: 500;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: var(--code-bg);
+    color: var(--text-muted);
+    text-transform: lowercase;
   }
   .mkp-card-footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-top: 8px;
+    padding-top: 12px;
+    border-top: 1px solid var(--border);
+    margin-top: auto;
   }
-  .mkp-status-pill {
+
+  /* ── Status pills ───────────────────────────────────────────── */
+  .mkp-status {
     font-size: 11px;
-    padding: 2px 8px;
+    font-weight: 600;
+    padding: 4px 10px;
     border-radius: 999px;
     display: inline-flex;
     align-items: center;
-    gap: 4px;
+    gap: 5px;
   }
-  .mkp-status-pill.not-installed { background: var(--code-bg); color: var(--text-secondary); }
-  .mkp-status-pill.installed { background: #dbeafe; color: #1e40af; }
-  .mkp-status-pill.enabled { background: #dcfce7; color: #166534; }
-  [data-theme="dark"] .mkp-status-pill.installed { background: #1e3a5f; color: #93c5fd; }
-  [data-theme="dark"] .mkp-status-pill.enabled { background: #14532d; color: #86efac; }
+  .mkp-status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    display: inline-block;
+  }
+  .mkp-status.not-installed { color: var(--text-muted); background: var(--code-bg); }
+  .mkp-status.not-installed .mkp-status-dot { background: var(--text-muted); }
+  .mkp-status.installed { color: #1e40af; background: #dbeafe; }
+  .mkp-status.installed .mkp-status-dot { background: #3b82f6; }
+  [data-theme="dark"] .mkp-status.installed { color: #93c5fd; background: #1e3a5f; }
+  .mkp-status.enabled { color: #166534; background: #dcfce7; }
+  .mkp-status.enabled .mkp-status-dot { background: #22c55e; }
+  [data-theme="dark"] .mkp-status.enabled { color: #86efac; background: #14532d; }
 
-  .mkp-card-actions {
+  /* ── Update badge ───────────────────────────────────────────── */
+  .mkp-update-badge {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: #fef3c7;
+    color: #92400e;
+  }
+  [data-theme="dark"] .mkp-update-badge { background: #78350f; color: #fde68a; }
+
+  /* ── Buttons ────────────────────────────────────────────────── */
+  .mkp-actions {
     display: flex;
     gap: 6px;
   }
   .mkp-btn {
-    border-radius: 999px;
+    border-radius: 8px;
     border: 1px solid var(--border);
     background: transparent;
     color: var(--text-secondary);
-    font-size: 11px;
-    padding: 5px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    padding: 6px 14px;
     cursor: pointer;
-    transition: background .15s, color .15s, border-color .15s;
+    transition: .15s;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
   }
+  .mkp-btn:disabled { opacity: .5; cursor: not-allowed; }
   .mkp-btn.primary {
     background: var(--accent);
     border-color: var(--accent);
     color: #fff;
   }
-  .mkp-btn.primary:hover {
-    background: var(--accent-hover);
-  }
-  .mkp-btn.secondary:hover {
+  .mkp-btn.primary:hover:not(:disabled) { background: var(--accent-hover); }
+  .mkp-btn.secondary:hover:not(:disabled) {
     background: var(--code-bg);
     color: var(--text);
   }
@@ -167,93 +330,140 @@
     border-color: #fecaca;
     color: #ef4444;
   }
-  .mkp-btn.danger:hover {
-    background: rgba(239,68,68,.08);
-  }
-  .mkp-btn:disabled {
-    opacity: .6;
-    cursor: not-allowed;
-  }
+  .mkp-btn.danger:hover:not(:disabled) { background: rgba(239,68,68,.08); }
 
+  /* ── Links row ──────────────────────────────────────────────── */
+  .mkp-links {
+    display: flex;
+    gap: 10px;
+    margin-top: 4px;
+  }
+  .mkp-link {
+    font-size: 11px;
+    color: var(--accent);
+    text-decoration: none;
+  }
+  .mkp-link:hover { text-decoration: underline; }
+
+  /* ── Empty & loading states ─────────────────────────────────── */
   .mkp-empty {
-    padding: 32px 16px;
+    grid-column: 1 / -1;
+    padding: 60px 16px;
     text-align: center;
-    font-size: 14px;
     color: var(--text-muted);
   }
+  .mkp-empty-icon { font-size: 48px; margin-bottom: 12px; opacity: .5; }
+  .mkp-empty-title { font-size: 16px; font-weight: 600; color: var(--text-secondary); }
+  .mkp-empty-desc { font-size: 13px; margin-top: 6px; }
 
+  .mkp-skeleton {
+    background: linear-gradient(90deg, var(--code-bg) 25%, var(--border) 50%, var(--code-bg) 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 14px;
+    height: 220px;
+  }
+  @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+  /* ── Warning banner ─────────────────────────────────────────── */
   .mkp-warning {
-    margin-top: 18px;
-    padding: 12px 14px;
-    border-radius: 10px;
+    margin-top: 32px;
+    padding: 14px 18px;
+    border-radius: 12px;
     border: 1px solid #f97316;
     background: #fffbeb;
-    font-size: 12px;
+    font-size: 13px;
     color: #92400e;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    line-height: 1.5;
   }
   [data-theme="dark"] .mkp-warning {
     background: #451a03;
     color: #fed7aa;
     border-color: #fdba74;
   }
+  .mkp-warning-icon { font-size: 18px; flex-shrink: 0; margin-top: 1px; }
 
+  /* ── Toast notification ─────────────────────────────────────── */
+  .mkp-toast {
+    position: fixed;
+    bottom: 24px;
+    right: 24px;
+    padding: 12px 20px;
+    border-radius: 10px;
+    font-size: 13px;
+    font-weight: 500;
+    color: #fff;
+    background: #1f2937;
+    box-shadow: 0 4px 16px rgba(0,0,0,.2);
+    transform: translateY(80px);
+    opacity: 0;
+    transition: transform .3s ease, opacity .3s ease;
+    z-index: 100;
+  }
+  .mkp-toast.visible { transform: translateY(0); opacity: 1; }
+  .mkp-toast.success { background: #166534; }
+  .mkp-toast.error { background: #991b1b; }
+
+  /* ── Responsive ─────────────────────────────────────────────── */
   @media (max-width: 700px) {
-    .mkp-header {
-      flex-direction: column;
-      align-items: flex-start;
-      gap: 10px;
-    }
-    .mkp-controls {
-      width: 100%;
-      flex-wrap: wrap;
-      justify-content: flex-start;
-    }
-    .mkp-search {
-      flex: 1;
-      min-width: 0;
-    }
+    .mkp-topbar { padding: 12px 16px; }
+    .mkp-search-row { flex-direction: column; }
+    .mkp-filter-tabs { overflow-x: auto; }
+    .mkp-stats { gap: 8px; }
+    .mkp-stat { min-width: 140px; padding: 10px 14px; }
+    .mkp-grid { grid-template-columns: 1fr; }
+    .mkp-wrap { padding: 0 12px 40px; }
   }
 </style>
 {% endblock %}
 
 {% block content %}
-<div class="mkp-wrap">
-  <div class="mkp-header">
-    <div>
-      <div class="mkp-title">
-        <span>&#129472;</span>
+<div class="mkp-topbar">
+  <div class="mkp-topbar-inner">
+    <div class="mkp-nav">
+      <a href="/" class="mkp-back">&larr; Home</a>
+      <div class="mkp-nav-title">
         <span>Marketplace</span>
-        <span class="mkp-badge">Preview</span>
-      </div>
-      <div class="mkp-subtitle">
-        Browse add-ons for CHILI. Install only modules you trust&mdash;they can run code on your server.
+        <span class="mkp-preview-badge">Preview</span>
       </div>
     </div>
-    <div class="mkp-controls">
-      <input id="mkp-search" class="mkp-search" type="search" placeholder="Search modules..." />
-      <select id="mkp-filter" class="mkp-filter-select">
-        <option value="all">All</option>
-        <option value="enabled">Enabled</option>
-        <option value="installed">Installed</option>
-        <option value="not-installed">Not installed</option>
-      </select>
+    <div class="mkp-search-row">
+      <input id="mkp-search" class="mkp-search" type="search"
+             placeholder="Search modules by name, tag, or description..." autocomplete="off" />
+      <div class="mkp-filter-tabs" id="mkp-filters">
+        <button class="mkp-filter-tab active" data-filter="all">All</button>
+        <button class="mkp-filter-tab" data-filter="enabled">Enabled</button>
+        <button class="mkp-filter-tab" data-filter="installed">Installed</button>
+        <button class="mkp-filter-tab" data-filter="not-installed">Available</button>
+      </div>
     </div>
-  </div>
-
-  <div id="mkp-grid" class="mkp-grid"></div>
-  <div id="mkp-empty" class="mkp-empty" style="display:none;">No modules found.</div>
-
-  <div class="mkp-warning">
-    <strong>Security note:</strong> Third-party modules can execute arbitrary Python code
-    inside your CHILI instance. Only install modules from registries you control or trust,
-    and consider reviewing their source code before enabling them.
   </div>
 </div>
+
+<div class="mkp-wrap">
+  <div class="mkp-stats" id="mkp-stats"></div>
+  <div id="mkp-grid" class="mkp-grid"></div>
+
+  <div class="mkp-warning">
+    <span class="mkp-warning-icon">&#9888;&#65039;</span>
+    <div>
+      <strong>Third-party code warning</strong><br>
+      Marketplace modules can execute arbitrary Python on your CHILI server.
+      Only install modules from registries you control or trust, and review source code before enabling.
+    </div>
+  </div>
+</div>
+
+<div id="mkp-toast" class="mkp-toast"></div>
 
 <script>
 (function() {
   var modules = [];
-  var loading = false;
+  var loading = true;
+  var activeFilter = 'all';
 
   function esc(s) {
     var d = document.createElement('div');
@@ -261,43 +471,87 @@
     return d.innerHTML;
   }
 
+  function toast(msg, type) {
+    var el = document.getElementById('mkp-toast');
+    el.textContent = msg;
+    el.className = 'mkp-toast ' + (type || '') + ' visible';
+    clearTimeout(el._t);
+    el._t = setTimeout(function() { el.className = 'mkp-toast'; }, 3000);
+  }
+
+  /* ── Fetch ─────────────────────────────────────────────────── */
   function fetchModules() {
     loading = true;
-    var grid = document.getElementById('mkp-grid');
-    grid.innerHTML = '';
-    document.getElementById('mkp-empty').style.display = 'none';
-    var skeleton = document.createElement('div');
-    skeleton.className = 'mkp-empty';
-    skeleton.textContent = 'Loading modules...';
-    grid.appendChild(skeleton);
+    renderLoading();
 
     fetch('/api/marketplace/modules')
-      .then(function(r) { return r.json(); })
+      .then(function(r) {
+        if (!r.ok) throw new Error('HTTP ' + r.status);
+        return r.json();
+      })
       .then(function(data) {
         modules = data || [];
         loading = false;
+        renderStats();
         renderModules();
       })
-      .catch(function() {
+      .catch(function(e) {
         loading = false;
-        grid.innerHTML = '';
-        var err = document.createElement('div');
-        err.className = 'mkp-empty';
-        err.textContent = 'Could not load modules. Check your registry URL or try again.';
-        grid.appendChild(err);
+        var grid = document.getElementById('mkp-grid');
+        grid.innerHTML =
+          '<div class="mkp-empty">' +
+            '<div class="mkp-empty-icon">&#128268;</div>' +
+            '<div class="mkp-empty-title">Could not load modules</div>' +
+            '<div class="mkp-empty-desc">Check your registry URL or network connection and try again.</div>' +
+          '</div>';
       });
   }
 
+  function renderLoading() {
+    var grid = document.getElementById('mkp-grid');
+    grid.innerHTML = '';
+    for (var i = 0; i < 6; i++) {
+      var sk = document.createElement('div');
+      sk.className = 'mkp-skeleton';
+      grid.appendChild(sk);
+    }
+  }
+
+  /* ── Stats ─────────────────────────────────────────────────── */
+  function renderStats() {
+    var el = document.getElementById('mkp-stats');
+    var total = modules.length;
+    var installed = modules.filter(function(m) { return m.installed; }).length;
+    var enabled = modules.filter(function(m) { return m.enabled; }).length;
+
+    el.innerHTML =
+      '<div class="mkp-stat">' +
+        '<div class="mkp-stat-icon blue">&#129520;</div>' +
+        '<div><div class="mkp-stat-value">' + total + '</div><div class="mkp-stat-label">Total Modules</div></div>' +
+      '</div>' +
+      '<div class="mkp-stat">' +
+        '<div class="mkp-stat-icon purple">&#128230;</div>' +
+        '<div><div class="mkp-stat-value">' + installed + '</div><div class="mkp-stat-label">Installed</div></div>' +
+      '</div>' +
+      '<div class="mkp-stat">' +
+        '<div class="mkp-stat-icon green">&#9989;</div>' +
+        '<div><div class="mkp-stat-value">' + enabled + '</div><div class="mkp-stat-label">Enabled</div></div>' +
+      '</div>';
+  }
+
+  /* ── Render ────────────────────────────────────────────────── */
   function getIcon(mod) {
     if (mod.icon_url) {
-      return '<img src="' + esc(mod.icon_url) + '" alt="" style="width:24px;height:24px;border-radius:8px;object-fit:cover;" />';
+      return '<img src="' + esc(mod.icon_url) + '" alt="" />';
     }
-    var firstTag = (mod.tags && mod.tags.length) ? mod.tags[0] : '';
-    var icon = '🧩';
-    if (firstTag === 'planner') icon = '📋';
-    else if (firstTag === 'voice') icon = '🎙️';
-    else if (firstTag === 'productivity') icon = '⚙️';
-    return '<span>' + icon + '</span>';
+    var tags = mod.tags || [];
+    var first = tags.length ? tags[0].toLowerCase() : '';
+    var icons = {
+      planner: '&#128203;', voice: '&#127908;', productivity: '&#9881;&#65039;',
+      automation: '&#9889;', analytics: '&#128200;', security: '&#128274;',
+      communication: '&#128172;', ai: '&#129302;',
+    };
+    return '<span>' + (icons[first] || '&#129520;') + '</span>';
   }
 
   function statusInfo(mod) {
@@ -308,16 +562,14 @@
 
   function renderModules() {
     var grid = document.getElementById('mkp-grid');
-    var empty = document.getElementById('mkp-empty');
     grid.innerHTML = '';
 
     var q = (document.getElementById('mkp-search').value || '').toLowerCase();
-    var filter = document.getElementById('mkp-filter').value;
 
     var filtered = modules.filter(function(m) {
-      if (filter === 'enabled' && !m.enabled) return false;
-      if (filter === 'installed' && !m.installed) return false;
-      if (filter === 'not-installed' && m.installed) return false;
+      if (activeFilter === 'enabled' && !m.enabled) return false;
+      if (activeFilter === 'installed' && !m.installed) return false;
+      if (activeFilter === 'not-installed' && m.installed) return false;
       if (q) {
         var hay = (m.slug + ' ' + (m.name || '') + ' ' + (m.summary || '') + ' ' + (m.tags || []).join(' ')).toLowerCase();
         if (hay.indexOf(q) === -1) return false;
@@ -326,115 +578,140 @@
     });
 
     if (!filtered.length) {
-      empty.style.display = 'block';
+      grid.innerHTML =
+        '<div class="mkp-empty">' +
+          '<div class="mkp-empty-icon">' + (q ? '&#128269;' : '&#128230;') + '</div>' +
+          '<div class="mkp-empty-title">' + (q ? 'No modules match your search' : 'No modules found') + '</div>' +
+          '<div class="mkp-empty-desc">' +
+            (q ? 'Try a different search term or clear the filter.'
+               : 'Configure a MODULE_REGISTRY_URL in your .env to browse available add-ons.') +
+          '</div>' +
+        '</div>';
       return;
     }
-    empty.style.display = 'none';
 
     filtered.forEach(function(m) {
       var card = document.createElement('div');
       card.className = 'mkp-card';
       var st = statusInfo(m);
+
       var tagsHtml = '';
-      (m.tags || []).slice(0, 3).forEach(function(t) {
-        tagsHtml += '<span class="mkp-tag-pill">' + esc(t) + '</span>';
+      (m.tags || []).slice(0, 4).forEach(function(t) {
+        tagsHtml += '<span class="mkp-tag">' + esc(t) + '</span>';
       });
 
+      var linksHtml = '';
+      if (m.homepage_url || m.repo_url) {
+        linksHtml = '<div class="mkp-links">';
+        if (m.homepage_url) linksHtml += '<a class="mkp-link" href="' + esc(m.homepage_url) + '" target="_blank" rel="noopener">Homepage</a>';
+        if (m.repo_url) linksHtml += '<a class="mkp-link" href="' + esc(m.repo_url) + '" target="_blank" rel="noopener">Source</a>';
+        linksHtml += '</div>';
+      }
+
+      var updateBadge = m.has_update ? '<div class="mkp-update-badge">Update available</div>' : '';
+
       card.innerHTML =
+        updateBadge +
         '<div class="mkp-card-header">' +
           '<div class="mkp-icon">' + getIcon(m) + '</div>' +
-          '<div style="flex:1;min-width:0;">' +
+          '<div class="mkp-card-info">' +
             '<div class="mkp-card-title">' + esc(m.name || m.slug) + '</div>' +
-            '<div class="mkp-card-version">v' + esc(m.version || m.installed_version || '') + ' · ' + esc(m.slug) + '</div>' +
+            '<div class="mkp-card-slug">' + esc(m.slug) + '</div>' +
           '</div>' +
+          '<span class="mkp-card-version">v' + esc(m.version || m.installed_version || '?') + '</span>' +
         '</div>' +
-        '<div class="mkp-card-summary">' + esc(m.summary || '') + '</div>' +
-        (tagsHtml ? '<div style="margin-top:4px;">' + tagsHtml + '</div>' : '') +
+        '<div class="mkp-card-summary">' + esc(m.summary || 'No description available.') + '</div>' +
+        (tagsHtml ? '<div class="mkp-card-tags">' + tagsHtml + '</div>' : '') +
+        linksHtml +
         '<div class="mkp-card-footer">' +
-          '<span class="mkp-status-pill ' + st.cls + '">' + st.label + '</span>' +
-          '<div class="mkp-card-actions">' +
-            buildActionsHtml(m) +
-          '</div>' +
+          '<span class="mkp-status ' + st.cls + '"><span class="mkp-status-dot"></span>' + st.label + '</span>' +
+          '<div class="mkp-actions">' + buildActions(m) + '</div>' +
         '</div>';
 
-      attachActionHandlers(card, m);
+      attachHandlers(card, m);
       grid.appendChild(card);
     });
   }
 
-  function buildActionsHtml(m) {
+  function buildActions(m) {
     var html = '';
     if (!m.installed) {
       html += '<button class="mkp-btn primary" data-act="install" data-slug="' + esc(m.slug) + '">Install</button>';
     } else {
+      if (m.has_update) {
+        html += '<button class="mkp-btn primary" data-act="install" data-slug="' + esc(m.slug) + '">Update</button>';
+      }
       if (m.enabled) {
         html += '<button class="mkp-btn secondary" data-act="disable" data-slug="' + esc(m.slug) + '">Disable</button>';
       } else {
         html += '<button class="mkp-btn primary" data-act="enable" data-slug="' + esc(m.slug) + '">Enable</button>';
       }
-      html += '<button class="mkp-btn danger" data-act="uninstall" data-slug="' + esc(m.slug) + '">Uninstall</button>';
+      html += '<button class="mkp-btn danger" data-act="uninstall" data-slug="' + esc(m.slug) + '">Remove</button>';
     }
     return html;
   }
 
-  function attachActionHandlers(card, m) {
+  function attachHandlers(card, m) {
     card.querySelectorAll('[data-act]').forEach(function(btn) {
       btn.addEventListener('click', function(ev) {
         ev.preventDefault();
         var act = btn.getAttribute('data-act');
         var slug = btn.getAttribute('data-slug');
         if (!act || !slug) return;
-        if (act === 'uninstall' && !confirm('Uninstall "' + (m.name || m.slug) + '"?')) {
+        if (act === 'uninstall' && !confirm('Remove "' + (m.name || m.slug) + '"? This will delete all module files.')) {
           return;
         }
         btn.disabled = true;
-        if (act === 'install') {
-          actionInstall(slug, btn);
-        } else if (act === 'enable') {
-          actionToggle(slug, true, btn);
-        } else if (act === 'disable') {
-          actionToggle(slug, false, btn);
-        } else if (act === 'uninstall') {
-          actionUninstall(slug, btn);
-        }
+        btn.textContent = act === 'install' ? 'Installing...' : act === 'uninstall' ? 'Removing...' : (act === 'enable' ? 'Enabling...' : 'Disabling...');
+
+        if (act === 'install') doInstall(slug, m.name || slug);
+        else if (act === 'enable') doToggle(slug, true, m.name || slug);
+        else if (act === 'disable') doToggle(slug, false, m.name || slug);
+        else if (act === 'uninstall') doUninstall(slug, m.name || slug);
       });
     });
   }
 
-  function actionInstall(slug, btn) {
+  /* ── API calls ─────────────────────────────────────────────── */
+  function doInstall(slug, name) {
     fetch('/api/marketplace/install', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ slug: slug })
     })
-      .then(function(r) { return r.json(); })
-      .then(function() { fetchModules(); })
-      .catch(function() { btn.disabled = false; });
+      .then(function(r) { if (!r.ok) throw r; return r.json(); })
+      .then(function() { toast(name + ' installed successfully', 'success'); fetchModules(); })
+      .catch(function() { toast('Failed to install ' + name, 'error'); fetchModules(); });
   }
 
-  function actionToggle(slug, enabled, btn) {
+  function doToggle(slug, enabled, name) {
     fetch(enabled ? '/api/marketplace/enable' : '/api/marketplace/disable', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ slug: slug })
     })
-      .then(function(r) { return r.json(); })
-      .then(function() { fetchModules(); })
-      .catch(function() { btn.disabled = false; });
+      .then(function(r) { if (!r.ok) throw r; return r.json(); })
+      .then(function() { toast(name + (enabled ? ' enabled' : ' disabled'), 'success'); fetchModules(); })
+      .catch(function() { toast('Failed to update ' + name, 'error'); fetchModules(); });
   }
 
-  function actionUninstall(slug, btn) {
-    fetch('/api/marketplace/modules/' + encodeURIComponent(slug), {
-      method: 'DELETE'
-    })
-      .then(function() { fetchModules(); })
-      .catch(function() { btn.disabled = false; });
+  function doUninstall(slug, name) {
+    fetch('/api/marketplace/modules/' + encodeURIComponent(slug), { method: 'DELETE' })
+      .then(function(r) { if (!r.ok && r.status !== 204) throw r; toast(name + ' removed', 'success'); fetchModules(); })
+      .catch(function() { toast('Failed to remove ' + name, 'error'); fetchModules(); });
   }
 
+  /* ── Event binding ─────────────────────────────────────────── */
   document.getElementById('mkp-search').addEventListener('input', function() {
     if (!loading) renderModules();
   });
-  document.getElementById('mkp-filter').addEventListener('change', function() {
+
+  document.getElementById('mkp-filters').addEventListener('click', function(ev) {
+    var tab = ev.target.closest('.mkp-filter-tab');
+    if (!tab) return;
+    document.querySelectorAll('.mkp-filter-tab').forEach(function(t) { t.classList.remove('active'); });
+    tab.classList.add('active');
+    activeFilter = tab.getAttribute('data-filter');
     if (!loading) renderModules();
   });
 
@@ -442,4 +719,3 @@
 })();
 </script>
 {% endblock %}
-

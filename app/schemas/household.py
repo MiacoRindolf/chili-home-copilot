@@ -2,7 +2,7 @@
 from datetime import date
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 
 class ChoreCreate(BaseModel):
@@ -10,12 +10,11 @@ class ChoreCreate(BaseModel):
 
 
 class ChoreOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     title: str
     done: bool
-
-    class Config:
-        from_attributes = True
 
 
 class BirthdayCreate(BaseModel):
@@ -24,12 +23,11 @@ class BirthdayCreate(BaseModel):
 
 
 class BirthdayOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     name: str
     date: date
-
-    class Config:
-        from_attributes = True
 
 
 # Form / API request bodies (pages, pairing)

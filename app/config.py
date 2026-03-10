@@ -11,12 +11,12 @@ class Settings(BaseSettings):
     wellness_model: str = "phi4-mini"
     ollama_vision_model: str = "llama3.2-vision"
 
-    # Primary LLM — defaults to local Ollama via its OpenAI-compatible API.
-    # Override with Groq/OpenAI keys + base URL for cloud inference.
-    llm_api_key: str = "ollama"
+    # Primary LLM — defaults to Groq free tier (Llama 3.3 70B, ~800 tok/s).
+    # Override with Ollama or other OpenAI-compatible provider.
+    llm_api_key: str = ""
     openai_api_key: str = ""  # backward compat; used as primary if llm_api_key empty
-    llm_model: str = "phi4-mini"
-    llm_base_url: str = "http://127.0.0.1:11434/v1"
+    llm_model: str = "llama-3.3-70b-versatile"
+    llm_base_url: str = "https://api.groq.com/openai/v1"
 
     # Premium LLM (e.g. OpenAI)
     premium_api_key: str = ""

@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── Watchlist ───────────────────────────────────────────────────────────
@@ -12,12 +12,11 @@ class WatchlistAdd(BaseModel):
 
 
 class WatchlistOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     ticker: str
     added_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 # ── Trade journal ───────────────────────────────────────────────────────
@@ -44,6 +43,8 @@ class TradeUpdate(BaseModel):
 
 
 class TradeOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     ticker: str
     direction: str
@@ -57,9 +58,6 @@ class TradeOut(BaseModel):
     tags: Optional[str]
     notes: Optional[str]
 
-    class Config:
-        from_attributes = True
-
 
 # ── Journal entries ─────────────────────────────────────────────────────
 
@@ -69,14 +67,13 @@ class JournalCreate(BaseModel):
 
 
 class JournalOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     trade_id: Optional[int]
     content: str
     indicator_snapshot: Optional[str]
     created_at: datetime
-
-    class Config:
-        from_attributes = True
 
 
 # ── AI analysis ─────────────────────────────────────────────────────────
@@ -89,14 +86,13 @@ class AnalyzeRequest(BaseModel):
 
 
 class InsightOut(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     pattern_description: str
     confidence: float
     evidence_count: int
     last_seen: datetime
-
-    class Config:
-        from_attributes = True
 
 
 # ── Backtest ────────────────────────────────────────────────────────────

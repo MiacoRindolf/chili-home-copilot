@@ -1,0 +1,887 @@
+"""Scanner: ticker scoring, custom screener, batch scanning, smart pick."""
+from __future__ import annotations
+
+import json
+import logging
+import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
+from typing import Any
+
+import pandas as pd
+from sqlalchemy.orm import Session
+
+from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
+from .market_data import (
+    fetch_quote, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
+)
+from .portfolio import get_watchlist, get_trade_stats, get_insights
+
+logger = logging.getLogger(__name__)
+
+_shutting_down = threading.Event()
+_MAX_SCAN_WORKERS = 8
+
+
+def signal_shutdown():
+    _shutting_down.set()
+
+
+# ── Single ticker scoring ─────────────────────────────────────────────
+
+def _score_ticker(ticker: str) -> dict[str, Any] | None:
+    """Score a single ticker using multi-signal confluence (1-10)."""
+    try:
+        from ta.momentum import RSIIndicator, StochasticOscillator
+        from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
+        from ta.volatility import BollingerBands, AverageTrueRange
+
+        df = _yf_history(ticker, period="6mo", interval="1d")
+        if df.empty or len(df) < 30:
+            return None
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+
+        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+        macd_obj = MACD(close=close)
+        macd_val = macd_obj.macd().iloc[-1]
+        macd_sig = macd_obj.macd_signal().iloc[-1]
+        macd_hist = macd_obj.macd_diff().iloc[-1]
+        sma_20 = SMAIndicator(close=close, window=20).sma_indicator().iloc[-1]
+        sma_50 = SMAIndicator(close=close, window=50).sma_indicator().iloc[-1]
+        ema_20 = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
+        ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
+        ema_100 = EMAIndicator(close=close, window=100).ema_indicator().iloc[-1] if len(close) >= 100 else None
+        ema_200 = EMAIndicator(close=close, window=200).ema_indicator().iloc[-1] if len(close) >= 200 else None
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        bb_lower = bb.bollinger_lband().iloc[-1]
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        adx_val = ADXIndicator(high=high, low=low, close=close).adx().iloc[-1]
+        atr_val = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
+        stoch = StochasticOscillator(high=high, low=low, close=close)
+        stoch_k = stoch.stoch().iloc[-1]
+
+        price = float(close.iloc[-1])
+        vol_avg = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+        vol_latest = float(volume.iloc[-1])
+
+        score = 5.0
+        signals: list[str] = []
+
+        # EMA Stacking
+        ema_stack_bullish = False
+        ema_stack_bearish = False
+        if pd.notna(ema_20) and pd.notna(ema_50):
+            e20 = float(ema_20)
+            e50 = float(ema_50)
+            e100 = float(ema_100) if ema_100 is not None and pd.notna(ema_100) else None
+
+            if e100 is not None and price > e20 > e50 > e100:
+                ema_stack_bullish = True
+                score += 1.5
+                signals.append(f"EMA stacking bullish (P>{e20:.0f}>{e50:.0f}>{e100:.0f})")
+            elif price > e20 > e50:
+                score += 0.8
+                signals.append("Partial EMA alignment (P>EMA20>EMA50)")
+            elif e100 is not None and price < e20 < e50 < e100:
+                ema_stack_bearish = True
+                score -= 1.5
+                signals.append("EMA stacking bearish")
+            elif price < e20 < e50:
+                score -= 0.8
+                signals.append("Bearish EMA alignment")
+
+        if pd.notna(rsi_val):
+            if rsi_val < 30:
+                score += 1.5
+                signals.append(f"RSI oversold ({rsi_val:.0f})")
+            elif rsi_val < 40:
+                score += 0.5
+                signals.append(f"RSI near oversold ({rsi_val:.0f})")
+            elif rsi_val > 70:
+                score -= 1.5
+                signals.append(f"RSI overbought ({rsi_val:.0f})")
+
+        if pd.notna(macd_val) and pd.notna(macd_sig):
+            if macd_val > macd_sig:
+                score += 1.0
+                signals.append("MACD bullish crossover")
+            else:
+                score -= 0.5
+
+        if pd.notna(sma_20) and pd.notna(sma_50):
+            if price > sma_20 > sma_50:
+                score += 0.5
+                signals.append("Uptrend (price > SMA20 > SMA50)")
+            elif price < sma_20 < sma_50:
+                score -= 0.5
+                signals.append("Downtrend")
+
+        if pd.notna(bb_lower) and pd.notna(bb_upper):
+            bb_range = bb_upper - bb_lower
+            if bb_range > 0:
+                bb_pct = (price - bb_lower) / bb_range
+                if bb_pct < 0.15:
+                    score += 1.0
+                    signals.append("Near lower Bollinger Band")
+                elif bb_pct > 0.85:
+                    score -= 0.5
+
+        if pd.notna(adx_val) and adx_val > 25:
+            score += 0.5
+            signals.append(f"Strong trend (ADX {adx_val:.0f})")
+
+        if vol_avg > 0 and vol_latest > vol_avg * 1.5:
+            score += 0.5
+            signals.append("Volume surge")
+
+        is_crypto_ticker = ticker.upper().endswith("-USD")
+        if not is_crypto_ticker:
+            try:
+                fund = get_fundamentals(ticker)
+                if fund:
+                    fund_bonus = 0.0
+                    if fund.get("profit_margins") is not None and fund["profit_margins"] > 0.10:
+                        if fund.get("debt_to_equity") is not None and fund["debt_to_equity"] < 100:
+                            fund_bonus += 0.5
+                            signals.append("Strong margins + low debt")
+                    if fund.get("revenue_growth") is not None and fund["revenue_growth"] > 0:
+                        fund_bonus += 0.5
+                        signals.append(f"Revenue growth +{fund['revenue_growth']:.0%}")
+                    if fund.get("pe_trailing") is not None:
+                        pe = fund["pe_trailing"]
+                        if 5 < pe < 25:
+                            fund_bonus += 0.5
+                            signals.append(f"Reasonable P/E ({pe:.1f})")
+                        elif pe > 60:
+                            fund_bonus -= 0.5
+                            signals.append(f"Expensive P/E ({pe:.1f})")
+                    score += fund_bonus
+            except Exception:
+                pass
+
+        score = max(1.0, min(10.0, score))
+
+        if score >= 7:
+            signal = "buy"
+        elif score <= 3.5:
+            signal = "sell"
+        else:
+            signal = "hold"
+
+        atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
+        stop_loss = round(price - 2 * atr_f, 2)
+        take_profit = round(price + 3 * atr_f, 2)
+
+        volatility_pct = (atr_f / price * 100) if price > 0 else 5
+        if volatility_pct > 3:
+            risk = "high"
+        elif volatility_pct > 1.5:
+            risk = "medium"
+        else:
+            risk = "low"
+
+        return {
+            "ticker": ticker.upper(),
+            "score": round(score, 1),
+            "signal": signal,
+            "price": round(price, 2),
+            "entry_price": round(price, 2),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "risk_level": risk,
+            "signals": signals,
+            "ema_stack_bullish": ema_stack_bullish,
+            "ema_stack_bearish": ema_stack_bearish,
+            "indicators": {
+                "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
+                "macd": round(float(macd_val), 4) if pd.notna(macd_val) else None,
+                "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
+                "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
+                "atr": round(atr_f, 4),
+                "ema_20": round(float(ema_20), 2) if pd.notna(ema_20) else None,
+                "ema_50": round(float(ema_50), 2) if pd.notna(ema_50) else None,
+                "ema_100": round(float(ema_100), 2) if ema_100 is not None and pd.notna(ema_100) else None,
+                "ema_200": round(float(ema_200), 2) if ema_200 is not None and pd.notna(ema_200) else None,
+                "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
+                "bb_pct": round((price - float(bb_lower)) / (float(bb_upper) - float(bb_lower)) * 100, 1)
+                    if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
+                "vol_ratio": round(vol_latest / vol_avg, 2) if vol_avg > 0 else None,
+            },
+        }
+    except Exception:
+        return None
+
+
+# ── Custom Screener ───────────────────────────────────────────────────
+
+PRESET_SCREENS: dict[str, dict[str, Any]] = {
+    "ema_stack_bullish": {
+        "name": "EMA Stacking (Bullish)",
+        "description": "Price > EMA20 > EMA50 > EMA100",
+        "conditions": [{"field": "ema_stack_bullish", "op": "eq", "value": True}],
+        "confirmations": [
+            {"field": "adx", "op": "gte", "value": 20, "label": "ADX > 20 (trending)"},
+            {"field": "rsi", "op": "between", "value": [40, 70], "label": "RSI 40-70 (not overbought)"},
+            {"field": "macd_hist", "op": "gt", "value": 0, "label": "MACD histogram positive"},
+        ],
+    },
+    "ema_stack_bearish": {
+        "name": "EMA Stacking (Bearish)",
+        "description": "Price < EMA20 < EMA50 < EMA100",
+        "conditions": [{"field": "ema_stack_bearish", "op": "eq", "value": True}],
+    },
+    "oversold_bounce": {
+        "name": "Oversold Bounce",
+        "description": "RSI below 30 with MACD turning positive",
+        "conditions": [
+            {"field": "rsi", "op": "lt", "value": 30},
+            {"field": "macd_hist", "op": "gt", "value": 0},
+        ],
+    },
+    "golden_cross": {
+        "name": "Golden Cross Setup",
+        "description": "EMA20 crossed above EMA50 with price above both",
+        "conditions": [
+            {"field": "ema_20", "op": "gt_field", "value": "ema_50"},
+            {"field": "price", "op": "gt_field", "value": "ema_20"},
+            {"field": "adx", "op": "gte", "value": 20},
+        ],
+    },
+    "vol_breakout": {
+        "name": "Volume Breakout",
+        "description": "Volume 2x above average with bullish EMA alignment",
+        "conditions": [
+            {"field": "vol_ratio", "op": "gte", "value": 2.0},
+            {"field": "ema_20", "op": "gt_field", "value": "ema_50"},
+            {"field": "rsi", "op": "between", "value": [45, 75]},
+        ],
+    },
+    "bb_squeeze_bullish": {
+        "name": "Bollinger Squeeze (Bullish)",
+        "description": "Price near lower BB with RSI oversold",
+        "conditions": [
+            {"field": "bb_pct", "op": "lt", "value": 15},
+            {"field": "rsi", "op": "lt", "value": 35},
+        ],
+    },
+}
+
+
+def _eval_condition(cond: dict, scored: dict) -> bool:
+    """Evaluate a single screening condition against a scored ticker result."""
+    field = cond["field"]
+    op = cond["op"]
+    value = cond["value"]
+
+    if field in scored:
+        actual = scored[field]
+    elif field in scored.get("indicators", {}):
+        actual = scored["indicators"][field]
+    else:
+        actual = scored.get("indicators", {}).get(field)
+
+    if actual is None:
+        return False
+
+    if op == "eq":
+        return actual == value
+    elif op == "gt":
+        return float(actual) > float(value)
+    elif op == "gte":
+        return float(actual) >= float(value)
+    elif op == "lt":
+        return float(actual) < float(value)
+    elif op == "lte":
+        return float(actual) <= float(value)
+    elif op == "between":
+        return float(value[0]) <= float(actual) <= float(value[1])
+    elif op == "gt_field":
+        ref = scored.get("indicators", {}).get(value)
+        if ref is None:
+            ref = scored.get(value)
+        return ref is not None and float(actual) > float(ref)
+    return False
+
+
+def run_custom_screen(
+    screen_id: str | None = None,
+    conditions: list[dict] | None = None,
+    tickers: list[str] | None = None,
+) -> dict[str, Any]:
+    """Run a preset or custom screen against the ticker universe."""
+    from ..ticker_universe import get_full_ticker_universe
+
+    if screen_id and screen_id in PRESET_SCREENS:
+        preset = PRESET_SCREENS[screen_id]
+        conds = preset["conditions"]
+        confirms = preset.get("confirmations", [])
+        screen_name = preset["name"]
+    elif conditions:
+        conds = conditions
+        confirms = []
+        screen_name = "Custom Screen"
+    else:
+        return {"ok": False, "error": "No screen_id or conditions provided"}
+
+    scan_list = tickers or get_full_ticker_universe()
+    scored_all = batch_score_tickers(scan_list, max_workers=_MAX_SCAN_WORKERS)
+
+    matches = []
+    for scored in scored_all:
+        if all(_eval_condition(c, scored) for c in conds):
+            conf_met = 0
+            conf_details = []
+            for conf in confirms:
+                met = _eval_condition(conf, scored)
+                if met:
+                    conf_met += 1
+                conf_details.append({"label": conf.get("label", ""), "met": met})
+
+            matches.append({
+                **scored,
+                "confirmations_met": conf_met,
+                "confirmations_total": len(confirms),
+                "confirmation_details": conf_details,
+            })
+
+    matches.sort(key=lambda m: (m.get("confirmations_met", 0), m["score"]), reverse=True)
+
+    return {
+        "ok": True,
+        "screen_name": screen_name,
+        "total_scanned": len(scored_all),
+        "matches": len(matches),
+        "results": matches,
+    }
+
+
+_last_scan_cache: dict[str, Any] = {"results": [], "timestamp": None, "tickers_key": ""}
+
+
+def run_scan(
+    db: Session, user_id: int | None,
+    tickers: list[str] | None = None,
+    use_full_universe: bool = False,
+) -> list[dict[str, Any]]:
+    """Scan a list of tickers, score them, store results, return sorted.
+
+    Uses cached results if the same scan ran within the last 2 hours.
+    Pre-warms the OHLCV cache with a batch download before scoring.
+    """
+    from ...models.trading import ScanResult
+    from ..ticker_universe import get_full_ticker_universe
+
+    if tickers:
+        scan_list = tickers
+    elif use_full_universe:
+        scan_list = get_full_ticker_universe()
+    else:
+        scan_list = list(ALL_SCAN_TICKERS)
+
+    cache_key = ",".join(sorted(scan_list[:100]))
+    if (_last_scan_cache["timestamp"]
+            and _last_scan_cache["tickers_key"] == cache_key
+            and datetime.utcnow() - _last_scan_cache["timestamp"] < timedelta(hours=2)
+            and _last_scan_cache["results"]):
+        logger.info(f"[trading] Returning cached scan ({len(_last_scan_cache['results'])} results)")
+        return _last_scan_cache["results"]
+
+    _prewarm_cache(scan_list)
+
+    if len(scan_list) >= 10:
+        results = batch_score_tickers(scan_list, max_workers=_MAX_SCAN_WORKERS)
+    else:
+        results = []
+        for ticker in scan_list:
+            scored = _score_ticker(ticker)
+            if scored is not None:
+                results.append(scored)
+        results.sort(key=lambda r: r["score"], reverse=True)
+
+    for scored in results:
+        rationale = "; ".join(scored["signals"]) if scored["signals"] else "No strong signals"
+        record = ScanResult(
+            user_id=user_id,
+            ticker=scored["ticker"],
+            score=scored["score"],
+            signal=scored["signal"],
+            entry_price=scored["entry_price"],
+            stop_loss=scored["stop_loss"],
+            take_profit=scored["take_profit"],
+            risk_level=scored["risk_level"],
+            rationale=rationale,
+            indicator_data=json.dumps(scored["indicators"]),
+        )
+        db.add(record)
+
+    db.commit()
+
+    _last_scan_cache["results"] = results
+    _last_scan_cache["timestamp"] = datetime.utcnow()
+    _last_scan_cache["tickers_key"] = cache_key
+
+    return results
+
+
+def _prewarm_cache(tickers: list[str]) -> None:
+    """Pre-warm OHLCV cache with a batch download (single HTTP request per ~50 tickers)."""
+    BATCH_SIZE = 50
+    for i in range(0, len(tickers), BATCH_SIZE):
+        chunk = tickers[i:i + BATCH_SIZE]
+        try:
+            batch_download(chunk, period="6mo", interval="1d")
+        except Exception:
+            pass
+
+
+def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[dict]:
+    from ...models.trading import ScanResult
+
+    rows = db.query(ScanResult).filter(
+        ScanResult.user_id == user_id,
+    ).order_by(ScanResult.scanned_at.desc(), ScanResult.score.desc()).limit(limit).all()
+
+    return [
+        {
+            "id": r.id, "ticker": r.ticker, "score": r.score, "signal": r.signal,
+            "entry_price": r.entry_price, "stop_loss": r.stop_loss,
+            "take_profit": r.take_profit, "risk_level": r.risk_level,
+            "rationale": r.rationale,
+            "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            "scanned_at": r.scanned_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+# ── Signal Generation ─────────────────────────────────────────────────
+
+def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
+    """Generate buy/hold/sell signals for all watchlist tickers."""
+    from ...models.trading import BacktestResult
+
+    watchlist = get_watchlist(db, user_id)
+    if not watchlist:
+        return []
+
+    signals = []
+    insights = get_insights(db, user_id, limit=10)
+    insight_text = "; ".join(i.pattern_description for i in insights) if insights else ""
+
+    for w in watchlist:
+        scored = _score_ticker(w.ticker)
+        if not scored:
+            continue
+
+        best_bt = db.query(BacktestResult).filter(
+            BacktestResult.ticker == w.ticker,
+        ).order_by(BacktestResult.return_pct.desc()).first()
+
+        bt_confidence = 0
+        if best_bt and best_bt.win_rate > 50:
+            bt_confidence = min(30, best_bt.win_rate - 50)
+
+        base_confidence = (scored["score"] / 10) * 70
+        confidence = min(95, base_confidence + bt_confidence)
+
+        explanation = _make_plain_english(scored, insight_text)
+
+        signals.append({
+            **scored,
+            "confidence": round(confidence, 0),
+            "explanation": explanation,
+            "best_strategy": best_bt.strategy_name if best_bt else None,
+        })
+
+    signals.sort(key=lambda s: s["score"], reverse=True)
+    return signals
+
+
+def _make_plain_english(scored: dict, insights: str) -> str:
+    """Convert technical signals into beginner-friendly language."""
+    parts = []
+    signal = scored["signal"]
+
+    if signal == "buy":
+        parts.append("This stock looks like a good buying opportunity right now.")
+    elif signal == "sell":
+        parts.append("This stock might be overpriced. Consider taking profits.")
+    else:
+        parts.append("No strong signal either way. Best to wait for a clearer setup.")
+
+    for s in scored.get("signals", [])[:3]:
+        if "oversold" in s.lower():
+            parts.append("The price has dropped a lot and may be due for a bounce.")
+        elif "overbought" in s.lower():
+            parts.append("The price has risen sharply and may pull back soon.")
+        elif "uptrend" in s.lower():
+            parts.append("The overall direction has been up, which is a good sign.")
+        elif "downtrend" in s.lower():
+            parts.append("The overall direction has been down, so be cautious.")
+        elif "volume surge" in s.lower():
+            parts.append("Trading activity just spiked, which often signals a big move.")
+        elif "macd" in s.lower():
+            parts.append("Momentum indicators suggest buyers are stepping in.")
+        elif "bollinger" in s.lower():
+            parts.append("The price is near a statistical low point and often bounces from here.")
+
+    risk = scored.get("risk_level", "medium")
+    if risk == "high":
+        parts.append("Risk is HIGH -- only use money you're comfortable losing.")
+    elif risk == "low":
+        parts.append("This is a relatively stable stock with lower risk.")
+
+    return " ".join(parts)
+
+
+# ── Batch Concurrent Scanner ──────────────────────────────────────────
+
+_scan_status: dict[str, Any] = {
+    "running": False,
+    "last_run": None,
+    "last_run_duration_s": None,
+    "tickers_scanned": 0,
+    "tickers_scored": 0,
+    "tickers_total": 0,
+    "phase": "idle",
+    "progress_pct": 0,
+    "errors": 0,
+}
+
+
+def get_scan_status() -> dict[str, Any]:
+    return dict(_scan_status)
+
+
+def batch_score_tickers(
+    tickers: list[str],
+    max_workers: int = _MAX_SCAN_WORKERS,
+    progress_callback: Any = None,
+) -> list[dict[str, Any]]:
+    """Score many tickers concurrently using a thread pool."""
+    results: list[dict[str, Any]] = []
+    total = len(tickers)
+    completed = 0
+    errors = 0
+
+    def _score_one(ticker: str) -> dict[str, Any] | None:
+        try:
+            return _score_ticker(ticker)
+        except Exception:
+            return None
+
+    if _shutting_down.is_set():
+        return results
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        future_to_ticker = {}
+        for t in tickers:
+            if _shutting_down.is_set():
+                break
+            future_to_ticker[executor.submit(_score_one, t)] = t
+
+        for future in as_completed(future_to_ticker):
+            if _shutting_down.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            completed += 1
+            ticker = future_to_ticker[future]
+            try:
+                scored = future.result()
+                if scored is not None:
+                    results.append(scored)
+            except Exception:
+                errors += 1
+
+            if progress_callback and completed % 50 == 0:
+                progress_callback(completed, total, errors)
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results
+
+
+def run_full_market_scan(
+    db: Session,
+    user_id: int | None,
+    use_full_universe: bool = True,
+) -> list[dict[str, Any]]:
+    """Scan the entire ticker universe concurrently, store results, return sorted."""
+    from ...models.trading import ScanResult
+    from ..ticker_universe import get_full_ticker_universe
+
+    _scan_status["running"] = True
+    _scan_status["phase"] = "scanning"
+    _scan_status["errors"] = 0
+
+    if use_full_universe:
+        scan_list = get_full_ticker_universe()
+    else:
+        scan_list = list(ALL_SCAN_TICKERS)
+
+    watchlist = get_watchlist(db, user_id)
+    wl_tickers = {w.ticker for w in watchlist}
+    for t in wl_tickers:
+        if t not in scan_list:
+            scan_list.append(t)
+
+    _scan_status["tickers_total"] = len(scan_list)
+    _scan_status["tickers_scanned"] = 0
+    _scan_status["tickers_scored"] = 0
+
+    start = time.time()
+
+    def _progress(done: int, total: int, errs: int):
+        _scan_status["tickers_scanned"] = done
+        _scan_status["errors"] = errs
+        _scan_status["progress_pct"] = round(done / total * 100) if total else 0
+
+    logger.info(f"[trading] Full market scan starting: {len(scan_list)} tickers")
+
+    _scan_status["phase"] = "pre-warming cache"
+    _prewarm_cache(scan_list)
+    _scan_status["phase"] = "scoring"
+
+    results = batch_score_tickers(scan_list, progress_callback=_progress)
+
+    _scan_status["tickers_scanned"] = len(scan_list)
+    _scan_status["tickers_scored"] = len(results)
+    _scan_status["progress_pct"] = 100
+    _scan_status["phase"] = "storing"
+
+    old_cutoff = datetime.utcnow() - timedelta(days=7)
+    db.query(ScanResult).filter(
+        ScanResult.user_id == user_id,
+        ScanResult.scanned_at < old_cutoff,
+    ).delete(synchronize_session=False)
+
+    for scored in results:
+        rationale = "; ".join(scored["signals"]) if scored["signals"] else "No strong signals"
+        record = ScanResult(
+            user_id=user_id,
+            ticker=scored["ticker"],
+            score=scored["score"],
+            signal=scored["signal"],
+            entry_price=scored["entry_price"],
+            stop_loss=scored["stop_loss"],
+            take_profit=scored["take_profit"],
+            risk_level=scored["risk_level"],
+            rationale=rationale,
+            indicator_data=json.dumps(scored["indicators"]),
+        )
+        db.add(record)
+
+    db.commit()
+
+    elapsed = time.time() - start
+    _scan_status["phase"] = "idle"
+    _scan_status["running"] = False
+    _scan_status["last_run"] = datetime.utcnow().isoformat()
+    _scan_status["last_run_duration_s"] = round(elapsed, 1)
+
+    logger.info(
+        f"[trading] Full scan complete: {len(results)}/{len(scan_list)} scored "
+        f"in {elapsed:.0f}s"
+    )
+    return results
+
+
+# ── Smart Pick ────────────────────────────────────────────────────────
+
+def smart_pick(
+    db: Session, user_id: int | None,
+    message: str | None = None,
+    budget: float | None = None,
+    risk_tolerance: str = "medium",
+) -> dict[str, Any]:
+    """Scan the market, score all candidates, deep-analyze the top picks."""
+    from ...models.trading import ScanResult, BacktestResult
+    from sqlalchemy import or_
+    from ..ticker_universe import get_full_ticker_universe, get_ticker_count
+
+    recent_cutoff = datetime.utcnow() - timedelta(hours=2)
+    user_filter = or_(ScanResult.user_id == user_id, ScanResult.user_id.is_(None))
+
+    recent_results = db.query(ScanResult).filter(
+        user_filter,
+        ScanResult.scanned_at >= recent_cutoff,
+        ScanResult.score >= 5.5,
+        ScanResult.signal == "buy",
+    ).order_by(ScanResult.score.desc()).limit(50).all()
+
+    universe_counts = get_ticker_count()
+    total_scanned = universe_counts["total"]
+
+    if recent_results:
+        scored_results = [
+            {
+                "ticker": r.ticker, "score": r.score, "signal": r.signal,
+                "price": r.entry_price, "entry_price": r.entry_price,
+                "stop_loss": r.stop_loss, "take_profit": r.take_profit,
+                "risk_level": r.risk_level,
+                "signals": r.rationale.split("; ") if r.rationale else [],
+                "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            }
+            for r in recent_results
+        ]
+    else:
+        universe = get_full_ticker_universe()
+        total_scanned = len(universe)
+        all_scored = batch_score_tickers(universe, max_workers=_MAX_SCAN_WORKERS)
+        scored_results = [s for s in all_scored if s["signal"] == "buy" and s["score"] >= 5.5]
+
+    watchlist = get_watchlist(db, user_id)
+    existing_tickers = {s["ticker"] for s in scored_results}
+    for w in watchlist:
+        if w.ticker not in existing_tickers:
+            scored = _score_ticker(w.ticker)
+            if scored and scored["score"] >= 4.0:
+                scored_results.append(scored)
+
+    scored_results.sort(key=lambda r: r["score"], reverse=True)
+
+    if risk_tolerance == "low":
+        scored_results = [s for s in scored_results if s["risk_level"] in ("low", "medium")]
+
+    top_picks = scored_results[:8]
+
+    if not top_picks:
+        return {
+            "ok": True,
+            "reply": f"I scanned {total_scanned:,} stocks and crypto and none have a strong enough setup right now. "
+                     "The best trade is sometimes no trade. I'll keep watching and flag opportunities as they appear.",
+            "picks": [],
+        }
+
+    pick_details: list[str] = []
+    for p in top_picks:
+        detail = (
+            f"**{p['ticker']}** — Score: {p['score']}/10, Signal: {p['signal'].upper()}\n"
+            f"  Price: ${p['price']} | Entry: ${p['entry_price']} | Stop: ${p['stop_loss']} | Target: ${p['take_profit']}\n"
+            f"  Risk: {p['risk_level'].upper()} | Signals: {', '.join(p['signals'])}\n"
+            f"  Indicators: RSI={p['indicators'].get('rsi', 'N/A')}, "
+            f"MACD={p['indicators'].get('macd', 'N/A')}, "
+            f"ADX={p['indicators'].get('adx', 'N/A')}"
+        )
+
+        best_bt = db.query(BacktestResult).filter(
+            BacktestResult.ticker == p["ticker"],
+        ).order_by(BacktestResult.return_pct.desc()).first()
+        if best_bt:
+            detail += (
+                f"\n  Best backtest: {best_bt.strategy_name} → "
+                f"{best_bt.return_pct:+.1f}% return, {best_bt.win_rate:.0f}% win rate"
+            )
+
+        pick_details.append(detail)
+
+    context_parts = [
+        f"## MARKET SCAN RESULTS — Top {len(top_picks)} candidates from {total_scanned:,} stocks & crypto scanned",
+        "\n\n".join(pick_details),
+    ]
+
+    stats = get_trade_stats(db, user_id)
+    if stats.get("total_trades", 0) > 0:
+        context_parts.append(
+            f"## USER PROFILE\n"
+            f"Experience: {stats['total_trades']} trades, {stats['win_rate']}% win rate, "
+            f"Total P&L: ${stats['total_pnl']}"
+        )
+    else:
+        context_parts.append(
+            "## USER PROFILE\nBeginner trader with no closed trades yet. "
+            "Recommend safer, high-confidence setups with clear instructions."
+        )
+
+    insights = get_insights(db, user_id, limit=10)
+    if insights:
+        lines = ["## LEARNED PATTERNS (your edge)"]
+        for ins in insights:
+            lines.append(f"- [{ins.confidence:.0%}] {ins.pattern_description}")
+        context_parts.append("\n".join(lines))
+
+    if budget:
+        context_parts.append(f"## BUDGET\nUser has ${budget:,.2f} available to invest.")
+
+    context_parts.append(f"## RISK TOLERANCE: {risk_tolerance.upper()}")
+
+    try:
+        from .. import broker_service
+        portfolio_ctx = broker_service.build_portfolio_context()
+        if portfolio_ctx:
+            context_parts.insert(0, portfolio_ctx)
+    except Exception:
+        pass
+
+    full_context = "\n\n".join(context_parts)
+
+    user_msg = message or "Based on this scan, what are your top 3 stock picks I should buy RIGHT NOW? For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, position size, and your confidence level. Rank them by conviction."
+
+    from ...prompts import load_prompt
+    system_prompt = load_prompt("trading_analyst")
+
+    ticker_names = ", ".join(p["ticker"] for p in top_picks)
+
+    smart_pick_addendum = f"""
+
+SPECIAL INSTRUCTION — SMART PICK MODE:
+You scanned {total_scanned:,} stocks and crypto. The TOP candidates are: {ticker_names}
+Their full indicator data and scores are in the MARKET SCAN RESULTS section below.
+
+CRITICAL RULES:
+- You MUST reference tickers BY NAME (e.g. "AAPL", "BTC-USD", "NVDA") — NEVER give a generic recommendation without naming specific tickers.
+- Use the ACTUAL prices and indicator values from the data provided — do NOT make up numbers.
+- If the user asked about crypto specifically, prioritize crypto tickers from the scan.
+- If the user asked about stocks specifically, prioritize stock tickers.
+
+Your job: Pick the BEST 1-3 trades from this scan and present them as a clear, specific action plan.
+
+For EACH recommended trade, format it EXACTLY like this:
+
+## 1. TICKER — Company/Coin Name
+- **Verdict**: STRONG BUY / BUY
+- **Confidence**: X%
+- **Current Price**: $X.XX (from the data)
+- **Buy-in Price**: $X.XX (entry level)
+- **Stop-Loss**: $X.XX (reason)
+- **Target 1**: $X.XX (conservative)
+- **Target 2**: $X.XX (optimistic)
+- **Risk/Reward**: X:1
+- **Hold Duration**: X days/weeks
+- **Position Size**: X% of portfolio
+- **Why NOW**: 2-3 bullet points using the ACTUAL indicator values
+- **Exit Signal**: what would invalidate this trade
+
+If NONE have a strong enough setup, say so clearly. End with portfolio allocation advice.
+"""
+
+    try:
+        from ... import openai_client
+        from ...logger import new_trace_id
+        trace_id = new_trace_id()
+
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": user_msg}],
+            system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
+            trace_id=trace_id,
+            user_message=user_msg,
+            max_tokens=2048,
+        )
+        reply = result.get("reply", "Could not generate recommendation.")
+    except Exception as e:
+        reply = f"Analysis unavailable: {e}"
+
+    return {
+        "ok": True,
+        "reply": reply,
+        "picks_scanned": total_scanned,
+        "picks_qualified": len(scored_results),
+        "top_picks": [
+            {"ticker": p["ticker"], "score": p["score"], "signal": p["signal"], "price": p["price"]}
+            for p in top_picks
+        ],
+    }

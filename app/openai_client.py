@@ -61,16 +61,18 @@ def _premium_configured() -> bool:
 
 
 def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict],
-                   system_prompt: str, trace_id: str) -> dict:
+                   system_prompt: str, trace_id: str,
+                   max_tokens: int = 1024) -> dict:
     """Make a non-streaming call to an OpenAI-compatible API."""
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    timeout = 30.0 if "groq.com" in base_url else 60.0
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
     api_messages = [{"role": "system", "content": system_prompt}] + messages
 
     response = client.chat.completions.create(
         model=model,
         messages=api_messages,
         temperature=0.7,
-        max_tokens=1024,
+        max_tokens=max_tokens,
     )
     reply = response.choices[0].message.content.strip()
     tokens = response.usage.total_tokens if response.usage else 0
@@ -79,16 +81,18 @@ def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict]
 
 
 def _stream_provider(api_key: str, base_url: str, model: str, messages: list[dict],
-                     system_prompt: str, trace_id: str):
+                     system_prompt: str, trace_id: str,
+                     max_tokens: int = 1024):
     """Make a streaming call to an OpenAI-compatible API, yielding (token, model)."""
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    timeout = 45.0 if "groq.com" in base_url else 90.0
+    client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
     api_messages = [{"role": "system", "content": system_prompt}] + messages
 
     stream = client.chat.completions.create(
         model=model,
         messages=api_messages,
         temperature=0.7,
-        max_tokens=1024,
+        max_tokens=max_tokens,
         stream=True,
     )
     for chunk in stream:
@@ -103,6 +107,7 @@ def chat(
     system_prompt: str | None = None,
     trace_id: str = "llm",
     user_message: str = "",
+    max_tokens: int = 1024,
 ) -> dict:
     """Chat with auto-escalation: primary model first, premium if response is weak."""
     prompt = system_prompt or SYSTEM_PROMPT
@@ -111,19 +116,20 @@ def chat(
         if _premium_configured():
             try:
                 return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                      messages, prompt, trace_id)
+                                      messages, prompt, trace_id, max_tokens=max_tokens)
             except Exception as e:
                 log_info(trace_id, f"premium_error={e}")
         return {"reply": "", "tokens_used": 0, "model": "none"}
 
     try:
-        result = _call_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model, messages, prompt, trace_id)
+        result = _call_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
+                                messages, prompt, trace_id, max_tokens=max_tokens)
 
         if _is_weak_response(result["reply"], user_message) and _premium_configured():
             log_info(trace_id, f"escalating to premium: primary reply was weak ({len(result['reply'])} chars)")
             try:
                 premium_result = _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                                messages, prompt, trace_id)
+                                                messages, prompt, trace_id, max_tokens=max_tokens)
                 if premium_result["reply"]:
                     return premium_result
             except Exception as e:
@@ -137,7 +143,7 @@ def chat(
             try:
                 log_info(trace_id, "primary failed, falling back to premium")
                 return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                      messages, prompt, trace_id)
+                                      messages, prompt, trace_id, max_tokens=max_tokens)
             except Exception as e2:
                 log_info(trace_id, f"premium_fallback_error={e2}")
         return {"reply": "", "tokens_used": 0, "model": "error"}
@@ -148,6 +154,7 @@ def chat_stream(
     system_prompt: str | None = None,
     trace_id: str = "llm-stream",
     user_message: str = "",
+    max_tokens: int = 1024,
 ):
     """Stream tokens immediately (true streaming). No buffering for quality check;
     escalation to premium happens only on primary failure, not post-hoc."""
@@ -157,7 +164,7 @@ def chat_stream(
         if _premium_configured():
             try:
                 for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                                   messages, prompt, trace_id):
+                                                   messages, prompt, trace_id, max_tokens=max_tokens):
                     yield tok, model
             except Exception as e:
                 log_info(trace_id, f"premium_stream_error={e}")
@@ -165,7 +172,7 @@ def chat_stream(
 
     try:
         for tok, model in _stream_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
-                                           messages, prompt, trace_id):
+                                           messages, prompt, trace_id, max_tokens=max_tokens):
             yield tok, model
     except Exception as e:
         log_info(trace_id, f"primary_stream_error={e}")
@@ -173,7 +180,7 @@ def chat_stream(
             try:
                 log_info(trace_id, "primary stream failed, falling back to premium")
                 for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                                   messages, prompt, trace_id):
+                                                   messages, prompt, trace_id, max_tokens=max_tokens):
                     yield tok, model
             except Exception as e2:
                 log_info(trace_id, f"premium_stream_fallback_error={e2}")
