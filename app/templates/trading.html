@@ -1,0 +1,686 @@
+{% extends "base.html" %}
+{% block title %}CHILI Trading{% endblock %}
+
+{% block head_extra %}
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100vh; background: var(--bg); color: var(--text); }
+
+/* ── Layout ──────────────────────────────────────── */
+.t-header {
+  background: var(--bg-header); border-bottom: 1px solid var(--border);
+  padding: 10px 16px; display: flex; justify-content: space-between; align-items: center;
+}
+.t-header h1 { font-size: 18px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.t-header nav a { color: var(--text-secondary); text-decoration: none; margin-right: 14px; font-size: 13px; }
+.t-header nav a:hover { color: var(--accent); }
+.t-body { display: flex; height: calc(100vh - 49px); }
+
+/* ── Sidebar (watchlist) ─────────────────────────── */
+.t-sidebar {
+  width: 220px; min-width: 180px; background: var(--bg-header); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden;
+}
+.t-sidebar h3 { font-size: 13px; padding: 10px 12px 6px; color: var(--text-secondary); }
+.wl-search { display: flex; padding: 0 8px 8px; gap: 4px; }
+.wl-search input {
+  flex: 1; padding: 5px 8px; font-size: 12px; border: 1px solid var(--input-border);
+  border-radius: 6px; background: var(--input-bg); color: var(--text); outline: none;
+}
+.wl-search button {
+  padding: 5px 8px; font-size: 12px; border: none; border-radius: 6px;
+  background: var(--accent); color: #fff; cursor: pointer;
+}
+.wl-list { flex: 1; overflow-y: auto; }
+.wl-item {
+  padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; border-bottom: 1px solid var(--border); transition: background .1s;
+}
+.wl-item:hover { background: var(--bg); }
+.wl-item.active { background: var(--accent); color: #fff; }
+.wl-item .wl-ticker { font-weight: 600; }
+.wl-item .wl-price { font-size: 12px; }
+.wl-item .wl-change.up { color: #22c55e; }
+.wl-item .wl-change.down { color: #ef4444; }
+.wl-item.active .wl-change { color: #fff; }
+.wl-rm { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 2px; }
+.wl-rm:hover { color: #ef4444; }
+
+/* ── Main area ───────────────────────────────────── */
+.t-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+
+/* Toolbar */
+.t-toolbar {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  background: var(--bg-header); border-bottom: 1px solid var(--border); flex-wrap: wrap;
+}
+.t-toolbar .ticker-display { font-weight: 700; font-size: 16px; min-width: 80px; }
+.t-toolbar .price-display { font-size: 14px; margin-right: 12px; }
+.t-toolbar .price-display .change.up { color: #22c55e; }
+.t-toolbar .price-display .change.down { color: #ef4444; }
+.t-toolbar select, .t-toolbar button {
+  padding: 4px 10px; font-size: 12px; border: 1px solid var(--input-border);
+  border-radius: 6px; background: var(--input-bg); color: var(--text); cursor: pointer;
+}
+.t-toolbar button.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.tf-btn { min-width: 32px; text-align: center; }
+.tf-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* Chart + indicator sub-panes */
+.t-chart-area { flex: 1; position: relative; min-height: 0; }
+#main-chart { width: 100%; height: 100%; }
+
+/* ── Bottom tabs (journal / stats / insights) ───── */
+.t-bottom {
+  height: 220px; min-height: 120px; border-top: 1px solid var(--border);
+  display: flex; flex-direction: column; background: var(--bg-header);
+}
+.t-tabs { display: flex; border-bottom: 1px solid var(--border); }
+.t-tab {
+  padding: 6px 16px; font-size: 12px; font-weight: 600; cursor: pointer;
+  border-bottom: 2px solid transparent; color: var(--text-secondary);
+}
+.t-tab.active { border-color: var(--accent); color: var(--accent); }
+.t-tab-content { flex: 1; overflow-y: auto; padding: 8px 12px; font-size: 13px; display: none; }
+.t-tab-content.active { display: block; }
+
+/* Journal */
+.j-form { display: flex; gap: 6px; margin-bottom: 8px; }
+.j-form input { flex: 1; padding: 5px 8px; border: 1px solid var(--input-border); border-radius: 6px; background: var(--input-bg); color: var(--text); font-size: 12px; }
+.j-form button { padding: 5px 12px; border: none; border-radius: 6px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; }
+.j-entry { padding: 4px 0; border-bottom: 1px solid var(--border); }
+.j-entry .j-date { color: var(--text-muted); font-size: 11px; }
+
+/* Trade log */
+.trade-form { display: flex; gap: 4px; flex-wrap: wrap; margin-bottom: 8px; }
+.trade-form input, .trade-form select { padding: 4px 6px; font-size: 12px; border: 1px solid var(--input-border); border-radius: 6px; background: var(--input-bg); color: var(--text); }
+.trade-form input { width: 80px; }
+.trade-form button { padding: 4px 10px; border: none; border-radius: 6px; background: #22c55e; color: #fff; cursor: pointer; font-size: 12px; }
+table.trades { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.trades th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 600; }
+table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.pnl-pos { color: #22c55e; font-weight: 600; }
+.pnl-neg { color: #ef4444; font-weight: 600; }
+
+/* Stats */
+.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+.stat-card .stat-val { font-size: 20px; font-weight: 700; }
+.stat-card .stat-lbl { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+
+/* ── AI Chat sidebar ─────────────────────────────── */
+.t-ai {
+  width: 320px; min-width: 260px; border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; background: var(--bg-header);
+}
+.t-ai h3 { font-size: 13px; padding: 10px 12px 6px; color: var(--text-secondary); display: flex; align-items: center; gap: 6px; }
+.ai-msgs { flex: 1; overflow-y: auto; padding: 8px 12px; }
+.ai-msg { margin-bottom: 10px; font-size: 13px; line-height: 1.5; }
+.ai-msg.user { text-align: right; }
+.ai-msg .bubble {
+  display: inline-block; max-width: 90%; padding: 8px 12px; border-radius: 12px;
+  text-align: left; white-space: pre-wrap; word-break: break-word;
+}
+.ai-msg.user .bubble { background: var(--accent); color: #fff; }
+.ai-msg.assistant .bubble { background: var(--bg); border: 1px solid var(--border); }
+.ai-input { display: flex; gap: 6px; padding: 8px 12px; border-top: 1px solid var(--border); }
+.ai-input input {
+  flex: 1; padding: 6px 10px; font-size: 12px; border: 1px solid var(--input-border);
+  border-radius: 8px; background: var(--input-bg); color: var(--text); outline: none;
+}
+.ai-input button { padding: 6px 14px; border: none; border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; }
+
+/* ── Indicator panel ─────────────────────────────── */
+.ind-panel { display: flex; gap: 6px; flex-wrap: wrap; padding: 0 12px 6px; }
+.ind-chip {
+  padding: 3px 10px; font-size: 11px; border: 1px solid var(--border);
+  border-radius: 12px; cursor: pointer; user-select: none; background: var(--bg-header); color: var(--text-secondary);
+}
+.ind-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Header -->
+<div class="t-header">
+  <div>
+    <h1>&#x1F4C8; CHILI Trading</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/chat">Chat</a>
+      <a href="/trading" style="color:var(--accent)">Trading</a>
+      {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
+    </nav>
+  </div>
+  <div style="display:flex;gap:8px;align-items:center">
+    <button id="theme-toggle" onclick="toggleTheme()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--text);font-size:16px">&#127769;</button>
+  </div>
+</div>
+
+<div class="t-body">
+  <!-- Watchlist sidebar -->
+  <div class="t-sidebar">
+    <h3>Watchlist</h3>
+    <div class="wl-search">
+      <input type="text" id="wl-input" placeholder="Add ticker..." />
+      <button onclick="addToWatchlist()">+</button>
+    </div>
+    <div class="wl-list" id="wl-list"></div>
+  </div>
+
+  <!-- Main chart area -->
+  <div class="t-main">
+    <div class="t-toolbar">
+      <span class="ticker-display" id="ticker-label">AAPL</span>
+      <span class="price-display" id="price-label"></span>
+      <select id="interval-select" onchange="changeInterval(this.value)">
+        <option value="1m">1m</option><option value="5m">5m</option>
+        <option value="15m">15m</option><option value="30m">30m</option>
+        <option value="1h">1h</option>
+        <option value="1d" selected>1D</option><option value="1wk">1W</option><option value="1mo">1M</option>
+      </select>
+      <select id="period-select" onchange="changePeriod(this.value)">
+        <option value="1d">1d</option><option value="5d">5d</option>
+        <option value="1mo">1mo</option><option value="3mo">3mo</option>
+        <option value="6mo" selected>6mo</option><option value="1y">1y</option>
+        <option value="2y">2y</option><option value="5y">5y</option><option value="max">Max</option>
+      </select>
+      <button onclick="loadChart()" title="Refresh">&#x21BB;</button>
+      <button id="btn-analyze" onclick="runAnalysis()">&#x1F916; AI Analyze</button>
+    </div>
+    <!-- Indicator toggles -->
+    <div class="ind-panel" id="ind-panel"></div>
+
+    <div class="t-chart-area">
+      <div id="main-chart"></div>
+    </div>
+
+    <!-- Bottom tabs -->
+    <div class="t-bottom">
+      <div class="t-tabs">
+        <div class="t-tab active" data-tab="trades" onclick="switchTab(this)">Trades</div>
+        <div class="t-tab" data-tab="journal" onclick="switchTab(this)">Journal</div>
+        <div class="t-tab" data-tab="stats" onclick="switchTab(this)">Stats</div>
+        <div class="t-tab" data-tab="insights" onclick="switchTab(this)">AI Insights</div>
+      </div>
+      <!-- Trades -->
+      <div class="t-tab-content active" id="tab-trades">
+        <div class="trade-form">
+          <select id="tf-dir"><option value="long">Long</option><option value="short">Short</option></select>
+          <input id="tf-price" type="number" step="0.01" placeholder="Entry $" />
+          <input id="tf-qty" type="number" step="0.01" value="1" placeholder="Qty" />
+          <button onclick="createTrade()">Open Trade</button>
+        </div>
+        <table class="trades"><thead><tr>
+          <th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th></th>
+        </tr></thead><tbody id="trades-body"></tbody></table>
+      </div>
+      <!-- Journal -->
+      <div class="t-tab-content" id="tab-journal">
+        <div class="j-form">
+          <input type="text" id="j-input" placeholder="Write a journal note..." />
+          <button onclick="addJournal()">Add</button>
+        </div>
+        <div id="j-list"></div>
+      </div>
+      <!-- Stats -->
+      <div class="t-tab-content" id="tab-stats">
+        <div class="stats-grid" id="stats-grid"></div>
+      </div>
+      <!-- Insights -->
+      <div class="t-tab-content" id="tab-insights">
+        <div id="insights-list"><em>AI will learn from your journal and trades over time.</em></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- AI Chat sidebar -->
+  <div class="t-ai">
+    <h3>&#x1F916; Trading AI</h3>
+    <div class="ai-msgs" id="ai-msgs"></div>
+    <div class="ai-input">
+      <input type="text" id="ai-input" placeholder="Ask about this chart..." />
+      <button onclick="sendAiChat()">Send</button>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ── State ──────────────────────────────────────── */
+var currentTicker = 'AAPL';
+var currentInterval = '1d';
+var currentPeriod = '6mo';
+var chart = null;
+var candleSeries = null;
+var volumeSeries = null;
+var indicatorSeries = {};
+var activeIndicators = new Set(['sma_20', 'ema_20']);
+
+var INDICATORS = [
+  {id:'sma_20',label:'SMA 20',color:'#f59e0b'},
+  {id:'ema_20',label:'EMA 20',color:'#8b5cf6'},
+  {id:'sma_50',label:'SMA 50',color:'#06b6d4'},
+  {id:'bbands',label:'Bollinger',color:'#ec4899'},
+  {id:'rsi',label:'RSI',color:'#22c55e',pane:true},
+  {id:'macd',label:'MACD',color:'#3b82f6',pane:true},
+  {id:'stoch',label:'Stochastic',color:'#f97316',pane:true},
+  {id:'adx',label:'ADX',color:'#a855f7',pane:true},
+  {id:'atr',label:'ATR',color:'#14b8a6',pane:true},
+  {id:'obv',label:'OBV',color:'#64748b',pane:true},
+  {id:'vwap',label:'VWAP',color:'#e11d48'},
+  {id:'psar',label:'SAR',color:'#facc15'},
+  {id:'mfi',label:'MFI',color:'#84cc16',pane:true},
+  {id:'cci',label:'CCI',color:'#0ea5e9',pane:true},
+  {id:'willr',label:'Will%R',color:'#d946ef',pane:true},
+];
+
+/* ── Init ───────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', function() {
+  initChart();
+  buildIndicatorPanel();
+  loadWatchlist();
+  loadChart();
+  loadTrades();
+  loadJournal();
+  loadStats();
+  loadInsights();
+  document.getElementById('ai-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') sendAiChat();
+  });
+  document.getElementById('wl-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') addToWatchlist();
+  });
+  document.getElementById('j-input').addEventListener('keydown', function(e) {
+    if (e.key === 'Enter') addJournal();
+  });
+  setInterval(refreshPrice, 15000);
+});
+
+function initChart() {
+  var el = document.getElementById('main-chart');
+  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth,
+    height: el.clientHeight,
+    layout: {
+      background: { type: 'solid', color: isDark ? '#111827' : '#f9fafb' },
+      textColor: isDark ? '#f3f4f6' : '#1f2937',
+    },
+    grid: {
+      vertLines: { color: isDark ? '#1f2937' : '#f3f4f6' },
+      horzLines: { color: isDark ? '#1f2937' : '#f3f4f6' },
+    },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: isDark ? '#374151' : '#e5e7eb' },
+    timeScale: { borderColor: isDark ? '#374151' : '#e5e7eb', timeVisible: true },
+  });
+  candleSeries = chart.addCandlestickSeries({
+    upColor: '#22c55e', downColor: '#ef4444',
+    borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+    wickUpColor: '#22c55e', wickDownColor: '#ef4444',
+  });
+  volumeSeries = chart.addHistogramSeries({
+    priceFormat: { type: 'volume' },
+    priceScaleId: 'vol',
+  });
+  chart.priceScale('vol').applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
+  new ResizeObserver(function() { chart.applyOptions({ width: el.clientWidth, height: el.clientHeight }); }).observe(el);
+}
+
+/* ── Chart data ─────────────────────────────────── */
+function loadChart() {
+  document.getElementById('ticker-label').textContent = currentTicker;
+  fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.data.length) return;
+      candleSeries.setData(d.data.map(function(c) { return {time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}; }));
+      volumeSeries.setData(d.data.map(function(c) { return {time:c.time, value:c.volume, color: c.close>=c.open ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'}; }));
+      chart.timeScale().fitContent();
+      refreshPrice();
+      loadActiveIndicators();
+    });
+}
+
+function refreshPrice() {
+  fetch('/api/trading/quote?ticker=' + encodeURIComponent(currentTicker))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) return;
+      var lbl = document.getElementById('price-label');
+      var cls = (d.change_pct||0) >= 0 ? 'up' : 'down';
+      var sign = (d.change_pct||0) >= 0 ? '+' : '';
+      lbl.innerHTML = '<strong>$' + (d.price||'--') + '</strong> <span class="change ' + cls + '">' + sign + (d.change||0) + ' (' + sign + (d.change_pct||0) + '%)</span>';
+    });
+}
+
+function changeInterval(v) { currentInterval = v; loadChart(); }
+function changePeriod(v) { currentPeriod = v; loadChart(); }
+
+function selectTicker(t) {
+  currentTicker = t.toUpperCase();
+  document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
+  loadChart();
+}
+
+/* ── Indicators ─────────────────────────────────── */
+function buildIndicatorPanel() {
+  var panel = document.getElementById('ind-panel');
+  panel.innerHTML = '';
+  INDICATORS.forEach(function(ind) {
+    var chip = document.createElement('div');
+    chip.className = 'ind-chip' + (activeIndicators.has(ind.id) ? ' on' : '');
+    chip.textContent = ind.label;
+    chip.dataset.id = ind.id;
+    chip.onclick = function() { toggleIndicator(ind.id, chip); };
+    panel.appendChild(chip);
+  });
+}
+
+function toggleIndicator(id, chip) {
+  if (activeIndicators.has(id)) {
+    activeIndicators.delete(id);
+    chip.classList.remove('on');
+    removeIndicatorSeries(id);
+  } else {
+    activeIndicators.add(id);
+    chip.classList.add('on');
+    fetchAndDrawIndicator(id);
+  }
+}
+
+function loadActiveIndicators() {
+  Object.keys(indicatorSeries).forEach(function(k) { removeIndicatorSeries(k); });
+  if (activeIndicators.size === 0) return;
+  var indStr = Array.from(activeIndicators).join(',');
+  fetch('/api/trading/indicators?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod + '&indicators=' + indStr)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) return;
+      var indicators = d.indicators;
+      for (var key in indicators) {
+        drawIndicator(key, indicators[key]);
+      }
+    });
+}
+
+function fetchAndDrawIndicator(id) {
+  fetch('/api/trading/indicators?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod + '&indicators=' + id)
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) return;
+      var indicators = d.indicators;
+      for (var key in indicators) { drawIndicator(key, indicators[key]); }
+    });
+}
+
+function drawIndicator(id, data) {
+  if (!data || !data.length) return;
+  var meta = INDICATORS.find(function(i) { return i.id === id; }) || { color: '#888' };
+  removeIndicatorSeries(id);
+
+  if (id === 'macd') {
+    var macdLine = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceScaleId: 'macd', title: 'MACD' });
+    var signalLine = chart.addLineSeries({ color: '#f59e0b', lineWidth: 1, priceScaleId: 'macd', title: 'Signal' });
+    var histSeries = chart.addHistogramSeries({ priceScaleId: 'macd', title: 'Hist' });
+    macdLine.setData(data.filter(function(d){return d.macd!=null;}).map(function(d){return{time:d.time,value:d.macd};}));
+    signalLine.setData(data.filter(function(d){return d.signal!=null;}).map(function(d){return{time:d.time,value:d.signal};}));
+    histSeries.setData(data.filter(function(d){return d.histogram!=null;}).map(function(d){return{time:d.time,value:d.histogram,color:d.histogram>=0?'rgba(34,197,94,.6)':'rgba(239,68,68,.6)'};}));
+    chart.priceScale('macd').applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+    indicatorSeries[id] = [macdLine, signalLine, histSeries];
+    return;
+  }
+
+  if (id === 'bbands' || id === 'bb' || id === 'bollinger') {
+    var upper = chart.addLineSeries({ color: 'rgba(236,72,153,.5)', lineWidth: 1, title: 'BB Upper' });
+    var middle = chart.addLineSeries({ color: 'rgba(236,72,153,.8)', lineWidth: 1, title: 'BB Mid' });
+    var lower = chart.addLineSeries({ color: 'rgba(236,72,153,.5)', lineWidth: 1, title: 'BB Lower' });
+    upper.setData(data.filter(function(d){return d.upper!=null;}).map(function(d){return{time:d.time,value:d.upper};}));
+    middle.setData(data.filter(function(d){return d.middle!=null;}).map(function(d){return{time:d.time,value:d.middle};}));
+    lower.setData(data.filter(function(d){return d.lower!=null;}).map(function(d){return{time:d.time,value:d.lower};}));
+    indicatorSeries[id] = [upper, middle, lower];
+    return;
+  }
+
+  if (id === 'stoch' || id === 'stochastic') {
+    var kLine = chart.addLineSeries({ color: '#f97316', lineWidth: 1, priceScaleId: 'stoch', title: '%K' });
+    var dLine = chart.addLineSeries({ color: '#3b82f6', lineWidth: 1, priceScaleId: 'stoch', title: '%D' });
+    kLine.setData(data.filter(function(d){return d.k!=null;}).map(function(d){return{time:d.time,value:d.k};}));
+    dLine.setData(data.filter(function(d){return d.d!=null;}).map(function(d){return{time:d.time,value:d.d};}));
+    chart.priceScale('stoch').applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+    indicatorSeries[id] = [kLine, dLine];
+    return;
+  }
+
+  if (id === 'psar' || id === 'sar') {
+    var longS = chart.addLineSeries({ color: '#22c55e', lineWidth: 0, pointMarkersVisible: true, pointMarkersRadius: 2, title: 'SAR Long' });
+    var shortS = chart.addLineSeries({ color: '#ef4444', lineWidth: 0, pointMarkersVisible: true, pointMarkersRadius: 2, title: 'SAR Short' });
+    longS.setData(data.filter(function(d){return d.long!=null;}).map(function(d){return{time:d.time,value:d.long};}));
+    shortS.setData(data.filter(function(d){return d.short!=null;}).map(function(d){return{time:d.time,value:d.short};}));
+    indicatorSeries[id] = [longS, shortS];
+    return;
+  }
+
+  // Single-value indicators (RSI, ADX, ATR, OBV, MFI, CCI, VWAP, Williams, SMA, EMA)
+  var isPaneInd = meta.pane;
+  var scaleId = isPaneInd ? id : undefined;
+  var series = chart.addLineSeries({ color: meta.color, lineWidth: 1.5, priceScaleId: scaleId, title: meta.label });
+  series.setData(data.map(function(d) { return { time: d.time, value: d.value }; }));
+  if (isPaneInd) {
+    chart.priceScale(id).applyOptions({ scaleMargins: { top: 0.75, bottom: 0 } });
+  }
+  indicatorSeries[id] = [series];
+}
+
+function removeIndicatorSeries(id) {
+  if (indicatorSeries[id]) {
+    indicatorSeries[id].forEach(function(s) { chart.removeSeries(s); });
+    delete indicatorSeries[id];
+  }
+}
+
+/* ── Watchlist ──────────────────────────────────── */
+function loadWatchlist() {
+  fetch('/api/trading/watchlist').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var list = document.getElementById('wl-list');
+    list.innerHTML = '';
+    if (!d.items.length) {
+      list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px">Add tickers above</div>';
+      return;
+    }
+    d.items.forEach(function(item) {
+      var div = document.createElement('div');
+      div.className = 'wl-item' + (item.ticker === currentTicker ? ' active' : '');
+      div.dataset.ticker = item.ticker;
+      div.innerHTML = '<span class="wl-ticker">' + item.ticker + '</span><span class="wl-price" id="wl-p-'+item.ticker+'"></span><button class="wl-rm" onclick="event.stopPropagation();removeWatchlist(\''+item.ticker+'\')">&times;</button>';
+      div.onclick = function() { selectTicker(item.ticker); };
+      list.appendChild(div);
+      fetchWlPrice(item.ticker);
+    });
+  });
+}
+
+function fetchWlPrice(ticker) {
+  fetch('/api/trading/quote?ticker='+encodeURIComponent(ticker)).then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('wl-p-'+ticker);
+    if (!el || !d.ok) return;
+    var cls = (d.change_pct||0) >= 0 ? 'up' : 'down';
+    el.className = 'wl-price wl-change ' + cls;
+    el.textContent = '$' + (d.price||'--');
+  });
+}
+
+function addToWatchlist() {
+  var inp = document.getElementById('wl-input');
+  var ticker = inp.value.trim().toUpperCase();
+  if (!ticker) return;
+  inp.value = '';
+  fetch('/api/trading/watchlist', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticker:ticker}) })
+    .then(function() { loadWatchlist(); selectTicker(ticker); });
+}
+
+function removeWatchlist(ticker) {
+  fetch('/api/trading/watchlist?ticker='+encodeURIComponent(ticker), {method:'DELETE'}).then(function() { loadWatchlist(); });
+}
+
+/* ── Trades ─────────────────────────────────────── */
+function loadTrades() {
+  fetch('/api/trading/trades').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var body = document.getElementById('trades-body');
+    body.innerHTML = '';
+    d.trades.forEach(function(t) {
+      var pnlCls = t.pnl > 0 ? 'pnl-pos' : (t.pnl < 0 ? 'pnl-neg' : '');
+      var closeBtn = t.status === 'open' ? '<button onclick="promptClose('+t.id+')" style="font-size:11px;padding:2px 8px;border:none;border-radius:4px;background:#ef4444;color:#fff;cursor:pointer">Close</button>' : '';
+      body.innerHTML += '<tr><td>'+t.ticker+'</td><td>'+t.direction+'</td><td>$'+t.entry_price+'</td><td>'+(t.exit_price?'$'+t.exit_price:'-')+'</td><td>'+t.quantity+'</td><td class="'+pnlCls+'">'+(t.pnl!=null?'$'+t.pnl:'-')+'</td><td>'+t.status+'</td><td>'+closeBtn+'</td></tr>';
+    });
+  });
+}
+
+function createTrade() {
+  var price = parseFloat(document.getElementById('tf-price').value);
+  if (!price) return;
+  fetch('/api/trading/trades', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ ticker: currentTicker, direction: document.getElementById('tf-dir').value, entry_price: price, quantity: parseFloat(document.getElementById('tf-qty').value)||1 })
+  }).then(function() { loadTrades(); loadStats(); document.getElementById('tf-price').value=''; });
+}
+
+function promptClose(id) {
+  var price = prompt('Exit price:');
+  if (!price) return;
+  fetch('/api/trading/trades/'+id+'/close', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ exit_price: parseFloat(price) })
+  }).then(function() { loadTrades(); loadStats(); loadInsights(); });
+}
+
+/* ── Journal ────────────────────────────────────── */
+function loadJournal() {
+  fetch('/api/trading/journal').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var list = document.getElementById('j-list');
+    list.innerHTML = '';
+    d.entries.forEach(function(e) {
+      list.innerHTML += '<div class="j-entry"><span class="j-date">'+new Date(e.created_at).toLocaleDateString()+'</span> '+e.content+'</div>';
+    });
+  });
+}
+
+function addJournal() {
+  var inp = document.getElementById('j-input');
+  var text = inp.value.trim();
+  if (!text) return;
+  inp.value = '';
+  fetch('/api/trading/journal', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({content:text}) })
+    .then(function() { loadJournal(); });
+}
+
+/* ── Stats ──────────────────────────────────────── */
+function loadStats() {
+  fetch('/api/trading/journal/stats').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var grid = document.getElementById('stats-grid');
+    grid.innerHTML = '';
+    if (!d.total_trades) { grid.innerHTML = '<div style="color:var(--text-muted)">No closed trades yet</div>'; return; }
+    var cards = [
+      ['Total Trades', d.total_trades],
+      ['Win Rate', d.win_rate + '%'],
+      ['Total P&L', '$' + d.total_pnl],
+      ['Avg P&L', '$' + d.avg_pnl],
+      ['Best Trade', '$' + d.best_trade],
+      ['Worst Trade', '$' + d.worst_trade],
+      ['Max Drawdown', '$' + d.max_drawdown],
+    ];
+    cards.forEach(function(c) {
+      grid.innerHTML += '<div class="stat-card"><div class="stat-val">'+c[1]+'</div><div class="stat-lbl">'+c[0]+'</div></div>';
+    });
+  });
+}
+
+/* ── Insights ───────────────────────────────────── */
+function loadInsights() {
+  fetch('/api/trading/insights').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('insights-list');
+    if (!d.insights.length) { el.innerHTML = '<em>AI will learn from your journal and trades over time.</em>'; return; }
+    el.innerHTML = '';
+    d.insights.forEach(function(ins) {
+      el.innerHTML += '<div class="j-entry"><strong>[' + Math.round(ins.confidence*100) + '%]</strong> ' + ins.pattern_description + ' <span class="j-date">(' + ins.evidence_count + ' trades, last ' + new Date(ins.last_seen).toLocaleDateString() + ')</span></div>';
+    });
+  });
+}
+
+/* ── AI Chat ────────────────────────────────────── */
+function sendAiChat() {
+  var inp = document.getElementById('ai-input');
+  var msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  appendAiMsg('user', msg);
+  appendAiMsg('assistant', 'Analyzing...');
+  fetch('/api/trading/analyze', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg })
+  }).then(function(r){return r.json();}).then(function(d) {
+    removeLastAiMsg();
+    appendAiMsg('assistant', d.reply || 'No response.');
+  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+}
+
+function runAnalysis() {
+  appendAiMsg('assistant', 'Running full analysis on ' + currentTicker + '...');
+  fetch('/api/trading/analyze', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval })
+  }).then(function(r){return r.json();}).then(function(d) {
+    removeLastAiMsg();
+    appendAiMsg('assistant', d.reply || 'No response.');
+  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+}
+
+function appendAiMsg(role, text) {
+  var msgs = document.getElementById('ai-msgs');
+  msgs.innerHTML += '<div class="ai-msg '+role+'"><div class="bubble">'+escHtml(text)+'</div></div>';
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function removeLastAiMsg() {
+  var msgs = document.getElementById('ai-msgs');
+  if (msgs.lastElementChild) msgs.removeChild(msgs.lastElementChild);
+}
+
+function escHtml(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+/* ── Tab switching ──────────────────────────────── */
+function switchTab(el) {
+  document.querySelectorAll('.t-tab').forEach(function(t){t.classList.remove('active');});
+  document.querySelectorAll('.t-tab-content').forEach(function(t){t.classList.remove('active');});
+  el.classList.add('active');
+  document.getElementById('tab-'+el.dataset.tab).classList.add('active');
+}
+
+/* ── Theme ──────────────────────────────────────── */
+function toggleTheme() {
+  var cur = document.documentElement.getAttribute('data-theme');
+  var next = cur === 'dark' ? 'light' : 'dark';
+  document.documentElement.setAttribute('data-theme', next);
+  localStorage.setItem('chili-theme', next);
+  if (chart) {
+    var isDark = next === 'dark';
+    chart.applyOptions({
+      layout: {
+        background: { type: 'solid', color: isDark ? '#111827' : '#f9fafb' },
+        textColor: isDark ? '#f3f4f6' : '#1f2937',
+      },
+      grid: {
+        vertLines: { color: isDark ? '#1f2937' : '#f3f4f6' },
+        horzLines: { color: isDark ? '#1f2937' : '#f3f4f6' },
+      },
+    });
+  }
+}
+</script>
+{% endblock %}

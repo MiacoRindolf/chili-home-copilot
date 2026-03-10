@@ -16,6 +16,7 @@ from .planner import (
     TaskWatcher,
 )
 from .marketplace import MarketplaceModule
+from .trading import JournalEntry, Trade, TradingInsight, WatchlistItem
 
 __all__ = [
     "User",
@@ -43,5 +44,9 @@ __all__ = [
     "TaskLabel",
     "TaskWatcher",
     "MarketplaceModule",
+    "WatchlistItem",
+    "Trade",
+    "JournalEntry",
+    "TradingInsight",
 ]
 

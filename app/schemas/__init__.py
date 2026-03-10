@@ -1,6 +1,19 @@
 """Pydantic schemas for API and planner. Re-export for backward compatibility."""
 from ..modules import is_module_enabled
 
+from .trading import (
+    WatchlistAdd,
+    WatchlistOut,
+    TradeCreate,
+    TradeClose,
+    TradeUpdate,
+    TradeOut,
+    JournalCreate,
+    JournalOut,
+    AnalyzeRequest,
+    InsightOut,
+)
+
 from .household import (
     ChoreCreate,
     ChoreOut,

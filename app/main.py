@@ -9,7 +9,7 @@ from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, chat, health_routes, pages, marketplace, mobile
+from .routers import admin, chat, health_routes, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import MarketplaceModule
 
@@ -61,6 +61,7 @@ app.include_router(pages.router)
 app.include_router(health_routes.router)
 app.include_router(marketplace.router)
 app.include_router(mobile.router)
+app.include_router(trading.router)
 
 # Optional feature modules (planner, intercom, voice, projects, ...)
 for mod in enabled_modules:
