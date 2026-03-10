@@ -112,3 +112,9 @@ class BacktestRequest(BaseModel):
 
 class ScanRequest(BaseModel):
     tickers: Optional[list[str]] = None
+
+
+class SmartPickRequest(BaseModel):
+    message: Optional[str] = None
+    budget: Optional[float] = None
+    risk_tolerance: str = Field("medium", pattern=r"^(low|medium|high)$")

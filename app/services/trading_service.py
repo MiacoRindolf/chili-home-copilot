@@ -1255,3 +1255,166 @@ def _make_plain_english(scored: dict, insights: str) -> str:
         parts.append("This is a relatively stable stock with lower risk.")
 
     return " ".join(parts)
+
+
+# ── Smart Pick: full scan + deep AI analysis ───────────────────────────
+
+def smart_pick(
+    db: Session, user_id: int | None,
+    message: str | None = None,
+    budget: float | None = None,
+    risk_tolerance: str = "medium",
+) -> dict[str, Any]:
+    """Scan the market, score all candidates, deep-analyze the top picks,
+    and return one consolidated AI recommendation with exact trade plans."""
+
+    # 1. Score all default tickers
+    scored_results: list[dict[str, Any]] = []
+    for ticker in DEFAULT_SCAN_TICKERS:
+        scored = _score_ticker(ticker)
+        if scored and scored["signal"] == "buy" and scored["score"] >= 5.5:
+            scored_results.append(scored)
+
+    # Also score watchlist tickers
+    watchlist = get_watchlist(db, user_id)
+    wl_tickers = {w.ticker for w in watchlist}
+    for ticker in wl_tickers:
+        if ticker not in {s["ticker"] for s in scored_results}:
+            scored = _score_ticker(ticker)
+            if scored and scored["score"] >= 4.0:
+                scored_results.append(scored)
+
+    scored_results.sort(key=lambda r: r["score"], reverse=True)
+
+    # Filter by risk tolerance
+    if risk_tolerance == "low":
+        scored_results = [s for s in scored_results if s["risk_level"] in ("low", "medium")]
+    elif risk_tolerance == "high":
+        pass  # allow all
+
+    top_picks = scored_results[:8]
+
+    if not top_picks:
+        return {
+            "ok": True,
+            "reply": "I scanned 50+ stocks and none have a strong enough setup right now. "
+                     "The best trade is sometimes no trade. I'll keep watching and flag opportunities as they appear.",
+            "picks": [],
+        }
+
+    # 2. Build rich context for the top picks
+    pick_details: list[str] = []
+    for p in top_picks:
+        detail = (
+            f"**{p['ticker']}** — Score: {p['score']}/10, Signal: {p['signal'].upper()}\n"
+            f"  Price: ${p['price']} | Entry: ${p['entry_price']} | Stop: ${p['stop_loss']} | Target: ${p['take_profit']}\n"
+            f"  Risk: {p['risk_level'].upper()} | Signals: {', '.join(p['signals'])}\n"
+            f"  Indicators: RSI={p['indicators'].get('rsi', 'N/A')}, "
+            f"MACD={p['indicators'].get('macd', 'N/A')}, "
+            f"ADX={p['indicators'].get('adx', 'N/A')}"
+        )
+
+        # Add backtest data if available
+        from ..models.trading import BacktestResult
+        best_bt = db.query(BacktestResult).filter(
+            BacktestResult.ticker == p["ticker"],
+        ).order_by(BacktestResult.return_pct.desc()).first()
+        if best_bt:
+            detail += (
+                f"\n  Best backtest: {best_bt.strategy_name} → "
+                f"{best_bt.return_pct:+.1f}% return, {best_bt.win_rate:.0f}% win rate"
+            )
+
+        pick_details.append(detail)
+
+    # 3. Build the AI context
+    context_parts = [
+        f"## MARKET SCAN RESULTS — Top {len(top_picks)} candidates from 50+ stocks scanned",
+        "\n\n".join(pick_details),
+    ]
+
+    # User's performance context
+    stats = get_trade_stats(db, user_id)
+    if stats.get("total_trades", 0) > 0:
+        context_parts.append(
+            f"## USER PROFILE\n"
+            f"Experience: {stats['total_trades']} trades, {stats['win_rate']}% win rate, "
+            f"Total P&L: ${stats['total_pnl']}"
+        )
+    else:
+        context_parts.append(
+            "## USER PROFILE\nBeginner trader with no closed trades yet. "
+            "Recommend safer, high-confidence setups with clear instructions."
+        )
+
+    # Learned patterns
+    insights = get_insights(db, user_id, limit=10)
+    if insights:
+        lines = ["## LEARNED PATTERNS (your edge)"]
+        for ins in insights:
+            lines.append(f"- [{ins.confidence:.0%}] {ins.pattern_description}")
+        context_parts.append("\n".join(lines))
+
+    if budget:
+        context_parts.append(f"## BUDGET\nUser has ${budget:,.2f} available to invest.")
+
+    context_parts.append(f"## RISK TOLERANCE: {risk_tolerance.upper()}")
+
+    full_context = "\n\n".join(context_parts)
+
+    # 4. Ask the AI for the final recommendation
+    user_msg = message or "Based on this scan, what are your top 3 stock picks I should buy RIGHT NOW? For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, position size, and your confidence level. Rank them by conviction."
+
+    from ..prompts import load_prompt
+    system_prompt = load_prompt("trading_analyst")
+
+    smart_pick_addendum = """
+
+SPECIAL INSTRUCTION — SMART PICK MODE:
+You have just scanned 50+ stocks. The top candidates are provided below with their indicator data and scores.
+
+Your job: Pick the BEST 1-3 trades from this scan and present them as a clear action plan.
+
+For EACH recommended trade, you MUST provide ALL of these in a clean format:
+1. **TICKER** and company name
+2. **VERDICT**: STRONG BUY / BUY (no holds or sells in smart pick)
+3. **Confidence**: X% (be honest)
+4. **Buy-in price**: exact $ amount (use current price or a limit order level)
+5. **Stop-loss**: exact $ amount + reason
+6. **Target 1**: exact $ (conservative exit)
+7. **Target 2**: exact $ (optimistic exit)
+8. **Risk/reward ratio**: X:1
+9. **Hold duration**: X days/weeks (be specific)
+10. **Position size**: X% of portfolio
+11. **Why this stock NOW**: 2-3 bullet points of the key confluence signals
+12. **What would make you exit early**: the invalidation signal
+
+If NONE of the scanned stocks have a strong enough setup, say so clearly. "No trade" IS a valid recommendation.
+
+End with a brief portfolio allocation suggestion if recommending multiple stocks.
+"""
+
+    try:
+        from .. import openai_client
+        from ..logger import new_trace_id
+        trace_id = new_trace_id()
+
+        result = openai_client.chat(
+            messages=[{"role": "user", "content": user_msg}],
+            system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
+            trace_id=trace_id,
+            user_message=user_msg,
+        )
+        reply = result.get("reply", "Could not generate recommendation.")
+    except Exception as e:
+        reply = f"Analysis unavailable: {e}"
+
+    return {
+        "ok": True,
+        "reply": reply,
+        "picks_scanned": len(scored_results),
+        "top_picks": [
+            {"ticker": p["ticker"], "score": p["score"], "signal": p["signal"], "price": p["price"]}
+            for p in top_picks
+        ],
+    }

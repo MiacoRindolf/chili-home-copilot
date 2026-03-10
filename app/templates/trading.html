@@ -341,9 +341,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   <!-- AI Chat sidebar -->
   <div class="t-ai">
     <h3>&#x1F916; Trading AI</h3>
+    <div style="padding:4px 12px 8px;display:flex;gap:6px">
+      <button onclick="askSmartPick()" style="flex:1;padding:8px;border:none;border-radius:8px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;cursor:pointer;font-size:12px;font-weight:700">&#x1F4B0; What Should I Buy?</button>
+      <button onclick="runAnalysis()" style="flex:1;padding:8px;border:none;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">&#x1F4CA; Analyze Chart</button>
+    </div>
     <div class="ai-msgs" id="ai-msgs"></div>
     <div class="ai-input">
-      <input type="text" id="ai-input" placeholder="Ask about this chart..." />
+      <input type="text" id="ai-input" placeholder="Ask anything... e.g. 'What stock should I buy?'" />
       <button onclick="sendAiChat()">Send</button>
     </div>
   </div>
@@ -724,20 +728,51 @@ function loadInsights() {
 }
 
 /* ── AI Chat ────────────────────────────────────── */
+var SMART_PICK_PATTERNS = /\b(what.*(buy|invest|trade|pick|recommend)|should\s+i\s+buy|best\s+stock|top\s+pick|give\s+me\s+a\s+stock|which\s+stock|what\s+to\s+buy|find\s+me|scan.*market|suggest.*stock)/i;
+
 function sendAiChat() {
   var inp = document.getElementById('ai-input');
   var msg = inp.value.trim();
   if (!msg) return;
   inp.value = '';
   appendAiMsg('user', msg);
-  appendAiMsg('assistant', 'Analyzing...');
-  fetch('/api/trading/analyze', {
+
+  if (SMART_PICK_PATTERNS.test(msg)) {
+    appendAiMsg('assistant', 'Scanning 50+ stocks and running deep analysis... This may take a moment.');
+    fetch('/api/trading/smart-pick', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ message: msg, risk_tolerance: 'medium' })
+    }).then(function(r){return r.json();}).then(function(d) {
+      removeLastAiMsg();
+      var prefix = d.picks_scanned ? '(Scanned ' + d.picks_scanned + ' candidates)\n\n' : '';
+      appendAiMsg('assistant', prefix + (d.reply || 'No recommendations at this time.'));
+    }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error running scan.'); });
+  } else {
+    appendAiMsg('assistant', 'Analyzing...');
+    fetch('/api/trading/analyze', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg })
+    }).then(function(r){return r.json();}).then(function(d) {
+      removeLastAiMsg();
+      appendAiMsg('assistant', d.reply || 'No response.');
+    }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+  }
+}
+
+function askSmartPick() {
+  appendAiMsg('user', 'What stocks should I buy right now?');
+  appendAiMsg('assistant', 'Scanning 50+ stocks across all sectors... Running deep analysis on top candidates...');
+  fetch('/api/trading/smart-pick', {
     method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg })
+    body: JSON.stringify({ message: 'What are your top 3 stock picks I should buy RIGHT NOW? For each give me exact buy-in price, sell target, stop-loss, hold duration, position size, and confidence level. Rank by conviction.', risk_tolerance: 'medium' })
   }).then(function(r){return r.json();}).then(function(d) {
     removeLastAiMsg();
-    appendAiMsg('assistant', d.reply || 'No response.');
-  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+    var prefix = d.picks_scanned ? '(Scanned ' + d.picks_scanned + ' candidates)\n\n' : '';
+    appendAiMsg('assistant', prefix + (d.reply || 'No strong setups found right now. Sometimes the best trade is no trade.'));
+    if (d.top_picks && d.top_picks.length) {
+      selectTicker(d.top_picks[0].ticker);
+    }
+  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error running market scan.'); });
 }
 
 function runAnalysis() {

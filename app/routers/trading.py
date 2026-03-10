@@ -17,6 +17,7 @@ from ..schemas.trading import (
     BacktestRequest,
     JournalCreate,
     ScanRequest,
+    SmartPickRequest,
     TradeClose,
     TradeCreate,
     WatchlistAdd,
@@ -236,12 +237,7 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
 
     ai_context = ts.build_ai_context(db, ctx["user_id"], body.ticker, body.interval)
 
-    user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. What's the setup?"
-
-    messages = [
-        {"role": "system", "content": f"{_get_trading_prompt()}\n\n---\n\n{ai_context}"},
-        {"role": "user", "content": user_msg},
-    ]
+    user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. Give me a clear verdict: should I buy, sell, or hold? Include exact entry price, stop-loss, targets, hold duration, and confidence level."
 
     try:
         from .. import openai_client
@@ -257,6 +253,19 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
         reply = f"Analysis unavailable: {e}"
 
     return JSONResponse({"ok": True, "reply": reply, "ticker": body.ticker})
+
+
+@router.post("/api/trading/smart-pick")
+def api_smart_pick(body: SmartPickRequest, request: Request, db: Session = Depends(get_db)):
+    """Scan the entire market and return AI's top trade recommendations with exact levels."""
+    ctx = get_identity_ctx(request, db)
+    result = ts.smart_pick(
+        db, ctx["user_id"],
+        message=body.message,
+        budget=body.budget,
+        risk_tolerance=body.risk_tolerance,
+    )
+    return JSONResponse(result)
 
 
 @router.get("/api/trading/insights")
