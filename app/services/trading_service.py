@@ -9,7 +9,7 @@ import pandas as pd
 import yfinance as yf
 from sqlalchemy.orm import Session
 
-from ..models.trading import JournalEntry, Trade, TradingInsight, WatchlistItem
+from ..models.trading import JournalEntry, LearningEvent, Trade, TradingInsight, WatchlistItem
 
 
 # ── Market data (yfinance) ──────────────────────────────────────────────
@@ -519,6 +519,12 @@ def save_insight(
     db.add(insight)
     db.commit()
     db.refresh(insight)
+    log_learning_event(
+        db, user_id, "discovery",
+        f"New pattern: {pattern[:120]}",
+        confidence_after=confidence,
+        related_insight_id=insight.id,
+    )
     return insight
 
 
@@ -649,7 +655,75 @@ def build_ai_context(
             lines.append(f"- {j.created_at.strftime('%Y-%m-%d')}: {j.content[:300]}")
         parts.append("\n".join(lines))
 
+    # ── Market-wide context ──
+    market_ctx = build_market_context(db, user_id)
+    if market_ctx:
+        parts.insert(0, market_ctx)
+
     return "\n\n".join(parts)
+
+
+# ── Market-Wide Context ────────────────────────────────────────────────
+
+def build_market_context(db: Session, user_id: int | None) -> str:
+    """Build a market-wide sentiment summary for the AI to use in every response."""
+    parts: list[str] = []
+
+    # SPY as market proxy
+    spy_quote = fetch_quote("SPY")
+    if spy_quote:
+        spy_dir = "UP" if (spy_quote.get("change_pct") or 0) >= 0 else "DOWN"
+        parts.append(
+            f"S&P 500 (SPY): ${spy_quote.get('price')} ({spy_dir} {spy_quote.get('change_pct')}% today)"
+        )
+
+    # Quick scan of a sample for sentiment
+    sample_tickers = DEFAULT_SCAN_TICKERS[:15] + DEFAULT_CRYPTO_TICKERS[:5]
+    bullish = 0
+    bearish = 0
+    neutral = 0
+    rsi_vals: list[float] = []
+
+    for ticker in sample_tickers:
+        scored = _score_ticker(ticker)
+        if scored is None:
+            continue
+        if scored["signal"] == "buy":
+            bullish += 1
+        elif scored["signal"] == "sell":
+            bearish += 1
+        else:
+            neutral += 1
+        rsi_v = scored["indicators"].get("rsi")
+        if rsi_v is not None:
+            rsi_vals.append(rsi_v)
+
+    total = bullish + bearish + neutral
+    if total:
+        avg_rsi = sum(rsi_vals) / len(rsi_vals) if rsi_vals else 50
+        if bullish > bearish * 1.5:
+            sentiment = "RISK-ON (bullish majority)"
+        elif bearish > bullish * 1.5:
+            sentiment = "RISK-OFF (bearish majority)"
+        else:
+            sentiment = "MIXED / CHOPPY"
+
+        parts.append(
+            f"Market sentiment: {sentiment} — {bullish} bullish, {bearish} bearish, {neutral} neutral out of {total} sampled"
+        )
+        parts.append(f"Average RSI across sample: {avg_rsi:.0f}")
+
+    # Crypto snapshot
+    btc_quote = fetch_quote("BTC-USD")
+    eth_quote = fetch_quote("ETH-USD")
+    if btc_quote:
+        parts.append(f"BTC: ${btc_quote.get('price')} ({btc_quote.get('change_pct')}%)")
+    if eth_quote:
+        parts.append(f"ETH: ${eth_quote.get('price')} ({eth_quote.get('change_pct')}%)")
+
+    if not parts:
+        return ""
+    return "## MARKET PULSE (live)\n" + "\n".join(parts)
 
 
 # ── AI Self-Learning Loop ──────────────────────────────────────────────
@@ -767,13 +841,19 @@ def _extract_and_store_patterns(
                 break
 
         if matched_existing:
+            old_conf = matched_existing.confidence
             matched_existing.evidence_count += 1
-            matched_existing.confidence = min(
-                0.95,
-                matched_existing.confidence + 0.05,
-            )
+            matched_existing.confidence = min(0.95, old_conf + 0.05)
             matched_existing.last_seen = datetime.utcnow()
             db.commit()
+            log_learning_event(
+                db, user_id, "update",
+                f"Pattern reinforced: {matched_existing.pattern_description[:100]} "
+                f"({old_conf:.0%} -> {matched_existing.confidence:.0%}, {matched_existing.evidence_count} evidence)",
+                confidence_before=old_conf,
+                confidence_after=matched_existing.confidence,
+                related_insight_id=matched_existing.id,
+            )
         else:
             save_insight(db, user_id, desc, confidence=max(0.1, min(0.9, conf)))
 
@@ -788,6 +868,23 @@ DEFAULT_SCAN_TICKERS = [
     "NFLX", "DIS", "AMGN", "HON", "LOW", "UPS", "CAT", "BA", "GS",
     "SBUX", "PYPL", "SQ", "SNAP", "PLTR",
 ]
+
+DEFAULT_CRYPTO_TICKERS = [
+    "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
+    "ADA-USD", "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD",
+    "MATIC-USD", "ATOM-USD", "UNI-USD", "LTC-USD", "NEAR-USD",
+]
+
+ALL_SCAN_TICKERS = DEFAULT_SCAN_TICKERS + DEFAULT_CRYPTO_TICKERS
+
+
+def ticker_display_name(ticker: str) -> str:
+    """Strip -USD suffix for crypto display."""
+    return ticker.replace("-USD", "") if ticker.endswith("-USD") else ticker
+
+
+def is_crypto(ticker: str) -> bool:
+    return ticker.upper().endswith("-USD")
 
 
 def _score_ticker(ticker: str) -> dict[str, Any] | None:
@@ -929,7 +1026,7 @@ def run_scan(
     """Scan a list of tickers, score them, store results, return sorted."""
     from ..models.trading import ScanResult
 
-    scan_list = tickers or DEFAULT_SCAN_TICKERS
+    scan_list = tickers or ALL_SCAN_TICKERS
     results: list[dict[str, Any]] = []
 
     for ticker in scan_list:
@@ -1075,7 +1172,7 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
 
 def take_all_snapshots(db: Session, user_id: int | None) -> int:
     """Snapshot all watchlist tickers + defaults. Returns count."""
-    tickers = set(DEFAULT_SCAN_TICKERS[:20])
+    tickers = set(DEFAULT_SCAN_TICKERS[:20] + DEFAULT_CRYPTO_TICKERS[:10])
 
     watchlist = get_watchlist(db, user_id)
     for w in watchlist:
@@ -1268,9 +1365,9 @@ def smart_pick(
     """Scan the market, score all candidates, deep-analyze the top picks,
     and return one consolidated AI recommendation with exact trade plans."""
 
-    # 1. Score all default tickers
+    # 1. Score all default tickers (stocks + crypto)
     scored_results: list[dict[str, Any]] = []
-    for ticker in DEFAULT_SCAN_TICKERS:
+    for ticker in ALL_SCAN_TICKERS:
         scored = _score_ticker(ticker)
         if scored and scored["signal"] == "buy" and scored["score"] >= 5.5:
             scored_results.append(scored)
@@ -1418,3 +1515,237 @@ End with a brief portfolio allocation suggestion if recommending multiple stocks
             for p in top_picks
         ],
     }
+
+
+# ── Learning Event Logger ──────────────────────────────────────────────
+
+def log_learning_event(
+    db: Session, user_id: int | None,
+    event_type: str, description: str,
+    confidence_before: float | None = None,
+    confidence_after: float | None = None,
+    related_insight_id: int | None = None,
+) -> LearningEvent:
+    ev = LearningEvent(
+        user_id=user_id,
+        event_type=event_type,
+        description=description,
+        confidence_before=confidence_before,
+        confidence_after=confidence_after,
+        related_insight_id=related_insight_id,
+    )
+    db.add(ev)
+    db.commit()
+    db.refresh(ev)
+    return ev
+
+
+def get_learning_events(db: Session, user_id: int | None, limit: int = 50) -> list[LearningEvent]:
+    return db.query(LearningEvent).filter(
+        LearningEvent.user_id == user_id,
+    ).order_by(LearningEvent.created_at.desc()).limit(limit).all()
+
+
+# ── Auto-Journaling ───────────────────────────────────────────────────
+
+def auto_journal_trade_open(db: Session, trade: Trade) -> None:
+    """AI auto-journals why a trade was opened."""
+    try:
+        snap = get_indicator_snapshot(trade.ticker)
+        snap_text = json.dumps(snap, indent=2) if snap else "N/A"
+    except Exception:
+        snap_text = "N/A"
+
+    content = (
+        f"[AI] TRADE OPENED: {trade.direction.upper()} {trade.quantity}x {trade.ticker} @ ${trade.entry_price}\n"
+        f"Indicators at entry: {snap_text[:400]}"
+    )
+    add_journal_entry(db, trade.user_id, content=content, trade_id=trade.id)
+    log_learning_event(db, trade.user_id, "journal", f"Auto-journaled trade open: {trade.ticker} {trade.direction}")
+
+
+def daily_market_journal(db: Session, user_id: int | None) -> str | None:
+    """Generate a daily market observation journal entry."""
+    # Scan top movers
+    movers: list[dict] = []
+    for ticker in DEFAULT_SCAN_TICKERS[:15] + DEFAULT_CRYPTO_TICKERS[:5]:
+        q = fetch_quote(ticker)
+        if q and q.get("change_pct") is not None:
+            movers.append({"ticker": ticker, "pct": q["change_pct"], "price": q.get("price")})
+
+    movers.sort(key=lambda m: abs(m["pct"]), reverse=True)
+    top_movers = movers[:5]
+
+    if not top_movers:
+        return None
+
+    lines = [f"[AI] DAILY MARKET OBSERVATION — {datetime.utcnow().strftime('%Y-%m-%d')}"]
+    for m in top_movers:
+        direction = "UP" if m["pct"] >= 0 else "DOWN"
+        lines.append(f"  {ticker_display_name(m['ticker'])}: ${m['price']} ({direction} {m['pct']:+.1f}%)")
+
+    # Count bullish/bearish from scored
+    bull = bear = 0
+    for ticker in DEFAULT_SCAN_TICKERS[:10]:
+        scored = _score_ticker(ticker)
+        if scored:
+            if scored["signal"] == "buy":
+                bull += 1
+            elif scored["signal"] == "sell":
+                bear += 1
+
+    lines.append(f"  Market mood: {bull} bullish, {bear} bearish out of 10 sampled")
+
+    content = "\n".join(lines)
+    add_journal_entry(db, user_id, content=content)
+    log_learning_event(db, user_id, "journal", f"Daily market observation recorded")
+    return content
+
+
+def check_signal_events(db: Session, user_id: int | None) -> list[str]:
+    """Scan watchlist for significant indicator events and auto-journal them."""
+    watchlist = get_watchlist(db, user_id)
+    if not watchlist:
+        return []
+
+    events: list[str] = []
+    for w in watchlist:
+        scored = _score_ticker(w.ticker)
+        if not scored:
+            continue
+
+        rsi = scored["indicators"].get("rsi")
+        signals = scored.get("signals", [])
+
+        notable: list[str] = []
+        if rsi is not None and rsi < 30:
+            notable.append(f"RSI oversold ({rsi:.0f})")
+        elif rsi is not None and rsi > 70:
+            notable.append(f"RSI overbought ({rsi:.0f})")
+
+        for s in signals:
+            if "macd" in s.lower() and "bullish" in s.lower():
+                notable.append("MACD bullish crossover")
+            if "volume surge" in s.lower():
+                notable.append("Volume surge detected")
+            if "bollinger" in s.lower():
+                notable.append("Near Bollinger Band extreme")
+
+        if notable:
+            event_text = f"[AI] SIGNAL ALERT — {ticker_display_name(w.ticker)}: {', '.join(notable)}"
+            add_journal_entry(db, user_id, content=event_text)
+            events.append(event_text)
+            log_learning_event(db, user_id, "journal", f"Signal event: {w.ticker} — {', '.join(notable)}")
+
+    return events
+
+
+def weekly_performance_review(db: Session, user_id: int | None) -> str | None:
+    """AI writes a weekly performance summary."""
+    stats = get_trade_stats(db, user_id)
+    if not stats.get("total_trades"):
+        return None
+
+    insights = get_insights(db, user_id, limit=5)
+    insight_text = "; ".join(i.pattern_description for i in insights) if insights else "None yet"
+
+    content = (
+        f"[AI] WEEKLY REVIEW — {datetime.utcnow().strftime('%Y-%m-%d')}\n"
+        f"Total trades: {stats['total_trades']} | Win rate: {stats['win_rate']}%\n"
+        f"Total P&L: ${stats['total_pnl']} | Best: ${stats['best_trade']} | Worst: ${stats['worst_trade']}\n"
+        f"Active patterns: {len(insights)} | Top insight: {insight_text[:200]}\n"
+        f"Max drawdown: ${stats['max_drawdown']}"
+    )
+    add_journal_entry(db, user_id, content=content)
+    log_learning_event(db, user_id, "review", "Weekly performance review generated")
+    return content
+
+
+# ── Brain Dashboard Stats ──────────────────────────────────────────────
+
+def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Aggregate stats for the AI Brain dashboard."""
+    from ..models.trading import MarketSnapshot
+    from sqlalchemy import func
+
+    total_patterns = db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id, TradingInsight.active.is_(True),
+    ).count()
+
+    avg_confidence_row = db.query(func.avg(TradingInsight.confidence)).filter(
+        TradingInsight.user_id == user_id, TradingInsight.active.is_(True),
+    ).scalar()
+    avg_confidence = round(float(avg_confidence_row or 0) * 100, 1)
+
+    from datetime import timedelta
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    patterns_this_week = db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.created_at >= week_ago,
+    ).count()
+
+    total_snapshots = db.query(MarketSnapshot).count()
+
+    # Prediction accuracy: snapshots where we can compare signal vs outcome
+    filled_snaps = db.query(MarketSnapshot).filter(
+        MarketSnapshot.future_return_5d.isnot(None),
+    ).limit(200).all()
+    correct = 0
+    total_predictions = 0
+    for snap in filled_snaps:
+        try:
+            ind_data = json.loads(snap.indicator_data) if snap.indicator_data else {}
+            rsi_val = ind_data.get("rsi", {}).get("value")
+            if rsi_val is not None:
+                predicted_up = rsi_val < 50
+                actual_up = (snap.future_return_5d or 0) > 0
+                if predicted_up == actual_up:
+                    correct += 1
+                total_predictions += 1
+        except Exception:
+            continue
+    accuracy = round(correct / total_predictions * 100, 1) if total_predictions > 0 else 0
+
+    total_events = db.query(LearningEvent).filter(
+        LearningEvent.user_id == user_id,
+    ).count()
+
+    return {
+        "total_patterns": total_patterns,
+        "avg_confidence": avg_confidence,
+        "patterns_this_week": patterns_this_week,
+        "total_snapshots": total_snapshots,
+        "prediction_accuracy": accuracy,
+        "total_predictions": total_predictions,
+        "total_events": total_events,
+    }
+
+
+def get_confidence_history(db: Session, user_id: int | None) -> list[dict[str, Any]]:
+    """Weekly average confidence over time for the Brain chart."""
+    insights = db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id,
+    ).order_by(TradingInsight.created_at.asc()).all()
+
+    if not insights:
+        return []
+
+    from datetime import timedelta
+    points: list[dict[str, Any]] = []
+    if insights:
+        start = insights[0].created_at
+        end = datetime.utcnow()
+        current = start
+        while current <= end:
+            week_end = current + timedelta(days=7)
+            week_insights = [i for i in insights if current <= i.created_at < week_end and i.active]
+            if week_insights:
+                avg_conf = sum(i.confidence for i in week_insights) / len(week_insights)
+                points.append({
+                    "time": int(current.timestamp()),
+                    "value": round(avg_conf * 100, 1),
+                    "count": len(week_insights),
+                })
+            current = week_end
+
+    return points

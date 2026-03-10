@@ -146,7 +146,12 @@ def api_get_trades(
 
 
 @router.post("/api/trading/trades")
-def api_create_trade(body: TradeCreate, request: Request, db: Session = Depends(get_db)):
+def api_create_trade(
+    body: TradeCreate,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     ctx = get_identity_ctx(request, db)
     trade = ts.create_trade(
         db, ctx["user_id"],
@@ -158,6 +163,19 @@ def api_create_trade(body: TradeCreate, request: Request, db: Session = Depends(
         tags=body.tags,
         notes=body.notes,
     )
+
+    from ..db import SessionLocal
+
+    def _auto_journal(trade_id: int):
+        sdb = SessionLocal()
+        try:
+            t = sdb.query(ts.Trade).filter(ts.Trade.id == trade_id).first()
+            if t:
+                ts.auto_journal_trade_open(sdb, t)
+        finally:
+            sdb.close()
+
+    background_tasks.add_task(_auto_journal, trade.id)
     return JSONResponse({"ok": True, "id": trade.id, "ticker": trade.ticker})
 
 
@@ -368,8 +386,50 @@ def api_take_snapshots(
             count = ts.take_all_snapshots(sdb, user_id)
             ts.backfill_future_returns(sdb)
             ts.mine_patterns(sdb, user_id)
+            ts.daily_market_journal(sdb, user_id)
+            ts.check_signal_events(sdb, user_id)
         finally:
             sdb.close()
 
     background_tasks.add_task(_bg_snapshot, ctx["user_id"])
-    return JSONResponse({"ok": True, "message": "Snapshot + learning started in background"})
+    return JSONResponse({"ok": True, "message": "Snapshot + learning + journaling started in background"})
+
+
+# ── Brain Dashboard ───────────────────────────────────────────────────
+
+@router.get("/api/trading/brain/stats")
+def api_brain_stats(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    stats = ts.get_brain_stats(db, ctx["user_id"])
+    return JSONResponse({"ok": True, **stats})
+
+
+@router.get("/api/trading/brain/confidence-history")
+def api_confidence_history(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    history = ts.get_confidence_history(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "data": history})
+
+
+@router.get("/api/trading/brain/activity")
+def api_brain_activity(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    events = ts.get_learning_events(db, ctx["user_id"], limit=50)
+    return JSONResponse({"ok": True, "events": [
+        {
+            "id": e.id,
+            "event_type": e.event_type,
+            "description": e.description,
+            "confidence_before": e.confidence_before,
+            "confidence_after": e.confidence_after,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]})
+
+
+@router.post("/api/trading/learn/weekly-review")
+def api_weekly_review(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    review = ts.weekly_performance_review(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "review": review or "No trades to review yet."})

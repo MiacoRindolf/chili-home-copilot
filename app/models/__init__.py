@@ -19,6 +19,7 @@ from .marketplace import MarketplaceModule
 from .trading import (
     BacktestResult,
     JournalEntry,
+    LearningEvent,
     MarketSnapshot,
     ScanResult,
     Trade,
@@ -59,5 +60,6 @@ __all__ = [
     "ScanResult",
     "BacktestResult",
     "MarketSnapshot",
+    "LearningEvent",
 ]
 

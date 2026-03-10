@@ -138,6 +138,10 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   border-radius: 12px; cursor: pointer; user-select: none; background: var(--bg-header); color: var(--text-secondary);
 }
 .ind-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.crypto-btn { padding:3px 8px; font-size:10px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text-secondary); cursor:pointer; }
+.crypto-btn:hover { background:var(--accent); color:#fff; border-color:var(--accent); }
+.learn-btn { padding:2px 8px; font-size:10px; border:1px solid var(--border); border-radius:10px; background:var(--bg-header); color:var(--text-secondary); cursor:pointer; }
+.learn-btn:hover { background:#8b5cf6; color:#fff; border-color:#8b5cf6; }
 
 /* ── Signal cards ──────────────────────────────── */
 .signals-banner { padding: 12px; background: var(--bg-header); border-bottom: 1px solid var(--border); }
@@ -198,6 +202,22 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .bt-stat .bt-val { font-size: 16px; font-weight: 700; }
 .bt-stat .bt-lbl { font-size: 10px; color: var(--text-secondary); }
 #bt-chart-area { width: 100%; height: 120px; margin-top: 8px; }
+
+/* ── Brain dashboard ───────────────────────────── */
+.brain-kpis { display: flex; gap: 6px; flex-wrap: wrap; }
+.brain-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; text-align: center; min-width: 80px; }
+.brain-kpi .bk-val { font-size: 18px; font-weight: 700; }
+.brain-kpi .bk-val.good { color: #22c55e; }
+.brain-kpi .bk-val.warn { color: #f59e0b; }
+.brain-kpi .bk-lbl { font-size: 10px; color: var(--text-secondary); }
+.brain-event { padding: 3px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.brain-event .be-type { font-weight: 600; text-transform: uppercase; font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-right: 4px; }
+.be-type.discovery { background: #dcfce7; color: #16a34a; }
+.be-type.update { background: #dbeafe; color: #2563eb; }
+.be-type.demotion { background: #fee2e2; color: #dc2626; }
+.be-type.review { background: #fef9c3; color: #a16207; }
+.be-type.journal { background: #f3e8ff; color: #7c3aed; }
+.brain-event .be-date { color: var(--text-muted); font-size: 10px; }
 </style>
 {% endblock %}
 
@@ -227,6 +247,19 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <button onclick="addToWatchlist()">+</button>
     </div>
     <div class="wl-list" id="wl-list"></div>
+    <h3 style="border-top:1px solid var(--border);padding-top:8px">Quick Add Crypto</h3>
+    <div style="padding:0 8px 8px;display:flex;flex-wrap:wrap;gap:3px">
+      <button onclick="addCrypto('BTC-USD')" class="crypto-btn">BTC</button>
+      <button onclick="addCrypto('ETH-USD')" class="crypto-btn">ETH</button>
+      <button onclick="addCrypto('SOL-USD')" class="crypto-btn">SOL</button>
+      <button onclick="addCrypto('XRP-USD')" class="crypto-btn">XRP</button>
+      <button onclick="addCrypto('DOGE-USD')" class="crypto-btn">DOGE</button>
+      <button onclick="addCrypto('ADA-USD')" class="crypto-btn">ADA</button>
+      <button onclick="addCrypto('BNB-USD')" class="crypto-btn">BNB</button>
+      <button onclick="addCrypto('AVAX-USD')" class="crypto-btn">AVAX</button>
+      <button onclick="addCrypto('LINK-USD')" class="crypto-btn">LINK</button>
+      <button onclick="addCrypto('DOT-USD')" class="crypto-btn">DOT</button>
+    </div>
   </div>
 
   <!-- Main chart area -->
@@ -276,7 +309,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
         <div class="t-tab" data-tab="trades" onclick="switchTab(this)">Trades</div>
         <div class="t-tab" data-tab="journal" onclick="switchTab(this)">Journal</div>
         <div class="t-tab" data-tab="stats" onclick="switchTab(this)">Stats</div>
-        <div class="t-tab" data-tab="insights" onclick="switchTab(this)">AI Insights</div>
+        <div class="t-tab" data-tab="brain" onclick="switchTab(this)">&#x1F9E0; AI Brain</div>
       </div>
 
       <!-- Signals -->
@@ -331,9 +364,18 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <div class="t-tab-content" id="tab-stats">
         <div class="stats-grid" id="stats-grid"></div>
       </div>
-      <!-- Insights -->
-      <div class="t-tab-content" id="tab-insights">
-        <div id="insights-list"><em>AI will learn from your journal and trades over time.</em></div>
+      <!-- AI Brain -->
+      <div class="t-tab-content" id="tab-brain">
+        <div class="brain-kpis" id="brain-kpis"></div>
+        <div style="display:flex;gap:8px;margin-top:6px">
+          <div style="flex:1">
+            <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Confidence Evolution</div>
+            <div id="brain-chart" style="width:100%;height:80px"></div>
+          </div>
+          <div style="flex:1;max-height:160px;overflow-y:auto" id="brain-activity">
+            <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Learning Activity</div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -341,9 +383,17 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   <!-- AI Chat sidebar -->
   <div class="t-ai">
     <h3>&#x1F916; Trading AI</h3>
-    <div style="padding:4px 12px 8px;display:flex;gap:6px">
+    <div style="padding:4px 12px 6px;display:flex;gap:6px">
       <button onclick="askSmartPick()" style="flex:1;padding:8px;border:none;border-radius:8px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;cursor:pointer;font-size:12px;font-weight:700">&#x1F4B0; What Should I Buy?</button>
       <button onclick="runAnalysis()" style="flex:1;padding:8px;border:none;border-radius:8px;background:var(--accent);color:#fff;cursor:pointer;font-size:12px;font-weight:600">&#x1F4CA; Analyze Chart</button>
+    </div>
+    <div style="padding:0 12px 8px;display:flex;flex-wrap:wrap;gap:4px">
+      <button onclick="askLearn('What is RSI and how do I use it?')" class="learn-btn">What is RSI?</button>
+      <button onclick="askLearn('Explain this chart to me like I know nothing')" class="learn-btn">Explain Chart</button>
+      <button onclick="askLearn('What is a stop-loss and why do I need one?')" class="learn-btn">Stop-loss?</button>
+      <button onclick="askLearn('What are Bollinger Bands?')" class="learn-btn">Bollinger?</button>
+      <button onclick="askLearn('Teach me about MACD')" class="learn-btn">MACD?</button>
+      <button onclick="askLearn('How do I know when to sell?')" class="learn-btn">When to sell?</button>
     </div>
     <div class="ai-msgs" id="ai-msgs"></div>
     <div class="ai-input">
@@ -635,6 +685,11 @@ function addToWatchlist() {
     .then(function() { loadWatchlist(); selectTicker(ticker); });
 }
 
+function addCrypto(ticker) {
+  fetch('/api/trading/watchlist', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticker:ticker}) })
+    .then(function() { loadWatchlist(); selectTicker(ticker); });
+}
+
 function removeWatchlist(ticker) {
   fetch('/api/trading/watchlist?ticker='+encodeURIComponent(ticker), {method:'DELETE'}).then(function() { loadWatchlist(); });
 }
@@ -715,15 +770,57 @@ function loadStats() {
 }
 
 /* ── Insights ───────────────────────────────────── */
-function loadInsights() {
-  fetch('/api/trading/insights').then(function(r){return r.json();}).then(function(d) {
+function loadInsights() { loadBrainDashboard(); }
+
+var brainChart = null;
+var brainConfSeries = null;
+
+function loadBrainDashboard() {
+  fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var el = document.getElementById('insights-list');
-    if (!d.insights.length) { el.innerHTML = '<em>AI will learn from your journal and trades over time.</em>'; return; }
+    var kpis = document.getElementById('brain-kpis');
+    var confCls = d.avg_confidence >= 60 ? 'good' : 'warn';
+    var accCls = d.prediction_accuracy >= 55 ? 'good' : 'warn';
+    kpis.innerHTML =
+      '<div class="brain-kpi"><div class="bk-val">'+d.total_patterns+'</div><div class="bk-lbl">Patterns Learned</div></div>' +
+      '<div class="brain-kpi"><div class="bk-val '+confCls+'">'+d.avg_confidence+'%</div><div class="bk-lbl">Avg Confidence</div></div>' +
+      '<div class="brain-kpi"><div class="bk-val">'+d.patterns_this_week+'</div><div class="bk-lbl">This Week</div></div>' +
+      '<div class="brain-kpi"><div class="bk-val '+accCls+'">'+d.prediction_accuracy+'%</div><div class="bk-lbl">Accuracy ('+d.total_predictions+' pred)</div></div>' +
+      '<div class="brain-kpi"><div class="bk-val">'+d.total_snapshots+'</div><div class="bk-lbl">Snapshots</div></div>' +
+      '<div class="brain-kpi"><div class="bk-val">'+d.total_events+'</div><div class="bk-lbl">Events</div></div>';
+  });
+
+  fetch('/api/trading/brain/confidence-history').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.data || !d.data.length) return;
+    var el = document.getElementById('brain-chart');
     el.innerHTML = '';
-    d.insights.forEach(function(ins) {
-      el.innerHTML += '<div class="j-entry"><strong>[' + Math.round(ins.confidence*100) + '%]</strong> ' + ins.pattern_description + ' <span class="j-date">(' + ins.evidence_count + ' trades, last ' + new Date(ins.last_seen).toLocaleDateString() + ')</span></div>';
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    brainChart = LightweightCharts.createChart(el, {
+      width: el.clientWidth, height: 80,
+      layout: { background: {type:'solid', color: isDark ? '#111827' : '#f9fafb'}, textColor: isDark ? '#9ca3af' : '#6b7280' },
+      grid: { vertLines:{visible:false}, horzLines:{color: isDark ? '#1f2937' : '#f3f4f6'} },
+      rightPriceScale: { borderVisible:false }, timeScale: { borderVisible:false }, handleScroll:false, handleScale:false,
     });
+    brainConfSeries = brainChart.addAreaSeries({
+      lineColor: '#8b5cf6', topColor: 'rgba(139,92,246,.3)', bottomColor: 'rgba(139,92,246,.02)', lineWidth: 2,
+    });
+    brainConfSeries.setData(d.data);
+    brainChart.timeScale().fitContent();
+    new ResizeObserver(function() { brainChart.applyOptions({width:el.clientWidth}); }).observe(el);
+  });
+
+  fetch('/api/trading/brain/activity').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('brain-activity');
+    var html = '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Learning Activity</div>';
+    if (!d.events.length) { html += '<div style="font-size:11px;color:var(--text-muted)">No learning events yet. Run a scan or close a trade to start learning.</div>'; }
+    d.events.slice(0, 30).forEach(function(e) {
+      html += '<div class="brain-event"><span class="be-type '+e.event_type+'">'+e.event_type+'</span>' +
+        escHtml(e.description.substring(0,120)) +
+        (e.confidence_before != null && e.confidence_after != null ? ' <span style="color:var(--text-muted)">('+Math.round(e.confidence_before*100)+'% &rarr; '+Math.round(e.confidence_after*100)+'%)</span>' : '') +
+        ' <span class="be-date">'+new Date(e.created_at).toLocaleDateString()+'</span></div>';
+    });
+    el.innerHTML = html;
   });
 }
 
@@ -757,6 +854,18 @@ function sendAiChat() {
       appendAiMsg('assistant', d.reply || 'No response.');
     }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
   }
+}
+
+function askLearn(question) {
+  appendAiMsg('user', question);
+  appendAiMsg('assistant', 'Let me explain...');
+  fetch('/api/trading/analyze', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: question })
+  }).then(function(r){return r.json();}).then(function(d) {
+    removeLastAiMsg();
+    appendAiMsg('assistant', d.reply || 'No response.');
+  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
 }
 
 function askSmartPick() {

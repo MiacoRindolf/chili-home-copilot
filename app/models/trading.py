@@ -108,3 +108,17 @@ class MarketSnapshot(Base):
     indicator_data: Optional[str] = Column(Text, nullable=True)  # JSON blob
     future_return_5d: Optional[float] = Column(Float, nullable=True)  # filled later
     future_return_10d: Optional[float] = Column(Float, nullable=True)
+
+
+class LearningEvent(Base):
+    """Tracks every AI learning action for the Brain dashboard."""
+    __tablename__ = "trading_learning_events"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    event_type: str = Column(String(30), nullable=False)  # discovery / update / demotion / review / journal
+    description: str = Column(Text, nullable=False)
+    confidence_before: Optional[float] = Column(Float, nullable=True)
+    confidence_after: Optional[float] = Column(Float, nullable=True)
+    related_insight_id: Optional[int] = Column(Integer, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
