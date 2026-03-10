@@ -12,6 +12,8 @@ from ..deps import get_db, get_identity_ctx
 from ..logger import log_info, new_trace_id
 from ..prompts import load_prompt
 from ..services import trading_service as ts
+from ..services import trading_scheduler
+from ..services import ticker_universe
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
@@ -39,8 +41,22 @@ def _get_trading_prompt() -> str:
 # ── Page ────────────────────────────────────────────────────────────────
 
 @router.get("/trading", response_class=HTMLResponse)
-def trading_page(request: Request, db: Session = Depends(get_db)):
+def trading_page(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
+
+    # Auto-trigger learning cycle on page load if stale (>1 hr since last run)
+    if ts.should_run_learning():
+        from ..db import SessionLocal
+
+        def _bg_learn(user_id):
+            sdb = SessionLocal()
+            try:
+                ts.run_learning_cycle(sdb, user_id, full_universe=True)
+            finally:
+                sdb.close()
+
+        background_tasks.add_task(_bg_learn, ctx["user_id"])
+
     return request.app.state.templates.TemplateResponse(
         "trading.html",
         {
@@ -60,7 +76,10 @@ def api_ohlcv(
     interval: str = Query("1d"),
     period: str = Query("6mo"),
 ):
-    data = ts.fetch_ohlcv(ticker, interval=interval, period=period)
+    try:
+        data = ts.fetch_ohlcv(ticker, interval=interval, period=period)
+    except Exception:
+        data = []
     return JSONResponse({"ok": True, "ticker": ticker.upper(), "data": data})
 
 
@@ -68,7 +87,7 @@ def api_ohlcv(
 def api_quote(ticker: str = Query(...)):
     quote = ts.fetch_quote(ticker)
     if not quote:
-        return JSONResponse({"ok": False, "error": "Ticker not found"}, status_code=404)
+        return JSONResponse({"ok": True, "ticker": ticker.upper(), "price": None, "change": None, "change_pct": None})
     return JSONResponse({"ok": True, **quote})
 
 
@@ -349,6 +368,42 @@ def api_scan_results(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, "results": results})
 
 
+# ── Custom Screener ───────────────────────────────────────────────────
+
+@router.get("/api/trading/screener/presets")
+def api_screener_presets():
+    """List all available preset screening patterns."""
+    presets = []
+    for sid, info in ts.PRESET_SCREENS.items():
+        presets.append({
+            "id": sid,
+            "name": info["name"],
+            "description": info["description"],
+            "conditions": len(info["conditions"]),
+            "confirmations": len(info.get("confirmations", [])),
+        })
+    return JSONResponse({"ok": True, "presets": presets})
+
+
+from pydantic import BaseModel as _BaseModel
+from typing import Optional as _Optional
+
+
+class ScreenRequest(_BaseModel):
+    screen_id: _Optional[str] = None
+    conditions: _Optional[list[dict]] = None
+
+
+@router.post("/api/trading/screener/run")
+def api_run_screener(body: ScreenRequest):
+    """Run a preset or custom screen across the full ticker universe."""
+    result = ts.run_custom_screen(
+        screen_id=body.screen_id,
+        conditions=body.conditions,
+    )
+    return JSONResponse(result)
+
+
 # ── Portfolio ──────────────────────────────────────────────────────────
 
 @router.get("/api/trading/portfolio")
@@ -375,24 +430,23 @@ def api_take_snapshots(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Manually trigger market snapshots (also runs on schedule)."""
+    """Trigger a full learning cycle (replaces the old snapshot-only endpoint)."""
     ctx = get_identity_ctx(request, db)
+
+    if ts.get_learning_status()["running"]:
+        return JSONResponse({"ok": True, "message": "Learning cycle already running"})
 
     from ..db import SessionLocal
 
-    def _bg_snapshot(user_id):
+    def _bg_learn(user_id):
         sdb = SessionLocal()
         try:
-            count = ts.take_all_snapshots(sdb, user_id)
-            ts.backfill_future_returns(sdb)
-            ts.mine_patterns(sdb, user_id)
-            ts.daily_market_journal(sdb, user_id)
-            ts.check_signal_events(sdb, user_id)
+            ts.run_learning_cycle(sdb, user_id, full_universe=True)
         finally:
             sdb.close()
 
-    background_tasks.add_task(_bg_snapshot, ctx["user_id"])
-    return JSONResponse({"ok": True, "message": "Snapshot + learning + journaling started in background"})
+    background_tasks.add_task(_bg_learn, ctx["user_id"])
+    return JSONResponse({"ok": True, "message": "Full learning cycle started in background"})
 
 
 # ── Brain Dashboard ───────────────────────────────────────────────────
@@ -433,3 +487,128 @@ def api_weekly_review(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     review = ts.weekly_performance_review(db, ctx["user_id"])
     return JSONResponse({"ok": True, "review": review or "No trades to review yet."})
+
+
+# ── Full Universe Scan ─────────────────────────────────────────────────
+
+@router.post("/api/trading/scan/full")
+def api_full_scan(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Trigger a full market learning cycle (scan entire universe) in background."""
+    ctx = get_identity_ctx(request, db)
+    status = ts.get_learning_status()
+
+    if status["running"]:
+        return JSONResponse({
+            "ok": False,
+            "message": "Learning cycle already in progress",
+            "status": status,
+        })
+
+    from ..db import SessionLocal
+
+    def _bg_full_learn(user_id):
+        sdb = SessionLocal()
+        try:
+            ts.run_learning_cycle(sdb, user_id, full_universe=True)
+        finally:
+            sdb.close()
+
+    background_tasks.add_task(_bg_full_learn, ctx["user_id"])
+    return JSONResponse({
+        "ok": True,
+        "message": "Full market learning cycle started in background",
+        "universe": ticker_universe.get_ticker_count(),
+    })
+
+
+@router.get("/api/trading/scan/status")
+def api_scan_status():
+    """Live status of the current or last scan."""
+    return JSONResponse({
+        "ok": True,
+        "scan": ts.get_scan_status(),
+        "learning": ts.get_learning_status(),
+        "scheduler": trading_scheduler.get_scheduler_info(),
+    })
+
+
+@router.get("/api/trading/universe")
+def api_ticker_universe():
+    """Info about the ticker universe size."""
+    counts = ticker_universe.get_ticker_count()
+    return JSONResponse({"ok": True, **counts})
+
+
+@router.post("/api/trading/universe/refresh")
+def api_refresh_universe():
+    """Force refresh the ticker cache from SEC + CoinGecko."""
+    counts = ticker_universe.refresh_ticker_cache()
+    return JSONResponse({"ok": True, "message": "Ticker cache refreshed", **counts})
+
+
+@router.post("/api/trading/learn/trigger")
+def api_trigger_learning(background_tasks: BackgroundTasks, request: Request, db: Session = Depends(get_db)):
+    """Manually trigger a learning cycle."""
+    ctx = get_identity_ctx(request, db)
+
+    if ts.get_learning_status()["running"]:
+        return JSONResponse({"ok": False, "message": "Already running"})
+
+    from ..db import SessionLocal
+
+    def _bg(user_id):
+        sdb = SessionLocal()
+        try:
+            ts.run_learning_cycle(sdb, user_id, full_universe=True)
+        finally:
+            sdb.close()
+
+    background_tasks.add_task(_bg, ctx["user_id"])
+    return JSONResponse({"ok": True, "message": "Learning cycle triggered"})
+
+
+@router.post("/api/trading/learn/deep-study")
+def api_deep_study(request: Request, db: Session = Depends(get_db)):
+    """Intensive AI learning: mine patterns + generate a reflection report."""
+    ctx = get_identity_ctx(request, db)
+    result = ts.deep_study(db, ctx["user_id"])
+    return JSONResponse(result)
+
+
+@router.get("/api/trading/learn/patterns")
+def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
+    """Get all learned patterns with full detail for the Brain dashboard."""
+    ctx = get_identity_ctx(request, db)
+    from ..models.trading import TradingInsight
+    all_insights = db.query(TradingInsight).filter(
+        TradingInsight.user_id == ctx["user_id"],
+    ).order_by(TradingInsight.confidence.desc()).limit(50).all()
+
+    active = []
+    demoted = []
+    for ins in all_insights:
+        entry = {
+            "id": ins.id,
+            "pattern": ins.pattern_description,
+            "confidence": round(ins.confidence * 100, 1),
+            "evidence_count": ins.evidence_count,
+            "active": ins.active,
+            "created_at": ins.created_at.isoformat(),
+            "last_seen": ins.last_seen.isoformat() if ins.last_seen else None,
+        }
+        if ins.active:
+            active.append(entry)
+        else:
+            demoted.append(entry)
+
+    return JSONResponse({
+        "ok": True,
+        "active": active,
+        "demoted": demoted,
+        "total_active": len(active),
+        "total_demoted": len(demoted),
+    })

@@ -1,4 +1,5 @@
 """CHILI Home Copilot - FastAPI application entry point."""
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -12,11 +13,20 @@ from .migrations import run_migrations
 from .routers import admin, chat, health_routes, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import MarketplaceModule
+from .services.trading_scheduler import start_scheduler, stop_scheduler
 
 Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
-app = FastAPI(title="CHILI Home Copilot")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    start_scheduler()
+    yield
+    stop_scheduler()
+
+
+app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)
 
 # CORS for web and mobile clients (development-friendly defaults).
 app.add_middleware(
