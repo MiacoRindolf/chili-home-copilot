@@ -14,6 +14,7 @@ from ..prompts import load_prompt
 from ..services import trading_service as ts
 from ..services import trading_scheduler
 from ..services import ticker_universe
+from ..services import broker_service
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
@@ -58,9 +59,8 @@ def trading_page(request: Request, background_tasks: BackgroundTasks, db: Sessio
         background_tasks.add_task(_bg_learn, ctx["user_id"])
 
     return request.app.state.templates.TemplateResponse(
-        "trading.html",
+        request, "trading.html",
         {
-            "request": request,
             "title": "Trading",
             "is_guest": ctx["is_guest"],
             "user_name": ctx["user_name"],
@@ -546,6 +546,13 @@ def api_brain_activity(request: Request, db: Session = Depends(get_db)):
     ]})
 
 
+@router.get("/api/trading/brain/thesis")
+def api_brain_thesis(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    thesis = ts.generate_market_thesis(db, ctx["user_id"])
+    return JSONResponse({"ok": True, **thesis})
+
+
 @router.post("/api/trading/learn/weekly-review")
 def api_weekly_review(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
@@ -646,6 +653,7 @@ def api_deep_study(request: Request, db: Session = Depends(get_db)):
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     """Get all learned patterns with full detail for the Brain dashboard."""
+    import re
     ctx = get_identity_ctx(request, db)
     from ..models.trading import TradingInsight
     all_insights = db.query(TradingInsight).filter(
@@ -655,12 +663,34 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     active = []
     demoted = []
     for ins in all_insights:
+        desc = ins.pattern_description or ""
+        # Extract signal type from pattern text
+        desc_lower = desc.lower()
+        if any(w in desc_lower for w in ("bullish", "oversold", "buy", "uptrend", "gained", "above")):
+            signal_type = "bullish"
+        elif any(w in desc_lower for w in ("bearish", "overbought", "sell", "downtrend", "lost", "below")):
+            signal_type = "bearish"
+        else:
+            signal_type = "neutral"
+        # Extract win rate and avg return from description if present
+        win_match = re.search(r"(\d+(?:\.\d+)?)%\s*win", desc)
+        ret_match = re.search(r"([+-]?\d+(?:\.\d+)?)%\s*(?:avg|average|return)", desc)
+        ticker_match = re.findall(r"\b([A-Z]{1,5}(?:-USD)?)\b", desc)
+        tickers_found = [t for t in ticker_match if len(t) >= 2 and t not in {
+            "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "AND", "THE", "FOR",
+            "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
+        }][:3]
+
         entry = {
             "id": ins.id,
-            "pattern": ins.pattern_description,
+            "pattern": desc,
             "confidence": round(ins.confidence * 100, 1),
             "evidence_count": ins.evidence_count,
             "active": ins.active,
+            "signal_type": signal_type,
+            "win_rate": float(win_match.group(1)) if win_match else None,
+            "avg_return": float(ret_match.group(1)) if ret_match else None,
+            "example_tickers": tickers_found,
             "created_at": ins.created_at.isoformat(),
             "last_seen": ins.last_seen.isoformat() if ins.last_seen else None,
         }
@@ -676,3 +706,73 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         "total_active": len(active),
         "total_demoted": len(demoted),
     })
+
+
+# ── Broker (Robinhood) endpoints ──────────────────────────────────────
+
+
+@router.get("/api/trading/broker/status")
+async def api_broker_status():
+    """Connection status: configured, connected, username, last login."""
+    return JSONResponse({"ok": True, **broker_service.get_connection_status()})
+
+
+@router.post("/api/trading/broker/connect")
+async def api_broker_connect():
+    """Initiate Robinhood connection. If TOTP is configured, connects immediately.
+    Otherwise triggers SMS MFA and returns status 'sms_sent'."""
+    result = broker_service.login_step1_sms()
+    status = broker_service.get_connection_status()
+    return JSONResponse({"ok": result["status"] == "connected", **result, **status})
+
+
+@router.post("/api/trading/broker/verify")
+async def api_broker_verify(request: Request):
+    """Submit the SMS MFA code to complete Robinhood login."""
+    body = await request.json()
+    code = body.get("code", "")
+    result = broker_service.login_step2_verify(code)
+    status = broker_service.get_connection_status()
+    return JSONResponse({"ok": result["status"] == "connected", **result, **status})
+
+
+@router.get("/api/trading/broker/poll")
+async def api_broker_poll():
+    """Poll for app-based approval status."""
+    result = broker_service.poll_app_approval()
+    status = broker_service.get_connection_status()
+    return JSONResponse({"ok": result["status"] == "approved", **result, **status})
+
+
+@router.get("/api/trading/broker/positions")
+async def api_broker_positions():
+    """Fetch live stock + crypto positions from Robinhood."""
+    if not broker_service.is_connected():
+        return JSONResponse({"ok": False, "error": "Not connected to Robinhood", "positions": []})
+    positions = broker_service.get_positions()
+    crypto = broker_service.get_crypto_positions()
+    return JSONResponse({"ok": True, "positions": positions + crypto})
+
+
+@router.get("/api/trading/broker/portfolio")
+async def api_broker_portfolio():
+    """Account value, buying power, cash."""
+    if not broker_service.is_connected():
+        return JSONResponse({"ok": False, "error": "Not connected to Robinhood", "portfolio": {}})
+    portfolio = broker_service.get_portfolio()
+    return JSONResponse({"ok": True, "portfolio": portfolio})
+
+
+@router.post("/api/trading/broker/sync")
+async def api_broker_sync(
+    bg: BackgroundTasks,
+    db: Session = Depends(get_db),
+    identity: dict = Depends(get_identity_ctx),
+):
+    """Trigger position sync from Robinhood to local DB."""
+    if not broker_service.is_connected():
+        return JSONResponse({"ok": False, "error": "Not connected to Robinhood"})
+
+    user_id = identity.get("user_id")
+    result = broker_service.sync_positions_to_db(db, user_id)
+    return JSONResponse({"ok": True, **result})

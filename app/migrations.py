@@ -82,6 +82,18 @@ def _migration_007_backfill_project_members(conn) -> None:
         conn.commit()
 
 
+def _migration_008_trade_broker_columns(conn) -> None:
+    if "trading_trades" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_trades")
+    if "broker_source" not in cols:
+        conn.execute(text("ALTER TABLE trading_trades ADD COLUMN broker_source TEXT"))
+        conn.commit()
+    if "broker_order_id" not in cols:
+        conn.execute(text("ALTER TABLE trading_trades ADD COLUMN broker_order_id TEXT"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -91,6 +103,7 @@ MIGRATIONS = [
     ("005_plan_projects_key", _migration_005_plan_projects_key),
     ("006_plan_tasks_parent_reporter", _migration_006_plan_tasks_parent_reporter),
     ("007_backfill_project_members", _migration_007_backfill_project_members),
+    ("008_trade_broker_columns", _migration_008_trade_broker_columns),
 ]
 
 

@@ -22,6 +22,9 @@ pyrate-limiter>=3.0.0
 ta>=0.11.0
 backtesting>=0.3.3
 apscheduler>=3.10.0
+pyyaml>=6.0
+robin-stocks>=3.0.0
+pyotp>=2.9.0
 
 # dev / test
 pytest==9.0.2

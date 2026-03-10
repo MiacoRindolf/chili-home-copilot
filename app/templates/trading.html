@@ -89,9 +89,29 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .t-chart-area { flex: 1; position: relative; min-height: 200px; }
 #main-chart { width: 100%; height: 100%; }
 
+/* ── Resize handle ──────────────────────────────── */
+.t-resize-handle {
+  height: 6px; cursor: row-resize; background: var(--bg-header); border-top: 1px solid var(--border);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; user-select: none;
+  transition: background .15s;
+}
+.t-resize-handle:hover, .t-resize-handle.dragging { background: rgba(139,92,246,.15); }
+.t-resize-handle::after { content: ''; width: 30px; height: 3px; border-radius: 2px; background: var(--border); }
+
+/* ── Brain full-view mode ──────────────────────────── */
+.t-main.brain-active .t-chart-area,
+.t-main.brain-active .t-resize-handle,
+.t-main.brain-active .ind-panel,
+.t-main.brain-active .t-bottom { display: none !important; }
+#tab-brain-full {
+  display: none; flex: 1; overflow-y: auto; padding: 20px 24px; background: var(--bg-header);
+  flex-direction: column; gap: 0;
+}
+.t-main.brain-active #tab-brain-full { display: flex; }
+
 /* ── Bottom tabs ─────────────────────────────────── */
 .t-bottom {
-  height: 260px; min-height: 140px; border-top: 1px solid var(--border);
+  height: 260px; min-height: 140px; border-top: none;
   display: flex; flex-direction: column; background: var(--bg-header);
 }
 .t-tabs { display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch; border-bottom: 1px solid var(--border); scrollbar-width: none; }
@@ -142,9 +162,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .t-ai-header .close-ai { display: none; margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; padding: 0 4px; }
 .t-ai-header .clear-chat { margin-left: auto; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); cursor: pointer; font-size: 10px; padding: 3px 8px; transition: all .15s; }
 .t-ai-header .clear-chat:hover { color: #ef4444; border-color: #ef4444; }
-.ai-quick-actions { padding: 6px 10px; display: flex; gap: 6px; }
+.ai-quick-actions { padding: 6px 10px; display: flex; gap: 6px; flex-wrap: wrap; }
 .ai-quick-actions button {
-  flex: 1; padding: 8px 6px; border: none; border-radius: 8px; cursor: pointer;
+  flex: 1; min-width: 0; padding: 8px 6px; border: none; border-radius: 8px; cursor: pointer;
   font-size: 11px; font-weight: 700; color: #fff; transition: transform .1s;
 }
 .ai-quick-actions button:active { transform: scale(.96); }
@@ -408,23 +428,110 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 #bt-chart-area { width: 100%; height: 100px; margin-top: 6px; }
 
 /* ── Brain dashboard ───────────────────────────── */
-.brain-kpis { display: flex; gap: 6px; flex-wrap: wrap; }
-.brain-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; text-align: center; min-width: 70px; flex:1; }
-.brain-kpi .bk-val { font-size: 16px; font-weight: 700; }
-.brain-pulse { width:10px;height:10px;border-radius:50%;background:#4ade80;animation:bpulse 1.2s infinite ease-in-out; }
-@keyframes bpulse { 0%,100% { opacity:1;transform:scale(1); } 50% { opacity:.4;transform:scale(.8); } }
+.brain-section { margin-bottom: 12px; }
+.brain-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 6px; display: flex; align-items: center; gap: 6px; }
+.brain-section-title .bs-icon { font-size: 14px; }
+
+/* Explainer */
+.brain-explainer { background: linear-gradient(135deg, rgba(139,92,246,.08), rgba(99,102,241,.06)); border: 1px solid rgba(139,92,246,.2); border-radius: 10px; padding: 12px 14px; font-size: 12px; line-height: 1.6; color: var(--text); }
+.brain-explainer-toggle { background: none; border: none; cursor: pointer; font-size: 11px; color: #8b5cf6; font-weight: 600; padding: 0; }
+.brain-pipeline-diagram { display: flex; align-items: center; gap: 4px; margin-top: 10px; flex-wrap: wrap; }
+.brain-pipe-step { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 8px; border-radius: 8px; background: var(--bg); border: 1px solid var(--border); min-width: 64px; text-align: center; }
+.brain-pipe-step .bps-icon { font-size: 16px; }
+.brain-pipe-step .bps-label { font-size: 9px; font-weight: 600; color: var(--text-secondary); }
+.brain-pipe-arrow { color: var(--text-muted); font-size: 14px; }
+.brain-pipe-step.active { border-color: #8b5cf6; background: rgba(139,92,246,.08); }
+.brain-pipe-step.done { border-color: #22c55e; background: rgba(34,197,94,.06); }
+
+/* Thesis card */
+.brain-thesis-card { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; position: relative; overflow: hidden; }
+.brain-thesis-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+.brain-thesis-card.bullish::before { background: linear-gradient(90deg, #22c55e, #4ade80); }
+.brain-thesis-card.bearish::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+.brain-thesis-card.neutral::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.thesis-stance { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.thesis-stance.bullish { background: rgba(34,197,94,.15); color: #16a34a; }
+.thesis-stance.bearish { background: rgba(239,68,68,.15); color: #dc2626; }
+.thesis-stance.neutral { background: rgba(245,158,11,.15); color: #d97706; }
+.thesis-gauge { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; position: relative; overflow: hidden; }
+.thesis-gauge-fill { height: 100%; border-radius: 3px; transition: width .6s ease; }
+.thesis-text { font-size: 12px; line-height: 1.6; margin-top: 8px; color: var(--text); }
+
+/* KPI gauges */
+.brain-kpis { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.brain-kpi { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 10px; text-align: center; position: relative; }
+.brain-kpi .bk-val { font-size: 20px; font-weight: 800; }
 .brain-kpi .bk-val.good { color: #22c55e; }
 .brain-kpi .bk-val.warn { color: #f59e0b; }
-.brain-kpi .bk-lbl { font-size: 10px; color: var(--text-secondary); }
-.brain-event { padding: 3px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
-.brain-event .be-type { font-weight: 600; text-transform: uppercase; font-size: 10px; padding: 1px 5px; border-radius: 4px; margin-right: 4px; }
-.be-type.discovery { background: #dcfce7; color: #16a34a; }
-.be-type.update { background: #dbeafe; color: #2563eb; }
-.be-type.demotion { background: #fee2e2; color: #dc2626; }
-.be-type.review { background: #fef9c3; color: #a16207; }
-.be-type.journal { background: #f3e8ff; color: #7c3aed; }
-.be-type.scan { background: #e0e7ff; color: #4338ca; }
-.be-type.error { background: #fee2e2; color: #dc2626; }
+.brain-kpi .bk-val.danger { color: #ef4444; }
+.brain-kpi .bk-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.brain-kpi .bk-trend { font-size: 10px; margin-top: 2px; }
+.brain-kpi .bk-trend.up { color: #22c55e; }
+.brain-kpi .bk-trend.down { color: #ef4444; }
+.brain-kpi .bk-trend.flat { color: var(--text-muted); }
+
+/* Ring chart for accuracy */
+.brain-ring { width: 60px; height: 60px; margin: 0 auto 4px; position: relative; }
+.brain-ring svg { transform: rotate(-90deg); }
+.brain-ring .ring-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; }
+
+/* Live learning pipeline */
+.brain-pulse { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; animation: bpulse 1.2s infinite ease-in-out; }
+@keyframes bpulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.4; transform:scale(.8); } }
+.brain-live-pipeline { display: flex; align-items: center; gap: 2px; flex-wrap: wrap; padding: 8px 0; }
+.blp-step { display: flex; align-items: center; gap: 4px; padding: 4px 8px; border-radius: 6px; font-size: 10px; font-weight: 600; background: var(--bg); border: 1px solid var(--border); white-space: nowrap; }
+.blp-step.running { background: rgba(139,92,246,.1); border-color: #8b5cf6; color: #8b5cf6; animation: bpulse 1.2s infinite ease-in-out; }
+.blp-step.done { background: rgba(34,197,94,.08); border-color: #22c55e; color: #22c55e; }
+.blp-step.pending { opacity: .5; }
+.blp-arrow { color: var(--text-muted); font-size: 10px; }
+
+/* Pattern cards enhanced */
+.pattern-card { padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 6px; background: var(--bg); transition: border-color .2s; }
+.pattern-card:hover { border-color: var(--accent); }
+.pattern-card .pc-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.pattern-card .pc-signal { padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.pc-signal.bullish { background: rgba(34,197,94,.15); color: #16a34a; }
+.pc-signal.bearish { background: rgba(239,68,68,.15); color: #dc2626; }
+.pc-signal.neutral { background: rgba(107,114,128,.15); color: #6b7280; }
+.pattern-card .pc-desc { font-size: 11px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.pattern-card .pc-stats { display: flex; gap: 10px; font-size: 10px; color: var(--text-muted); margin-top: 4px; flex-wrap: wrap; }
+.pattern-card .pc-stats span { display: flex; align-items: center; gap: 3px; }
+.pattern-card .pc-tickers { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.pattern-card .pc-ticker { padding: 1px 6px; border-radius: 4px; background: rgba(139,92,246,.1); color: #8b5cf6; font-size: 9px; font-weight: 600; cursor: pointer; }
+.pattern-bar-bg { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; }
+.pattern-bar { height: 100%; border-radius: 2px; transition: width .4s; }
+.pattern-meta { display: flex; gap: 8px; align-items: center; color: var(--text-muted); font-size: 10px; margin-top: 2px; }
+
+/* Reflection content */
+#brain-reflection-content h3 { font-size: 12px; font-weight: 700; margin: 8px 0 4px; color: var(--text); }
+#brain-reflection-content p { margin: 3px 0; }
+#brain-reflection-content ul, #brain-reflection-content ol { margin: 3px 0; padding-left: 16px; }
+#brain-reflection-content li { margin: 2px 0; }
+
+/* Activity timeline */
+.brain-timeline { max-height: 200px; overflow-y: auto; }
+.bt-date-group { margin-bottom: 8px; }
+.bt-date-label { font-size: 10px; font-weight: 700; color: var(--text-muted); padding: 4px 0; border-bottom: 1px solid var(--border); margin-bottom: 4px; text-transform: uppercase; letter-spacing: .5px; }
+.brain-event { padding: 4px 0; display: flex; align-items: flex-start; gap: 6px; font-size: 11px; }
+.brain-event .be-icon { width: 18px; height: 18px; border-radius: 50%; display: flex; align-items: center; justify-content: center; font-size: 10px; flex-shrink: 0; }
+.be-icon.discovery { background: #dcfce7; color: #16a34a; }
+.be-icon.update { background: #dbeafe; color: #2563eb; }
+.be-icon.demotion { background: #fee2e2; color: #dc2626; }
+.be-icon.review { background: #fef9c3; color: #a16207; }
+.be-icon.journal { background: #f3e8ff; color: #7c3aed; }
+.be-icon.scan { background: #e0e7ff; color: #4338ca; }
+.be-icon.error { background: #fee2e2; color: #dc2626; }
+.be-icon.reflection { background: #ede9fe; color: #7c3aed; }
+.brain-event .be-body { flex: 1; min-width: 0; }
+.brain-event .be-desc { color: var(--text); line-height: 1.4; }
+.brain-event .be-desc.expandable { cursor: pointer; }
+.brain-event .be-desc.expandable:hover { color: var(--accent); }
+.brain-event .be-time { font-size: 9px; color: var(--text-muted); }
+.brain-event .be-conf { font-size: 10px; color: var(--text-muted); }
+.brain-filter-bar { display: flex; gap: 4px; margin-bottom: 6px; flex-wrap: wrap; }
+.brain-filter-btn { padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 600; border: 1px solid var(--border); background: var(--bg); cursor: pointer; color: var(--text-muted); transition: all .15s; }
+.brain-filter-btn.active { background: #8b5cf6; color: #fff; border-color: #8b5cf6; }
+.brain-filter-btn:hover { border-color: #8b5cf6; }
 
 /* ── Screener results ──────────────────────────────── */
 .scr-row { display: grid; grid-template-columns: 80px 60px 45px 50px 60px 60px 1fr; gap: 4px; align-items: center; padding: 5px 6px; font-size: 11px; border-bottom: 1px solid var(--border); cursor: pointer; transition: background .15s; }
@@ -505,10 +612,16 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .signal-card { min-width: 160px; padding: 8px; }
   .signal-card .sc-ticker { font-size: 13px; }
 
-  /* Brain KPIs wrap */
-  .brain-kpis { gap: 4px; }
-  .brain-kpi { min-width: 60px; padding: 4px 6px; }
-  .brain-kpi .bk-val { font-size: 14px; }
+  /* Brain layout responsive */
+  .brain-top-grid, .brain-bottom-grid { grid-template-columns: 1fr !important; }
+  .brain-kpis { grid-template-columns: repeat(2, 1fr); gap: 4px; }
+  .brain-kpi { padding: 6px; }
+  .brain-kpi .bk-val { font-size: 16px; }
+  .brain-pipeline-diagram { gap: 2px; }
+  .brain-pipe-step { min-width: 50px; padding: 4px 6px; }
+  .brain-live-pipeline { gap: 1px; }
+  .blp-step { font-size: 9px; padding: 3px 5px; }
+  #tab-brain-full { padding: 12px 14px !important; }
 
   /* Portfolio grid 2 cols */
   .portfolio-grid { grid-template-columns: 1fr 1fr; }
@@ -541,6 +654,151 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .fab-ai { width: 46px; height: 46px; font-size: 20px; bottom: 12px; right: 12px; }
   .portfolio-grid { grid-template-columns: 1fr; }
 }
+
+/* ═══════════════════════════════════════════════════
+   BROKER STATUS & TRADE PROPOSALS
+   ═══════════════════════════════════════════════════ */
+.broker-status {
+  display: flex; align-items: center; gap: 6px;
+  padding: 8px 10px; margin: 0 0 4px;
+  border-radius: 8px; font-size: 11px;
+  background: var(--bg); border: 1px solid var(--border);
+  cursor: pointer; transition: all 0.2s;
+}
+.broker-status:hover { border-color: var(--accent); }
+.broker-dot {
+  width: 8px; height: 8px; border-radius: 50%;
+  flex-shrink: 0;
+}
+.broker-dot.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e88; }
+.broker-dot.disconnected { background: #6b7280; }
+.broker-label { flex: 1; font-weight: 500; }
+.broker-sub { font-size: 10px; color: var(--text-secondary); }
+.broker-sync-btn {
+  background: none; border: 1px solid var(--border); border-radius: 4px;
+  padding: 2px 6px; font-size: 10px; color: var(--text-secondary);
+  cursor: pointer;
+}
+.broker-sync-btn:hover { border-color: var(--accent); color: var(--text); }
+
+/* SMS Code Dialog */
+.broker-sms-dialog {
+  display: none;
+  position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+  z-index: 9999;
+  background: rgba(0,0,0,0.6);
+  backdrop-filter: blur(4px);
+  align-items: center; justify-content: center;
+}
+.broker-sms-dialog.visible { display: flex; }
+.broker-sms-card {
+  background: var(--card); border: 1px solid var(--border);
+  border-radius: 16px; padding: 28px 24px; width: 340px; max-width: 90vw;
+  text-align: center; box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+.broker-sms-card h3 { margin: 0 0 6px; font-size: 18px; }
+.broker-sms-card p { margin: 0 0 16px; font-size: 13px; color: var(--text-secondary); }
+.broker-sms-card .sms-code-input {
+  width: 100%; padding: 12px; font-size: 24px; text-align: center;
+  letter-spacing: 8px; font-weight: 700;
+  border: 2px solid var(--border); border-radius: 10px;
+  background: var(--bg); color: var(--text);
+  outline: none; transition: border-color 0.2s;
+}
+.broker-sms-card .sms-code-input:focus { border-color: #00c805; }
+.broker-sms-card .sms-actions {
+  display: flex; gap: 8px; margin-top: 16px;
+}
+.broker-sms-card .sms-actions button {
+  flex: 1; padding: 10px; border-radius: 10px; font-weight: 600;
+  font-size: 14px; cursor: pointer; border: none; transition: all 0.2s;
+}
+.broker-sms-card .sms-btn-verify {
+  background: linear-gradient(135deg, #00c805, #00a804); color: #fff;
+}
+.broker-sms-card .sms-btn-verify:hover { filter: brightness(1.1); }
+.broker-sms-card .sms-btn-verify:disabled { opacity: 0.5; cursor: not-allowed; }
+.broker-sms-card .sms-btn-cancel {
+  background: var(--bg); border: 1px solid var(--border) !important; color: var(--text);
+}
+.broker-sms-card .sms-error {
+  color: #ef4444; font-size: 12px; margin-top: 8px; min-height: 18px;
+}
+.broker-sms-card .sms-icon {
+  font-size: 40px; margin-bottom: 8px;
+}
+
+/* Robinhood portfolio section in Portfolio tab */
+.rh-portfolio-section {
+  background: linear-gradient(135deg, rgba(0,200,5,0.05), rgba(0,200,5,0.02));
+  border: 1px solid rgba(0,200,5,0.2); border-radius: 10px;
+  padding: 10px 12px; margin-bottom: 10px;
+}
+.rh-portfolio-section h4 {
+  margin: 0 0 6px; font-size: 12px; color: #22c55e;
+  display: flex; align-items: center; gap: 6px;
+}
+.rh-positions-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.rh-positions-table th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 500; }
+.rh-positions-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
+.rh-positions-table .rh-pnl-pos { color: #22c55e; }
+.rh-positions-table .rh-pnl-neg { color: #ef4444; }
+
+/* Trade Proposal Cards in chat */
+.trade-proposal {
+  background: linear-gradient(135deg, var(--bg), rgba(99,102,241,0.08));
+  border: 1px solid rgba(99,102,241,0.3); border-radius: 12px;
+  padding: 12px; margin: 8px 0; width: 100%; max-width: 380px;
+}
+.trade-proposal .tp-header {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 8px; font-weight: 600;
+}
+.trade-proposal .tp-ticker {
+  font-size: 16px; font-weight: 700;
+  background: linear-gradient(135deg, #6366f1, #8b5cf6);
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.trade-proposal .tp-direction {
+  font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 600;
+}
+.trade-proposal .tp-direction.buy { background: rgba(34,197,94,0.15); color: #22c55e; }
+.trade-proposal .tp-direction.sell { background: rgba(239,68,68,0.15); color: #ef4444; }
+.trade-proposal .tp-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 4px;
+  font-size: 11px; margin-bottom: 10px;
+}
+.trade-proposal .tp-grid .tp-item { padding: 4px 0; }
+.trade-proposal .tp-grid .tp-label { color: var(--text-secondary); font-size: 10px; }
+.trade-proposal .tp-grid .tp-value { font-weight: 600; }
+.trade-proposal .tp-confidence {
+  font-size: 11px; margin-bottom: 8px;
+  display: flex; align-items: center; gap: 6px;
+}
+.trade-proposal .tp-conf-bar {
+  flex: 1; height: 4px; background: var(--border); border-radius: 2px; overflow: hidden;
+}
+.trade-proposal .tp-conf-fill { height: 100%; border-radius: 2px; background: linear-gradient(90deg, #f59e0b, #22c55e); }
+.trade-proposal .tp-actions {
+  display: flex; gap: 6px; margin-top: 4px;
+}
+.trade-proposal .tp-actions button {
+  flex: 1; padding: 6px 8px; border-radius: 6px;
+  font-size: 11px; font-weight: 600; cursor: pointer;
+  border: none; transition: all 0.2s;
+}
+.trade-proposal .tp-btn-confirm {
+  background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff;
+}
+.trade-proposal .tp-btn-confirm:hover { filter: brightness(1.1); }
+.trade-proposal .tp-btn-reject {
+  background: var(--bg); border: 1px solid var(--border) !important; color: var(--text);
+}
+.trade-proposal .tp-btn-reject:hover { border-color: #ef4444 !important; color: #ef4444; }
+.trade-proposal .tp-btn-rh {
+  background: linear-gradient(135deg, #00c805, #00a804); color: #fff;
+}
+.trade-proposal .tp-btn-rh:hover { filter: brightness(1.1); }
 </style>
 {% endblock %}
 
@@ -565,6 +823,15 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 <div class="t-body">
   <!-- Watchlist sidebar -->
   <div class="t-sidebar">
+    <!-- Robinhood connection status -->
+    <div class="broker-status" id="broker-status" onclick="connectBroker()" title="Click to connect/refresh Robinhood">
+      <span class="broker-dot disconnected" id="broker-dot"></span>
+      <div>
+        <div class="broker-label" id="broker-label">Robinhood</div>
+        <div class="broker-sub" id="broker-sub">Not configured</div>
+      </div>
+      <button class="broker-sync-btn" id="broker-sync-btn" onclick="event.stopPropagation();syncBroker()" style="display:none">Sync</button>
+    </div>
     <h3>Watchlist</h3>
     <div class="wl-search">
       <input type="text" id="wl-input" placeholder="Add ticker..." />
@@ -624,6 +891,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <div id="main-chart"></div>
     </div>
 
+    <!-- Resize handle (between chart and bottom panel) -->
+    <div class="t-resize-handle" id="resize-handle"></div>
+
     <!-- Bottom tabs -->
     <div class="t-bottom">
       <div class="t-tabs">
@@ -659,6 +929,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
       <!-- Portfolio -->
       <div class="t-tab-content" id="tab-portfolio">
+        <!-- Robinhood live positions -->
+        <div id="rh-portfolio-section" class="rh-portfolio-section" style="display:none">
+          <h4><span style="font-size:14px">&#x1F7E2;</span> Robinhood Live Portfolio <button class="broker-sync-btn" onclick="syncBroker()" style="margin-left:auto">Sync Now</button></h4>
+          <div id="rh-portfolio-summary"></div>
+          <div id="rh-positions-list"></div>
+        </div>
+        <!-- CHILI tracked portfolio -->
         <div class="portfolio-grid" id="portfolio-grid"></div>
         <div id="portfolio-positions"></div>
       </div>
@@ -704,55 +981,118 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <div class="t-tab-content" id="tab-stats">
         <div class="stats-grid" id="stats-grid"></div>
       </div>
-      <!-- AI Brain -->
-      <div class="t-tab-content" id="tab-brain" style="overflow-y:auto;max-height:100%">
-        <!-- Learning Status Banner -->
-        <div id="brain-learning-status" style="display:none;padding:8px 12px;margin-bottom:8px;border-radius:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;font-size:12px">
-          <div style="display:flex;align-items:center;gap:8px">
-            <div class="brain-pulse"></div>
-            <strong id="brain-learning-phase">Learning...</strong>
-            <span id="brain-learning-step" style="opacity:.8"></span>
-            <span style="margin-left:auto" id="brain-learning-progress"></span>
+    </div>
+
+    <!-- AI Brain (full-height, outside .t-bottom) -->
+    <div id="tab-brain-full">
+      <!-- Back to chart button -->
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:12px">
+        <button onclick="switchTabByName('signals')" style="padding:5px 12px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);cursor:pointer;font-size:11px;font-weight:600">&#x2190; Back to Chart</button>
+        <div style="font-size:16px;font-weight:800;color:var(--text)">🧠 CHILI's AI Brain</div>
+        <div style="flex:1"></div>
+        <button onclick="askBrainExplain()" style="padding:5px 12px;border:none;border-radius:6px;background:linear-gradient(135deg,#6366f1,#8b5cf6);color:#fff;cursor:pointer;font-size:11px;font-weight:600">💬 Ask AI to Explain</button>
+      </div>
+
+      <!-- A1: What is CHILI's Brain? -->
+      <div class="brain-section" id="brain-explainer-section">
+        <div style="display:flex;align-items:center;justify-content:space-between">
+          <div class="brain-section-title"><span class="bs-icon">🧠</span> What is CHILI's Brain?</div>
+          <button class="brain-explainer-toggle" onclick="toggleBrainExplainer()">Hide</button>
+        </div>
+        <div class="brain-explainer" id="brain-explainer-body">
+          <div>CHILI constantly scans thousands of stocks and crypto, records indicator snapshots, then checks days later if prices went up or down. Over time, it discovers which indicator combinations (including fundamentals like P/E, margins, and growth) predict profitable trades — and uses those patterns to give you smarter advice.</div>
+          <div class="brain-pipeline-diagram">
+            <div class="brain-pipe-step"><span class="bps-icon">🔍</span><span class="bps-label">Scan Market</span></div>
+            <span class="brain-pipe-arrow">→</span>
+            <div class="brain-pipe-step"><span class="bps-icon">📸</span><span class="bps-label">Snapshots</span></div>
+            <span class="brain-pipe-arrow">→</span>
+            <div class="brain-pipe-step"><span class="bps-icon">⏳</span><span class="bps-label">Wait 5 Days</span></div>
+            <span class="brain-pipe-arrow">→</span>
+            <div class="brain-pipe-step"><span class="bps-icon">📊</span><span class="bps-label">Check Results</span></div>
+            <span class="brain-pipe-arrow">→</span>
+            <div class="brain-pipe-step"><span class="bps-icon">💡</span><span class="bps-label">Learn Patterns</span></div>
           </div>
-          <div style="height:3px;background:rgba(255,255,255,.2);border-radius:2px;margin-top:6px">
-            <div id="brain-progress-bar" style="height:100%;background:#fff;border-radius:2px;transition:width .3s"></div>
+        </div>
+      </div>
+
+      <!-- A3: Live Learning Pipeline -->
+      <div class="brain-section" id="brain-pipeline-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">⚡</span> Learning In Progress</div>
+        <div class="brain-live-pipeline" id="brain-pipeline-steps"></div>
+        <div style="height:3px;background:var(--border);border-radius:2px;margin-top:4px">
+          <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
+          <span id="brain-learning-step"></span>
+          <span id="brain-learning-progress"></span>
+        </div>
+      </div>
+
+      <!-- Two-column layout for thesis + scorecard -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px" class="brain-top-grid">
+        <!-- A2: Current Market Thesis -->
+        <div class="brain-section" style="margin-bottom:0">
+          <div class="brain-section-title"><span class="bs-icon">📈</span> Current Market Thesis</div>
+          <div class="brain-thesis-card neutral" id="brain-thesis-card">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+              <span class="thesis-stance neutral" id="thesis-stance">Loading...</span>
+              <span style="font-size:10px;color:var(--text-muted)" id="thesis-meta"></span>
+            </div>
+            <div class="thesis-gauge"><div class="thesis-gauge-fill" id="thesis-gauge" style="width:50%;background:#f59e0b"></div></div>
+            <div class="thesis-text" id="thesis-text" style="font-size:12px;color:var(--text-muted)">Generating market thesis...</div>
           </div>
         </div>
 
-        <!-- KPI Cards -->
-        <div class="brain-kpis" id="brain-kpis"></div>
+        <!-- A5: Performance Scorecard -->
+        <div class="brain-section" style="margin-bottom:0">
+          <div class="brain-section-title"><span class="bs-icon">🎯</span> Performance Scorecard</div>
+          <div class="brain-kpis" id="brain-kpis"></div>
+        </div>
+      </div>
 
-        <!-- Action Buttons Row -->
-        <div style="display:flex;align-items:center;gap:8px;margin-top:8px;padding:6px 0;border-top:1px solid var(--border)">
-          <div style="flex:1;font-size:11px;color:var(--text-muted)" id="brain-scheduler-info">Loading scheduler info...</div>
-          <button onclick="triggerDeepStudy()" id="btn-deep-study" style="padding:6px 14px;border:none;border-radius:6px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">Deep Study</button>
-          <button onclick="triggerFullScan()" id="btn-full-scan" style="padding:6px 14px;border:none;border-radius:6px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">Scan Entire Market</button>
+      <!-- Action Buttons Row -->
+      <div style="display:flex;align-items:center;gap:8px;padding:8px 0;border-top:1px solid var(--border);border-bottom:1px solid var(--border);margin-top:12px">
+        <div style="flex:1;font-size:10px;color:var(--text-muted)" id="brain-scheduler-info">Loading scheduler info...</div>
+        <button onclick="triggerDeepStudy()" id="btn-deep-study" style="padding:6px 16px;border:none;border-radius:6px;background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">🔬 Deep Study</button>
+        <button onclick="triggerFullScan()" id="btn-full-scan" style="padding:6px 16px;border:none;border-radius:6px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;cursor:pointer;font-size:11px;font-weight:600;white-space:nowrap">🌐 Scan Market</button>
+      </div>
+
+      <!-- AI Reflection Panel -->
+      <div id="brain-reflection" style="display:none;margin-top:12px;padding:12px 16px;background:var(--bg);border:1px solid rgba(139,92,246,.3);border-radius:10px;font-size:13px;line-height:1.6">
+        <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+          <span>🔬</span><strong style="font-size:13px">AI Learning Report</strong>
+          <button onclick="document.getElementById('brain-reflection').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:16px">&times;</button>
+        </div>
+        <div id="brain-reflection-content"></div>
+      </div>
+
+      <!-- Two-column layout for patterns + timeline -->
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:12px" class="brain-bottom-grid">
+        <!-- A4: Discovered Patterns -->
+        <div class="brain-section" style="margin-bottom:0">
+          <div class="brain-section-title"><span class="bs-icon">🧩</span> Discovered Patterns</div>
+          <div id="brain-patterns" style="max-height:350px;overflow-y:auto"></div>
         </div>
 
-        <!-- AI Reflection Panel -->
-        <div id="brain-reflection" style="display:none;margin-top:8px;padding:10px 12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;font-size:12px;line-height:1.6">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <strong style="font-size:12px">AI Learning Report</strong>
-            <button onclick="document.getElementById('brain-reflection').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px">&times;</button>
+        <!-- A6: Learning Timeline -->
+        <div class="brain-section" style="margin-bottom:0">
+          <div class="brain-section-title"><span class="bs-icon">📋</span> Learning Timeline</div>
+          <div class="brain-filter-bar" id="brain-filter-bar">
+            <button class="brain-filter-btn active" data-filter="all" onclick="filterBrainEvents('all',this)">All</button>
+            <button class="brain-filter-btn" data-filter="discovery" onclick="filterBrainEvents('discovery',this)">Discovery</button>
+            <button class="brain-filter-btn" data-filter="update" onclick="filterBrainEvents('update',this)">Update</button>
+            <button class="brain-filter-btn" data-filter="scan" onclick="filterBrainEvents('scan',this)">Scan</button>
+            <button class="brain-filter-btn" data-filter="review" onclick="filterBrainEvents('review',this)">Review</button>
+            <button class="brain-filter-btn" data-filter="demotion" onclick="filterBrainEvents('demotion',this)">Demotion</button>
           </div>
-          <div id="brain-reflection-content"></div>
+          <div class="brain-timeline" id="brain-activity"></div>
         </div>
+      </div>
 
-        <!-- Learned Patterns -->
-        <div style="margin-top:8px">
-          <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Learned Patterns</div>
-          <div id="brain-patterns" style="max-height:140px;overflow-y:auto"></div>
-        </div>
-
-        <div style="display:flex;gap:8px;margin-top:6px">
-          <div style="flex:1">
-            <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Confidence Evolution</div>
-            <div id="brain-chart" style="width:100%;height:80px"></div>
-          </div>
-          <div style="flex:1;max-height:140px;overflow-y:auto" id="brain-activity">
-            <div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Learning Activity</div>
-          </div>
-        </div>
+      <!-- Confidence chart (full width) -->
+      <div class="brain-section" style="margin-top:12px">
+        <div class="brain-section-title"><span class="bs-icon">📉</span> Confidence Evolution</div>
+        <div id="brain-chart" style="width:100%;height:150px"></div>
       </div>
     </div>
   </div>
@@ -767,6 +1107,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     <div class="ai-quick-actions">
       <button onclick="askSmartPick()" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x1F4B0; What Should I Buy?</button>
       <button onclick="runAnalysis()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">&#x1F4CA; Analyze Chart</button>
+      <button onclick="askBrainExplain()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F9E0; What Has Your Brain Learned?</button>
     </div>
     <div class="ai-learn-btns">
       <button onclick="askLearn('What is RSI and how do I use it?')" class="learn-btn">What is RSI?</button>
@@ -787,6 +1128,21 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
   <!-- Drawer backdrop (mobile) -->
   <div class="drawer-backdrop" id="drawer-backdrop" onclick="closeAllDrawers()"></div>
+</div>
+
+<!-- Robinhood SMS Code Dialog -->
+<div class="broker-sms-dialog" id="sms-dialog">
+  <div class="broker-sms-card">
+    <div class="sms-icon">&#x1F4F1;</div>
+    <h3>Enter SMS Code</h3>
+    <p>Robinhood sent a verification code to your phone. Enter it below to connect.</p>
+    <input type="text" class="sms-code-input" id="sms-code-input" maxlength="6" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" />
+    <div class="sms-error" id="sms-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeSmsDialog()">Cancel</button>
+      <button class="sms-btn-verify" id="sms-verify-btn" onclick="verifySmsCode()">Verify</button>
+    </div>
+  </div>
 </div>
 
 <!-- Floating AI button (mobile) -->
@@ -889,6 +1245,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadStats();
   loadInsights();
   loadSignalsBanner();
+  loadBrokerStatus();
   document.getElementById('ai-input').addEventListener('keydown', _onAiInputKey);
   _loadChatHistory();
   _refreshKnownTickers();
@@ -1252,28 +1609,82 @@ function loadStats() {
   });
 }
 
-/* ── Insights ───────────────────────────────────── */
+/* ── Brain Dashboard (Insights alias) ────────────── */
 function loadInsights() { loadBrainDashboard(); }
 
 var brainChart = null;
 var brainConfSeries = null;
 var brainPollInterval = null;
+var _brainEventsRaw = [];
+var _brainActiveFilter = 'all';
+
+function toggleBrainExplainer() {
+  var body = document.getElementById('brain-explainer-body');
+  var btn = body.parentElement.querySelector('.brain-explainer-toggle');
+  if (body.style.display === 'none') {
+    body.style.display = 'block'; btn.textContent = 'Hide';
+  } else {
+    body.style.display = 'none'; btn.textContent = 'Show';
+  }
+}
+
+function _makeRingSvg(pct, color, size) {
+  size = size || 60;
+  var r = (size / 2) - 4;
+  var c = Math.PI * 2 * r;
+  var offset = c - (c * Math.min(pct, 100) / 100);
+  return '<svg width="'+size+'" height="'+size+'" viewBox="0 0 '+size+' '+size+'">' +
+    '<circle cx="'+(size/2)+'" cy="'+(size/2)+'" r="'+r+'" fill="none" stroke="var(--border)" stroke-width="4"/>' +
+    '<circle cx="'+(size/2)+'" cy="'+(size/2)+'" r="'+r+'" fill="none" stroke="'+color+'" stroke-width="4" ' +
+      'stroke-dasharray="'+c+'" stroke-dashoffset="'+offset+'" stroke-linecap="round"/>' +
+  '</svg>';
+}
 
 function loadBrainDashboard() {
-  // KPI stats
+  // KPI stats with ring chart
   fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var kpis = document.getElementById('brain-kpis');
-    var confCls = d.avg_confidence >= 60 ? 'good' : 'warn';
-    var accCls = d.prediction_accuracy >= 55 ? 'good' : 'warn';
+    var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
+    var accCls = d.prediction_accuracy >= 55 ? 'good' : d.prediction_accuracy >= 40 ? 'warn' : 'danger';
+    var accColor = d.prediction_accuracy >= 55 ? '#22c55e' : d.prediction_accuracy >= 40 ? '#f59e0b' : '#ef4444';
+    var weekTrend = d.patterns_this_week > 0
+      ? '<div class="bk-trend up">▲ +' + d.patterns_this_week + ' this week</div>'
+      : '<div class="bk-trend flat">— no new this week</div>';
+
     kpis.innerHTML =
-      '<div class="brain-kpi"><div class="bk-val" style="color:#8b5cf6">'+(d.universe_total||0).toLocaleString()+'</div><div class="bk-lbl">Tickers Watched</div></div>' +
-      '<div class="brain-kpi"><div class="bk-val">'+d.total_patterns+'</div><div class="bk-lbl">Patterns Learned</div></div>' +
-      '<div class="brain-kpi"><div class="bk-val '+confCls+'">'+d.avg_confidence+'%</div><div class="bk-lbl">Avg Confidence</div></div>' +
-      '<div class="brain-kpi"><div class="bk-val '+accCls+'">'+d.prediction_accuracy+'%</div><div class="bk-lbl">Accuracy ('+d.total_predictions+' pred)</div></div>' +
-      '<div class="brain-kpi"><div class="bk-val">'+d.total_snapshots+'</div><div class="bk-lbl">Snapshots</div></div>' +
-      '<div class="brain-kpi"><div class="bk-val">'+d.total_events+'</div><div class="bk-lbl">Events</div></div>';
+      '<div class="brain-kpi">' +
+        '<div class="brain-ring">' + _makeRingSvg(d.prediction_accuracy, accColor) +
+          '<div class="ring-label ' + accCls + '">' + d.prediction_accuracy + '%</div>' +
+        '</div>' +
+        '<div class="bk-lbl">Accuracy (' + d.total_predictions + ' predictions)</div>' +
+      '</div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val" style="color:#8b5cf6">' + d.total_patterns + '</div>' +
+        '<div class="bk-lbl">Patterns Learned</div>' +
+        weekTrend +
+      '</div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
+        '<div class="bk-lbl">Avg Confidence</div>' +
+      '</div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val" style="color:#8b5cf6">' + (d.universe_total||0).toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Tickers Watched</div>' +
+        '<div class="bk-trend flat">' + (d.universe_stocks||0) + ' stocks · ' + (d.universe_crypto||0) + ' crypto</div>' +
+      '</div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Snapshots Taken</div>' +
+      '</div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val">' + d.total_events.toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Learning Events</div>' +
+      '</div>';
   });
+
+  // Market thesis
+  loadBrainThesis();
 
   // Confidence chart
   fetch('/api/trading/brain/confidence-history').then(function(r){return r.json();}).then(function(d) {
@@ -1282,7 +1693,7 @@ function loadBrainDashboard() {
     el.innerHTML = '';
     var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     brainChart = LightweightCharts.createChart(el, {
-      width: el.clientWidth, height: 80,
+      width: el.clientWidth, height: el.clientHeight || 150,
       layout: { background: {type:'solid', color: isDark ? '#111827' : '#f9fafb'}, textColor: isDark ? '#9ca3af' : '#6b7280' },
       grid: { vertLines:{visible:false}, horzLines:{color: isDark ? '#1f2937' : '#f3f4f6'} },
       rightPriceScale: { borderVisible:false }, timeScale: { borderVisible:false }, handleScroll:false, handleScale:false,
@@ -1292,23 +1703,11 @@ function loadBrainDashboard() {
     });
     brainConfSeries.setData(d.data);
     brainChart.timeScale().fitContent();
-    new ResizeObserver(function() { brainChart.applyOptions({width:el.clientWidth}); }).observe(el);
+    new ResizeObserver(function() { if (brainChart) brainChart.applyOptions({width:el.clientWidth}); }).observe(el);
   });
 
-  // Activity log
-  fetch('/api/trading/brain/activity').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    var el = document.getElementById('brain-activity');
-    var html = '<div style="font-size:11px;font-weight:600;color:var(--text-secondary);margin-bottom:4px">Learning Activity</div>';
-    if (!d.events.length) { html += '<div style="font-size:11px;color:var(--text-muted)">No learning events yet. The AI is starting its first learning cycle now...</div>'; }
-    d.events.slice(0, 30).forEach(function(e) {
-      html += '<div class="brain-event"><span class="be-type '+e.event_type+'">'+e.event_type+'</span>' +
-        escHtml(e.description.substring(0,150)) +
-        (e.confidence_before != null && e.confidence_after != null ? ' <span style="color:var(--text-muted)">('+Math.round(e.confidence_before*100)+'% &rarr; '+Math.round(e.confidence_after*100)+'%)</span>' : '') +
-        ' <span class="be-date">'+new Date(e.created_at).toLocaleDateString()+'</span></div>';
-    });
-    el.innerHTML = html;
-  });
+  // Activity timeline
+  loadBrainActivity();
 
   // Learned patterns
   loadLearnedPatterns();
@@ -1319,6 +1718,114 @@ function loadBrainDashboard() {
   brainPollInterval = setInterval(pollLearningStatus, 5000);
 }
 
+function loadBrainThesis() {
+  fetch('/api/trading/brain/thesis').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var card = document.getElementById('brain-thesis-card');
+    var stanceEl = document.getElementById('thesis-stance');
+    var gaugeEl = document.getElementById('thesis-gauge');
+    var textEl = document.getElementById('thesis-text');
+    var metaEl = document.getElementById('thesis-meta');
+
+    card.className = 'brain-thesis-card ' + d.stance;
+    stanceEl.className = 'thesis-stance ' + d.stance;
+    var stanceLabels = {bullish: '🟢 Bullish', bearish: '🔴 Bearish', neutral: '🟡 Neutral'};
+    stanceEl.textContent = stanceLabels[d.stance] || 'Neutral';
+
+    var gaugePct = d.stance === 'bullish' ? 75 : d.stance === 'bearish' ? 25 : 50;
+    var gaugeColor = d.stance === 'bullish' ? '#22c55e' : d.stance === 'bearish' ? '#ef4444' : '#f59e0b';
+    gaugeEl.style.width = gaugePct + '%';
+    gaugeEl.style.background = gaugeColor;
+
+    if (typeof marked !== 'undefined') {
+      try { textEl.innerHTML = marked.parse(d.thesis); } catch(e) { textEl.textContent = d.thesis; }
+    } else {
+      textEl.textContent = d.thesis;
+    }
+    textEl.style.color = 'var(--text)';
+
+    var metaParts = [];
+    if (d.patterns_count) metaParts.push(d.patterns_count + ' patterns');
+    if (d.accuracy) metaParts.push(d.accuracy + '% accuracy');
+    metaEl.textContent = metaParts.join(' · ');
+  }).catch(function() {
+    document.getElementById('thesis-text').textContent = 'Could not load thesis. Run a scan first.';
+  });
+}
+
+function _eventIcon(type) {
+  var icons = {
+    discovery: '💡', update: '🔄', demotion: '📉', review: '📝',
+    journal: '✏️', scan: '🔍', error: '⚠️', reflection: '🔬',
+  };
+  return icons[type] || '📌';
+}
+
+function loadBrainActivity() {
+  fetch('/api/trading/brain/activity').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    _brainEventsRaw = d.events || [];
+    renderBrainTimeline(_brainEventsRaw);
+  });
+}
+
+function renderBrainTimeline(events) {
+  var el = document.getElementById('brain-activity');
+  if (!events.length) {
+    el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px 0">No learning events yet. Click "Deep Study" or "Scan Market" to begin.</div>';
+    return;
+  }
+
+  var filtered = _brainActiveFilter === 'all' ? events : events.filter(function(e) { return e.event_type === _brainActiveFilter; });
+  // Group by date
+  var groups = {};
+  filtered.forEach(function(e) {
+    var dateKey = new Date(e.created_at).toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'});
+    if (!groups[dateKey]) groups[dateKey] = [];
+    groups[dateKey].push(e);
+  });
+
+  var html = '';
+  Object.keys(groups).forEach(function(dateKey) {
+    html += '<div class="bt-date-group"><div class="bt-date-label">' + dateKey + '</div>';
+    groups[dateKey].forEach(function(e) {
+      var desc = e.description || '';
+      var isLong = desc.length > 120;
+      var displayDesc = isLong ? escHtml(desc.substring(0, 120)) + '...' : escHtml(desc);
+      var confHtml = '';
+      if (e.confidence_before != null && e.confidence_after != null) {
+        var arrow = e.confidence_after > e.confidence_before ? '▲' : e.confidence_after < e.confidence_before ? '▼' : '→';
+        confHtml = '<div class="be-conf">' + arrow + ' ' + Math.round(e.confidence_before*100) + '% → ' + Math.round(e.confidence_after*100) + '%</div>';
+      }
+      html += '<div class="brain-event" data-type="' + e.event_type + '">' +
+        '<div class="be-icon ' + e.event_type + '">' + _eventIcon(e.event_type) + '</div>' +
+        '<div class="be-body">' +
+          '<div class="be-desc' + (isLong ? ' expandable" data-full="' + escHtml(desc) + '" onclick="this.textContent=this.dataset.full' : '') + '">' + displayDesc + '</div>' +
+          confHtml +
+          '<div class="be-time">' + new Date(e.created_at).toLocaleTimeString() + '</div>' +
+        '</div></div>';
+    });
+    html += '</div>';
+  });
+
+  el.innerHTML = html;
+}
+
+function filterBrainEvents(filter, btnEl) {
+  _brainActiveFilter = filter;
+  document.querySelectorAll('.brain-filter-btn').forEach(function(b) { b.classList.remove('active'); });
+  if (btnEl) btnEl.classList.add('active');
+  renderBrainTimeline(_brainEventsRaw);
+}
+
+var _PIPELINE_STEPS = [
+  {id: 'scan', label: 'Scan Market', icon: '🔍'},
+  {id: 'snapshot', label: 'Take Snapshots', icon: '📸'},
+  {id: 'backfill', label: 'Check Predictions', icon: '📊'},
+  {id: 'mine', label: 'Discover Patterns', icon: '💡'},
+  {id: 'reflect', label: 'AI Reflection', icon: '🔬'},
+];
+
 function pollLearningStatus() {
   fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
@@ -1326,24 +1833,38 @@ function pollLearningStatus() {
     var scan = d.scan;
     var scheduler = d.scheduler;
 
-    var banner = document.getElementById('brain-learning-status');
+    var pipelineSection = document.getElementById('brain-pipeline-section');
     var btn = document.getElementById('btn-full-scan');
 
     if (learning.running) {
-      banner.style.display = 'block';
-      document.getElementById('brain-learning-phase').textContent = learning.phase.toUpperCase();
-      document.getElementById('brain-learning-step').textContent = learning.current_step;
-      var pct = scan.tickers_total > 0 ? Math.round(scan.tickers_scanned / scan.tickers_total * 100) : (learning.steps_completed / learning.total_steps * 100);
+      pipelineSection.style.display = 'block';
+      var phase = (learning.phase || '').toLowerCase();
+      var stepsHtml = '';
+      _PIPELINE_STEPS.forEach(function(step, i) {
+        var status = 'pending';
+        if (phase === step.id || phase.indexOf(step.id) !== -1) status = 'running';
+        else {
+          var phaseIdx = _PIPELINE_STEPS.findIndex(function(s) { return phase === s.id || phase.indexOf(s.id) !== -1; });
+          if (phaseIdx >= 0 && i < phaseIdx) status = 'done';
+        }
+        if (i > 0) stepsHtml += '<span class="blp-arrow">→</span>';
+        stepsHtml += '<div class="blp-step ' + status + '">' +
+          (status === 'running' ? '<div class="brain-pulse" style="width:6px;height:6px"></div>' : status === 'done' ? '✓' : '') +
+          ' ' + step.icon + ' ' + step.label + '</div>';
+      });
+      document.getElementById('brain-pipeline-steps').innerHTML = stepsHtml;
+      document.getElementById('brain-learning-step').textContent = learning.current_step || '';
+      var pct = scan.tickers_total > 0 ? Math.round(scan.tickers_scanned / scan.tickers_total * 100) : Math.round(learning.steps_completed / learning.total_steps * 100);
       document.getElementById('brain-learning-progress').textContent = scan.tickers_total > 0
         ? scan.tickers_scanned.toLocaleString() + ' / ' + scan.tickers_total.toLocaleString() + ' tickers'
         : 'Step ' + learning.steps_completed + '/' + learning.total_steps;
       document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
       btn.disabled = true;
-      btn.textContent = 'Learning in progress...';
+      btn.textContent = '⏳ Learning...';
     } else {
-      banner.style.display = 'none';
+      pipelineSection.style.display = 'none';
       btn.disabled = false;
-      btn.textContent = 'Scan Entire Market';
+      btn.textContent = '🌐 Scan Market';
     }
 
     // Scheduler info
@@ -1351,11 +1872,11 @@ function pollLearningStatus() {
     var parts = [];
     if (scan.last_run) {
       var ago = timeSince(new Date(scan.last_run));
-      parts.push('Last scan: ' + ago + ' ago');
-      if (scan.tickers_scored) parts.push(scan.tickers_scored.toLocaleString() + ' tickers scored');
-      if (scan.last_run_duration_s) parts.push('took ' + scan.last_run_duration_s + 's');
+      parts.push('Last: ' + ago + ' ago');
+      if (scan.tickers_scored) parts.push(scan.tickers_scored.toLocaleString() + ' scored');
+      if (scan.last_run_duration_s) parts.push(scan.last_run_duration_s + 's');
     } else {
-      parts.push('No scans yet — first learning cycle starting automatically');
+      parts.push('No scans yet');
     }
     if (scheduler.jobs && scheduler.jobs.length) {
       var nextJob = scheduler.jobs.find(function(j) { return j.id === 'learning_cycle'; });
@@ -1365,11 +1886,10 @@ function pollLearningStatus() {
     }
     infoEl.textContent = parts.join(' · ');
 
-    // Refresh dashboard data if learning just finished
-    if (!learning.running && learning.last_run && !banner._wasRunning) {
-      // pass
+    if (!learning.running && pipelineSection._wasRunning) {
+      loadBrainDashboard();
     }
-    banner._wasRunning = learning.running;
+    pipelineSection._wasRunning = learning.running;
   }).catch(function() {});
 }
 
@@ -1388,23 +1908,45 @@ function loadLearnedPatterns() {
     if (!d.ok) return;
     var el = document.getElementById('brain-patterns');
     if (!d.active.length && !d.demoted.length) {
-      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px 0">No patterns learned yet. The AI needs to collect snapshots and verify outcomes over several days before patterns emerge. Click "Deep Study" to accelerate learning.</div>';
+      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px;text-align:center;background:var(--bg);border:1px dashed var(--border);border-radius:8px">' +
+        '<div style="font-size:24px;margin-bottom:6px">🔍</div>' +
+        'No patterns discovered yet. CHILI needs to collect market snapshots and verify outcomes before patterns emerge.<br>' +
+        '<strong style="color:#8b5cf6">Click "Deep Study" to accelerate learning.</strong></div>';
       return;
     }
     var html = '';
     d.active.forEach(function(p) {
       var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+      var signalType = p.signal_type || 'neutral';
       html += '<div class="pattern-card">' +
-        '<div style="font-weight:600;color:var(--text)">' + escHtml(p.pattern) + '</div>' +
-        '<div class="pattern-bar-bg"><div class="pattern-bar" style="width:'+p.confidence+'%;background:'+barColor+'"></div></div>' +
-        '<div class="pattern-meta">' +
-          '<span style="font-weight:600;color:'+barColor+'">'+p.confidence+'%</span>' +
-          '<span>'+p.evidence_count+' evidence</span>' +
-          (p.last_seen ? '<span>Seen: '+new Date(p.last_seen).toLocaleDateString()+'</span>' : '') +
-        '</div></div>';
+        '<div class="pc-header">' +
+          '<span class="pc-signal ' + signalType + '">' + signalType + '</span>' +
+          '<span style="font-weight:700;color:' + barColor + '">' + p.confidence + '%</span>' +
+        '</div>' +
+        '<div class="pc-desc">' + escHtml(p.pattern) + '</div>' +
+        '<div class="pc-stats">' +
+          '<span>📊 ' + p.evidence_count + ' evidence</span>' +
+          (p.win_rate != null ? '<span>🎯 ' + p.win_rate + '% win</span>' : '') +
+          (p.avg_return != null ? '<span>💰 ' + (p.avg_return > 0 ? '+' : '') + p.avg_return + '% avg</span>' : '') +
+          (p.last_seen ? '<span>🕐 ' + new Date(p.last_seen).toLocaleDateString() + '</span>' : '') +
+        '</div>';
+      if (p.example_tickers && p.example_tickers.length) {
+        html += '<div class="pc-tickers">';
+        p.example_tickers.forEach(function(t) {
+          html += '<span class="pc-ticker" onclick="selectTicker(\'' + t + '\')">' + t + '</span>';
+        });
+        html += '</div>';
+      }
+      var safeDesc = p.pattern.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+      html += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px">' +
+        '<div class="pattern-bar-bg" style="flex:1"><div class="pattern-bar" style="width:' + p.confidence + '%;background:' + barColor + '"></div></div>' +
+        '<button onclick="askPatternExplain(\'' + safeDesc + '\')" style="padding:2px 8px;border:none;border-radius:4px;background:rgba(139,92,246,.1);color:#8b5cf6;cursor:pointer;font-size:9px;font-weight:600;white-space:nowrap" title="Ask AI to explain">💬 Ask AI</button>' +
+      '</div>';
+      html += '</div>';
     });
     if (d.demoted.length) {
-      html += '<div style="font-size:10px;color:var(--text-muted);margin-top:6px;font-style:italic">'+d.demoted.length+' pattern(s) demoted (low confidence)</div>';
+      html += '<div style="font-size:10px;color:var(--text-muted);margin-top:8px;font-style:italic;text-align:center">' +
+        '📉 ' + d.demoted.length + ' pattern(s) demoted due to low confidence</div>';
     }
     el.innerHTML = html;
   });
@@ -1413,10 +1955,10 @@ function loadLearnedPatterns() {
 function triggerDeepStudy() {
   var btn = document.getElementById('btn-deep-study');
   btn.disabled = true;
-  btn.textContent = 'Studying...';
+  btn.textContent = '🔬 Studying...';
   fetch('/api/trading/learn/deep-study', { method: 'POST' }).then(function(r){return r.json();}).then(function(d) {
     btn.disabled = false;
-    btn.textContent = 'Deep Study';
+    btn.textContent = '🔬 Deep Study';
     if (d.ok) {
       var panel = document.getElementById('brain-reflection');
       var content = document.getElementById('brain-reflection-content');
@@ -1426,30 +1968,28 @@ function triggerDeepStudy() {
       } else {
         content.textContent = d.reflection;
       }
-      // Refresh patterns and KPIs
       loadBrainDashboard();
-      loadLearnedPatterns();
     }
   }).catch(function() {
     btn.disabled = false;
-    btn.textContent = 'Deep Study';
+    btn.textContent = '🔬 Deep Study';
   });
 }
 
 function triggerFullScan() {
   var btn = document.getElementById('btn-full-scan');
   btn.disabled = true;
-  btn.textContent = 'Starting...';
+  btn.textContent = '🌐 Starting...';
   fetch('/api/trading/scan/full', { method: 'POST' }).then(function(r){return r.json();}).then(function(d) {
     if (d.ok) {
-      btn.textContent = 'Scanning ' + (d.universe ? d.universe.total.toLocaleString() : '...') + ' tickers...';
+      btn.textContent = '🌐 Scanning ' + (d.universe ? d.universe.total.toLocaleString() : '...') + ' tickers...';
     } else {
       btn.textContent = d.message || 'Already running';
-      setTimeout(function() { btn.disabled = false; btn.textContent = 'Scan Entire Market'; }, 3000);
+      setTimeout(function() { btn.disabled = false; btn.textContent = '🌐 Scan Market'; }, 3000);
     }
   }).catch(function() {
     btn.disabled = false;
-    btn.textContent = 'Scan Entire Market';
+    btn.textContent = '🌐 Scan Market';
   });
 }
 
@@ -1607,12 +2147,20 @@ function _generateFollowups(text, ticker) {
   if (/\brsi\b/i.test(text) || /\bmacd\b/i.test(text) || /\bbollinger\b/i.test(text)) {
     chips.push('Explain this in simpler terms');
   }
+  if (/pattern/i.test(text) || /confidence/i.test(text) || /brain/i.test(text) || /learned/i.test(text)) {
+    chips.push('How confident are you in these patterns?');
+    chips.push('Show me a trading example');
+    chips.push('What is your Brain still learning?');
+  }
+  if (/fundament/i.test(text) || /P\/E|earnings|revenue|margin/i.test(text)) {
+    chips.push('How do fundamentals affect this trade?');
+  }
   if (chips.length === 0) {
     chips.push('Tell me more');
     chips.push('Analyze ' + ticker);
   }
   chips.push('What should I buy?');
-  return chips.slice(0, 3);
+  return chips.slice(0, 4);
 }
 
 function _renderFollowups(chips) {
@@ -1668,8 +2216,17 @@ function appendAiMsg(role, text, opts) {
     content = escHtml(text);
   }
 
+  // Detect and render trade proposals from AI responses
+  var proposalHtml = '';
+  if (role === 'assistant' && !opts.isThinking && !opts.skipProposals) {
+    var proposals = _tryParseProposals(text);
+    proposals.forEach(function(p) {
+      proposalHtml += renderTradeProposal(p);
+    });
+  }
+
   var followups = (role === 'assistant' && !opts.isThinking) ? _generateFollowups(text, currentTicker) : null;
-  msgs.innerHTML += _buildMsgHtml(role, content, opts.isThinking ? null : followups);
+  msgs.innerHTML += _buildMsgHtml(role, content + proposalHtml, opts.isThinking ? null : followups);
   msgs.scrollTop = msgs.scrollHeight;
 
   if (!opts.isThinking) {
@@ -1871,6 +2428,30 @@ function runAnalysis() {
   _streamAnalyze(msg, false);
 }
 
+function askBrainExplain() {
+  var msg = 'Summarize everything your AI Brain has learned so far. For each pattern you have discovered:\n' +
+    '1. Explain in plain English what the pattern means (no jargon)\n' +
+    '2. How confident are you in it and how many times you have seen it\n' +
+    '3. Give a real example of when this pattern would trigger\n' +
+    '4. How should I use this pattern in my trading decisions?\n\n' +
+    'Also tell me: What is your current market thesis? What are you most confident about right now?';
+  appendAiMsg('user', 'What has your Brain learned? Explain it to me.');
+  _streamAnalyze(msg, false);
+}
+
+function askPatternExplain(patternDesc) {
+  var aiPanel = document.getElementById('ai-panel');
+  if (aiPanel && !aiPanel.classList.contains('open')) {
+    toggleAiPanel();
+  }
+  var msg = 'Explain this pattern your Brain discovered in simple terms I can understand:\n\n"' +
+    patternDesc + '"\n\n' +
+    'Tell me: What does this mean? When does it trigger? How should I trade when I see this? ' +
+    'What are the risks? Give me a concrete example with a real stock or crypto.';
+  appendAiMsg('user', 'Explain pattern: ' + patternDesc.substring(0, 80) + (patternDesc.length > 80 ? '...' : ''));
+  _streamAnalyze(msg, false);
+}
+
 /* ── Ticker Autocomplete ──────────────────────────── */
 function _hideAutocomplete() {
   document.getElementById('ticker-ac').classList.remove('open');
@@ -2021,14 +2602,106 @@ function runScreener() {
 
 /* ── Tab switching ──────────────────────────────── */
 function switchTab(el) {
+  var tabName = el.dataset.tab;
+  var mainEl = document.querySelector('.t-main');
+
   document.querySelectorAll('.t-tab').forEach(function(t){t.classList.remove('active');});
   document.querySelectorAll('.t-tab-content').forEach(function(t){t.classList.remove('active');});
   el.classList.add('active');
-  document.getElementById('tab-'+el.dataset.tab).classList.add('active');
-  if (el.dataset.tab === 'screener' && !document.getElementById('screen-preset').options.length > 1) {
-    loadScreenerPresets();
+
+  if (tabName === 'brain') {
+    mainEl.classList.add('brain-active');
+    loadBrainDashboard();
+  } else {
+    var wasBrain = mainEl.classList.contains('brain-active');
+    mainEl.classList.remove('brain-active');
+    document.getElementById('tab-'+tabName).classList.add('active');
+    if (tabName === 'screener' && !document.getElementById('screen-preset').options.length > 1) {
+      loadScreenerPresets();
+    }
+    if (wasBrain) {
+      setTimeout(function() { window.dispatchEvent(new Event('resize')); }, 50);
+    }
   }
 }
+
+function switchTabByName(name) {
+  var tab = document.querySelector('.t-tab[data-tab="'+name+'"]');
+  if (tab) switchTab(tab);
+}
+
+/* ── Resize handle for bottom panel ────────────── */
+(function initResizeHandle() {
+  var handle = document.getElementById('resize-handle');
+  if (!handle) return;
+  var bottom = document.querySelector('.t-bottom');
+  var mainEl = document.querySelector('.t-main');
+  if (!bottom || !mainEl) return;
+
+  var savedH = localStorage.getItem('chili_bottom_h');
+  if (savedH) {
+    var h = parseInt(savedH, 10);
+    if (h >= 140 && h <= 600) bottom.style.height = h + 'px';
+  }
+
+  var dragging = false;
+  var startY = 0;
+  var startH = 0;
+
+  handle.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    dragging = true;
+    startY = e.clientY;
+    startH = bottom.offsetHeight;
+    handle.classList.add('dragging');
+    document.body.style.cursor = 'row-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var delta = startY - e.clientY;
+    var maxH = Math.floor(mainEl.offsetHeight * 0.7);
+    var newH = Math.max(140, Math.min(maxH, startH + delta));
+    bottom.style.height = newH + 'px';
+  });
+
+  document.addEventListener('mouseup', function() {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    localStorage.setItem('chili_bottom_h', bottom.offsetHeight);
+    if (typeof mainChart !== 'undefined' && mainChart) mainChart.resize(0, 0);
+    window.dispatchEvent(new Event('resize'));
+  });
+
+  handle.addEventListener('touchstart', function(e) {
+    var touch = e.touches[0];
+    startY = touch.clientY;
+    startH = bottom.offsetHeight;
+    dragging = true;
+    handle.classList.add('dragging');
+  }, {passive: true});
+
+  document.addEventListener('touchmove', function(e) {
+    if (!dragging) return;
+    var touch = e.touches[0];
+    var delta = startY - touch.clientY;
+    var maxH = Math.floor(mainEl.offsetHeight * 0.7);
+    var newH = Math.max(140, Math.min(maxH, startH + delta));
+    bottom.style.height = newH + 'px';
+  }, {passive: true});
+
+  document.addEventListener('touchend', function() {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('dragging');
+    localStorage.setItem('chili_bottom_h', bottom.offsetHeight);
+    window.dispatchEvent(new Event('resize'));
+  });
+})();
 
 /* ── Signals (Beginner Dashboard) ──────────────── */
 function loadSignals() {
@@ -2202,6 +2875,384 @@ function drawBacktestChart(data) {
 
   new ResizeObserver(function() { btChart.applyOptions({width: el.clientWidth}); }).observe(el);
 }
+
+/* ── Broker (Robinhood) ────────────────────────────── */
+var _brokerConnected = false;
+
+function loadBrokerStatus() {
+  fetch('/api/trading/broker/status').then(function(r){return r.json();}).then(function(d) {
+    var dot = document.getElementById('broker-dot');
+    var label = document.getElementById('broker-label');
+    var sub = document.getElementById('broker-sub');
+    var syncBtn = document.getElementById('broker-sync-btn');
+
+    if (d.connected) {
+      _brokerConnected = true;
+      dot.className = 'broker-dot connected';
+      label.textContent = 'Robinhood Connected';
+      sub.textContent = d.username || 'Linked account';
+      syncBtn.style.display = 'inline-block';
+      loadRhPortfolio();
+    } else if (d.configured) {
+      dot.className = 'broker-dot disconnected';
+      label.textContent = 'Robinhood';
+      sub.textContent = 'Click to connect';
+      syncBtn.style.display = 'none';
+    } else {
+      dot.className = 'broker-dot disconnected';
+      label.textContent = 'Robinhood';
+      sub.textContent = 'Set credentials in .env';
+      syncBtn.style.display = 'none';
+    }
+  }).catch(function() {});
+}
+
+var _approvalPollTimer = null;
+
+function connectBroker() {
+  var sub = document.getElementById('broker-sub');
+  sub.textContent = 'Connecting...';
+  fetch('/api/trading/broker/connect', { method: 'POST' })
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      if (d.ok) {
+        loadBrokerStatus();
+        appendAiMsg('assistant', 'Robinhood connected successfully! I can now see your real portfolio and give you personalized advice based on your actual holdings.');
+      } else if (d.status === 'app_approval') {
+        sub.textContent = 'Check Robinhood app';
+        openApprovalDialog();
+      } else if (d.status === 'sms_sent') {
+        sub.textContent = 'Check your phone for SMS';
+        openSmsDialog('sms');
+      } else {
+        sub.textContent = d.configured ? 'Click to connect' : 'Set credentials in .env';
+        var msg = d.message || 'Could not connect to Robinhood.';
+        appendAiMsg('assistant', msg);
+      }
+    }).catch(function() {
+      document.getElementById('broker-sub').textContent = 'Connection failed';
+    });
+}
+
+function openApprovalDialog() {
+  var dialog = document.getElementById('sms-dialog');
+  var card = dialog.querySelector('.broker-sms-card');
+  card.querySelector('.sms-icon').innerHTML = '&#x1F4F1;';
+  card.querySelector('h3').textContent = 'Approve in Robinhood App';
+  card.querySelector('p').textContent = 'A login request was sent to your Robinhood app. Open the app and tap "Approve" to continue.';
+  document.getElementById('sms-code-input').style.display = 'none';
+  document.getElementById('sms-verify-btn').style.display = 'none';
+  document.getElementById('sms-error').textContent = '';
+
+  dialog.classList.add('visible');
+  _startApprovalPolling();
+}
+
+function _startApprovalPolling() {
+  if (_approvalPollTimer) clearInterval(_approvalPollTimer);
+  var attempts = 0;
+  _approvalPollTimer = setInterval(function() {
+    attempts++;
+    if (attempts > 24) { // ~2 minutes
+      clearInterval(_approvalPollTimer);
+      _approvalPollTimer = null;
+      document.getElementById('sms-error').textContent = 'Timed out waiting for approval. Try again.';
+      return;
+    }
+    fetch('/api/trading/broker/poll').then(function(r){return r.json();}).then(function(d) {
+      if (d.ok) {
+        clearInterval(_approvalPollTimer);
+        _approvalPollTimer = null;
+        closeSmsDialog();
+        loadBrokerStatus();
+        appendAiMsg('assistant', 'Robinhood connected successfully! I can now see your real portfolio and give you personalized advice based on your actual holdings.');
+      } else if (d.status === 'error') {
+        clearInterval(_approvalPollTimer);
+        _approvalPollTimer = null;
+        document.getElementById('sms-error').textContent = d.message || 'Approval failed.';
+      }
+    }).catch(function() {});
+  }, 5000);
+}
+
+function openSmsDialog(mode) {
+  var dialog = document.getElementById('sms-dialog');
+  var card = dialog.querySelector('.broker-sms-card');
+  card.querySelector('.sms-icon').innerHTML = '&#x1F4F1;';
+  card.querySelector('h3').textContent = 'Enter Verification Code';
+  card.querySelector('p').textContent = 'A verification code was sent to your device. Enter it below.';
+  document.getElementById('sms-code-input').style.display = '';
+  document.getElementById('sms-code-input').value = '';
+  document.getElementById('sms-verify-btn').style.display = '';
+  document.getElementById('sms-error').textContent = '';
+
+  dialog.classList.add('visible');
+  setTimeout(function() { document.getElementById('sms-code-input').focus(); }, 100);
+
+  document.getElementById('sms-code-input').onkeydown = function(e) {
+    if (e.key === 'Enter') verifySmsCode();
+    if (e.key === 'Escape') closeSmsDialog();
+  };
+}
+
+function closeSmsDialog() {
+  if (_approvalPollTimer) { clearInterval(_approvalPollTimer); _approvalPollTimer = null; }
+  document.getElementById('sms-dialog').classList.remove('visible');
+  document.getElementById('sms-code-input').value = '';
+  document.getElementById('sms-error').textContent = '';
+  loadBrokerStatus();
+}
+
+function verifySmsCode() {
+  var input = document.getElementById('sms-code-input');
+  var btn = document.getElementById('sms-verify-btn');
+  var error = document.getElementById('sms-error');
+  var code = input.value.trim();
+
+  if (!code || code.length < 4) {
+    error.textContent = 'Please enter the 6-digit code.';
+    return;
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Verifying...';
+  error.textContent = '';
+
+  fetch('/api/trading/broker/verify', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ code: code })
+  }).then(function(r){return r.json();}).then(function(d) {
+    btn.disabled = false;
+    btn.textContent = 'Verify';
+    if (d.ok) {
+      closeSmsDialog();
+      loadBrokerStatus();
+      appendAiMsg('assistant', 'Robinhood connected successfully! I can now see your real portfolio and give you personalized advice based on your actual holdings.');
+    } else {
+      error.textContent = d.message || 'Invalid code. Please try again.';
+      input.value = '';
+      input.focus();
+    }
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = 'Verify';
+    error.textContent = 'Network error. Please try again.';
+  });
+}
+
+function syncBroker() {
+  var syncBtn = document.getElementById('broker-sync-btn');
+  syncBtn.textContent = 'Syncing...';
+  syncBtn.disabled = true;
+  fetch('/api/trading/broker/sync', { method: 'POST' })
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      syncBtn.textContent = 'Sync';
+      syncBtn.disabled = false;
+      if (d.ok) {
+        loadRhPortfolio();
+        loadPortfolio();
+        var msg = 'Synced! ' + d.created + ' new, ' + d.updated + ' updated, ' + d.closed + ' closed.';
+        appendAiMsg('assistant', msg);
+      }
+    }).catch(function() {
+      syncBtn.textContent = 'Sync';
+      syncBtn.disabled = false;
+    });
+}
+
+function loadRhPortfolio() {
+  if (!_brokerConnected) return;
+
+  var section = document.getElementById('rh-portfolio-section');
+  var summaryEl = document.getElementById('rh-portfolio-summary');
+  var listEl = document.getElementById('rh-positions-list');
+
+  Promise.all([
+    fetch('/api/trading/broker/portfolio').then(function(r){return r.json();}),
+    fetch('/api/trading/broker/positions').then(function(r){return r.json();})
+  ]).then(function(results) {
+    var portData = results[0];
+    var posData = results[1];
+
+    if (!portData.ok && !posData.ok) {
+      section.style.display = 'none';
+      return;
+    }
+
+    section.style.display = 'block';
+
+    if (portData.ok && portData.portfolio && portData.portfolio.equity) {
+      var p = portData.portfolio;
+      summaryEl.innerHTML =
+        '<div class="portfolio-grid" style="margin-bottom:8px">' +
+        '<div class="p-card"><div class="p-val">$' + (p.equity || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Equity</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.buying_power || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Buying Power</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.cash || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Cash</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.market_value || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Market Value</div></div>' +
+        '</div>';
+    }
+
+    if (posData.ok && posData.positions && posData.positions.length) {
+      var html = '<table class="rh-positions-table"><thead><tr><th>Ticker</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th>Equity</th><th>%</th></tr></thead><tbody>';
+      posData.positions.forEach(function(p) {
+        var pct = p.percent_change || 0;
+        var cls = pct >= 0 ? 'rh-pnl-pos' : 'rh-pnl-neg';
+        var pctStr = (pct >= 0 ? '+' : '') + parseFloat(pct).toFixed(2) + '%';
+        html += '<tr onclick="selectTicker(\'' + p.ticker + '\')" style="cursor:pointer">' +
+          '<td><strong>' + p.ticker + '</strong></td>' +
+          '<td>' + p.quantity + '</td>' +
+          '<td>$' + (p.average_buy_price || 0).toFixed(2) + '</td>' +
+          '<td>$' + (p.current_price || 0).toFixed(2) + '</td>' +
+          '<td>$' + (p.equity || 0).toFixed(2) + '</td>' +
+          '<td class="' + cls + '">' + pctStr + '</td></tr>';
+      });
+      html += '</tbody></table>';
+      listEl.innerHTML = html;
+    } else {
+      listEl.innerHTML = '<div style="color:var(--text-muted);font-size:11px;margin-top:4px">No open positions on Robinhood</div>';
+    }
+  }).catch(function() {
+    section.style.display = 'none';
+  });
+}
+
+
+/* ── Trade Proposal Cards ──────────────────────────── */
+function renderTradeProposal(data) {
+  var ticker = data.ticker || '???';
+  var direction = (data.direction || 'buy').toLowerCase();
+  var dirClass = direction === 'sell' ? 'sell' : 'buy';
+  var dirLabel = direction === 'sell' ? 'SELL' : 'BUY';
+  var confidence = data.confidence || 0;
+
+  var html = '<div class="trade-proposal" data-ticker="' + ticker + '">';
+  html += '<div class="tp-header">';
+  html += '<span class="tp-ticker">' + ticker + '</span>';
+  html += '<span class="tp-direction ' + dirClass + '">' + dirLabel + '</span>';
+  if (data.timeframe) html += '<span style="font-size:10px;color:var(--text-secondary)">' + data.timeframe + '</span>';
+  html += '</div>';
+
+  html += '<div class="tp-grid">';
+  if (data.entry_price) html += '<div class="tp-item"><div class="tp-label">Entry</div><div class="tp-value">$' + data.entry_price + '</div></div>';
+  if (data.target_price) html += '<div class="tp-item"><div class="tp-label">Target</div><div class="tp-value" style="color:#22c55e">$' + data.target_price + '</div></div>';
+  if (data.stop_loss) html += '<div class="tp-item"><div class="tp-label">Stop Loss</div><div class="tp-value" style="color:#ef4444">$' + data.stop_loss + '</div></div>';
+  if (data.quantity) html += '<div class="tp-item"><div class="tp-label">Quantity</div><div class="tp-value">' + data.quantity + '</div></div>';
+  html += '</div>';
+
+  if (confidence) {
+    html += '<div class="tp-confidence">';
+    html += '<span>Confidence: ' + confidence + '%</span>';
+    html += '<div class="tp-conf-bar"><div class="tp-conf-fill" style="width:' + confidence + '%"></div></div>';
+    html += '</div>';
+  }
+
+  if (data.rationale) {
+    html += '<div style="font-size:10px;color:var(--text-secondary);margin-bottom:8px">' + data.rationale + '</div>';
+  }
+
+  var proposalId = 'tp_' + Date.now() + '_' + Math.random().toString(36).substring(2,7);
+  html += '<div class="tp-actions">';
+  html += '<button class="tp-btn-confirm" onclick="confirmProposal(\'' + proposalId + '\',\'' + ticker + '\',\'' + direction + '\',' + (data.entry_price||0) + ',' + (data.quantity||1) + ')">Confirm & Track</button>';
+  html += '<button class="tp-btn-reject" onclick="rejectProposal(this)">Dismiss</button>';
+  html += '<button class="tp-btn-rh" onclick="openInRobinhood(\'' + ticker + '\')" title="Open in Robinhood">RH</button>';
+  html += '</div>';
+  html += '</div>';
+
+  return html;
+}
+
+function confirmProposal(proposalId, ticker, direction, entryPrice, quantity) {
+  var btn = event.target;
+  btn.textContent = 'Tracking...';
+  btn.disabled = true;
+
+  fetch('/api/trading/trades', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      ticker: ticker,
+      direction: direction || 'long',
+      entry_price: entryPrice,
+      quantity: quantity || 1,
+      tags: 'ai-proposal',
+      notes: 'AI trade proposal confirmed by user (proposal: ' + proposalId + ')'
+    })
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      btn.textContent = 'Tracked!';
+      btn.style.background = '#22c55e';
+      loadTrades();
+      loadPortfolio();
+      appendAiMsg('assistant', 'Trade confirmed! I\'m now tracking your ' + direction.toUpperCase() + ' position on **' + ticker + '** at $' + entryPrice + '. I\'ll monitor it and alert you when targets or stop-loss levels are hit.');
+    } else {
+      btn.textContent = 'Error';
+      btn.disabled = false;
+    }
+  }).catch(function() {
+    btn.textContent = 'Error';
+    btn.disabled = false;
+  });
+}
+
+function rejectProposal(btn) {
+  var card = btn.closest('.trade-proposal');
+  if (card) {
+    card.style.opacity = '0.4';
+    card.style.pointerEvents = 'none';
+    card.querySelector('.tp-actions').innerHTML = '<span style="font-size:11px;color:var(--text-secondary)">Dismissed</span>';
+  }
+}
+
+function openInRobinhood(ticker) {
+  var cleanTicker = ticker.replace('-USD', '');
+  var isCrypto = ticker.includes('-USD') || ticker.includes('-');
+  var url;
+  if (isCrypto) {
+    url = 'https://robinhood.com/crypto/' + cleanTicker;
+  } else {
+    url = 'https://robinhood.com/stocks/' + cleanTicker;
+  }
+  window.open(url, '_blank');
+}
+
+function _tryParseProposals(text) {
+  var proposals = [];
+  var buyPattern = /\*\*(?:BUY|SELL)\*\*[^]*?\*\*([A-Z]{1,5}(?:-USD)?)\*\*/gi;
+  var verdictPattern = /VERDICT:\s*(BUY|SELL)/i;
+  var entryPattern = /Entry\s*(?:zone|price)?[:\s]*\$?([\d,.]+)/i;
+  var targetPattern = /Target\s*(?:1)?[:\s]*\$?([\d,.]+)/i;
+  var stopPattern = /Stop[- ]?loss[:\s]*\$?([\d,.]+)/i;
+  var confPattern = /Confidence[:\s]*([\d]+)%/i;
+
+  var verdict = text.match(verdictPattern);
+  var entry = text.match(entryPattern);
+  var target = text.match(targetPattern);
+  var stop = text.match(stopPattern);
+  var conf = text.match(confPattern);
+
+  var tickers = [];
+  var tickerPat = /\$([A-Z]{1,6}(?:-USD)?)/g;
+  var m;
+  while ((m = tickerPat.exec(text)) !== null) {
+    if (tickers.indexOf(m[1]) === -1) tickers.push(m[1]);
+  }
+
+  if (verdict && tickers.length > 0 && (entry || target || stop)) {
+    proposals.push({
+      ticker: tickers[0],
+      direction: verdict[1].toLowerCase(),
+      entry_price: entry ? parseFloat(entry[1].replace(',','')) : null,
+      target_price: target ? parseFloat(target[1].replace(',','')) : null,
+      stop_loss: stop ? parseFloat(stop[1].replace(',','')) : null,
+      confidence: conf ? parseInt(conf[1]) : null,
+    });
+  }
+
+  return proposals;
+}
+
 
 /* ── Theme ──────────────────────────────────────── */
 function toggleTheme() {

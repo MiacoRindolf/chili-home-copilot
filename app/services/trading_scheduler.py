@@ -50,6 +50,25 @@ def _run_weekly_review_job():
         db.close()
 
 
+def _run_broker_sync_job():
+    """Sync Robinhood positions to local DB during market hours."""
+    from . import broker_service
+
+    if not broker_service.is_connected():
+        return
+
+    from ..db import SessionLocal
+    logger.info("[scheduler] Starting Robinhood position sync")
+    db = SessionLocal()
+    try:
+        result = broker_service.sync_positions_to_db(db, user_id=None)
+        logger.info(f"[scheduler] Broker sync result: {result}")
+    except Exception as e:
+        logger.error(f"[scheduler] Broker sync failed: {e}")
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -78,8 +97,21 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_broker_sync_job,
+            trigger=CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-16",
+                minute="*/15",
+            ),
+            id="broker_sync",
+            name="Robinhood position sync (market hours)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _scheduler.start()
-        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM)")
+        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min market hours)")
 
 
 def stop_scheduler():

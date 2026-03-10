@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     # Desktop command refinement: LLM corrects ASR and normalizes app names (mobile/desktop API).
     desktop_refinement_enabled: bool = True
 
+    # Robinhood (read-only portfolio sync)
+    robinhood_username: str = ""
+    robinhood_password: str = ""
+    robinhood_totp_secret: str = ""  # optional: base32 TOTP secret; if empty, SMS-based MFA is used
+
     @property
     def primary_api_key(self) -> str:
         """Primary LLM key: LLM_API_KEY or OPENAI_API_KEY."""

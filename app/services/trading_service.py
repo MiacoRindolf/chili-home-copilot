@@ -623,6 +623,68 @@ def build_ai_context(
             f"Market cap: {quote.get('market_cap', 'N/A')}"
         )
 
+    # ── Fundamental data (stocks only, not crypto) ──
+    is_crypto = ticker_up.endswith("-USD") or ticker_up in {
+        "BTC-USD", "ETH-USD", "SOL-USD", "DOGE-USD", "XRP-USD",
+        "ADA-USD", "AVAX-USD", "DOT-USD", "MATIC-USD", "LINK-USD",
+    }
+    if not is_crypto:
+        try:
+            from .yf_session import get_fundamentals
+            fund = get_fundamentals(ticker)
+            if fund and fund.get("short_name"):
+                lines = [f"## FUNDAMENTALS — {ticker_up} ({fund['short_name']})"]
+                if fund.get("sector"):
+                    lines.append(f"Sector: {fund['sector']} | Industry: {fund.get('industry', 'N/A')}")
+                val_parts = []
+                if fund.get("pe_trailing") is not None:
+                    val_parts.append(f"P/E (TTM): {fund['pe_trailing']:.1f}")
+                if fund.get("pe_forward") is not None:
+                    val_parts.append(f"P/E (Fwd): {fund['pe_forward']:.1f}")
+                if fund.get("eps_trailing") is not None:
+                    val_parts.append(f"EPS: ${fund['eps_trailing']:.2f}")
+                if fund.get("peg_ratio") is not None:
+                    val_parts.append(f"PEG: {fund['peg_ratio']:.2f}")
+                if val_parts:
+                    lines.append(" | ".join(val_parts))
+                val_parts2 = []
+                if fund.get("price_to_sales") is not None:
+                    val_parts2.append(f"P/S: {fund['price_to_sales']:.1f}")
+                if fund.get("price_to_book") is not None:
+                    val_parts2.append(f"P/B: {fund['price_to_book']:.1f}")
+                if fund.get("ev_to_ebitda") is not None:
+                    val_parts2.append(f"EV/EBITDA: {fund['ev_to_ebitda']:.1f}")
+                if val_parts2:
+                    lines.append(" | ".join(val_parts2))
+                if fund.get("revenue_fmt"):
+                    rev_line = f"Revenue: {fund['revenue_fmt']}"
+                    if fund.get("revenue_growth") is not None:
+                        rev_line += f" | Growth: {fund['revenue_growth']:+.1%}"
+                    lines.append(rev_line)
+                margin_parts = []
+                if fund.get("gross_margins") is not None:
+                    margin_parts.append(f"Gross {fund['gross_margins']:.1%}")
+                if fund.get("operating_margins") is not None:
+                    margin_parts.append(f"Operating {fund['operating_margins']:.1%}")
+                if fund.get("profit_margins") is not None:
+                    margin_parts.append(f"Net {fund['profit_margins']:.1%}")
+                if margin_parts:
+                    lines.append("Margins: " + " | ".join(margin_parts))
+                health_parts = []
+                if fund.get("free_cash_flow_fmt"):
+                    health_parts.append(f"FCF: {fund['free_cash_flow_fmt']}")
+                if fund.get("debt_to_equity") is not None:
+                    health_parts.append(f"D/E: {fund['debt_to_equity']:.1f}")
+                if fund.get("return_on_equity") is not None:
+                    health_parts.append(f"ROE: {fund['return_on_equity']:.1%}")
+                if health_parts:
+                    lines.append(" | ".join(health_parts))
+                if fund.get("dividend_yield") is not None and fund["dividend_yield"] > 0:
+                    lines.append(f"Dividend yield: {fund['dividend_yield']:.2%}")
+                parts.append("\n".join(lines))
+        except Exception:
+            pass
+
     # ── Scanner score if available ──
     scored = _score_ticker(ticker)
     if scored:
@@ -709,6 +771,15 @@ def build_ai_context(
     market_ctx = build_market_context(db, user_id)
     if market_ctx:
         parts.insert(0, market_ctx)
+
+    # ── Real portfolio from Robinhood ──
+    try:
+        from . import broker_service
+        portfolio_ctx = broker_service.build_portfolio_context()
+        if portfolio_ctx:
+            parts.insert(0, portfolio_ctx)
+    except Exception:
+        pass
 
     return "\n\n".join(parts)
 
@@ -1054,6 +1125,33 @@ def _score_ticker(ticker: str) -> dict[str, Any] | None:
         if vol_avg > 0 and vol_latest > vol_avg * 1.5:
             score += 0.5
             signals.append("Volume surge")
+
+        # Fundamental quality bonus (stocks only)
+        is_crypto_ticker = ticker.upper().endswith("-USD")
+        if not is_crypto_ticker:
+            try:
+                from .yf_session import get_fundamentals
+                fund = get_fundamentals(ticker)
+                if fund:
+                    fund_bonus = 0.0
+                    if fund.get("profit_margins") is not None and fund["profit_margins"] > 0.10:
+                        if fund.get("debt_to_equity") is not None and fund["debt_to_equity"] < 100:
+                            fund_bonus += 0.5
+                            signals.append("Strong margins + low debt")
+                    if fund.get("revenue_growth") is not None and fund["revenue_growth"] > 0:
+                        fund_bonus += 0.5
+                        signals.append(f"Revenue growth +{fund['revenue_growth']:.0%}")
+                    if fund.get("pe_trailing") is not None:
+                        pe = fund["pe_trailing"]
+                        if 5 < pe < 25:
+                            fund_bonus += 0.5
+                            signals.append(f"Reasonable P/E ({pe:.1f})")
+                        elif pe > 60:
+                            fund_bonus -= 0.5
+                            signals.append(f"Expensive P/E ({pe:.1f})")
+                    score += fund_bonus
+            except Exception:
+                pass
 
         score = max(1.0, min(10.0, score))
 
@@ -2053,6 +2151,15 @@ def smart_pick(
 
     context_parts.append(f"## RISK TOLERANCE: {risk_tolerance.upper()}")
 
+    # Real portfolio from Robinhood
+    try:
+        from . import broker_service
+        portfolio_ctx = broker_service.build_portfolio_context()
+        if portfolio_ctx:
+            context_parts.insert(0, portfolio_ctx)
+    except Exception:
+        pass
+
     full_context = "\n\n".join(context_parts)
 
     # 4. Ask the AI for the final recommendation
@@ -2364,6 +2471,101 @@ def get_confidence_history(db: Session, user_id: int | None) -> list[dict[str, A
             current = week_end
 
     return points
+
+
+# ── Market Thesis (AI Brain Summary) ──────────────────────────────────
+
+_thesis_cache: dict[str, tuple[float, dict]] = {}
+_THESIS_TTL = 3600  # 1 hour
+
+
+def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Ask the LLM to summarize its current market thesis based on learned patterns,
+    recent scans, and market conditions.  Cached for 1 hour."""
+    import time as _time
+    cache_key = f"thesis:{user_id}"
+    cached = _thesis_cache.get(cache_key)
+    if cached and (_time.time() - cached[0]) < _THESIS_TTL:
+        return cached[1]
+
+    # Gather context for the thesis
+    parts: list[str] = []
+
+    # Market pulse
+    market_ctx = build_market_context(db, user_id)
+    if market_ctx:
+        parts.append(market_ctx)
+
+    # Learned patterns
+    insights = get_insights(db, user_id, limit=15)
+    if insights:
+        lines = ["LEARNED PATTERNS:"]
+        for ins in insights:
+            lines.append(
+                f"- [{ins.confidence:.0%} conf, {ins.evidence_count} evidence] {ins.pattern_description}"
+            )
+        parts.append("\n".join(lines))
+
+    # Recent scan results
+    from ..models.trading import ScanResult
+    recent_scans = db.query(ScanResult).filter(
+        (ScanResult.user_id == user_id) | (ScanResult.user_id.is_(None)),
+    ).order_by(ScanResult.scanned_at.desc()).limit(20).all()
+    if recent_scans:
+        buy_count = sum(1 for s in recent_scans if s.signal == "buy")
+        sell_count = sum(1 for s in recent_scans if s.signal == "sell")
+        hold_count = sum(1 for s in recent_scans if s.signal == "hold")
+        top_picks = [s for s in recent_scans if s.signal == "buy"][:5]
+        parts.append(
+            f"RECENT SCAN: {buy_count} buy, {hold_count} hold, {sell_count} sell signals\n"
+            f"Top picks: {', '.join(s.ticker + ' (' + str(round(s.score, 1)) + ')' for s in top_picks)}"
+        )
+
+    # Brain stats
+    stats = get_brain_stats(db, user_id)
+    parts.append(
+        f"BRAIN STATE: {stats['total_patterns']} patterns learned, "
+        f"{stats['avg_confidence']}% avg confidence, "
+        f"{stats['prediction_accuracy']}% accuracy ({stats['total_predictions']} predictions)"
+    )
+
+    context = "\n\n".join(parts) if parts else "No market data available yet."
+
+    thesis_prompt = (
+        "Based on the market data, learned patterns, and scan results below, write a concise "
+        "market thesis in 3-5 sentences. Include:\n"
+        "1. Overall market stance: BULLISH, BEARISH, or NEUTRAL (pick one)\n"
+        "2. Top 2-3 highest-conviction trade ideas with specific tickers\n"
+        "3. Key risks to watch\n"
+        "Format: Start with **STANCE: [BULLISH/BEARISH/NEUTRAL]** on the first line.\n"
+        "Keep it actionable and specific. No disclaimers needed here.\n\n"
+        f"DATA:\n{context}"
+    )
+
+    from ..openai_client import chat
+    result = chat(
+        messages=[{"role": "user", "content": thesis_prompt}],
+        system_prompt="You are CHILI's market strategist. Summarize the current market thesis concisely.",
+        trace_id="brain-thesis",
+    )
+
+    reply = result.get("reply", "").strip()
+    stance = "neutral"
+    if "BULLISH" in reply.upper()[:100]:
+        stance = "bullish"
+    elif "BEARISH" in reply.upper()[:100]:
+        stance = "bearish"
+
+    thesis_data = {
+        "thesis": reply,
+        "stance": stance,
+        "patterns_count": stats["total_patterns"],
+        "accuracy": stats["prediction_accuracy"],
+        "last_scan": stats.get("last_scan"),
+    }
+
+    _thesis_cache[cache_key] = (_time.time(), thesis_data)
+    return thesis_data
 
 
 # ── Batch Concurrent Scanner ──────────────────────────────────────────
