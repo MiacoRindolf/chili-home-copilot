@@ -60,6 +60,23 @@ def api_brain_activity(request: Request, db: Session = Depends(get_db)):
     ]})
 
 
+@router.get("/api/trading/brain/volatility")
+def api_volatility_regime():
+    regime = ts.get_volatility_regime()
+    return JSONResponse({"ok": True, **regime})
+
+
+@router.get("/api/trading/brain/predictions")
+def api_brain_predictions(
+    request: Request,
+    db: Session = Depends(get_db),
+    tickers: str = Query("", description="Comma-separated tickers to predict"),
+):
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
+    predictions = ts.get_current_predictions(db, ticker_list)
+    return JSONResponse({"ok": True, "predictions": predictions})
+
+
 @router.get("/api/trading/brain/thesis")
 def api_brain_thesis(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
@@ -155,6 +172,12 @@ def api_deep_study(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     result = ts.deep_study(db, ctx["user_id"])
     return JSONResponse(result)
+
+
+@router.post("/api/trading/learn/retrain-ml")
+def api_retrain_ml(request: Request, db: Session = Depends(get_db)):
+    result = ts.train_ml_model(db)
+    return JSONResponse({"ok": True, **result})
 
 
 @router.get("/api/trading/learn/patterns")

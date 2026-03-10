@@ -26,6 +26,8 @@ from .market_data import (
     DEFAULT_SCAN_TICKERS,
     DEFAULT_CRYPTO_TICKERS,
     ALL_SCAN_TICKERS,
+    get_vix,
+    get_volatility_regime,
 )
 
 # Portfolio
@@ -55,10 +57,14 @@ from .journal import (
 # Scanner
 from .scanner import (
     _score_ticker,
+    _score_ticker_intraday,
+    _score_breakout,
     PRESET_SCREENS,
     _eval_condition,
     run_custom_screen,
     run_scan,
+    run_daytrade_scan,
+    run_breakout_scan,
     get_latest_scan,
     generate_signals,
     get_scan_status,
@@ -87,14 +93,27 @@ from .learning import (
     get_brain_stats,
     get_confidence_history,
     get_learning_status,
+    get_current_predictions,
     run_learning_cycle,
     should_run_learning,
 )
 
 
+# ML engine
+from .ml_engine import (
+    train_model as train_ml_model,
+    predict_ml,
+    extract_features as extract_ml_features,
+    get_model_stats as get_ml_model_stats,
+    load_model as load_ml_model,
+    is_model_ready as is_ml_model_ready,
+)
+
 # Pre-screener (fast server-side filtering)
 from .prescreener import (
     get_prescreened_candidates,
+    get_daytrade_candidates,
+    get_breakout_candidates,
     get_prescreen_status,
     invalidate_cache as invalidate_prescreen_cache,
 )

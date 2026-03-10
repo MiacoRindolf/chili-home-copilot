@@ -108,6 +108,10 @@ class MarketSnapshot(Base):
     snapshot_date: datetime = Column(DateTime, nullable=False, index=True)
     close_price: float = Column(Float, nullable=False)
     indicator_data: Optional[str] = Column(Text, nullable=True)  # JSON blob
+    predicted_score: Optional[float] = Column(Float, nullable=True)  # -10 bearish to +10 bullish
+    vix_at_snapshot: Optional[float] = Column(Float, nullable=True)
+    future_return_1d: Optional[float] = Column(Float, nullable=True)
+    future_return_3d: Optional[float] = Column(Float, nullable=True)
     future_return_5d: Optional[float] = Column(Float, nullable=True)  # filled later
     future_return_10d: Optional[float] = Column(Float, nullable=True)
 

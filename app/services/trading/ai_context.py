@@ -349,7 +349,8 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
     parts.append(
         f"BRAIN STATE: {stats['total_patterns']} patterns learned, "
         f"{stats['avg_confidence']}% avg confidence, "
-        f"{stats['prediction_accuracy']}% accuracy ({stats['total_predictions']} predictions)"
+        f"{stats['prediction_accuracy']}% overall accuracy ({stats['total_predictions']} predictions), "
+        f"{stats.get('strong_accuracy', 0)}% strong-signal accuracy ({stats.get('strong_predictions', 0)} high-conviction)"
     )
 
     context = "\n\n".join(parts) if parts else "No market data available yet."
@@ -384,6 +385,9 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
         "stance": stance,
         "patterns_count": stats["total_patterns"],
         "accuracy": stats["prediction_accuracy"],
+        "strong_accuracy": stats.get("strong_accuracy", 0),
+        "total_predictions": stats["total_predictions"],
+        "strong_predictions": stats.get("strong_predictions", 0),
         "last_scan": stats.get("last_scan"),
     }
 

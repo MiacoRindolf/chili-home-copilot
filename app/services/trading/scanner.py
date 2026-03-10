@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
 from .market_data import (
-    fetch_quote, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
+    fetch_quote, smart_round, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
 
@@ -179,8 +179,8 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
             signal = "hold"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
-        stop_loss = round(price - 2 * atr_f, 2)
-        take_profit = round(price + 3 * atr_f, 2)
+        stop_loss = smart_round(price - 2 * atr_f)
+        take_profit = smart_round(price + 3 * atr_f)
 
         volatility_pct = (atr_f / price * 100) if price > 0 else 5
         if volatility_pct > 3:
@@ -194,8 +194,8 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
-            "price": round(price, 2),
-            "entry_price": round(price, 2),
+            "price": smart_round(price),
+            "entry_price": smart_round(price),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "risk_level": risk,
@@ -208,14 +208,340 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
                 "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
                 "atr": round(atr_f, 4),
-                "ema_20": round(float(ema_20), 2) if pd.notna(ema_20) else None,
-                "ema_50": round(float(ema_50), 2) if pd.notna(ema_50) else None,
-                "ema_100": round(float(ema_100), 2) if ema_100 is not None and pd.notna(ema_100) else None,
-                "ema_200": round(float(ema_200), 2) if ema_200 is not None and pd.notna(ema_200) else None,
+                "ema_20": smart_round(float(ema_20)) if pd.notna(ema_20) else None,
+                "ema_50": smart_round(float(ema_50)) if pd.notna(ema_50) else None,
+                "ema_100": smart_round(float(ema_100)) if ema_100 is not None and pd.notna(ema_100) else None,
+                "ema_200": smart_round(float(ema_200)) if ema_200 is not None and pd.notna(ema_200) else None,
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "bb_pct": round((price - float(bb_lower)) / (float(bb_upper) - float(bb_lower)) * 100, 1)
                     if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
                 "vol_ratio": round(vol_latest / vol_avg, 2) if vol_avg > 0 else None,
+            },
+        }
+    except Exception:
+        return None
+
+
+# ── Intraday (Day-Trade) Scoring ──────────────────────────────────────
+
+def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
+    """Score a ticker for day-trade suitability using 15-minute intraday data.
+
+    Evaluates momentum, VWAP positioning, volume surge, and ATR-based
+    risk on 5 days of 15m bars.
+    """
+    try:
+        from ta.momentum import RSIIndicator, StochasticOscillator
+        from ta.trend import MACD, EMAIndicator
+        from ta.volatility import AverageTrueRange
+
+        df = _yf_history(ticker, period="5d", interval="15m")
+        if df.empty or len(df) < 40:
+            return None
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+
+        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+        macd_obj = MACD(close=close)
+        macd_val = macd_obj.macd().iloc[-1]
+        macd_sig = macd_obj.macd_signal().iloc[-1]
+        macd_hist = macd_obj.macd_diff().iloc[-1]
+        ema_9 = EMAIndicator(close=close, window=9).ema_indicator().iloc[-1]
+        ema_21 = EMAIndicator(close=close, window=21).ema_indicator().iloc[-1]
+        atr_val = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range().iloc[-1]
+        stoch = StochasticOscillator(high=high, low=low, close=close)
+        stoch_k = stoch.stoch().iloc[-1]
+
+        price = float(close.iloc[-1])
+        if price <= 0:
+            return None
+
+        # VWAP (cumulative from market open of today)
+        today_mask = df.index.date == df.index.date[-1]
+        today_df = df[today_mask]
+        vwap = None
+        vwap_pct = 0.0
+        if len(today_df) > 1:
+            typical = (today_df["High"] + today_df["Low"] + today_df["Close"]) / 3
+            cum_vol = today_df["Volume"].cumsum()
+            cum_tp_vol = (typical * today_df["Volume"]).cumsum()
+            if float(cum_vol.iloc[-1]) > 0:
+                vwap = float(cum_tp_vol.iloc[-1] / cum_vol.iloc[-1])
+                vwap_pct = round((price - vwap) / vwap * 100, 2)
+
+        # Volume analysis
+        vol_avg = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+        vol_latest = float(volume.iloc[-1])
+        vol_ratio = round(vol_latest / vol_avg, 2) if vol_avg > 0 else 1.0
+
+        # Gap from previous close
+        if len(df) > 26:
+            prev_day_close = float(close.iloc[-27]) if len(df) >= 27 else price
+            gap_pct = round((float(df["Open"].iloc[-1]) - prev_day_close) / prev_day_close * 100, 2) if prev_day_close > 0 else 0
+        else:
+            gap_pct = 0.0
+
+        # Scoring
+        score = 5.0
+        signals: list[str] = []
+
+        # Momentum: RSI sweet spot for day trades (40-65 for longs, 35-60 for shorts)
+        if pd.notna(rsi_val):
+            if 40 <= rsi_val <= 65:
+                score += 1.0
+                signals.append(f"RSI in momentum zone ({rsi_val:.0f})")
+            elif rsi_val < 25:
+                score += 0.5
+                signals.append(f"RSI deeply oversold ({rsi_val:.0f}) — potential bounce")
+            elif rsi_val > 75:
+                score -= 0.5
+                signals.append(f"RSI overextended ({rsi_val:.0f})")
+
+        # MACD momentum
+        if pd.notna(macd_val) and pd.notna(macd_sig):
+            if macd_val > macd_sig and pd.notna(macd_hist) and float(macd_hist) > 0:
+                score += 1.0
+                signals.append("MACD bullish + positive histogram")
+            elif macd_val < macd_sig and pd.notna(macd_hist) and float(macd_hist) < 0:
+                score -= 0.5
+
+        # EMA trend alignment
+        if pd.notna(ema_9) and pd.notna(ema_21):
+            if price > float(ema_9) > float(ema_21):
+                score += 1.0
+                signals.append("Price > EMA9 > EMA21 (bullish intraday)")
+            elif price < float(ema_9) < float(ema_21):
+                score -= 0.5
+                signals.append("Bearish EMA alignment")
+
+        # VWAP positioning
+        if vwap is not None:
+            if price > vwap:
+                score += 0.8
+                signals.append(f"Above VWAP ({vwap_pct:+.1f}%)")
+            else:
+                score -= 0.3
+                signals.append(f"Below VWAP ({vwap_pct:+.1f}%)")
+
+        # Volume surge
+        if vol_ratio >= 3.0:
+            score += 1.5
+            signals.append(f"Volume explosion ({vol_ratio:.1f}x avg)")
+        elif vol_ratio >= 2.0:
+            score += 1.0
+            signals.append(f"Strong volume surge ({vol_ratio:.1f}x avg)")
+        elif vol_ratio >= 1.5:
+            score += 0.5
+            signals.append(f"Above-average volume ({vol_ratio:.1f}x)")
+
+        # Gap play
+        if abs(gap_pct) > 2:
+            score += 0.5
+            signals.append(f"Gap {'up' if gap_pct > 0 else 'down'} {gap_pct:+.1f}%")
+
+        score = max(1.0, min(10.0, score))
+
+        if score >= 7:
+            signal = "long"
+        elif score <= 3.5:
+            signal = "short"
+        else:
+            signal = "wait"
+
+        atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.01
+        scalp_stop = smart_round(price - 1.5 * atr_f)
+        scalp_target = smart_round(price + 2.0 * atr_f)
+        risk_reward = round(2.0 * atr_f / (1.5 * atr_f), 2) if atr_f > 0 else 1.33
+
+        return {
+            "ticker": ticker.upper(),
+            "score": round(score, 1),
+            "signal": signal,
+            "price": smart_round(price),
+            "entry_price": smart_round(price),
+            "stop_loss": scalp_stop,
+            "take_profit": scalp_target,
+            "risk_reward": risk_reward,
+            "risk_level": "high" if atr_f / price > 0.02 else "medium",
+            "signals": signals,
+            "vwap": smart_round(vwap) if vwap else None,
+            "vwap_pct": vwap_pct,
+            "vol_ratio": vol_ratio,
+            "gap_pct": gap_pct,
+            "indicators": {
+                "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
+                "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
+                "ema_9": smart_round(float(ema_9)) if pd.notna(ema_9) else None,
+                "ema_21": smart_round(float(ema_21)) if pd.notna(ema_21) else None,
+                "atr": round(atr_f, 4),
+                "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
+                "vol_ratio": vol_ratio,
+            },
+        }
+    except Exception:
+        return None
+
+
+# ── Breakout Detection Scoring ────────────────────────────────────────
+
+def _score_breakout(ticker: str) -> dict[str, Any] | None:
+    """Score a ticker for breakout readiness.
+
+    Detects consolidation via Bollinger Band squeeze, low ADX, declining
+    volume, and proximity to resistance.  Returns a "readiness" score
+    and distance-to-breakout percentage.
+    """
+    try:
+        from ta.momentum import RSIIndicator
+        from ta.trend import MACD, EMAIndicator, ADXIndicator
+        from ta.volatility import BollingerBands, AverageTrueRange
+
+        df = _yf_history(ticker, period="6mo", interval="1d")
+        if df.empty or len(df) < 60:
+            return None
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+        price = float(close.iloc[-1])
+        if price <= 0:
+            return None
+
+        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+        macd_obj = MACD(close=close)
+        macd_hist = macd_obj.macd_diff().iloc[-1]
+        ema_20 = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
+        ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
+        adx_val = ADXIndicator(high=high, low=low, close=close).adx().iloc[-1]
+        atr_val = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        bb_upper = bb.bollinger_hband()
+        bb_lower = bb.bollinger_lband()
+        bb_width = bb.bollinger_wband()
+
+        # Resistance: 20-day high
+        resistance = float(high.rolling(20).max().iloc[-1])
+        dist_to_breakout = round((resistance - price) / price * 100, 2)
+
+        # Bollinger Band width squeeze detection
+        bb_width_series = bb_width.dropna()
+        if len(bb_width_series) < 20:
+            return None
+        current_bb_width = float(bb_width_series.iloc[-1])
+        bb_width_pct_rank = float(
+            (bb_width_series < current_bb_width).sum() / len(bb_width_series) * 100
+        )
+        is_squeeze = bb_width_pct_rank < 25
+
+        # Volume trend (declining = compression before expansion)
+        vol_recent = float(volume.iloc[-5:].mean())
+        vol_prior = float(volume.iloc[-20:-5].mean()) if len(volume) >= 20 else vol_recent
+        vol_declining = vol_recent < vol_prior * 0.8
+        vol_trend_pct = round((vol_recent - vol_prior) / vol_prior * 100, 1) if vol_prior > 0 else 0
+
+        # Consolidation days: how many recent bars stayed within a tight range
+        recent_range = high.iloc[-20:].max() - low.iloc[-20:].min()
+        daily_ranges = high.iloc[-20:] - low.iloc[-20:]
+        tight_days = int((daily_ranges < recent_range * 0.3).sum())
+
+        # Scoring
+        score = 5.0
+        signals: list[str] = []
+
+        # BB squeeze = consolidation
+        if is_squeeze:
+            score += 2.0
+            signals.append(f"Bollinger squeeze (width percentile: {bb_width_pct_rank:.0f}%)")
+
+        # Near resistance
+        if 0 <= dist_to_breakout <= 2.0:
+            score += 1.5
+            signals.append(f"Near resistance — {dist_to_breakout:.1f}% to breakout")
+        elif 2.0 < dist_to_breakout <= 5.0:
+            score += 0.5
+            signals.append(f"{dist_to_breakout:.1f}% below resistance")
+
+        # Already breaking out
+        if dist_to_breakout <= 0:
+            score += 2.0
+            signals.append("BREAKING OUT — new 20-day high!")
+
+        # Low ADX = consolidation, not trending
+        if pd.notna(adx_val):
+            if adx_val < 20:
+                score += 1.0
+                signals.append(f"Low ADX ({adx_val:.0f}) — consolidating")
+            elif adx_val > 30:
+                score -= 0.5
+
+        # Declining volume = coiling
+        if vol_declining:
+            score += 0.8
+            signals.append(f"Volume declining ({vol_trend_pct:+.0f}%) — coiling")
+
+        # EMA support
+        if pd.notna(ema_20) and pd.notna(ema_50):
+            if price > float(ema_20) > float(ema_50):
+                score += 0.5
+                signals.append("Above rising EMAs — bullish base")
+
+        # RSI neutral zone (not overbought for a pre-breakout)
+        if pd.notna(rsi_val):
+            if 45 <= rsi_val <= 65:
+                score += 0.5
+                signals.append(f"RSI neutral ({rsi_val:.0f}) — room to run")
+            elif rsi_val > 70:
+                score -= 1.0
+                signals.append(f"RSI overbought ({rsi_val:.0f}) — may fade")
+
+        # MACD building
+        if pd.notna(macd_hist) and float(macd_hist) > 0:
+            score += 0.5
+            signals.append("MACD histogram positive — momentum building")
+
+        score = max(1.0, min(10.0, score))
+
+        if dist_to_breakout <= 0:
+            status = "breaking_out"
+        elif score >= 7:
+            status = "ready"
+        elif score >= 5:
+            status = "watch"
+        else:
+            status = "wait"
+
+        atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
+
+        return {
+            "ticker": ticker.upper(),
+            "score": round(score, 1),
+            "signal": status,
+            "status": status,
+            "price": smart_round(price),
+            "resistance": smart_round(resistance),
+            "dist_to_breakout": dist_to_breakout,
+            "bb_squeeze": is_squeeze,
+            "bb_width_pctile": round(bb_width_pct_rank, 0),
+            "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
+            "vol_trend_pct": vol_trend_pct,
+            "tight_days": tight_days,
+            "risk_level": "medium" if status == "watch" else "high",
+            "signals": signals,
+            "entry_price": smart_round(resistance),
+            "stop_loss": smart_round(resistance - 2 * atr_f),
+            "take_profit": smart_round(resistance + 3 * atr_f),
+            "indicators": {
+                "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
+                "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
+                "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
+                "atr": round(atr_f, 4),
+                "ema_20": smart_round(float(ema_20)) if pd.notna(ema_20) else None,
+                "ema_50": smart_round(float(ema_50)) if pd.notna(ema_50) else None,
+                "bb_width_pctile": round(bb_width_pct_rank, 0),
             },
         }
     except Exception:
@@ -274,7 +600,96 @@ PRESET_SCREENS: dict[str, dict[str, Any]] = {
             {"field": "rsi", "op": "lt", "value": 35},
         ],
     },
+    "day_trade": {
+        "name": "Day Trade Momentum",
+        "description": "Intraday momentum with volume surge, VWAP support, and RSI in the sweet spot",
+        "scan_type": "intraday",
+        "conditions": [],
+    },
+    "breakout_watch": {
+        "name": "Breakout Watchlist",
+        "description": "Consolidating near resistance with Bollinger squeeze — wait for the breakout",
+        "scan_type": "breakout",
+        "conditions": [],
+    },
 }
+
+
+# ── Batch runners for day-trade / breakout scans ──────────────────────
+
+def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
+    """Pre-filter with FinViz day-trade signals, then score intraday."""
+    from .prescreener import get_daytrade_candidates
+
+    start = time.time()
+    candidates = get_daytrade_candidates()
+    logger.info(f"[trading] Day-trade scan: {len(candidates)} candidates")
+
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
+        futures = {executor.submit(_score_ticker_intraday, t): t for t in candidates}
+        for future in as_completed(futures):
+            if _shutting_down.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            try:
+                scored = future.result()
+                if scored is not None:
+                    results.append(scored)
+            except Exception:
+                pass
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    results = results[:max_results]
+    elapsed = round(time.time() - start, 1)
+
+    return {
+        "ok": True,
+        "scan_type": "day_trade",
+        "candidates_scanned": len(candidates),
+        "matches": len(results),
+        "elapsed_s": elapsed,
+        "results": results,
+    }
+
+
+def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
+    """Pre-filter with FinViz consolidation signals, then score for breakout readiness."""
+    from .prescreener import get_breakout_candidates
+
+    start = time.time()
+    candidates = get_breakout_candidates()
+    logger.info(f"[trading] Breakout scan: {len(candidates)} candidates")
+
+    # Pre-warm the OHLCV cache for breakout scoring (uses 6mo daily)
+    _prewarm_cache(candidates)
+
+    results: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
+        futures = {executor.submit(_score_breakout, t): t for t in candidates}
+        for future in as_completed(futures):
+            if _shutting_down.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            try:
+                scored = future.result()
+                if scored is not None:
+                    results.append(scored)
+            except Exception:
+                pass
+
+    results.sort(key=lambda r: r["score"], reverse=True)
+    results = results[:max_results]
+    elapsed = round(time.time() - start, 1)
+
+    return {
+        "ok": True,
+        "scan_type": "breakout",
+        "candidates_scanned": len(candidates),
+        "matches": len(results),
+        "elapsed_s": elapsed,
+        "results": results,
+    }
 
 
 def _eval_condition(cond: dict, scored: dict) -> bool:

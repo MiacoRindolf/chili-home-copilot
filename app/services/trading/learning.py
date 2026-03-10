@@ -17,7 +17,7 @@ from ...models.trading import (
 )
 from ..yf_session import get_history as _yf_history
 from .market_data import (
-    fetch_quote, get_indicator_snapshot,
+    fetch_quote, get_indicator_snapshot, get_vix, get_volatility_regime,
     DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight
@@ -197,12 +197,17 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
         snap = get_indicator_snapshot(ticker, "1d")
         quote = fetch_quote(ticker)
         price = quote.get("price", 0) if quote else 0
+        ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
+        pred_score = compute_prediction(ind_data) if ind_data else None
+        vix = get_vix()
 
         record = MarketSnapshot(
             ticker=ticker.upper(),
             snapshot_date=datetime.utcnow(),
             close_price=price,
             indicator_data=json.dumps(snap),
+            predicted_score=pred_score,
+            vix_at_snapshot=vix,
         )
         db.add(record)
         db.commit()
@@ -253,17 +258,22 @@ def take_snapshots_parallel(
             except Exception:
                 pass
 
+    vix = get_vix()
     count = 0
     for ticker, snap, quote in fetched:
         if snap is None:
             continue
         try:
             price = quote.get("price", 0) if quote else 0
+            ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
+            pred_score = compute_prediction(ind_data) if ind_data else None
             record = MarketSnapshot(
                 ticker=ticker.upper(),
                 snapshot_date=datetime.utcnow(),
                 close_price=price,
                 indicator_data=json.dumps(snap),
+                predicted_score=pred_score,
+                vix_at_snapshot=vix,
             )
             db.add(record)
             count += 1
@@ -291,26 +301,29 @@ def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] 
 def backfill_future_returns(db: Session) -> int:
     unfilled = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.is_(None),
-    ).limit(100).all()
+    ).limit(300).all()
 
     updated = 0
     for snap in unfilled:
         try:
             df = _yf_history(snap.ticker, start=snap.snapshot_date, period="15d", interval="1d")
-            if len(df) < 6:
+            if len(df) < 2:
                 continue
             base_price = snap.close_price
             if base_price <= 0:
                 continue
 
+            def _ret(idx):
+                return round((float(df["Close"].iloc[idx]) - base_price) / base_price * 100, 2)
+
+            if len(df) >= 2:
+                snap.future_return_1d = _ret(1)
+            if len(df) >= 4:
+                snap.future_return_3d = _ret(3)
             if len(df) >= 6:
-                snap.future_return_5d = round(
-                    (float(df["Close"].iloc[5]) - base_price) / base_price * 100, 2
-                )
+                snap.future_return_5d = _ret(5)
             if len(df) >= 11:
-                snap.future_return_10d = round(
-                    (float(df["Close"].iloc[10]) - base_price) / base_price * 100, 2
-                )
+                snap.future_return_10d = _ret(10)
             updated += 1
         except Exception:
             continue
@@ -485,6 +498,9 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     if len(all_rows) < 10:
         return []
 
+    vol_regime = get_volatility_regime()
+    regime_tag = f" [{vol_regime['label']}]" if vol_regime.get("regime") != "unknown" else ""
+
     discoveries: list[str] = []
     MIN_SAMPLES = 3
 
@@ -500,7 +516,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
             ret_str = f"{avg_5d:+.1f}%/5d"
             if avg_10d is not None:
                 ret_str += f", {avg_10d:+.1f}%/10d"
-            pattern = f"{label} -> avg {ret_str} ({wr:.0f}% win, {len(filtered)} samples)"
+            pattern = f"{label} -> avg {ret_str} ({wr:.0f}% win, {len(filtered)} samples){regime_tag}"
             discoveries.append(pattern)
             save_insight(db, user_id, pattern, confidence=min(0.9, wr / 100))
 
@@ -596,6 +612,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                "Gap down >2% into oversold RSI (gap-fill reversal)")
 
     existing = get_insights(db, user_id, limit=50)
+    now = datetime.utcnow()
     for ins in existing:
         if ins.evidence_count >= 5 and ins.confidence < 0.35:
             old_conf = ins.confidence
@@ -607,6 +624,25 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                 confidence_before=old_conf, confidence_after=0,
                 related_insight_id=ins.id,
             )
+            continue
+
+        days_since_seen = (now - (ins.last_seen or ins.created_at)).days
+        if days_since_seen > 30:
+            months_inactive = days_since_seen / 30
+            decay = 0.95 ** months_inactive
+            old_conf = ins.confidence
+            ins.confidence = round(max(0.05, ins.confidence * decay), 3)
+            if ins.confidence < 0.15:
+                ins.active = False
+                db.commit()
+                log_learning_event(
+                    db, user_id, "demotion",
+                    f"Pattern decayed and demoted (inactive {days_since_seen}d): {ins.pattern_description[:100]}",
+                    confidence_before=old_conf, confidence_after=ins.confidence,
+                    related_insight_id=ins.id,
+                )
+            elif abs(ins.confidence - old_conf) > 0.01:
+                db.commit()
 
     logger.info(f"[mine_patterns] Discovered {len(discoveries)} patterns from {len(all_rows)} data points")
     return discoveries
@@ -782,6 +818,271 @@ Keep it conversational and honest. Use actual numbers from the patterns above. I
     }
 
 
+# ── Multi-Signal Prediction Engine ────────────────────────────────────
+
+def compute_prediction(indicator_data: dict) -> float:
+    """Compute a directional prediction score from indicator data.
+
+    Returns a score from -10 (strongly bearish) to +10 (strongly bullish).
+    Each signal contributes a weighted vote. The final score is the sum
+    clamped to [-10, +10].
+
+    Signals used (with weights):
+      RSI (2.0), MACD histogram (1.5), MACD crossover (1.0),
+      EMA alignment (1.5), Bollinger Band position (1.0),
+      Stochastic (1.0), ADX trend strength (0.5), Volume (0.5)
+    """
+    score = 0.0
+
+    rsi_data = indicator_data.get("rsi", {})
+    macd_data = indicator_data.get("macd", {})
+    bb_data = indicator_data.get("bbands", {})
+    stoch_data = indicator_data.get("stoch", {})
+    adx_data = indicator_data.get("adx", {})
+    ema20_data = indicator_data.get("ema_20", {})
+    ema50_data = indicator_data.get("ema_50", {})
+    ema100_data = indicator_data.get("ema_100", {})
+    sma20_data = indicator_data.get("sma_20", {})
+    obv_data = indicator_data.get("obv", {})
+    atr_data = indicator_data.get("atr", {})
+
+    rsi = rsi_data.get("value") if rsi_data else None
+    if rsi is not None:
+        if rsi < 25:
+            score += 2.0
+        elif rsi < 35:
+            score += 1.5
+        elif rsi < 45:
+            score += 0.5
+        elif rsi > 75:
+            score -= 2.0
+        elif rsi > 65:
+            score -= 1.5
+        elif rsi > 55:
+            score -= 0.5
+
+    macd_hist = macd_data.get("histogram") if macd_data else None
+    macd_line = macd_data.get("macd") if macd_data else None
+    macd_sig = macd_data.get("signal") if macd_data else None
+    if macd_hist is not None:
+        if macd_hist > 0:
+            score += min(1.5, macd_hist * 10)
+        else:
+            score -= min(1.5, abs(macd_hist) * 10)
+    if macd_line is not None and macd_sig is not None:
+        if macd_line > macd_sig:
+            score += 1.0
+        elif macd_line < macd_sig:
+            score -= 1.0
+
+    e20 = ema20_data.get("value") if ema20_data else None
+    e50 = ema50_data.get("value") if ema50_data else None
+    e100 = ema100_data.get("value") if ema100_data else None
+    sma20 = sma20_data.get("value") if sma20_data else None
+    if e20 is not None and e50 is not None and e100 is not None:
+        if e20 > e50 > e100:
+            score += 1.5
+        elif e20 < e50 < e100:
+            score -= 1.5
+        elif e20 > e50:
+            score += 0.5
+        elif e20 < e50:
+            score -= 0.5
+
+    bb_upper = bb_data.get("upper") if bb_data else None
+    bb_lower = bb_data.get("lower") if bb_data else None
+    if bb_upper and bb_lower and bb_upper > bb_lower:
+        bb_mid = (bb_upper + bb_lower) / 2
+        bb_range = bb_upper - bb_lower
+        if sma20 is not None:
+            bb_pos = (sma20 - bb_lower) / bb_range
+        elif e20 is not None:
+            bb_pos = (e20 - bb_lower) / bb_range
+        else:
+            bb_pos = 0.5
+        if bb_pos < 0.15:
+            score += 1.0
+        elif bb_pos < 0.3:
+            score += 0.5
+        elif bb_pos > 0.85:
+            score -= 1.0
+        elif bb_pos > 0.7:
+            score -= 0.5
+
+    stoch_k = stoch_data.get("k") if stoch_data else None
+    if stoch_k is not None:
+        if stoch_k < 20:
+            score += 1.0
+        elif stoch_k < 30:
+            score += 0.5
+        elif stoch_k > 80:
+            score -= 1.0
+        elif stoch_k > 70:
+            score -= 0.5
+
+    adx_val = adx_data.get("adx") if adx_data else None
+    if adx_val is not None and adx_val > 25:
+        score *= 1.0 + min(0.5, (adx_val - 25) / 50)
+
+    return max(-10.0, min(10.0, round(score, 2)))
+
+
+def predict_direction(score: float) -> str:
+    """Convert prediction score to a human-readable direction."""
+    if score >= 3.0:
+        return "bullish"
+    elif score >= 1.0:
+        return "slightly_bullish"
+    elif score <= -3.0:
+        return "bearish"
+    elif score <= -1.0:
+        return "slightly_bearish"
+    return "neutral"
+
+
+def predict_confidence(score: float) -> int:
+    """Convert absolute prediction score to a confidence percentage (0-100)."""
+    return min(100, int(abs(score) * 10))
+
+
+def get_current_predictions(db: Session, tickers: list[str] | None = None) -> list[dict]:
+    """Generate live predictions for a set of tickers.
+
+    Blends rule-based scores with ML probabilities and adjusts for
+    volatility regime. Includes risk-management fields (stop, target, R:R).
+    """
+    from .ml_engine import predict_ml, extract_features, is_model_ready
+
+    if not tickers:
+        tickers = list(DEFAULT_SCAN_TICKERS[:10] + DEFAULT_CRYPTO_TICKERS[:5])
+
+    vix = get_vix()
+    vol_regime = get_volatility_regime(vix)
+    ml_available = is_model_ready()
+
+    results = []
+    for ticker in tickers[:20]:
+        try:
+            snapshot = get_indicator_snapshot(ticker)
+            if not snapshot or len(snapshot) < 3:
+                continue
+            ind_data = {k: v for k, v in snapshot.items() if k not in ("ticker", "interval")}
+            rule_score = compute_prediction(ind_data)
+
+            quote = fetch_quote(ticker)
+            price = quote["price"] if quote else None
+
+            ml_prob = None
+            blended_score = rule_score
+            if ml_available and price:
+                ind_data_with_ticker = dict(ind_data)
+                ind_data_with_ticker["ticker"] = ticker
+                features = extract_features(ind_data_with_ticker, close_price=price, vix=vix)
+                ml_prob = predict_ml(features)
+                if ml_prob is not None:
+                    rule_norm = (rule_score + 10) / 20
+                    blended = 0.4 * rule_norm + 0.6 * ml_prob
+                    blended_score = round((blended * 20) - 10, 2)
+
+            regime = vol_regime.get("regime", "normal")
+            if regime == "extreme":
+                blended_score *= 0.6
+            elif regime == "elevated":
+                if abs(blended_score) < 3:
+                    blended_score *= 0.8
+
+            blended_score = max(-10.0, min(10.0, round(blended_score, 2)))
+            direction = predict_direction(blended_score)
+            confidence = predict_confidence(blended_score)
+
+            atr_val = (ind_data.get("atr") or {}).get("value")
+            stop = target = rr = pos_size_pct = None
+            if price and atr_val and atr_val > 0:
+                if blended_score > 0:
+                    stop = round(price - atr_val * 1.5, 6)
+                    target = round(price + atr_val * 3.0, 6)
+                elif blended_score < 0:
+                    stop = round(price + atr_val * 1.5, 6)
+                    target = round(price - atr_val * 3.0, 6)
+                if stop is not None and target is not None:
+                    risk = abs(price - stop)
+                    reward = abs(target - price)
+                    rr = round(reward / risk, 2) if risk > 0 else 0
+                    pos_size_pct = round(min(5.0, 1.0 / (risk / price * 100)) * 100 / 100, 2) if price > 0 else None
+
+            result_entry = {
+                "ticker": ticker,
+                "price": price,
+                "score": blended_score,
+                "rule_score": rule_score,
+                "ml_probability": round(ml_prob, 4) if ml_prob is not None else None,
+                "direction": direction,
+                "confidence": confidence,
+                "signals": _explain_prediction(ind_data, blended_score),
+                "vix_regime": regime,
+                "suggested_stop": stop,
+                "suggested_target": target,
+                "risk_reward": rr,
+                "position_size_pct": pos_size_pct,
+            }
+            results.append(result_entry)
+        except Exception:
+            continue
+    results.sort(key=lambda x: abs(x["score"]), reverse=True)
+    return results
+
+
+def _explain_prediction(ind_data: dict, score: float) -> list[str]:
+    """Generate human-readable explanations for a prediction."""
+    reasons = []
+    rsi = (ind_data.get("rsi") or {}).get("value")
+    macd_data = ind_data.get("macd") or {}
+    stoch = (ind_data.get("stoch") or {}).get("k")
+    e20 = (ind_data.get("ema_20") or {}).get("value")
+    e50 = (ind_data.get("ema_50") or {}).get("value")
+    e100 = (ind_data.get("ema_100") or {}).get("value")
+    adx = (ind_data.get("adx") or {}).get("adx")
+
+    if rsi is not None:
+        if rsi < 30:
+            reasons.append(f"RSI oversold at {rsi:.0f}")
+        elif rsi < 40:
+            reasons.append(f"RSI near oversold ({rsi:.0f})")
+        elif rsi > 70:
+            reasons.append(f"RSI overbought at {rsi:.0f}")
+        elif rsi > 60:
+            reasons.append(f"RSI elevated ({rsi:.0f})")
+
+    hist = macd_data.get("histogram")
+    macd_l = macd_data.get("macd")
+    macd_s = macd_data.get("signal")
+    if macd_l is not None and macd_s is not None:
+        if macd_l > macd_s and hist and hist > 0:
+            reasons.append("MACD bullish crossover")
+        elif macd_l < macd_s and hist and hist < 0:
+            reasons.append("MACD bearish crossover")
+
+    if e20 is not None and e50 is not None and e100 is not None:
+        if e20 > e50 > e100:
+            reasons.append("EMA stacking bullish")
+        elif e20 < e50 < e100:
+            reasons.append("EMA stacking bearish")
+
+    if stoch is not None:
+        if stoch < 20:
+            reasons.append(f"Stochastic oversold ({stoch:.0f})")
+        elif stoch > 80:
+            reasons.append(f"Stochastic overbought ({stoch:.0f})")
+
+    if adx is not None and adx > 25:
+        reasons.append(f"Strong trend (ADX {adx:.0f})")
+
+    if not reasons:
+        reasons.append("Mixed signals, no strong conviction")
+
+    return reasons
+
+
 # ── Brain Dashboard Stats ────────────────────────────────────────────
 
 def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
@@ -807,22 +1108,58 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
 
     filled_snaps = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
-    ).limit(200).all()
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(2000).all()
     correct = 0
+    strong_correct = 0
+    strong_total = 0
     total_predictions = 0
+    stock_correct = stock_total = crypto_correct = crypto_total = 0
     for snap in filled_snaps:
         try:
-            ind_data = json.loads(snap.indicator_data) if snap.indicator_data else {}
-            rsi_val = ind_data.get("rsi", {}).get("value")
-            if rsi_val is not None:
-                predicted_up = rsi_val < 50
-                actual_up = (snap.future_return_5d or 0) > 0
-                if predicted_up == actual_up:
-                    correct += 1
-                total_predictions += 1
+            if snap.predicted_score is not None:
+                pred_score = snap.predicted_score
+            else:
+                ind_data = json.loads(snap.indicator_data) if snap.indicator_data else {}
+                if not ind_data:
+                    continue
+                pred_score = compute_prediction(ind_data)
+                snap.predicted_score = pred_score
+
+            if abs(pred_score) < 0.5:
+                continue
+
+            predicted_up = pred_score > 0
+            actual_up = (snap.future_return_5d or 0) > 0
+            is_hit = predicted_up == actual_up
+            if is_hit:
+                correct += 1
+            total_predictions += 1
+
+            is_c = snap.ticker.endswith("-USD")
+            if is_c:
+                crypto_total += 1
+                if is_hit:
+                    crypto_correct += 1
+            else:
+                stock_total += 1
+                if is_hit:
+                    stock_correct += 1
+
+            if abs(pred_score) >= 3.0:
+                strong_total += 1
+                if is_hit:
+                    strong_correct += 1
         except Exception:
             continue
+    if total_predictions > 0:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
     accuracy = round(correct / total_predictions * 100, 1) if total_predictions > 0 else 0
+    strong_accuracy = round(strong_correct / strong_total * 100, 1) if strong_total > 0 else 0
+    stock_accuracy = round(stock_correct / stock_total * 100, 1) if stock_total > 0 else 0
+    crypto_accuracy = round(crypto_correct / crypto_total * 100, 1) if crypto_total > 0 else 0
 
     total_events = db.query(LearningEvent).filter(
         LearningEvent.user_id == user_id,
@@ -831,6 +1168,10 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     universe_counts = get_ticker_count()
     scan_st = get_scan_status()
     learning_st = get_learning_status()
+    vol_regime = get_volatility_regime()
+
+    from .ml_engine import get_model_stats, is_model_ready
+    ml_stats = get_model_stats()
 
     return {
         "total_patterns": total_patterns,
@@ -838,13 +1179,27 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         "patterns_this_week": patterns_this_week,
         "total_snapshots": total_snapshots,
         "prediction_accuracy": accuracy,
+        "strong_accuracy": strong_accuracy,
         "total_predictions": total_predictions,
+        "strong_predictions": strong_total,
+        "stock_accuracy": stock_accuracy,
+        "stock_predictions": stock_total,
+        "crypto_accuracy": crypto_accuracy,
+        "crypto_predictions": crypto_total,
         "total_events": total_events,
         "universe_stocks": universe_counts["stocks"],
         "universe_crypto": universe_counts["crypto"],
         "universe_total": universe_counts["total"],
         "last_scan": scan_st.get("last_run"),
         "learning_running": learning_st.get("running", False),
+        "vix": vol_regime.get("vix"),
+        "vix_regime": vol_regime.get("regime"),
+        "vix_label": vol_regime.get("label"),
+        "ml_ready": is_model_ready(),
+        "ml_accuracy": ml_stats.get("cv_accuracy", 0),
+        "ml_samples": ml_stats.get("samples", 0),
+        "ml_trained_at": ml_stats.get("trained_at"),
+        "ml_feature_importances": ml_stats.get("feature_importances"),
     }
 
 
@@ -924,7 +1279,7 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 9
+    _learning_status["total_steps"] = 10
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -972,7 +1327,7 @@ def run_learning_cycle(
         step_start = time.time()
         _learning_status["current_step"] = "Taking market snapshots"
         _learning_status["phase"] = "snapshots"
-        top_tickers = [r["ticker"] for r in scan_results[:100]]
+        top_tickers = [r["ticker"] for r in scan_results[:250]]
         watchlist = get_watchlist(db, user_id)
         for w in watchlist:
             if w.ticker not in top_tickers:
@@ -1034,7 +1389,20 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 8
         _step_time("signals", step_start)
 
-        # Step 9: Finalize
+        # Step 9: Train ML model
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Training ML model"
+        _learning_status["phase"] = "ml_training"
+        from .ml_engine import train_model as _train_ml
+        ml_result = _train_ml(db)
+        report["ml_trained"] = ml_result.get("ok", False)
+        report["ml_accuracy"] = ml_result.get("cv_accuracy", 0)
+        _learning_status["steps_completed"] = 9
+        _step_time("ml_train", step_start)
+
+        # Step 10: Finalize
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start
@@ -1044,9 +1412,10 @@ def run_learning_cycle(
             f"scored {report['tickers_scored']}, {report['snapshots_taken']} snapshots, "
             f"{report['patterns_discovered']} patterns, "
             f"{report.get('backtests_run', 0)} backtests, "
-            f"{report['signal_events']} signals — {elapsed:.0f}s",
+            f"{report['signal_events']} signals, "
+            f"ML={'trained' if report.get('ml_trained') else 'skipped'} — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = 9
+        _learning_status["steps_completed"] = 10
 
     except InterruptedError:
         logger.info("[trading] Learning cycle interrupted by shutdown")

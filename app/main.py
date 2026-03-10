@@ -22,6 +22,11 @@ run_migrations(engine)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     start_scheduler()
+    try:
+        from .services.trading.ml_engine import load_model
+        load_model()
+    except Exception:
+        pass
     yield
     stop_scheduler()
 

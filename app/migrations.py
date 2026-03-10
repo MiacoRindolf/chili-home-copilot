@@ -94,6 +94,25 @@ def _migration_008_trade_broker_columns(conn) -> None:
         conn.commit()
 
 
+def _migration_009_snapshot_predicted_score(conn) -> None:
+    if "trading_snapshots" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_snapshots")
+    if "predicted_score" not in cols:
+        conn.execute(text("ALTER TABLE trading_snapshots ADD COLUMN predicted_score REAL"))
+        conn.commit()
+
+
+def _migration_010_snapshot_extra_columns(conn) -> None:
+    if "trading_snapshots" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_snapshots")
+    for col_name in ("vix_at_snapshot", "future_return_1d", "future_return_3d"):
+        if col_name not in cols:
+            conn.execute(text(f"ALTER TABLE trading_snapshots ADD COLUMN {col_name} REAL"))
+            conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -104,6 +123,8 @@ MIGRATIONS = [
     ("006_plan_tasks_parent_reporter", _migration_006_plan_tasks_parent_reporter),
     ("007_backfill_project_members", _migration_007_backfill_project_members),
     ("008_trade_broker_columns", _migration_008_trade_broker_columns),
+    ("009_snapshot_predicted_score", _migration_009_snapshot_predicted_score),
+    ("010_snapshot_extra_columns", _migration_010_snapshot_extra_columns),
 ]
 
 

@@ -161,11 +161,47 @@ def get_insights(db: Session, user_id: int | None, limit: int = 20) -> list[Trad
     ).order_by(TradingInsight.confidence.desc()).limit(limit).all()
 
 
+def _pattern_keywords(desc: str) -> set[str]:
+    """Extract meaningful keywords from a pattern description for dedup matching."""
+    import re
+    stop = {"the", "and", "for", "with", "avg", "win", "samples", "signal", "->"}
+    words = set(re.findall(r"[a-z_]+(?:\d+)?", desc.lower()))
+    return words - stop
+
+
 def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
 ) -> TradingInsight:
     from .learning import log_learning_event
+    from datetime import datetime
+
+    new_kw = _pattern_keywords(pattern)
+    existing = db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.active.is_(True),
+    ).all()
+    for ins in existing:
+        old_kw = _pattern_keywords(ins.pattern_description)
+        if not old_kw or not new_kw:
+            continue
+        overlap = len(new_kw & old_kw) / max(1, len(new_kw | old_kw))
+        if overlap >= 0.6:
+            old_conf = ins.confidence
+            ins.confidence = round(min(0.95, ins.confidence * 0.7 + confidence * 0.3), 3)
+            ins.evidence_count += 1
+            ins.last_seen = datetime.utcnow()
+            db.commit()
+            if abs(ins.confidence - old_conf) > 0.005:
+                log_learning_event(
+                    db, user_id, "update",
+                    f"Pattern reinforced ({old_conf:.0%}->{ins.confidence:.0%}): {ins.pattern_description[:100]}",
+                    confidence_before=old_conf,
+                    confidence_after=ins.confidence,
+                    related_insight_id=ins.id,
+                )
+            return ins
+
     insight = TradingInsight(
         user_id=user_id,
         pattern_description=pattern,

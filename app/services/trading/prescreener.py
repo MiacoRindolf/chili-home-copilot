@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
 _CACHE_TTL = 1800  # 30 minutes
+_finviz_lock = threading.Lock()  # serialize FinViz requests to avoid 429
 
 _prescreen_status: dict[str, Any] = {
     "running": False,
@@ -57,39 +58,46 @@ def _cache_set(key: str, val: Any) -> None:
 def _finviz_screen(filters_dict: dict | None = None,
                    signal: str = "",
                    limit: int = 200) -> list[str]:
-    """Run a FinViz screen and return a list of ticker strings."""
-    try:
-        from finvizfinance.screener.overview import Overview
+    """Run a FinViz screen and return a list of ticker strings.
 
-        screener = Overview()
-        screener.set_filter(signal=signal, filters_dict=filters_dict or {})
-        df = screener.screener_view(limit=limit, verbose=0, sleep_sec=0)
-        if df is not None and not df.empty:
-            col = "Ticker" if "Ticker" in df.columns else df.columns[0]
-            return df[col].tolist()
-    except Exception as e:
-        logger.warning(f"[prescreener] FinViz screen failed ({signal or filters_dict}): {e}")
+    Uses a module-level lock so only one FinViz request runs at a time,
+    preventing HTTP 429 rate-limit errors.
+    """
+    with _finviz_lock:
+        try:
+            from finvizfinance.screener.overview import Overview
+
+            screener = Overview()
+            screener.set_filter(signal=signal, filters_dict=filters_dict or {})
+            df = screener.screener_view(limit=limit, verbose=0, sleep_sec=1)
+            if df is not None and not df.empty:
+                col = "Ticker" if "Ticker" in df.columns else df.columns[0]
+                return df[col].tolist()
+        except Exception as e:
+            logger.warning(f"[prescreener] FinViz screen failed ({signal or filters_dict}): {e}")
+        finally:
+            time.sleep(0.5)
     return []
 
 
 def _finviz_most_active() -> list[str]:
-    return _finviz_screen(signal="ta_mostactive", limit=200)
+    return _finviz_screen(signal="Most Active", limit=200)
 
 
 def _finviz_top_gainers() -> list[str]:
-    return _finviz_screen(signal="ta_topgainers", limit=100)
+    return _finviz_screen(signal="Top Gainers", limit=100)
 
 
 def _finviz_new_high() -> list[str]:
-    return _finviz_screen(signal="ta_newhigh", limit=100)
+    return _finviz_screen(signal="New High", limit=100)
 
 
 def _finviz_oversold() -> list[str]:
-    return _finviz_screen(signal="ta_oversold", limit=100)
+    return _finviz_screen(signal="Oversold", limit=100)
 
 
 def _finviz_unusual_volume() -> list[str]:
-    return _finviz_screen(signal="ta_unusualvolume", limit=100)
+    return _finviz_screen(signal="Unusual Volume", limit=100)
 
 
 def _finviz_bullish_sma() -> list[str]:
@@ -262,3 +270,202 @@ def invalidate_cache() -> None:
     """Force the next call to re-fetch from sources."""
     with _cache_lock:
         _cache.pop("prescreened_candidates", None)
+        _cache.pop("daytrade_candidates", None)
+        _cache.pop("breakout_candidates", None)
+
+
+# ── Day-Trade Candidates ──────────────────────────────────────────────
+
+def _finviz_most_volatile() -> list[str]:
+    return _finviz_screen(signal="Most Volatile", limit=100)
+
+
+def _finviz_top_losers() -> list[str]:
+    return _finviz_screen(signal="Top Losers", limit=100)
+
+
+def _yf_day_losers() -> list[str]:
+    return _yf_screen("day_losers", 100)
+
+
+def _crypto_top_movers() -> list[str]:
+    """Fetch top crypto movers by 24h volume via CoinGecko (free, cached)."""
+    cached = _cache_get("crypto_top_movers")
+    if cached is not None:
+        return cached
+    try:
+        import requests
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/coins/markets",
+            params={
+                "vs_currency": "usd",
+                "order": "volume_desc",
+                "per_page": 50,
+                "page": 1,
+                "sparkline": "false",
+            },
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        stables = {"usdt", "usdc", "dai", "busd", "tusd", "usdp", "frax", "gusd"}
+        tickers = []
+        for coin in data:
+            sym = coin.get("symbol", "").lower()
+            if sym in stables:
+                continue
+            tickers.append(sym.upper() + "-USD")
+        _cache_set("crypto_top_movers", tickers)
+        return tickers
+    except Exception as e:
+        logger.warning(f"[prescreener] CoinGecko top movers failed: {e}")
+        from .market_data import DEFAULT_CRYPTO_TICKERS
+        return list(DEFAULT_CRYPTO_TICKERS)
+
+
+def get_daytrade_candidates(max_total: int = 300) -> list[str]:
+    """Return tickers suited for intraday / day-trade scanning.
+
+    Combines high-activity FinViz signals (most active, top gainers,
+    top losers, most volatile, unusual volume) for stocks that are
+    moving *today*, plus top crypto movers (crypto trades 24/7).
+    Cached for 15 minutes (shorter TTL than swing).
+    """
+    cached = _cache_get("daytrade_candidates")
+    if cached is not None:
+        logger.info(f"[prescreener] Returning {len(cached)} cached day-trade candidates")
+        return cached
+
+    start = time.time()
+    sources: dict[str, Any] = {
+        "finviz_most_active": _finviz_most_active,
+        "finviz_top_gainers": _finviz_top_gainers,
+        "finviz_top_losers": _finviz_top_losers,
+        "finviz_most_volatile": _finviz_most_volatile,
+        "finviz_unusual_volume": _finviz_unusual_volume,
+        "yf_most_actives": _yf_most_actives,
+        "yf_day_gainers": _yf_day_gainers,
+        "yf_day_losers": _yf_day_losers,
+        "crypto_movers": _crypto_top_movers,
+        "crypto_base": _crypto_candidates,
+    }
+
+    seen: set[str] = set()
+    combined: list[str] = []
+
+    core = _core_tickers()
+    for t in core:
+        if t not in seen:
+            seen.add(t)
+            combined.append(t)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        future_map = {executor.submit(fn): name for name, fn in sources.items()}
+        for future in as_completed(future_map):
+            name = future_map[future]
+            try:
+                tickers = future.result()
+                for t in tickers:
+                    t_upper = t.upper().strip()
+                    if t_upper and t_upper not in seen:
+                        seen.add(t_upper)
+                        combined.append(t_upper)
+            except Exception as e:
+                logger.warning(f"[prescreener] Day-trade source '{name}' failed: {e}")
+
+    combined = combined[:max_total]
+    elapsed = time.time() - start
+    logger.info(f"[prescreener] Day-trade pre-screen: {len(combined)} candidates in {elapsed:.1f}s")
+
+    with _cache_lock:
+        _cache["daytrade_candidates"] = (time.time(), combined)
+    return combined
+
+
+# ── Breakout Candidates ───────────────────────────────────────────────
+
+def _finviz_consolidation() -> list[str]:
+    """Low-volatility stocks that may be building up for a breakout."""
+    return _finviz_screen(
+        filters_dict={
+            "Volatility": "Week - Under 3%",
+            "Average Volume": "Over 500K",
+            "Price": "Over $5",
+            "20-Day Simple Moving Average": "Price above SMA20",
+        },
+        limit=150,
+    )
+
+
+def _finviz_channel_up() -> list[str]:
+    """Stocks currently in a rising channel pattern."""
+    return _finviz_screen(signal="Channel Up", limit=100)
+
+
+def _finviz_wedge() -> list[str]:
+    """Stocks in wedge patterns (often precede breakouts)."""
+    return _finviz_screen(signal="Wedge", limit=100)
+
+
+def _finviz_near_52w_high() -> list[str]:
+    """Stocks within 5% of 52-week high — potential breakout through."""
+    return _finviz_screen(
+        filters_dict={
+            "52-Week High/Low": "0-5% below High",
+            "Average Volume": "Over 300K",
+        },
+        limit=150,
+    )
+
+
+def get_breakout_candidates(max_total: int = 300) -> list[str]:
+    """Return tickers suited for breakout / consolidation scanning.
+
+    Combines low-volatility stocks near resistance, channel patterns,
+    wedges, near-52-week-high stocks, and crypto (which can consolidate
+    and break out just like equities).  Cached for 30 minutes.
+    """
+    cached = _cache_get("breakout_candidates")
+    if cached is not None:
+        logger.info(f"[prescreener] Returning {len(cached)} cached breakout candidates")
+        return cached
+
+    start = time.time()
+    sources: dict[str, Any] = {
+        "finviz_consolidation": _finviz_consolidation,
+        "finviz_channel_up": _finviz_channel_up,
+        "finviz_wedge": _finviz_wedge,
+        "finviz_near_52w_high": _finviz_near_52w_high,
+        "finviz_new_high": _finviz_new_high,
+        "crypto_base": _crypto_candidates,
+    }
+
+    seen: set[str] = set()
+    combined: list[str] = []
+
+    core = _core_tickers()
+    for t in core:
+        if t not in seen:
+            seen.add(t)
+            combined.append(t)
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        future_map = {executor.submit(fn): name for name, fn in sources.items()}
+        for future in as_completed(future_map):
+            name = future_map[future]
+            try:
+                tickers = future.result()
+                for t in tickers:
+                    t_upper = t.upper().strip()
+                    if t_upper and t_upper not in seen:
+                        seen.add(t_upper)
+                        combined.append(t_upper)
+            except Exception as e:
+                logger.warning(f"[prescreener] Breakout source '{name}' failed: {e}")
+
+    combined = combined[:max_total]
+    elapsed = time.time() - start
+    logger.info(f"[prescreener] Breakout pre-screen: {len(combined)} candidates in {elapsed:.1f}s")
+
+    _cache_set("breakout_candidates", combined)
+    return combined

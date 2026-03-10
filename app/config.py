@@ -49,6 +49,9 @@ class Settings(BaseSettings):
     # Desktop command refinement: LLM corrects ASR and normalizes app names (mobile/desktop API).
     desktop_refinement_enabled: bool = True
 
+    # 0x DEX aggregator (free tier, for MetaMask swap quotes)
+    zerox_api_key: str = ""
+
     # Robinhood (read-only portfolio sync)
     robinhood_username: str = ""
     robinhood_password: str = ""

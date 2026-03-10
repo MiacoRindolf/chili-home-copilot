@@ -15,7 +15,7 @@ from ..services import trading_service as ts
 from ..services import trading_scheduler
 from ..services import ticker_universe
 from ..services import broker_service
-from .trading_sub import ai_router, broker_router
+from .trading_sub import ai_router, broker_router, web3_router
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
@@ -31,6 +31,7 @@ from ..services import backtest_service as bt_svc
 router = APIRouter(tags=["trading"])
 router.include_router(ai_router)
 router.include_router(broker_router)
+router.include_router(web3_router)
 
 _TRADING_PROMPT: str | None = None
 
@@ -455,7 +456,8 @@ def api_screener_presets():
             "id": sid,
             "name": info["name"],
             "description": info["description"],
-            "conditions": len(info["conditions"]),
+            "scan_type": info.get("scan_type", "swing"),
+            "conditions": len(info.get("conditions", [])),
             "confirmations": len(info.get("confirmations", [])),
         })
     return JSONResponse({"ok": True, "presets": presets})
@@ -477,6 +479,22 @@ def api_run_screener(body: ScreenRequest):
         screen_id=body.screen_id,
         conditions=body.conditions,
     )
+    return JSONResponse(result)
+
+
+# ── Day-Trade & Breakout Scans ────────────────────────────────────────
+
+@router.post("/api/trading/scan/daytrade")
+def api_run_daytrade_scan():
+    """Scan for day-trade opportunities using intraday data."""
+    result = ts.run_daytrade_scan()
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/scan/breakouts")
+def api_run_breakout_scan():
+    """Scan for stocks consolidating near resistance — breakout watchlist."""
+    result = ts.run_breakout_scan()
     return JSONResponse(result)
 
 

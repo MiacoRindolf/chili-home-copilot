@@ -14,6 +14,29 @@ from ..yf_session import (
 
 logger = logging.getLogger(__name__)
 
+
+def smart_round(value: float | None, fallback: int = 2) -> float | None:
+    """Round a price to an appropriate number of decimals based on magnitude.
+
+    >= $1       -> 2 decimals   (45231.89, 1.23)
+    >= $0.01    -> 4 decimals   (0.0543)
+    >= $0.0001  -> 6 decimals   (0.000123)
+    < $0.0001   -> 8 decimals   (0.00000012)
+    """
+    if value is None:
+        return None
+    abs_v = abs(value)
+    if abs_v >= 1:
+        d = 2
+    elif abs_v >= 0.01:
+        d = 4
+    elif abs_v >= 0.0001:
+        d = 6
+    else:
+        d = 8
+    return round(value, d)
+
+
 # ── Interval / period validation ──────────────────────────────────────
 
 _VALID_INTERVALS = {
@@ -94,23 +117,23 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
     prev = fi.get("previous_close")
     result: dict[str, Any] = {
         "ticker": ticker.upper(),
-        "price": round(price, 2),
-        "previous_close": round(prev, 2) if prev else None,
-        "change": round(price - prev, 2) if prev else None,
+        "price": smart_round(price),
+        "previous_close": smart_round(prev) if prev else None,
+        "change": smart_round(price - prev) if prev else None,
         "change_pct": round((price - prev) / prev * 100, 2) if prev else None,
         "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
         "currency": "USD",
     }
     if fi.get("day_high"):
-        result["day_high"] = round(fi["day_high"], 2)
+        result["day_high"] = smart_round(fi["day_high"])
     if fi.get("day_low"):
-        result["day_low"] = round(fi["day_low"], 2)
+        result["day_low"] = smart_round(fi["day_low"])
     if fi.get("volume"):
         result["volume"] = fi["volume"]
     if fi.get("year_high"):
-        result["year_high"] = round(fi["year_high"], 2)
+        result["year_high"] = smart_round(fi["year_high"])
     if fi.get("year_low"):
-        result["year_low"] = round(fi["year_low"], 2)
+        result["year_low"] = smart_round(fi["year_low"])
     if fi.get("avg_volume"):
         result["avg_volume"] = fi["avg_volume"]
     return result
@@ -397,3 +420,45 @@ def ticker_display_name(ticker: str) -> str:
 
 def is_crypto(ticker: str) -> bool:
     return ticker.upper().endswith("-USD")
+
+
+# ── VIX / Volatility Regime ──────────────────────────────────────────
+
+_vix_cache: dict[str, Any] = {"value": None, "ts": 0}
+_VIX_CACHE_TTL = 900  # 15 minutes
+
+def get_vix() -> float | None:
+    """Fetch current VIX value with 15-minute caching."""
+    import time as _t
+    now = _t.time()
+    if _vix_cache["value"] is not None and now - _vix_cache["ts"] < _VIX_CACHE_TTL:
+        return _vix_cache["value"]
+    try:
+        fi = _yf_fast_info("^VIX")
+        if fi and fi.get("last_price"):
+            val = round(float(fi["last_price"]), 2)
+            _vix_cache["value"] = val
+            _vix_cache["ts"] = now
+            return val
+    except Exception:
+        pass
+    return _vix_cache.get("value")
+
+
+def get_volatility_regime(vix: float | None = None) -> dict[str, Any]:
+    """Classify the current volatility regime from VIX."""
+    if vix is None:
+        vix = get_vix()
+    if vix is None:
+        return {"regime": "unknown", "vix": None, "label": "Unknown"}
+
+    if vix < 15:
+        regime, label = "low", "Low Volatility"
+    elif vix < 20:
+        regime, label = "normal", "Normal"
+    elif vix < 30:
+        regime, label = "elevated", "Elevated"
+    else:
+        regime, label = "extreme", "Extreme"
+
+    return {"regime": regime, "vix": vix, "label": label}
