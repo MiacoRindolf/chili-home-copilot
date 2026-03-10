@@ -13,6 +13,8 @@ import pandas as pd
 import yfinance as yf
 from sqlalchemy.orm import Session
 
+from .yf_session import get_ticker as _yf_ticker, get_history as _yf_history, get_fast_info as _yf_fast_info, acquire as _yf_acquire
+
 from ..models.trading import JournalEntry, LearningEvent, Trade, TradingInsight, WatchlistItem
 
 logger = logging.getLogger(__name__)
@@ -74,12 +76,7 @@ def fetch_ohlcv(
         period = "6mo"
     period = _clamp_period(interval, period)
 
-    try:
-        t = yf.Ticker(ticker)
-        df = t.history(period=period, interval=interval)
-    except Exception as e:
-        logger.warning(f"[trading] OHLCV fetch failed for {ticker}: {e}")
-        return []
+    df = _yf_history(ticker, period=period, interval=interval)
 
     if df.empty:
         return []
@@ -100,38 +97,45 @@ def fetch_ohlcv(
 
 def fetch_quote(ticker: str) -> dict[str, Any] | None:
     """Current price + enriched info for a ticker."""
+    fi = _yf_fast_info(ticker)
+    if fi is None or fi.get("last_price") is None:
+        return None
+    price = fi["last_price"]
+    prev = fi.get("previous_close")
+    result: dict[str, Any] = {
+        "ticker": ticker.upper(),
+        "price": round(price, 2),
+        "previous_close": round(prev, 2) if prev else None,
+        "change": round(price - prev, 2) if prev else None,
+        "change_pct": round((price - prev) / prev * 100, 2) if prev else None,
+        "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
+        "currency": "USD",
+    }
+    if fi.get("day_high"):
+        result["day_high"] = round(fi["day_high"], 2)
+    if fi.get("day_low"):
+        result["day_low"] = round(fi["day_low"], 2)
+    if fi.get("volume"):
+        result["volume"] = fi["volume"]
     try:
+        _yf_acquire()
         t = yf.Ticker(ticker)
         info = t.fast_info
-        result: dict[str, Any] = {
-            "ticker": ticker.upper(),
-            "price": round(float(info.last_price), 2) if info.last_price else None,
-            "previous_close": round(float(info.previous_close), 2) if info.previous_close else None,
-            "change": round(float(info.last_price - info.previous_close), 2)
-                if info.last_price and info.previous_close else None,
-            "change_pct": round(
-                float((info.last_price - info.previous_close) / info.previous_close * 100), 2
-            ) if info.last_price and info.previous_close else None,
-            "market_cap": int(info.market_cap) if info.market_cap else None,
-            "currency": info.currency if hasattr(info, "currency") else "USD",
-        }
-        try:
-            result["day_high"] = round(float(info.day_high), 2) if info.day_high else None
-            result["day_low"] = round(float(info.day_low), 2) if info.day_low else None
-            result["year_high"] = round(float(info.year_high), 2) if info.year_high else None
-            result["year_low"] = round(float(info.year_low), 2) if info.year_low else None
-            result["volume"] = int(info.last_volume) if info.last_volume else None
-            result["avg_volume"] = int(info.three_month_average_volume) if hasattr(info, "three_month_average_volume") and info.three_month_average_volume else None
-        except Exception:
-            pass
-        return result
+        if hasattr(info, "year_high") and info.year_high:
+            result["year_high"] = round(float(info.year_high), 2)
+        if hasattr(info, "year_low") and info.year_low:
+            result["year_low"] = round(float(info.year_low), 2)
+        if hasattr(info, "three_month_average_volume") and info.three_month_average_volume:
+            result["avg_volume"] = int(info.three_month_average_volume)
     except Exception:
-        return None
+        pass
+    return result
 
 
 def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
     """Search for tickers matching a query string."""
     try:
+        _yf_acquire()
         results = yf.search(query, max_results=limit)
         quotes = results.get("quotes", []) if isinstance(results, dict) else []
         return [
@@ -165,8 +169,7 @@ def compute_indicators(
         indicators = ["rsi", "macd", "sma_20", "ema_20", "bbands"]
     period = _clamp_period(interval, period)
 
-    t = yf.Ticker(ticker)
-    df = t.history(period=period, interval=interval)
+    df = _yf_history(ticker, period=period, interval=interval)
     if df.empty:
         return {}
 
@@ -944,8 +947,7 @@ def _score_ticker(ticker: str) -> dict[str, Any] | None:
         from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
         from ta.volatility import BollingerBands, AverageTrueRange
 
-        t = yf.Ticker(ticker)
-        df = t.history(period="6mo", interval="1d")
+        df = _yf_history(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 30:
             return None
 
@@ -1449,8 +1451,7 @@ def backfill_future_returns(db: Session) -> int:
     updated = 0
     for snap in unfilled:
         try:
-            t = yf.Ticker(snap.ticker)
-            df = t.history(start=snap.snapshot_date, period="15d", interval="1d")
+            df = _yf_history(snap.ticker, start=snap.snapshot_date, period="15d", interval="1d")
             if len(df) < 6:
                 continue
             base_price = snap.close_price
@@ -1485,8 +1486,7 @@ def _mine_from_history(ticker: str) -> list[dict]:
     from ta.volatility import BollingerBands, AverageTrueRange
 
     try:
-        t = yf.Ticker(ticker)
-        df = t.history(period="1y", interval="1d")
+        df = _yf_history(ticker, period="1y", interval="1d")
         if df.empty or len(df) < 60:
             return []
     except Exception:
@@ -2368,7 +2368,7 @@ def get_confidence_history(db: Session, user_id: int | None) -> list[dict[str, A
 
 # ── Batch Concurrent Scanner ──────────────────────────────────────────
 
-_MAX_SCAN_WORKERS = 20
+_MAX_SCAN_WORKERS = 5
 
 _scan_status: dict[str, Any] = {
     "running": False,

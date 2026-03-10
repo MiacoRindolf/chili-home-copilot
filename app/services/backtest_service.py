@@ -11,6 +11,8 @@ from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 from sqlalchemy.orm import Session
 
+from .yf_session import get_history as _yf_history
+
 from ..models.trading import BacktestResult
 
 
@@ -217,8 +219,7 @@ def run_backtest(
     if strategy_id not in STRATEGIES:
         return {"ok": False, "error": f"Unknown strategy: {strategy_id}"}
 
-    t = yf.Ticker(ticker)
-    df = t.history(period=period, interval="1d")
+    df = _yf_history(ticker, period=period, interval="1d")
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 

@@ -85,6 +85,7 @@ class AnalyzeRequest(BaseModel):
     ticker: str
     interval: str = "1d"
     message: Optional[str] = None
+    history: Optional[list[dict]] = None
 
 
 class InsightOut(BaseModel):

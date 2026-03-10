@@ -5,7 +5,7 @@ import json
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_identity_ctx
@@ -276,10 +276,17 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
 
     user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. Give me a clear verdict: should I buy, sell, or hold? Include exact entry price, stop-loss, targets, hold duration, and confidence level."
 
+    messages = []
+    if body.history:
+        for h in body.history[-10:]:
+            if isinstance(h, dict) and h.get("role") and h.get("content"):
+                messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": user_msg})
+
     try:
         from .. import openai_client
         result = openai_client.chat(
-            messages=[{"role": "user", "content": user_msg}],
+            messages=messages,
             system_prompt=f"{_get_trading_prompt()}\n\n---\n\n{ai_context}",
             trace_id=trace_id,
             user_message=user_msg,
@@ -290,6 +297,63 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
         reply = f"Analysis unavailable: {e}"
 
     return JSONResponse({"ok": True, "reply": reply, "ticker": body.ticker})
+
+
+@router.get("/api/trading/analyze/stream")
+def api_analyze_stream(
+    request: Request,
+    db: Session = Depends(get_db),
+    ticker: str = Query("AAPL"),
+    interval: str = Query("1d"),
+    message: str = Query(""),
+    history: str = Query("[]"),
+):
+    """SSE streaming endpoint for trading AI analysis."""
+    ctx = get_identity_ctx(request, db)
+    trace_id = new_trace_id()
+
+    ai_context = ts.build_ai_context(db, ctx["user_id"], ticker, interval)
+    user_msg = message or (
+        f"Analyze {ticker} on the {interval} timeframe. "
+        "Give me a clear verdict: should I buy, sell, or hold? "
+        "Include exact entry price, stop-loss, targets, hold duration, and confidence level."
+    )
+
+    try:
+        hist_list = json.loads(history) if history else []
+    except (json.JSONDecodeError, TypeError):
+        hist_list = []
+
+    messages = []
+    for h in hist_list[-10:]:
+        if isinstance(h, dict) and h.get("role") and h.get("content"):
+            messages.append({"role": h["role"], "content": h["content"]})
+    messages.append({"role": "user", "content": user_msg})
+
+    system_prompt = f"{_get_trading_prompt()}\n\n---\n\n{ai_context}"
+
+    def _generate():
+        from .. import openai_client
+        try:
+            for tok, model in openai_client.chat_stream(
+                messages=messages,
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=user_msg,
+            ):
+                yield f"data: {json.dumps({'token': tok})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            log_info(trace_id, f"[trading] stream error: {e}")
+            err_msg = f"\n\n*Analysis error: {e}*"
+            yield f"data: {json.dumps({'token': err_msg})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/api/trading/smart-pick")

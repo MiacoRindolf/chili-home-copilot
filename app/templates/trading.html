@@ -131,15 +131,17 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
 /* ── AI Chat panel ───────────────────────────────── */
 .t-ai {
-  width: 340px; min-width: 280px; border-left: 1px solid var(--border);
+  width: 380px; min-width: 300px; border-left: 1px solid var(--border);
   display: flex; flex-direction: column; background: var(--bg-header);
   z-index: 200; transition: transform .25s cubic-bezier(.4,0,.2,1);
 }
 .t-ai-header {
-  display: flex; align-items: center; gap: 6px; padding: 8px 12px;
+  display: flex; align-items: center; gap: 6px; padding: 10px 14px;
   border-bottom: 1px solid var(--border); font-size: 13px; font-weight: 600; color: var(--text-secondary);
 }
 .t-ai-header .close-ai { display: none; margin-left: auto; background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 18px; padding: 0 4px; }
+.t-ai-header .clear-chat { margin-left: auto; background: none; border: 1px solid var(--border); border-radius: 6px; color: var(--text-muted); cursor: pointer; font-size: 10px; padding: 3px 8px; transition: all .15s; }
+.t-ai-header .clear-chat:hover { color: #ef4444; border-color: #ef4444; }
 .ai-quick-actions { padding: 6px 10px; display: flex; gap: 6px; }
 .ai-quick-actions button {
   flex: 1; padding: 8px 6px; border: none; border-radius: 8px; cursor: pointer;
@@ -147,28 +149,172 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 .ai-quick-actions button:active { transform: scale(.96); }
 .ai-learn-btns { padding: 0 10px 6px; display: flex; flex-wrap: wrap; gap: 4px; }
-.ai-msgs { flex: 1; overflow-y: auto; padding: 8px 10px; }
-.ai-msg { margin-bottom: 10px; font-size: 13px; line-height: 1.5; }
-.ai-msg.user { text-align: right; }
+.ai-msgs { flex: 1; overflow-y: auto; padding: 10px 12px; scroll-behavior: smooth; }
+
+/* Message row with avatar */
+.ai-msg { display: flex; gap: 8px; margin-bottom: 14px; font-size: 13px; line-height: 1.55; animation: msgFadeIn .3s ease-out; }
+.ai-msg.user { flex-direction: row-reverse; }
+@keyframes msgFadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+
+.ai-msg .msg-avatar {
+  width: 28px; height: 28px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center; font-size: 14px;
+  margin-top: 2px;
+}
+.ai-msg.user .msg-avatar { background: var(--accent); color: #fff; }
+.ai-msg.assistant .msg-avatar { background: linear-gradient(135deg, #f97316, #ef4444); color: #fff; }
+
+.ai-msg .msg-body { max-width: 85%; min-width: 0; }
 .ai-msg .bubble {
-  display: inline-block; max-width: 92%; padding: 8px 12px; border-radius: 14px;
-  text-align: left; word-break: break-word;
+  display: block; padding: 10px 14px; border-radius: 16px;
+  text-align: left; word-break: break-word; position: relative;
 }
 .ai-msg.user .bubble { background: var(--accent); color: #fff; white-space: pre-wrap; border-bottom-right-radius: 4px; }
-.ai-msg.assistant .bubble { background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.ai-msg.assistant .bubble {
+  background: var(--bg); border: 1px solid var(--border); border-bottom-left-radius: 4px;
+  box-shadow: 0 1px 4px rgba(0,0,0,.04);
+}
 .ai-msg.assistant .bubble p { margin: 4px 0; }
+.ai-msg.assistant .bubble p:first-child { margin-top: 0; }
+.ai-msg.assistant .bubble p:last-child { margin-bottom: 0; }
 .ai-msg.assistant .bubble ul, .ai-msg.assistant .bubble ol { margin: 4px 0; padding-left: 18px; }
 .ai-msg.assistant .bubble li { margin: 2px 0; }
 .ai-msg.assistant .bubble strong { color: var(--text); }
-.ai-msg.assistant .bubble h1,.ai-msg.assistant .bubble h2,.ai-msg.assistant .bubble h3 { font-size: 13px; margin: 8px 0 4px; }
-.ai-msg.assistant .bubble code { background: rgba(0,0,0,.06); padding: 1px 4px; border-radius: 3px; font-size: 11px; }
-.ai-input { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); }
+.ai-msg.assistant .bubble h1,.ai-msg.assistant .bubble h2,.ai-msg.assistant .bubble h3 { font-size: 13px; margin: 8px 0 4px; font-weight: 700; }
+.ai-msg.assistant .bubble code { background: rgba(0,0,0,.06); padding: 1px 5px; border-radius: 3px; font-size: 11px; font-family: 'SF Mono', Consolas, monospace; }
+.ai-msg.assistant .bubble pre { background: var(--code-bg); border-radius: 8px; padding: 8px 10px; overflow-x: auto; margin: 6px 0; }
+.ai-msg.assistant .bubble pre code { background: none; padding: 0; font-size: 11px; }
+.ai-msg.assistant .bubble table { width: 100%; border-collapse: collapse; margin: 6px 0; font-size: 11px; }
+.ai-msg.assistant .bubble th { text-align: left; padding: 4px 6px; border-bottom: 2px solid var(--border); font-weight: 600; color: var(--text-secondary); }
+.ai-msg.assistant .bubble td { padding: 3px 6px; border-bottom: 1px solid var(--border); }
+.ai-msg.assistant .bubble blockquote { border-left: 3px solid var(--accent); margin: 6px 0; padding: 4px 10px; color: var(--text-secondary); }
+
+/* Timestamp */
+.ai-msg .msg-time { font-size: 10px; color: var(--text-muted); margin-top: 3px; padding: 0 2px; }
+.ai-msg.user .msg-time { text-align: right; }
+
+/* Copy button */
+.ai-msg .msg-actions { display: none; margin-top: 4px; }
+.ai-msg.assistant:hover .msg-actions { display: flex; gap: 4px; }
+.msg-actions button {
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 6px;
+  padding: 2px 8px; font-size: 10px; cursor: pointer; color: var(--text-muted); transition: all .15s;
+}
+.msg-actions button:hover { color: var(--accent); border-color: var(--accent); }
+
+/* Ticker tag pills */
+.ticker-tag {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 1px 7px; border-radius: 10px; font-size: 11px; font-weight: 700;
+  background: rgba(99,102,241,.12); color: var(--accent); cursor: pointer;
+  border: 1px solid rgba(99,102,241,.2); transition: all .15s; text-decoration: none;
+  position: relative; white-space: nowrap;
+}
+.ticker-tag:hover { background: rgba(99,102,241,.2); border-color: var(--accent); transform: translateY(-1px); }
+
+/* Ticker tooltip */
+.ticker-tooltip {
+  position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%);
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; min-width: 180px; z-index: 500;
+  box-shadow: 0 8px 24px rgba(0,0,0,.15); font-size: 12px; pointer-events: none;
+  animation: tooltipIn .15s ease-out;
+}
+@keyframes tooltipIn { from { opacity:0; transform: translateX(-50%) translateY(4px); } to { opacity:1; transform: translateX(-50%) translateY(0); } }
+.ticker-tooltip .tt-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 4px; }
+.ticker-tooltip .tt-ticker { font-weight: 700; font-size: 14px; }
+.ticker-tooltip .tt-signal { padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.ticker-tooltip .tt-price { font-size: 16px; font-weight: 700; }
+.ticker-tooltip .tt-change { font-size: 11px; font-weight: 600; }
+.ticker-tooltip .tt-loading { color: var(--text-muted); font-style: italic; }
+
+/* Inline ticker recommendation cards */
+.ticker-card {
+  margin: 8px 0; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid var(--border); background: var(--bg-header);
+  box-shadow: 0 2px 8px rgba(0,0,0,.06);
+}
+.ticker-card .tc-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ticker-card .tc-ticker { font-weight: 700; font-size: 14px; cursor: pointer; }
+.ticker-card .tc-ticker:hover { color: var(--accent); }
+.ticker-card .tc-signal { padding: 2px 8px; border-radius: 20px; font-size: 10px; font-weight: 700; text-transform: uppercase; }
+.tc-signal.buy { background: #dcfce7; color: #16a34a; }
+.tc-signal.sell { background: #fee2e2; color: #dc2626; }
+.tc-signal.hold { background: #fef9c3; color: #a16207; }
+.ticker-card .tc-price { font-size: 15px; font-weight: 700; }
+.ticker-card .tc-change { font-size: 11px; font-weight: 600; margin-left: 6px; }
+.ticker-card .tc-meta { display: flex; gap: 12px; font-size: 11px; color: var(--text-secondary); margin: 4px 0; flex-wrap: wrap; }
+.ticker-card .tc-meta span { display: flex; flex-direction: column; }
+.ticker-card .tc-meta .tc-lbl { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
+.ticker-card .tc-actions { display: flex; gap: 6px; margin-top: 6px; }
+.ticker-card .tc-actions button {
+  padding: 4px 10px; font-size: 10px; border-radius: 6px; cursor: pointer; font-weight: 600; transition: all .15s;
+}
+.ticker-card .tc-btn-chart { background: var(--accent); color: #fff; border: none; }
+.ticker-card .tc-btn-chart:hover { opacity: .85; }
+.ticker-card .tc-btn-wl { background: none; border: 1px solid var(--border); color: var(--text-secondary); }
+.ticker-card .tc-btn-wl:hover { border-color: var(--accent); color: var(--accent); }
+
+/* Confidence gauge */
+.conf-gauge { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; }
+.conf-gauge .cg-bar { width: 40px; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.conf-gauge .cg-fill { height: 100%; border-radius: 3px; }
+
+/* Thinking indicator */
+.thinking-dots { display: inline-flex; gap: 4px; padding: 4px 0; }
+.thinking-dots span { width: 7px; height: 7px; border-radius: 50%; background: var(--text-muted); animation: dotBounce 1.2s infinite ease-in-out; }
+.thinking-dots span:nth-child(2) { animation-delay: .2s; }
+.thinking-dots span:nth-child(3) { animation-delay: .4s; }
+@keyframes dotBounce { 0%,80%,100% { transform: scale(.6); opacity: .4; } 40% { transform: scale(1); opacity: 1; } }
+.thinking-status { font-size: 11px; color: var(--text-muted); margin-top: 2px; font-style: italic; }
+
+/* Streaming cursor */
+.streaming-cursor::after { content: '\u258C'; animation: cursorBlink .8s infinite; color: var(--accent); }
+@keyframes cursorBlink { 0%,100% { opacity: 1; } 50% { opacity: 0; } }
+
+/* Follow-up suggestion chips */
+.followup-chips { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 6px; }
+.followup-chip {
+  padding: 4px 10px; border-radius: 14px; font-size: 10px; font-weight: 600;
+  border: 1px solid var(--border); background: var(--bg-header); color: var(--text-secondary);
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.followup-chip:hover { background: var(--accent); color: #fff; border-color: var(--accent); transform: translateY(-1px); }
+
+/* Stop generating button */
+.stop-btn {
+  display: flex; align-items: center; justify-content: center; gap: 4px;
+  margin: 4px auto 8px; padding: 5px 14px; border-radius: 16px;
+  border: 1px solid var(--border); background: var(--bg-header); color: var(--text-secondary);
+  font-size: 11px; font-weight: 600; cursor: pointer; transition: all .15s;
+}
+.stop-btn:hover { border-color: #ef4444; color: #ef4444; }
+
+/* Ticker autocomplete dropdown */
+.ticker-ac {
+  position: absolute; bottom: 100%; left: 0; right: 0;
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  max-height: 200px; overflow-y: auto; z-index: 400; display: none;
+  box-shadow: 0 -4px 16px rgba(0,0,0,.1); margin-bottom: 4px;
+}
+.ticker-ac.open { display: block; }
+.ticker-ac-item {
+  padding: 7px 12px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 8px;
+  transition: background .1s;
+}
+.ticker-ac-item:hover, .ticker-ac-item.active { background: var(--bg); }
+.ticker-ac-item .ac-sym { font-weight: 700; min-width: 60px; }
+.ticker-ac-item .ac-name { color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ticker-ac-item .ac-type { font-size: 9px; color: var(--text-muted); margin-left: auto; text-transform: uppercase; }
+
+.ai-input { display: flex; gap: 6px; padding: 8px 10px; border-top: 1px solid var(--border); position: relative; }
 .ai-input input {
-  flex: 1; padding: 8px 12px; font-size: 13px; border: 1px solid var(--input-border);
-  border-radius: 10px; background: var(--input-bg); color: var(--text); outline: none;
+  flex: 1; padding: 9px 14px; font-size: 13px; border: 1px solid var(--input-border);
+  border-radius: 12px; background: var(--input-bg); color: var(--text); outline: none;
 }
 .ai-input input:focus { border-color: var(--accent); box-shadow: 0 0 0 2px rgba(99,102,241,.15); }
-.ai-input button { padding: 8px 16px; border: none; border-radius: 10px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; font-weight: 600; }
+.ai-input button { padding: 9px 18px; border: none; border-radius: 12px; background: var(--accent); color: #fff; cursor: pointer; font-size: 12px; font-weight: 600; transition: all .15s; }
+.ai-input button:hover { background: var(--accent-hover); }
 
 /* ── Floating AI toggle (mobile) ─────────────────── */
 .fab-ai {
@@ -309,7 +455,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
    ═══════════════════════════════════════════════════ */
 @media (max-width: 1024px) {
   .t-sidebar { width: 180px; min-width: 150px; }
-  .t-ai { width: 280px; min-width: 240px; }
+  .t-ai { width: 320px; min-width: 260px; }
 }
 
 /* ═══════════════════════════════════════════════════
@@ -614,7 +760,8 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   <!-- AI Chat panel -->
   <div class="t-ai" id="ai-panel">
     <div class="t-ai-header">
-      &#x1F916; Trading AI
+      &#x1F336;&#xFE0F; CHILI Trading AI
+      <button class="clear-chat" onclick="clearChatHistory()" title="Clear chat">Clear</button>
       <button class="close-ai" onclick="toggleAiPanel()" aria-label="Close AI chat">&times;</button>
     </div>
     <div class="ai-quick-actions">
@@ -630,9 +777,11 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <button onclick="askLearn('How do I know when to sell?')" class="learn-btn">When to sell?</button>
     </div>
     <div class="ai-msgs" id="ai-msgs"></div>
+    <div id="stop-btn-container"></div>
     <div class="ai-input">
-      <input type="text" id="ai-input" placeholder="Ask anything... e.g. 'What stock should I buy?'" />
-      <button onclick="sendAiChat()">Send</button>
+      <div class="ticker-ac" id="ticker-ac"></div>
+      <input type="text" id="ai-input" placeholder="Ask about any $TICKER or strategy..." autocomplete="off" />
+      <button onclick="sendAiChat()" id="btn-send">Send</button>
     </div>
   </div>
 
@@ -740,9 +889,9 @@ document.addEventListener('DOMContentLoaded', function() {
   loadStats();
   loadInsights();
   loadSignalsBanner();
-  document.getElementById('ai-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') sendAiChat();
-  });
+  document.getElementById('ai-input').addEventListener('keydown', _onAiInputKey);
+  _loadChatHistory();
+  _refreshKnownTickers();
   document.getElementById('wl-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') addToWatchlist();
   });
@@ -1306,85 +1455,227 @@ function triggerFullScan() {
 
 /* ── AI Chat ────────────────────────────────────── */
 var SMART_PICK_PATTERNS = /\b(what.*(buy|invest|trade|pick|recommend)|should\s+i\s+buy|best\s+stock|top\s+pick|give\s+me\s+a\s+stock|which\s+stock|what\s+to\s+buy|find\s+me|scan.*market|suggest.*stock)/i;
+var chatHistory = [];
+var _streamAbort = null;
+var _acDebounce = null;
+var _acIdx = -1;
 
-function sendAiChat() {
-  var inp = document.getElementById('ai-input');
-  var msg = inp.value.trim();
-  if (!msg) return;
-  inp.value = '';
-  appendAiMsg('user', msg);
-
-  if (SMART_PICK_PATTERNS.test(msg)) {
-    appendAiMsg('assistant', 'Scanning the entire market (thousands of stocks + crypto) and running deep AI analysis... This may take a moment.');
-    fetch('/api/trading/smart-pick', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ message: msg, risk_tolerance: 'medium' })
-    }).then(function(r){return r.json();}).then(function(d) {
-      removeLastAiMsg();
-      var prefix = d.picks_scanned ? '*Scanned ' + d.picks_scanned.toLocaleString() + ' tickers, ' + (d.picks_qualified||0) + ' qualified*\n\n' : '';
-      appendAiMsg('assistant', prefix + (d.reply || 'No recommendations at this time.'));
-    }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error running scan.'); });
-  } else {
-    appendAiMsg('assistant', 'Analyzing...');
-    fetch('/api/trading/analyze', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg })
-    }).then(function(r){return r.json();}).then(function(d) {
-      removeLastAiMsg();
-      appendAiMsg('assistant', d.reply || 'No response.');
-    }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
-  }
+function _loadChatHistory() {
+  try { var s = sessionStorage.getItem('chili_trade_chat'); if (s) chatHistory = JSON.parse(s); } catch(e) {}
+}
+function _saveChatHistory() {
+  try { sessionStorage.setItem('chili_trade_chat', JSON.stringify(chatHistory.slice(-30))); } catch(e) {}
+}
+function _historyPayload() {
+  return chatHistory.slice(-10).map(function(m) { return { role: m.role, content: m.text }; });
 }
 
-function askLearn(question) {
-  appendAiMsg('user', question);
-  appendAiMsg('assistant', 'Let me explain...');
-  fetch('/api/trading/analyze', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: question })
-  }).then(function(r){return r.json();}).then(function(d) {
-    removeLastAiMsg();
-    appendAiMsg('assistant', d.reply || 'No response.');
-  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+function clearChatHistory() {
+  chatHistory = [];
+  _saveChatHistory();
+  document.getElementById('ai-msgs').innerHTML = '';
 }
 
-function askSmartPick() {
-  appendAiMsg('user', 'What stocks should I buy right now?');
-  appendAiMsg('assistant', 'Scanning thousands of stocks + crypto across the entire market... Running deep AI analysis on top candidates...');
-  fetch('/api/trading/smart-pick', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ message: 'What are your top 3 stock picks I should buy RIGHT NOW? For each give me exact buy-in price, sell target, stop-loss, hold duration, position size, and confidence level. Rank by conviction.', risk_tolerance: 'medium' })
-  }).then(function(r){return r.json();}).then(function(d) {
-    removeLastAiMsg();
-    var prefix = d.picks_scanned ? '*Scanned ' + d.picks_scanned.toLocaleString() + ' tickers, ' + (d.picks_qualified||0) + ' qualified*\n\n' : '';
-    appendAiMsg('assistant', prefix + (d.reply || 'No strong setups found right now. Sometimes the best trade is no trade.'));
-    if (d.top_picks && d.top_picks.length) {
-      selectTicker(d.top_picks[0].ticker);
+function _timeStr() {
+  var d = new Date();
+  var h = d.getHours(), m = d.getMinutes();
+  var ampm = h >= 12 ? 'PM' : 'AM';
+  h = h % 12 || 12;
+  return h + ':' + (m < 10 ? '0' : '') + m + ' ' + ampm;
+}
+
+function escHtml(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+
+/* Ticker tag regex: $AAPL, $BTC-USD or standalone known patterns */
+var _TICKER_RE = /\$([A-Z]{1,5}(?:-USD)?)\b/g;
+var _BARE_TICKER_RE = /\b([A-Z]{2,5}(?:-USD)?)\b/g;
+var _KNOWN_TICKERS = new Set();
+
+function _refreshKnownTickers() {
+  fetch('/api/trading/watchlist').then(function(r){return r.json();}).then(function(d) {
+    if (d.ok && d.items) d.items.forEach(function(i) { _KNOWN_TICKERS.add(i.ticker); });
+  });
+  ['AAPL','MSFT','GOOGL','AMZN','TSLA','NVDA','META','BTC-USD','ETH-USD','SOL-USD'].forEach(function(t) { _KNOWN_TICKERS.add(t); });
+}
+
+function linkifyTickers(html) {
+  html = html.replace(_TICKER_RE, function(match, ticker) {
+    return '<span class="ticker-tag" data-ticker="'+ticker+'" onclick="event.stopPropagation();selectTicker(\''+ticker+'\')" onmouseenter="_showTickerTooltip(this)" onmouseleave="_hideTickerTooltip(this)">$'+ticker+'</span>';
+  });
+  html = html.replace(_BARE_TICKER_RE, function(match, ticker) {
+    if (_KNOWN_TICKERS.has(ticker) && html.indexOf('data-ticker="'+ticker+'"') === -1) {
+      return '<span class="ticker-tag" data-ticker="'+ticker+'" onclick="event.stopPropagation();selectTicker(\''+ticker+'\')" onmouseenter="_showTickerTooltip(this)" onmouseleave="_hideTickerTooltip(this)">$'+ticker+'</span>';
     }
-  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error running market scan.'); });
+    return match;
+  });
+  return html;
 }
 
-function runAnalysis() {
-  appendAiMsg('assistant', 'Running full analysis on ' + currentTicker + '...');
-  fetch('/api/trading/analyze', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ ticker: currentTicker, interval: currentInterval })
-  }).then(function(r){return r.json();}).then(function(d) {
-    removeLastAiMsg();
-    appendAiMsg('assistant', d.reply || 'No response.');
-  }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+/* Ticker tooltip on hover */
+var _ttCache = {};
+function _showTickerTooltip(el) {
+  var ticker = el.dataset.ticker;
+  var tip = document.createElement('div');
+  tip.className = 'ticker-tooltip';
+  tip.innerHTML = '<div class="tt-loading">Loading...</div>';
+  el.appendChild(tip);
+
+  if (_ttCache[ticker] && (Date.now() - _ttCache[ticker]._ts < 30000)) {
+    tip.innerHTML = _ttCache[ticker].html;
+    return;
+  }
+  fetch('/api/trading/quote?ticker='+encodeURIComponent(ticker)).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || d.price == null) { tip.innerHTML = '<span class="tt-ticker">'+ticker+'</span><br><span class="tt-loading">No data</span>'; return; }
+    var cls = (d.change_pct||0)>=0 ? 'color:#22c55e' : 'color:#ef4444';
+    var sign = (d.change_pct||0)>=0 ? '+' : '';
+    var h = '<div class="tt-header"><span class="tt-ticker">'+ticker+'</span></div>' +
+      '<div class="tt-price" style="margin:2px 0">$'+d.price+'</div>' +
+      '<div class="tt-change" style="'+cls+'">'+sign+(d.change||0)+' ('+sign+(d.change_pct||0)+'%)</div>';
+    if (d.volume) h += '<div style="font-size:10px;color:var(--text-muted);margin-top:2px">Vol: '+(d.volume/1e6).toFixed(1)+'M</div>';
+    _ttCache[ticker] = { html: h, _ts: Date.now() };
+    tip.innerHTML = h;
+  }).catch(function() { tip.innerHTML = '<span class="tt-ticker">'+ticker+'</span>'; });
 }
 
-function appendAiMsg(role, text) {
+function _hideTickerTooltip(el) {
+  var tip = el.querySelector('.ticker-tooltip');
+  if (tip) tip.remove();
+}
+
+/* Inline ticker recommendation cards */
+function renderTickerCards(html) {
+  var cardRe = /\*\*(?:VERDICT|Signal|Recommendation)[:\s]*\s*(BUY|SELL|HOLD)\*\*/i;
+  var tickerInContext = currentTicker;
+  var match = html.match(cardRe);
+  if (!match) return html;
+
+  var tickers = [];
+  var tagRe = /data-ticker="([A-Z]{1,5}(?:-USD)?)"/g;
+  var tm;
+  while ((tm = tagRe.exec(html)) !== null) { if (tickers.indexOf(tm[1]) === -1) tickers.push(tm[1]); }
+  if (!tickers.length) tickers.push(tickerInContext);
+
+  tickers.slice(0, 3).forEach(function(ticker) {
+    var signal = match[1].toLowerCase();
+    var sigCls = signal === 'buy' ? 'buy' : (signal === 'sell' ? 'sell' : 'hold');
+    var card = '<div class="ticker-card" id="tc-'+ticker+'">' +
+      '<div class="tc-header">' +
+        '<span class="tc-ticker" onclick="selectTicker(\''+ticker+'\')">'+ticker+'</span>' +
+        '<span class="tc-signal '+sigCls+'">'+signal.toUpperCase()+'</span>' +
+        '<span class="tc-price" id="tc-price-'+ticker+'">...</span>' +
+        '<span class="tc-change" id="tc-chg-'+ticker+'"></span>' +
+      '</div>' +
+      '<div class="tc-actions">' +
+        '<button class="tc-btn-chart" onclick="selectTicker(\''+ticker+'\')">View Chart</button>' +
+        '<button class="tc-btn-wl" onclick="addCrypto(\''+ticker+'\')">+ Watchlist</button>' +
+      '</div>' +
+    '</div>';
+    html += card;
+    _fetchCardPrice(ticker);
+  });
+  return html;
+}
+
+function _fetchCardPrice(ticker) {
+  fetch('/api/trading/quote?ticker='+encodeURIComponent(ticker)).then(function(r){return r.json();}).then(function(d) {
+    var priceEl = document.getElementById('tc-price-'+ticker);
+    var chgEl = document.getElementById('tc-chg-'+ticker);
+    if (!priceEl || !d.ok || d.price == null) return;
+    priceEl.textContent = '$' + d.price;
+    if (chgEl && d.change_pct != null) {
+      var cls = d.change_pct >= 0 ? 'color:#22c55e' : 'color:#ef4444';
+      var sign = d.change_pct >= 0 ? '+' : '';
+      chgEl.innerHTML = '<span style="'+cls+'">'+sign+d.change_pct+'%</span>';
+    }
+  }).catch(function() {});
+}
+
+/* Generate follow-up chips */
+function _generateFollowups(text, ticker) {
+  var chips = [];
+  if (/\bbuy\b/i.test(text)) {
+    chips.push('Run backtest on ' + ticker);
+    chips.push('What are the risks?');
+    chips.push('Show similar stocks');
+  } else if (/\bsell\b/i.test(text)) {
+    chips.push('When exactly should I sell?');
+    chips.push('What could change this outlook?');
+  } else if (/\bhold\b/i.test(text)) {
+    chips.push('What signals should I watch?');
+    chips.push('Compare to alternatives');
+  }
+  if (/\brsi\b/i.test(text) || /\bmacd\b/i.test(text) || /\bbollinger\b/i.test(text)) {
+    chips.push('Explain this in simpler terms');
+  }
+  if (chips.length === 0) {
+    chips.push('Tell me more');
+    chips.push('Analyze ' + ticker);
+  }
+  chips.push('What should I buy?');
+  return chips.slice(0, 3);
+}
+
+function _renderFollowups(chips) {
+  if (!chips || !chips.length) return '';
+  var html = '<div class="followup-chips">';
+  chips.forEach(function(c) {
+    html += '<button class="followup-chip" onclick="_clickFollowup(this)">'+escHtml(c)+'</button>';
+  });
+  html += '</div>';
+  return html;
+}
+
+function _clickFollowup(el) {
+  var text = el.textContent;
+  document.getElementById('ai-input').value = text;
+  sendAiChat();
+}
+
+/* Build message HTML with avatar, timestamp, copy, followups */
+function _buildMsgHtml(role, content, followups) {
+  var avatar = role === 'assistant' ? '&#x1F336;' : '&#x1F464;';
+  var time = _timeStr();
+  var actions = role === 'assistant' ? '<div class="msg-actions"><button onclick="_copyBubble(this)">Copy</button></div>' : '';
+  var followHtml = role === 'assistant' && followups ? _renderFollowups(followups) : '';
+  return '<div class="ai-msg '+role+'">' +
+    '<div class="msg-avatar">'+avatar+'</div>' +
+    '<div class="msg-body">' +
+      '<div class="bubble">'+content+'</div>' +
+      '<div class="msg-time">'+time+'</div>' +
+      actions + followHtml +
+    '</div></div>';
+}
+
+function _copyBubble(btn) {
+  var bubble = btn.closest('.msg-body').querySelector('.bubble');
+  if (!bubble) return;
+  var text = bubble.innerText || bubble.textContent;
+  navigator.clipboard.writeText(text).then(function() {
+    btn.textContent = 'Copied!';
+    setTimeout(function() { btn.textContent = 'Copy'; }, 1500);
+  });
+}
+
+function appendAiMsg(role, text, opts) {
+  opts = opts || {};
   var msgs = document.getElementById('ai-msgs');
   var content;
   if (role === 'assistant' && typeof marked !== 'undefined') {
     try { content = marked.parse(text); } catch(e) { content = escHtml(text); }
+    content = linkifyTickers(content);
+    if (!opts.skipCards) content = renderTickerCards(content);
   } else {
     content = escHtml(text);
   }
-  msgs.innerHTML += '<div class="ai-msg '+role+'"><div class="bubble">'+content+'</div></div>';
+
+  var followups = (role === 'assistant' && !opts.isThinking) ? _generateFollowups(text, currentTicker) : null;
+  msgs.innerHTML += _buildMsgHtml(role, content, opts.isThinking ? null : followups);
   msgs.scrollTop = msgs.scrollHeight;
+
+  if (!opts.isThinking) {
+    chatHistory.push({ role: role, text: text, time: Date.now() });
+    _saveChatHistory();
+  }
 }
 
 function removeLastAiMsg() {
@@ -1392,7 +1683,264 @@ function removeLastAiMsg() {
   if (msgs.lastElementChild) msgs.removeChild(msgs.lastElementChild);
 }
 
-function escHtml(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
+/* Thinking indicator */
+function _showThinking(statusText) {
+  var msgs = document.getElementById('ai-msgs');
+  var html = _buildMsgHtml('assistant',
+    '<div class="thinking-dots"><span></span><span></span><span></span></div>' +
+    '<div class="thinking-status">' + escHtml(statusText || 'Thinking...') + '</div>',
+    null
+  );
+  msgs.innerHTML += html;
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+/* Stop button */
+function _showStopBtn() {
+  document.getElementById('stop-btn-container').innerHTML = '<button class="stop-btn" onclick="_stopStream()">&#x25A0; Stop generating</button>';
+}
+function _hideStopBtn() {
+  document.getElementById('stop-btn-container').innerHTML = '';
+}
+function _stopStream() {
+  if (_streamAbort) { _streamAbort.abort(); _streamAbort = null; }
+  _hideStopBtn();
+}
+
+/* SSE streaming for analyze */
+function _streamAnalyze(msg, isSmartPick) {
+  var url = isSmartPick ? '/api/trading/smart-pick' : '/api/trading/analyze/stream';
+  if (isSmartPick) {
+    _showThinking('Scanning the entire market...');
+    _showStopBtn();
+    var controller = new AbortController();
+    _streamAbort = controller;
+    fetch('/api/trading/smart-pick', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ message: msg, risk_tolerance: 'medium' }),
+      signal: controller.signal
+    }).then(function(r){return r.json();}).then(function(d) {
+      removeLastAiMsg();
+      _hideStopBtn();
+      var prefix = d.picks_scanned ? '*Scanned ' + d.picks_scanned.toLocaleString() + ' tickers, ' + (d.picks_qualified||0) + ' qualified*\n\n' : '';
+      appendAiMsg('assistant', prefix + (d.reply || 'No recommendations at this time.'));
+      if (d.top_picks && d.top_picks.length) selectTicker(d.top_picks[0].ticker);
+    }).catch(function(e) {
+      removeLastAiMsg(); _hideStopBtn();
+      if (e.name !== 'AbortError') appendAiMsg('assistant', 'Error running scan.');
+    });
+    return;
+  }
+
+  _showThinking('Analyzing ' + currentTicker + '...');
+  _showStopBtn();
+
+  var params = new URLSearchParams({
+    ticker: currentTicker, interval: currentInterval, message: msg,
+    history: JSON.stringify(_historyPayload())
+  });
+
+  var controller2 = new AbortController();
+  _streamAbort = controller2;
+
+  fetch('/api/trading/analyze/stream?' + params.toString(), { signal: controller2.signal })
+    .then(function(response) {
+      if (!response.ok || !response.body) {
+        return response.json().then(function(d) {
+          removeLastAiMsg(); _hideStopBtn();
+          appendAiMsg('assistant', d.reply || 'Analysis unavailable.');
+        });
+      }
+      removeLastAiMsg();
+
+      var msgs = document.getElementById('ai-msgs');
+      var msgEl = document.createElement('div');
+      msgEl.innerHTML = _buildMsgHtml('assistant', '<span class="streaming-cursor"></span>', null);
+      msgs.appendChild(msgEl.firstElementChild);
+      var bubble = msgs.lastElementChild.querySelector('.bubble');
+      var fullText = '';
+      var renderTimer = null;
+
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = '';
+
+      function _renderStream() {
+        if (!bubble) return;
+        var parsed = fullText;
+        try { parsed = marked.parse(fullText); } catch(e) {}
+        parsed = linkifyTickers(parsed);
+        bubble.innerHTML = parsed + '<span class="streaming-cursor"></span>';
+        msgs.scrollTop = msgs.scrollHeight;
+      }
+
+      function pump() {
+        reader.read().then(function(result) {
+          if (result.done) {
+            clearInterval(renderTimer);
+            _hideStopBtn();
+            var parsed2 = fullText;
+            try { parsed2 = marked.parse(fullText); } catch(e) {}
+            parsed2 = linkifyTickers(parsed2);
+            parsed2 = renderTickerCards(parsed2);
+            var followups = _generateFollowups(fullText, currentTicker);
+            bubble.innerHTML = parsed2;
+            var body = bubble.closest('.msg-body');
+            if (body) {
+              body.querySelector('.msg-time').textContent = _timeStr();
+              var actDiv = document.createElement('div');
+              actDiv.className = 'msg-actions';
+              actDiv.innerHTML = '<button onclick="_copyBubble(this)">Copy</button>';
+              body.appendChild(actDiv);
+              var chipDiv = document.createElement('div');
+              chipDiv.innerHTML = _renderFollowups(followups);
+              if (chipDiv.firstElementChild) body.appendChild(chipDiv.firstElementChild);
+            }
+            chatHistory.push({ role: 'assistant', text: fullText, time: Date.now() });
+            _saveChatHistory();
+            return;
+          }
+          buffer += decoder.decode(result.value, { stream: true });
+          var lines = buffer.split('\n');
+          buffer = lines.pop();
+          lines.forEach(function(line) {
+            if (line.startsWith('data: ')) {
+              var payload = line.substring(6);
+              if (payload === '[DONE]') return;
+              try {
+                var ev = JSON.parse(payload);
+                if (ev.token) fullText += ev.token;
+                if (ev.suggestions) { /* handled at end */ }
+              } catch(e) {
+                fullText += payload;
+              }
+            }
+          });
+          pump();
+        }).catch(function(e) {
+          clearInterval(renderTimer);
+          _hideStopBtn();
+          if (e.name !== 'AbortError') {
+            bubble.innerHTML = marked.parse(fullText || 'Stream interrupted.');
+          }
+        });
+      }
+
+      renderTimer = setInterval(_renderStream, 80);
+      pump();
+    })
+    .catch(function(e) {
+      removeLastAiMsg(); _hideStopBtn();
+      if (e.name !== 'AbortError') {
+        appendAiMsg('assistant', 'Error reaching AI. Retrying with fallback...');
+        fetch('/api/trading/analyze', {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg, history: _historyPayload() })
+        }).then(function(r){return r.json();}).then(function(d) {
+          removeLastAiMsg();
+          appendAiMsg('assistant', d.reply || 'No response.');
+        }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
+      }
+    });
+}
+
+function sendAiChat() {
+  var inp = document.getElementById('ai-input');
+  var msg = inp.value.trim();
+  if (!msg) return;
+  inp.value = '';
+  _hideAutocomplete();
+  appendAiMsg('user', msg);
+  var isSmartPick = SMART_PICK_PATTERNS.test(msg);
+  _streamAnalyze(msg, isSmartPick);
+}
+
+function askLearn(question) {
+  appendAiMsg('user', question);
+  _streamAnalyze(question, false);
+}
+
+function askSmartPick() {
+  var msg = 'What are your top 3 stock picks I should buy RIGHT NOW? For each give me exact buy-in price, sell target, stop-loss, hold duration, position size, and confidence level. Rank by conviction.';
+  appendAiMsg('user', 'What stocks should I buy right now?');
+  _streamAnalyze(msg, true);
+}
+
+function runAnalysis() {
+  var msg = 'Analyze ' + currentTicker + ' on the ' + currentInterval + ' timeframe. Give me a clear verdict: should I buy, sell, or hold?';
+  _streamAnalyze(msg, false);
+}
+
+/* ── Ticker Autocomplete ──────────────────────────── */
+function _hideAutocomplete() {
+  document.getElementById('ticker-ac').classList.remove('open');
+  document.getElementById('ticker-ac').innerHTML = '';
+  _acIdx = -1;
+}
+
+function _showAutocomplete(results) {
+  var ac = document.getElementById('ticker-ac');
+  if (!results.length) { _hideAutocomplete(); return; }
+  _acIdx = -1;
+  var html = '';
+  results.forEach(function(r, i) {
+    html += '<div class="ticker-ac-item" data-idx="'+i+'" data-ticker="'+escHtml(r.ticker)+'" onclick="_selectAcItem(this)">' +
+      '<span class="ac-sym">'+escHtml(r.ticker)+'</span>' +
+      '<span class="ac-name">'+escHtml(r.name||'')+'</span>' +
+      '<span class="ac-type">'+escHtml(r.type||'')+'</span>' +
+    '</div>';
+  });
+  ac.innerHTML = html;
+  ac.classList.add('open');
+}
+
+function _selectAcItem(el) {
+  var ticker = el.dataset.ticker;
+  var inp = document.getElementById('ai-input');
+  var val = inp.value;
+  var dollarIdx = val.lastIndexOf('$');
+  if (dollarIdx >= 0) {
+    inp.value = val.substring(0, dollarIdx) + '$' + ticker + ' ';
+  } else {
+    inp.value += '$' + ticker + ' ';
+  }
+  inp.focus();
+  _hideAutocomplete();
+}
+
+function _onAiInputKey(e) {
+  if (e.key === 'Enter') {
+    if (document.getElementById('ticker-ac').classList.contains('open') && _acIdx >= 0) {
+      var items = document.querySelectorAll('.ticker-ac-item');
+      if (items[_acIdx]) { _selectAcItem(items[_acIdx]); e.preventDefault(); return; }
+    }
+    sendAiChat();
+    return;
+  }
+  if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+    var items2 = document.querySelectorAll('.ticker-ac-item');
+    if (!items2.length) return;
+    e.preventDefault();
+    items2.forEach(function(it) { it.classList.remove('active'); });
+    if (e.key === 'ArrowDown') _acIdx = Math.min(_acIdx + 1, items2.length - 1);
+    else _acIdx = Math.max(_acIdx - 1, 0);
+    items2[_acIdx].classList.add('active');
+    return;
+  }
+  if (e.key === 'Escape') { _hideAutocomplete(); return; }
+
+  clearTimeout(_acDebounce);
+  _acDebounce = setTimeout(function() {
+    var val = document.getElementById('ai-input').value;
+    var dollarIdx = val.lastIndexOf('$');
+    if (dollarIdx < 0 || dollarIdx === val.length - 1) { _hideAutocomplete(); return; }
+    var query = val.substring(dollarIdx + 1).trim();
+    if (query.length < 1) { _hideAutocomplete(); return; }
+    fetch('/api/trading/search?q='+encodeURIComponent(query)).then(function(r){return r.json();}).then(function(d) {
+      if (d.ok) _showAutocomplete(d.results || []);
+    }).catch(function() {});
+  }, 250);
+}
 
 /* ── Custom Screener ───────────────────────────── */
 var _screenerPresets = {};
