@@ -73,7 +73,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 /* ── Bottom tabs (journal / stats / insights) ───── */
 .t-bottom {
-  height: 220px; min-height: 120px; border-top: 1px solid var(--border);
+  height: 260px; min-height: 160px; border-top: 1px solid var(--border);
   display: flex; flex-direction: column; background: var(--bg-header);
 }
 .t-tabs { display: flex; border-bottom: 1px solid var(--border); }
@@ -138,6 +138,66 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   border-radius: 12px; cursor: pointer; user-select: none; background: var(--bg-header); color: var(--text-secondary);
 }
 .ind-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ── Signal cards ──────────────────────────────── */
+.signals-banner { padding: 12px; background: var(--bg-header); border-bottom: 1px solid var(--border); }
+.signals-banner h3 { font-size: 14px; margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.signals-scroll { display: flex; gap: 10px; overflow-x: auto; padding-bottom: 4px; }
+.signal-card {
+  min-width: 200px; max-width: 240px; border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px; background: var(--bg); flex-shrink: 0; cursor: pointer;
+  transition: box-shadow .15s, border-color .15s;
+}
+.signal-card:hover { border-color: var(--accent); box-shadow: 0 2px 12px rgba(0,0,0,.12); }
+.signal-card .sc-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.signal-card .sc-ticker { font-weight: 700; font-size: 15px; }
+.signal-card .sc-badge {
+  padding: 2px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase;
+}
+.sc-badge.buy { background: #dcfce7; color: #16a34a; }
+.sc-badge.sell { background: #fee2e2; color: #dc2626; }
+.sc-badge.hold { background: #fef9c3; color: #a16207; }
+.signal-card .sc-score { font-size: 12px; color: var(--text-secondary); margin-bottom: 4px; }
+.signal-card .sc-explain { font-size: 11px; color: var(--text-muted); line-height: 1.4; margin-bottom: 6px; }
+.signal-card .sc-levels { display: flex; gap: 8px; font-size: 11px; }
+.signal-card .sc-levels span { display: flex; flex-direction: column; }
+.signal-card .sc-levels .lbl { color: var(--text-muted); font-size: 10px; }
+.sc-confidence { font-size: 11px; color: var(--text-secondary); margin-top: 4px; }
+.sc-risk { display: inline-block; padding: 1px 6px; border-radius: 8px; font-size: 10px; font-weight: 600; }
+.sc-risk.low { background: #dcfce7; color: #16a34a; }
+.sc-risk.medium { background: #fef9c3; color: #a16207; }
+.sc-risk.high { background: #fee2e2; color: #dc2626; }
+.signals-actions { display: flex; gap: 8px; margin-top: 8px; }
+.signals-actions button {
+  padding: 5px 14px; font-size: 12px; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg-header); color: var(--text); cursor: pointer;
+}
+.signals-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+
+/* ── Portfolio ─────────────────────────────────── */
+.portfolio-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.portfolio-grid .p-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 12px; text-align: center; }
+.portfolio-grid .p-val { font-size: 18px; font-weight: 700; }
+.portfolio-grid .p-val.pos { color: #22c55e; }
+.portfolio-grid .p-val.neg { color: #ef4444; }
+.portfolio-grid .p-lbl { font-size: 11px; color: var(--text-secondary); }
+.pos-table { width: 100%; border-collapse: collapse; font-size: 12px; margin-top: 6px; }
+.pos-table th { text-align: left; padding: 3px 6px; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+.pos-table td { padding: 3px 6px; border-bottom: 1px solid var(--border); }
+
+/* ── Backtest ──────────────────────────────────── */
+.bt-form { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 10px; align-items: center; }
+.bt-form select, .bt-form input, .bt-form button {
+  padding: 5px 10px; font-size: 12px; border: 1px solid var(--input-border);
+  border-radius: 6px; background: var(--input-bg); color: var(--text);
+}
+.bt-form button { cursor: pointer; background: var(--accent); color: #fff; border-color: var(--accent); }
+.bt-results { margin-top: 8px; }
+.bt-stats { display: flex; flex-wrap: wrap; gap: 6px; }
+.bt-stat { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 6px 12px; text-align: center; min-width: 90px; }
+.bt-stat .bt-val { font-size: 16px; font-weight: 700; }
+.bt-stat .bt-lbl { font-size: 10px; color: var(--text-secondary); }
+#bt-chart-area { width: 100%; height: 120px; margin-top: 8px; }
 </style>
 {% endblock %}
 
@@ -171,6 +231,16 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
   <!-- Main chart area -->
   <div class="t-main">
+    <!-- Signal Cards Banner -->
+    <div class="signals-banner" id="signals-banner" style="display:none">
+      <h3>&#x1F525; CHILI's Top Picks <span style="font-weight:400;font-size:11px;color:var(--text-muted)" id="signals-time"></span></h3>
+      <div class="signals-scroll" id="signals-scroll"></div>
+      <div class="signals-actions">
+        <button class="primary" onclick="runFullScan()">&#x1F50D; Run Full Scan</button>
+        <button onclick="loadSignals()">&#x21BB; Refresh Signals</button>
+      </div>
+    </div>
+
     <div class="t-toolbar">
       <span class="ticker-display" id="ticker-label">AAPL</span>
       <span class="price-display" id="price-label"></span>
@@ -188,6 +258,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       </select>
       <button onclick="loadChart()" title="Refresh">&#x21BB;</button>
       <button id="btn-analyze" onclick="runAnalysis()">&#x1F916; AI Analyze</button>
+      <button onclick="runBacktest()" title="Backtest current ticker">&#x1F9EA; Backtest</button>
     </div>
     <!-- Indicator toggles -->
     <div class="ind-panel" id="ind-panel"></div>
@@ -199,13 +270,45 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     <!-- Bottom tabs -->
     <div class="t-bottom">
       <div class="t-tabs">
-        <div class="t-tab active" data-tab="trades" onclick="switchTab(this)">Trades</div>
+        <div class="t-tab active" data-tab="signals" onclick="switchTab(this)">&#x1F7E2; Signals</div>
+        <div class="t-tab" data-tab="portfolio" onclick="switchTab(this)">&#x1F4B0; Portfolio</div>
+        <div class="t-tab" data-tab="backtest" onclick="switchTab(this)">&#x1F9EA; Backtest</div>
+        <div class="t-tab" data-tab="trades" onclick="switchTab(this)">Trades</div>
         <div class="t-tab" data-tab="journal" onclick="switchTab(this)">Journal</div>
         <div class="t-tab" data-tab="stats" onclick="switchTab(this)">Stats</div>
         <div class="t-tab" data-tab="insights" onclick="switchTab(this)">AI Insights</div>
       </div>
+
+      <!-- Signals -->
+      <div class="t-tab-content active" id="tab-signals">
+        <div id="signals-list"><em>Add stocks to your watchlist, then signals will appear here.</em></div>
+      </div>
+
+      <!-- Portfolio -->
+      <div class="t-tab-content" id="tab-portfolio">
+        <div class="portfolio-grid" id="portfolio-grid"></div>
+        <div id="portfolio-positions"></div>
+      </div>
+
+      <!-- Backtest -->
+      <div class="t-tab-content" id="tab-backtest">
+        <div class="bt-form">
+          <select id="bt-strategy"></select>
+          <select id="bt-period">
+            <option value="6mo">6 months</option>
+            <option value="1y" selected>1 year</option>
+            <option value="2y">2 years</option>
+            <option value="5y">5 years</option>
+          </select>
+          <input id="bt-cash" type="number" value="10000" step="1000" style="width:90px" placeholder="Cash $" />
+          <button onclick="runBacktest()">Run Backtest</button>
+        </div>
+        <div class="bt-results" id="bt-results"></div>
+        <div id="bt-chart-area"></div>
+      </div>
+
       <!-- Trades -->
-      <div class="t-tab-content active" id="tab-trades">
+      <div class="t-tab-content" id="tab-trades">
         <div class="trade-form">
           <select id="tf-dir"><option value="long">Long</option><option value="short">Short</option></select>
           <input id="tf-price" type="number" step="0.01" placeholder="Entry $" />
@@ -276,15 +379,22 @@ var INDICATORS = [
 ];
 
 /* ── Init ───────────────────────────────────────── */
+var btChart = null;
+var btEquitySeries = null;
+
 document.addEventListener('DOMContentLoaded', function() {
   initChart();
   buildIndicatorPanel();
+  loadStrategies();
   loadWatchlist();
   loadChart();
+  loadSignals();
+  loadPortfolio();
   loadTrades();
   loadJournal();
   loadStats();
   loadInsights();
+  loadSignalsBanner();
   document.getElementById('ai-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') sendAiChat();
   });
@@ -660,6 +770,179 @@ function switchTab(el) {
   document.querySelectorAll('.t-tab-content').forEach(function(t){t.classList.remove('active');});
   el.classList.add('active');
   document.getElementById('tab-'+el.dataset.tab).classList.add('active');
+}
+
+/* ── Signals (Beginner Dashboard) ──────────────── */
+function loadSignals() {
+  fetch('/api/trading/signals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('signals-list');
+    if (!d.signals || !d.signals.length) { el.innerHTML = '<em>Add stocks to your watchlist, then signals will appear here.</em>'; return; }
+    el.innerHTML = '';
+    d.signals.forEach(function(s) {
+      var badgeCls = s.signal === 'buy' ? 'buy' : (s.signal === 'sell' ? 'sell' : 'hold');
+      var riskCls = s.risk_level || 'medium';
+      var pnlDir = s.score >= 7 ? 'pos' : (s.score <= 3.5 ? 'neg' : '');
+      el.innerHTML +=
+        '<div class="signal-card" onclick="selectTicker(\''+s.ticker+'\')" style="display:inline-block;vertical-align:top;margin:0 8px 8px 0;width:220px">' +
+          '<div class="sc-header"><span class="sc-ticker">'+s.ticker+'</span><span class="sc-badge '+badgeCls+'">'+s.signal.toUpperCase()+'</span></div>' +
+          '<div class="sc-score">Score: '+s.score+'/10 &nbsp; <span class="sc-risk '+riskCls+'">'+riskCls.toUpperCase()+' risk</span></div>' +
+          '<div class="sc-explain">'+escHtml(s.explanation || '')+'</div>' +
+          '<div class="sc-levels"><span><span class="lbl">Entry</span>$'+s.entry_price+'</span>' +
+            '<span><span class="lbl">Stop</span>$'+s.stop_loss+'</span>' +
+            '<span><span class="lbl">Target</span>$'+s.take_profit+'</span></div>' +
+          '<div class="sc-confidence">AI confidence: '+Math.round(s.confidence)+'%' +
+            (s.best_strategy ? ' &middot; Best: '+s.best_strategy : '') + '</div>' +
+        '</div>';
+    });
+  });
+}
+
+function loadSignalsBanner() {
+  fetch('/api/trading/signals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.signals || !d.signals.length) return;
+    var banner = document.getElementById('signals-banner');
+    banner.style.display = 'block';
+    var scroll = document.getElementById('signals-scroll');
+    scroll.innerHTML = '';
+    d.signals.slice(0, 8).forEach(function(s) {
+      var badgeCls = s.signal === 'buy' ? 'buy' : (s.signal === 'sell' ? 'sell' : 'hold');
+      var riskCls = s.risk_level || 'medium';
+      scroll.innerHTML +=
+        '<div class="signal-card" onclick="selectTicker(\''+s.ticker+'\')">' +
+          '<div class="sc-header"><span class="sc-ticker">'+s.ticker+'</span><span class="sc-badge '+badgeCls+'">'+s.signal.toUpperCase()+'</span></div>' +
+          '<div class="sc-score">Score: '+s.score+'/10 &nbsp; <span class="sc-risk '+riskCls+'">'+riskCls.toUpperCase()+'</span></div>' +
+          '<div class="sc-levels"><span><span class="lbl">Entry</span>$'+s.entry_price+'</span>' +
+            '<span><span class="lbl">Stop</span>$'+s.stop_loss+'</span>' +
+            '<span><span class="lbl">Target</span>$'+s.take_profit+'</span></div>' +
+          '<div class="sc-confidence">'+Math.round(s.confidence)+'% confident</div>' +
+        '</div>';
+    });
+  });
+}
+
+function runFullScan() {
+  var btn = event.target;
+  btn.textContent = 'Scanning...';
+  btn.disabled = true;
+  fetch('/api/trading/scan', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({})})
+    .then(function(r){return r.json();}).then(function(d) {
+      btn.textContent = '\uD83D\uDD0D Run Full Scan';
+      btn.disabled = false;
+      if (d.ok) {
+        loadSignals();
+        loadSignalsBanner();
+      }
+    }).catch(function() { btn.textContent = '\uD83D\uDD0D Run Full Scan'; btn.disabled = false; });
+}
+
+/* ── Portfolio ─────────────────────────────────── */
+function loadPortfolio() {
+  fetch('/api/trading/portfolio').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var grid = document.getElementById('portfolio-grid');
+    var totalCls = d.total_pnl >= 0 ? 'pos' : 'neg';
+    var unrealCls = d.unrealized_pnl >= 0 ? 'pos' : 'neg';
+    var realCls = d.realized_pnl >= 0 ? 'pos' : 'neg';
+    grid.innerHTML =
+      '<div class="p-card"><div class="p-val '+totalCls+'">$'+d.total_pnl+'</div><div class="p-lbl">Total P&L</div></div>' +
+      '<div class="p-card"><div class="p-val '+realCls+'">$'+d.realized_pnl+'</div><div class="p-lbl">Realized</div></div>' +
+      '<div class="p-card"><div class="p-val '+unrealCls+'">$'+d.unrealized_pnl+'</div><div class="p-lbl">Unrealized</div></div>' +
+      '<div class="p-card"><div class="p-val">'+d.position_count+'</div><div class="p-lbl">Open Positions</div></div>' +
+      '<div class="p-card"><div class="p-val">$'+d.total_invested+'</div><div class="p-lbl">Invested</div></div>' +
+      '<div class="p-card"><div class="p-val">$'+d.total_current+'</div><div class="p-lbl">Current Value</div></div>';
+
+    var posEl = document.getElementById('portfolio-positions');
+    if (d.positions && d.positions.length) {
+      var html = '<table class="pos-table"><thead><tr><th>Ticker</th><th>Dir</th><th>Entry</th><th>Current</th><th>Qty</th><th>P&L</th><th>%</th></tr></thead><tbody>';
+      d.positions.forEach(function(p) {
+        var cls = p.unrealized_pnl >= 0 ? 'pnl-pos' : 'pnl-neg';
+        html += '<tr><td>'+p.ticker+'</td><td>'+p.direction+'</td><td>$'+p.entry_price+'</td><td>$'+p.current_price+'</td><td>'+p.quantity+'</td><td class="'+cls+'">$'+p.unrealized_pnl+'</td><td class="'+cls+'">'+p.unrealized_pct+'%</td></tr>';
+      });
+      html += '</tbody></table>';
+      posEl.innerHTML = html;
+    } else {
+      posEl.innerHTML = '<div style="color:var(--text-muted);font-size:12px;margin-top:8px">No open positions</div>';
+    }
+  });
+}
+
+/* ── Backtest ──────────────────────────────────── */
+function loadStrategies() {
+  fetch('/api/trading/backtest/strategies').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var sel = document.getElementById('bt-strategy');
+    sel.innerHTML = '';
+    d.strategies.forEach(function(s) {
+      var opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = s.name;
+      opt.title = s.description;
+      sel.appendChild(opt);
+    });
+  });
+}
+
+function runBacktest() {
+  var strategy = document.getElementById('bt-strategy').value;
+  var period = document.getElementById('bt-period').value;
+  var cash = parseFloat(document.getElementById('bt-cash').value) || 10000;
+  var results = document.getElementById('bt-results');
+  results.innerHTML = '<em>Running backtest on ' + currentTicker + '...</em>';
+
+  fetch('/api/trading/backtest', {
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ticker: currentTicker, strategy: strategy, period: period, cash: cash, commission: 0.001})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+escHtml(d.error||'Backtest failed')+'</em>'; return; }
+
+    var retCls = d.return_pct >= 0 ? 'pnl-pos' : 'pnl-neg';
+    var bhCls = d.buy_hold_pct >= 0 ? 'pnl-pos' : 'pnl-neg';
+
+    results.innerHTML =
+      '<div style="font-size:13px;font-weight:600;margin-bottom:6px">'+d.strategy+' on '+d.ticker+' ('+d.period+')</div>' +
+      '<div class="bt-stats">' +
+        '<div class="bt-stat"><div class="bt-val '+retCls+'">'+d.return_pct+'%</div><div class="bt-lbl">Strategy Return</div></div>' +
+        '<div class="bt-stat"><div class="bt-val '+bhCls+'">'+d.buy_hold_pct+'%</div><div class="bt-lbl">Buy & Hold</div></div>' +
+        '<div class="bt-stat"><div class="bt-val">'+d.win_rate+'%</div><div class="bt-lbl">Win Rate</div></div>' +
+        '<div class="bt-stat"><div class="bt-val">'+(d.sharpe||'-')+'</div><div class="bt-lbl">Sharpe Ratio</div></div>' +
+        '<div class="bt-stat"><div class="bt-val" style="color:#ef4444">'+d.max_drawdown+'%</div><div class="bt-lbl">Max Drawdown</div></div>' +
+        '<div class="bt-stat"><div class="bt-val">'+d.trade_count+'</div><div class="bt-lbl">Total Trades</div></div>' +
+        '<div class="bt-stat"><div class="bt-val">$'+d.final_equity+'</div><div class="bt-lbl">Final Equity</div></div>' +
+        (d.profit_factor ? '<div class="bt-stat"><div class="bt-val">'+d.profit_factor+'</div><div class="bt-lbl">Profit Factor</div></div>' : '') +
+      '</div>';
+
+    if (d.equity_curve && d.equity_curve.length > 1) {
+      drawBacktestChart(d.equity_curve);
+    }
+
+    switchTab(document.querySelector('[data-tab="backtest"]'));
+  }).catch(function() { results.innerHTML = '<em style="color:#ef4444">Error running backtest</em>'; });
+}
+
+function drawBacktestChart(data) {
+  var el = document.getElementById('bt-chart-area');
+  el.innerHTML = '';
+  el.style.height = '120px';
+  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+
+  btChart = LightweightCharts.createChart(el, {
+    width: el.clientWidth, height: 120,
+    layout: { background: {type:'solid', color: isDark ? '#111827' : '#f9fafb'}, textColor: isDark ? '#9ca3af' : '#6b7280' },
+    grid: { vertLines: {visible:false}, horzLines: {color: isDark ? '#1f2937' : '#f3f4f6'} },
+    rightPriceScale: { borderVisible: false },
+    timeScale: { borderVisible: false, timeVisible: true },
+    handleScroll: false, handleScale: false,
+  });
+
+  btEquitySeries = btChart.addAreaSeries({
+    lineColor: '#3b82f6', topColor: 'rgba(59,130,246,.3)', bottomColor: 'rgba(59,130,246,.02)',
+    lineWidth: 2,
+  });
+  btEquitySeries.setData(data);
+  btChart.timeScale().fitContent();
+
+  new ResizeObserver(function() { btChart.applyOptions({width: el.clientWidth}); }).observe(el);
 }
 
 /* ── Theme ──────────────────────────────────────── */

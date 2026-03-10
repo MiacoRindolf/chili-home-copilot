@@ -96,3 +96,19 @@ class InsightOut(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── Backtest ────────────────────────────────────────────────────────────
+
+class BacktestRequest(BaseModel):
+    ticker: str
+    strategy: str = "sma_cross"
+    period: str = "1y"
+    cash: float = Field(10000, gt=0)
+    commission: float = Field(0.001, ge=0)
+
+
+# ── Scanner ─────────────────────────────────────────────────────────────
+
+class ScanRequest(BaseModel):
+    tickers: Optional[list[str]] = None

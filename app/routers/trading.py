@@ -14,11 +14,14 @@ from ..prompts import load_prompt
 from ..services import trading_service as ts
 from ..schemas.trading import (
     AnalyzeRequest,
+    BacktestRequest,
     JournalCreate,
+    ScanRequest,
     TradeClose,
     TradeCreate,
     WatchlistAdd,
 )
+from ..services import backtest_service as bt_svc
 
 router = APIRouter(tags=["trading"])
 
@@ -270,3 +273,94 @@ def api_get_insights(request: Request, db: Session = Depends(get_db)):
         }
         for i in insights
     ]})
+
+
+# ── Backtest ───────────────────────────────────────────────────────────
+
+@router.get("/api/trading/backtest/strategies")
+def api_list_strategies():
+    return JSONResponse({"ok": True, "strategies": bt_svc.list_strategies()})
+
+
+@router.post("/api/trading/backtest")
+def api_run_backtest(
+    body: BacktestRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ctx = get_identity_ctx(request, db)
+    result = bt_svc.run_backtest(
+        ticker=body.ticker, strategy_id=body.strategy, period=body.period,
+        cash=body.cash, commission=body.commission,
+    )
+    if not result.get("ok"):
+        return JSONResponse(result, status_code=400)
+
+    bt_svc.save_backtest(db, ctx["user_id"], result)
+    return JSONResponse(result)
+
+
+# ── Scanner ────────────────────────────────────────────────────────────
+
+@router.post("/api/trading/scan")
+def api_run_scan(
+    body: ScanRequest,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Run a full market scan. This is heavy, so we return top results and continue in BG."""
+    ctx = get_identity_ctx(request, db)
+    results = ts.run_scan(db, ctx["user_id"], tickers=body.tickers)
+    return JSONResponse({"ok": True, "count": len(results), "results": results[:20]})
+
+
+@router.get("/api/trading/scan/results")
+def api_scan_results(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    results = ts.get_latest_scan(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "results": results})
+
+
+# ── Portfolio ──────────────────────────────────────────────────────────
+
+@router.get("/api/trading/portfolio")
+def api_portfolio(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    summary = ts.get_portfolio_summary(db, ctx["user_id"])
+    return JSONResponse({"ok": True, **summary})
+
+
+# ── Signals ────────────────────────────────────────────────────────────
+
+@router.get("/api/trading/signals")
+def api_signals(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    signals = ts.generate_signals(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "signals": signals})
+
+
+# ── Background Learning ───────────────────────────────────────────────
+
+@router.post("/api/trading/learn/snapshot")
+def api_take_snapshots(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Manually trigger market snapshots (also runs on schedule)."""
+    ctx = get_identity_ctx(request, db)
+
+    from ..db import SessionLocal
+
+    def _bg_snapshot(user_id):
+        sdb = SessionLocal()
+        try:
+            count = ts.take_all_snapshots(sdb, user_id)
+            ts.backfill_future_returns(sdb)
+            ts.mine_patterns(sdb, user_id)
+        finally:
+            sdb.close()
+
+    background_tasks.add_task(_bg_snapshot, ctx["user_id"])
+    return JSONResponse({"ok": True, "message": "Snapshot + learning started in background"})

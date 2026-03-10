@@ -696,3 +696,482 @@ def _extract_and_store_patterns(
             db.commit()
         else:
             save_insight(db, user_id, desc, confidence=max(0.1, min(0.9, conf)))
+
+
+# ── Stock Scanner ──────────────────────────────────────────────────────
+
+DEFAULT_SCAN_TICKERS = [
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
+    "JPM", "V", "UNH", "MA", "HD", "PG", "JNJ", "COST", "ABBV", "CRM",
+    "MRK", "PEP", "AVGO", "KO", "TMO", "WMT", "CSCO", "ACN", "MCD",
+    "ABT", "LIN", "DHR", "TXN", "NEE", "AMD", "PM", "INTC", "QCOM",
+    "NFLX", "DIS", "AMGN", "HON", "LOW", "UPS", "CAT", "BA", "GS",
+    "SBUX", "PYPL", "SQ", "SNAP", "PLTR",
+]
+
+
+def _score_ticker(ticker: str) -> dict[str, Any] | None:
+    """Score a single ticker using multi-signal confluence (1-10)."""
+    try:
+        from ta.momentum import RSIIndicator, StochasticOscillator
+        from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
+        from ta.volatility import BollingerBands, AverageTrueRange
+
+        t = yf.Ticker(ticker)
+        df = t.history(period="3mo", interval="1d")
+        if df.empty or len(df) < 30:
+            return None
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+
+        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+        macd_obj = MACD(close=close)
+        macd_val = macd_obj.macd().iloc[-1]
+        macd_sig = macd_obj.macd_signal().iloc[-1]
+        sma_20 = SMAIndicator(close=close, window=20).sma_indicator().iloc[-1]
+        sma_50 = SMAIndicator(close=close, window=50).sma_indicator().iloc[-1]
+        ema_12 = EMAIndicator(close=close, window=12).ema_indicator().iloc[-1]
+        ema_26 = EMAIndicator(close=close, window=26).ema_indicator().iloc[-1]
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        bb_lower = bb.bollinger_lband().iloc[-1]
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        adx_val = ADXIndicator(high=high, low=low, close=close).adx().iloc[-1]
+        atr_val = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
+
+        price = float(close.iloc[-1])
+        vol_avg = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+        vol_latest = float(volume.iloc[-1])
+
+        score = 5.0  # neutral baseline
+        signals: list[str] = []
+
+        # RSI signal
+        if pd.notna(rsi_val):
+            if rsi_val < 30:
+                score += 1.5
+                signals.append(f"RSI oversold ({rsi_val:.0f})")
+            elif rsi_val < 40:
+                score += 0.5
+                signals.append(f"RSI near oversold ({rsi_val:.0f})")
+            elif rsi_val > 70:
+                score -= 1.5
+                signals.append(f"RSI overbought ({rsi_val:.0f})")
+
+        # MACD crossover
+        if pd.notna(macd_val) and pd.notna(macd_sig):
+            if macd_val > macd_sig:
+                score += 1.0
+                signals.append("MACD bullish crossover")
+            else:
+                score -= 0.5
+
+        # Price vs moving averages
+        if pd.notna(sma_20) and pd.notna(sma_50):
+            if price > sma_20 > sma_50:
+                score += 1.0
+                signals.append("Uptrend (price > SMA20 > SMA50)")
+            elif price < sma_20 < sma_50:
+                score -= 1.0
+                signals.append("Downtrend")
+
+        # Bollinger Band position
+        if pd.notna(bb_lower) and pd.notna(bb_upper):
+            bb_range = bb_upper - bb_lower
+            if bb_range > 0:
+                bb_pct = (price - bb_lower) / bb_range
+                if bb_pct < 0.15:
+                    score += 1.0
+                    signals.append("Near lower Bollinger Band")
+                elif bb_pct > 0.85:
+                    score -= 0.5
+
+        # ADX trend strength
+        if pd.notna(adx_val) and adx_val > 25:
+            score += 0.5
+            signals.append(f"Strong trend (ADX {adx_val:.0f})")
+
+        # Volume surge
+        if vol_avg > 0 and vol_latest > vol_avg * 1.5:
+            score += 0.5
+            signals.append("Volume surge")
+
+        score = max(1.0, min(10.0, score))
+
+        if score >= 7:
+            signal = "buy"
+        elif score <= 3.5:
+            signal = "sell"
+        else:
+            signal = "hold"
+
+        # Calculate levels
+        atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
+        stop_loss = round(price - 2 * atr_f, 2)
+        take_profit = round(price + 3 * atr_f, 2)
+
+        # Risk level
+        volatility_pct = (atr_f / price * 100) if price > 0 else 5
+        if volatility_pct > 3:
+            risk = "high"
+        elif volatility_pct > 1.5:
+            risk = "medium"
+        else:
+            risk = "low"
+
+        return {
+            "ticker": ticker.upper(),
+            "score": round(score, 1),
+            "signal": signal,
+            "price": round(price, 2),
+            "entry_price": round(price, 2),
+            "stop_loss": stop_loss,
+            "take_profit": take_profit,
+            "risk_level": risk,
+            "signals": signals,
+            "indicators": {
+                "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
+                "macd": round(float(macd_val), 4) if pd.notna(macd_val) else None,
+                "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
+                "atr": round(atr_f, 4),
+            },
+        }
+    except Exception:
+        return None
+
+
+def run_scan(
+    db: Session, user_id: int | None,
+    tickers: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Scan a list of tickers, score them, store results, return sorted."""
+    from ..models.trading import ScanResult
+
+    scan_list = tickers or DEFAULT_SCAN_TICKERS
+    results: list[dict[str, Any]] = []
+
+    for ticker in scan_list:
+        scored = _score_ticker(ticker)
+        if scored is None:
+            continue
+
+        rationale = "; ".join(scored["signals"]) if scored["signals"] else "No strong signals"
+
+        record = ScanResult(
+            user_id=user_id,
+            ticker=scored["ticker"],
+            score=scored["score"],
+            signal=scored["signal"],
+            entry_price=scored["entry_price"],
+            stop_loss=scored["stop_loss"],
+            take_profit=scored["take_profit"],
+            risk_level=scored["risk_level"],
+            rationale=rationale,
+            indicator_data=json.dumps(scored["indicators"]),
+        )
+        db.add(record)
+        results.append(scored)
+
+    db.commit()
+    results.sort(key=lambda r: r["score"], reverse=True)
+    return results
+
+
+def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[dict]:
+    """Get the most recent scan results."""
+    from ..models.trading import ScanResult
+
+    rows = db.query(ScanResult).filter(
+        ScanResult.user_id == user_id,
+    ).order_by(ScanResult.scanned_at.desc(), ScanResult.score.desc()).limit(limit).all()
+
+    return [
+        {
+            "id": r.id, "ticker": r.ticker, "score": r.score, "signal": r.signal,
+            "entry_price": r.entry_price, "stop_loss": r.stop_loss,
+            "take_profit": r.take_profit, "risk_level": r.risk_level,
+            "rationale": r.rationale,
+            "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            "scanned_at": r.scanned_at.isoformat(),
+        }
+        for r in rows
+    ]
+
+
+# ── Portfolio Tracker ──────────────────────────────────────────────────
+
+def get_portfolio_summary(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Full portfolio overview: open positions, equity curve, benchmark."""
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "open",
+    ).all()
+    closed_trades = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "closed",
+    ).order_by(Trade.exit_date.asc()).all()
+
+    # Open positions with live P&L
+    positions = []
+    total_invested = 0.0
+    total_current = 0.0
+    allocation: dict[str, float] = {}
+
+    for t in open_trades:
+        quote = fetch_quote(t.ticker)
+        current_price = quote.get("price", t.entry_price) if quote else t.entry_price
+        unrealized = (current_price - t.entry_price) * t.quantity
+        if t.direction == "short":
+            unrealized = -unrealized
+        position_value = current_price * t.quantity
+
+        positions.append({
+            "id": t.id, "ticker": t.ticker, "direction": t.direction,
+            "entry_price": t.entry_price, "current_price": current_price,
+            "quantity": t.quantity, "unrealized_pnl": round(unrealized, 2),
+            "unrealized_pct": round(unrealized / (t.entry_price * t.quantity) * 100, 2) if t.entry_price > 0 else 0,
+        })
+        total_invested += t.entry_price * t.quantity
+        total_current += position_value
+        allocation[t.ticker] = allocation.get(t.ticker, 0) + position_value
+
+    # Equity curve from closed trades
+    realized_pnl = 0.0
+    equity_curve = []
+    for t in closed_trades:
+        realized_pnl += t.pnl or 0
+        if t.exit_date:
+            equity_curve.append({
+                "time": int(t.exit_date.timestamp()),
+                "value": round(realized_pnl, 2),
+            })
+
+    total_unrealized = round(total_current - total_invested, 2) if total_invested > 0 else 0
+
+    # Allocation percentages
+    alloc_pct = {}
+    if total_current > 0:
+        for ticker, val in allocation.items():
+            alloc_pct[ticker] = round(val / total_current * 100, 1)
+
+    stats = get_trade_stats(db, user_id)
+
+    return {
+        "positions": positions,
+        "position_count": len(positions),
+        "total_invested": round(total_invested, 2),
+        "total_current": round(total_current, 2),
+        "unrealized_pnl": total_unrealized,
+        "realized_pnl": round(realized_pnl, 2),
+        "total_pnl": round(realized_pnl + total_unrealized, 2),
+        "allocation": alloc_pct,
+        "equity_curve": equity_curve,
+        "stats": stats,
+    }
+
+
+# ── Continuous Learning: Market Snapshots + Pattern Mining ─────────────
+
+def take_market_snapshot(db: Session, ticker: str) -> None:
+    """Record today's indicator state for a ticker (called by background task)."""
+    from ..models.trading import MarketSnapshot
+
+    try:
+        snap = get_indicator_snapshot(ticker, "1d")
+        quote = fetch_quote(ticker)
+        price = quote.get("price", 0) if quote else 0
+
+        record = MarketSnapshot(
+            ticker=ticker.upper(),
+            snapshot_date=datetime.utcnow(),
+            close_price=price,
+            indicator_data=json.dumps(snap),
+        )
+        db.add(record)
+        db.commit()
+    except Exception:
+        pass
+
+
+def take_all_snapshots(db: Session, user_id: int | None) -> int:
+    """Snapshot all watchlist tickers + defaults. Returns count."""
+    tickers = set(DEFAULT_SCAN_TICKERS[:20])
+
+    watchlist = get_watchlist(db, user_id)
+    for w in watchlist:
+        tickers.add(w.ticker)
+
+    count = 0
+    for ticker in tickers:
+        take_market_snapshot(db, ticker)
+        count += 1
+    return count
+
+
+def backfill_future_returns(db: Session) -> int:
+    """Fill in 5d/10d future returns for past snapshots that now have enough data."""
+    from ..models.trading import MarketSnapshot
+
+    unfilled = db.query(MarketSnapshot).filter(
+        MarketSnapshot.future_return_5d.is_(None),
+    ).limit(100).all()
+
+    updated = 0
+    for snap in unfilled:
+        try:
+            t = yf.Ticker(snap.ticker)
+            df = t.history(start=snap.snapshot_date, period="15d", interval="1d")
+            if len(df) < 6:
+                continue
+            base_price = snap.close_price
+            if base_price <= 0:
+                continue
+
+            if len(df) >= 6:
+                snap.future_return_5d = round(
+                    (float(df["Close"].iloc[5]) - base_price) / base_price * 100, 2
+                )
+            if len(df) >= 11:
+                snap.future_return_10d = round(
+                    (float(df["Close"].iloc[10]) - base_price) / base_price * 100, 2
+                )
+            updated += 1
+        except Exception:
+            continue
+
+    if updated:
+        db.commit()
+    return updated
+
+
+def mine_patterns(db: Session, user_id: int | None) -> list[str]:
+    """Analyze snapshots to discover profitable indicator patterns."""
+    from ..models.trading import MarketSnapshot
+
+    snapshots = db.query(MarketSnapshot).filter(
+        MarketSnapshot.future_return_5d.isnot(None),
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(500).all()
+
+    if len(snapshots) < 20:
+        return []
+
+    discoveries: list[str] = []
+
+    # Analyze: RSI oversold → 5d return
+    rsi_low = [s for s in snapshots if _snap_indicator(s, "rsi", "value", 0) < 30]
+    if len(rsi_low) >= 5:
+        avg_ret = sum(s.future_return_5d or 0 for s in rsi_low) / len(rsi_low)
+        win_count = sum(1 for s in rsi_low if (s.future_return_5d or 0) > 0)
+        win_rate = win_count / len(rsi_low) * 100
+        if avg_ret > 0.5:
+            pattern = f"RSI < 30 → avg +{avg_ret:.1f}% in 5 days ({win_rate:.0f}% win rate, {len(rsi_low)} samples)"
+            discoveries.append(pattern)
+            save_insight(db, user_id, pattern, confidence=min(0.9, win_rate / 100))
+
+    # MACD bullish crossover → 5d return
+    macd_bull = [s for s in snapshots if _snap_indicator(s, "macd", "macd", 0) > _snap_indicator(s, "macd", "signal", 0)]
+    if len(macd_bull) >= 5:
+        avg_ret = sum(s.future_return_5d or 0 for s in macd_bull) / len(macd_bull)
+        win_count = sum(1 for s in macd_bull if (s.future_return_5d or 0) > 0)
+        win_rate = win_count / len(macd_bull) * 100
+        if avg_ret > 0.3:
+            pattern = f"MACD bullish → avg +{avg_ret:.1f}% in 5 days ({win_rate:.0f}% win rate, {len(macd_bull)} samples)"
+            discoveries.append(pattern)
+            save_insight(db, user_id, pattern, confidence=min(0.9, win_rate / 100))
+
+    return discoveries
+
+
+def _snap_indicator(snapshot, ind_name: str, key: str, default: float) -> float:
+    """Extract a single value from a MarketSnapshot's indicator_data JSON."""
+    try:
+        data = json.loads(snapshot.indicator_data) if snapshot.indicator_data else {}
+        ind = data.get(ind_name, {})
+        if isinstance(ind, dict):
+            return float(ind.get(key, default))
+        return float(ind) if ind is not None else default
+    except Exception:
+        return default
+
+
+# ── Signal Generation (beginner-friendly) ──────────────────────────────
+
+def generate_signals(
+    db: Session, user_id: int | None,
+) -> list[dict[str, Any]]:
+    """Generate buy/hold/sell signals for all watchlist tickers."""
+    watchlist = get_watchlist(db, user_id)
+    if not watchlist:
+        return []
+
+    signals = []
+    insights = get_insights(db, user_id, limit=10)
+    insight_text = "; ".join(i.pattern_description for i in insights) if insights else ""
+
+    for w in watchlist:
+        scored = _score_ticker(w.ticker)
+        if not scored:
+            continue
+
+        # Confidence from backtest history
+        from ..models.trading import BacktestResult
+        best_bt = db.query(BacktestResult).filter(
+            BacktestResult.ticker == w.ticker,
+        ).order_by(BacktestResult.return_pct.desc()).first()
+
+        bt_confidence = 0
+        if best_bt and best_bt.win_rate > 50:
+            bt_confidence = min(30, best_bt.win_rate - 50)
+
+        base_confidence = (scored["score"] / 10) * 70
+        confidence = min(95, base_confidence + bt_confidence)
+
+        # Plain English explanation
+        explanation = _make_plain_english(scored, insight_text)
+
+        signals.append({
+            **scored,
+            "confidence": round(confidence, 0),
+            "explanation": explanation,
+            "best_strategy": best_bt.strategy_name if best_bt else None,
+        })
+
+    signals.sort(key=lambda s: s["score"], reverse=True)
+    return signals
+
+
+def _make_plain_english(scored: dict, insights: str) -> str:
+    """Convert technical signals into beginner-friendly language."""
+    parts = []
+    signal = scored["signal"]
+
+    if signal == "buy":
+        parts.append("This stock looks like a good buying opportunity right now.")
+    elif signal == "sell":
+        parts.append("This stock might be overpriced. Consider taking profits.")
+    else:
+        parts.append("No strong signal either way. Best to wait for a clearer setup.")
+
+    for s in scored.get("signals", [])[:3]:
+        if "oversold" in s.lower():
+            parts.append("The price has dropped a lot and may be due for a bounce.")
+        elif "overbought" in s.lower():
+            parts.append("The price has risen sharply and may pull back soon.")
+        elif "uptrend" in s.lower():
+            parts.append("The overall direction has been up, which is a good sign.")
+        elif "downtrend" in s.lower():
+            parts.append("The overall direction has been down, so be cautious.")
+        elif "volume surge" in s.lower():
+            parts.append("Trading activity just spiked, which often signals a big move.")
+        elif "macd" in s.lower():
+            parts.append("Momentum indicators suggest buyers are stepping in.")
+        elif "bollinger" in s.lower():
+            parts.append("The price is near a statistical low point and often bounces from here.")
+
+    risk = scored.get("risk_level", "medium")
+    if risk == "high":
+        parts.append("Risk is HIGH -- only use money you're comfortable losing.")
+    elif risk == "low":
+        parts.append("This is a relatively stable stock with lower risk.")
+
+    return " ".join(parts)

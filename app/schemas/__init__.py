@@ -12,6 +12,8 @@ from .trading import (
     JournalOut,
     AnalyzeRequest,
     InsightOut,
+    BacktestRequest,
+    ScanRequest,
 )
 
 from .household import (
