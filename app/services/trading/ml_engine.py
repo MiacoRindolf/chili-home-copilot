@@ -134,7 +134,14 @@ def train_model(db) -> dict[str, Any]:
 
     if len(snaps) < _MIN_SAMPLES:
         logger.info(f"[ml_engine] Not enough labeled snapshots ({len(snaps)}/{_MIN_SAMPLES})")
-        return {"ok": False, "reason": f"Need {_MIN_SAMPLES} labeled snapshots, have {len(snaps)}"}
+        return {
+            "ok": False,
+            "reason": "Not enough training data yet",
+            "labeled_snapshots": len(snaps),
+            "needed": _MIN_SAMPLES,
+            "tip": "Run a full market scan, then wait 1-2 days for outcomes to be verified. "
+                   "Snapshots need at least 5 trading days before their predictions can be checked.",
+        }
 
     X_rows = []
     y_rows = []
@@ -155,7 +162,14 @@ def train_model(db) -> dict[str, Any]:
             continue
 
     if len(X_rows) < _MIN_SAMPLES:
-        return {"ok": False, "reason": f"Only {len(X_rows)} usable samples"}
+        return {
+            "ok": False,
+            "reason": "Not enough usable samples after filtering",
+            "labeled_snapshots": len(snaps),
+            "usable_samples": len(X_rows),
+            "needed": _MIN_SAMPLES,
+            "tip": "Some snapshots had missing indicator data. Run more scans to collect better data.",
+        }
 
     X = np.array(X_rows)
     y = np.array(y_rows)

@@ -180,6 +180,45 @@ def api_retrain_ml(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, **result})
 
 
+@router.get("/api/trading/brain/accuracy-detail")
+def api_accuracy_detail(
+    request: Request,
+    db: Session = Depends(get_db),
+    type: str = Query("all", description="all|stock|crypto|strong"),
+    limit: int = Query(20, ge=1, le=100),
+):
+    rows = ts.get_accuracy_detail(db, detail_type=type, limit=limit)
+    return JSONResponse({"ok": True, "rows": rows, "total": len(rows)})
+
+
+@router.post("/api/trading/learn/dedup-patterns")
+def api_dedup_patterns(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    result = ts.dedup_existing_patterns(db, ctx["user_id"])
+    return JSONResponse({"ok": True, **result})
+
+
+@router.post("/api/trading/learn/patterns/{pattern_id}/demote")
+def api_demote_pattern(pattern_id: int, request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    from ...models.trading import TradingInsight
+    ins = db.query(TradingInsight).filter(
+        TradingInsight.id == pattern_id,
+        TradingInsight.user_id == ctx["user_id"],
+    ).first()
+    if not ins:
+        return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
+    ins.active = False
+    db.commit()
+    ts.log_learning_event(
+        db, ctx["user_id"], "demotion",
+        f"Pattern manually demoted: {ins.pattern_description[:100]}",
+        confidence_before=ins.confidence,
+        related_insight_id=ins.id,
+    )
+    return JSONResponse({"ok": True, "message": "Pattern demoted"})
+
+
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)

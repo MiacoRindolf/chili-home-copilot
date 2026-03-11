@@ -161,6 +161,12 @@ def get_insights(db: Session, user_id: int | None, limit: int = 20) -> list[Trad
     ).order_by(TradingInsight.confidence.desc()).limit(limit).all()
 
 
+def _pattern_label(desc: str) -> str:
+    """Extract the stable label prefix before dynamic stats (e.g. ' -> avg')."""
+    idx = desc.find(" -> ")
+    return (desc[:idx] if idx != -1 else desc).strip()
+
+
 def _pattern_keywords(desc: str) -> set[str]:
     """Extract meaningful keywords from a pattern description for dedup matching."""
     import re
@@ -176,21 +182,24 @@ def save_insight(
     from .learning import log_learning_event
     from datetime import datetime
 
-    new_kw = _pattern_keywords(pattern)
+    new_label = _pattern_label(pattern)
+    new_kw = _pattern_keywords(new_label)
     existing = db.query(TradingInsight).filter(
         TradingInsight.user_id == user_id,
         TradingInsight.active.is_(True),
     ).all()
     for ins in existing:
-        old_kw = _pattern_keywords(ins.pattern_description)
+        old_label = _pattern_label(ins.pattern_description)
+        old_kw = _pattern_keywords(old_label)
         if not old_kw or not new_kw:
             continue
         overlap = len(new_kw & old_kw) / max(1, len(new_kw | old_kw))
-        if overlap >= 0.6:
+        if overlap >= 0.5:
             old_conf = ins.confidence
             ins.confidence = round(min(0.95, ins.confidence * 0.7 + confidence * 0.3), 3)
             ins.evidence_count += 1
             ins.last_seen = datetime.utcnow()
+            ins.pattern_description = pattern
             db.commit()
             if abs(ins.confidence - old_conf) > 0.005:
                 log_learning_event(

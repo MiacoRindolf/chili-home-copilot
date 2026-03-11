@@ -162,18 +162,32 @@ def _fetch_sec_tickers() -> list[dict[str, str]]:
 _COINGECKO_URL = "https://api.coingecko.com/api/v3/coins/markets"
 
 _STATIC_CRYPTO_TOP100 = [
+    # Top 20 by market cap
     "BTC", "ETH", "BNB", "SOL", "XRP", "ADA", "DOGE", "AVAX", "DOT",
-    "LINK", "MATIC", "ATOM", "LTC", "NEAR", "FIL", "ARB",
-    "OP", "ICP", "HBAR", "VET", "ALGO", "MANA", "SAND", "AXS", "AAVE",
-    "GRT", "MKR", "SNX", "CRV", "COMP", "LDO", "RPL", "FTM", "RUNE",
-    "INJ", "SEI", "SHIB",
-    "FET", "STX", "IMX", "GALA",
-    "ENJ", "CHZ", "BAT", "ZRX", "1INCH", "SUSHI", "YFI", "UMA",
-    "CELO", "ROSE", "FLOW", "MINA", "KAVA",
-    "EGLD", "QNT", "THETA", "XTZ", "EOS", "NEO", "IOTA", "ZEC",
-    "DASH", "XMR", "KSM", "ZIL", "ENS",
-    "DYDX", "GMX", "CAKE", "PENDLE",
-    "JASMY", "TRX", "TON", "RENDER",
+    "LINK", "MATIC", "ATOM", "LTC", "NEAR", "FIL", "ARB", "TRX", "TON",
+    # DeFi
+    "OP", "ICP", "HBAR", "VET", "ALGO", "AAVE", "GRT", "MKR", "SNX",
+    "CRV", "COMP", "LDO", "RPL", "FTM", "RUNE", "INJ", "SEI",
+    "DYDX", "GMX", "CAKE", "PENDLE", "1INCH", "SUSHI", "YFI", "UMA",
+    # Gaming / Metaverse
+    "MANA", "SAND", "AXS", "IMX", "GALA", "ENJ", "CHZ", "RENDER",
+    # AI / Data
+    "FET", "RNDR", "AGIX", "OCEAN",
+    # Infrastructure
+    "STX", "ROSE", "FLOW", "MINA", "KAVA", "CELO",
+    "EGLD", "QNT", "THETA", "XTZ", "EOS", "NEO", "IOTA",
+    # Privacy / Legacy
+    "ZEC", "DASH", "XMR", "KSM", "ZIL", "ENS",
+    # Meme / Trending
+    "SHIB", "JASMY", "BAT", "ZRX",
+    # Additional coverage (next 50 by market cap)
+    "KCS", "CKB", "IOTX", "SC", "RVN", "ICX", "STORJ",
+    "AUDIO", "LRC", "ANKR", "BAND", "RLC", "NKN", "SKL",
+    "CTSI", "CELR", "REQ", "MTL", "OGN", "BICO",
+    "FLUX", "RAD", "API3", "ACH", "PERP", "LOOM",
+    "MASK", "HIGH", "MAGIC", "YGG", "SUPER", "ALICE",
+    "TLM", "RARE", "MOVR", "GLMR", "ASTR", "SDN",
+    "CFX", "CORE", "SXP", "DUSK", "PROM", "TROY",
 ]
 
 _CRYPTO_BLACKLIST = {
@@ -298,9 +312,9 @@ def get_all_crypto_tickers(n: int = 100, force_refresh: bool = False) -> list[st
 
 
 def get_full_ticker_universe(force_refresh: bool = False) -> list[str]:
-    """Return the full scanning universe: all US stocks + top 100 crypto."""
+    """Return the full scanning universe: all US stocks + top 200 crypto."""
     stocks = get_all_us_stock_tickers(force_refresh=force_refresh)
-    crypto = get_all_crypto_tickers(n=100, force_refresh=force_refresh)
+    crypto = get_all_crypto_tickers(n=200, force_refresh=force_refresh)
     combined = list(dict.fromkeys(stocks + crypto))
     logger.info(f"[ticker_universe] Full universe: {len(stocks)} stocks + {len(crypto)} crypto = {len(combined)} total")
     return combined

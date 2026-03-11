@@ -96,6 +96,8 @@ from .learning import (
     get_current_predictions,
     run_learning_cycle,
     should_run_learning,
+    dedup_existing_patterns,
+    get_accuracy_detail,
 )
 
 

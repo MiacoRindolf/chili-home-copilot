@@ -122,6 +122,62 @@ def _finviz_high_volume_tradeable() -> list[str]:
     )
 
 
+def _finviz_overbought() -> list[str]:
+    return _finviz_screen(signal="Overbought", limit=100)
+
+
+def _finviz_most_volatile() -> list[str]:
+    return _finviz_screen(signal="Most Volatile", limit=100)
+
+
+def _finviz_top_losers() -> list[str]:
+    return _finviz_screen(signal="Top Losers", limit=100)
+
+
+def _finviz_double_bottom() -> list[str]:
+    return _finviz_screen(signal="Double Bottom", limit=100)
+
+
+def _finviz_multiple_tops() -> list[str]:
+    return _finviz_screen(signal="Multiple Top", limit=100)
+
+
+def _finviz_upgrades() -> list[str]:
+    return _finviz_screen(signal="Upgrade", limit=100)
+
+
+def _finviz_earnings_before() -> list[str]:
+    return _finviz_screen(signal="Earnings Before", limit=100)
+
+
+def _finviz_recent_insider_buying() -> list[str]:
+    return _finviz_screen(signal="Insider Buying", limit=100)
+
+
+def _finviz_high_relative_volume() -> list[str]:
+    """Stocks with today's volume > 2x average — something is happening."""
+    return _finviz_screen(
+        filters_dict={
+            "Relative Volume": "Over 2",
+            "Average Volume": "Over 200K",
+            "Price": "Over $2",
+        },
+        limit=200,
+    )
+
+
+def _finviz_small_cap_momentum() -> list[str]:
+    """Small-cap stocks with upward price momentum."""
+    return _finviz_screen(
+        filters_dict={
+            "Market Cap.": "Small ($300mln to $2bln)",
+            "Performance": "Week Up",
+            "Average Volume": "Over 200K",
+        },
+        limit=150,
+    )
+
+
 # ── Yahoo Finance Screener ────────────────────────────────────────────
 
 def _yf_screen(query_name: str, count: int = 100) -> list[str]:
@@ -149,17 +205,37 @@ def _yf_undervalued_growth() -> list[str]:
 
 
 def _yf_aggressive_small_caps() -> list[str]:
-    return _yf_screen("aggressive_small_caps", 50)
+    return _yf_screen("aggressive_small_caps", 100)
+
+
+def _yf_day_losers() -> list[str]:
+    return _yf_screen("day_losers", 100)
+
+
+def _yf_growth_tech() -> list[str]:
+    return _yf_screen("growth_technology_stocks", 100)
+
+
+def _yf_undervalued_large() -> list[str]:
+    return _yf_screen("undervalued_large_caps", 100)
+
+
+def _yf_conservative_foreign() -> list[str]:
+    return _yf_screen("conservative_foreign_funds", 50)
+
+
+def _yf_small_cap_gainers() -> list[str]:
+    return _yf_screen("small_cap_gainers", 100)
 
 
 # ── Crypto candidates ─────────────────────────────────────────────────
 
 def _crypto_candidates() -> list[str]:
-    """Top crypto tickers -- fast, no API call needed for the list."""
+    """Top crypto tickers by market cap."""
     from .market_data import DEFAULT_CRYPTO_TICKERS
     from ..ticker_universe import get_all_crypto_tickers
     try:
-        return get_all_crypto_tickers(n=50)
+        return get_all_crypto_tickers(n=200)
     except Exception:
         return list(DEFAULT_CRYPTO_TICKERS)
 
@@ -176,14 +252,14 @@ def _core_tickers() -> list[str]:
 
 def get_prescreened_candidates(
     include_crypto: bool = True,
-    max_total: int = 500,
+    max_total: int = 1500,
 ) -> list[str]:
     """Return a de-duplicated list of pre-screened candidate tickers.
 
     Combines multiple FinViz signals + yfinance screens + crypto in
     parallel.  Results are cached for 30 minutes.
 
-    Typical output: 200-400 unique tickers, gathered in 5-15 seconds.
+    Typical output: 600-1200 unique tickers, gathered in 10-30 seconds.
     """
     cached = _cache_get("prescreened_candidates")
     if cached is not None:
@@ -198,15 +274,29 @@ def get_prescreened_candidates(
     sources: dict[str, Any] = {
         "finviz_most_active": _finviz_most_active,
         "finviz_top_gainers": _finviz_top_gainers,
+        "finviz_top_losers": _finviz_top_losers,
         "finviz_new_high": _finviz_new_high,
         "finviz_oversold": _finviz_oversold,
+        "finviz_overbought": _finviz_overbought,
         "finviz_unusual_volume": _finviz_unusual_volume,
+        "finviz_most_volatile": _finviz_most_volatile,
         "finviz_bullish_sma": _finviz_bullish_sma,
         "finviz_high_volume": _finviz_high_volume_tradeable,
+        "finviz_high_rel_volume": _finviz_high_relative_volume,
+        "finviz_double_bottom": _finviz_double_bottom,
+        "finviz_multiple_tops": _finviz_multiple_tops,
+        "finviz_upgrades": _finviz_upgrades,
+        "finviz_earnings_before": _finviz_earnings_before,
+        "finviz_insider_buying": _finviz_recent_insider_buying,
+        "finviz_smallcap_momentum": _finviz_small_cap_momentum,
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
+        "yf_day_losers": _yf_day_losers,
         "yf_undervalued_growth": _yf_undervalued_growth,
         "yf_small_caps": _yf_aggressive_small_caps,
+        "yf_growth_tech": _yf_growth_tech,
+        "yf_undervalued_large": _yf_undervalued_large,
+        "yf_small_cap_gainers": _yf_small_cap_gainers,
     }
 
     results_by_source: dict[str, list[str]] = {}
@@ -220,7 +310,7 @@ def get_prescreened_candidates(
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         future_map = {
             executor.submit(fn): name for name, fn in sources.items()
         }
@@ -276,18 +366,6 @@ def invalidate_cache() -> None:
 
 # ── Day-Trade Candidates ──────────────────────────────────────────────
 
-def _finviz_most_volatile() -> list[str]:
-    return _finviz_screen(signal="Most Volatile", limit=100)
-
-
-def _finviz_top_losers() -> list[str]:
-    return _finviz_screen(signal="Top Losers", limit=100)
-
-
-def _yf_day_losers() -> list[str]:
-    return _yf_screen("day_losers", 100)
-
-
 def _crypto_top_movers() -> list[str]:
     """Fetch top crypto movers by 24h volume via CoinGecko (free, cached)."""
     cached = _cache_get("crypto_top_movers")
@@ -300,7 +378,7 @@ def _crypto_top_movers() -> list[str]:
             params={
                 "vs_currency": "usd",
                 "order": "volume_desc",
-                "per_page": 50,
+                "per_page": 100,
                 "page": 1,
                 "sparkline": "false",
             },

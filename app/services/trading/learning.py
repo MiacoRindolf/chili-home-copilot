@@ -301,7 +301,7 @@ def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] 
 def backfill_future_returns(db: Session) -> int:
     unfilled = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.is_(None),
-    ).limit(300).all()
+    ).limit(600).all()
 
     updated = 0
     for snap in unfilled:
@@ -427,7 +427,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
         if w.ticker not in mine_tickers:
             mine_tickers.append(w.ticker)
 
-    mine_tickers = mine_tickers[:50]
+    mine_tickers = mine_tickers[:150]
 
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=6) as executor:
@@ -448,7 +448,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     snapshots = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
-    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(500).all()
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(1500).all()
 
     for s in snapshots:
         try:
@@ -1203,6 +1203,110 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     }
 
 
+def dedup_existing_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
+    """One-time cleanup: merge duplicate active patterns that share the same label prefix."""
+    from .portfolio import _pattern_label, _pattern_keywords
+
+    active = db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.active.is_(True),
+    ).order_by(TradingInsight.evidence_count.desc()).all()
+
+    groups: dict[str, list[TradingInsight]] = {}
+    for ins in active:
+        label = _pattern_label(ins.pattern_description).lower().strip()
+        kw = frozenset(_pattern_keywords(label))
+        placed = False
+        for key, members in groups.items():
+            existing_kw = frozenset(_pattern_keywords(key))
+            if existing_kw and kw:
+                overlap = len(kw & existing_kw) / max(1, len(kw | existing_kw))
+                if overlap >= 0.5:
+                    members.append(ins)
+                    placed = True
+                    break
+        if not placed:
+            groups[label] = [ins]
+
+    merged = 0
+    deactivated = 0
+    for _label, members in groups.items():
+        if len(members) <= 1:
+            continue
+        members.sort(key=lambda i: i.evidence_count, reverse=True)
+        keeper = members[0]
+        for dup in members[1:]:
+            keeper.evidence_count += dup.evidence_count
+            keeper.confidence = round(
+                min(0.95, max(keeper.confidence, dup.confidence)), 3
+            )
+            if dup.last_seen and (not keeper.last_seen or dup.last_seen > keeper.last_seen):
+                keeper.last_seen = dup.last_seen
+            dup.active = False
+            deactivated += 1
+        keeper.pattern_description = members[0].pattern_description
+        merged += 1
+
+    if deactivated:
+        db.commit()
+        log_learning_event(
+            db, user_id, "review",
+            f"Pattern cleanup: merged {merged} groups, deactivated {deactivated} duplicates",
+        )
+
+    return {
+        "groups_merged": merged,
+        "duplicates_removed": deactivated,
+        "remaining_active": len(active) - deactivated,
+    }
+
+
+def get_accuracy_detail(
+    db: Session,
+    detail_type: str = "all",
+    limit: int = 20,
+) -> list[dict[str, Any]]:
+    """Return recent evaluated predictions with outcomes for drill-down."""
+    filled_snaps = db.query(MarketSnapshot).filter(
+        MarketSnapshot.future_return_5d.isnot(None),
+        MarketSnapshot.predicted_score.isnot(None),
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(500).all()
+
+    results: list[dict[str, Any]] = []
+    for snap in filled_snaps:
+        pred_score = snap.predicted_score
+        if abs(pred_score) < 0.5:
+            continue
+
+        is_crypto = snap.ticker.endswith("-USD")
+        if detail_type == "stock" and is_crypto:
+            continue
+        if detail_type == "crypto" and not is_crypto:
+            continue
+        if detail_type == "strong" and abs(pred_score) < 3.0:
+            continue
+
+        predicted_up = pred_score > 0
+        actual_return = snap.future_return_5d or 0
+        actual_up = actual_return > 0
+        is_hit = predicted_up == actual_up
+
+        results.append({
+            "ticker": snap.ticker,
+            "date": snap.snapshot_date.isoformat() if snap.snapshot_date else None,
+            "predicted_score": round(pred_score, 2),
+            "predicted_direction": "bullish" if predicted_up else "bearish",
+            "actual_return_5d": round(actual_return, 2),
+            "actual_direction": "up" if actual_up else "down",
+            "hit": is_hit,
+            "close_price": round(snap.close_price, 4) if snap.close_price else None,
+        })
+        if len(results) >= limit:
+            break
+
+    return results
+
+
 def get_confidence_history(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     insights = db.query(TradingInsight).filter(
         TradingInsight.user_id == user_id,
@@ -1327,7 +1431,7 @@ def run_learning_cycle(
         step_start = time.time()
         _learning_status["current_step"] = "Taking market snapshots"
         _learning_status["phase"] = "snapshots"
-        top_tickers = [r["ticker"] for r in scan_results[:250]]
+        top_tickers = [r["ticker"] for r in scan_results[:500]]
         watchlist = get_watchlist(db, user_id)
         for w in watchlist:
             if w.ticker not in top_tickers:

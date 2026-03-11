@@ -396,18 +396,51 @@ def get_indicator_snapshot(ticker: str, interval: str = "1d") -> dict[str, Any]:
 # ── Ticker lists ──────────────────────────────────────────────────────
 
 DEFAULT_SCAN_TICKERS = [
-    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "BRK-B",
-    "JPM", "V", "UNH", "MA", "HD", "PG", "JNJ", "COST", "ABBV", "CRM",
-    "MRK", "PEP", "AVGO", "KO", "TMO", "WMT", "CSCO", "ACN", "MCD",
-    "ABT", "LIN", "DHR", "TXN", "NEE", "AMD", "PM", "INTC", "QCOM",
-    "NFLX", "DIS", "AMGN", "HON", "LOW", "UPS", "CAT", "BA", "GS",
-    "SBUX", "PYPL", "SQ", "SNAP", "PLTR",
+    # Mega-cap tech
+    "AAPL", "MSFT", "GOOGL", "AMZN", "NVDA", "META", "TSLA", "AVGO", "ORCL", "CRM",
+    "ADBE", "AMD", "INTC", "QCOM", "TXN", "NFLX", "CSCO", "IBM", "NOW", "INTU",
+    "AMAT", "LRCX", "MU", "KLAC", "MRVL", "SNPS", "CDNS", "PANW", "CRWD", "FTNT",
+    # Cloud / SaaS / AI
+    "DDOG", "NET", "SNOW", "PLTR", "SHOP", "SQ", "PYPL", "COIN", "UBER", "ABNB",
+    "DASH", "RBLX", "TTD", "PINS", "SNAP", "ROKU", "SPOT", "ZM", "OKTA", "TWLO",
+    "MDB", "HUBS", "TEAM", "WDAY", "VEEV", "PATH", "BILL", "ESTC", "MNDY", "TOST",
+    # Finance
+    "JPM", "V", "MA", "BAC", "WFC", "GS", "MS", "C", "AXP", "BLK",
+    "SCHW", "CME", "ICE", "COF", "DFS", "ALLY", "HOOD", "SOFI",
+    # Healthcare / Pharma
+    "UNH", "JNJ", "LLY", "ABBV", "MRK", "PFE", "TMO", "ABT", "DHR", "BMY",
+    "AMGN", "GILD", "VRTX", "REGN", "ISRG", "SYK", "MDT", "BSX", "MRNA", "DXCM",
+    # Consumer
+    "WMT", "COST", "HD", "LOW", "TGT", "PG", "KO", "PEP", "MCD", "SBUX",
+    "NKE", "LULU", "TJX", "CMG", "DPZ", "YUM", "EL", "MDLZ", "KMB", "GIS",
+    # Industrial / Defense
+    "CAT", "DE", "HON", "UPS", "FDX", "BA", "LMT", "RTX", "GE", "EMR",
+    "ETN", "ROK", "CMI", "PH", "ITW", "GD", "NOC", "HII", "TDG", "AXON",
+    # Energy
+    "XOM", "CVX", "COP", "SLB", "EOG", "MPC", "VLO", "PSX", "OXY", "HAL",
+    "DVN", "FANG", "HES", "BKR", "KMI", "WMB", "LNG", "TRGP",
+    # REITs / Telecom / Utilities
+    "PLD", "AMT", "CCI", "EQIX", "SPG", "O", "DLR", "DIS", "CMCSA", "T",
+    "VZ", "TMUS", "NEE", "DUK", "SO", "D", "AEP", "SRE",
+    # Materials
+    "LIN", "APD", "SHW", "ECL", "FCX", "NEM", "NUE", "CF", "MOS",
+    # ETFs
+    "SPY", "QQQ", "IWM", "DIA", "VTI", "ARKK", "XLF", "XLE", "XLK", "XLV",
+    # Growth / momentum small/mid
+    "SMCI", "ARM", "CELH", "DUOL", "MNST", "ENPH", "FSLR", "DKNG", "BKNG", "EXPE",
+    "RIVN", "LCID", "NIO", "XPEV", "LI", "IONQ", "AFRM", "UPST", "CAVA", "BRK-B",
+    "PM", "ACN", "MCO", "SPGI",
 ]
 
 DEFAULT_CRYPTO_TICKERS = [
     "BTC-USD", "ETH-USD", "SOL-USD", "BNB-USD", "XRP-USD",
     "ADA-USD", "DOGE-USD", "AVAX-USD", "DOT-USD", "LINK-USD",
     "MATIC-USD", "ATOM-USD", "UNI-USD", "LTC-USD", "NEAR-USD",
+    "FIL-USD", "ARB-USD", "OP-USD", "ICP-USD", "HBAR-USD",
+    "VET-USD", "ALGO-USD", "AAVE-USD", "GRT-USD", "MKR-USD",
+    "SNX-USD", "LDO-USD", "FTM-USD", "RUNE-USD", "INJ-USD",
+    "SEI-USD", "SHIB-USD", "FET-USD", "STX-USD", "IMX-USD",
+    "RENDER-USD", "TRX-USD", "TON-USD", "DYDX-USD", "PENDLE-USD",
 ]
 
 ALL_SCAN_TICKERS = DEFAULT_SCAN_TICKERS + DEFAULT_CRYPTO_TICKERS
