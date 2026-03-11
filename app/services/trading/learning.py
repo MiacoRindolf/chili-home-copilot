@@ -216,10 +216,20 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
 
 
 def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None]:
-    """Fetch snapshot data in a thread (no DB access)."""
+    """Fetch snapshot data in a thread (no DB access).
+
+    Uses the prewarmed OHLCV cache for the price instead of calling
+    fetch_quote (which hits get_fast_info with a 30s TTL and triggers
+    individual API requests when the TTL expires during a long batch).
+    """
     try:
         snap = get_indicator_snapshot(ticker, "1d")
-        quote = fetch_quote(ticker)
+        # Extract price from the already-cached OHLCV history to avoid
+        # a per-ticker API call through the rate limiter.
+        from ..yf_session import get_history as _yf_hist
+        df = _yf_hist(ticker, period="3mo", interval="1d")
+        price = float(df.iloc[-1]["Close"]) if df is not None and not df.empty else 0
+        quote = {"price": price}
         return ticker, snap, quote
     except Exception:
         return ticker, None, None
@@ -228,7 +238,7 @@ def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None]:
 def take_snapshots_parallel(
     db: Session,
     tickers: list[str],
-    max_workers: int = 8,
+    max_workers: int = 16,
 ) -> int:
     """Take snapshots for many tickers using a thread pool.
 
@@ -238,7 +248,9 @@ def take_snapshots_parallel(
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from ..yf_session import batch_download
 
-    # Pre-warm the OHLCV cache so indicator computation hits cache
+    # Pre-warm the OHLCV cache so indicator computation hits cache.
+    # batch_download also seeds the quote: cache from the last OHLCV row,
+    # eliminating the need for per-ticker get_fast_info calls.
     BATCH = 50
     for i in range(0, len(tickers), BATCH):
         try:
@@ -1479,7 +1491,7 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 2
         _step_time("scan", step_start)
 
-        # Step 3: Snapshots (parallel, top 100 + watchlist)
+        # Step 3: Snapshots (parallel, top 500 + watchlist)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()

@@ -624,6 +624,7 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     start = time.time()
     candidates = get_daytrade_candidates()
     logger.info(f"[trading] Day-trade scan: {len(candidates)} candidates")
+    _prewarm_cache_intraday(candidates)
 
     results: list[dict[str, Any]] = []
     with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
@@ -749,6 +750,7 @@ def run_custom_screen(
         return {"ok": False, "error": "No screen_id or conditions provided"}
 
     scan_list = tickers or get_prescreened_candidates()
+    _prewarm_cache(scan_list)
     scored_all = batch_score_tickers(
         scan_list, max_workers=_MAX_SCAN_WORKERS, skip_fundamentals=True,
     )
@@ -863,6 +865,17 @@ def _prewarm_cache(tickers: list[str]) -> None:
         chunk = tickers[i:i + BATCH_SIZE]
         try:
             batch_download(chunk, period="6mo", interval="1d")
+        except Exception:
+            pass
+
+
+def _prewarm_cache_intraday(tickers: list[str]) -> None:
+    """Pre-warm 5d/15m intraday cache for day-trade scoring."""
+    BATCH_SIZE = 50
+    for i in range(0, len(tickers), BATCH_SIZE):
+        chunk = tickers[i:i + BATCH_SIZE]
+        try:
+            batch_download(chunk, period="5d", interval="15m")
         except Exception:
             pass
 

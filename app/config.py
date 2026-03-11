@@ -18,10 +18,11 @@ class Settings(BaseSettings):
     llm_model: str = "llama-3.3-70b-versatile"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
-    # Premium LLM (e.g. OpenAI)
+    # Fallback LLM — defaults to Google Gemini free tier (OpenAI-compatible endpoint).
+    # Get a free key at https://aistudio.google.com/apikey
     premium_api_key: str = ""
-    premium_model: str = "gpt-5.2"
-    premium_base_url: str = "https://api.openai.com/v1"
+    premium_model: str = "gemini-2.0-flash"
+    premium_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
     # Vision fallback (often same as premium)
     openai_vision_model: str = "gpt-4o-mini"

@@ -3,7 +3,7 @@
 Modern yfinance (>=0.2.40) uses curl_cffi internally and rejects injected
 requests-cache sessions.  Instead we rate-limit and cache at the wrapper level:
 
-- A ``pyrate_limiter.Limiter`` gates all Yahoo Finance requests to 2 per 5 seconds.
+- A ``pyrate_limiter.Limiter`` gates all Yahoo Finance requests to 12 per 5 seconds.
 - An in-memory TTL cache avoids re-fetching recently-seen data.
 - ``get_ticker(symbol)`` is the single entry-point used by all services.
 """
@@ -34,8 +34,8 @@ def _get_limiter():
             return _limiter
         try:
             from pyrate_limiter import Duration, Rate, Limiter
-            _limiter = Limiter(Rate(8, Duration.SECOND * 5))
-            logger.info("[yf_session] Rate limiter active (8 req/5s)")
+            _limiter = Limiter(Rate(12, Duration.SECOND * 5))
+            logger.info("[yf_session] Rate limiter active (12 req/5s)")
         except ImportError:
             _limiter = None
             logger.warning("[yf_session] pyrate-limiter not installed — no rate limiting")

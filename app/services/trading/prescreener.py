@@ -624,6 +624,7 @@ def get_breakout_candidates(max_total: int = 300) -> list[str]:
         "finviz_near_52w_high": _finviz_near_52w_high,
         "finviz_new_high": _finviz_new_high,
         "crypto_base": _crypto_candidates,
+        "crypto_trending": get_trending_crypto,
     }
 
     seen: set[str] = set()
@@ -650,8 +651,9 @@ def get_breakout_candidates(max_total: int = 300) -> list[str]:
                 logger.warning(f"[prescreener] Breakout source '{name}' failed: {e}")
 
     combined = combined[:max_total]
+    crypto_count = sum(1 for t in combined if t.endswith("-USD"))
     elapsed = time.time() - start
-    logger.info(f"[prescreener] Breakout pre-screen: {len(combined)} candidates in {elapsed:.1f}s")
+    logger.info(f"[prescreener] Breakout pre-screen: {len(combined)} candidates ({crypto_count} crypto) in {elapsed:.1f}s")
 
     _cache_set("breakout_candidates", combined)
     return combined

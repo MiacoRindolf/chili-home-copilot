@@ -105,14 +105,70 @@ _POPULAR_TOKENS: dict[int, list[dict[str, str]]] = {
 }
 
 
+def _fetch_zerox_tokens(chain_id: int) -> list[dict]:
+    """Fetch a richer token list from 0x for the given chain.
+
+    This allows swapping arbitrary ERC-20 tokens available on that chain,
+    not just the small POPULAR_TOKENS set.
+    """
+    chain = CHAINS.get(chain_id)
+    if not chain:
+        return []
+
+    _rate_limit_zerox()
+    try:
+        resp = requests.get(
+            f"{chain['zerox']}/swap/v1/tokens",
+            headers=_zerox_headers(),
+            timeout=20,
+        )
+        data = resp.json()
+        if resp.status_code != 200:
+            logger.warning(f"[web3] 0x tokens failed ({chain_id}): {data.get('reason', resp.text)[:200]}")
+            return []
+        records = data.get("records", [])
+        tokens: list[dict[str, str]] = []
+        for rec in records:
+            t = rec.get("token", rec)
+            addr = t.get("address") or ""
+            symbol = t.get("symbol") or ""
+            name = t.get("name") or symbol
+            decimals = str(t.get("decimals") or "18")
+            if not addr or not symbol:
+                continue
+            tokens.append({
+                "symbol": symbol,
+                "name": name,
+                "address": addr,
+                "decimals": decimals,
+            })
+        return tokens
+    except Exception as e:
+        logger.warning(f"[web3] 0x tokens exception ({chain_id}): {e}")
+        return []
+
+
 def get_token_list(chain_id: int) -> list[dict]:
-    """Return a list of popular tokens for a chain (cached)."""
+    """Return a list of tokens for a chain (popular + 0x list, cached)."""
     now = time.time()
     if chain_id in _token_cache:
         ts, tokens = _token_cache[chain_id]
         if now - ts < _TOKEN_CACHE_TTL:
             return tokens
-    tokens = _POPULAR_TOKENS.get(chain_id, [])
+
+    # Start from curated popular tokens so they always appear first
+    base = list(_POPULAR_TOKENS.get(chain_id, []))
+    seen = {t["address"].lower() for t in base if t.get("address")}
+
+    extra = _fetch_zerox_tokens(chain_id)
+    for t in extra:
+        addr = (t.get("address") or "").lower()
+        if addr and addr not in seen:
+            base.append(t)
+            seen.add(addr)
+
+    # Keep list to a reasonable size for the UI
+    tokens = base[:500]
     _token_cache[chain_id] = (now, tokens)
     return tokens
 
