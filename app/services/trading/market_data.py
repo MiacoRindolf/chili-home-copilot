@@ -164,8 +164,15 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
 
 
 def fetch_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
-    """Fetch quotes for multiple tickers efficiently using batch download."""
-    from ..yf_session import batch_download, get_fast_info as _batch_fi
+    """Fetch quotes for multiple tickers efficiently.
+
+    Uses batch_download to pre-warm history + quote caches in a single HTTP
+    request, then reads individual quotes from the now-warm cache.
+    """
+    from ..yf_session import batch_download
+
+    batch_download(tickers, period="3mo", interval="1d")
+
     results: dict[str, dict[str, Any]] = {}
     for t in tickers:
         q = fetch_quote(t)
@@ -519,3 +526,71 @@ def get_volatility_regime(vix: float | None = None) -> dict[str, Any]:
         regime, label = "extreme", "Extreme"
 
     return {"regime": regime, "vix": vix, "label": label}
+
+
+_market_regime_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_MARKET_REGIME_TTL = 300  # 5 minutes
+
+
+def get_market_regime() -> dict[str, Any]:
+    """Return combined SPY/VIX market regime, cached for 5 minutes.
+
+    Returns:
+        dict with keys: spy_direction, spy_momentum_5d, vix, vix_regime,
+        regime (risk_on | cautious | risk_off), regime_numeric (1 / 0 / -1)
+    """
+    import time as _t
+
+    now = _t.time()
+    cached = _market_regime_cache
+    if cached["data"] is not None and now - cached["ts"] < _MARKET_REGIME_TTL:
+        return cached["data"]
+
+    vix_data = get_volatility_regime()
+    vix_val = vix_data.get("vix")
+    vix_regime = vix_data.get("regime", "unknown")
+
+    spy_direction = "flat"
+    spy_momentum_5d = 0.0
+    try:
+        spy_quote = fetch_quote("SPY")
+        if spy_quote:
+            chg = spy_quote.get("change_pct", 0.0) or 0.0
+            if chg > 0.3:
+                spy_direction = "up"
+            elif chg < -0.3:
+                spy_direction = "down"
+    except Exception:
+        pass
+
+    try:
+        df = _yf_history("SPY", period="10d", interval="1d")
+        if df is not None and len(df) >= 5:
+            close = df["Close"]
+            spy_momentum_5d = round(
+                (float(close.iloc[-1]) - float(close.iloc[-5])) / float(close.iloc[-5]) * 100, 2
+            )
+    except Exception:
+        pass
+
+    if vix_regime in ("low", "normal") and spy_direction != "down":
+        regime = "risk_on"
+        regime_numeric = 1
+    elif vix_regime in ("elevated", "extreme") or spy_direction == "down":
+        regime = "risk_off"
+        regime_numeric = -1
+    else:
+        regime = "cautious"
+        regime_numeric = 0
+
+    result = {
+        "spy_direction": spy_direction,
+        "spy_momentum_5d": spy_momentum_5d,
+        "vix": vix_val,
+        "vix_regime": vix_regime,
+        "regime": regime,
+        "regime_numeric": regime_numeric,
+    }
+    _market_regime_cache["data"] = result
+    _market_regime_cache["ts"] = now
+    return result

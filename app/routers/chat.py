@@ -346,11 +346,15 @@ async def chat_api(
         planner_current = {"id": planner_project_id, "name": planner_project_name.strip()}
     on_planner_page = from_planner_page in ("1", "true", "yes") or planner_current is not None
 
-    try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id, planner_current_project=planner_current)
-    except Exception as e:
-        log_info(trace_id, f"llm_error={e}, trying NLU fallback")
-        ctx = None
+    if openai_client.is_configured():
+        log_info(trace_id, "direct_llm_path skipping Ollama planner")
+        ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id)
+    else:
+        try:
+            ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id, planner_current_project=planner_current)
+        except Exception as e:
+            log_info(trace_id, f"llm_error={e}, trying NLU fallback")
+            ctx = None
 
     result = resolve_response(db, message, recent, identity, ctx, on_planner_page, trace_id, stream=False)
 
@@ -1138,11 +1142,15 @@ async def chat_stream_api(
         planner_current_stream = {"id": planner_project_id, "name": planner_project_name.strip()}
     on_planner_page_stream = from_planner_page in ("1", "true", "yes") or planner_current_stream is not None
 
-    try:
-        ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream, planner_current_project=planner_current_stream)
-    except Exception as e:
-        log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
-        ctx = None
+    if openai_client.is_configured():
+        log_info(trace_id, "stream_direct_llm_path skipping Ollama planner")
+        ctx = gather_context_only(db, message, identity, trace_id, project_id=_project_id_stream)
+    else:
+        try:
+            ctx = plan_and_enrich(db, message, identity, recent, trace_id, project_id=_project_id_stream, planner_current_project=planner_current_stream)
+        except Exception as e:
+            log_info(trace_id, f"llm_error={e}, trying NLU fallback (stream)")
+            ctx = None
 
     result = resolve_response(db, message, recent, identity, ctx, on_planner_page_stream, trace_id, stream=True)
 

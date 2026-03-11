@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
 from .market_data import (
     fetch_quote, smart_round, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
+    get_market_regime,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
 
@@ -23,9 +24,165 @@ logger = logging.getLogger(__name__)
 _shutting_down = threading.Event()
 _MAX_SCAN_WORKERS = 12
 
+_top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
+_TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster
+_TOP_PICKS_STALE_TTL = 600  # 10 minutes — serve stale while refreshing in background
+_top_picks_refresh_lock = threading.Lock()
+
 
 def signal_shutdown():
     _shutting_down.set()
+
+
+# ── Adaptive Weight System ────────────────────────────────────────────
+# Starting defaults are informed by common momentum strategies, but CHILI's
+# brain continuously adjusts them via backtest validation and pattern mining.
+# Every learning cycle, evolve_strategy_weights() recalibrates these based
+# on what the data actually shows — no assumption is sacred.
+
+_DEFAULT_WEIGHTS: dict[str, float] = {
+    "macd_positive_bonus": 1.5,
+    "macd_negative_penalty": -2.0,
+    "float_micro_bonus": 2.0,
+    "float_low_bonus": 1.0,
+    "float_high_penalty": -0.5,
+    "vol_surge_5x": 2.0,
+    "vol_surge_3x": 1.0,
+    "price_sweetspot_bonus": 0.5,
+    "price_out_of_range_penalty": -1.0,
+    "topping_tail_penalty": -1.5,
+    "extended_pullback_penalty": -1.0,
+    "volume_profile_bonus": 0.5,
+    "pullback_clean_bonus": 1.5,
+    "daily_gainer_10pct": 1.0,
+    "daily_gainer_5pct": 0.5,
+    "time_of_day_bonus": 0.5,
+    "macd_negative_cap": 4.0,
+    "immaculate_min_score": 8.0,
+    "immaculate_min_vol": 3.0,
+    "immaculate_min_rr": 2.0,
+    "regime_risk_off_penalty": -0.5,
+    "regime_risk_on_bonus": 0.3,
+    "regime_vix_breakout_penalty": -0.8,
+    "regime_spy_concordance": 0.5,
+    "stoch_oversold_macd_bonus": 0.8,
+    "stoch_overbought_macd_penalty": -0.8,
+    "stoch_crossover_bonus": 0.5,
+}
+
+_adaptive_weights: dict[str, float] = dict(_DEFAULT_WEIGHTS)
+_weights_lock = threading.Lock()
+
+
+def get_adaptive_weight(key: str) -> float:
+    """Read a scoring weight — returns the brain-adjusted value."""
+    with _weights_lock:
+        return _adaptive_weights.get(key, _DEFAULT_WEIGHTS.get(key, 0.0))
+
+
+def get_all_weights() -> dict[str, float]:
+    """Snapshot of current adaptive weights for diagnostics."""
+    with _weights_lock:
+        return dict(_adaptive_weights)
+
+
+def _apply_learned_weights(overrides: dict[str, float]) -> None:
+    """Merge brain-computed weight adjustments into the live weights."""
+    with _weights_lock:
+        for k, v in overrides.items():
+            if k in _DEFAULT_WEIGHTS:
+                default = _DEFAULT_WEIGHTS[k]
+                floor = default * 0.2 if default > 0 else default * 3.0
+                ceil = default * 3.0 if default > 0 else default * 0.2
+                _adaptive_weights[k] = round(max(floor, min(ceil, v)), 3)
+
+
+def evolve_strategy_weights(db: Session) -> dict[str, Any]:
+    """Called during each learning cycle to let the brain refine its own
+    scoring weights based on actual pattern performance.
+
+    Reads active TradingInsights, groups them by the scoring factor they
+    relate to, and nudges each weight up or down based on whether the
+    patterns that use that factor are being validated or invalidated by
+    real data.
+
+    This is how CHILI outgrows any single teacher's strategy — the data
+    decides what works.
+    """
+    from .portfolio import get_insights
+
+    insights = get_insights(db, user_id=None, limit=100)
+    if not insights:
+        return {"adjusted": 0, "note": "no insights yet"}
+
+    FACTOR_KEYWORDS: dict[str, list[str]] = {
+        "macd_positive_bonus": ["macd positive", "macd bullish", "macd+", "histogram rising"],
+        "macd_negative_penalty": ["macd negative", "macd flipped", "momentum lost", "setup invalidated"],
+        "float_micro_bonus": ["micro float", "low float"],
+        "float_low_bonus": ["low float", "float"],
+        "vol_surge_5x": ["volume surge 5x", "massive volume", "5x"],
+        "vol_surge_3x": ["volume surge", "high volume", "relative volume", "3x"],
+        "topping_tail_penalty": ["topping tail", "reversal warning", "volume top"],
+        "extended_pullback_penalty": ["extended pullback", "7+ red", "setup dead", "consecutive red"],
+        "pullback_clean_bonus": ["clean pullback", "first pullback", "bread-and-butter", "pullback"],
+        "volume_profile_bonus": ["volume profile", "green vol", "buyers stronger"],
+        "daily_gainer_10pct": ["gapper", "top gainer", "10%+"],
+        "time_of_day_bonus": ["morning session", "prime trading", "time of day"],
+        "regime_risk_off_penalty": ["risk-off", "risk off", "bearish regime"],
+        "regime_risk_on_bonus": ["risk-on", "risk on", "bullish regime"],
+        "regime_vix_breakout_penalty": ["high vix", "elevated vix", "false breakout"],
+        "regime_spy_concordance": ["spy concordance", "spy direction", "market alignment"],
+        "stoch_oversold_macd_bonus": ["stoch oversold", "stochastic oversold", "double bottom"],
+        "stoch_overbought_macd_penalty": ["stoch overbought", "stochastic overbought"],
+        "stoch_crossover_bonus": ["stoch crossover", "stochastic crossover", "bullish crossover from oversold"],
+    }
+
+    adjustments: dict[str, float] = {}
+    details: list[str] = []
+
+    for factor_key, keywords in FACTOR_KEYWORDS.items():
+        related = [
+            ins for ins in insights
+            if any(kw in ins.pattern_description.lower() for kw in keywords)
+        ]
+        if not related:
+            continue
+
+        avg_conf = sum(ins.confidence for ins in related) / len(related)
+        total_evidence = sum(ins.evidence_count for ins in related)
+
+        if total_evidence < 5:
+            continue
+
+        default = _DEFAULT_WEIGHTS[factor_key]
+        if avg_conf >= 0.7:
+            new_val = default * (1.0 + (avg_conf - 0.5) * 0.5)
+        elif avg_conf <= 0.3:
+            new_val = default * max(0.3, avg_conf / 0.5)
+        else:
+            new_val = default
+
+        if abs(new_val - default) > 0.05:
+            adjustments[factor_key] = round(new_val, 3)
+            direction = "up" if abs(new_val) > abs(default) else "down"
+            details.append(
+                f"{factor_key}: {default}->{new_val:.3f} ({direction}, "
+                f"avg_conf={avg_conf:.0%}, evidence={total_evidence})"
+            )
+
+    if adjustments:
+        _apply_learned_weights(adjustments)
+        from .learning import log_learning_event
+        log_learning_event(
+            db, None, "weight_evolution",
+            f"Brain evolved {len(adjustments)} scoring weights: {'; '.join(details[:5])}",
+        )
+
+    return {
+        "adjusted": len(adjustments),
+        "details": details,
+        "current_weights": get_all_weights(),
+    }
 
 
 # ── Single ticker scoring ─────────────────────────────────────────────
@@ -144,6 +301,24 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
             score += 0.5
             signals.append("Volume surge")
 
+        # ── Stochastic scoring (brain-adaptive) ──
+        if pd.notna(stoch_k):
+            stoch_d = stoch.stoch_signal().iloc[-1] if hasattr(stoch, 'stoch_signal') else None
+            sk = float(stoch_k)
+
+            if sk < 20 and pd.notna(macd_val) and pd.notna(macd_sig) and float(macd_val) > float(macd_sig):
+                score += get_adaptive_weight("stoch_oversold_macd_bonus")
+                signals.append(f"Stoch oversold ({sk:.0f}) + MACD bullish — double-bottom bounce")
+            elif sk > 80 and pd.notna(macd_val) and pd.notna(macd_sig) and float(macd_val) < float(macd_sig):
+                score += get_adaptive_weight("stoch_overbought_macd_penalty")
+                signals.append(f"Stoch overbought ({sk:.0f}) + MACD bearish — sell signal")
+
+            if stoch_d is not None and pd.notna(stoch_d):
+                sd = float(stoch_d)
+                if sk > sd and sk < 25:
+                    score += get_adaptive_weight("stoch_crossover_bonus")
+                    signals.append(f"Stoch bullish crossover from oversold ({sk:.0f}>{sd:.0f})")
+
         is_crypto_ticker = ticker.upper().endswith("-USD")
         if not is_crypto_ticker and not skip_fundamentals:
             try:
@@ -168,6 +343,24 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
                     score += fund_bonus
             except Exception:
                 pass
+
+        # ── Market regime modifier (brain-adaptive) ──
+        try:
+            _regime = get_market_regime()
+            _regime_label = _regime.get("regime", "cautious")
+            if _regime_label == "risk_off":
+                score += get_adaptive_weight("regime_risk_off_penalty")
+                if pd.notna(rsi_val) and rsi_val < 35:
+                    score += 0.3
+                    signals.append("Risk-off regime but oversold — contra play")
+                else:
+                    signals.append("Risk-off regime — penalised")
+            elif _regime_label == "risk_on":
+                if pd.notna(rsi_val) and rsi_val < 60:
+                    score += get_adaptive_weight("regime_risk_on_bonus")
+                    signals.append("Risk-on regime — momentum boost")
+        except Exception:
+            pass
 
         score = max(1.0, min(10.0, score))
 
@@ -228,8 +421,9 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
 def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
     """Score a ticker for day-trade suitability using 15-minute intraday data.
 
-    Evaluates momentum, VWAP positioning, volume surge, and ATR-based
-    risk on 5 days of 15m bars.
+    Evaluates momentum, VWAP positioning, volume surge, MACD gating,
+    pullback quality, float, time-of-day, and ATR-based risk on 5 days
+    of 15m bars.
     """
     try:
         from ta.momentum import RSIIndicator, StochasticOscillator
@@ -278,18 +472,31 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         vol_latest = float(volume.iloc[-1])
         vol_ratio = round(vol_latest / vol_avg, 2) if vol_avg > 0 else 1.0
 
-        # Gap from previous close
+        # Gap from previous close (daily % change)
         if len(df) > 26:
             prev_day_close = float(close.iloc[-27]) if len(df) >= 27 else price
             gap_pct = round((float(df["Open"].iloc[-1]) - prev_day_close) / prev_day_close * 100, 2) if prev_day_close > 0 else 0
         else:
             gap_pct = 0.0
 
+        # Daily change % (from today's open to current price)
+        daily_change_pct = 0.0
+        if len(today_df) > 0:
+            today_open = float(today_df["Open"].iloc[0])
+            if today_open > 0:
+                daily_change_pct = round((price - today_open) / today_open * 100, 2)
+
+        # ── MACD negative disqualification flag ──
+        macd_negative = (
+            pd.notna(macd_val) and pd.notna(macd_sig) and pd.notna(macd_hist)
+            and float(macd_val) < float(macd_sig) and float(macd_hist) < 0
+        )
+
         # Scoring
         score = 5.0
         signals: list[str] = []
 
-        # Momentum: RSI sweet spot for day trades (40-65 for longs, 35-60 for shorts)
+        # Momentum: RSI sweet spot for day trades
         if pd.notna(rsi_val):
             if 40 <= rsi_val <= 65:
                 score += 1.0
@@ -301,13 +508,14 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                 score -= 0.5
                 signals.append(f"RSI overextended ({rsi_val:.0f})")
 
-        # MACD momentum
+        # MACD momentum (brain-adaptive gating)
         if pd.notna(macd_val) and pd.notna(macd_sig):
             if macd_val > macd_sig and pd.notna(macd_hist) and float(macd_hist) > 0:
-                score += 1.0
-                signals.append("MACD bullish + positive histogram")
-            elif macd_val < macd_sig and pd.notna(macd_hist) and float(macd_hist) < 0:
-                score -= 0.5
+                score += get_adaptive_weight("macd_positive_bonus")
+                signals.append("MACD bullish + positive histogram — momentum confirmed")
+            elif macd_negative:
+                score += get_adaptive_weight("macd_negative_penalty")
+                signals.append("MACD negative — momentum lost, avoid entry")
 
         # EMA trend alignment
         if pd.notna(ema_9) and pd.notna(ema_21):
@@ -327,12 +535,15 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                 score -= 0.3
                 signals.append(f"Below VWAP ({vwap_pct:+.1f}%)")
 
-        # Volume surge
-        if vol_ratio >= 3.0:
-            score += 1.5
+        # Volume surge (brain-adaptive tiers)
+        if vol_ratio >= 5.0:
+            score += get_adaptive_weight("vol_surge_5x")
+            signals.append(f"Massive volume surge ({vol_ratio:.1f}x avg) — high conviction")
+        elif vol_ratio >= 3.0:
+            score += get_adaptive_weight("vol_surge_3x") + 0.5
             signals.append(f"Volume explosion ({vol_ratio:.1f}x avg)")
         elif vol_ratio >= 2.0:
-            score += 1.0
+            score += get_adaptive_weight("vol_surge_3x")
             signals.append(f"Strong volume surge ({vol_ratio:.1f}x avg)")
         elif vol_ratio >= 1.5:
             score += 0.5
@@ -342,6 +553,87 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         if abs(gap_pct) > 2:
             score += 0.5
             signals.append(f"Gap {'up' if gap_pct > 0 else 'down'} {gap_pct:+.1f}%")
+
+        # ── Daily gainer check (brain-adaptive) ──
+        if daily_change_pct >= 10.0:
+            score += get_adaptive_weight("daily_gainer_10pct")
+            signals.append(f"Top gainer today (+{daily_change_pct:.1f}%)")
+        elif daily_change_pct >= 5.0:
+            score += get_adaptive_weight("daily_gainer_5pct")
+            signals.append(f"Strong gainer today (+{daily_change_pct:.1f}%)")
+
+        # ── Float factor (brain-adaptive — learns its own float preferences) ──
+        _cr = ticker.upper().endswith("-USD")
+        if not _cr:
+            try:
+                fund = get_fundamentals(ticker)
+                if fund and fund.get("market_cap") and price > 0:
+                    shares = fund["market_cap"] / price
+                    if shares < 5_000_000:
+                        score += get_adaptive_weight("float_micro_bonus")
+                        signals.append(f"Micro float ({shares/1e6:.1f}M) — explosive potential")
+                    elif shares < 20_000_000:
+                        score += get_adaptive_weight("float_low_bonus") * 0.8
+                        signals.append(f"Low float ({shares/1e6:.1f}M)")
+            except Exception:
+                pass
+
+        # ── Pullback detection (brain-adaptive — clean first pullback) ──
+        if len(today_df) >= 5 and not macd_negative:
+            today_high = float(today_df["High"].max())
+            pullback_pct = (today_high - price) / today_high * 100 if today_high > 0 else 0
+            if 2.0 <= pullback_pct <= 8.0:
+                red_count = 0
+                for i in range(len(today_df) - 1, max(0, len(today_df) - 8), -1):
+                    if float(today_df["Close"].iloc[i]) < float(today_df["Open"].iloc[i]):
+                        red_count += 1
+                    else:
+                        break
+                if red_count <= 4:
+                    score += get_adaptive_weight("pullback_clean_bonus")
+                    signals.append(f"Clean pullback ({pullback_pct:.1f}% from high, {red_count} red bars) — entry zone")
+
+        # ── Topping tail warning (brain-adaptive) ──
+        last_open = float(df["Open"].iloc[-1])
+        last_high = float(high.iloc[-1])
+        body = abs(price - last_open)
+        upper_wick = last_high - max(price, last_open)
+        if body > 0 and upper_wick > 2 * body and vol_latest > vol_avg * 1.5:
+            score += get_adaptive_weight("topping_tail_penalty") * 0.67
+            signals.append("Topping tail on volume — reversal risk")
+
+        # ── Time-of-day factor (brain-adaptive) ──
+        try:
+            from datetime import timezone, timedelta as _td
+            last_ts = df.index[-1]
+            if hasattr(last_ts, 'hour'):
+                et_offset = last_ts.utcoffset() or _td(0)
+                et_hour = last_ts.hour
+                if 9 <= et_hour <= 10:
+                    score += get_adaptive_weight("time_of_day_bonus")
+                    signals.append("Prime trading window (morning session)")
+        except Exception:
+            pass
+
+        # ── MACD negative cap (brain-adaptive) ──
+        if macd_negative:
+            score = min(score, get_adaptive_weight("macd_negative_cap"))
+
+        # ── Market regime modifier (brain-adaptive) ──
+        try:
+            _regime = get_market_regime()
+            _regime_label = _regime.get("regime", "cautious")
+            _spy_dir = _regime.get("spy_direction", "flat")
+            if _regime_label == "risk_off":
+                score += get_adaptive_weight("regime_risk_off_penalty")
+                signals.append("Risk-off regime — tighter filters")
+            if _spy_dir in ("up",) and daily_change_pct > 0:
+                score += get_adaptive_weight("regime_spy_concordance")
+                signals.append("Trade direction aligns with SPY — concordance bonus")
+            elif _spy_dir == "down" and daily_change_pct > 0:
+                signals.append("Long against SPY trend — added caution")
+        except Exception:
+            pass
 
         score = max(1.0, min(10.0, score))
 
@@ -353,10 +645,9 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             signal = "wait"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.01
-        _cr = ticker.upper().endswith("-USD")
         scalp_stop = smart_round(price - 1.5 * atr_f, crypto=_cr)
-        scalp_target = smart_round(price + 2.0 * atr_f, crypto=_cr)
-        risk_reward = round(2.0 * atr_f / (1.5 * atr_f), 2) if atr_f > 0 else 1.33
+        scalp_target = smart_round(price + 2.5 * atr_f, crypto=_cr)
+        risk_reward = round(2.5 * atr_f / (1.5 * atr_f), 2) if atr_f > 0 else 1.67
 
         return {
             "ticker": ticker.upper(),
@@ -373,6 +664,8 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             "vwap_pct": vwap_pct,
             "vol_ratio": vol_ratio,
             "gap_pct": gap_pct,
+            "daily_change_pct": daily_change_pct,
+            "macd_positive": not macd_negative,
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
@@ -393,8 +686,9 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
     """Score a ticker for breakout readiness.
 
     Detects consolidation via Bollinger Band squeeze, low ADX, declining
-    volume, and proximity to resistance.  Returns a "readiness" score
-    and distance-to-breakout percentage.
+    volume, and proximity to resistance.  Also evaluates momentum quality
+    via MACD gating, float size, relative volume surge, pullback quality,
+    and volume profile analysis.
     """
     try:
         from ta.momentum import RSIIndicator
@@ -415,6 +709,8 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
 
         rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
         macd_obj = MACD(close=close)
+        macd_line = macd_obj.macd().iloc[-1]
+        macd_sig = macd_obj.macd_signal().iloc[-1]
         macd_hist = macd_obj.macd_diff().iloc[-1]
         ema_20 = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
         ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
@@ -444,6 +740,11 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         vol_prior = float(volume.iloc[-20:-5].mean()) if len(volume) >= 20 else vol_recent
         vol_declining = vol_recent < vol_prior * 0.8
         vol_trend_pct = round((vol_recent - vol_prior) / vol_prior * 100, 1) if vol_prior > 0 else 0
+
+        # Relative volume (latest bar vs 20-day average)
+        vol_avg_20 = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+        vol_latest = float(volume.iloc[-1])
+        rel_vol = round(vol_latest / vol_avg_20, 2) if vol_avg_20 > 0 else 1.0
 
         # Consolidation days: how many recent bars stayed within a tight range
         recent_range = high.iloc[-20:].max() - low.iloc[-20:].min()
@@ -500,10 +801,92 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 score -= 1.0
                 signals.append(f"RSI overbought ({rsi_val:.0f}) — may fade")
 
-        # MACD building
-        if pd.notna(macd_hist) and float(macd_hist) > 0:
-            score += 0.5
-            signals.append("MACD histogram positive — momentum building")
+        # ── MACD gate (primary momentum filter — weight is brain-adaptive) ──
+        if pd.notna(macd_hist) and pd.notna(macd_line) and pd.notna(macd_sig):
+            if float(macd_line) > float(macd_sig) and float(macd_hist) > 0:
+                score += get_adaptive_weight("macd_positive_bonus")
+                signals.append("MACD positive + histogram rising — strong momentum")
+            elif float(macd_hist) > 0:
+                score += 0.5
+                signals.append("MACD histogram positive — momentum building")
+            elif float(macd_line) < float(macd_sig) and float(macd_hist) < 0:
+                score += get_adaptive_weight("macd_negative_penalty")
+                signals.append("MACD negative — momentum lost, avoid entry")
+
+        # ── Relative volume surge (brain-adaptive thresholds) ──
+        if rel_vol >= 5.0:
+            score += get_adaptive_weight("vol_surge_5x")
+            signals.append(f"Massive volume surge ({rel_vol:.1f}x avg) — high conviction")
+        elif rel_vol >= 3.0:
+            score += get_adaptive_weight("vol_surge_3x")
+            signals.append(f"Strong relative volume ({rel_vol:.1f}x avg)")
+
+        # ── Price range sweet spot ──
+        _is_crypto = ticker.upper().endswith("-USD")
+        if not _is_crypto:
+            if 2.0 <= price <= 20.0:
+                score += get_adaptive_weight("price_sweetspot_bonus")
+                signals.append(f"Price ${price:.2f} in momentum sweet spot ($2-$20)")
+            elif price < 1.0 or price > 50.0:
+                score += get_adaptive_weight("price_out_of_range_penalty")
+
+        # ── Float size (brain-adaptive — CHILI learns its own float preferences) ──
+        if not _is_crypto:
+            try:
+                fund = get_fundamentals(ticker)
+                if fund and fund.get("market_cap"):
+                    shares = fund["market_cap"] / price if price > 0 else None
+                    if shares:
+                        if shares < 5_000_000:
+                            score += get_adaptive_weight("float_micro_bonus")
+                            signals.append(f"Micro float ({shares/1e6:.1f}M shares) — explosive potential")
+                        elif shares < 20_000_000:
+                            score += get_adaptive_weight("float_low_bonus")
+                            signals.append(f"Low float ({shares/1e6:.1f}M shares)")
+                        elif shares > 50_000_000:
+                            score += get_adaptive_weight("float_high_penalty")
+            except Exception:
+                pass
+
+        # ── Topping tail detection (brain-adaptive penalty) ──
+        last_open = float(df["Open"].iloc[-1])
+        last_high = float(high.iloc[-1])
+        last_low = float(low.iloc[-1])
+        last_close = float(close.iloc[-1])
+        body = abs(last_close - last_open)
+        upper_wick = last_high - max(last_close, last_open)
+        if body > 0 and upper_wick > 2 * body and vol_latest > vol_avg_20 * 1.5:
+            score += get_adaptive_weight("topping_tail_penalty")
+            signals.append("Topping tail on high volume — reversal warning")
+
+        # ── Pullback quality (consecutive red candles) ──
+        consec_red = 0
+        for i in range(len(close) - 1, max(0, len(close) - 15), -1):
+            if float(close.iloc[i]) < float(df["Open"].iloc[i]):
+                consec_red += 1
+            else:
+                break
+        if consec_red >= 7:
+            score += get_adaptive_weight("extended_pullback_penalty")
+            signals.append(f"Extended pullback ({consec_red} red candles) — setup weakened")
+
+        # ── Volume profile: green vs red candle volume ──
+        last_10 = df.iloc[-10:]
+        green_vol = float(last_10[last_10["Close"] >= last_10["Open"]]["Volume"].mean() or 0)
+        red_vol = float(last_10[last_10["Close"] < last_10["Open"]]["Volume"].mean() or 0)
+        if green_vol > 0 and red_vol > 0 and green_vol > red_vol * 1.3:
+            score += get_adaptive_weight("volume_profile_bonus")
+            signals.append("Buyers stronger than sellers (green vol > red vol)")
+
+        # ── Market regime modifier for breakouts (brain-adaptive) ──
+        try:
+            _regime = get_market_regime()
+            _vix_regime = _regime.get("vix_regime", "normal")
+            if _vix_regime in ("elevated", "extreme"):
+                score += get_adaptive_weight("regime_vix_breakout_penalty")
+                signals.append(f"High VIX ({_vix_regime}) — false breakout risk elevated")
+        except Exception:
+            pass
 
         score = max(1.0, min(10.0, score))
 
@@ -690,6 +1073,92 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
         "ok": True,
         "scan_type": "breakout",
         "candidates_scanned": len(candidates),
+        "matches": len(results),
+        "elapsed_s": elapsed,
+        "results": results,
+    }
+
+
+# ── Momentum Scanner (active, finds "immaculate" trades) ──────────────
+
+_momentum_cache: dict[str, Any] = {"results": [], "ts": 0.0}
+_MOMENTUM_CACHE_TTL = 120  # 2 minutes
+
+def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
+    """Active momentum scanner: finds the best intraday setups right now.
+
+    Applies strict "immaculate trade" filters so only A+ setups surface:
+    score >= 8.0, MACD positive, relative volume >= 3x, risk:reward >= 2:1.
+    Returns the top few setups ranked by score.
+    """
+    global _momentum_cache
+    now = time.time()
+    if _momentum_cache["results"] and (now - _momentum_cache["ts"]) < _MOMENTUM_CACHE_TTL:
+        return {
+            "ok": True,
+            "scan_type": "momentum",
+            "cached": True,
+            "matches": len(_momentum_cache["results"]),
+            "results": _momentum_cache["results"],
+        }
+
+    from .prescreener import get_daytrade_candidates
+
+    start = time.time()
+    candidates = get_daytrade_candidates()
+    logger.info(f"[trading] Momentum scanner: {len(candidates)} candidates")
+    _prewarm_cache_intraday(candidates)
+
+    scored: list[dict[str, Any]] = []
+    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
+        futures = {executor.submit(_score_ticker_intraday, t): t for t in candidates}
+        for future in as_completed(futures):
+            if _shutting_down.is_set():
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+            try:
+                result = future.result()
+                if result is not None:
+                    scored.append(result)
+            except Exception:
+                pass
+
+    imm_score = get_adaptive_weight("immaculate_min_score")
+    imm_vol = get_adaptive_weight("immaculate_min_vol")
+    imm_rr = get_adaptive_weight("immaculate_min_rr")
+
+    immaculate: list[dict[str, Any]] = []
+    for r in scored:
+        if (
+            r["score"] >= imm_score
+            and r.get("macd_positive", False)
+            and r.get("vol_ratio", 0) >= imm_vol
+            and r.get("risk_reward", 0) >= imm_rr
+        ):
+            r["immaculate"] = True
+            immaculate.append(r)
+
+    immaculate.sort(key=lambda x: x["score"], reverse=True)
+    immaculate = immaculate[:max_results]
+
+    if not immaculate:
+        good = [r for r in scored if r["score"] >= 7.0]
+        good.sort(key=lambda x: x["score"], reverse=True)
+        results = good[:max_results]
+        for r in results:
+            r["immaculate"] = False
+    else:
+        results = immaculate
+
+    _momentum_cache = {"results": results, "ts": time.time()}
+    elapsed = round(time.time() - start, 1)
+
+    return {
+        "ok": True,
+        "scan_type": "momentum",
+        "cached": False,
+        "candidates_scanned": len(candidates),
+        "immaculate_count": len(immaculate),
         "matches": len(results),
         "elapsed_s": elapsed,
         "results": results,
@@ -946,13 +1415,52 @@ def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     return signals
 
 
+def _bg_refresh_top_picks(user_id: int | None) -> None:
+    """Background thread: recompute top picks and update the cache."""
+    from ...db import SessionLocal
+    global _top_picks_cache
+    if not _top_picks_refresh_lock.acquire(blocking=False):
+        return
+    try:
+        s = SessionLocal()
+        try:
+            picks = _generate_top_picks_impl(s, user_id)
+            _top_picks_cache = {"picks": picks, "ts": time.time()}
+        finally:
+            s.close()
+    except Exception:
+        logger.debug("Background top-picks refresh failed", exc_info=True)
+    finally:
+        _top_picks_refresh_lock.release()
+
+
 def generate_top_picks(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     """Generate proactive AI-driven top picks from scan results + Brain predictions.
 
-    Unlike generate_signals (watchlist-only), this aggregates across the
-    entire market universe using recent scan data and AI Brain analysis
-    to surface the best opportunities CHILI has identified today.
+    Uses a stale-while-revalidate cache: returns cached data immediately and
+    triggers a background refresh when the cache is past its fresh TTL but
+    still within the stale window.
     """
+    global _top_picks_cache
+    now = time.time()
+    age = now - _top_picks_cache["ts"]
+
+    if _top_picks_cache["picks"] and age < _TOP_PICKS_TTL:
+        return _top_picks_cache["picks"]
+
+    if _top_picks_cache["picks"] and age < _TOP_PICKS_STALE_TTL:
+        threading.Thread(
+            target=_bg_refresh_top_picks, args=(user_id,), daemon=True,
+        ).start()
+        return _top_picks_cache["picks"]
+
+    picks = _generate_top_picks_impl(db, user_id)
+    _top_picks_cache = {"picks": picks, "ts": time.time()}
+    return picks
+
+
+def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str, Any]]:
+    """Core logic — scan DB + optionally merge Brain predictions."""
     from ...models.trading import ScanResult, BacktestResult
     from sqlalchemy import or_
 
@@ -986,9 +1494,15 @@ def generate_top_picks(db: Session, user_id: int | None) -> list[dict[str, Any]]
             "is_crypto": _cr,
         }
 
-    try:
+    def _get_brain_predictions():
         from .learning import get_current_predictions
-        preds = get_current_predictions(db, tickers=None)
+        return get_current_predictions(db, tickers=None)
+
+    try:
+        pool = ThreadPoolExecutor(max_workers=1)
+        future = pool.submit(_get_brain_predictions)
+        preds = future.result(timeout=30)
+        pool.shutdown(wait=False)
         for p in preds:
             t = p["ticker"]
             if p.get("direction") != "bullish" or (p.get("confidence") or 0) < 50:
@@ -1026,7 +1540,7 @@ def generate_top_picks(db: Session, user_id: int | None) -> list[dict[str, Any]]
                     "risk_reward": p.get("risk_reward"),
                 }
     except Exception:
-        pass
+        logger.debug("Brain predictions skipped (timeout or error)")
 
     picks = list(candidates.values())
 

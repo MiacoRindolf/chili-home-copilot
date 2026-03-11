@@ -371,6 +371,7 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
         messages=[{"role": "user", "content": thesis_prompt}],
         system_prompt="You are CHILI's market strategist. Summarize the current market thesis concisely.",
         trace_id="brain-thesis",
+        max_tokens=512,
     )
 
     reply = result.get("reply", "").strip()

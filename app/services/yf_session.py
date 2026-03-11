@@ -64,7 +64,11 @@ _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
 _TTL_NEWS = 600        # 10 minutes for ticker news
+_TTL_DEAD = 14400      # 4 hours for known-bad tickers
 _MAX_CACHE_SIZE = 2000
+
+_dead_tickers: dict[str, float] = {}
+_dead_lock = threading.Lock()
 
 
 def _cache_get(key: str) -> Any | None:
@@ -103,6 +107,25 @@ def _get_ttl(key: str) -> float:
     return _TTL_HISTORY
 
 
+def _is_dead(symbol: str) -> bool:
+    """Check if a ticker is in the negative cache (known bad)."""
+    with _dead_lock:
+        ts = _dead_tickers.get(symbol)
+        if ts is None:
+            return False
+        if time.time() - ts > _TTL_DEAD:
+            del _dead_tickers[symbol]
+            return False
+        return True
+
+
+def _mark_dead(symbol: str) -> None:
+    """Add ticker to the negative cache after confirmed failure."""
+    with _dead_lock:
+        _dead_tickers[symbol] = time.time()
+    logger.info(f"[yf_session] Marked {symbol} as dead (skip for {_TTL_DEAD}s)")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -120,9 +143,12 @@ def get_ticker(symbol: str) -> yf.Ticker:
 def get_history(symbol: str, **kwargs) -> Any:
     """Rate-limited + cached wrapper around ``yf.Ticker(symbol).history(**kwargs)``.
 
-    Returns a DataFrame (possibly empty on error).
+    Returns a DataFrame (possibly empty on error). Skips known-dead tickers.
     """
     import pandas as pd
+
+    if _is_dead(symbol):
+        return pd.DataFrame()
 
     period = kwargs.get("period", "6mo")
     interval = kwargs.get("interval", "1d")
@@ -140,6 +166,9 @@ def get_history(symbol: str, **kwargs) -> Any:
     except Exception as e:
         logger.warning(f"[yf_session] history({symbol}) failed: {e}")
         df = pd.DataFrame()
+
+    if df.empty:
+        _mark_dead(symbol)
 
     _cache_set(cache_key, df)
 
@@ -168,11 +197,21 @@ def get_fast_info(symbol: str) -> dict[str, Any] | None:
 
     Returns all available fields including year_high, year_low, avg_volume
     so callers don't need a separate API call for those.
+    Falls back to CoinGecko for crypto tickers that yfinance can't resolve.
     """
     cache_key = f"quote:{symbol}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
+
+    if _is_dead(symbol) and symbol.upper().endswith("-USD"):
+        result = _coingecko_quote(symbol)
+        if result:
+            _cache_set(cache_key, result)
+        return result
+
+    if _is_dead(symbol):
+        return None
 
     acquire()
     try:
@@ -209,6 +248,73 @@ def _safe_float(val: Any) -> float | None:
         return None
 
 
+_COINGECKO_SYMBOL_MAP: dict[str, str] = {}
+
+
+def _coingecko_quote(symbol: str) -> dict[str, Any] | None:
+    """Fallback: fetch price from CoinGecko for crypto tickers yfinance can't resolve."""
+    try:
+        import requests
+        coin_id = symbol.upper().replace("-USD", "").lower()
+        # CoinGecko needs coin IDs, not symbols — try common mappings first
+        known = {
+            "btc": "bitcoin", "eth": "ethereum", "sol": "solana", "ada": "cardano",
+            "xrp": "ripple", "doge": "dogecoin", "avax": "avalanche-2", "dot": "polkadot",
+            "link": "chainlink", "matic": "matic-network", "shib": "shiba-inu",
+            "pepe": "pepe", "sui": "sui", "tao": "bittensor", "hype": "hyperliquid",
+            "pengu": "pudgy-penguins", "pi": "pi-network",
+            "near": "near", "atom": "cosmos", "uni": "uniswap", "aave": "aave",
+            "ape": "apecoin", "arb": "arbitrum", "op": "optimism", "ftm": "fantom",
+            "fil": "filecoin", "grt": "the-graph", "inj": "injective-protocol",
+            "apt": "aptos", "sei": "sei-network", "jup": "jupiter-exchange-solana",
+            "wif": "dogwifcoin", "bonk": "bonk", "floki": "floki",
+            "render": "render-token", "fet": "artificial-superintelligence-alliance",
+            "ondo": "ondo-finance", "kas": "kaspa", "imx": "immutable-x",
+        }
+        cg_id = known.get(coin_id) or _COINGECKO_SYMBOL_MAP.get(coin_id)
+        if not cg_id:
+            try:
+                search_resp = requests.get(
+                    "https://api.coingecko.com/api/v3/search",
+                    params={"query": coin_id}, timeout=6,
+                )
+                search_resp.raise_for_status()
+                coins = search_resp.json().get("coins", [])
+                for c in coins:
+                    if c.get("symbol", "").upper() == coin_id.upper():
+                        cg_id = c["id"]
+                        _COINGECKO_SYMBOL_MAP[coin_id] = cg_id
+                        break
+            except Exception:
+                pass
+            if not cg_id:
+                cg_id = coin_id
+        resp = requests.get(
+            f"https://api.coingecko.com/api/v3/simple/price",
+            params={"ids": cg_id, "vs_currencies": "usd", "include_24hr_change": "true",
+                    "include_24hr_vol": "true", "include_market_cap": "true"},
+            timeout=8,
+        )
+        resp.raise_for_status()
+        data = resp.json().get(cg_id)
+        if not data or "usd" not in data:
+            return None
+        return {
+            "last_price": data["usd"],
+            "previous_close": None,
+            "day_high": None,
+            "day_low": None,
+            "volume": int(data.get("usd_24h_vol", 0)) or None,
+            "market_cap": data.get("usd_market_cap"),
+            "year_high": None,
+            "year_low": None,
+            "avg_volume": None,
+        }
+    except Exception as e:
+        logger.debug(f"[yf_session] CoinGecko fallback for {symbol} failed: {e}")
+        return None
+
+
 def _fmt_large(val: float | None) -> str | None:
     """Format large numbers for display (e.g. 385.6B, 12.3M)."""
     if val is None:
@@ -238,6 +344,8 @@ def batch_download(
     uncached: list[str] = []
     result: dict[str, Any] = {}
     for sym in symbols:
+        if _is_dead(sym):
+            continue
         key = f"hist:{sym}:{period}:{interval}:None"
         cached = _cache_get(key)
         if cached is not None:

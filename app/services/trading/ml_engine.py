@@ -29,6 +29,7 @@ FEATURE_NAMES = [
     "rsi", "macd_hist", "macd_crossover", "ema_alignment",
     "bb_position", "stoch_k", "adx", "atr_pct",
     "obv_direction", "vol_ratio", "is_crypto", "vix",
+    "spy_momentum_5d", "regime_numeric",
 ]
 
 
@@ -36,6 +37,7 @@ def extract_features(
     indicator_data: dict,
     close_price: float | None = None,
     vix: float | None = None,
+    regime: dict | None = None,
 ) -> dict[str, float]:
     """Extract ML features from an indicator_data dict."""
     rsi_data = indicator_data.get("rsi") or {}
@@ -97,6 +99,15 @@ def extract_features(
     ticker = indicator_data.get("ticker", "")
     is_crypto = 1.0 if (isinstance(ticker, str) and ticker.endswith("-USD")) else 0.0
 
+    spy_mom = 0.0
+    regime_num = 0.0
+    if regime:
+        spy_mom = regime.get("spy_momentum_5d", 0.0) or 0.0
+        regime_num = float(regime.get("regime_numeric", 0))
+    elif indicator_data.get("spy_momentum_5d") is not None:
+        spy_mom = float(indicator_data["spy_momentum_5d"])
+        regime_num = float(indicator_data.get("regime_numeric", 0))
+
     return {
         "rsi": rsi if rsi is not None else 50.0,
         "macd_hist": macd_hist if macd_hist is not None else 0.0,
@@ -110,6 +121,8 @@ def extract_features(
         "vol_ratio": indicator_data.get("vol_ratio", 1.0),
         "is_crypto": is_crypto,
         "vix": vix if vix is not None else 18.0,
+        "spy_momentum_5d": spy_mom,
+        "regime_numeric": regime_num,
     }
 
 
@@ -155,6 +168,7 @@ def train_model(db) -> dict[str, Any]:
                 ind_data,
                 close_price=snap.close_price,
                 vix=getattr(snap, "vix_at_snapshot", None),
+                regime=None,
             )
             X_rows.append([features.get(f, 0.0) for f in FEATURE_NAMES])
             y_rows.append(1 if (snap.future_return_5d or 0) > 0 else 0)

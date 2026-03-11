@@ -155,7 +155,7 @@ def _finviz_multiple_tops() -> list[str]:
 
 
 def _finviz_upgrades() -> list[str]:
-    return _finviz_screen(signal="Upgrade", limit=100)
+    return _finviz_screen(signal="Upgrades", limit=100)
 
 
 def _finviz_earnings_before() -> list[str]:
@@ -163,7 +163,7 @@ def _finviz_earnings_before() -> list[str]:
 
 
 def _finviz_recent_insider_buying() -> list[str]:
-    return _finviz_screen(signal="Insider Buying", limit=100)
+    return _finviz_screen(signal="Recent Insider Buying", limit=100)
 
 
 def _finviz_high_relative_volume() -> list[str]:
@@ -187,6 +187,25 @@ def _finviz_small_cap_momentum() -> list[str]:
             "Average Volume": "Over 200K",
         },
         limit=150,
+    )
+
+
+def _finviz_momentum_gappers() -> list[str]:
+    """Low-float momentum gappers: price $2-$20, up > 5%, high relative vol.
+
+    These are the bread-and-butter candidates for momentum day trading —
+    small/micro floats gapping up on volume with potential for 20-100%
+    intraday moves.
+    """
+    return _finviz_screen(
+        filters_dict={
+            "Price": "$2 to $20",
+            "Change": "Up more than 5%",
+            "Relative Volume": "Over 3",
+            "Float Short": "Under 20%",
+            "Average Volume": "Over 100K",
+        },
+        limit=100,
     )
 
 
@@ -529,9 +548,11 @@ def get_daytrade_candidates(max_total: int = 300) -> list[str]:
         "finviz_top_losers": _finviz_top_losers,
         "finviz_most_volatile": _finviz_most_volatile,
         "finviz_unusual_volume": _finviz_unusual_volume,
+        "finviz_momentum_gappers": _finviz_momentum_gappers,
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
         "yf_day_losers": _yf_day_losers,
+        "yf_small_cap_gainers": _yf_small_cap_gainers,
         "crypto_movers": _crypto_top_movers,
         "crypto_base": _crypto_candidates,
     }

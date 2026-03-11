@@ -85,6 +85,42 @@ def _run_price_monitor_job():
         db.close()
 
 
+def _run_momentum_scanner_job():
+    """Active momentum scanner: find immaculate day-trade setups and alert."""
+    from .trading.scanner import run_momentum_scanner
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running momentum scanner")
+    try:
+        result = run_momentum_scanner(max_results=3)
+        immaculate = [r for r in result.get("results", []) if r.get("immaculate")]
+        if immaculate:
+            for setup in immaculate:
+                msg = (
+                    f"MOMENTUM ALERT: {setup['ticker']} "
+                    f"Score {setup['score']}/10 | "
+                    f"${setup['price']} | "
+                    f"Vol {setup.get('vol_ratio', 0):.1f}x | "
+                    f"R:R {setup.get('risk_reward', 0):.1f} | "
+                    f"{', '.join(setup.get('signals', [])[:3])}"
+                )
+                dispatch_alert(
+                    ticker=setup["ticker"],
+                    alert_type="momentum_immaculate",
+                    message=msg,
+                    price=setup["price"],
+                )
+            logger.info(
+                f"[scheduler] Momentum scanner found {len(immaculate)} immaculate setup(s)"
+            )
+        else:
+            logger.info(
+                f"[scheduler] Momentum scanner: {result.get('matches', 0)} decent, 0 immaculate"
+            )
+    except Exception as e:
+        logger.error(f"[scheduler] Momentum scanner failed: {e}")
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -139,8 +175,22 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_momentum_scanner_job,
+            trigger=CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-10",
+                minute="*/15",
+                timezone="US/Eastern",
+            ),
+            id="momentum_scanner",
+            name="Momentum scanner (9:30-11AM ET every 15min)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _scheduler.start()
-        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min, price monitor every 5min market hours)")
+        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, momentum scanner 9:30-11AM ET market hours)")
 
 
 def stop_scheduler():

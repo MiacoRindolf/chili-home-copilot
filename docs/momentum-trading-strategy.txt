@@ -1,0 +1,222 @@
+CHILI Momentum Day Trading Strategy
+====================================
+
+This document describes CHILI's momentum day trading approach. The initial
+framework below was seeded from professional day trading best practices,
+but CHILI does NOT treat any of these rules as gospel. Every assumption
+listed here is a starting hypothesis that CHILI's brain continuously
+tests against real market data via its self-validation system.
+
+Each learning cycle, CHILI:
+- Tests every key hypothesis (e.g. "MACD negative = bad") against actual
+  historical returns and win rates.
+- If the data contradicts an assumption, CHILI weakens its weight and
+  logs a "hypothesis challenged" insight.
+- If the data confirms an assumption, CHILI reinforces it.
+- CHILI also explores novel patterns that no strategy taught it —
+  discovering its own edge in the market.
+- All scoring weights are adaptive: they start at defaults but evolve
+  based on what CHILI's brain learns from real data.
+
+The goal is not to replicate any single trader's style, but to absorb
+the best ideas, stress-test them, and ultimately build something better.
+
+
+1. THE FIVE PILLARS OF STOCK SELECTION
+--------------------------------------
+
+Every momentum candidate must pass all five checks before consideration:
+
+1. **Float**: Prefer stocks with a float under 20 million shares. Micro-floats
+   (under 5M shares) move the fastest because limited supply means any buying
+   pressure creates outsized price moves. Above 50M shares, momentum trades
+   become much harder.
+
+2. **Relative Volume**: The stock must be trading at least 3x its 20-day
+   average volume (5x or higher is ideal). High relative volume means the
+   institutional and retail crowd is paying attention *right now*.
+
+3. **Price Range**: The sweet spot is $2 to $20 for small-account traders.
+   Below $1 is penny-stock territory (risky, illiquid). Above $50, the
+   percentage moves shrink unless the catalyst is massive.
+
+4. **Catalyst / Gap**: The stock should have a clear reason for moving —
+   earnings surprise, FDA approval, partnership, sector rotation, or a
+   pre-market gap of 5%+ from the prior close. No-catalyst moves fade.
+
+5. **Chart Pattern**: The best entries come on the *first pullback* after
+   the initial breakout. The pullback should be clean (fewer than 5 red
+   candles, decreasing volume on the pullback) and occur near a support
+   level (VWAP, EMA-9, or prior resistance turned support).
+
+
+2. MACD GATING RULES
+---------------------
+
+MACD is the primary momentum gatekeeper. These rules are non-negotiable:
+
+- **MACD positive + histogram rising**: GREEN LIGHT. The trend is
+  accelerating. This is the ideal entry condition.
+
+- **MACD positive + histogram flat/declining**: YELLOW. Momentum is
+  slowing but the trend is still intact. Only enter on perfect pullback
+  setups with excellent risk:reward.
+
+- **MACD negative (below signal line) + histogram below zero**: RED.
+  Never enter a new long position when MACD has crossed below its signal
+  line. This is the single most important rule. If you're already in the
+  trade, this is your exit signal.
+
+- **MACD crossover from below**: Watch for potential new entry, but wait
+  for confirmation (histogram turns positive for 2+ bars).
+
+
+3. PULLBACK ENTRY CRITERIA
+---------------------------
+
+The "bread and butter" trade is the first pullback after a breakout:
+
+a) Stock gaps up or breaks out on volume (5x+ relative volume ideal)
+b) Stock makes a new high on the timeframe
+c) Stock pulls back 3-8% from the high
+d) Pullback has 2-4 red candles with *decreasing* volume
+e) MACD remains positive throughout the pullback
+f) Entry trigger: first green candle on the pullback reversal
+
+Avoid:
+- Pullbacks with 7 or more consecutive red candles (setup is dead)
+- Pullbacks where MACD flips negative (momentum is lost)
+- Pullbacks on *increasing* volume (selling pressure, not just rest)
+
+
+4. VOLUME PROFILE ANALYSIS
+---------------------------
+
+Volume tells the truth about who's in control:
+
+- **Green candle volume > red candle volume** (over the last 10 bars):
+  Buyers are stronger. This confirms the trend.
+
+- **Red candle volume > green candle volume**: Sellers are stronger.
+  The move may be exhausting. Be cautious.
+
+- **Volume top / topping tail**: If the last candle has an upper wick
+  that is more than 2x the body size AND this happens on high volume,
+  it signals a rejection / reversal. This is a key *avoidance* signal.
+  Sellers overwhelmed buyers at the highs.
+
+- **Volume expansion on breakout**: The breakout candle should have
+  at least 2-3x the recent average volume. Without volume confirmation,
+  the breakout is likely to fail.
+
+
+5. RISK MANAGEMENT
+------------------
+
+- **Risk:Reward minimum**: 2:1 (risk $1 to make $2). The scanner
+  requires at least 2:1 for "immaculate" classification.
+
+- **Position sizing**: Never risk more than 2% of account on a single
+  trade. For a $25,000 account, max loss per trade is $500.
+
+- **Daily target**: Aim for 1-2% of account value per day. Compounding
+  small consistent wins beats chasing home runs.
+
+- **Daily max loss**: Stop trading for the day after losing 3% of
+  account value. Revenge trading is the #1 account killer.
+
+- **Stop loss placement**: Place stops just below the pullback low or
+  1.5x ATR below entry. Never average down on a losing trade.
+
+- **Profit taking**: Take 1/3 off at 1:1, move stop to break-even,
+  take another 1/3 at 2:1, let the rest ride with a trailing stop.
+
+
+6. TIME-OF-DAY RULES
+---------------------
+
+- **9:30-10:30 AM ET**: The power hour. This is when momentum is
+  strongest. 70%+ of the best day trades happen in this window.
+  The scanner prioritizes this period.
+
+- **10:30-11:30 AM**: Still viable for first pullback entries, but
+  the initial momentum wave has often played out.
+
+- **11:30 AM - 2:00 PM**: The "chop zone." Most moves have exhausted.
+  Avoid new entries unless a strong catalyst develops.
+
+- **2:00-4:00 PM**: Can see a late-day push or reversal. Be cautious;
+  this window is more suitable for closing positions than opening them.
+
+
+7. COMMON MISTAKES TO AVOID
+----------------------------
+
+1. Entering when MACD is negative (the #1 mistake)
+2. Chasing a stock that's already up 20%+ without a pullback
+3. Ignoring volume tops / topping tails
+4. Trading stocks with floats above 50M (they don't move enough)
+5. Not having a stop loss before entering
+6. Trading during the midday chop zone
+7. Entering on extended pullbacks (7+ red candles)
+8. Averaging down on a losing position
+9. Ignoring the risk:reward ratio (must be >= 2:1)
+10. Trading without a catalyst or clear reason for the move
+
+
+8. THE "IMMACULATE" SETUP
+--------------------------
+
+CHILI's scanner flags an "immaculate" trade when ALL of these align:
+
+- Intraday score >= 8.0/10
+- MACD positive with rising histogram
+- Relative volume >= 3x (5x+ preferred)
+- Clean pullback (< 5 red candles, decreasing volume)
+- Risk:Reward >= 2:1
+- Favorable time of day (ideally 9:30-10:30 AM ET)
+
+When the scanner finds an immaculate setup, it sends an immediate alert.
+These are rare (0-3 per day) but represent the highest-probability
+trades the system can identify.
+
+Note: Even these thresholds (8.0 score, 3x vol, 2:1 R:R) are adaptive.
+If CHILI's brain learns that 7.5-score setups with 4x volume consistently
+outperform 8.0-score setups with 3x volume, it will adjust accordingly.
+
+
+9. HOW CHILI EVOLVES BEYOND THIS
+----------------------------------
+
+This strategy document represents CHILI's starting knowledge. Here's how
+the brain improves over time:
+
+a) **Hypothesis Testing**: Every learning cycle, CHILI explicitly tests
+   assumptions like "MACD positive always outperforms MACD negative" by
+   comparing actual 5-day and 10-day returns across both groups. If an
+   assumption fails, CHILI creates a "hypothesis challenged" insight and
+   reduces the weight of that factor in scoring.
+
+b) **Novel Pattern Discovery**: CHILI doesn't just test existing rules —
+   it explores combinations that no human taught it. For example, it might
+   discover that "Bollinger Band oversold + MACD negative" is actually a
+   profitable contrarian bounce setup, even though conventional wisdom
+   says to avoid MACD-negative entries.
+
+c) **Adaptive Weight Evolution**: All scoring weights (MACD bonus, float
+   bonus, volume thresholds, etc.) start at defaults but continuously
+   adjust based on the brain's confidence in related patterns. High
+   confidence in a pattern = stronger weight. Low confidence = weakened
+   weight. Weights are bounded so they can't swing too wildly.
+
+d) **Cross-Validation**: Discovered patterns are backtested across
+   multiple tickers and timeframes. Patterns that only work on a few
+   stocks get demoted. Patterns that work broadly get promoted.
+
+e) **Decay & Demotion**: Patterns that haven't been seen in 30+ days
+   gradually lose confidence. Patterns with lots of evidence but low
+   win rates are deactivated. The brain prunes what doesn't work.
+
+The result: CHILI starts with a solid foundation but continuously tests,
+challenges, and improves every aspect of its trading logic. No single
+strategy or teacher limits what it can become.

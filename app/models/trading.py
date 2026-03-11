@@ -36,6 +36,7 @@ class Trade(Base):
     indicator_snapshot: Optional[str] = Column(Text, nullable=True)  # JSON blob
     broker_source: Optional[str] = Column(String(20), nullable=True)  # "robinhood" / "manual" / None
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
+    pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
 
 
 class JournalEntry(Base):

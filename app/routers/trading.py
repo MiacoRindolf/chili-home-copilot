@@ -514,6 +514,14 @@ def api_run_breakout_scan():
     return JSONResponse(result)
 
 
+@router.get("/api/trading/scan/momentum")
+@router.post("/api/trading/scan/momentum")
+def api_run_momentum_scan():
+    """Active momentum scanner — finds top intraday setups with strict filters."""
+    result = ts.run_momentum_scanner()
+    return JSONResponse(result)
+
+
 # ── Portfolio ──────────────────────────────────────────────────────────
 
 @router.get("/api/trading/portfolio")

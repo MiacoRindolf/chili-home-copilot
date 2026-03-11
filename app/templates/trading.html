@@ -452,6 +452,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   min-width: 0; flex: 1 1 auto; cursor: help; opacity: .7;
 }
 .td-loading, .td-muted { font-size: 10px; color: var(--text-muted); }
+.td-skeleton { display: inline-flex; gap: 10px; align-items: center; flex: 1; }
+.td-bone {
+  height: 10px; border-radius: 4px;
+  background: linear-gradient(90deg, var(--border) 25%, rgba(99,102,241,.06) 50%, var(--border) 75%);
+  background-size: 200% 100%; animation: boneShimmer 1.4s infinite ease-in-out;
+}
+@keyframes boneShimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 .ticker-news-row {
   display: flex; align-items: stretch; gap: 0; overflow-x: auto;
   -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border);
@@ -477,19 +484,43 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 /* ── Top Picks Banner ──────────────────────────── */
 .signals-banner {
   padding: 8px 12px; background: var(--bg-header); border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
 }
-.signals-banner h3 { font-size: 12px; margin-bottom: 6px; display: flex; align-items: center; gap: 6px; font-weight: 700; }
-.signals-scroll { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; -webkit-overflow-scrolling: touch; }
-.signals-scroll::-webkit-scrollbar { height: 2px; }
-.signals-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-.signals-actions { display: flex; gap: 6px; margin-top: 6px; }
-.signals-actions button {
-  padding: 4px 12px; font-size: 10px; border: 1px solid var(--border);
+.signals-banner .sb-header {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 6px;
+}
+.signals-banner .sb-title {
+  font-size: 12px; font-weight: 700; display: flex; align-items: center; gap: 6px;
+}
+.signals-banner .sb-hint {
+  font-size: 10px; color: var(--text-muted); margin-left: auto;
+}
+.signals-banner .sb-actions {
+  display: flex; gap: 6px; margin-left: auto;
+}
+.sb-actions button {
+  padding: 3px 10px; font-size: 10px; border: 1px solid var(--border);
   border-radius: 8px; background: var(--bg); color: var(--text); cursor: pointer; font-weight: 500;
   transition: all .12s;
 }
-.signals-actions button:hover { border-color: var(--accent); }
-.signals-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.sb-actions button:hover { border-color: var(--accent); }
+.sb-actions button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
+.signals-scroll {
+  display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px;
+  -webkit-overflow-scrolling: touch;
+}
+.signals-scroll::-webkit-scrollbar { height: 2px; }
+.signals-scroll::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+.signals-banner .sb-empty {
+  display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+  color: var(--text-muted); font-size: 11px; background: var(--bg);
+  border: 1px dashed var(--border); border-radius: 8px;
+}
+.signals-banner .sb-empty button {
+  padding: 4px 12px; font-size: 10px; border: 1px solid var(--accent);
+  border-radius: 8px; background: var(--accent); color: #fff; cursor: pointer;
+  font-weight: 600; white-space: nowrap;
+}
 
 /* ── Pick Cards (banner + signals tab) ────────── */
 .pick-card {
@@ -665,6 +696,12 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .sig-status { font-size: 10px; color: var(--text-muted); }
 .sig-badge-count { font-size: 10px; color: var(--text-muted); font-weight: 400; }
 .sig-settings-wrap { margin-bottom: 8px; }
+.sig-section-label {
+  display: flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 700;
+  color: var(--text-muted); margin: 8px 0 4px; padding-bottom: 4px;
+  border-bottom: 1px solid var(--border); text-transform: uppercase; letter-spacing: .3px;
+}
+.sig-section-count { font-weight: 400; font-size: 10px; }
 .alert-history-scroll { max-height: 200px; overflow-y: auto; margin-top: 6px; }
 
 /* Back-compat: old signal-card class */
@@ -898,6 +935,10 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .screen-type-btn.active { background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; border-color: transparent; }
 .screen-type-btn[data-stype="daytrade"].active { background: linear-gradient(135deg, #f59e0b, #d97706); }
 .screen-type-btn[data-stype="breakouts"].active { background: linear-gradient(135deg, #10b981, #059669); }
+.screen-type-btn[data-stype="momentum"].active { background: linear-gradient(135deg, #ef4444, #dc2626); }
+.momentum-badge { display:inline-block; padding:1px 6px; border-radius:8px; font-size:9px; font-weight:700; margin-left:4px; }
+.momentum-badge.immaculate { background:linear-gradient(135deg,#f59e0b,#ef4444); color:#fff; }
+.momentum-badge.good { background:rgba(16,185,129,.15); color:#10b981; }
 
 /* ── Screener results ──────────────────────────────── */
 .scr-row { display: grid; grid-template-columns: 80px 60px 45px 50px 60px 60px 1fr; gap: 4px; align-items: center; padding: 4px 6px; font-size: 11px; border-bottom: 1px solid rgba(128,128,128,.08); cursor: pointer; transition: background .1s; border-radius: 4px; }
@@ -1316,10 +1357,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .portfolio-grid { grid-template-columns: 1fr 1fr; }
   .stats-grid { grid-template-columns: 1fr 1fr; }
 
-  /* Ticker detail compact on mobile */
+  /* Ticker detail & banner compact on mobile */
   .ticker-detail-info { padding: 3px 8px; gap: 5px; font-size: 10px; }
   .td-desc-text { display: none; }
   .news-pill { padding: 3px 10px; font-size: 9px; }
+  .signals-banner { padding: 6px 8px; }
+  .signals-banner .sb-title { font-size: 11px; }
+  .sb-actions button { font-size: 9px; padding: 3px 8px; }
 
   /* Snap scroll tabs on mobile */
   .t-tabs { gap: 0; scroll-snap-type: x mandatory; scroll-behavior: smooth; }
@@ -1564,12 +1608,20 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   <!-- Main chart area -->
   <div class="t-main">
     <!-- Signal Cards Banner -->
-    <div class="signals-banner" id="signals-banner" style="display:none">
-      <h3>&#x1F9E0; CHILI's Top Picks <span class="sig-status" id="signals-time"></span></h3>
-      <div class="signals-scroll" id="signals-scroll"></div>
-      <div class="signals-actions">
-        <button class="primary" onclick="runFullScan()">&#x1F50D; Full Scan</button>
-        <button onclick="loadTopPicks()">&#x21BB; Refresh</button>
+    <div class="signals-banner" id="signals-banner">
+      <div class="sb-header">
+        <span class="sb-title">&#x1F9E0; CHILI's Top Picks</span>
+        <span class="sb-hint" id="signals-time"></span>
+        <div class="sb-actions">
+          <button onclick="loadTopPicks()">&#x21BB; Refresh</button>
+          <button class="primary" onclick="runFullScan()">&#x1F50D; Full Scan</button>
+        </div>
+      </div>
+      <div class="signals-scroll" id="signals-scroll">
+        <div class="sb-empty">
+          <span>Run a Full Scan so CHILI can analyze the market and surface its best ideas.</span>
+          <button onclick="runFullScan()">&#x1F50D; Scan Now</button>
+        </div>
       </div>
     </div>
 
@@ -1597,8 +1649,10 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     </div>
 
     <!-- Ticker detail + news (full-width strip under toolbar) -->
-    <div id="ticker-detail-section" class="ticker-detail-section" style="display:none">
-      <div id="ticker-detail-bar" class="ticker-detail-info"></div>
+    <div id="ticker-detail-section" class="ticker-detail-section" style="display:flex">
+      <div id="ticker-detail-bar" class="ticker-detail-info">
+        <span class="td-skeleton"><span class="td-bone" style="width:70px"></span><span class="td-bone" style="width:50px"></span><span class="td-bone" style="width:100px"></span></span>
+      </div>
       <div id="ticker-news-cards" class="ticker-news-row"></div>
     </div>
 
@@ -1650,9 +1704,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <!-- Signals -->
       <div class="t-tab-content active" id="tab-signals">
         <div class="sig-toolbar">
-          <button class="sig-btn sig-btn-primary" onclick="loadTopPicks()" id="btn-refresh-picks">&#x1F9E0; Refresh AI Picks</button>
-          <button class="sig-btn sig-btn-success" onclick="loadProposals()">&#x1F4CB; Proposals</button>
-          <button class="sig-btn sig-btn-ghost" onclick="toggleAlertSettings()" title="Alert Settings">&#x2699;</button>
+          <button class="sig-btn sig-btn-primary" onclick="runFullScan()" id="btn-refresh-picks">&#x1F50D; Full Market Scan</button>
+          <button class="sig-btn sig-btn-ghost" onclick="loadTopPicks()">&#x21BB; Refresh Picks</button>
+          <button class="sig-btn sig-btn-ghost" onclick="toggleAlertSettings()" title="Alert Settings">&#x2699; Alerts</button>
           <span id="picks-status" class="sig-status"></span>
         </div>
 
@@ -1670,11 +1724,15 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
           <div id="proposals-list"></div>
         </div>
 
+        <div class="sig-section-label" id="picks-section-label" style="display:none">
+          <span>&#x1F9E0; AI Top Picks</span>
+          <span class="sig-section-count" id="picks-total-count"></span>
+        </div>
         <div id="signals-list" class="picks-grid">
           <div class="picks-empty">
-            <div class="pe-icon">&#x1F9E0;</div>
-            <div class="pe-title">CHILI's AI Top Picks</div>
-            <div class="pe-sub">Run a full scan first, then CHILI will analyze the entire market and surface its best trade ideas with detailed entry/exit plans.</div>
+            <div class="pe-icon">&#x1F50D;</div>
+            <div class="pe-title">Run a Full Market Scan</div>
+            <div class="pe-sub">CHILI will scan the entire market, score opportunities, and surface AI-driven trade ideas with entry, exit, risk, and projected returns.</div>
           </div>
         </div>
 
@@ -1690,6 +1748,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
           <button class="screen-type-btn active" data-stype="swing" onclick="switchScreenType(this,'swing')">Swing</button>
           <button class="screen-type-btn" data-stype="daytrade" onclick="switchScreenType(this,'daytrade')">Day Trade</button>
           <button class="screen-type-btn" data-stype="breakouts" onclick="switchScreenType(this,'breakouts')">Breakouts</button>
+          <button class="screen-type-btn" data-stype="momentum" onclick="switchScreenType(this,'momentum')">Momentum</button>
         </div>
         <div class="screen-panel" id="screen-panel-swing">
           <div class="scr-action-row">
@@ -1753,6 +1812,16 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
           </div>
           <div id="breakout-results" class="scr-results-area">
             <div class="scr-empty">Click "Scan Breakouts" to find consolidation setups.</div>
+          </div>
+        </div>
+        <!-- Momentum Scanner -->
+        <div class="screen-panel" id="screen-panel-momentum" style="display:none">
+          <div class="scr-action-row">
+            <button onclick="runMomentumScan()" id="btn-momentum" class="sig-btn" style="background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff">Scan Momentum</button>
+            <span id="momentum-status" class="sig-status"></span>
+          </div>
+          <div id="momentum-results" class="scr-results-area">
+            <div class="scr-empty">Click "Scan Momentum" to find the best intraday setups with strict A+ filters.</div>
           </div>
         </div>
       </div>
@@ -2156,7 +2225,6 @@ document.addEventListener('DOMContentLoaded', function() {
   loadJournal();
   loadStats();
   loadInsights();
-  loadSignalsBanner();
   loadBrokerStatus();
   document.getElementById('ai-input').addEventListener('keydown', _onAiInputKey);
   _loadChatHistory();
@@ -2380,28 +2448,36 @@ function loadTickerDetail(ticker) {
   var bar = document.getElementById('ticker-detail-bar');
   if (!section || !bar) return;
   section.style.display = 'flex';
-  bar.innerHTML = '<span class="td-loading">Loading ' + escHtml(ticker) + '…</span>';
+  bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>' +
+    '<span class="td-skeleton"><span class="td-bone" style="width:60px"></span><span class="td-bone" style="width:45px"></span><span class="td-bone" style="width:80px"></span><span class="td-bone" style="width:140px"></span></span>';
   fetch('/api/trading/ticker-info?ticker=' + encodeURIComponent(ticker))
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (!d.ok || !d.info) { bar.innerHTML = ''; section.style.display = 'none'; return; }
+      if (!d.ok || !d.info) {
+        bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>';
+        return;
+      }
       var i = d.info;
       var h = '<span class="td-company">' + escHtml(i.name || ticker) + '</span>';
       var tags = [];
       if (i.sector_or_type && i.sector_or_type !== '—') tags.push(escHtml(i.sector_or_type));
       if (i.market_cap_fmt) tags.push('MCap <b>' + escHtml(i.market_cap_fmt) + '</b>');
       if (i.pe != null && i.pe > 0) tags.push('P/E <b>' + i.pe.toFixed(1) + '</b>');
-      tags.forEach(function(t) { h += '<span class="td-dot">·</span><span class="td-tag">' + t + '</span>'; });
-      if (i.description) h += '<span class="td-dot">·</span><span class="td-desc-text" title="' + escHtml(i.description) + '">' + escHtml(i.description) + '</span>';
+      tags.forEach(function(t) { h += '<span class="td-dot">&middot;</span><span class="td-tag">' + t + '</span>'; });
+      if (i.description) h += '<span class="td-dot">&middot;</span><span class="td-desc-text" title="' + escHtml(i.description) + '">' + escHtml(i.description) + '</span>';
       bar.innerHTML = h;
     })
-    .catch(function() { bar.innerHTML = ''; section.style.display = 'none'; });
+    .catch(function() {
+      bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>';
+    });
 }
 
 function loadTickerNews(ticker) {
   var container = document.getElementById('ticker-news-cards');
   if (!container) return;
-  container.innerHTML = '';
+  container.innerHTML = '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:120px;height:8px"></span><span class="td-bone" style="width:60px;height:8px"></span></div>' +
+    '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:100px;height:8px"></span><span class="td-bone" style="width:50px;height:8px"></span></div>' +
+    '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:130px;height:8px"></span></div>';
   fetch('/api/trading/news?ticker=' + encodeURIComponent(ticker) + '&limit=8')
     .then(function(r) { return r.json(); })
     .then(function(d) {
@@ -4493,6 +4569,58 @@ function runBreakoutScan() {
   });
 }
 
+/* ── Momentum Scanner ──────────────────────────── */
+function runMomentumScan() {
+  var btn = document.getElementById('btn-momentum');
+  var status = document.getElementById('momentum-status');
+  var results = document.getElementById('momentum-results');
+  btn.disabled = true;
+  btn.textContent = 'Scanning...';
+  status.textContent = 'Searching for A+ momentum setups...';
+  _injectSkeletons(results, 3, '70px 58px 42px 60px 55px 1fr');
+
+  fetch('/api/trading/scan/momentum')
+    .then(function(r){return r.json();}).then(function(d) {
+    btn.disabled = false;
+    btn.textContent = 'Scan Momentum';
+    if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
+    var ic = d.immaculate_count || 0;
+    status.textContent = d.matches + ' setups' + (ic ? ' (' + ic + ' immaculate)' : '') + ' from ' + (d.candidates_scanned||'cached') + ' candidates' + (d.elapsed_s ? ' (' + d.elapsed_s + 's)' : '') + (d.cached ? ' [cached]' : '');
+    _renderMomentumResults(d.results || []);
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = 'Scan Momentum';
+    status.textContent = 'Error';
+    results.innerHTML = '<em style="color:#ef4444">Network error</em>';
+  });
+}
+
+function _renderMomentumResults(data) {
+  var container = document.getElementById('momentum-results');
+  if (!data.length) {
+    container.innerHTML = '<div class="scr-empty">No A+ setups found right now. Check again during market hours (9:30-11 AM ET).</div>';
+    return;
+  }
+  var html = '<div style="display:grid;grid-template-columns:70px 58px 50px 60px 55px 55px 1fr;gap:4px;padding:4px 6px;font-size:10px;color:var(--text-dim);font-weight:600">' +
+    '<span>Ticker</span><span>Price</span><span>Score</span><span>Vol</span><span>R:R</span><span>Signal</span><span>Key Signals</span></div>';
+  data.forEach(function(r, i) {
+    var badge = r.immaculate ? '<span class="momentum-badge immaculate">IMMACULATE</span>' : '<span class="momentum-badge good">GOOD</span>';
+    var scoreColor = r.score >= 8.5 ? '#ef4444' : r.score >= 7 ? '#f59e0b' : '#10b981';
+    var signals = (r.signals || []).slice(0, 3).join(' · ');
+    html += '<div class="scr-dt-row" onclick="selectTicker(\'' + escHtml(r.ticker) + '\')" title="' + escHtml((r.signals||[]).join(', ')) + '" style="border-left:3px solid ' + scoreColor + '">' +
+      '<span style="font-weight:700">' + escHtml(r.ticker) + badge + '</span>' +
+      '<span>$' + r.price + '</span>' +
+      '<span class="score" style="color:' + scoreColor + ';font-weight:700">' + r.score + '</span>' +
+      '<span>' + (r.vol_ratio||0).toFixed(1) + 'x</span>' +
+      '<span>' + (r.risk_reward||0).toFixed(1) + ':1</span>' +
+      '<span style="color:' + (r.signal==='long'?'#10b981':'#ef4444') + '">' + (r.signal||'').toUpperCase() + '</span>' +
+      '<span style="font-size:10px;color:var(--text-dim)">' + escHtml(signals) + '</span>' +
+      '</div>';
+  });
+  container.innerHTML = html;
+  _attachScoreTooltips();
+}
+
 /* ── Score tooltip on hover ─────────────────────── */
 var _activeScoreTip = null;
 function _attachScoreTooltips() {
@@ -4677,34 +4805,51 @@ function _renderPickCard(p, compact) {
 
 function loadTopPicks() {
   var status = document.getElementById('picks-status');
-  if (status) status.textContent = 'Loading AI picks...';
+  if (status) status.textContent = 'Loading…';
   fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(function(d) {
     if (status) status.textContent = '';
     if (!d.ok) return;
     var el = document.getElementById('signals-list');
+    var label = document.getElementById('picks-section-label');
+    var count = document.getElementById('picks-total-count');
     if (!d.picks || !d.picks.length) {
+      if (label) label.style.display = 'none';
       el.innerHTML = '<div class="picks-empty">' +
-        '<div class="pe-icon">&#x1F9E0;</div>' +
+        '<div class="pe-icon">&#x1F50D;</div>' +
         '<div class="pe-title">No Top Picks Yet</div>' +
-        '<div class="pe-sub">Run a Full Scan first so CHILI can analyze the market and identify opportunities. Click "Run Full Scan" to get started.</div></div>';
+        '<div class="pe-sub">Run a Full Market Scan to generate AI-driven trade ideas with entry, exit, risk, and projected returns.</div></div>';
       return;
     }
+    if (label) { label.style.display = 'flex'; }
+    if (count) count.textContent = d.picks.length + ' picks';
     el.innerHTML = '';
     d.picks.forEach(function(p) { el.innerHTML += _renderPickCard(p, false); });
-  }).catch(function() { if (status) status.textContent = ''; });
-
+  }).catch(function() {
+    if (status) status.textContent = '';
+    var el = document.getElementById('signals-list');
+    if (el) el.innerHTML = '<div class="picks-empty">' +
+      '<div class="pe-icon">&#x26A0;</div>' +
+      '<div class="pe-title">Could not load picks</div>' +
+      '<div class="pe-sub">The server may still be computing predictions. Try refreshing in a moment.</div></div>';
+  });
   _loadTopPicksBanner();
 }
 
 function _loadTopPicksBanner() {
   fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok || !d.picks || !d.picks.length) return;
-    var banner = document.getElementById('signals-banner');
-    banner.style.display = 'block';
     var scroll = document.getElementById('signals-scroll');
+    var timeEl = document.getElementById('signals-time');
+    if (!scroll) return;
+    if (!d.ok || !d.picks || !d.picks.length) {
+      scroll.innerHTML = '<div class="sb-empty">' +
+        '<span>Run a Full Scan so CHILI can analyze the market and surface its best ideas.</span>' +
+        '<button onclick="runFullScan()">&#x1F50D; Scan Now</button></div>';
+      return;
+    }
+    if (timeEl) timeEl.textContent = d.picks.length + ' picks';
     scroll.innerHTML = '';
     d.picks.slice(0, 8).forEach(function(p) { scroll.innerHTML += _renderPickCard(p, true); });
-  });
+  }).catch(function() {});
 }
 
 function loadSignals() { loadTopPicks(); loadProposals(); }
@@ -4742,6 +4887,9 @@ function loadProposals() {
     section.style.display = 'block';
     list.innerHTML = '';
     d.proposals.forEach(function(p) { list.innerHTML += _renderProposalCard(p); });
+  }).catch(function() {
+    var section = document.getElementById('proposals-section');
+    if (section) section.style.display = 'none';
   });
   loadAlertHistory();
   loadAlertSettings();
@@ -4868,7 +5016,7 @@ function loadAlertSettings() {
       indicator.className = 'sms-status off';
       indicator.textContent = 'Not configured - set SMS_PHONE in .env';
     }
-  });
+  }).catch(function() {});
 }
 
 function sendTestAlert() {
@@ -4908,7 +5056,7 @@ function loadAlertHistory() {
       html += '</div>';
     });
     list.innerHTML = html;
-  });
+  }).catch(function() {});
 }
 
 /* ── Portfolio ─────────────────────────────────── */

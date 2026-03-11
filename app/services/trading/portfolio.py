@@ -152,6 +152,43 @@ def get_trade_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     }
 
 
+def get_trade_stats_by_pattern(
+    db: Session, user_id: int | None, min_trades: int = 1,
+) -> list[dict[str, Any]]:
+    """Per-pattern performance stats from closed trades that have pattern_tags."""
+    closed = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "closed",
+        Trade.pattern_tags.isnot(None),
+    ).all()
+
+    tag_trades: dict[str, list[float]] = {}
+    for t in closed:
+        pnl = t.pnl or 0.0
+        for tag in (t.pattern_tags or "").split(","):
+            tag = tag.strip()
+            if tag:
+                tag_trades.setdefault(tag, []).append(pnl)
+
+    results = []
+    for pattern, pnls in tag_trades.items():
+        if len(pnls) < min_trades:
+            continue
+        wins = sum(1 for p in pnls if p > 0)
+        results.append({
+            "pattern": pattern,
+            "trades": len(pnls),
+            "wins": wins,
+            "losses": len(pnls) - wins,
+            "win_rate": round(wins / len(pnls) * 100, 1),
+            "avg_pnl": round(sum(pnls) / len(pnls), 2),
+            "total_pnl": round(sum(pnls), 2),
+        })
+
+    results.sort(key=lambda x: x["trades"], reverse=True)
+    return results
+
+
 # ── AI Insights CRUD ──────────────────────────────────────────────────
 
 def get_insights(db: Session, user_id: int | None, limit: int = 20) -> list[TradingInsight]:

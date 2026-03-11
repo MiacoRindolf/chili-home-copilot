@@ -5,6 +5,7 @@ import json
 import logging
 import time
 import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -17,10 +18,10 @@ from ...models.trading import (
 )
 from ..yf_session import get_history as _yf_history
 from .market_data import (
-    fetch_quote, get_indicator_snapshot, get_vix, get_volatility_regime,
-    DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
+    fetch_quote, fetch_quotes_batch, get_indicator_snapshot, get_vix,
+    get_volatility_regime, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
 )
-from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight
+from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
 
 logger = logging.getLogger(__name__)
 
@@ -315,7 +316,7 @@ def backfill_future_returns(db: Session) -> int:
 
     unfilled = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.is_(None),
-    ).limit(1500).all()
+    ).limit(3000).all()
 
     if not unfilled:
         return 0
@@ -437,6 +438,17 @@ def _mine_from_history(ticker: str) -> list[dict]:
         prev_close = float(close.iloc[i - 1]) if i > 0 else price
         gap_pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
 
+        # Stochastic divergence detection (last 5 bars)
+        stoch_bull_div = False
+        stoch_bear_div = False
+        if i >= 5:
+            prices_5 = [float(close.iloc[j]) for j in range(i - 4, i + 1)]
+            stochs_5 = [float(stoch_k.iloc[j]) if pd.notna(stoch_k.iloc[j]) else 50 for j in range(i - 4, i + 1)]
+            if prices_5[-1] < min(prices_5[:-1]) and stochs_5[-1] > min(stochs_5[:-1]):
+                stoch_bull_div = True
+            if prices_5[-1] > max(prices_5[:-1]) and stochs_5[-1] < max(stochs_5[:-1]):
+                stoch_bear_div = True
+
         rows.append({
             "ticker": ticker,
             "price": price,
@@ -450,6 +462,8 @@ def _mine_from_history(ticker: str) -> list[dict]:
             "bb_pct": bb_pct,
             "atr": float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0,
             "stoch_k": float(stoch_k.iloc[i]) if pd.notna(stoch_k.iloc[i]) else 50,
+            "stoch_bull_div": stoch_bull_div,
+            "stoch_bear_div": stoch_bear_div,
             "above_sma20": price > float(sma20.iloc[i]) if pd.notna(sma20.iloc[i]) else False,
             "ema_stack": (e20 is not None and e50 is not None and e100 is not None
                           and price > e20 > e50 > e100),
@@ -480,7 +494,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     except Exception:
         pass
 
-    mine_tickers = mine_tickers[:250]
+    mine_tickers = mine_tickers[:500]
 
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=12) as executor:
@@ -501,7 +515,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     snapshots = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
-    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(3000).all()
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(5000).all()
 
     for s in snapshots:
         try:
@@ -664,6 +678,69 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
         _check([r for r in gap_rows if r["gap_pct"] < -2.0 and r["rsi"] < 30],
                "Gap down >2% into oversold RSI (gap-fill reversal)")
 
+    # ── Momentum pullback patterns (inspired by day-trade best practices) ──
+
+    # MACD positive + high relative volume + pullback = bread-and-butter entry
+    if vol_rows:
+        _check([r for r in vol_rows if r["vol_ratio"] > 5.0
+                and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
+                and r["rsi"] < 65],
+               "MACD positive + volume surge 5x+ (momentum pullback setup)")
+
+    # Topping tail warning (upper wick dominance on high volume)
+    _check([r for r in all_rows
+            if r["rsi"] > 60 and r.get("vol_ratio") is not None
+            and r["vol_ratio"] > 2.0 and r["macd_hist"] < 0],
+           "High RSI + volume spike + MACD turning negative (topping/reversal warning)")
+
+    # MACD flipped negative after extended run = setup invalidated
+    _check([r for r in all_rows
+            if r["macd"] < r["macd_sig"] and r["macd_hist"] < 0
+            and r["rsi"] > 40 and r["adx"] > 20],
+           "MACD flipped negative in active trend — setup invalidated (avoid entry)")
+
+    # Low float + strong gapper + MACD confirmation
+    if gap_rows and vol_rows:
+        _check([r for r in gap_rows
+                if r["gap_pct"] > 10.0 and r["macd_hist"] > 0
+                and r.get("vol_ratio") is not None and r["vol_ratio"] > 3.0],
+               "10%+ gapper + MACD positive + high volume (high-conviction momentum)")
+
+    # First pullback with clean volume profile
+    _check([r for r in all_rows
+            if r["rsi"] > 45 and r["rsi"] < 65
+            and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
+            and r["ema_stack"] and r.get("vol_ratio") is not None
+            and r["vol_ratio"] > 1.5],
+           "First pullback: MACD+, EMA stack, rising volume (bread-and-butter entry)")
+
+    # Extended pullback (7+ candles = dead setup) — captured as sell signal
+    _check([r for r in all_rows
+            if r["rsi"] < 35 and r["macd_hist"] < 0
+            and r["adx"] > 15 and not r["ema_stack"]],
+           "Extended pullback with MACD negative + broken EMA stack — setup dead")
+
+    # ── Stochastic divergence patterns ──
+    _check([r for r in all_rows if r.get("stoch_bull_div")],
+           "Stochastic bullish divergence (price lower low, stoch higher low)")
+    _check([r for r in all_rows if r.get("stoch_bear_div")],
+           "Stochastic bearish divergence (price higher high, stoch lower high) — sell signal")
+    _check([r for r in all_rows if r.get("stoch_bull_div") and r["macd_hist"] > 0],
+           "Stoch bullish divergence + MACD turning positive (reversal confirmation)")
+    _check([r for r in all_rows if r.get("stoch_bear_div") and r["macd_hist"] < 0],
+           "Stoch bearish divergence + MACD turning negative (top confirmation)")
+
+    # ── Multi-indicator confluence patterns ──
+    _check([r for r in all_rows
+            if r["rsi"] < 35 and r["stoch_k"] < 25 and r["bb_pct"] < 0.15],
+           "Triple oversold confluence: RSI<35 + Stoch<25 + BB<0.15")
+    _check([r for r in all_rows
+            if r["adx"] > 30 and r["stoch_k"] < 20 and r["ema_stack"]],
+           "Trend pullback to oversold: ADX>30 + Stoch<20 + EMA stack")
+    _check([r for r in all_rows
+            if r.get("stoch_bull_div") and r["rsi"] < 40 and r["bb_pct"] < 0.25],
+           "Multi-signal reversal: stoch bull divergence + RSI<40 + near lower BB")
+
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
     for ins in existing:
@@ -701,6 +778,161 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     return discoveries
 
 
+_PATTERN_CONDITION_MAP: dict[str, dict[str, Any]] = {
+    "rsi oversold": {"field": "rsi", "op": "lt", "val": 30},
+    "rsi overbought": {"field": "rsi", "op": "gt", "val": 70},
+    "rsi near-oversold": {"field": "rsi", "op": "lt", "val": 40},
+    "macd bullish": {"field": "macd", "op": "gt_field", "val": "macd_sig"},
+    "macd positive": {"field": "macd_hist", "op": "gt", "val": 0},
+    "macd negative": {"field": "macd_hist", "op": "lt", "val": 0},
+    "ema stack": {"field": "ema_stack", "op": "eq", "val": True},
+    "bollinger": {"field": "bb_pct", "op": "lt", "val": 0.15},
+    "adx>25": {"field": "adx", "op": "gt", "val": 25},
+    "adx>30": {"field": "adx", "op": "gt", "val": 30},
+    "stoch oversold": {"field": "stoch_k", "op": "lt", "val": 20},
+    "stoch overbought": {"field": "stoch_k", "op": "gt", "val": 80},
+    "volume surge": {"field": "vol_ratio", "op": "gt", "val": 2.0},
+    "5x": {"field": "vol_ratio", "op": "gt", "val": 5.0},
+    "gap up": {"field": "gap_pct", "op": "gt", "val": 2.0},
+    "pullback": {"field": "rsi", "op": "lt", "val": 55},
+}
+
+
+def _row_matches_condition(row: dict, cond: dict) -> bool:
+    val = row.get(cond["field"])
+    if val is None:
+        return False
+    op = cond["op"]
+    target = cond["val"]
+    if op == "lt":
+        return val < target
+    elif op == "gt":
+        return val > target
+    elif op == "eq":
+        return val == target
+    elif op == "gt_field":
+        return val > (row.get(target) or 0)
+    return False
+
+
+def _filter_rows_by_condition(rows: list[dict], condition_str: str) -> list[dict]:
+    """Parse a simple condition string like 'rsi < 30' and filter rows."""
+    import re
+    parts = re.split(r'\s+and\s+', condition_str.lower().strip())
+    filtered = list(rows)
+    for part in parts:
+        m = re.match(r'(\w+)\s*([<>=!]+)\s*([\d.]+)', part.strip())
+        if not m:
+            continue
+        field, op_str, val_str = m.group(1), m.group(2), m.group(3)
+        try:
+            threshold = float(val_str)
+        except ValueError:
+            continue
+        if op_str in ("<", "<="):
+            filtered = [r for r in filtered if (r.get(field) or 999) < threshold + (0.001 if "<=" in op_str else 0)]
+        elif op_str in (">", ">="):
+            filtered = [r for r in filtered if (r.get(field) or -999) > threshold - (0.001 if ">=" in op_str else 0)]
+        elif op_str == "==":
+            filtered = [r for r in filtered if r.get(field) == threshold]
+    return filtered
+
+
+def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Actively mine more data for under-sampled but promising patterns.
+
+    Identifies insights with few evidence samples but decent confidence,
+    then mines a broader ticker set specifically looking for bars that
+    match those pattern conditions to boost evidence counts.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .prescreener import get_prescreened_candidates
+
+    insights = get_insights(db, user_id, limit=50)
+    under_sampled = [
+        ins for ins in insights
+        if ins.evidence_count < 20 and ins.confidence > 0.4 and ins.active
+    ]
+    if not under_sampled:
+        return {"sought": 0, "note": "no under-sampled patterns"}
+
+    try:
+        seek_tickers = get_prescreened_candidates(include_crypto=True, max_total=600)
+    except Exception:
+        from .market_data import ALL_SCAN_TICKERS
+        seek_tickers = list(ALL_SCAN_TICKERS)
+
+    seek_tickers = seek_tickers[:400]
+    extra_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=12) as pool:
+        futs = {pool.submit(_mine_from_history, t): t for t in seek_tickers}
+        for f in as_completed(futs):
+            if _shutting_down.is_set():
+                break
+            try:
+                extra_rows.extend(f.result())
+            except Exception:
+                pass
+
+    if len(extra_rows) < 10:
+        return {"sought": 0, "rows_mined": len(extra_rows)}
+
+    boosted = 0
+    for ins in under_sampled:
+        desc_lower = ins.pattern_description.lower()
+        conditions = [
+            cond for keyword, cond in _PATTERN_CONDITION_MAP.items()
+            if keyword in desc_lower
+        ]
+        if not conditions:
+            continue
+
+        matching = [
+            r for r in extra_rows
+            if all(_row_matches_condition(r, c) for c in conditions)
+        ]
+        if len(matching) < 3:
+            continue
+
+        avg_5d = sum(r["ret_5d"] for r in matching) / len(matching)
+        wins = sum(1 for r in matching if r["ret_5d"] > 0)
+        wr = wins / len(matching) * 100
+
+        old_evidence = ins.evidence_count
+        old_conf = ins.confidence
+        ins.evidence_count = min(old_evidence + len(matching), 200)
+
+        if avg_5d > 0 and wr > 50:
+            ins.confidence = round(min(0.95, old_conf * 0.7 + (wr / 100) * 0.3), 3)
+        elif wr < 40:
+            ins.confidence = round(max(0.1, old_conf * 0.8), 3)
+
+        ins.last_seen = datetime.utcnow()
+        db.commit()
+        boosted += 1
+
+        log_learning_event(
+            db, user_id, "active_seeking",
+            f"Boosted '{ins.pattern_description[:60]}' with {len(matching)} new samples "
+            f"(evidence {old_evidence}->{ins.evidence_count}, "
+            f"conf {old_conf:.0%}->{ins.confidence:.0%}, "
+            f"avg {avg_5d:+.2f}%/5d, {wr:.0f}%wr)",
+            confidence_before=old_conf,
+            confidence_after=ins.confidence,
+            related_insight_id=ins.id,
+        )
+
+    logger.info(
+        f"[learning] Active seeking: boosted {boosted}/{len(under_sampled)} "
+        f"under-sampled patterns from {len(extra_rows)} extra rows"
+    )
+    return {
+        "sought": boosted,
+        "under_sampled_total": len(under_sampled),
+        "extra_rows_mined": len(extra_rows),
+    }
+
+
 def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
     """Run backtests on a sample of tickers to validate discovered patterns.
 
@@ -724,7 +956,7 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
     if not insights:
         return 0
 
-    test_tickers = list(DEFAULT_SCAN_TICKERS[:10]) + list(DEFAULT_CRYPTO_TICKERS[:3])
+    test_tickers = list(DEFAULT_SCAN_TICKERS[:18]) + list(DEFAULT_CRYPTO_TICKERS[:7])
 
     backtests_run = 0
     for ins in insights[:10]:
@@ -739,7 +971,7 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
 
         wins = 0
         total = 0
-        for ticker in test_tickers[:5]:
+        for ticker in test_tickers[:10]:
             if _shutting_down.is_set():
                 break
             try:
@@ -774,8 +1006,411 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
     return backtests_run
 
 
+def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Test every scoring assumption against real data and evolve.
+
+    This is where CHILI grows beyond any single strategy.  For each key
+    hypothesis (e.g. "MACD negative = always bad"), we check the actual
+    historical data.  If the data contradicts an assumption, CHILI weakens
+    it.  If CHILI discovers something new that no strategy taught it, it
+    creates a novel insight.
+
+    Called as part of the learning cycle.
+    """
+    from .market_data import ALL_SCAN_TICKERS
+
+    mine_tickers = list(ALL_SCAN_TICKERS)[:120]
+
+    rows: list[dict] = []
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
+        for f in as_completed(futs):
+            try:
+                rows.extend(f.result())
+            except Exception:
+                pass
+
+    if len(rows) < 30:
+        return {"tested": 0, "note": "insufficient data for self-validation"}
+
+    results: list[dict[str, Any]] = []
+
+    def _test_hypothesis(label: str, group_a: list, group_b: list, expected: str):
+        """Compare two groups (e.g. MACD+ vs MACD-) and report which actually performs better."""
+        if len(group_a) < 5 or len(group_b) < 5:
+            return
+        avg_a = sum(r["ret_5d"] for r in group_a) / len(group_a)
+        avg_b = sum(r["ret_5d"] for r in group_b) / len(group_b)
+        wr_a = sum(1 for r in group_a if r["ret_5d"] > 0) / len(group_a) * 100
+        wr_b = sum(1 for r in group_b if r["ret_5d"] > 0) / len(group_b) * 100
+
+        if expected == "a_better":
+            confirmed = avg_a > avg_b
+        else:
+            confirmed = avg_b > avg_a
+
+        finding = {
+            "hypothesis": label,
+            "confirmed": confirmed,
+            "group_a_avg": round(avg_a, 3),
+            "group_b_avg": round(avg_b, 3),
+            "group_a_wr": round(wr_a, 1),
+            "group_b_wr": round(wr_b, 1),
+            "group_a_n": len(group_a),
+            "group_b_n": len(group_b),
+        }
+        results.append(finding)
+
+        if not confirmed:
+            save_insight(
+                db, user_id,
+                f"CHILI challenge: {label} — data says otherwise "
+                f"(A: {avg_a:+.2f}%/5d {wr_a:.0f}%wr vs B: {avg_b:+.2f}%/5d {wr_b:.0f}%wr, "
+                f"n={len(group_a)}+{len(group_b)})",
+                confidence=0.45,
+            )
+            log_learning_event(
+                db, user_id, "hypothesis_challenged",
+                f"Data challenges: {label} | "
+                f"Expected {'A' if expected == 'a_better' else 'B'} wins, "
+                f"but {'B' if expected == 'a_better' else 'A'} actually performed better",
+            )
+        else:
+            if avg_a > 0 and wr_a > 55:
+                save_insight(
+                    db, user_id,
+                    f"CHILI validated: {label} — confirmed by data "
+                    f"({avg_a:+.2f}%/5d, {wr_a:.0f}%wr, {len(group_a)} samples)",
+                    confidence=min(0.85, wr_a / 100),
+                )
+
+    # ── Test: Does MACD positive actually outperform MACD negative? ──
+    macd_pos = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0]
+    macd_neg = [r for r in rows if r["macd"] < r["macd_sig"] and r["macd_hist"] < 0]
+    _test_hypothesis(
+        "MACD positive entries outperform MACD negative entries",
+        macd_pos, macd_neg, "a_better",
+    )
+
+    # ── Test: Do high-volume (>3x) entries outperform low-volume? ──
+    vol_hi = [r for r in rows if r.get("vol_ratio") and r["vol_ratio"] > 3.0]
+    vol_lo = [r for r in rows if r.get("vol_ratio") and r["vol_ratio"] < 1.5]
+    _test_hypothesis(
+        "High relative volume (>3x) entries outperform low volume (<1.5x)",
+        vol_hi, vol_lo, "a_better",
+    )
+
+    # ── Test: Do strong ADX trends (>25) produce better returns? ──
+    adx_hi = [r for r in rows if r["adx"] > 25]
+    adx_lo = [r for r in rows if r["adx"] < 15]
+    _test_hypothesis(
+        "Strong trends (ADX>25) outperform range-bound (ADX<15)",
+        adx_hi, adx_lo, "a_better",
+    )
+
+    # ── Test: Does EMA stack (bullish alignment) outperform broken EMAs? ──
+    ema_stack = [r for r in rows if r.get("ema_stack")]
+    ema_broken = [r for r in rows if not r.get("ema_stack")]
+    _test_hypothesis(
+        "Bullish EMA stack outperforms broken EMA alignment",
+        ema_stack, ema_broken, "a_better",
+    )
+
+    # ── Test: Do oversold RSI entries (RSI<30) outperform neutral RSI? ──
+    rsi_os = [r for r in rows if r["rsi"] < 30]
+    rsi_mid = [r for r in rows if 40 <= r["rsi"] <= 60]
+    _test_hypothesis(
+        "Oversold RSI (<30) mean-reversion outperforms neutral RSI entries",
+        rsi_os, rsi_mid, "a_better",
+    )
+
+    # ── Test: MACD histogram momentum (positive hist) vs negative hist ──
+    hist_pos = [r for r in rows if r["macd_hist"] > 0 and r["rsi"] > 40 and r["rsi"] < 65]
+    hist_neg = [r for r in rows if r["macd_hist"] < 0 and r["rsi"] > 40 and r["rsi"] < 65]
+    _test_hypothesis(
+        "MACD histogram positive (momentum) outperforms histogram negative in neutral RSI zone",
+        hist_pos, hist_neg, "a_better",
+    )
+
+    # ── Exploratory: Find novel patterns CHILI discovers on its own ──
+    # Check conditions that no human taught — let the data reveal surprises
+    bb_low_macd_neg = [r for r in rows if r["bb_pct"] < 0.15 and r["macd_hist"] < 0]
+    bb_low_macd_pos = [r for r in rows if r["bb_pct"] < 0.15 and r["macd_hist"] > 0]
+    if len(bb_low_macd_neg) >= 5 and len(bb_low_macd_pos) >= 5:
+        avg_neg = sum(r["ret_5d"] for r in bb_low_macd_neg) / len(bb_low_macd_neg)
+        avg_pos = sum(r["ret_5d"] for r in bb_low_macd_pos) / len(bb_low_macd_pos)
+        if avg_neg > avg_pos and avg_neg > 0.5:
+            save_insight(
+                db, user_id,
+                f"CHILI discovery: BB low + MACD negative STILL profitable "
+                f"({avg_neg:+.2f}%/5d vs {avg_pos:+.2f}%/5d) — "
+                f"contrarian bounce pattern (n={len(bb_low_macd_neg)})",
+                confidence=0.5,
+            )
+            results.append({
+                "hypothesis": "CHILI novel: BB oversold + MACD neg = contrarian opportunity",
+                "confirmed": True,
+                "avg_return": round(avg_neg, 3),
+            })
+
+    stoch_ext_adx = [r for r in rows if r["stoch_k"] < 20 and r["adx"] > 30]
+    if len(stoch_ext_adx) >= 5:
+        avg_ret = sum(r["ret_5d"] for r in stoch_ext_adx) / len(stoch_ext_adx)
+        wr = sum(1 for r in stoch_ext_adx if r["ret_5d"] > 0) / len(stoch_ext_adx) * 100
+        if avg_ret > 0.3 and wr > 50:
+            save_insight(
+                db, user_id,
+                f"CHILI discovery: Stochastic extreme (<20) + strong trend (ADX>30) "
+                f"= high-probability snap-back ({avg_ret:+.2f}%/5d, {wr:.0f}%wr, "
+                f"n={len(stoch_ext_adx)})",
+                confidence=min(0.8, wr / 100),
+            )
+
+    # ── Dynamic hypothesis testing (from LLM-generated hypotheses) ──
+    dynamic_tested = 0
+    try:
+        hyp_insights = db.query(TradingInsight).filter(
+            TradingInsight.user_id == user_id,
+            TradingInsight.active.is_(True),
+            TradingInsight.pattern_description.like("hypothesis:%"),
+        ).limit(10).all()
+
+        for hyp_ins in hyp_insights:
+            desc = hyp_ins.pattern_description
+            parts = desc.split("|")
+            if len(parts) < 3:
+                continue
+            cond_a_str = parts[1].strip().replace("A:", "").strip()
+            cond_b_str = parts[2].strip().replace("B:", "").strip()
+            expected = "a"
+            if len(parts) >= 4:
+                exp_part = parts[3].strip().lower()
+                if "b" in exp_part:
+                    expected = "b"
+
+            group_a = _filter_rows_by_condition(rows, cond_a_str)
+            group_b = _filter_rows_by_condition(rows, cond_b_str)
+
+            if len(group_a) >= 5 and len(group_b) >= 5:
+                label = desc.split("|")[0].replace("hypothesis:", "").strip()
+                _test_hypothesis(label, group_a, group_b, f"{expected}_better")
+                dynamic_tested += 1
+
+                hyp_ins.active = False
+                db.commit()
+
+        if dynamic_tested > 0:
+            log_learning_event(
+                db, user_id, "dynamic_hypothesis_testing",
+                f"Tested {dynamic_tested} LLM-generated hypotheses",
+            )
+    except Exception as e:
+        logger.warning(f"[learning] Dynamic hypothesis testing failed: {e}")
+
+    # ── Feed real-trade per-pattern win rates back into insight confidence ──
+    real_trade_adjustments = 0
+    try:
+        pattern_stats = get_trade_stats_by_pattern(db, user_id, min_trades=3)
+        if pattern_stats:
+            all_insights = get_insights(db, user_id, limit=100)
+            for ps in pattern_stats:
+                tag = ps["pattern"]
+                real_wr = ps["win_rate"]
+                for ins in all_insights:
+                    if tag.replace("_", " ") in ins.pattern_description.lower():
+                        old_conf = ins.confidence
+                        ins.confidence = round(
+                            min(0.95, old_conf * 0.5 + (real_wr / 100) * 0.5), 3
+                        )
+                        db.commit()
+                        real_trade_adjustments += 1
+                        log_learning_event(
+                            db, user_id, "real_trade_validation",
+                            f"Pattern '{tag}' real-trade WR {real_wr:.0f}% "
+                            f"({ps['trades']} trades) adjusted confidence "
+                            f"{old_conf:.0%} -> {ins.confidence:.0%}",
+                            confidence_before=old_conf,
+                            confidence_after=ins.confidence,
+                            related_insight_id=ins.id,
+                        )
+                        break
+    except Exception as e:
+        logger.warning(f"[learning] Per-pattern trade feedback failed: {e}")
+
+    # ── Now evolve the scoring weights based on what we learned ──
+    from .scanner import evolve_strategy_weights
+    weight_result = evolve_strategy_weights(db)
+
+    confirmed_count = sum(1 for r in results if r.get("confirmed"))
+    challenged_count = sum(1 for r in results if not r.get("confirmed", True))
+
+    log_learning_event(
+        db, user_id, "self_validation",
+        f"Tested {len(results)} hypotheses: {confirmed_count} confirmed, "
+        f"{challenged_count} challenged by data. "
+        f"Real-trade adjustments: {real_trade_adjustments}. "
+        f"Evolved {weight_result.get('adjusted', 0)} scoring weights.",
+    )
+
+    logger.info(
+        f"[learning] Self-validation: {len(results)} hypotheses tested, "
+        f"{confirmed_count} confirmed, {challenged_count} challenged, "
+        f"{real_trade_adjustments} real-trade adjustments, "
+        f"{weight_result.get('adjusted', 0)} weights evolved"
+    )
+
+    return {
+        "hypotheses_tested": len(results),
+        "confirmed": confirmed_count,
+        "challenged": challenged_count,
+        "real_trade_adjustments": real_trade_adjustments,
+        "weights_evolved": weight_result.get("adjusted", 0),
+        "details": results,
+    }
+
+
+# ── Pattern Refinement Engine ──────────────────────────────────────────
+
+REFINEMENT_RULES: dict[str, list[dict[str, Any]]] = {
+    "rsi oversold": [
+        {"field": "rsi", "op": "lt", "variations": [25, 28, 30, 32, 35]},
+    ],
+    "rsi overbought": [
+        {"field": "rsi", "op": "gt", "variations": [65, 68, 70, 72, 75]},
+    ],
+    "rsi<35": [
+        {"field": "rsi", "op": "lt", "variations": [30, 33, 35, 38, 40]},
+    ],
+    "rsi<40": [
+        {"field": "rsi", "op": "lt", "variations": [35, 38, 40, 42, 45]},
+    ],
+    "adx>25": [
+        {"field": "adx", "op": "gt", "variations": [20, 22, 25, 28, 30]},
+    ],
+    "adx>30": [
+        {"field": "adx", "op": "gt", "variations": [25, 28, 30, 33, 35]},
+    ],
+    "stoch<20": [
+        {"field": "stoch_k", "op": "lt", "variations": [15, 18, 20, 22, 25]},
+    ],
+    "stoch<25": [
+        {"field": "stoch_k", "op": "lt", "variations": [18, 20, 25, 28, 30]},
+    ],
+    "bb<0.15": [
+        {"field": "bb_pct", "op": "lt", "variations": [0.10, 0.12, 0.15, 0.18, 0.20]},
+    ],
+    "volume surge": [
+        {"field": "vol_ratio", "op": "gt", "variations": [1.5, 2.0, 2.5, 3.0, 4.0]},
+    ],
+    "volume spike 2x": [
+        {"field": "vol_ratio", "op": "gt", "variations": [1.5, 2.0, 3.0, 4.0, 5.0]},
+    ],
+    "macd positive": [
+        {"field": "macd_hist", "op": "gt", "variations": [0, 0.01, 0.05]},
+    ],
+}
+
+
+def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Test parameter variations of top patterns and save improved variants.
+
+    For each high-evidence pattern, tries different threshold values
+    (e.g. RSI < 25/28/30/32/35) and saves the variant that outperforms
+    the original.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+    from .market_data import ALL_SCAN_TICKERS
+
+    insights = get_insights(db, user_id, limit=50)
+    top_patterns = sorted(insights, key=lambda i: i.evidence_count, reverse=True)[:10]
+
+    if not top_patterns:
+        return {"refined": 0, "note": "no patterns to refine"}
+
+    mine_tickers = list(ALL_SCAN_TICKERS)[:200]
+    all_rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
+        for f in as_completed(futs):
+            if _shutting_down.is_set():
+                break
+            try:
+                all_rows.extend(f.result())
+            except Exception:
+                pass
+
+    if len(all_rows) < 50:
+        return {"refined": 0, "note": "insufficient data for refinement"}
+
+    refined_count = 0
+    for ins in top_patterns:
+        desc_lower = ins.pattern_description.lower()
+
+        for rule_key, rule_defs in REFINEMENT_RULES.items():
+            if rule_key not in desc_lower:
+                continue
+
+            for rule_def in rule_defs:
+                field = rule_def["field"]
+                op = rule_def["op"]
+                variations = rule_def["variations"]
+
+                best_variant = None
+                best_score = -999.0
+                best_wr = 0.0
+                best_n = 0
+
+                for threshold in variations:
+                    if op == "lt":
+                        filtered = [r for r in all_rows if r.get(field, 999) < threshold]
+                    elif op == "gt":
+                        filtered = [r for r in all_rows if r.get(field, -999) > threshold]
+                    else:
+                        continue
+
+                    if len(filtered) < 10:
+                        continue
+
+                    avg_5d = sum(r["ret_5d"] for r in filtered) / len(filtered)
+                    wins = sum(1 for r in filtered if r["ret_5d"] > 0)
+                    wr = wins / len(filtered) * 100
+                    composite = avg_5d * 0.6 + (wr / 100) * 0.4
+
+                    if composite > best_score:
+                        best_score = composite
+                        best_variant = threshold
+                        best_wr = wr
+                        best_n = len(filtered)
+
+                if best_variant is not None and best_score > 0:
+                    original_desc = ins.pattern_description[:80]
+                    refined_label = (
+                        f"CHILI refinement: {field} {op} {best_variant} "
+                        f"(avg {best_score:.2f}, {best_wr:.0f}%wr, n={best_n}) "
+                        f"— refined from '{original_desc}'"
+                    )
+                    save_insight(
+                        db, user_id, refined_label,
+                        confidence=min(0.85, best_wr / 100),
+                    )
+                    refined_count += 1
+                    log_learning_event(
+                        db, user_id, "pattern_refinement",
+                        f"Refined '{original_desc}': best threshold "
+                        f"{field}{op}{best_variant} "
+                        f"({best_wr:.0f}%wr, n={best_n})",
+                        related_insight_id=ins.id,
+                    )
+                    break
+
+    logger.info(f"[learning] Pattern refinement: {refined_count} patterns improved")
+    return {"refined": refined_count, "top_patterns_checked": len(top_patterns)}
+
+
 def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Intensive AI-powered learning: mine patterns then ask LLM to reflect."""
+    """Intensive AI-powered learning: mine patterns, then ask LLM to reflect
+    and generate structured testable hypotheses for the next validation cycle."""
     discoveries = mine_patterns(db, user_id)
 
     insights = get_insights(db, user_id, limit=30)
@@ -800,6 +1435,58 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 
     stats = get_trade_stats(db, user_id)
 
+    # Per-pattern trade stats
+    pattern_stats = get_trade_stats_by_pattern(db, user_id, min_trades=1)
+    pattern_stats_text = "No per-pattern trade data yet."
+    if pattern_stats:
+        lines = []
+        for ps in pattern_stats[:15]:
+            lines.append(
+                f"  - {ps['pattern']}: {ps['trades']} trades, "
+                f"{ps['win_rate']:.0f}%wr, avg P&L ${ps['avg_pnl']:.2f}"
+            )
+        pattern_stats_text = "\n".join(lines)
+
+    # Market regime
+    regime_text = "Unknown"
+    try:
+        from .market_data import get_market_regime
+        regime = get_market_regime()
+        regime_text = (
+            f"SPY {regime['spy_direction']} (5d momentum {regime['spy_momentum_5d']:+.1f}%), "
+            f"VIX {regime['vix_regime']} ({regime['vix']}), "
+            f"overall: {regime['regime']}"
+        )
+    except Exception:
+        pass
+
+    # Adaptive weights drift
+    weights_text = "Not available"
+    try:
+        from .scanner import get_all_weights, _DEFAULT_WEIGHTS
+        current_w = get_all_weights()
+        drifts = []
+        for k, v in current_w.items():
+            default = _DEFAULT_WEIGHTS.get(k, v)
+            if default != 0 and abs(v - default) / abs(default) > 0.1:
+                drifts.append(f"  - {k}: {default} -> {v} ({(v-default)/abs(default):+.0%})")
+        weights_text = "\n".join(drifts) if drifts else "All weights at defaults."
+    except Exception:
+        pass
+
+    # Recently challenged hypotheses
+    challenged_text = "None yet."
+    try:
+        challenged_events = db.query(LearningEvent).filter(
+            LearningEvent.event_type == "hypothesis_challenged",
+        ).order_by(LearningEvent.created_at.desc()).limit(5).all()
+        if challenged_events:
+            challenged_text = "\n".join(
+                f"  - {e.description[:120]}" for e in challenged_events
+            )
+    except Exception:
+        pass
+
     reflection_prompt = f"""You are an AI trading brain doing a self-reflection on what you've learned.
 
 ## YOUR LEARNED PATTERNS
@@ -816,10 +1503,22 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 - Win rate: {stats.get('win_rate', 0)}%
 - Total P&L: ${stats.get('total_pnl', 0)}
 
+## PER-PATTERN TRADE PERFORMANCE
+{pattern_stats_text}
+
+## CURRENT MARKET REGIME
+{regime_text}
+
+## ADAPTIVE WEIGHT DRIFT (what the brain is learning)
+{weights_text}
+
+## RECENTLY CHALLENGED HYPOTHESES
+{challenged_text}
+
 Write a LEARNING REPORT in this format:
 
 ### What I've Learned So Far
-(Summarize the top 3-5 most reliable patterns you've discovered, explain each in plain English)
+(Summarize the top 3-5 most reliable patterns, explain each in plain English)
 
 ### What's Working
 (Which patterns have the highest confidence and best returns?)
@@ -828,12 +1527,34 @@ Write a LEARNING REPORT in this format:
 (What areas need more data? What hypotheses are you testing?)
 
 ### My Current Market Read
-(Based on the patterns, what's the overall market telling you right now?)
+(Based on the patterns + regime, what's the overall market telling you?)
 
 ### Next Study Goals
 (What should I focus on studying next to get smarter?)
 
-Keep it conversational and honest. Use actual numbers from the patterns above. If there isn't enough data yet, be transparent about that."""
+### Hypotheses to Test
+IMPORTANT: After your report, output a JSON block with concrete testable hypotheses.
+Use EXACTLY this format (valid JSON):
+
+```json
+{{
+  "hypotheses": [
+    {{
+      "description": "human-readable description of what to test",
+      "condition_a": "indicator condition for group A (e.g. 'rsi < 30')",
+      "condition_b": "indicator condition for group B (e.g. 'rsi >= 30 and rsi < 50')",
+      "expected_winner": "a"
+    }}
+  ]
+}}
+```
+
+Generate 3-5 hypotheses based on gaps in your knowledge, challenged hypotheses above,
+or interesting combinations you want to explore. Use indicator fields: rsi, macd_hist,
+macd (vs macd_sig), adx, stoch_k, bb_pct, vol_ratio, ema_stack, gap_pct.
+Conditions should use simple comparisons like "rsi < 30", "adx > 25", "stoch_k < 20".
+
+Keep it conversational and honest. Use actual numbers from the patterns above."""
 
     try:
         from ...prompts import load_prompt
@@ -847,15 +1568,32 @@ Keep it conversational and honest. Use actual numbers from the patterns above. I
             system_prompt=system_prompt,
             trace_id=trace_id,
             user_message=reflection_prompt,
-            max_tokens=2048,
+            max_tokens=3000,
         )
         reflection = result.get("reply", "Could not generate reflection.")
     except Exception as e:
         reflection = f"Reflection unavailable: {e}"
 
+    # Extract structured hypotheses from the LLM response
+    extracted_hypotheses = _extract_hypotheses_from_reflection(reflection)
+    hypotheses_saved = 0
+    for hyp in extracted_hypotheses:
+        desc = hyp.get("description", "")
+        cond_a = hyp.get("condition_a", "")
+        cond_b = hyp.get("condition_b", "")
+        expected = hyp.get("expected_winner", "a")
+        if desc and cond_a and cond_b:
+            save_insight(
+                db, user_id,
+                f"hypothesis:{desc} | A: {cond_a} | B: {cond_b} | expected: {expected}",
+                confidence=0.5,
+            )
+            hypotheses_saved += 1
+
     log_learning_event(
         db, user_id, "review",
-        f"Deep study: {len(discoveries)} new patterns, {len(insights)} total active. AI reflection generated.",
+        f"Deep study: {len(discoveries)} new patterns, {len(insights)} total active. "
+        f"AI reflection generated. {hypotheses_saved} new hypotheses extracted.",
     )
 
     return {
@@ -863,12 +1601,32 @@ Keep it conversational and honest. Use actual numbers from the patterns above. I
         "discoveries": discoveries,
         "total_patterns": len(insights),
         "reflection": reflection,
+        "hypotheses_extracted": hypotheses_saved,
         "stats": {
             "snapshots": snap_count,
             "verified": filled_count,
             "new_discoveries": len(discoveries),
         },
     }
+
+
+def _extract_hypotheses_from_reflection(text: str) -> list[dict]:
+    """Parse structured hypotheses JSON from LLM reflection output."""
+    import re
+    hypotheses = []
+    json_match = re.search(r'```json\s*(\{.*?\})\s*```', text, re.DOTALL)
+    if not json_match:
+        json_match = re.search(r'\{\s*"hypotheses"\s*:\s*\[.*?\]\s*\}', text, re.DOTALL)
+    if json_match:
+        try:
+            data = json.loads(json_match.group(1) if json_match.lastindex else json_match.group(0))
+            raw = data.get("hypotheses", [])
+            for h in raw:
+                if isinstance(h, dict) and "description" in h:
+                    hypotheses.append(h)
+        except (json.JSONDecodeError, AttributeError):
+            pass
+    return hypotheses[:10]
 
 
 # ── Multi-Signal Prediction Engine ────────────────────────────────────
@@ -1053,90 +1811,131 @@ def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[s
     return result
 
 
+def _predict_single_ticker(
+    ticker: str,
+    quotes_map: dict[str, dict],
+    vix: float | None,
+    vol_regime: dict,
+    ml_available: bool,
+    predict_ml_fn,
+    extract_features_fn,
+    market_regime: dict | None = None,
+) -> dict | None:
+    """Predict a single ticker. Thread-safe; returns None on failure."""
+    try:
+        snapshot = get_indicator_snapshot(ticker)
+        if not snapshot or len(snapshot) < 3:
+            return None
+        ind_data = {k: v for k, v in snapshot.items() if k not in ("ticker", "interval")}
+        rule_score = compute_prediction(ind_data)
+
+        quote = quotes_map.get(ticker)
+        if not quote:
+            quote = fetch_quote(ticker)
+        price = quote["price"] if quote else None
+
+        ml_prob = None
+        blended_score = rule_score
+        if ml_available and price:
+            ind_data_with_ticker = dict(ind_data)
+            ind_data_with_ticker["ticker"] = ticker
+            features = extract_features_fn(
+                ind_data_with_ticker, close_price=price, vix=vix,
+                regime=market_regime,
+            )
+            ml_prob = predict_ml_fn(features)
+            if ml_prob is not None:
+                rule_norm = (rule_score + 10) / 20
+                blended = 0.4 * rule_norm + 0.6 * ml_prob
+                blended_score = round((blended * 20) - 10, 2)
+
+        regime = vol_regime.get("regime", "normal")
+        if regime == "extreme":
+            blended_score *= 0.6
+        elif regime == "elevated":
+            if abs(blended_score) < 3:
+                blended_score *= 0.8
+
+        blended_score = max(-10.0, min(10.0, round(blended_score, 2)))
+        direction = predict_direction(blended_score)
+        confidence = predict_confidence(blended_score)
+
+        atr_val = (ind_data.get("atr") or {}).get("value")
+        _cr = ticker.upper().endswith("-USD")
+        _rd = 8 if _cr else 6
+        stop = target = rr = pos_size_pct = None
+        if price and atr_val and atr_val > 0:
+            if blended_score > 0:
+                stop = round(price - atr_val * 1.5, _rd)
+                target = round(price + atr_val * 3.0, _rd)
+            elif blended_score < 0:
+                stop = round(price + atr_val * 1.5, _rd)
+                target = round(price - atr_val * 3.0, _rd)
+            if stop is not None and target is not None:
+                risk = abs(price - stop)
+                reward = abs(target - price)
+                rr = round(reward / risk, 2) if risk > 0 else 0
+                pos_size_pct = round(min(5.0, 1.0 / (risk / price * 100)) * 100 / 100, 2) if price > 0 else None
+
+        return {
+            "ticker": ticker,
+            "price": price,
+            "score": blended_score,
+            "rule_score": rule_score,
+            "ml_probability": round(ml_prob, 4) if ml_prob is not None else None,
+            "direction": direction,
+            "confidence": confidence,
+            "signals": _explain_prediction(ind_data, blended_score),
+            "vix_regime": regime,
+            "suggested_stop": stop,
+            "suggested_target": target,
+            "risk_reward": rr,
+            "position_size_pct": pos_size_pct,
+        }
+    except Exception:
+        return None
+
+
 def get_current_predictions(db: Session, tickers: list[str] | None = None) -> list[dict]:
     """Generate live predictions for a set of tickers.
 
     Blends rule-based scores with ML probabilities and adjusts for
     volatility regime. Includes risk-management fields (stop, target, R:R).
+    Uses ThreadPoolExecutor to process tickers in parallel for speed.
     """
     from .ml_engine import predict_ml, extract_features, is_model_ready
 
     tickers = _build_prediction_tickers(db, tickers)
+    ticker_batch = tickers[:100]
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
     ml_available = is_model_ready()
 
+    try:
+        from .market_data import get_market_regime
+        _mkt_regime = get_market_regime()
+    except Exception:
+        _mkt_regime = None
+
+    quotes_map = fetch_quotes_batch(ticker_batch)
+
     results = []
-    for ticker in tickers[:100]:
-        try:
-            snapshot = get_indicator_snapshot(ticker)
-            if not snapshot or len(snapshot) < 3:
-                continue
-            ind_data = {k: v for k, v in snapshot.items() if k not in ("ticker", "interval")}
-            rule_score = compute_prediction(ind_data)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        futures = {
+            pool.submit(
+                _predict_single_ticker,
+                t, quotes_map, vix, vol_regime, ml_available,
+                predict_ml, extract_features,
+                _mkt_regime,
+            ): t
+            for t in ticker_batch
+        }
+        for fut in as_completed(futures):
+            entry = fut.result()
+            if entry is not None:
+                results.append(entry)
 
-            quote = fetch_quote(ticker)
-            price = quote["price"] if quote else None
-
-            ml_prob = None
-            blended_score = rule_score
-            if ml_available and price:
-                ind_data_with_ticker = dict(ind_data)
-                ind_data_with_ticker["ticker"] = ticker
-                features = extract_features(ind_data_with_ticker, close_price=price, vix=vix)
-                ml_prob = predict_ml(features)
-                if ml_prob is not None:
-                    rule_norm = (rule_score + 10) / 20
-                    blended = 0.4 * rule_norm + 0.6 * ml_prob
-                    blended_score = round((blended * 20) - 10, 2)
-
-            regime = vol_regime.get("regime", "normal")
-            if regime == "extreme":
-                blended_score *= 0.6
-            elif regime == "elevated":
-                if abs(blended_score) < 3:
-                    blended_score *= 0.8
-
-            blended_score = max(-10.0, min(10.0, round(blended_score, 2)))
-            direction = predict_direction(blended_score)
-            confidence = predict_confidence(blended_score)
-
-            atr_val = (ind_data.get("atr") or {}).get("value")
-            _cr = ticker.upper().endswith("-USD")
-            _rd = 8 if _cr else 6
-            stop = target = rr = pos_size_pct = None
-            if price and atr_val and atr_val > 0:
-                if blended_score > 0:
-                    stop = round(price - atr_val * 1.5, _rd)
-                    target = round(price + atr_val * 3.0, _rd)
-                elif blended_score < 0:
-                    stop = round(price + atr_val * 1.5, _rd)
-                    target = round(price - atr_val * 3.0, _rd)
-                if stop is not None and target is not None:
-                    risk = abs(price - stop)
-                    reward = abs(target - price)
-                    rr = round(reward / risk, 2) if risk > 0 else 0
-                    pos_size_pct = round(min(5.0, 1.0 / (risk / price * 100)) * 100 / 100, 2) if price > 0 else None
-
-            result_entry = {
-                "ticker": ticker,
-                "price": price,
-                "score": blended_score,
-                "rule_score": rule_score,
-                "ml_probability": round(ml_prob, 4) if ml_prob is not None else None,
-                "direction": direction,
-                "confidence": confidence,
-                "signals": _explain_prediction(ind_data, blended_score),
-                "vix_regime": regime,
-                "suggested_stop": stop,
-                "suggested_target": target,
-                "risk_reward": rr,
-                "position_size_pct": pos_size_pct,
-            }
-            results.append(result_entry)
-        except Exception:
-            continue
     results.sort(key=lambda x: abs(x["score"]), reverse=True)
     return results
 
@@ -1492,7 +2291,7 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 11
+    _learning_status["total_steps"] = 14
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -1569,7 +2368,18 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 5
         _step_time("mine", step_start)
 
-        # Step 6: Backtest discovered patterns
+        # Step 5b: Active pattern seeking (boost under-sampled patterns)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Active pattern seeking"
+        _learning_status["phase"] = "active_seeking"
+        seek_result = seek_pattern_data(db, user_id)
+        report["patterns_boosted"] = seek_result.get("sought", 0)
+        _learning_status["steps_completed"] = 6
+        _step_time("active_seek", step_start)
+
+        # Step 6: Backtest discovered patterns (expanded)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -1577,10 +2387,35 @@ def run_learning_cycle(
         _learning_status["phase"] = "backtesting"
         bt_count = _auto_backtest_patterns(db, user_id)
         report["backtests_run"] = bt_count
-        _learning_status["steps_completed"] = 6
+        _learning_status["steps_completed"] = 7
         _step_time("backtest", step_start)
 
-        # Step 7: Market journal
+        # Step 8: Self-validation & weight evolution (with dynamic hypotheses)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Testing hypotheses & evolving strategy"
+        _learning_status["phase"] = "evolving"
+        evolve_result = validate_and_evolve(db, user_id)
+        report["hypotheses_tested"] = evolve_result.get("hypotheses_tested", 0)
+        report["hypotheses_challenged"] = evolve_result.get("challenged", 0)
+        report["real_trade_adjustments"] = evolve_result.get("real_trade_adjustments", 0)
+        report["weights_evolved"] = evolve_result.get("weights_evolved", 0)
+        _learning_status["steps_completed"] = 8
+        _step_time("evolve", step_start)
+
+        # Step 8b: Refine patterns (parameter sweeping)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Refining patterns"
+        _learning_status["phase"] = "refining"
+        refine_result = refine_patterns(db, user_id)
+        report["patterns_refined"] = refine_result.get("refined", 0)
+        _learning_status["steps_completed"] = 9
+        _step_time("refine", step_start)
+
+        # Step 9: Market journal
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -1588,10 +2423,10 @@ def run_learning_cycle(
         _learning_status["phase"] = "journaling"
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
-        _learning_status["steps_completed"] = 7
+        _learning_status["steps_completed"] = 10
         _step_time("journal", step_start)
 
-        # Step 8: Signal events
+        # Step 10: Signal events
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -1599,10 +2434,10 @@ def run_learning_cycle(
         _learning_status["phase"] = "signals"
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
-        _learning_status["steps_completed"] = 8
+        _learning_status["steps_completed"] = 11
         _step_time("signals", step_start)
 
-        # Step 9: Train ML model
+        # Step 11: Train ML model (with regime features)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -1612,10 +2447,10 @@ def run_learning_cycle(
         ml_result = _train_ml(db)
         report["ml_trained"] = ml_result.get("ok", False)
         report["ml_accuracy"] = ml_result.get("cv_accuracy", 0)
-        _learning_status["steps_completed"] = 9
+        _learning_status["steps_completed"] = 12
         _step_time("ml_train", step_start)
 
-        # Step 10: Generate strategy proposals
+        # Step 12: Generate strategy proposals
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -1628,10 +2463,10 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning(f"[trading] Strategy proposal generation failed: {e}")
             report["proposals_generated"] = 0
-        _learning_status["steps_completed"] = 10
+        _learning_status["steps_completed"] = 13
         _step_time("proposals", step_start)
 
-        # Step 11: Finalize
+        # Step 13: Finalize + log
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start
@@ -1640,12 +2475,18 @@ def run_learning_cycle(
             f"Learning cycle: {report.get('prescreen_candidates', 0)} pre-screened, "
             f"scored {report['tickers_scored']}, {report['snapshots_taken']} snapshots, "
             f"{report['patterns_discovered']} patterns, "
+            f"{report.get('patterns_boosted', 0)} boosted, "
             f"{report.get('backtests_run', 0)} backtests, "
+            f"{report.get('hypotheses_tested', 0)} hypotheses tested "
+            f"({report.get('hypotheses_challenged', 0)} challenged), "
+            f"{report.get('real_trade_adjustments', 0)} real-trade adjustments, "
+            f"{report.get('patterns_refined', 0)} refined, "
+            f"{report.get('weights_evolved', 0)} weights evolved, "
             f"{report['signal_events']} signals, "
             f"ML={'trained' if report.get('ml_trained') else 'skipped'}, "
             f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = 11
+        _learning_status["steps_completed"] = 14
 
     except InterruptedError:
         logger.info("[trading] Learning cycle interrupted by shutdown")

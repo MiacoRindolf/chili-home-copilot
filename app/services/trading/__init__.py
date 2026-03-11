@@ -28,6 +28,7 @@ from .market_data import (
     ALL_SCAN_TICKERS,
     get_vix,
     get_volatility_regime,
+    get_market_regime,
 )
 from ..yf_session import get_ticker_info, get_ticker_news
 
@@ -40,6 +41,7 @@ from .portfolio import (
     close_trade,
     get_trades,
     get_trade_stats,
+    get_trade_stats_by_pattern,
     get_insights,
     save_insight,
     get_portfolio_summary,
@@ -66,6 +68,9 @@ from .scanner import (
     run_scan,
     run_daytrade_scan,
     run_breakout_scan,
+    run_momentum_scanner,
+    evolve_strategy_weights,
+    get_all_weights,
     get_latest_scan,
     generate_signals,
     generate_top_picks,
@@ -91,7 +96,10 @@ from .learning import (
     take_all_snapshots,
     backfill_future_returns,
     mine_patterns,
+    seek_pattern_data,
     deep_study,
+    validate_and_evolve,
+    refine_patterns,
     get_brain_stats,
     get_confidence_history,
     get_learning_status,

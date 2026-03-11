@@ -1,4 +1,6 @@
 """CHILI Home Copilot - FastAPI application entry point."""
+import logging
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -14,6 +16,16 @@ from .routers import admin, chat, health_routes, pages, marketplace, mobile, tra
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import MarketplaceModule
 from .services.trading_scheduler import start_scheduler, stop_scheduler
+
+# Suppress noisy WinError 10054 tracebacks from asyncio on Windows
+if sys.platform == "win32":
+    class _WinErrorFilter(logging.Filter):
+        def filter(self, record: logging.LogRecord) -> bool:
+            msg = record.getMessage()
+            if "WinError 10054" in msg or "_call_connection_lost" in msg:
+                return False
+            return True
+    logging.getLogger("asyncio").addFilter(_WinErrorFilter())
 
 Base.metadata.create_all(bind=engine)
 run_migrations(engine)

@@ -29,43 +29,91 @@ ALL_ALERT_TYPES = [
     POSITION_OPENED, POSITION_CLOSED, STRATEGY_PROPOSED, WEEKLY_REVIEW,
 ]
 
+_PATTERN_KW = [
+    "macd_bullish", "macd_positive", "macd_negative",
+    "ema_stack", "ema_stacking", "rsi_oversold", "rsi_overbought",
+    "bollinger", "bb_squeeze", "volume_surge", "pullback",
+    "breakout", "gap_up", "gap_down", "stoch_oversold", "stoch_overbought",
+    "adx_strong", "float_micro", "float_low", "topping_tail",
+    "vwap_above", "momentum", "reversal", "divergence",
+]
+
+
+def _extract_pattern_keywords(signals: list[str]) -> list[str]:
+    """Extract canonical pattern tags from free-form signal descriptions."""
+    found: list[str] = []
+    combined = " ".join(s.lower() for s in signals)
+    for kw in _PATTERN_KW:
+        readable = kw.replace("_", " ")
+        if readable in combined or kw in combined:
+            found.append(kw)
+    if not found and signals:
+        found.append("unclassified")
+    return found[:10]
+
 _PROPOSAL_EXPIRE_HOURS = 24
 _MIN_SCORE_FOR_PROPOSAL = 7.5
 _MAX_RISK_PCT = 2.0  # max 2% of portfolio per trade
 
 
 def dispatch_alert(
-    db: Session,
-    user_id: int | None,
-    alert_type: str,
-    ticker: str | None,
-    message: str,
+    db: Session | None = None,
+    user_id: int | None = None,
+    alert_type: str = "",
+    ticker: str | None = None,
+    message: str = "",
+    *,
+    price: float | None = None,
 ) -> bool:
-    """Log and send an alert via SMS. Returns True if sent successfully."""
-    from ...models.trading import AlertHistory
-    from ..sms_service import send_sms
+    """Log an alert to the DB and optionally send via SMS.
 
-    sent = send_sms(message)
-    provider = "twilio" if sent else "email_gateway"
+    Always persists to DB regardless of SMS outcome.  If SMS is not
+    configured, the alert is logged with sent_via='log_only' (no
+    error-level log — just info).  Only logs a warning when SMS IS
+    configured but delivery fails.
+    """
+    from ..sms_service import is_configured as sms_is_configured, send_sms
 
-    record = AlertHistory(
-        user_id=user_id,
-        alert_type=alert_type,
-        ticker=ticker,
-        message=message,
-        sent_via=provider if sent else "failed",
-        success=sent,
-    )
-    db.add(record)
+    own_session = False
+    if db is None:
+        from ...db import SessionLocal
+        db = SessionLocal()
+        own_session = True
+
+    sent = False
+    sent_via = "log_only"
+
     try:
-        db.commit()
-    except Exception:
-        db.rollback()
+        if sms_is_configured():
+            sent = send_sms(message)
+            sent_via = ("twilio" if sent else "sms_failed")
+            if sent:
+                logger.info(f"[alerts] Sent {alert_type} alert for {ticker}: {message[:80]}")
+            else:
+                logger.warning(f"[alerts] SMS delivery failed for {alert_type}/{ticker}")
+        else:
+            logger.info(f"[alerts] Logged {alert_type} for {ticker} (SMS not configured)")
 
-    if sent:
-        logger.info(f"[alerts] Sent {alert_type} alert for {ticker}: {message[:80]}")
-    else:
-        logger.warning(f"[alerts] Failed to send {alert_type} alert for {ticker}")
+        from ...models.trading import AlertHistory
+        record = AlertHistory(
+            user_id=user_id,
+            alert_type=alert_type,
+            ticker=ticker,
+            message=message,
+            sent_via=sent_via,
+            success=sent,
+        )
+        db.add(record)
+        db.commit()
+    except Exception as e:
+        logger.error(f"[alerts] dispatch_alert DB error: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        if own_session:
+            db.close()
 
     return sent
 
@@ -528,7 +576,16 @@ def _execute_proposal(
             proposal.executed_at = datetime.utcnow()
             proposal.broker_order_id = result.get("order_id")
 
-            # Create a local Trade record
+            # Extract pattern tags from proposal signals for per-pattern tracking
+            _ptags = ""
+            if proposal.signals_json:
+                try:
+                    _signals = json.loads(proposal.signals_json) if isinstance(proposal.signals_json, str) else proposal.signals_json
+                    if isinstance(_signals, list):
+                        _ptags = ",".join(_extract_pattern_keywords(_signals))
+                except Exception:
+                    pass
+
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
@@ -544,6 +601,7 @@ def _execute_proposal(
                     "proposal_id": proposal.id,
                 }),
                 tags="auto-trade,proposal",
+                pattern_tags=_ptags or None,
                 notes=f"Auto-executed from proposal #{proposal.id}: {proposal.thesis[:100]}",
             )
             db.add(trade)
