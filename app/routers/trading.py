@@ -516,6 +516,13 @@ def api_signals(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, "signals": signals})
 
 
+@router.get("/api/trading/top-picks")
+def api_top_picks(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    picks = ts.generate_top_picks(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "picks": picks})
+
+
 # ── Background Learning ───────────────────────────────────────────────
 
 @router.post("/api/trading/learn/snapshot")

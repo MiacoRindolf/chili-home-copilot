@@ -15,25 +15,48 @@ from ..yf_session import (
 logger = logging.getLogger(__name__)
 
 
-def smart_round(value: float | None, fallback: int = 2) -> float | None:
+def smart_round(value: float | None, fallback: int = 2, *, crypto: bool = False) -> float | None:
     """Round a price to an appropriate number of decimals based on magnitude.
 
-    >= $1       -> 2 decimals   (45231.89, 1.23)
-    >= $0.01    -> 4 decimals   (0.0543)
-    >= $0.0001  -> 6 decimals   (0.000123)
-    < $0.0001   -> 8 decimals   (0.00000012)
+    For regular assets:
+        >= $1000    -> 2 decimals   (45231.89)
+        >= $1       -> 2 decimals   (12.34)
+        >= $0.01    -> 4 decimals   (0.0543)
+        >= $0.0001  -> 6 decimals   (0.000123)
+        < $0.0001   -> 8 decimals   (0.00000012)
+
+    For crypto (crypto=True), precision is increased so that
+    stablecoins near $1 (e.g. USDF-USD, USDD-USD) show enough
+    decimals to distinguish entry/stop/target:
+        >= $100     -> 2 decimals
+        >= $1       -> 6 decimals   (1.000234)
+        >= $0.01    -> 6 decimals   (0.054321)
+        >= $0.0001  -> 8 decimals
+        < $0.0001   -> 10 decimals
     """
     if value is None:
         return None
     abs_v = abs(value)
-    if abs_v >= 1:
-        d = 2
-    elif abs_v >= 0.01:
-        d = 4
-    elif abs_v >= 0.0001:
-        d = 6
+    if crypto:
+        if abs_v >= 100:
+            d = 2
+        elif abs_v >= 1:
+            d = 6
+        elif abs_v >= 0.01:
+            d = 6
+        elif abs_v >= 0.0001:
+            d = 8
+        else:
+            d = 10
     else:
-        d = 8
+        if abs_v >= 1:
+            d = 2
+        elif abs_v >= 0.01:
+            d = 4
+        elif abs_v >= 0.0001:
+            d = 6
+        else:
+            d = 8
     return round(value, d)
 
 
@@ -115,25 +138,26 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
         return None
     price = fi["last_price"]
     prev = fi.get("previous_close")
+    _cr = ticker.upper().endswith("-USD")
     result: dict[str, Any] = {
         "ticker": ticker.upper(),
-        "price": smart_round(price),
-        "previous_close": smart_round(prev) if prev else None,
-        "change": smart_round(price - prev) if prev else None,
+        "price": smart_round(price, crypto=_cr),
+        "previous_close": smart_round(prev, crypto=_cr) if prev else None,
+        "change": smart_round(price - prev, crypto=_cr) if prev else None,
         "change_pct": round((price - prev) / prev * 100, 2) if prev else None,
         "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
         "currency": "USD",
     }
     if fi.get("day_high"):
-        result["day_high"] = smart_round(fi["day_high"])
+        result["day_high"] = smart_round(fi["day_high"], crypto=_cr)
     if fi.get("day_low"):
-        result["day_low"] = smart_round(fi["day_low"])
+        result["day_low"] = smart_round(fi["day_low"], crypto=_cr)
     if fi.get("volume"):
         result["volume"] = fi["volume"]
     if fi.get("year_high"):
-        result["year_high"] = smart_round(fi["year_high"])
+        result["year_high"] = smart_round(fi["year_high"], crypto=_cr)
     if fi.get("year_low"):
-        result["year_low"] = smart_round(fi["year_low"])
+        result["year_low"] = smart_round(fi["year_low"], crypto=_cr)
     if fi.get("avg_volume"):
         result["avg_volume"] = fi["avg_volume"]
     return result

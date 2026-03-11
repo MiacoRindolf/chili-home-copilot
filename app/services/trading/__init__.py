@@ -67,6 +67,7 @@ from .scanner import (
     run_breakout_scan,
     get_latest_scan,
     generate_signals,
+    generate_top_picks,
     get_scan_status,
     batch_score_tickers,
     run_full_market_scan,

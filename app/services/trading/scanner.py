@@ -21,7 +21,7 @@ from .portfolio import get_watchlist, get_trade_stats, get_insights
 logger = logging.getLogger(__name__)
 
 _shutting_down = threading.Event()
-_MAX_SCAN_WORKERS = 8
+_MAX_SCAN_WORKERS = 12
 
 
 def signal_shutdown():
@@ -179,8 +179,9 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
             signal = "hold"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
-        stop_loss = smart_round(price - 2 * atr_f)
-        take_profit = smart_round(price + 3 * atr_f)
+        _cr = is_crypto_ticker
+        stop_loss = smart_round(price - 2 * atr_f, crypto=_cr)
+        take_profit = smart_round(price + 3 * atr_f, crypto=_cr)
 
         volatility_pct = (atr_f / price * 100) if price > 0 else 5
         if volatility_pct > 3:
@@ -194,8 +195,8 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
-            "price": smart_round(price),
-            "entry_price": smart_round(price),
+            "price": smart_round(price, crypto=_cr),
+            "entry_price": smart_round(price, crypto=_cr),
             "stop_loss": stop_loss,
             "take_profit": take_profit,
             "risk_level": risk,
@@ -207,11 +208,11 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
                 "macd": round(float(macd_val), 4) if pd.notna(macd_val) else None,
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
                 "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
-                "atr": round(atr_f, 4),
-                "ema_20": smart_round(float(ema_20)) if pd.notna(ema_20) else None,
-                "ema_50": smart_round(float(ema_50)) if pd.notna(ema_50) else None,
-                "ema_100": smart_round(float(ema_100)) if ema_100 is not None and pd.notna(ema_100) else None,
-                "ema_200": smart_round(float(ema_200)) if ema_200 is not None and pd.notna(ema_200) else None,
+                "atr": round(atr_f, 6 if _cr else 4),
+                "ema_20": smart_round(float(ema_20), crypto=_cr) if pd.notna(ema_20) else None,
+                "ema_50": smart_round(float(ema_50), crypto=_cr) if pd.notna(ema_50) else None,
+                "ema_100": smart_round(float(ema_100), crypto=_cr) if ema_100 is not None and pd.notna(ema_100) else None,
+                "ema_200": smart_round(float(ema_200), crypto=_cr) if ema_200 is not None and pd.notna(ema_200) else None,
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "bb_pct": round((price - float(bb_lower)) / (float(bb_upper) - float(bb_lower)) * 100, 1)
                     if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
@@ -352,22 +353,23 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             signal = "wait"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.01
-        scalp_stop = smart_round(price - 1.5 * atr_f)
-        scalp_target = smart_round(price + 2.0 * atr_f)
+        _cr = ticker.upper().endswith("-USD")
+        scalp_stop = smart_round(price - 1.5 * atr_f, crypto=_cr)
+        scalp_target = smart_round(price + 2.0 * atr_f, crypto=_cr)
         risk_reward = round(2.0 * atr_f / (1.5 * atr_f), 2) if atr_f > 0 else 1.33
 
         return {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
-            "price": smart_round(price),
-            "entry_price": smart_round(price),
+            "price": smart_round(price, crypto=_cr),
+            "entry_price": smart_round(price, crypto=_cr),
             "stop_loss": scalp_stop,
             "take_profit": scalp_target,
             "risk_reward": risk_reward,
             "risk_level": "high" if atr_f / price > 0.02 else "medium",
             "signals": signals,
-            "vwap": smart_round(vwap) if vwap else None,
+            "vwap": smart_round(vwap, crypto=_cr) if vwap else None,
             "vwap_pct": vwap_pct,
             "vol_ratio": vol_ratio,
             "gap_pct": gap_pct,
@@ -515,14 +517,15 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             status = "wait"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
+        _cr = ticker.upper().endswith("-USD")
 
         return {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": status,
             "status": status,
-            "price": smart_round(price),
-            "resistance": smart_round(resistance),
+            "price": smart_round(price, crypto=_cr),
+            "resistance": smart_round(resistance, crypto=_cr),
             "dist_to_breakout": dist_to_breakout,
             "bb_squeeze": is_squeeze,
             "bb_width_pctile": round(bb_width_pct_rank, 0),
@@ -531,16 +534,16 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             "tight_days": tight_days,
             "risk_level": "medium" if status == "watch" else "high",
             "signals": signals,
-            "entry_price": smart_round(resistance),
-            "stop_loss": smart_round(resistance - 2 * atr_f),
-            "take_profit": smart_round(resistance + 3 * atr_f),
+            "entry_price": smart_round(resistance, crypto=_cr),
+            "stop_loss": smart_round(resistance - 2 * atr_f, crypto=_cr),
+            "take_profit": smart_round(resistance + 3 * atr_f, crypto=_cr),
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
                 "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
-                "atr": round(atr_f, 4),
-                "ema_20": smart_round(float(ema_20)) if pd.notna(ema_20) else None,
-                "ema_50": smart_round(float(ema_50)) if pd.notna(ema_50) else None,
+                "atr": round(atr_f, 6 if _cr else 4),
+                "ema_20": smart_round(float(ema_20), crypto=_cr) if pd.notna(ema_20) else None,
+                "ema_50": smart_round(float(ema_50), crypto=_cr) if pd.notna(ema_50) else None,
                 "bb_width_pctile": round(bb_width_pct_rank, 0),
             },
         }
@@ -941,6 +944,150 @@ def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
 
     signals.sort(key=lambda s: s["score"], reverse=True)
     return signals
+
+
+def generate_top_picks(db: Session, user_id: int | None) -> list[dict[str, Any]]:
+    """Generate proactive AI-driven top picks from scan results + Brain predictions.
+
+    Unlike generate_signals (watchlist-only), this aggregates across the
+    entire market universe using recent scan data and AI Brain analysis
+    to surface the best opportunities CHILI has identified today.
+    """
+    from ...models.trading import ScanResult, BacktestResult
+    from sqlalchemy import or_
+
+    recent_cutoff = datetime.utcnow() - timedelta(hours=6)
+    user_filter = or_(ScanResult.user_id == user_id, ScanResult.user_id.is_(None))
+
+    scan_rows = db.query(ScanResult).filter(
+        user_filter,
+        ScanResult.scanned_at >= recent_cutoff,
+        ScanResult.score >= 6.0,
+        ScanResult.signal == "buy",
+    ).order_by(ScanResult.score.desc()).limit(100).all()
+
+    candidates: dict[str, dict] = {}
+    for r in scan_rows:
+        if r.ticker in candidates:
+            continue
+        _cr = r.ticker.endswith("-USD")
+        candidates[r.ticker] = {
+            "ticker": r.ticker,
+            "score": r.score,
+            "signal": r.signal,
+            "price": r.entry_price,
+            "entry_price": r.entry_price,
+            "stop_loss": r.stop_loss,
+            "take_profit": r.take_profit,
+            "risk_level": r.risk_level,
+            "signals": r.rationale.split("; ") if r.rationale else [],
+            "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            "source": "scan",
+            "is_crypto": _cr,
+        }
+
+    try:
+        from .learning import get_current_predictions
+        preds = get_current_predictions(db, tickers=None)
+        for p in preds:
+            t = p["ticker"]
+            if p.get("direction") != "bullish" or (p.get("confidence") or 0) < 50:
+                continue
+            if t in candidates:
+                candidates[t]["brain_score"] = p["score"]
+                candidates[t]["brain_confidence"] = p["confidence"]
+                candidates[t]["brain_direction"] = p["direction"]
+                candidates[t]["ml_probability"] = p.get("ml_probability")
+                if p.get("suggested_stop"):
+                    candidates[t]["brain_stop"] = p["suggested_stop"]
+                if p.get("suggested_target"):
+                    candidates[t]["brain_target"] = p["suggested_target"]
+                if p.get("risk_reward"):
+                    candidates[t]["risk_reward"] = p["risk_reward"]
+            else:
+                _cr = t.endswith("-USD")
+                candidates[t] = {
+                    "ticker": t,
+                    "score": max(6.0, (p["score"] + 10) / 2),
+                    "signal": "buy",
+                    "price": p.get("price"),
+                    "entry_price": p.get("price"),
+                    "stop_loss": p.get("suggested_stop"),
+                    "take_profit": p.get("suggested_target"),
+                    "risk_level": "high" if (p.get("confidence") or 0) < 60 else "medium",
+                    "signals": p.get("signals", []),
+                    "indicators": {},
+                    "source": "brain",
+                    "is_crypto": _cr,
+                    "brain_score": p["score"],
+                    "brain_confidence": p["confidence"],
+                    "brain_direction": p["direction"],
+                    "ml_probability": p.get("ml_probability"),
+                    "risk_reward": p.get("risk_reward"),
+                }
+    except Exception:
+        pass
+
+    picks = list(candidates.values())
+
+    for pick in picks:
+        combined = pick["score"]
+        if pick.get("brain_confidence"):
+            combined = combined * 0.5 + (pick["brain_confidence"] / 10) * 0.5
+        pick["combined_score"] = round(combined, 2)
+
+        price = pick.get("price") or 0
+        target = pick.get("take_profit") or pick.get("brain_target")
+        stop = pick.get("stop_loss") or pick.get("brain_stop")
+        if price and target and price > 0:
+            pick["projected_profit_pct"] = round((target - price) / price * 100, 2)
+            pick["projected_profit_dollar"] = round(target - price, 6)
+        if price and stop and target and price > 0:
+            risk_amt = abs(price - stop)
+            reward_amt = abs(target - price)
+            pick["risk_reward"] = round(reward_amt / risk_amt, 2) if risk_amt > 0 else 0
+            if risk_amt > 0:
+                pick["position_size_pct"] = round(min(5.0, 1.0 / (risk_amt / price * 100)) * 100 / 100, 2)
+
+        # Backtest validation
+        best_bt = db.query(BacktestResult).filter(
+            BacktestResult.ticker == pick["ticker"],
+        ).order_by(BacktestResult.return_pct.desc()).first()
+        if best_bt:
+            pick["best_strategy"] = best_bt.strategy_name
+            pick["backtest_return"] = best_bt.return_pct
+            pick["backtest_win_rate"] = best_bt.win_rate
+        else:
+            pick["best_strategy"] = None
+            pick["backtest_return"] = None
+            pick["backtest_win_rate"] = None
+
+        # Build trade thesis
+        thesis_parts = []
+        if pick["signal"] == "buy":
+            thesis_parts.append("Bullish setup identified by CHILI's AI.")
+        for sig in (pick.get("signals") or [])[:3]:
+            thesis_parts.append(sig)
+        if pick.get("brain_confidence"):
+            thesis_parts.append(f"AI Brain confidence: {pick['brain_confidence']:.0f}%")
+        if pick.get("risk_reward"):
+            thesis_parts.append(f"Risk:Reward ratio {pick['risk_reward']:.1f}:1")
+        pick["thesis"] = " ".join(thesis_parts)
+
+        # Timeframe suggestion
+        if pick.get("indicators", {}).get("adx") and pick["indicators"]["adx"] > 25:
+            pick["timeframe"] = "1-5 days (trending)"
+        else:
+            pick["timeframe"] = "3-10 days (swing)"
+
+    picks.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
+
+    top = picks[:15]
+
+    for i, pick in enumerate(top):
+        pick["rank"] = i + 1
+
+    return top
 
 
 def _make_plain_english(scored: dict, insights: str) -> str:

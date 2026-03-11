@@ -311,34 +311,67 @@ def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] 
 
 
 def backfill_future_returns(db: Session) -> int:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     unfilled = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.is_(None),
-    ).limit(600).all()
+    ).limit(1500).all()
 
-    updated = 0
-    for snap in unfilled:
+    if not unfilled:
+        return 0
+
+    tickers = list({s.ticker for s in unfilled})
+    from .yf_session import batch_download as _bd
+    BATCH = 50
+    for i in range(0, len(tickers), BATCH):
+        try:
+            _bd(tickers[i:i + BATCH], period="1mo", interval="1d")
+        except Exception:
+            pass
+
+    def _fetch_returns(snap):
         try:
             df = _yf_history(snap.ticker, start=snap.snapshot_date, period="15d", interval="1d")
             if len(df) < 2:
-                continue
+                return None
             base_price = snap.close_price
             if base_price <= 0:
-                continue
-
+                return None
             def _ret(idx):
                 return round((float(df["Close"].iloc[idx]) - base_price) / base_price * 100, 2)
-
-            if len(df) >= 2:
-                snap.future_return_1d = _ret(1)
-            if len(df) >= 4:
-                snap.future_return_3d = _ret(3)
-            if len(df) >= 6:
-                snap.future_return_5d = _ret(5)
-            if len(df) >= 11:
-                snap.future_return_10d = _ret(10)
-            updated += 1
+            r1 = _ret(1) if len(df) >= 2 else None
+            r3 = _ret(3) if len(df) >= 4 else None
+            r5 = _ret(5) if len(df) >= 6 else None
+            r10 = _ret(10) if len(df) >= 11 else None
+            return (snap.id, r1, r3, r5, r10)
         except Exception:
+            return None
+
+    results = []
+    with ThreadPoolExecutor(max_workers=16) as executor:
+        futures = {executor.submit(_fetch_returns, s): s for s in unfilled}
+        for f in as_completed(futures):
+            if _shutting_down.is_set():
+                break
+            r = f.result()
+            if r:
+                results.append(r)
+
+    updated = 0
+    snap_map = {s.id: s for s in unfilled}
+    for snap_id, r1, r3, r5, r10 in results:
+        snap = snap_map.get(snap_id)
+        if not snap:
             continue
+        if r1 is not None:
+            snap.future_return_1d = r1
+        if r3 is not None:
+            snap.future_return_3d = r3
+        if r5 is not None:
+            snap.future_return_5d = r5
+        if r10 is not None:
+            snap.future_return_10d = r10
+        updated += 1
 
     if updated:
         db.commit()
@@ -439,10 +472,18 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
         if w.ticker not in mine_tickers:
             mine_tickers.append(w.ticker)
 
-    mine_tickers = mine_tickers[:150]
+    try:
+        from .prescreener import get_trending_crypto
+        for t in get_trending_crypto():
+            if t not in mine_tickers:
+                mine_tickers.append(t)
+    except Exception:
+        pass
+
+    mine_tickers = mine_tickers[:250]
 
     all_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=12) as executor:
         futures = {}
         for ticker in mine_tickers:
             if _shutting_down.is_set():
@@ -460,7 +501,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     snapshots = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
-    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(1500).all()
+    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(3000).all()
 
     for s in snapshots:
         try:
@@ -974,39 +1015,39 @@ def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[s
     recent_scans = (
         db.query(ScanResult.ticker, ScanResult.score)
         .order_by(ScanResult.scanned_at.desc())
-        .limit(200)
+        .limit(500)
         .all()
     )
     top_scanned = sorted(set((r.ticker, r.score) for r in recent_scans), key=lambda x: x[1], reverse=True)
-    for ticker, _ in top_scanned[:30]:
+    for ticker, _ in top_scanned[:60]:
         _add(ticker)
 
     try:
         from .prescreener import get_trending_crypto
-        for t in get_trending_crypto()[:20]:
+        for t in get_trending_crypto()[:30]:
             _add(t)
     except Exception:
         pass
 
     try:
         from ..ticker_universe import get_all_crypto_tickers
-        for t in get_all_crypto_tickers(n=50)[:20]:
+        for t in get_all_crypto_tickers(n=100)[:40]:
             _add(t)
     except Exception:
-        for t in DEFAULT_CRYPTO_TICKERS[:15]:
+        for t in DEFAULT_CRYPTO_TICKERS[:20]:
             _add(t)
 
     try:
         wl_items = get_watchlist(db, user_id=None)
-        for item in wl_items[:15]:
+        for item in wl_items[:20]:
             _add(item.ticker)
     except Exception:
         pass
 
-    if len(result) < 25:
-        for t in DEFAULT_SCAN_TICKERS[:20]:
+    if len(result) < 40:
+        for t in DEFAULT_SCAN_TICKERS[:30]:
             _add(t)
-        for t in DEFAULT_CRYPTO_TICKERS[:10]:
+        for t in DEFAULT_CRYPTO_TICKERS[:15]:
             _add(t)
 
     return result
@@ -1027,7 +1068,7 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
     ml_available = is_model_ready()
 
     results = []
-    for ticker in tickers[:50]:
+    for ticker in tickers[:100]:
         try:
             snapshot = get_indicator_snapshot(ticker)
             if not snapshot or len(snapshot) < 3:
@@ -1062,14 +1103,16 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
             confidence = predict_confidence(blended_score)
 
             atr_val = (ind_data.get("atr") or {}).get("value")
+            _cr = ticker.upper().endswith("-USD")
+            _rd = 8 if _cr else 6
             stop = target = rr = pos_size_pct = None
             if price and atr_val and atr_val > 0:
                 if blended_score > 0:
-                    stop = round(price - atr_val * 1.5, 6)
-                    target = round(price + atr_val * 3.0, 6)
+                    stop = round(price - atr_val * 1.5, _rd)
+                    target = round(price + atr_val * 3.0, _rd)
                 elif blended_score < 0:
-                    stop = round(price + atr_val * 1.5, 6)
-                    target = round(price - atr_val * 3.0, 6)
+                    stop = round(price + atr_val * 1.5, _rd)
+                    target = round(price - atr_val * 3.0, _rd)
                 if stop is not None and target is not None:
                     risk = abs(price - stop)
                     reward = abs(target - price)
