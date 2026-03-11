@@ -118,6 +118,7 @@ from .prescreener import (
     get_breakout_candidates,
     get_prescreen_status,
     invalidate_cache as invalidate_prescreen_cache,
+    get_trending_crypto,
 )
 
 

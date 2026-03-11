@@ -401,6 +401,46 @@ def _crypto_top_movers() -> list[str]:
         return list(DEFAULT_CRYPTO_TICKERS)
 
 
+def get_trending_crypto() -> list[str]:
+    """Fetch currently trending crypto from CoinGecko search/trending.
+
+    Returns yfinance-compatible SYMBOL-USD tickers. Merged with top movers
+    for a broader discovery set that captures new/viral tokens (including
+    those available on MetaMask DEXes).
+    """
+    cached = _cache_get("trending_crypto")
+    if cached is not None:
+        return cached
+
+    trending: list[str] = []
+    stables = {"usdt", "usdc", "dai", "busd", "tusd", "usdp", "frax", "gusd"}
+    try:
+        import requests
+        resp = requests.get(
+            "https://api.coingecko.com/api/v3/search/trending",
+            timeout=10,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        for item in data.get("coins", []):
+            coin = item.get("item", {})
+            sym = coin.get("symbol", "").lower()
+            if sym and sym not in stables:
+                trending.append(sym.upper() + "-USD")
+    except Exception as e:
+        logger.warning(f"[prescreener] CoinGecko trending failed: {e}")
+
+    movers = _crypto_top_movers()
+    seen: set[str] = set()
+    merged: list[str] = []
+    for t in trending + movers:
+        if t not in seen:
+            seen.add(t)
+            merged.append(t)
+    _cache_set("trending_crypto", merged)
+    return merged
+
+
 def get_daytrade_candidates(max_total: int = 300) -> list[str]:
     """Return tickers suited for intraday / day-trade scanning.
 

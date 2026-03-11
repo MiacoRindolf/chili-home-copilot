@@ -817,6 +817,35 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .cal-item .cal-price { font-family: monospace; font-weight: 700; font-size: 11px; margin-left: auto; color: var(--text); }
 .chart-annotations-legend.dragging { box-shadow: 0 8px 28px rgba(0,0,0,.2); }
 
+/* ── Chart drawing toolbar ───────────────────────── */
+.chart-draw-toolbar {
+  position: absolute; left: 0; top: 0; bottom: 0; width: 34px; z-index: 5;
+  display: flex; flex-direction: column; gap: 2px; padding: 4px 3px;
+  background: var(--bg-header); border-right: 1px solid var(--border);
+  overflow-y: auto; overflow-x: hidden;
+}
+.draw-btn {
+  width: 28px; height: 28px; border: none; border-radius: 6px; cursor: pointer;
+  background: transparent; color: var(--text-muted); font-size: 14px;
+  display: flex; align-items: center; justify-content: center;
+  transition: all .15s; position: relative; flex-shrink: 0;
+}
+.draw-btn:hover { background: var(--accent-bg, rgba(139,92,246,.1)); color: var(--text); }
+.draw-btn.active { background: rgba(99,102,241,.2); color: #818cf8; box-shadow: inset 0 0 0 1.5px #818cf8; }
+.draw-btn[title]:hover::after {
+  content: attr(title); position: absolute; left: 36px; top: 50%; transform: translateY(-50%);
+  background: var(--bg); border: 1px solid var(--border); border-radius: 5px;
+  padding: 2px 8px; font-size: 10px; white-space: nowrap; color: var(--text);
+  z-index: 10; pointer-events: none; box-shadow: 0 2px 8px rgba(0,0,0,.12);
+}
+.draw-sep { height: 1px; background: var(--border); margin: 2px 0; flex-shrink: 0; }
+#draw-canvas {
+  position: absolute; inset: 0; z-index: 4; pointer-events: none;
+}
+#draw-canvas.drawing { pointer-events: auto; cursor: crosshair; }
+.t-chart-area { position: relative; }
+#main-chart { margin-left: 34px; }
+
 /* ── Multi-chart grid ────────────────────────────── */
 .multi-chart-grid {
   display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: 1fr 1fr;
@@ -1255,6 +1284,17 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     <div class="ind-panel" id="ind-panel"></div>
 
     <div class="t-chart-area" id="chart-area">
+      <div class="chart-draw-toolbar" id="draw-toolbar">
+        <button class="draw-btn" data-tool="trendline" title="Trend Line (L)">&#x2571;</button>
+        <button class="draw-btn" data-tool="hline" title="Horizontal Line (H)">&#x2500;</button>
+        <button class="draw-btn" data-tool="rect" title="Rectangle (R)">&#x25AD;</button>
+        <button class="draw-btn" data-tool="fib" title="Fibonacci (F)">&#x0192;</button>
+        <button class="draw-btn" data-tool="text" title="Text Label (T)">&#x0054;</button>
+        <div class="draw-sep"></div>
+        <button class="draw-btn" data-tool="eraser" title="Eraser (E)">&#x2716;</button>
+        <button class="draw-btn" id="draw-clear-btn" title="Clear All (X)">&#x1F5D1;</button>
+      </div>
+      <canvas id="draw-canvas"></canvas>
       <div id="main-chart"></div>
       <div id="multi-chart-grid" class="multi-chart-grid hidden">
         <div class="mc-cell" data-tf="1wk" onclick="exitMultiView('1wk')"><div class="mc-label">Weekly</div><div class="mc-chart" id="mc-1wk"></div></div>
@@ -1713,6 +1753,7 @@ var volumeSeries = null;
 var indicatorSeries = {};
 var activeIndicators = new Set(['sma_20', 'ema_20']);
 var _chartAnnotations = [];
+var _savedAnnotationSpecs = [];
 var _lastBreakoutData = null;
 var _lastDaytradeData = null;
 var _multiViewActive = false;
@@ -1747,6 +1788,7 @@ var btEquitySeries = null;
 
 document.addEventListener('DOMContentLoaded', function() {
   initChart();
+  _initDrawingListeners();
   buildIndicatorPanel();
   loadStrategies();
   loadWatchlist();
@@ -1884,6 +1926,7 @@ function loadChart() {
         volumeSeries.setData([]);
         return;
       }
+      clearAnnotations(true);
       candleSeries.setData(d.data.map(function(c) { return {time:c.time, open:c.open, high:c.high, low:c.low, close:c.close}; }));
       volumeSeries.setData(d.data.map(function(c) { return {time:c.time, value:c.volume, color: c.close>=c.open ? 'rgba(34,197,94,.3)' : 'rgba(239,68,68,.3)'}; }));
       var lastPrice = d.data[d.data.length - 1].close;
@@ -1891,6 +1934,8 @@ function loadChart() {
       chart.timeScale().fitContent();
       refreshPrice();
       loadActiveIndicators();
+      _restoreAnnotations();
+      _resizeDrawCanvas();
     }).catch(function() {
       _hideChartOverlay();
       document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">Error loading chart</em>';
@@ -1951,6 +1996,7 @@ var _selectDebounce = null;
 function selectTicker(t) {
   currentTicker = t.toUpperCase();
   clearAnnotations();
+  _loadDrawings();
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
   var tickerLabel = document.getElementById('ticker-label');
   tickerLabel.innerHTML = currentTicker + '<span class="ticker-spinner"></span>';
@@ -2501,69 +2547,99 @@ function loadBrainDashboard() {
 }
 
 
+var _predShowAll = false;
+var _PRED_INITIAL = 20;
+var _cachedScanTickers = [];
+
 function loadBrainPredictions() {
   var container = document.getElementById('brain-predictions');
   if (!container) return;
   container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:12px"><div class="brain-pulse"></div> Computing predictions from live indicators...</div>';
-  fetch('/api/trading/brain/predictions').then(function(r){return r.json();}).then(function(d) {
+  var url = '/api/trading/brain/predictions';
+  if (_cachedScanTickers.length) {
+    url += '?tickers=' + encodeURIComponent(_cachedScanTickers.join(','));
+  }
+  fetch(url).then(function(r){return r.json();}).then(function(d) {
     if (!d.ok || !d.predictions || !d.predictions.length) {
       container.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">No predictions available yet. Run a scan first to generate prediction data.</div>';
       return;
     }
     window._brainPredictions = d.predictions;
-    var _sp = typeof smartPrice === 'function' ? smartPrice : function(v) { return '$' + (v||0).toFixed(2); };
-    var html = '<div class="pred-grid">';
-    d.predictions.forEach(function(p, idx) {
-      var dirLabel = p.direction.replace('_', ' ');
-      var scoreNorm = ((p.score + 10) / 20) * 100;
-      var fillColor = p.score > 0 ? '#22c55e' : p.score < 0 ? '#ef4444' : '#f59e0b';
-      var confColor = p.confidence >= 60 ? '#22c55e' : p.confidence >= 30 ? '#f59e0b' : '#6b7280';
-      var priceStr = p.price != null ? _sp(p.price) : '';
-
-      var riskLine = '';
-      if (p.suggested_stop != null && p.suggested_target != null) {
-        var rrStr = p.risk_reward != null ? p.risk_reward.toFixed(1) : '?';
-        var stopStr = _sp(p.suggested_stop);
-        var targetStr = _sp(p.suggested_target);
-        riskLine = '<div style="display:flex;gap:8px;font-size:9px;margin-top:3px;color:var(--text-muted)">' +
-          '<span style="color:#ef4444">SL ' + stopStr + '</span>' +
-          '<span style="color:#22c55e">TP ' + targetStr + '</span>' +
-          '<span style="font-weight:700">R:R ' + rrStr + '</span>' +
-          (p.position_size_pct ? '<span>Size ' + p.position_size_pct + '%</span>' : '') +
-        '</div>';
-      }
-
-      var mlLine = '';
-      if (p.ml_probability != null) {
-        var mlPct = Math.round(p.ml_probability * 100);
-        mlLine = '<span style="font-size:9px;color:#06b6d4;font-weight:600" title="ML probability of 5d up">ML ' + mlPct + '%</span>';
-      }
-
-      html +=
-        '<div class="pred-card" onclick="showPredictionDetail(' + idx + ')" title="Click for details on ' + p.ticker + '">' +
-          '<div class="pred-top">' +
-            '<span class="pred-ticker">' + p.ticker.replace('-USD','') + '</span>' +
-            '<span class="pred-price">' + priceStr + '</span>' +
-            (mlLine ? mlLine : '') +
-            '<span class="pred-dir ' + p.direction + '">' + dirLabel + '</span>' +
-          '</div>' +
-          '<div style="display:flex;align-items:center;gap:6px">' +
-            '<span class="pred-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
-            '<div class="pred-score-bar" style="flex:1">' +
-              '<div class="pred-score-mid"></div>' +
-              '<div class="pred-score-fill" style="width:' + Math.max(2, scoreNorm) + '%;background:' + fillColor + '"></div>' +
-            '</div>' +
-            '<span style="font-size:10px;font-weight:700;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</span>' +
-          '</div>' +
-          '<div class="pred-signals">' + p.signals.join(' &middot; ') + '</div>' +
-          riskLine +
-        '</div>';
-    });
-    html += '</div>';
-    container.innerHTML = html;
+    _predShowAll = false;
+    _renderPredCards(container, d.predictions);
   }).catch(function() {
     container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load predictions.</div>';
   });
+}
+
+function _renderPredCards(container, predictions) {
+  var _sp = typeof smartPrice === 'function' ? smartPrice : function(v) { return '$' + (v||0).toFixed(2); };
+  var limit = _predShowAll ? predictions.length : Math.min(_PRED_INITIAL, predictions.length);
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">' +
+    '<span style="font-size:11px;color:var(--text-muted)">' + predictions.length + ' predictions</span>' +
+    '<button onclick="loadBrainPredictions()" style="font-size:10px;padding:2px 8px;border-radius:4px;background:var(--accent-bg,rgba(139,92,246,.1));color:#818cf8;border:1px solid rgba(129,140,248,.2);cursor:pointer">Refresh</button>' +
+  '</div>';
+  html += '<div class="pred-grid">';
+  for (var idx = 0; idx < limit; idx++) {
+    var p = predictions[idx];
+    var dirLabel = p.direction.replace('_', ' ');
+    var scoreNorm = ((p.score + 10) / 20) * 100;
+    var fillColor = p.score > 0 ? '#22c55e' : p.score < 0 ? '#ef4444' : '#f59e0b';
+    var confColor = p.confidence >= 60 ? '#22c55e' : p.confidence >= 30 ? '#f59e0b' : '#6b7280';
+    var priceStr = p.price != null ? _sp(p.price) : '';
+
+    var riskLine = '';
+    if (p.suggested_stop != null && p.suggested_target != null) {
+      var rrStr = p.risk_reward != null ? p.risk_reward.toFixed(1) : '?';
+      var stopStr = _sp(p.suggested_stop);
+      var targetStr = _sp(p.suggested_target);
+      riskLine = '<div style="display:flex;gap:8px;font-size:9px;margin-top:3px;color:var(--text-muted)">' +
+        '<span style="color:#ef4444">SL ' + stopStr + '</span>' +
+        '<span style="color:#22c55e">TP ' + targetStr + '</span>' +
+        '<span style="font-weight:700">R:R ' + rrStr + '</span>' +
+        (p.position_size_pct ? '<span>Size ' + p.position_size_pct + '%</span>' : '') +
+      '</div>';
+    }
+
+    var mlLine = '';
+    if (p.ml_probability != null) {
+      var mlPct = Math.round(p.ml_probability * 100);
+      mlLine = '<span style="font-size:9px;color:#06b6d4;font-weight:600" title="ML probability of 5d up">ML ' + mlPct + '%</span>';
+    }
+
+    html +=
+      '<div class="pred-card" onclick="showPredictionDetail(' + idx + ')" title="Click for details on ' + p.ticker + '">' +
+        '<div class="pred-top">' +
+          '<span class="pred-ticker">' + p.ticker.replace('-USD','') + '</span>' +
+          '<span class="pred-price">' + priceStr + '</span>' +
+          (mlLine ? mlLine : '') +
+          '<span class="pred-dir ' + p.direction + '">' + dirLabel + '</span>' +
+        '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px">' +
+          '<span class="pred-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
+          '<div class="pred-score-bar" style="flex:1">' +
+            '<div class="pred-score-mid"></div>' +
+            '<div class="pred-score-fill" style="width:' + Math.max(2, scoreNorm) + '%;background:' + fillColor + '"></div>' +
+          '</div>' +
+          '<span style="font-size:10px;font-weight:700;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</span>' +
+        '</div>' +
+        '<div class="pred-signals">' + p.signals.join(' &middot; ') + '</div>' +
+        riskLine +
+      '</div>';
+  }
+  html += '</div>';
+  if (!_predShowAll && predictions.length > _PRED_INITIAL) {
+    html += '<div style="text-align:center;margin-top:8px"><button onclick="_showAllPredictions()" style="font-size:11px;padding:4px 16px;border-radius:6px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(129,140,248,.2);cursor:pointer">Show All ' + predictions.length + ' Predictions</button></div>';
+  }
+  container.innerHTML = html;
+}
+
+function _showAllPredictions() {
+  _predShowAll = true;
+  var container = document.getElementById('brain-predictions');
+  if (container && window._brainPredictions) {
+    _renderPredCards(container, window._brainPredictions);
+  }
 }
 
 function showPredictionDetail(idx) {
@@ -3783,6 +3859,7 @@ function runScreener() {
     btn.textContent = 'Scan Market';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+escHtml(d.error||'Screener error')+'</em>'; status.textContent = ''; return; }
     status.textContent = d.screen_name + ': ' + d.matches + ' matches out of ' + d.total_scanned.toLocaleString() + ' scanned';
+    _cachedScanTickers = (d.results || []).map(function(r) { return r.ticker; });
     if (!d.results.length) { results.innerHTML = '<div style="padding:12px 0;font-size:12px;color:var(--text-muted)">No tickers matched this pattern right now. Try again after market hours change.</div>'; return; }
 
     var html = '<div class="scr-header"><span>Ticker</span><span>Price</span><span>Score</span><span>Signal</span><span>Stop</span><span>Target</span><span>Confirmations</span></div>';
@@ -3843,6 +3920,8 @@ function runDaytradeScan() {
     btn.textContent = 'Scan Day Trades';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
     status.textContent = d.matches + ' setups from ' + d.candidates_scanned + ' candidates (' + d.elapsed_s + 's)';
+    var dtTickers = (d.results || []).map(function(r) { return r.ticker; });
+    _cachedScanTickers = _cachedScanTickers.concat(dtTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     if (!d.results.length) { results.innerHTML = '<div style="padding:12px 0;font-size:12px;color:var(--text-muted)">No strong day-trade setups found right now.</div>'; return; }
     _lastDaytradeData = d.results;
 
@@ -3890,6 +3969,8 @@ function runBreakoutScan() {
     btn.textContent = 'Scan Breakouts';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
     status.textContent = d.matches + ' setups from ' + d.candidates_scanned + ' candidates (' + d.elapsed_s + 's)';
+    var boTickers = (d.results || []).map(function(r) { return r.ticker; });
+    _cachedScanTickers = _cachedScanTickers.concat(boTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     if (!d.results.length) { results.innerHTML = '<div style="padding:12px 0;font-size:12px;color:var(--text-muted)">No breakout setups detected right now.</div>'; return; }
     _lastBreakoutData = d.results;
 
@@ -5032,11 +5113,12 @@ function prefillSwap(symbol) {
 
 
 /* ── Chart Annotations ──────────────────────────── */
-function clearAnnotations() {
+function clearAnnotations(keepSpecs) {
   _chartAnnotations.forEach(function(line) {
     try { candleSeries.removePriceLine(line); } catch(e) {}
   });
   _chartAnnotations = [];
+  if (!keepSpecs) { _savedAnnotationSpecs = []; }
   var legend = document.getElementById('annotations-legend');
   if (legend) {
     legend.innerHTML = '';
@@ -5045,14 +5127,30 @@ function clearAnnotations() {
   }
 }
 
-function _addPriceLine(price, color, title, style, width) {
+function _restoreAnnotations() {
+  if (!_savedAnnotationSpecs.length || !candleSeries) return;
+  _savedAnnotationSpecs.forEach(function(spec) {
+    _addPriceLine(spec.price, spec.color, spec.title, spec.style, spec.width, true);
+  });
+  if (_savedAnnotationSpecs.length) {
+    _showAnnotationLegend(_savedAnnotationSpecs.map(function(s) {
+      return {label: s.title + (s.price ? ' $' + s.price : ''), color: s.color, dashed: s.style === LightweightCharts.LineStyle.Dashed};
+    }));
+  }
+}
+
+function _addPriceLine(price, color, title, style, width, skipSave) {
   if (!price || !candleSeries) return null;
+  var lineStyle = style || LightweightCharts.LineStyle.Solid;
   var line = candleSeries.createPriceLine({
     price: price, color: color, lineWidth: width || 1,
-    lineStyle: style || LightweightCharts.LineStyle.Solid,
+    lineStyle: lineStyle,
     axisLabelVisible: true, title: title,
   });
   _chartAnnotations.push(line);
+  if (!skipSave) {
+    _savedAnnotationSpecs.push({price: price, color: color, title: title, style: lineStyle, width: width || 1});
+  }
   return line;
 }
 
@@ -5168,6 +5266,312 @@ function _finishLegendDrag() {
 }
 document.addEventListener('mouseup', _finishLegendDrag);
 document.addEventListener('touchend', _finishLegendDrag);
+
+/* ── Drawing Tools Engine ─────────────────────────────────── */
+var _drawTool = null;
+var _userDrawings = [];
+var _drawPending = [];
+var _drawCanvas = null;
+var _drawCtx = null;
+
+function _initDrawCanvas() {
+  _drawCanvas = document.getElementById('draw-canvas');
+  if (!_drawCanvas) return;
+  _drawCtx = _drawCanvas.getContext('2d');
+  _resizeDrawCanvas();
+}
+
+function _resizeDrawCanvas() {
+  if (!_drawCanvas) return;
+  var mc = document.getElementById('main-chart');
+  if (!mc) return;
+  _drawCanvas.width = mc.clientWidth;
+  _drawCanvas.height = mc.clientHeight;
+  _drawCanvas.style.left = mc.offsetLeft + 'px';
+  _drawCanvas.style.top = mc.offsetTop + 'px';
+  _drawCanvas.style.width = mc.clientWidth + 'px';
+  _drawCanvas.style.height = mc.clientHeight + 'px';
+  _redrawAll();
+}
+
+function _setDrawTool(tool) {
+  if (_drawTool === tool) { _drawTool = null; } else { _drawTool = tool; }
+  _drawPending = [];
+  document.querySelectorAll('.draw-btn[data-tool]').forEach(function(b) {
+    b.classList.toggle('active', b.dataset.tool === _drawTool);
+  });
+  var canvas = document.getElementById('draw-canvas');
+  if (canvas) {
+    canvas.classList.toggle('drawing', !!_drawTool);
+    canvas.style.cursor = _drawTool === 'eraser' ? 'pointer' : (_drawTool ? 'crosshair' : 'default');
+  }
+}
+
+document.getElementById('draw-toolbar').addEventListener('click', function(e) {
+  var btn = e.target.closest('.draw-btn');
+  if (!btn) return;
+  if (btn.id === 'draw-clear-btn') { _clearAllDrawings(); return; }
+  var tool = btn.dataset.tool;
+  if (tool) _setDrawTool(tool);
+});
+
+function _pixelToChart(px, py) {
+  if (!chart || !candleSeries) return null;
+  var t = chart.timeScale().coordinateToTime(px);
+  var p = candleSeries.coordinateToPrice(py);
+  if (t == null || p == null) return null;
+  return {time: t, price: p};
+}
+
+function _chartToPixel(time, price) {
+  if (!chart || !candleSeries) return null;
+  var x = chart.timeScale().timeToCoordinate(time);
+  var y = candleSeries.priceToCoordinate(price);
+  if (x == null || y == null) return null;
+  return {x: x, y: y};
+}
+
+function _drawLineOnCanvas(ctx, x1, y1, x2, y2, color, width, dashed) {
+  ctx.beginPath();
+  ctx.strokeStyle = color || '#818cf8';
+  ctx.lineWidth = width || 1.5;
+  if (dashed) ctx.setLineDash([6, 3]); else ctx.setLineDash([]);
+  ctx.moveTo(x1, y1);
+  ctx.lineTo(x2, y2);
+  ctx.stroke();
+  ctx.setLineDash([]);
+}
+
+function _drawRectOnCanvas(ctx, x1, y1, x2, y2, color) {
+  ctx.fillStyle = (color || 'rgba(99,102,241,0.12)');
+  ctx.fillRect(Math.min(x1,x2), Math.min(y1,y2), Math.abs(x2-x1), Math.abs(y2-y1));
+  ctx.strokeStyle = color ? color.replace('0.12','0.5') : 'rgba(99,102,241,0.5)';
+  ctx.lineWidth = 1;
+  ctx.strokeRect(Math.min(x1,x2), Math.min(y1,y2), Math.abs(x2-x1), Math.abs(y2-y1));
+}
+
+function _drawTextOnCanvas(ctx, x, y, text, color) {
+  ctx.font = '12px Inter, sans-serif';
+  ctx.fillStyle = color || '#e2e8f0';
+  ctx.fillText(text, x, y);
+}
+
+var _FIB_LEVELS = [0, 0.236, 0.382, 0.5, 0.618, 0.786, 1];
+var _FIB_COLORS = ['#ef4444','#f59e0b','#eab308','#22c55e','#06b6d4','#3b82f6','#8b5cf6'];
+
+function _drawFibOnCanvas(ctx, high, low, w) {
+  var range = high.price - low.price;
+  for (var i = 0; i < _FIB_LEVELS.length; i++) {
+    var price = low.price + range * _FIB_LEVELS[i];
+    var pt = _chartToPixel(low.time, price);
+    if (!pt) continue;
+    _drawLineOnCanvas(ctx, 0, pt.y, w, pt.y, _FIB_COLORS[i], 1, true);
+    ctx.font = '10px Inter, sans-serif';
+    ctx.fillStyle = _FIB_COLORS[i];
+    ctx.fillText((_FIB_LEVELS[i]*100).toFixed(1) + '% $' + smartPrice(price), 4, pt.y - 3);
+  }
+}
+
+function _redrawAll() {
+  if (!_drawCtx || !_drawCanvas) return;
+  _drawCtx.clearRect(0, 0, _drawCanvas.width, _drawCanvas.height);
+  var w = _drawCanvas.width;
+  _userDrawings.forEach(function(d) { _renderDrawing(_drawCtx, d, w); });
+  if (_drawPending.length > 0 && _drawTool) {
+    _renderPendingPreview(_drawCtx, w);
+  }
+}
+
+function _renderDrawing(ctx, d, w) {
+  if (d.type === 'trendline') {
+    var a = _chartToPixel(d.points[0].time, d.points[0].price);
+    var b = _chartToPixel(d.points[1].time, d.points[1].price);
+    if (a && b) _drawLineOnCanvas(ctx, a.x, a.y, b.x, b.y, d.color, 2);
+  } else if (d.type === 'hline') {
+    var pt = _chartToPixel(d.points[0].time, d.points[0].price);
+    if (pt) {
+      _drawLineOnCanvas(ctx, 0, pt.y, w, pt.y, d.color, 1.5, true);
+      ctx.font = '10px Inter, sans-serif';
+      ctx.fillStyle = d.color || '#818cf8';
+      ctx.fillText('$' + smartPrice(d.points[0].price), 4, pt.y - 3);
+    }
+  } else if (d.type === 'rect') {
+    var a = _chartToPixel(d.points[0].time, d.points[0].price);
+    var b = _chartToPixel(d.points[1].time, d.points[1].price);
+    if (a && b) _drawRectOnCanvas(ctx, a.x, a.y, b.x, b.y, d.color);
+  } else if (d.type === 'fib') {
+    var high = d.points[0].price > d.points[1].price ? d.points[0] : d.points[1];
+    var low = d.points[0].price <= d.points[1].price ? d.points[0] : d.points[1];
+    _drawFibOnCanvas(ctx, high, low, w);
+  } else if (d.type === 'text') {
+    var pt = _chartToPixel(d.points[0].time, d.points[0].price);
+    if (pt) _drawTextOnCanvas(ctx, pt.x, pt.y, d.text, d.color);
+  }
+}
+
+function _renderPendingPreview(ctx, w) {
+  if (_drawPending.length === 0) return;
+  if ((_drawTool === 'trendline' || _drawTool === 'rect' || _drawTool === 'fib') && _drawPending.length === 1 && _drawHover) {
+    var a = _chartToPixel(_drawPending[0].time, _drawPending[0].price);
+    var b = _drawHover;
+    if (a && b) {
+      if (_drawTool === 'trendline') _drawLineOnCanvas(ctx, a.x, a.y, b.x, b.y, 'rgba(129,140,248,.5)', 1.5);
+      else if (_drawTool === 'rect') _drawRectOnCanvas(ctx, a.x, a.y, b.x, b.y);
+      else if (_drawTool === 'fib') {
+        var priceA = _drawPending[0].price;
+        var priceB = candleSeries.coordinateToPrice(b.y);
+        if (priceB != null) {
+          var high = {price: Math.max(priceA, priceB), time: _drawPending[0].time};
+          var low = {price: Math.min(priceA, priceB), time: _drawPending[0].time};
+          _drawFibOnCanvas(ctx, high, low, w);
+        }
+      }
+    }
+  }
+}
+
+var _drawHover = null;
+
+function _handleDrawCanvasClick(e) {
+  if (!_drawTool || !chart || !candleSeries) return;
+  var rect = _drawCanvas.getBoundingClientRect();
+  var px = e.clientX - rect.left;
+  var py = e.clientY - rect.top;
+
+  if (_drawTool === 'eraser') {
+    _eraseAt(px, py);
+    return;
+  }
+
+  var pt = _pixelToChart(px, py);
+  if (!pt) return;
+
+  if (_drawTool === 'text') {
+    var txt = prompt('Enter label text:');
+    if (txt) {
+      _userDrawings.push({type:'text', points:[pt], text:txt, color:'#e2e8f0'});
+      _saveDrawings();
+      _redrawAll();
+    }
+    return;
+  }
+
+  if (_drawTool === 'hline') {
+    _userDrawings.push({type:'hline', points:[pt], color:'#818cf8'});
+    _saveDrawings();
+    _redrawAll();
+    return;
+  }
+
+  _drawPending.push(pt);
+  if (_drawPending.length >= 2) {
+    _userDrawings.push({type:_drawTool, points:[_drawPending[0], _drawPending[1]], color: _drawTool === 'rect' ? 'rgba(99,102,241,0.12)' : '#818cf8'});
+    _drawPending = [];
+    _drawHover = null;
+    _saveDrawings();
+    _redrawAll();
+  }
+}
+
+function _handleDrawCanvasMove(e) {
+  if (!_drawTool || _drawPending.length === 0) { _drawHover = null; return; }
+  var rect = _drawCanvas.getBoundingClientRect();
+  _drawHover = {x: e.clientX - rect.left, y: e.clientY - rect.top};
+  _redrawAll();
+}
+
+function _eraseAt(px, py) {
+  var threshold = 12;
+  for (var i = _userDrawings.length - 1; i >= 0; i--) {
+    var d = _userDrawings[i];
+    if (d.type === 'hline') {
+      var pt = _chartToPixel(d.points[0].time, d.points[0].price);
+      if (pt && Math.abs(pt.y - py) < threshold) { _userDrawings.splice(i,1); break; }
+    } else if (d.type === 'text') {
+      var pt = _chartToPixel(d.points[0].time, d.points[0].price);
+      if (pt && Math.abs(pt.x - px) < 40 && Math.abs(pt.y - py) < 15) { _userDrawings.splice(i,1); break; }
+    } else if (d.points && d.points.length === 2) {
+      var a = _chartToPixel(d.points[0].time, d.points[0].price);
+      var b = _chartToPixel(d.points[1].time, d.points[1].price);
+      if (a && b) {
+        if (d.type === 'rect') {
+          var minX = Math.min(a.x, b.x), maxX = Math.max(a.x, b.x);
+          var minY = Math.min(a.y, b.y), maxY = Math.max(a.y, b.y);
+          if (px >= minX - threshold && px <= maxX + threshold && py >= minY - threshold && py <= maxY + threshold) {
+            _userDrawings.splice(i,1); break;
+          }
+        } else {
+          var dist = _pointToLineDistance(px, py, a.x, a.y, b.x, b.y);
+          if (dist < threshold) { _userDrawings.splice(i,1); break; }
+        }
+      }
+    }
+  }
+  _saveDrawings();
+  _redrawAll();
+}
+
+function _pointToLineDistance(px, py, x1, y1, x2, y2) {
+  var A = px - x1, B = py - y1, C = x2 - x1, D = y2 - y1;
+  var dot = A*C + B*D, len2 = C*C + D*D;
+  var t = len2 !== 0 ? Math.max(0, Math.min(1, dot / len2)) : 0;
+  var projX = x1 + t*C, projY = y1 + t*D;
+  return Math.sqrt((px-projX)*(px-projX) + (py-projY)*(py-projY));
+}
+
+function _clearAllDrawings() {
+  _userDrawings = [];
+  _drawPending = [];
+  _drawHover = null;
+  _saveDrawings();
+  _redrawAll();
+  _setDrawTool(null);
+}
+
+function _saveDrawings() {
+  if (!currentTicker) return;
+  try { sessionStorage.setItem('drawings_' + currentTicker, JSON.stringify(_userDrawings)); } catch(e) {}
+}
+
+function _loadDrawings() {
+  _userDrawings = [];
+  if (!currentTicker) return;
+  try {
+    var s = sessionStorage.getItem('drawings_' + currentTicker);
+    if (s) _userDrawings = JSON.parse(s);
+  } catch(e) {}
+  _redrawAll();
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
+  var k = e.key.toUpperCase();
+  if (k === 'L') { _setDrawTool('trendline'); e.preventDefault(); }
+  else if (k === 'H' && !e.ctrlKey && !e.metaKey) { _setDrawTool('hline'); e.preventDefault(); }
+  else if (k === 'R' && !e.ctrlKey && !e.metaKey) { _setDrawTool('rect'); e.preventDefault(); }
+  else if (k === 'F' && !e.ctrlKey && !e.metaKey) { _setDrawTool('fib'); e.preventDefault(); }
+  else if (k === 'T' && !e.ctrlKey && !e.metaKey) { _setDrawTool('text'); e.preventDefault(); }
+  else if (k === 'E') { _setDrawTool('eraser'); e.preventDefault(); }
+  else if (k === 'X') { _clearAllDrawings(); e.preventDefault(); }
+  else if (k === 'ESCAPE') { _setDrawTool(null); }
+  else if (k === 'DELETE' || k === 'BACKSPACE') { if (_drawTool === 'eraser') e.preventDefault(); }
+});
+
+function _initDrawingListeners() {
+  _initDrawCanvas();
+  var canvas = document.getElementById('draw-canvas');
+  if (!canvas) return;
+  canvas.addEventListener('click', _handleDrawCanvasClick);
+  canvas.addEventListener('mousemove', _handleDrawCanvasMove);
+  canvas.addEventListener('contextmenu', function(e) {
+    e.preventDefault();
+    _setDrawTool(null);
+  });
+  if (chart) {
+    chart.timeScale().subscribeVisibleTimeRangeChange(function() { _redrawAll(); });
+  }
+  new ResizeObserver(function() { _resizeDrawCanvas(); }).observe(document.getElementById('main-chart'));
+}
 
 function drawBreakoutAnnotations(r) {
   clearAnnotations();

@@ -945,6 +945,61 @@ def predict_confidence(score: float) -> int:
     return min(100, int(abs(score) * 10))
 
 
+def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[str]:
+    """Build a diverse ticker list for predictions from multiple sources."""
+    if explicit:
+        return explicit
+
+    seen: set[str] = set()
+    result: list[str] = []
+
+    def _add(t: str):
+        u = t.upper()
+        if u not in seen:
+            seen.add(u)
+            result.append(u)
+
+    recent_scans = (
+        db.query(ScanResult.ticker, ScanResult.score)
+        .order_by(ScanResult.scanned_at.desc())
+        .limit(200)
+        .all()
+    )
+    top_scanned = sorted(set((r.ticker, r.score) for r in recent_scans), key=lambda x: x[1], reverse=True)
+    for ticker, _ in top_scanned[:30]:
+        _add(ticker)
+
+    try:
+        from .prescreener import get_trending_crypto
+        for t in get_trending_crypto()[:20]:
+            _add(t)
+    except Exception:
+        pass
+
+    try:
+        from ..ticker_universe import get_all_crypto_tickers
+        for t in get_all_crypto_tickers(n=50)[:20]:
+            _add(t)
+    except Exception:
+        for t in DEFAULT_CRYPTO_TICKERS[:15]:
+            _add(t)
+
+    try:
+        wl_items = get_watchlist(db, user_id=None)
+        for item in wl_items[:15]:
+            _add(item.ticker)
+    except Exception:
+        pass
+
+    if len(result) < 25:
+        for t in DEFAULT_SCAN_TICKERS[:20]:
+            _add(t)
+        for t in DEFAULT_CRYPTO_TICKERS[:10]:
+            _add(t)
+
+    return result
+
+
 def get_current_predictions(db: Session, tickers: list[str] | None = None) -> list[dict]:
     """Generate live predictions for a set of tickers.
 
@@ -953,15 +1008,14 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
     """
     from .ml_engine import predict_ml, extract_features, is_model_ready
 
-    if not tickers:
-        tickers = list(DEFAULT_SCAN_TICKERS[:10] + DEFAULT_CRYPTO_TICKERS[:5])
+    tickers = _build_prediction_tickers(db, tickers)
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
     ml_available = is_model_ready()
 
     results = []
-    for ticker in tickers[:20]:
+    for ticker in tickers[:50]:
         try:
             snapshot = get_indicator_snapshot(ticker)
             if not snapshot or len(snapshot) < 3:
