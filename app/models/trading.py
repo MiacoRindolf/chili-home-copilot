@@ -128,3 +128,56 @@ class LearningEvent(Base):
     confidence_after: Optional[float] = Column(Float, nullable=True)
     related_insight_id: Optional[int] = Column(Integer, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class AlertHistory(Base):
+    """Log of all SMS/notification alerts sent to the user."""
+    __tablename__ = "trading_alerts"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    alert_type: str = Column(String(30), nullable=False)
+    ticker: str = Column(String(20), nullable=True)
+    message: str = Column(Text, nullable=False)
+    sent_via: str = Column(String(20), nullable=False, default="email_gateway")
+    success: bool = Column(Boolean, nullable=False, default=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class StrategyProposal(Base):
+    """AI-generated trade proposal for user review and optional auto-execution."""
+    __tablename__ = "trading_proposals"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    ticker: str = Column(String(20), nullable=False, index=True)
+    direction: str = Column(String(10), nullable=False, default="long")  # long / short
+    status: str = Column(String(20), nullable=False, default="pending")  # pending / approved / rejected / executed / expired
+
+    entry_price: float = Column(Float, nullable=False)
+    stop_loss: float = Column(Float, nullable=False)
+    take_profit: float = Column(Float, nullable=False)
+    quantity: Optional[float] = Column(Float, nullable=True)
+    position_size_pct: Optional[float] = Column(Float, nullable=True)
+
+    projected_profit_pct: float = Column(Float, nullable=False, default=0.0)
+    projected_loss_pct: float = Column(Float, nullable=False, default=0.0)
+    risk_reward_ratio: float = Column(Float, nullable=False, default=0.0)
+    confidence: float = Column(Float, nullable=False, default=0.0)
+
+    timeframe: str = Column(String(30), nullable=False, default="swing")
+    thesis: str = Column(Text, nullable=False, default="")
+    signals_json: Optional[str] = Column(Text, nullable=True)
+    indicator_json: Optional[str] = Column(Text, nullable=True)
+
+    brain_score: Optional[float] = Column(Float, nullable=True)
+    ml_probability: Optional[float] = Column(Float, nullable=True)
+    scan_score: Optional[float] = Column(Float, nullable=True)
+
+    proposed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    reviewed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    executed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    expires_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+    broker_order_id: Optional[str] = Column(String(100), nullable=True)
+    trade_id: Optional[int] = Column(Integer, nullable=True)

@@ -1492,7 +1492,7 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 10
+    _learning_status["total_steps"] = 11
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -1615,7 +1615,23 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 9
         _step_time("ml_train", step_start)
 
-        # Step 10: Finalize
+        # Step 10: Generate strategy proposals
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Generating strategy proposals"
+        _learning_status["phase"] = "proposals"
+        try:
+            from .alerts import generate_strategy_proposals
+            proposals = generate_strategy_proposals(db, user_id)
+            report["proposals_generated"] = len(proposals)
+        except Exception as e:
+            logger.warning(f"[trading] Strategy proposal generation failed: {e}")
+            report["proposals_generated"] = 0
+        _learning_status["steps_completed"] = 10
+        _step_time("proposals", step_start)
+
+        # Step 11: Finalize
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start
@@ -1626,9 +1642,10 @@ def run_learning_cycle(
             f"{report['patterns_discovered']} patterns, "
             f"{report.get('backtests_run', 0)} backtests, "
             f"{report['signal_events']} signals, "
-            f"ML={'trained' if report.get('ml_trained') else 'skipped'} — {elapsed:.0f}s",
+            f"ML={'trained' if report.get('ml_trained') else 'skipped'}, "
+            f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = 10
+        _learning_status["steps_completed"] = 11
 
     except InterruptedError:
         logger.info("[trading] Learning cycle interrupted by shutdown")

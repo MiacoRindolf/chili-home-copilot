@@ -69,6 +69,22 @@ def _run_broker_sync_job():
         db.close()
 
 
+def _run_price_monitor_job():
+    """Check positions/breakouts/picks and dispatch alerts every 5 minutes."""
+    from ..db import SessionLocal
+    from .trading.alerts import run_price_monitor
+
+    logger.info("[scheduler] Starting price monitor check")
+    db = SessionLocal()
+    try:
+        result = run_price_monitor(db, user_id=None)
+        logger.info(f"[scheduler] Price monitor result: {result}")
+    except Exception as e:
+        logger.error(f"[scheduler] Price monitor failed: {e}")
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -110,8 +126,21 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_price_monitor_job,
+            trigger=CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-16",
+                minute="*/5",
+            ),
+            id="price_monitor",
+            name="Price monitor & alerts (market hours every 5min)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _scheduler.start()
-        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min market hours)")
+        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min, price monitor every 5min market hours)")
 
 
 def stop_scheduler():

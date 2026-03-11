@@ -523,6 +523,80 @@ def api_top_picks(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, "picks": picks})
 
 
+# ── Strategy Proposals ─────────────────────────────────────────────────
+
+@router.get("/api/trading/proposals")
+def api_get_proposals(
+    request: Request,
+    db: Session = Depends(get_db),
+    status: str | None = Query(None),
+):
+    ctx = get_identity_ctx(request, db)
+    proposals = ts.get_proposals(db, ctx["user_id"], status=status)
+    return JSONResponse({"ok": True, "proposals": proposals})
+
+
+@router.post("/api/trading/proposals/{proposal_id}/approve")
+def api_approve_proposal(
+    proposal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ctx = get_identity_ctx(request, db)
+    result = ts.approve_proposal(db, proposal_id, ctx["user_id"])
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/proposals/{proposal_id}/reject")
+def api_reject_proposal(
+    proposal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    ctx = get_identity_ctx(request, db)
+    result = ts.reject_proposal(db, proposal_id, ctx["user_id"])
+    return JSONResponse(result)
+
+
+# ── Alerts ─────────────────────────────────────────────────────────────
+
+@router.get("/api/trading/alerts/history")
+def api_alert_history(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(50),
+):
+    ctx = get_identity_ctx(request, db)
+    history = ts.get_alert_history(db, ctx["user_id"], limit=limit)
+    return JSONResponse({"ok": True, "alerts": history})
+
+
+@router.post("/api/trading/alerts/test")
+def api_test_alert(request: Request, db: Session = Depends(get_db)):
+    """Send a test SMS alert to verify the notification setup."""
+    ctx = get_identity_ctx(request, db)
+    from ..services.sms_service import send_sms, get_sms_status
+
+    sms_status = get_sms_status()
+    if not sms_status["configured"]:
+        return JSONResponse({"ok": False, "error": "SMS not configured. Set SMS_PHONE and SMS_CARRIER (or Twilio) in .env"})
+
+    msg = "CHILI Test Alert: SMS notifications are working! You'll receive alerts for breakouts, targets, stops, and strategy proposals."
+    sent = send_sms(msg)
+
+    if sent:
+        ts.dispatch_alert(db, ctx["user_id"], "test", None, msg)
+
+    return JSONResponse({"ok": sent, "status": sms_status})
+
+
+@router.get("/api/trading/alerts/settings")
+def api_alert_settings():
+    """Return current alert settings for the UI."""
+    from ..services.sms_service import get_sms_status
+    return JSONResponse({"ok": True, **get_sms_status()})
+
+
 # ── Background Learning ───────────────────────────────────────────────
 
 @router.post("/api/trading/learn/snapshot")

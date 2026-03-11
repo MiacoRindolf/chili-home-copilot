@@ -1,4 +1,4 @@
-"""Robinhood read-only portfolio integration via robin_stocks.
+"""Robinhood portfolio integration via robin_stocks.
 
 Supports two MFA flows:
   1. TOTP (automatic) — if ROBINHOOD_TOTP_SECRET is set in .env
@@ -9,7 +9,7 @@ Uses robin_stocks' internal HTTP helpers for the raw API calls during
 SMS verification, since the library's login() uses input() which is
 unusable in a web server.
 
-No orders are ever placed through this module.
+Includes order placement for approved strategy proposals.
 """
 from __future__ import annotations
 
@@ -698,6 +698,147 @@ def build_portfolio_context() -> str:
             lines.append(f"Total P&L: {pnl_sign}${total_pnl:,.2f} ({pnl_sign}{total_pct:.2f}%)")
 
     return "\n".join(lines)
+
+
+# ── Order Placement ───────────────────────────────────────────────────
+
+
+def place_buy_order(
+    ticker: str,
+    quantity: float,
+    order_type: str = "market",
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    """Place a buy order via Robinhood.
+
+    Args:
+        ticker: Stock symbol (e.g. "AAPL")
+        quantity: Number of shares
+        order_type: "market" or "limit"
+        limit_price: Required for limit orders
+
+    Returns:
+        {"ok": True, "order_id": "...", "state": "..."} on success,
+        {"ok": False, "error": "..."} on failure.
+    """
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        if order_type == "limit" and limit_price:
+            result = rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="buy",
+                limitPrice=round(limit_price, 2),
+                stopPrice=None,
+                timeInForce="gtc",
+                trigger="immediate",
+                orderType="limit",
+                extendedHours=False,
+                jsonify=True,
+            )
+        else:
+            result = rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="buy",
+                limitPrice=None,
+                stopPrice=None,
+                timeInForce="gtc",
+                trigger="immediate",
+                orderType="market",
+                extendedHours=False,
+                jsonify=True,
+            )
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id", "")
+            state = result.get("state", "unknown")
+            logger.info(f"[broker] BUY order placed: {ticker} x{quantity} ({order_type}) → {state}")
+            _cache.pop("positions", None)
+            _cache.pop("portfolio", None)
+            _cache.pop("recent_orders", None)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+        else:
+            error_msg = str(result) if result else "Empty response from Robinhood"
+            logger.error(f"[broker] BUY order failed for {ticker}: {error_msg}")
+            return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error(f"[broker] BUY order exception for {ticker}: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
+
+
+def place_sell_order(
+    ticker: str,
+    quantity: float,
+    order_type: str = "market",
+    limit_price: float | None = None,
+) -> dict[str, Any]:
+    """Place a sell order via Robinhood.
+
+    Args:
+        ticker: Stock symbol (e.g. "AAPL")
+        quantity: Number of shares
+        order_type: "market" or "limit"
+        limit_price: Required for limit orders
+
+    Returns:
+        {"ok": True, "order_id": "...", "state": "..."} on success,
+        {"ok": False, "error": "..."} on failure.
+    """
+    if not is_connected():
+        return {"ok": False, "error": "Not connected to Robinhood"}
+
+    try:
+        import robin_stocks.robinhood as rh
+
+        if order_type == "limit" and limit_price:
+            result = rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="sell",
+                limitPrice=round(limit_price, 2),
+                stopPrice=None,
+                timeInForce="gtc",
+                trigger="immediate",
+                orderType="limit",
+                extendedHours=False,
+                jsonify=True,
+            )
+        else:
+            result = rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="sell",
+                limitPrice=None,
+                stopPrice=None,
+                timeInForce="gtc",
+                trigger="immediate",
+                orderType="market",
+                extendedHours=False,
+                jsonify=True,
+            )
+
+        if result and isinstance(result, dict):
+            order_id = result.get("id", "")
+            state = result.get("state", "unknown")
+            logger.info(f"[broker] SELL order placed: {ticker} x{quantity} ({order_type}) → {state}")
+            _cache.pop("positions", None)
+            _cache.pop("portfolio", None)
+            _cache.pop("recent_orders", None)
+            return {"ok": True, "order_id": order_id, "state": state, "raw": result}
+        else:
+            error_msg = str(result) if result else "Empty response from Robinhood"
+            logger.error(f"[broker] SELL order failed for {ticker}: {error_msg}")
+            return {"ok": False, "error": error_msg}
+
+    except Exception as e:
+        logger.error(f"[broker] SELL order exception for {ticker}: {e}", exc_info=True)
+        return {"ok": False, "error": str(e)}
 
 
 # ── Helpers ──

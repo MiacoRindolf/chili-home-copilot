@@ -53,7 +53,17 @@ class Settings(BaseSettings):
     # 0x DEX aggregator (free tier, for MetaMask swap quotes)
     zerox_api_key: str = ""
 
-    # Robinhood (read-only portfolio sync)
+    # SMS Notifications (trading alerts)
+    sms_phone: str = ""              # 10-digit US phone number, e.g. "8509774415"
+    sms_carrier: str = "verizon"     # verizon, att, tmobile, sprint, uscellular, boost, cricket, metro, mint, visible, google_fi
+    alerts_enabled: bool = True
+
+    # Twilio (optional SMS upgrade — if empty, email-to-SMS gateway is used)
+    twilio_account_sid: str = ""
+    twilio_auth_token: str = ""
+    twilio_phone_number: str = ""    # Twilio phone number with country code, e.g. "+18001234567"
+
+    # Robinhood (portfolio sync + order execution)
     robinhood_username: str = ""
     robinhood_password: str = ""
     robinhood_totp_secret: str = ""  # optional: base32 TOTP secret; if empty, SMS-based MFA is used

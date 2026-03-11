@@ -493,6 +493,95 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .picks-empty .pe-title { font-size: 14px; font-weight: 600; color: var(--text); margin-bottom: 4px; }
 .picks-empty .pe-sub { font-size: 11px; line-height: 1.5; }
 
+/* ── Strategy proposals ──────────────────────────── */
+.proposals-section { margin-bottom: 12px; }
+.proposals-section h4 { font-size: 13px; font-weight: 700; margin: 0 0 8px 0; display: flex; align-items: center; gap: 6px; }
+.proposal-card {
+  border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 10px;
+  background: var(--bg); position: relative; overflow: hidden;
+  border-left: 4px solid #8b5cf6; transition: box-shadow .2s;
+}
+.proposal-card:hover { box-shadow: 0 4px 20px rgba(139,92,246,.12); }
+.proposal-card.executed { border-left-color: #22c55e; opacity: .7; }
+.proposal-card.rejected { border-left-color: #ef4444; opacity: .5; }
+.proposal-card.expired { border-left-color: #6b7280; opacity: .4; }
+.prop-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 8px; }
+.prop-ticker { font-weight: 800; font-size: 16px; letter-spacing: .5px; }
+.prop-status { font-size: 10px; font-weight: 700; padding: 2px 10px; border-radius: 20px; text-transform: uppercase; }
+.prop-status.pending { background: #dbeafe; color: #2563eb; }
+.prop-status.approved { background: #dcfce7; color: #16a34a; }
+.prop-status.executed { background: #dcfce7; color: #16a34a; }
+.prop-status.rejected { background: #fee2e2; color: #dc2626; }
+.prop-status.expired { background: var(--bg-header); color: var(--text-muted); }
+.prop-price-ladder {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;
+  background: var(--bg-header); border-radius: 10px; padding: 8px; margin-bottom: 8px;
+}
+.prop-price-ladder .pl-item { text-align: center; }
+.prop-price-ladder .pl-label { font-size: 8px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); }
+.prop-price-ladder .pl-value { font-weight: 700; font-family: monospace; font-size: 13px; }
+.pl-value.entry { color: #3b82f6; }
+.pl-value.stop { color: #ef4444; }
+.pl-value.target { color: #22c55e; }
+.prop-pnl-row { display: flex; gap: 12px; margin-bottom: 8px; flex-wrap: wrap; }
+.prop-pnl-item { display: flex; flex-direction: column; align-items: center; }
+.prop-pnl-label { font-size: 8px; text-transform: uppercase; color: var(--text-muted); }
+.prop-pnl-val { font-weight: 700; font-size: 14px; }
+.prop-pnl-val.profit { color: #22c55e; }
+.prop-pnl-val.loss { color: #ef4444; }
+.prop-pnl-val.rr { color: #3b82f6; }
+.prop-conf { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.prop-conf-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; max-width: 120px; }
+.prop-conf-fill { height: 100%; border-radius: 3px; }
+.prop-thesis { font-size: 11px; color: var(--text-muted); line-height: 1.4; margin-bottom: 8px; cursor: pointer; }
+.prop-thesis.collapsed { max-height: 32px; overflow: hidden; text-overflow: ellipsis; }
+.prop-meta { font-size: 9px; color: var(--text-muted); display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 8px; }
+.prop-actions { display: flex; gap: 8px; }
+.prop-btn-approve {
+  padding: 6px 18px; border: none; border-radius: 8px; font-weight: 700; font-size: 12px;
+  background: linear-gradient(135deg, #22c55e, #16a34a); color: #fff; cursor: pointer;
+  transition: transform .1s;
+}
+.prop-btn-approve:hover { transform: scale(1.03); }
+.prop-btn-reject {
+  padding: 6px 14px; border: 1px solid var(--border); border-radius: 8px; font-weight: 600;
+  font-size: 12px; background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.prop-btn-reject:hover { border-color: #ef4444; color: #ef4444; }
+.prop-expiry { font-size: 9px; color: var(--text-muted); }
+
+/* ── Alerts settings ──────────────────────────────── */
+.alerts-settings-bar {
+  display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
+  padding: 8px 10px; background: var(--bg-header); border-radius: 10px;
+  margin-bottom: 10px; font-size: 11px;
+}
+.alerts-settings-bar label { color: var(--text-muted); font-size: 10px; }
+.alerts-settings-bar input { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 11px; width: 100px; }
+.alerts-settings-bar select { padding: 3px 6px; border: 1px solid var(--border); border-radius: 4px; background: var(--input-bg); color: var(--text); font-size: 11px; }
+.alerts-settings-bar button { padding: 3px 10px; border: 1px solid var(--accent); border-radius: 6px; background: transparent; color: var(--accent); cursor: pointer; font-size: 10px; font-weight: 600; }
+.alerts-settings-bar .sms-status { font-size: 10px; }
+.sms-status.ok { color: #22c55e; }
+.sms-status.off { color: #ef4444; }
+
+/* ── Alert history ──────────────────────────────── */
+.alert-history { margin-top: 10px; }
+.alert-history summary { font-size: 12px; font-weight: 600; cursor: pointer; color: var(--text-muted); }
+.alert-history summary:hover { color: var(--text); }
+.alert-row { display: flex; gap: 8px; align-items: center; padding: 4px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.alert-type-badge { padding: 1px 6px; border-radius: 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+.alert-type-badge.target_hit { background: #dcfce7; color: #16a34a; }
+.alert-type-badge.stop_hit { background: #fee2e2; color: #dc2626; }
+.alert-type-badge.breakout_triggered { background: #dbeafe; color: #2563eb; }
+.alert-type-badge.strategy_proposed { background: #f3e8ff; color: #7c3aed; }
+.alert-type-badge.position_opened { background: #dcfce7; color: #16a34a; }
+.alert-type-badge.position_closed { background: #fef9c3; color: #a16207; }
+.alert-type-badge.weekly_review { background: var(--bg-header); color: var(--text-muted); }
+.alert-type-badge.test { background: var(--bg-header); color: var(--text-muted); }
+.alert-ticker { font-weight: 700; min-width: 60px; }
+.alert-msg { flex: 1; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alert-time { font-size: 9px; color: var(--text-muted); white-space: nowrap; }
+
 /* Back-compat: old signal-card class */
 .signal-card { display: none; }
 .sc-badge.buy { background: #dcfce7; color: #16a34a; }
@@ -1443,8 +1532,28 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <div class="t-tab-content active" id="tab-signals">
         <div style="display:flex;gap:8px;align-items:center;margin-bottom:8px;flex-wrap:wrap">
           <button onclick="loadTopPicks()" id="btn-refresh-picks" style="padding:5px 14px;border:none;border-radius:6px;background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;cursor:pointer;font-size:12px;font-weight:600">&#x1F9E0; Refresh AI Picks</button>
+          <button onclick="loadProposals()" style="padding:5px 14px;border:none;border-radius:6px;background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;cursor:pointer;font-size:12px;font-weight:600">&#x1F4CB; Proposals</button>
+          <button onclick="toggleAlertSettings()" style="padding:5px 10px;border:1px solid var(--border);border-radius:6px;background:transparent;color:var(--text-muted);cursor:pointer;font-size:12px" title="Alert Settings">&#x2699;</button>
           <span id="picks-status" style="font-size:11px;color:var(--text-muted)"></span>
         </div>
+
+        <!-- Alert Settings (hidden by default) -->
+        <div id="alert-settings-panel" style="display:none">
+          <div class="alerts-settings-bar">
+            <span>&#x1F4F1; SMS Alerts</span>
+            <span id="sms-status-indicator" class="sms-status off">checking...</span>
+            <button onclick="sendTestAlert()">Test SMS</button>
+            <span id="test-alert-result" style="font-size:10px"></span>
+          </div>
+        </div>
+
+        <!-- Strategy Proposals -->
+        <div id="proposals-section" class="proposals-section" style="display:none">
+          <h4>&#x1F4CB; Strategy Proposals <span id="proposals-count" style="font-size:10px;color:var(--text-muted)"></span></h4>
+          <div id="proposals-list"></div>
+        </div>
+
+        <!-- Top Picks -->
         <div id="signals-list" class="picks-grid">
           <div class="picks-empty">
             <div class="pe-icon">&#x1F9E0;</div>
@@ -1452,6 +1561,12 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
             <div class="pe-sub">Run a full scan first, then CHILI will analyze the entire market and surface its best trade ideas with detailed entry/exit plans.</div>
           </div>
         </div>
+
+        <!-- Alert History -->
+        <details class="alert-history" id="alert-history-section">
+          <summary>&#x1F514; Alert History</summary>
+          <div id="alert-history-list" style="max-height:200px;overflow-y:auto;margin-top:6px"></div>
+        </details>
       </div>
 
       <!-- Screener -->
@@ -4430,7 +4545,7 @@ function _loadTopPicksBanner() {
   });
 }
 
-function loadSignals() { loadTopPicks(); }
+function loadSignals() { loadTopPicks(); loadProposals(); }
 function loadSignalsBanner() { _loadTopPicksBanner(); }
 
 function runFullScan() {
@@ -4445,6 +4560,193 @@ function runFullScan() {
         loadTopPicks();
       }
     }).catch(function() { btn.textContent = '\uD83D\uDD0D Run Full Scan'; btn.disabled = false; });
+}
+
+/* ── Strategy Proposals ──────────────────────────── */
+
+function loadProposals() {
+  fetch('/api/trading/proposals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var section = document.getElementById('proposals-section');
+    var list = document.getElementById('proposals-list');
+    var count = document.getElementById('proposals-count');
+    var pending = (d.proposals || []).filter(function(p) { return p.status === 'pending'; });
+    if (count) count.textContent = pending.length ? '(' + pending.length + ' pending)' : '';
+    if (!d.proposals || !d.proposals.length) {
+      section.style.display = 'block';
+      list.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">No strategy proposals yet. AI Brain will generate proposals during the next learning cycle when high-confidence opportunities are found.</div>';
+      return;
+    }
+    section.style.display = 'block';
+    list.innerHTML = '';
+    d.proposals.forEach(function(p) { list.innerHTML += _renderProposalCard(p); });
+  });
+  loadAlertHistory();
+  loadAlertSettings();
+}
+
+function _renderProposalCard(p) {
+  var isCr = (p.ticker || '').indexOf('-USD') !== -1;
+  var statusCls = p.status || 'pending';
+  var confPct = Math.round(p.confidence || 0);
+  var confColor = confPct >= 70 ? '#22c55e' : (confPct >= 50 ? '#f59e0b' : '#ef4444');
+  var profitPct = p.projected_profit_pct ? (p.projected_profit_pct > 0 ? '+' : '') + p.projected_profit_pct.toFixed(1) + '%' : '--';
+  var lossPct = p.projected_loss_pct ? '-' + Math.abs(p.projected_loss_pct).toFixed(1) + '%' : '--';
+  var rrText = p.risk_reward_ratio ? p.risk_reward_ratio.toFixed(1) + ':1' : '--';
+
+  var timeLeft = '';
+  if (p.status === 'pending' && p.expires_at) {
+    var exp = new Date(p.expires_at);
+    var now = new Date();
+    var diffMs = exp - now;
+    if (diffMs > 0) {
+      var hrs = Math.floor(diffMs / 3600000);
+      var mins = Math.floor((diffMs % 3600000) / 60000);
+      timeLeft = hrs + 'h ' + mins + 'm left';
+    } else {
+      timeLeft = 'Expired';
+    }
+  }
+
+  var html = '<div class="proposal-card ' + statusCls + '">';
+  html += '<div class="prop-header">';
+  html += '<div><span class="prop-ticker">' + p.ticker + '</span> <span style="font-size:11px;color:var(--text-muted)">' + (p.direction || 'long').toUpperCase() + '</span></div>';
+  html += '<span class="prop-status ' + statusCls + '">' + statusCls + '</span></div>';
+
+  html += '<div class="prop-price-ladder">';
+  html += '<div class="pl-item"><div class="pl-label">Entry</div><div class="pl-value entry">$' + smartPrice(p.entry_price, isCr) + '</div></div>';
+  html += '<div class="pl-item"><div class="pl-label">Stop Loss</div><div class="pl-value stop">$' + smartPrice(p.stop_loss, isCr) + '</div></div>';
+  html += '<div class="pl-item"><div class="pl-label">Target</div><div class="pl-value target">$' + smartPrice(p.take_profit, isCr) + '</div></div>';
+  html += '</div>';
+
+  html += '<div class="prop-pnl-row">';
+  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Projected Profit</span><span class="prop-pnl-val profit">' + profitPct + '</span></div>';
+  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Max Loss</span><span class="prop-pnl-val loss">' + lossPct + '</span></div>';
+  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">R:R Ratio</span><span class="prop-pnl-val rr">' + rrText + '</span></div>';
+  if (p.quantity) html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Qty</span><span class="prop-pnl-val">' + p.quantity + '</span></div>';
+  if (p.position_size_pct) html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Position</span><span class="prop-pnl-val">' + p.position_size_pct + '%</span></div>';
+  html += '</div>';
+
+  html += '<div class="prop-conf"><span style="font-size:10px;color:var(--text-muted)">Confidence</span>';
+  html += '<div class="prop-conf-bar"><div class="prop-conf-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>';
+  html += '<span style="font-size:11px;font-weight:700;color:' + confColor + '">' + confPct + '%</span></div>';
+
+  if (p.thesis) {
+    html += '<div class="prop-thesis collapsed" onclick="this.classList.toggle(\'collapsed\')">' + escHtml(p.thesis) + '</div>';
+  }
+
+  html += '<div class="prop-meta">';
+  if (p.timeframe) html += '<span>Timeframe: ' + p.timeframe + '</span>';
+  if (p.brain_score) html += '<span>Brain: ' + (p.brain_score > 0 ? '+' : '') + p.brain_score.toFixed(1) + '</span>';
+  if (p.ml_probability) html += '<span>ML: ' + (p.ml_probability * 100).toFixed(0) + '%</span>';
+  if (p.scan_score) html += '<span>Scan: ' + p.scan_score.toFixed(1) + '/10</span>';
+  if (timeLeft) html += '<span class="prop-expiry">' + timeLeft + '</span>';
+  html += '</div>';
+
+  if (p.status === 'pending') {
+    html += '<div class="prop-actions">';
+    html += '<button class="prop-btn-approve" onclick="approveProposal(' + p.id + ', this)">Approve & Execute</button>';
+    html += '<button class="prop-btn-reject" onclick="rejectProposal(' + p.id + ', this)">Reject</button>';
+    html += '</div>';
+  }
+  if (p.status === 'executed' && p.broker_order_id) {
+    html += '<div style="font-size:10px;color:#22c55e;margin-top:4px">Order ID: ' + p.broker_order_id + '</div>';
+  }
+
+  html += '</div>';
+  return html;
+}
+
+function approveProposal(id, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Executing...';
+  fetch('/api/trading/proposals/' + id + '/approve', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        loadProposals();
+        loadTopPicks();
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Approve & Execute';
+        alert(d.error || 'Failed to approve proposal');
+      }
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Approve & Execute'; });
+}
+
+function rejectProposal(id, btn) {
+  btn.disabled = true;
+  btn.textContent = 'Rejecting...';
+  fetch('/api/trading/proposals/' + id + '/reject', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) loadProposals();
+      else { btn.disabled = false; btn.textContent = 'Reject'; }
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Reject'; });
+}
+
+/* ── Alert Settings & History ──────────────────── */
+
+function toggleAlertSettings() {
+  var panel = document.getElementById('alert-settings-panel');
+  panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+  if (panel.style.display === 'block') loadAlertSettings();
+}
+
+function loadAlertSettings() {
+  fetch('/api/trading/alerts/settings').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var indicator = document.getElementById('sms-status-indicator');
+    if (d.configured) {
+      indicator.className = 'sms-status ok';
+      indicator.textContent = 'Connected (' + (d.provider === 'twilio' ? 'Twilio' : 'Email Gateway') + ') - ***' + d.phone;
+    } else {
+      indicator.className = 'sms-status off';
+      indicator.textContent = 'Not configured - set SMS_PHONE in .env';
+    }
+  });
+}
+
+function sendTestAlert() {
+  var result = document.getElementById('test-alert-result');
+  result.textContent = 'Sending...';
+  result.style.color = 'var(--text-muted)';
+  fetch('/api/trading/alerts/test', {method: 'POST'})
+    .then(function(r){return r.json();}).then(function(d) {
+      if (d.ok) {
+        result.textContent = 'Test SMS sent!';
+        result.style.color = '#22c55e';
+      } else {
+        result.textContent = d.error || 'Failed to send';
+        result.style.color = '#ef4444';
+      }
+    })
+    .catch(function() { result.textContent = 'Error'; result.style.color = '#ef4444'; });
+}
+
+function loadAlertHistory() {
+  fetch('/api/trading/alerts/history?limit=30').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var list = document.getElementById('alert-history-list');
+    if (!d.alerts || !d.alerts.length) {
+      list.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px">No alerts yet.</div>';
+      return;
+    }
+    var html = '';
+    d.alerts.forEach(function(a) {
+      var typeCls = (a.alert_type || 'test').replace(/ /g, '_');
+      var time = a.created_at ? new Date(a.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+      html += '<div class="alert-row">';
+      html += '<span class="alert-type-badge ' + typeCls + '">' + typeCls.replace(/_/g, ' ') + '</span>';
+      html += '<span class="alert-ticker">' + (a.ticker || '') + '</span>';
+      html += '<span class="alert-msg" title="' + escHtml(a.message) + '">' + escHtml(a.message) + '</span>';
+      html += '<span class="alert-time">' + time + '</span>';
+      html += '</div>';
+    });
+    list.innerHTML = html;
+  });
 }
 
 /* ── Portfolio ─────────────────────────────────── */

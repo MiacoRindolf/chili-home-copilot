@@ -122,6 +122,17 @@ from .prescreener import (
     get_trending_crypto,
 )
 
+# Alerts & strategy proposals
+from .alerts import (
+    dispatch_alert,
+    get_alert_history,
+    generate_strategy_proposals,
+    get_proposals,
+    approve_proposal,
+    reject_proposal,
+    run_price_monitor,
+)
+
 
 def signal_shutdown():
     """Propagate shutdown signal to all sub-modules."""
