@@ -41,16 +41,16 @@ def _cache_get(key: str) -> Any | None:
         entry = _cache.get(key)
         if entry is None:
             return None
-        ts, val = entry
-        if time.time() - ts > _CACHE_TTL:
+        stored_ts, val, ttl = entry if len(entry) == 3 else (entry[0], entry[1], _CACHE_TTL)
+        if time.time() - stored_ts > ttl:
             del _cache[key]
             return None
         return val
 
 
-def _cache_set(key: str, val: Any) -> None:
+def _cache_set(key: str, val: Any, ttl: int = _CACHE_TTL) -> None:
     with _cache_lock:
-        _cache[key] = (time.time(), val)
+        _cache[key] = (time.time(), val, ttl)
 
 
 # ── FinViz Screener Queries ───────────────────────────────────────────
@@ -60,10 +60,20 @@ def _finviz_screen(filters_dict: dict | None = None,
                    limit: int = 200) -> list[str]:
     """Run a FinViz screen and return a list of ticker strings.
 
+    Each individual screen result is cached for 60 minutes so that
+    repeated calls (e.g. from different scan types) don't hit FinViz again.
     Uses a module-level lock so only one FinViz request runs at a time,
     preventing HTTP 429 rate-limit errors.
     """
+    cache_key = f"finviz_{signal or ''}_{'_'.join(sorted((filters_dict or {}).keys()))}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
     with _finviz_lock:
+        rechecked = _cache_get(cache_key)
+        if rechecked is not None:
+            return rechecked
         try:
             from finvizfinance.screener.overview import Overview
 
@@ -72,7 +82,9 @@ def _finviz_screen(filters_dict: dict | None = None,
             df = screener.screener_view(limit=limit, verbose=0, sleep_sec=1)
             if df is not None and not df.empty:
                 col = "Ticker" if "Ticker" in df.columns else df.columns[0]
-                return df[col].tolist()
+                result = df[col].tolist()
+                _cache_set(cache_key, result, ttl=3600)
+                return result
         except Exception as e:
             logger.warning(f"[prescreener] FinViz screen failed ({signal or filters_dict}): {e}")
         finally:
@@ -181,12 +193,18 @@ def _finviz_small_cap_momentum() -> list[str]:
 # ── Yahoo Finance Screener ────────────────────────────────────────────
 
 def _yf_screen(query_name: str, count: int = 100) -> list[str]:
-    """Run a yfinance predefined screener query."""
+    """Run a yfinance predefined screener query (cached 60 min per query)."""
+    cache_key = f"yf_{query_name}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
     try:
         import yfinance as yf
         response = yf.screen(query_name, count=min(count, 250))
         if response and "quotes" in response:
-            return [q["symbol"] for q in response["quotes"] if q.get("symbol")]
+            result = [q["symbol"] for q in response["quotes"] if q.get("symbol")]
+            _cache_set(cache_key, result, ttl=3600)
+            return result
     except Exception as e:
         logger.warning(f"[prescreener] yfinance screen '{query_name}' failed: {e}")
     return []
@@ -238,6 +256,48 @@ def _crypto_candidates() -> list[str]:
         return get_all_crypto_tickers(n=200)
     except Exception:
         return list(DEFAULT_CRYPTO_TICKERS)
+
+
+# ── Static fallback pool (used when live sources underperform) ────────
+
+_STATIC_ACTIVE_STOCKS = [
+    # Large-cap tech
+    "MSFT", "AAPL", "GOOGL", "AMZN", "META", "NVDA", "TSLA", "AMD", "INTC",
+    "CRM", "ADBE", "ORCL", "IBM", "CSCO", "QCOM", "AVGO", "TXN", "MU", "AMAT",
+    "LRCX", "KLAC", "MRVL", "SNPS", "CDNS", "PANW", "CRWD", "ZS", "FTNT",
+    # Cloud / SaaS / AI
+    "NOW", "SNOW", "DDOG", "NET", "PLTR", "AI", "PATH", "MDB", "TEAM", "HUBS",
+    "WDAY", "ZM", "DOCU", "OKTA", "TWLO", "SQ", "SHOP", "MELI", "SE",
+    # Finance
+    "JPM", "BAC", "GS", "MS", "WFC", "C", "BLK", "SCHW", "AXP", "V", "MA",
+    "PYPL", "COF", "USB", "PNC", "TFC", "ALLY",
+    # Healthcare / Biotech
+    "UNH", "JNJ", "PFE", "MRK", "ABBV", "LLY", "TMO", "DHR", "ABT", "BMY",
+    "GILD", "AMGN", "REGN", "VRTX", "ISRG", "MDT", "SYK", "BDX", "ZBH",
+    "MRNA", "BNTX", "ILMN",
+    # Consumer
+    "COST", "WMT", "HD", "LOW", "TGT", "SBUX", "MCD", "NKE", "DIS", "NFLX",
+    "ABNB", "BKNG", "MAR", "PG", "KO", "PEP", "CL", "EL", "PM",
+    # Industrial / Energy
+    "CAT", "DE", "GE", "HON", "MMM", "BA", "RTX", "LMT", "NOC", "GD",
+    "XOM", "CVX", "COP", "SLB", "HAL", "OXY", "DVN", "MPC", "VLO", "PSX",
+    # Growth / Momentum mid-cap
+    "RKLB", "LUNR", "ASTS", "SMCI", "AFRM", "HOOD", "SOFI", "UPST", "RIVN",
+    "LCID", "DKNG", "PENN", "DASH", "UBER", "LYFT", "GRAB", "NU", "CPNG",
+    "DUOL", "RDDT", "IONQ", "RGTI", "QUBT", "SOUN", "JOBY", "ACHR",
+    # REITs / Utilities / Telecom
+    "AMT", "PLD", "CCI", "EQIX", "SPG", "O", "NEE", "DUK", "SO", "D",
+    "T", "VZ", "TMUS",
+    # ETFs for diversity
+    "SPY", "QQQ", "IWM", "DIA", "XLF", "XLE", "XLK", "XLV", "XLI",
+    "ARKK", "ARKG", "TLT", "HYG", "GLD", "SLV", "USO", "KWEB",
+]
+
+
+def _static_active_stocks() -> list[str]:
+    """Fallback pool of ~200 popular tickers used when live sources
+    are rate-limited or returning few results."""
+    return list(_STATIC_ACTIVE_STOCKS)
 
 
 # ── Core watchlist / fallback tickers ─────────────────────────────────
@@ -336,6 +396,14 @@ def get_prescreened_candidates(
             if t_upper and t_upper not in seen:
                 seen.add(t_upper)
                 combined.append(t_upper)
+
+    if len(combined) < 600:
+        fallback = _static_active_stocks()
+        results_by_source["static_fallback"] = fallback
+        for t in fallback:
+            if t not in seen:
+                seen.add(t)
+                combined.append(t)
 
     combined = combined[:max_total]
 
