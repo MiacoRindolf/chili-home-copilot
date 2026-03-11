@@ -108,6 +108,22 @@ def api_search(q: str = Query(...), limit: int = Query(10)):
     return JSONResponse({"ok": True, "results": results})
 
 
+@router.get("/api/trading/ticker-info")
+def api_ticker_info(ticker: str = Query(...)):
+    """Compact metadata for the ticker detail strip (name, sector, mcap, P/E, description)."""
+    info = ts.get_ticker_info(ticker)
+    if not info:
+        return JSONResponse({"ok": True, "ticker": ticker.upper(), "info": None})
+    return JSONResponse({"ok": True, "ticker": ticker.upper(), "info": info})
+
+
+@router.get("/api/trading/news")
+def api_ticker_news(ticker: str = Query(...), limit: int = Query(5)):
+    """News articles related to the selected ticker."""
+    news = ts.get_ticker_news(ticker, limit=limit)
+    return JSONResponse({"ok": True, "ticker": ticker.upper(), "news": news})
+
+
 # ── Indicators ──────────────────────────────────────────────────────────
 
 @router.get("/api/trading/indicators")

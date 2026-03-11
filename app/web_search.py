@@ -60,6 +60,30 @@ def search(query: str, max_results: int = _MAX_RESULTS, trace_id: str = "web") -
         return []
 
 
+def news_search(query: str, max_results: int = 5, trace_id: str = "web") -> list[dict]:
+    """Run a DuckDuckGo news search.
+
+    Returns a list of dicts: [{"title", "url", "publisher", "date"}, ...]
+    for use by ticker news fallback. Returns empty list on any failure.
+    """
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.news(query, max_results=max_results))
+        log_info(trace_id, f"news_search query={query!r} results={len(results)}")
+        out = []
+        for r in results:
+            out.append({
+                "title": (r.get("title") or "")[:100],
+                "url": r.get("url") or r.get("href") or "",
+                "publisher": r.get("publisher") or r.get("source") or "",
+                "date": r.get("date") or "",
+            })
+        return out
+    except Exception as e:
+        log_info(trace_id, f"news_search_error query={query!r} error={e}")
+        return []
+
+
 def format_results(results: list[dict]) -> str:
     """Format search results into a context block for the LLM."""
     if not results:

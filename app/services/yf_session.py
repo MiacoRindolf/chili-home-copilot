@@ -62,6 +62,8 @@ _TTL_HISTORY = 1800    # 30 minutes for OHLCV / indicator data
 _TTL_QUOTE = 30        # 30 seconds for live price
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
+_TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
+_TTL_NEWS = 600        # 10 minutes for ticker news
 _MAX_CACHE_SIZE = 2000
 
 
@@ -94,6 +96,10 @@ def _get_ttl(key: str) -> float:
         return _TTL_SEARCH
     if key.startswith("fund:"):
         return _TTL_FUNDAMENTALS
+    if key.startswith("ticker_info:"):
+        return _TTL_TICKER_INFO
+    if key.startswith("news:"):
+        return _TTL_NEWS
     return _TTL_HISTORY
 
 
@@ -368,3 +374,106 @@ def get_fundamentals(symbol: str) -> dict[str, Any] | None:
 
     _cache_set(cache_key, result)
     return result
+
+
+def get_ticker_info(symbol: str) -> dict[str, Any] | None:
+    """Compact ticker metadata for the detail strip: name, sector/type, mcap, P/E, description.
+
+    Works for both stocks (sector, industry) and crypto (category). Cached 1 hour.
+    """
+    cache_key = f"ticker_info:{symbol}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    acquire()
+    try:
+        t = yf.Ticker(symbol)
+        info = t.info
+        if not info:
+            return None
+
+        name = info.get("shortName") or info.get("longName") or symbol
+        sector = info.get("sector") or info.get("industry") or info.get("category") or "—"
+        mcap = _safe_float(info.get("marketCap"))
+        mcap_fmt = _fmt_large(mcap) if mcap else None
+        pe = _safe_float(info.get("trailingPE"))
+        desc = (info.get("longBusinessSummary") or info.get("description") or "").strip()
+        if desc:
+            desc = desc[:300] + "…" if len(desc) > 300 else desc
+        else:
+            desc = None
+
+        result = {
+            "name": name,
+            "sector_or_type": sector,
+            "market_cap_fmt": mcap_fmt,
+            "pe": pe,
+            "description": desc,
+        }
+        _cache_set(cache_key, result)
+        return result
+    except Exception as e:
+        logger.debug(f"[yf_session] ticker_info({symbol}) failed: {e}")
+        return None
+
+
+def get_ticker_news(symbol: str, limit: int = 5) -> list[dict[str, Any]]:
+    """News for the given ticker. Uses yfinance Ticker.news; fallback DDGS news search."""
+    cache_key = f"news:{symbol}:{limit}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    out: list[dict[str, Any]] = []
+    try:
+        acquire()
+        t = yf.Ticker(symbol)
+        raw = getattr(t, "news", None)
+        if callable(raw):
+            raw = raw()
+        if isinstance(raw, list) and raw:
+            for item in raw[:limit]:
+                if not isinstance(item, dict):
+                    continue
+                # New yfinance format: item has id + content; content has title, provider, canonicalUrl, pubDate
+                content = item.get("content") or item
+                if isinstance(content, dict):
+                    title = content.get("title") or item.get("title") or ""
+                    url = ""
+                    curl = content.get("canonicalUrl") or content.get("clickThroughUrl")
+                    if isinstance(curl, dict) and curl.get("url"):
+                        url = curl["url"]
+                    else:
+                        url = content.get("link") or content.get("url") or item.get("link") or item.get("url") or ""
+                    prov = content.get("provider") or {}
+                    pub = prov.get("displayName", "") if isinstance(prov, dict) else (content.get("publisher") or item.get("publisher") or "")
+                    pub_date = content.get("pubDate") or content.get("displayTime") or ""
+                    if pub_date and "T" in str(pub_date):
+                        try:
+                            from datetime import datetime
+                            dt = datetime.fromisoformat(str(pub_date).replace("Z", "+00:00"))
+                            date_str = dt.strftime("%Y-%m-%d %H:%M")
+                        except Exception:
+                            date_str = str(pub_date)[:16]
+                    else:
+                        ts = content.get("providerPublishTime") or item.get("providerPublishTime") or 0
+                        if isinstance(ts, (int, float)) and ts:
+                            from datetime import datetime
+                            date_str = datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M")
+                        else:
+                            date_str = ""
+                    out.append({"title": title, "url": url, "publisher": pub, "date": date_str})
+    except Exception as e:
+        logger.debug(f"[yf_session] ticker news({symbol}) failed: {e}")
+
+    if not out:
+        try:
+            from .web_search import news_search
+            query = f"{symbol} stock news" if not symbol.upper().endswith("-USD") else f"{symbol.replace('-USD', '')} cryptocurrency news"
+            out = news_search(query, max_results=limit, trace_id="ticker_news")
+        except Exception as e:
+            logger.debug(f"[yf_session] DDG news fallback failed: {e}")
+
+    _cache_set(cache_key, out)
+    return out

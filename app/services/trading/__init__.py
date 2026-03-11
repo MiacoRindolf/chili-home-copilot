@@ -29,6 +29,7 @@ from .market_data import (
     get_vix,
     get_volatility_regime,
 )
+from ..yf_session import get_ticker_info, get_ticker_news
 
 # Portfolio
 from .portfolio import (
