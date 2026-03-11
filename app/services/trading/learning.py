@@ -321,7 +321,7 @@ def backfill_future_returns(db: Session) -> int:
         return 0
 
     tickers = list({s.ticker for s in unfilled})
-    from .yf_session import batch_download as _bd
+    from ..yf_session import batch_download as _bd
     BATCH = 50
     for i in range(0, len(tickers), BATCH):
         try:
