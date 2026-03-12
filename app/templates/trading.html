@@ -628,6 +628,14 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   font-size: 8px; padding: 1px 5px; border-radius: 6px;
   background: linear-gradient(135deg,#8b5cf630,#6d28d920); color: #a78bfa; font-weight: 600;
 }
+.picks-freshness.picks-stale { color: #f59e0b; }
+.pick-card .pc-recheck-btn {
+  font-size: 9px; padding: 2px 6px; margin-top: 4px; border: 1px solid var(--border);
+  border-radius: 4px; background: var(--bg-header); color: var(--text-muted);
+  cursor: pointer;
+}
+.pick-card .pc-recheck-btn:hover { color: var(--accent); border-color: var(--accent);
+}
 
 /* ── Signals tab full cards ──────────────────────── */
 .picks-grid {
@@ -1856,8 +1864,11 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
         </div>
 
         <div class="sig-section-label" id="picks-section-label" style="display:none">
-          <span>&#x1F9E0; AI Top Picks</span>
-          <span class="sig-section-count" id="picks-total-count"></span>
+          <div>
+            <span>&#x1F9E0; AI Top Picks</span>
+            <span class="sig-section-count" id="picks-total-count"></span>
+          </div>
+          <span id="picks-freshness" class="picks-freshness" style="font-size:11px;color:var(--text-muted);font-weight:400"></span>
         </div>
         <div id="signals-list" class="picks-grid">
           <div class="picks-empty">
@@ -4432,32 +4443,145 @@ function _stopStream() {
 
 /* SSE streaming for analyze */
 function _streamAnalyze(msg, isSmartPick) {
-  var url = isSmartPick ? '/api/trading/smart-pick' : '/api/trading/analyze/stream';
+  var url = isSmartPick ? '/api/trading/smart-pick/stream' : '/api/trading/analyze/stream';
   if (isSmartPick) {
     _showThinking('Scanning the entire market...');
     _showStopBtn();
+
     var controller = new AbortController();
     _streamAbort = controller;
-    var _spSlow = setTimeout(function() {
-      var thinkEl = document.querySelector('.ai-thinking');
-      if (thinkEl) thinkEl.textContent = 'Still scanning — this can take a minute for full market analysis...';
-    }, 15000);
-    fetch('/api/trading/smart-pick', {
-      method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ message: msg, risk_tolerance: 'medium' }),
-      signal: controller.signal
-    }).then(function(r){return r.json();}).then(function(d) {
-      clearTimeout(_spSlow);
-      removeLastAiMsg();
-      _hideStopBtn();
-      var prefix = d.picks_scanned ? '*Scanned ' + d.picks_scanned.toLocaleString() + ' tickers, ' + (d.picks_qualified||0) + ' qualified*\n\n' : '';
-      appendAiMsg('assistant', prefix + (d.reply || 'No recommendations at this time.'));
-      if (d.top_picks && d.top_picks.length) selectTicker(d.top_picks[0].ticker);
-    }).catch(function(e) {
-      clearTimeout(_spSlow);
-      removeLastAiMsg(); _hideStopBtn();
-      if (e.name !== 'AbortError') appendAiMsg('assistant', 'Error running scan.');
-    });
+    var _streamStartTime = Date.now();
+    var _slowTimer = null;
+    var _timeoutTimer = null;
+
+    fetch(url + '?risk_tolerance=medium', { signal: controller.signal })
+      .then(function(response) {
+        if (!response.ok || !response.body) {
+          return response.json().then(function(d) {
+            removeLastAiMsg(); _hideStopBtn();
+            appendAiMsg('assistant', (d && d.reply) || 'Smart Pick unavailable.');
+          });
+        }
+        removeLastAiMsg();
+
+        var msgs = document.getElementById('ai-msgs');
+        var msgEl = document.createElement('div');
+        msgEl.innerHTML = _buildMsgHtml('assistant', '<span class="streaming-cursor"></span>', null);
+        msgs.appendChild(msgEl.firstElementChild);
+        var bubble = msgs.lastElementChild.querySelector('.bubble');
+        var fullText = '';
+        var renderTimer = null;
+        var gotFirstToken = false;
+        var scannedPrefix = '';
+
+        var reader = response.body.getReader();
+        var decoder = new TextDecoder();
+        var buffer = '';
+
+        _slowTimer = setTimeout(function() {
+          if (!gotFirstToken && bubble) {
+            bubble.innerHTML = '<span class="streaming-slow">Scanning the entire market — this can take a moment...</span><span class="streaming-cursor"></span>';
+            msgs.scrollTop = msgs.scrollHeight;
+          }
+        }, 15000);
+
+        _timeoutTimer = setTimeout(function() {
+          if (!gotFirstToken) {
+            controller.abort();
+            clearInterval(renderTimer);
+            _hideStopBtn();
+            if (bubble) bubble.innerHTML = '<span class="streaming-slow">Smart Pick timed out. The AI model may be overloaded — please try again.</span>';
+          }
+        }, 60000);
+
+        function _renderStream() {
+          if (!bubble) return;
+          var parsed = fullText;
+          try { parsed = marked.parse(fullText); } catch(e) {}
+          parsed = linkifyTickers(parsed);
+          bubble.innerHTML = (scannedPrefix ? scannedPrefix + '\n\n' : '') + parsed + '<span class="streaming-cursor"></span>';
+          msgs.scrollTop = msgs.scrollHeight;
+        }
+
+        function pump() {
+          reader.read().then(function(result) {
+            if (result.done) {
+              clearInterval(renderTimer);
+              clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
+              _hideStopBtn();
+              var parsed2 = fullText;
+              try { parsed2 = marked.parse(fullText); } catch(e) {}
+              parsed2 = linkifyTickers(parsed2);
+              parsed2 = renderTickerCards(parsed2);
+              var followups = _generateFollowups(fullText, currentTicker);
+              bubble.innerHTML = (scannedPrefix ? scannedPrefix + '\n\n' : '') + parsed2;
+              var body = bubble.closest('.msg-body');
+              if (body) {
+                body.querySelector('.msg-time').textContent = _timeStr();
+                var actDiv = document.createElement('div');
+                actDiv.className = 'msg-actions';
+                actDiv.innerHTML = '<button onclick="_copyBubble(this)">Copy</button>';
+                body.appendChild(actDiv);
+                var chipDiv = document.createElement('div');
+                chipDiv.innerHTML = _renderFollowups(followups);
+                if (chipDiv.firstElementChild) body.appendChild(chipDiv.firstElementChild);
+              }
+              chatHistory.push({ role: 'assistant', text: (scannedPrefix ? scannedPrefix + '\n\n' : '') + fullText, time: Date.now() });
+              _saveChatHistory();
+              var elapsed = ((Date.now() - _streamStartTime) / 1000).toFixed(1);
+              var ctxEl = document.getElementById('ai-ctx-info');
+              ctxEl.textContent = elapsed + 's';
+              ctxEl.title = 'Response time: ' + elapsed + 's | Smart Pick';
+              ctxEl.classList.add('visible');
+              return;
+            }
+            buffer += decoder.decode(result.value, { stream: true });
+            var lines = buffer.split('\n');
+            buffer = lines.pop();
+            lines.forEach(function(line) {
+              if (line.startsWith('data: ')) {
+                var payload = line.substring(6);
+                if (payload === '[DONE]') return;
+                try {
+                  var ev = JSON.parse(payload);
+                  if (ev.meta) {
+                    var scanned = ev.meta.scanned || 0;
+                    var qualified = ev.meta.qualified || 0;
+                    scannedPrefix = '*Scanned ' + scanned.toLocaleString() + ' tickers, ' + qualified + ' qualified*';
+                  }
+                  if (ev.token) {
+                    if (!gotFirstToken) {
+                      gotFirstToken = true;
+                      clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
+                    }
+                    fullText += ev.token;
+                  }
+                } catch(e) {
+                  if (!gotFirstToken) { gotFirstToken = true; clearTimeout(_slowTimer); clearTimeout(_timeoutTimer); }
+                  fullText += payload;
+                }
+              }
+            });
+            pump();
+          }).catch(function(e) {
+            clearInterval(renderTimer);
+            clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
+            _hideStopBtn();
+            if (e.name !== 'AbortError') {
+              bubble.innerHTML = marked.parse(fullText || 'Smart Pick stream interrupted.');
+            }
+          });
+        }
+
+        renderTimer = setInterval(_renderStream, 80);
+        pump();
+      })
+      .catch(function(e) {
+        removeLastAiMsg(); _hideStopBtn();
+        if (e.name !== 'AbortError') {
+          appendAiMsg('assistant', 'Error reaching Smart Pick AI.');
+        }
+      });
     return;
   }
 
@@ -5265,8 +5389,41 @@ function _renderPickCard(p, compact) {
   if (!compact && p.timeframe) {
     html += '<div class="pc-timeframe">&#x23F1; '+p.timeframe+(p.best_strategy ? ' &middot; Best: '+p.best_strategy : '')+'</div>';
   }
+  if (!compact && p.scanned_at) {
+    var scanDate = new Date(p.scanned_at);
+    var scanAgo = _formatRelativeTime(scanDate);
+    html += '<div class="pc-scan-meta" style="font-size:9px;color:var(--text-muted);margin-top:2px">from scan: '+scanAgo+'</div>';
+  }
+  if (!compact) {
+    var entryPrice = (p.entry_price || p.price || 0);
+    html += '<button class="pc-recheck-btn" onclick="event.stopPropagation();recheckPick(\''+escAttr(p.ticker)+'\','+entryPrice+',this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
+  }
   html += '</div>';
   return html;
+}
+function _formatRelativeTime(d) {
+  var sec = Math.floor((Date.now() - d) / 1000);
+  if (sec < 60) return 'just now';
+  if (sec < 3600) return Math.floor(sec/60)+' min ago';
+  if (sec < 86400) return Math.floor(sec/3600)+'h ago';
+  return Math.floor(sec/86400)+'d ago';
+}
+function escAttr(s){ return String(s||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'&quot;'); }
+function recheckPick(ticker, entryPrice, btnEl) {
+  if (!btnEl || !ticker || entryPrice == null) return;
+  btnEl.disabled = true;
+  btnEl.textContent = '…';
+  fetch('/api/trading/top-picks/recheck', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticker:ticker,entry_price:entryPrice})})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      btnEl.disabled = false;
+      btnEl.textContent = 'Recheck';
+      if (d.ok && d.status) {
+        var msg = d.status === 'valid' ? 'Valid' : (d.status === 'moved_but_ok' ? 'Moved '+(d.drift_pct||0)+'%' : 'Invalidated');
+        btnEl.title = d.live_price ? 'Now $'+d.live_price+' ('+msg+')' : (d.message || msg);
+      }
+    })
+    .catch(function(){ btnEl.disabled = false; btnEl.textContent = 'Recheck'; });
 }
 
 function loadTopPicks() {
@@ -5287,6 +5444,18 @@ function loadTopPicks() {
     } else {
       if (label) { label.style.display = 'flex'; }
       if (count) count.textContent = d.picks.length + ' picks';
+      var freshness = document.getElementById('picks-freshness');
+      if (freshness) {
+        var ageSec = d.age_seconds || 0;
+        var ageMin = Math.floor(ageSec / 60);
+        var ageStr = ageMin < 1 ? 'just now' : (ageMin === 1 ? '1 min ago' : ageMin + ' min ago');
+        var asOf = d.as_of ? new Date(d.as_of).toLocaleTimeString(undefined, {hour:'2-digit',minute:'2-digit'}) : '';
+        freshness.textContent = asOf ? 'As of ' + asOf + ' (' + ageStr + ')' : ageStr;
+        freshness.className = 'picks-freshness' + (d.is_stale ? ' picks-stale' : '');
+        if (d.is_stale && ageMin >= 15) {
+          freshness.title = 'May be stale — generated ' + ageMin + ' minutes ago. Consider refreshing.';
+        }
+      }
       el.innerHTML = '';
       d.picks.forEach(function(p) { el.innerHTML += _renderPickCard(p, false); });
     }
@@ -5373,7 +5542,15 @@ function _renderProposalCard(p) {
   var rrText = p.risk_reward_ratio ? p.risk_reward_ratio.toFixed(1) + ':1' : '--';
 
   var timeLeft = '';
-  if (p.status === 'pending' && p.expires_at) {
+  if (p.expires_in_seconds != null) {
+    if (p.expires_in_seconds <= 0) timeLeft = 'Expired';
+    else {
+      var m = Math.floor(p.expires_in_seconds / 60);
+      var h = Math.floor(m / 60);
+      m = m % 60;
+      timeLeft = h ? h + 'h ' + m + 'm left' : m + 'm left';
+    }
+  } else if (p.status === 'pending' && p.expires_at) {
     var exp = new Date(p.expires_at);
     var now = new Date();
     var diffMs = exp - now;
@@ -5381,9 +5558,16 @@ function _renderProposalCard(p) {
       var hrs = Math.floor(diffMs / 3600000);
       var mins = Math.floor((diffMs % 3600000) / 60000);
       timeLeft = hrs + 'h ' + mins + 'm left';
-    } else {
-      timeLeft = 'Expired';
-    }
+    } else timeLeft = 'Expired';
+  }
+  var proposedAgo = '';
+  if (p.age_seconds != null) {
+    var asec = p.age_seconds;
+    proposedAgo = asec < 60 ? 'just now' : (asec < 3600 ? Math.floor(asec/60) + ' min ago' : Math.floor(asec/3600) + 'h ago');
+  }
+  var expiryBadge = '';
+  if (p.status === 'expired' && p.expiry_reason) {
+    expiryBadge = '<span class="prop-expiry-badge" title="' + (p.expiry_reason === 'price_drift' ? 'Price moved too far from entry' : 'Time limit reached') + '">' + (p.expiry_reason === 'price_drift' ? 'Expired (drift)' : 'Expired (time)') + '</span>';
   }
 
   var html = '<div class="proposal-card ' + statusCls + '">';
@@ -5414,17 +5598,20 @@ function _renderProposalCard(p) {
   }
 
   html += '<div class="prop-meta">';
+  if (proposedAgo) html += '<span class="prop-proposed">Proposed ' + proposedAgo + '</span>';
+  if (timeLeft) html += '<span class="prop-expiry">' + timeLeft + '</span>';
+  if (expiryBadge) html += expiryBadge;
   if (p.timeframe) html += '<span>Timeframe: ' + p.timeframe + '</span>';
   if (p.brain_score) html += '<span>Brain: ' + (p.brain_score > 0 ? '+' : '') + p.brain_score.toFixed(1) + '</span>';
   if (p.ml_probability) html += '<span>ML: ' + (p.ml_probability * 100).toFixed(0) + '%</span>';
   if (p.scan_score) html += '<span>Scan: ' + p.scan_score.toFixed(1) + '/10</span>';
-  if (timeLeft) html += '<span class="prop-expiry">' + timeLeft + '</span>';
   html += '</div>';
 
   if (p.status === 'pending') {
     html += '<div class="prop-actions">';
     html += '<button class="prop-btn-approve" onclick="approveProposal(' + p.id + ', this)">Approve & Execute</button>';
     html += '<button class="prop-btn-reject" onclick="rejectProposal(' + p.id + ', this)">Reject</button>';
+    html += '<button class="prop-btn-recheck" onclick="recheckProposal(' + p.id + ', this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
     html += '</div>';
   }
   if (p.status === 'executed' && p.broker_order_id) {
@@ -5488,6 +5675,23 @@ function rejectProposal(id, btn) {
       else { btn.disabled = false; btn.textContent = 'Reject'; }
     })
     .catch(function() { btn.disabled = false; btn.textContent = 'Reject'; });
+}
+
+function recheckProposal(id, btnEl) {
+  if (!btnEl || !id) return;
+  btnEl.disabled = true;
+  btnEl.textContent = '\u2026';
+  fetch('/api/trading/proposals/' + id + '/recheck', {method: 'POST'})
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      btnEl.disabled = false;
+      btnEl.textContent = '\u21BB Recheck';
+      if (d.ok && d.expired) loadProposals();
+      else if (d.ok && d.status) {
+        btnEl.title = d.live_price ? 'Now $' + d.live_price + ' (' + (d.drift_pct || 0) + '% drift) — ' + d.status : d.message || d.status;
+      }
+    })
+    .catch(function() { btnEl.disabled = false; btnEl.textContent = '\u21BB Recheck'; });
 }
 
 /* ── Alert Settings & History ──────────────────── */

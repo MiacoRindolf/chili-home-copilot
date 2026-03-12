@@ -1,4 +1,10 @@
-"""Market data: OHLCV, quotes, search, and technical indicators."""
+"""Market data: OHLCV, quotes, search, and technical indicators.
+
+Data provider hierarchy:
+  1. Massive.com  – primary real-time provider (REST + optional WebSocket)
+  2. Polygon.io   – secondary fallback (if configured)
+  3. yfinance      – free fallback for stocks/indices/crypto
+"""
 from __future__ import annotations
 
 import logging
@@ -7,6 +13,7 @@ import time as _time
 from typing import Any
 
 import pandas as pd
+from ...config import settings
 from ..yf_session import (
     get_ticker as _yf_ticker,
     get_history as _yf_history,
@@ -15,6 +22,36 @@ from ..yf_session import (
 )
 
 logger = logging.getLogger(__name__)
+
+# --- Massive (primary) ---
+_massive_available = False
+try:
+    from .. import massive_client as _massive
+    _massive_available = True
+except ImportError:
+    _massive = None  # type: ignore[assignment]
+
+# --- Polygon (secondary) ---
+_polygon_available = False
+try:
+    from .. import polygon_client as _poly
+    _polygon_available = True
+except ImportError:
+    _poly = None  # type: ignore[assignment]
+
+
+def _use_massive() -> bool:
+    """Check if Massive is available and configured."""
+    return _massive_available and bool(settings.massive_api_key)
+
+
+def _use_polygon() -> bool:
+    """Check if Polygon is enabled and configured (secondary fallback)."""
+    return (
+        _polygon_available
+        and settings.use_polygon
+        and bool(settings.polygon_api_key)
+    )
 
 
 def smart_round(value: float | None, fallback: int = 2, *, crypto: bool = False) -> float | None:
@@ -105,13 +142,34 @@ def fetch_ohlcv(
     interval: str = "1d",
     period: str = "6mo",
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV candle data from Yahoo Finance."""
+    """Fetch OHLCV candle data.  Massive → Polygon → yfinance."""
     if interval not in _VALID_INTERVALS:
         interval = "1d"
     if period not in _VALID_PERIODS:
         period = "6mo"
-    period = _clamp_period(interval, period)
 
+    # --- Massive path (primary) ---
+    if _use_massive():
+        try:
+            bars = _massive.get_aggregates(ticker, interval=interval, period=period)
+            if bars:
+                return bars
+            logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
+        except Exception as e:
+            logger.warning(f"[market_data] Massive OHLCV failed for {ticker}: {e}")
+
+    # --- Polygon path (secondary) ---
+    if _use_polygon():
+        try:
+            bars = _poly.get_aggregates(ticker, interval=interval, period=period)
+            if bars:
+                return bars
+            logger.debug(f"[market_data] Polygon returned empty for {ticker}, falling back to yfinance")
+        except Exception as e:
+            logger.warning(f"[market_data] Polygon OHLCV failed for {ticker}: {e}")
+
+    # --- yfinance fallback ---
+    period = _clamp_period(interval, period)
     df = _yf_history(ticker, period=period, interval=interval)
 
     if df.empty:
@@ -131,14 +189,100 @@ def fetch_ohlcv(
     return records
 
 
+def fetch_ohlcv_df(
+    ticker: str,
+    interval: str = "1d",
+    period: str = "6mo",
+) -> pd.DataFrame:
+    """Fetch OHLCV as a pandas DataFrame (Open/High/Low/Close/Volume columns).
+
+    Provider order: Massive → Polygon → yfinance.
+    This is the preferred entry-point for indicator computation and scanner scoring.
+    """
+    if interval not in _VALID_INTERVALS:
+        interval = "1d"
+    if period not in _VALID_PERIODS:
+        period = "6mo"
+
+    # --- Massive path (primary) ---
+    if _use_massive():
+        try:
+            df = _massive.get_aggregates_df(ticker, interval=interval, period=period)
+            if not df.empty:
+                return df
+        except Exception as e:
+            logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
+
+    # --- Polygon path (secondary) ---
+    if _use_polygon():
+        try:
+            df = _poly.get_aggregates_df(ticker, interval=interval, period=period)
+            if not df.empty:
+                return df
+        except Exception as e:
+            logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
+
+    # --- yfinance fallback ---
+    period = _clamp_period(interval, period)
+    df = _yf_history(ticker, period=period, interval=interval)
+    return df if df is not None else pd.DataFrame()
+
+
 # ── Quote ──────────────────────────────────────────────────────────────
 
 def fetch_quote(ticker: str) -> dict[str, Any] | None:
-    """Current price + enriched info for a ticker (single API call)."""
+    """Current price + enriched info.  Massive WS → Massive REST → Polygon → yfinance."""
+    fi: dict[str, Any] | None = None
+
+    # --- Massive WebSocket cache (fastest path) ---
+    if _use_massive():
+        try:
+            ws_snap = _massive.get_ws_quote(ticker)
+            if ws_snap and ws_snap.price:
+                fi = {
+                    "last_price": ws_snap.price,
+                    "previous_close": None,
+                    "bid": ws_snap.bid,
+                    "ask": ws_snap.ask,
+                }
+                return _build_quote_result(ticker, fi)
+        except Exception:
+            pass
+
+    # --- Massive REST (primary) ---
+    if _use_massive():
+        try:
+            fi = _massive.get_last_quote(ticker)
+            if fi and fi.get("last_price") is not None:
+                return _build_quote_result(ticker, fi)
+            logger.debug(f"[market_data] Massive quote empty for {ticker}, falling back")
+            fi = None
+        except Exception as e:
+            logger.warning(f"[market_data] Massive quote failed for {ticker}: {e}")
+
+    # --- Polygon path (secondary) ---
+    if _use_polygon():
+        try:
+            fi = _poly.get_last_quote(ticker)
+            if fi and fi.get("last_price") is not None:
+                return _build_quote_result(ticker, fi)
+            logger.debug(f"[market_data] Polygon quote empty for {ticker}, falling back")
+            fi = None
+        except Exception as e:
+            logger.warning(f"[market_data] Polygon quote failed for {ticker}: {e}")
+
+    # --- yfinance / CoinGecko fallback ---
     fi = _yf_fast_info(ticker)
     if fi is None or fi.get("last_price") is None:
         return None
-    price = fi["last_price"]
+    return _build_quote_result(ticker, fi)
+
+
+def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | None:
+    """Assemble a standardised quote dict from raw provider data."""
+    price = fi.get("last_price")
+    if price is None:
+        return None
     prev = fi.get("previous_close")
     _cr = ticker.upper().endswith("-USD")
     result: dict[str, Any] = {
@@ -166,20 +310,55 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
 
 
 def fetch_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
-    """Fetch quotes for multiple tickers efficiently.
-
-    Uses batch_download to pre-warm history + quote caches in a single HTTP
-    request, then reads individual quotes from the now-warm cache.
-    """
-    from ..yf_session import batch_download
-
-    batch_download(tickers, period="3mo", interval="1d")
-
+    """Fetch quotes for multiple tickers.  Massive → Polygon → yfinance."""
     results: dict[str, dict[str, Any]] = {}
+
+    # --- Massive path (primary) ---
+    if _use_massive():
+        try:
+            raw = _massive.get_quotes_batch(tickers)
+            for sym, fi in raw.items():
+                if fi and fi.get("last_price") is not None:
+                    q = _build_quote_result(sym, fi)
+                    if q:
+                        results[sym] = q
+        except Exception as e:
+            logger.warning(f"[market_data] Massive batch quotes failed: {e}")
+
+        missing = [t for t in tickers if t not in results]
+        if not missing:
+            return results
+        tickers = missing
+
+    # --- Polygon path (secondary) ---
+    if _use_polygon():
+        try:
+            raw = _poly.get_quotes_batch(tickers)
+            for sym, fi in raw.items():
+                if fi and fi.get("last_price") is not None:
+                    q = _build_quote_result(sym, fi)
+                    if q:
+                        results[sym] = q
+        except Exception as e:
+            logger.warning(f"[market_data] Polygon batch quotes failed: {e}")
+
+        missing = [t for t in tickers if t not in results]
+        if not missing:
+            return results
+        logger.debug(f"[market_data] {len(missing)} tickers missing from Polygon, trying yfinance")
+        tickers = missing
+
+    # --- yfinance fallback ---
+    from ..yf_session import batch_download
+    batch_download(tickers, period="3mo", interval="1d")
     for t in tickers:
-        q = fetch_quote(t)
-        if q and q.get("price"):
-            results[t] = q
+        if t in results:
+            continue
+        q = _yf_fast_info(t)
+        if q and q.get("last_price") is not None:
+            built = _build_quote_result(t, q)
+            if built:
+                results[t] = built
     return results
 
 
@@ -253,8 +432,11 @@ def compute_indicators(
 def _compute_indicators_fresh(
     ticker: str, interval: str, period: str, indicators: list[str],
 ) -> dict[str, Any]:
-    """Actual indicator computation (no cache)."""
-    df = _yf_history(ticker, period=period, interval=interval)
+    """Actual indicator computation (no cache).
+
+    Uses fetch_ohlcv_df() which routes through Polygon → yfinance automatically.
+    """
+    df = fetch_ohlcv_df(ticker, interval=interval, period=period)
     if df.empty:
         return {}
 
@@ -531,6 +713,8 @@ def get_vix() -> float | None:
     now = _t.time()
     if _vix_cache["value"] is not None and now - _vix_cache["ts"] < _VIX_CACHE_TTL:
         return _vix_cache["value"]
+
+    # VIX is only available via yfinance (not covered by Massive/Polygon)
     try:
         fi = _yf_fast_info("^VIX")
         if fi and fi.get("last_price"):
@@ -598,7 +782,7 @@ def get_market_regime() -> dict[str, Any]:
         pass
 
     try:
-        df = _yf_history("SPY", period="10d", interval="1d")
+        df = fetch_ohlcv_df("SPY", period="1mo", interval="1d")
         if df is not None and len(df) >= 5:
             close = df["Close"]
             spy_momentum_5d = round(

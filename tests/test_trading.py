@@ -507,3 +507,146 @@ class TestBrainAPI:
         data = resp.json()
         assert "active" in data
         assert "demoted" in data
+
+
+class TestTopPicksFreshness:
+    """Tests for top picks freshness metadata and recheck."""
+
+    def test_top_picks_returns_freshness_metadata(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/top-picks")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "picks" in data
+        assert "as_of" in data
+        assert "age_seconds" in data
+        assert "is_stale" in data
+
+    @patch("app.services.trading.market_data.fetch_quote")
+    def test_pick_recheck_valid(self, mock_fetch, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        mock_fetch.return_value = {"price": 150.0}
+        resp = client.post(
+            "/api/trading/top-picks/recheck",
+            json={"ticker": "AAPL", "entry_price": 150.0},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["status"] == "valid"
+        assert data["live_price"] == 150.0
+        assert data["drift_pct"] == 0
+
+    @patch("app.services.trading.market_data.fetch_quote")
+    def test_pick_recheck_invalidated(self, mock_fetch, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        mock_fetch.return_value = {"price": 200.0}  # 33% drift from 150
+        resp = client.post(
+            "/api/trading/top-picks/recheck",
+            json={"ticker": "AAPL", "entry_price": 150.0},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["status"] == "invalidated"
+        assert data["drift_pct"] == pytest.approx(33.33, abs=0.5)
+
+    def test_pick_recheck_requires_ticker(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.post(
+            "/api/trading/top-picks/recheck",
+            json={"entry_price": 150.0},
+        )
+        assert resp.status_code == 422  # validation error
+
+    def test_pick_recheck_requires_entry_price(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.post(
+            "/api/trading/top-picks/recheck",
+            json={"ticker": "AAPL"},
+        )
+        assert resp.status_code == 422
+
+
+class TestProposalFreshness:
+    """Tests for proposal freshness metadata and recheck."""
+
+    def test_proposals_contain_freshness_fields(self, db, client):
+        from app.models.trading import StrategyProposal
+        from datetime import datetime, timedelta
+
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        prop = StrategyProposal(
+            user_id=user.id,
+            ticker="AAPL",
+            direction="long",
+            status="pending",
+            entry_price=150.0,
+            stop_loss=140.0,
+            take_profit=170.0,
+            proposed_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            projected_profit_pct=13.3,
+            projected_loss_pct=-6.7,
+            risk_reward_ratio=2.0,
+            confidence=75,
+            timeframe="swing",
+            thesis="Test thesis",
+        )
+        db.add(prop)
+        db.commit()
+
+        resp = client.get("/api/trading/proposals")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert len(data["proposals"]) >= 1
+        p = data["proposals"][0]
+        assert "age_seconds" in p
+        assert "expires_in_seconds" in p
+        assert "is_expired" in p
+        assert "expiry_reason" in p
+
+    @patch("app.services.trading.market_data.fetch_quote")
+    def test_proposal_recheck_returns_drift(self, mock_fetch, db, client):
+        from app.models.trading import StrategyProposal
+        from datetime import datetime, timedelta
+
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        prop = StrategyProposal(
+            user_id=user.id,
+            ticker="AAPL",
+            direction="long",
+            status="pending",
+            entry_price=150.0,
+            stop_loss=140.0,
+            take_profit=170.0,
+            proposed_at=datetime.utcnow(),
+            expires_at=datetime.utcnow() + timedelta(hours=1),
+            projected_profit_pct=13.3,
+            projected_loss_pct=-6.7,
+            risk_reward_ratio=2.0,
+            confidence=75,
+            timeframe="swing",
+            thesis="Test",
+        )
+        db.add(prop)
+        db.commit()
+        proposal_id = prop.id
+
+        mock_fetch.return_value = {"price": 155.0}  # ~3.3% drift
+        resp = client.post(f"/api/trading/proposals/{proposal_id}/recheck")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert "live_price" in data
+        assert "drift_pct" in data
+        assert "status" in data

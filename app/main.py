@@ -39,9 +39,33 @@ async def lifespan(app: FastAPI):
         load_model()
     except Exception:
         pass
+    _start_massive_ws()
     _prewarm_market_context()
     yield
+    _stop_massive_ws()
     stop_scheduler()
+
+
+def _start_massive_ws():
+    """Start the Massive WebSocket client if configured."""
+    try:
+        from .config import settings
+        if settings.massive_api_key and settings.massive_use_websocket:
+            from .services.massive_client import get_ws_client
+            ws = get_ws_client()
+            ws.start()
+    except Exception:
+        pass
+
+
+def _stop_massive_ws():
+    """Gracefully stop the Massive WebSocket client."""
+    try:
+        from .services.massive_client import get_ws_client
+        ws = get_ws_client()
+        ws.stop()
+    except Exception:
+        pass
 
 
 def _prewarm_market_context():

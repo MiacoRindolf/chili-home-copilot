@@ -14,8 +14,9 @@ from sqlalchemy.orm import Session
 
 from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
 from .market_data import (
-    fetch_quote, smart_round, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
-    get_market_regime,
+    fetch_quote, fetch_ohlcv_df, fetch_quotes_batch, smart_round,
+    DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
+    get_market_regime, _use_massive, _use_polygon,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
 
@@ -28,6 +29,12 @@ _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
 _TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster
 _TOP_PICKS_STALE_TTL = 600  # 10 minutes — serve stale while refreshing in background
 _top_picks_refresh_lock = threading.Lock()
+
+# Smart Pick context cache — cache expensive scan/context work, not the LLM reply
+_smart_pick_ctx_cache: dict[tuple[int | None, str], dict[str, Any]] = {}
+_SMART_PICK_CTX_TTL = 300  # 5 minutes fresh
+_SMART_PICK_CTX_STALE_TTL = 600  # 10 minutes stale-while-revalidate
+_smart_pick_ctx_lock = threading.Lock()
 
 
 def signal_shutdown():
@@ -242,7 +249,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
         from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
         from ta.volatility import BollingerBands, AverageTrueRange
 
-        df = _yf_history(ticker, period="6mo", interval="1d")
+        df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 30:
             return None
 
@@ -497,7 +504,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         from ta.trend import MACD, EMAIndicator
         from ta.volatility import AverageTrueRange
 
-        df = _yf_history(ticker, period="5d", interval="15m")
+        df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
         if df.empty or len(df) < 40:
             return None
 
@@ -762,7 +769,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         from ta.trend import MACD, EMAIndicator, ADXIndicator
         from ta.volatility import BollingerBands, AverageTrueRange
 
-        df = _yf_history(ticker, period="6mo", interval="1d")
+        df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 60:
             return None
 
@@ -1407,7 +1414,14 @@ def run_scan(
 
 
 def _prewarm_cache(tickers: list[str]) -> None:
-    """Pre-warm OHLCV cache with a batch download (single HTTP request per ~50 tickers)."""
+    """Pre-warm OHLCV cache.
+
+    When Massive or Polygon is enabled the per-ticker cache inside the
+    respective client handles this automatically, so we skip the yfinance
+    batch_download.  Otherwise we fall back to the original yfinance bulk download.
+    """
+    if _use_massive() or _use_polygon():
+        return
     BATCH_SIZE = 50
     for i in range(0, len(tickers), BATCH_SIZE):
         chunk = tickers[i:i + BATCH_SIZE]
@@ -1419,6 +1433,8 @@ def _prewarm_cache(tickers: list[str]) -> None:
 
 def _prewarm_cache_intraday(tickers: list[str]) -> None:
     """Pre-warm 5d/15m intraday cache for day-trade scoring."""
+    if _use_massive() or _use_polygon():
+        return
     BATCH_SIZE = 50
     for i in range(0, len(tickers), BATCH_SIZE):
         chunk = tickers[i:i + BATCH_SIZE]
@@ -1535,6 +1551,68 @@ def generate_top_picks(db: Session, user_id: int | None) -> list[dict[str, Any]]
     return picks
 
 
+def get_top_picks_freshness(stale_threshold_seconds: float = 600) -> dict[str, Any]:
+    """Return batch-level freshness metadata for the cached top picks.
+
+    Used by the API to expose as_of, age_seconds, and is_stale.
+    """
+    global _top_picks_cache
+    ts = _top_picks_cache.get("ts") or 0.0
+    now = time.time()
+    age = now - ts
+    as_of_dt = datetime.utcfromtimestamp(ts) if ts else datetime.utcnow()
+    return {
+        "as_of": as_of_dt.isoformat() + "Z",
+        "age_seconds": round(age),
+        "is_stale": age > stale_threshold_seconds,
+    }
+
+
+def recheck_pick(
+    ticker: str,
+    entry_price: float,
+    *,
+    drift_ok_pct: float = 10.0,
+    drift_invalidate_pct: float = 15.0,
+) -> dict[str, Any]:
+    """Re-validate a single pick with live price. Fast, no full rescan.
+
+    Returns live price, drift_pct, and status: valid, moved_but_ok, or invalidated.
+    """
+    from .market_data import fetch_quote
+
+    quote = fetch_quote(ticker)
+    live_price = quote.get("price") if quote else None
+    if not live_price or live_price <= 0:
+        return {
+            "ok": True,
+            "ticker": ticker,
+            "live_price": None,
+            "entry_price": entry_price,
+            "drift_pct": None,
+            "status": "unavailable",
+            "message": "Could not fetch current price.",
+        }
+
+    drift_pct = abs(live_price - entry_price) / entry_price * 100 if entry_price else 0
+
+    if drift_pct <= drift_ok_pct:
+        status = "valid"
+    elif drift_pct <= drift_invalidate_pct:
+        status = "moved_but_ok"
+    else:
+        status = "invalidated"
+
+    return {
+        "ok": True,
+        "ticker": ticker,
+        "live_price": live_price,
+        "entry_price": entry_price,
+        "drift_pct": round(drift_pct, 2),
+        "status": status,
+    }
+
+
 def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     """Core logic — scan DB + optionally merge Brain predictions."""
     from ...models.trading import ScanResult, BacktestResult
@@ -1567,6 +1645,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             "signals": r.rationale.split("; ") if r.rationale else [],
             "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
             "source": "scan",
+            "scanned_at": r.scanned_at.isoformat() if r.scanned_at else None,
             "is_crypto": _cr,
         }
 
@@ -1608,6 +1687,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                     "signals": p.get("signals", []),
                     "indicators": {},
                     "source": "brain",
+                    "scanned_at": None,  # ML-only pick; no scan timestamp
                     "is_crypto": _cr,
                     "brain_score": p["score"],
                     "brain_confidence": p["confidence"],
@@ -1680,7 +1760,6 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
 
     # Filter out picks whose price has drifted >25% from the scored price
     # (stale scan results from DB where the stock has since crashed/spiked)
-    from .market_data import fetch_quotes_batch
     _pick_tickers_for_check = [p["ticker"] for p in picks if p.get("price")]
     _live_quotes = {}
     try:
@@ -1908,21 +1987,80 @@ def run_full_market_scan(
         f"[trading] Full scan complete: {len(results)}/{len(scan_list)} scored "
         f"in {elapsed:.0f}s"
     )
+
+    # Pre-warm Smart Pick context for this user in the background so the
+    # \"What Should I Buy?\" button feels instant after a full scan.
+    try:
+        threading.Thread(
+            target=_bg_refresh_smart_pick_context,
+            args=(user_id, None, "medium"),
+            daemon=True,
+        ).start()
+    except Exception:
+        logger.debug("[scanner] failed to start smart_pick_context pre-warm thread", exc_info=True)
     return results
 
 
 # ── Smart Pick ────────────────────────────────────────────────────────
 
-def smart_pick(
-    db: Session, user_id: int | None,
-    message: str | None = None,
+
+def _smart_pick_ctx_key(user_id: int | None, risk_tolerance: str) -> tuple[int | None, str]:
+    return user_id, (risk_tolerance or "medium").lower()
+
+
+def _bg_refresh_smart_pick_context(
+    user_id: int | None, budget: float | None, risk_tolerance: str,
+) -> None:
+    """Background refresh for the Smart Pick context cache."""
+    try:
+        # Local import to avoid circulars at import time
+        from ...database import SessionLocal
+
+        db = SessionLocal()
+        try:
+            smart_pick_context(db, user_id, budget=budget, risk_tolerance=risk_tolerance, force_fresh=True)
+        finally:
+            db.close()
+    except Exception:
+        # Background refresh failures should never break foreground requests
+        logger.exception("[scanner] smart_pick_context background refresh failed")
+
+
+def smart_pick_context(
+    db: Session,
+    user_id: int | None,
+    *,
     budget: float | None = None,
     risk_tolerance: str = "medium",
+    force_fresh: bool = False,
 ) -> dict[str, Any]:
-    """Scan the market, score all candidates, deep-analyze the top picks."""
-    from ...models.trading import ScanResult, BacktestResult
+    """Build (and cache) the expensive Smart Pick scan/context data.
+
+    This performs DB scans, optional full-universe scoring, watchlist scoring,
+    and user/brain context building — but does *not* call the LLM.
+    """
+    from ...models.trading import ScanResult
     from sqlalchemy import or_
     from ..ticker_universe import get_full_ticker_universe, get_ticker_count
+
+    key = _smart_pick_ctx_key(user_id, risk_tolerance)
+    now = time.time()
+
+    if not force_fresh:
+        with _smart_pick_ctx_lock:
+            cached = _smart_pick_ctx_cache.get(key)
+        if cached:
+            age = now - cached["ts"]
+            if age < _SMART_PICK_CTX_TTL:
+                return cached["ctx"]
+            if age < _SMART_PICK_CTX_STALE_TTL:
+                # Serve stale context but refresh in the background
+                threading.Thread(
+                    target=_bg_refresh_smart_pick_context,
+                    args=(user_id, budget, risk_tolerance),
+                    daemon=True,
+                ).start()
+                return cached["ctx"]
 
     recent_cutoff = datetime.utcnow() - timedelta(hours=2)
     user_filter = or_(ScanResult.user_id == user_id, ScanResult.user_id.is_(None))
@@ -1940,9 +2078,13 @@ def smart_pick(
     if recent_results:
         scored_results = [
             {
-                "ticker": r.ticker, "score": r.score, "signal": r.signal,
-                "price": r.entry_price, "entry_price": r.entry_price,
-                "stop_loss": r.stop_loss, "take_profit": r.take_profit,
+                "ticker": r.ticker,
+                "score": r.score,
+                "signal": r.signal,
+                "price": r.entry_price,
+                "entry_price": r.entry_price,
+                "stop_loss": r.stop_loss,
+                "take_profit": r.take_profit,
                 "risk_level": r.risk_level,
                 "signals": r.rationale.split("; ") if r.rationale else [],
                 "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
@@ -1970,13 +2112,48 @@ def smart_pick(
 
     top_picks = scored_results[:12]
 
-    if not top_picks:
-        return {
-            "ok": True,
-            "reply": f"I scanned {total_scanned:,} stocks and crypto and none have a strong enough setup right now. "
-                     "The best trade is sometimes no trade. I'll keep watching and flag opportunities as they appear.",
-            "picks": [],
-        }
+    # User / learning context (safe to cache; prices will be refreshed later)
+    stats = get_trade_stats(db, user_id)
+    insights = get_insights(db, user_id, limit=10)
+
+    portfolio_ctx: str | None = None
+    try:
+        from .. import broker_service
+
+        portfolio_ctx = broker_service.build_portfolio_context()
+    except Exception:
+        portfolio_ctx = None
+
+    ctx = {
+        "top_picks": top_picks,
+        "total_scanned": total_scanned,
+        "picks_qualified": len(scored_results),
+        "risk_tolerance": risk_tolerance,
+        "budget": budget,
+        "stats": stats,
+        "insights": insights,
+        "portfolio_ctx": portfolio_ctx,
+    }
+
+    with _smart_pick_ctx_lock:
+        _smart_pick_ctx_cache[key] = {"ctx": ctx, "ts": time.time()}
+
+    return ctx
+
+
+def _build_smart_pick_context_strings(
+    db: Session, ctx: dict[str, Any]
+) -> str:
+    """Render the human-readable context string for the LLM from structured ctx."""
+    from ...models.trading import BacktestResult
+
+    top_picks: list[dict[str, Any]] = ctx["top_picks"]
+    total_scanned: int = ctx["total_scanned"]
+    stats: dict[str, Any] = ctx.get("stats") or {}
+    insights = ctx.get("insights") or []
+    budget = ctx.get("budget")
+    risk_tolerance: str = ctx.get("risk_tolerance", "medium")
+    portfolio_ctx: str | None = ctx.get("portfolio_ctx")
 
     pick_details: list[str] = []
     for p in top_picks:
@@ -2000,12 +2177,11 @@ def smart_pick(
 
         pick_details.append(detail)
 
-    context_parts = [
+    context_parts: list[str] = [
         f"## MARKET SCAN RESULTS — Top {len(top_picks)} candidates from {total_scanned:,} stocks & crypto scanned",
         "\n\n".join(pick_details),
     ]
 
-    stats = get_trade_stats(db, user_id)
     if stats.get("total_trades", 0) > 0:
         context_parts.append(
             f"## USER PROFILE\n"
@@ -2018,7 +2194,6 @@ def smart_pick(
             "Recommend safer, high-confidence setups with clear instructions."
         )
 
-    insights = get_insights(db, user_id, limit=10)
     if insights:
         lines = ["## LEARNED PATTERNS (your edge)"]
         for ins in insights:
@@ -2030,19 +2205,94 @@ def smart_pick(
 
     context_parts.append(f"## RISK TOLERANCE: {risk_tolerance.upper()}")
 
+    if portfolio_ctx:
+        context_parts.insert(0, portfolio_ctx)
+
+    return "\n\n".join(context_parts)
+
+
+def _validate_live_prices(
+    picks: list[dict[str, Any]], *, drift_threshold_pct: float = 5.0
+) -> list[dict[str, Any]]:
+    """Refresh prices for picks and drop those whose price has drifted too far.
+
+    This ensures Smart Pick recommendations use live prices while still
+    benefiting from cached scan results and indicator data.
+    """
+    tickers = [p["ticker"] for p in picks if p.get("price")]
+    if not tickers:
+        return picks
+
     try:
-        from .. import broker_service
-        portfolio_ctx = broker_service.build_portfolio_context()
-        if portfolio_ctx:
-            context_parts.insert(0, portfolio_ctx)
+        live_quotes = fetch_quotes_batch(tickers)
     except Exception:
-        pass
+        live_quotes = {}
 
-    full_context = "\n\n".join(context_parts)
+    validated: list[dict[str, Any]] = []
+    for pick in picks:
+        scored_price = pick.get("price") or 0
+        if scored_price > 0 and live_quotes:
+            lq = live_quotes.get(pick["ticker"])
+            live_price = lq.get("price", 0) if lq else 0
+            if live_price and live_price > 0:
+                drift = abs(live_price - scored_price) / scored_price * 100
+                if drift > drift_threshold_pct:
+                    logger.debug(
+                        f"[scanner] Dropping stale smart-pick {pick['ticker']}: "
+                        f"scored at ${scored_price} but now ${live_price} ({drift:.0f}% drift)"
+                    )
+                    continue
+                # Use live price for both current and entry in the context
+                pick["price"] = live_price
+                pick["entry_price"] = live_price
+        validated.append(pick)
 
-    user_msg = message or "Based on this scan, what are your top 10 stock picks I should buy RIGHT NOW? For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, position size, and your confidence level. Rank them by conviction."
+    return validated
+
+
+def smart_pick(
+    db: Session, user_id: int | None,
+    message: str | None = None,
+    budget: float | None = None,
+    risk_tolerance: str = "medium",
+) -> dict[str, Any]:
+    """Scan the market (using cached context where possible) and deep-analyze the top picks."""
+    ctx = smart_pick_context(db, user_id, budget=budget, risk_tolerance=risk_tolerance)
+
+    # Work on a shallow copy of the top picks so we don't mutate cached dicts in-place
+    raw_top_picks: list[dict[str, Any]] = [dict(p) for p in ctx.get("top_picks", [])]
+    total_scanned: int = ctx.get("total_scanned", 0)
+
+    if not raw_top_picks:
+        return {
+            "ok": True,
+            "reply": f"I scanned {total_scanned:,} stocks and crypto and none have a strong enough setup right now. "
+                     "The best trade is sometimes no trade. I'll keep watching and flag opportunities as they appear.",
+            "picks": [],
+        }
+
+    top_picks = _validate_live_prices(raw_top_picks, drift_threshold_pct=5.0)
+    if not top_picks:
+        return {
+            "ok": True,
+            "reply": f"I scanned {total_scanned:,} stocks and crypto and all previously-good setups have moved too far from their ideal entries. "
+                     "Right now it's safer to wait for new clean setups. I'll keep scanning and surface fresh trades as they appear.",
+            "picks": [],
+        }
+
+    ctx["top_picks"] = top_picks
+    ctx["picks_qualified"] = len(top_picks)
+
+    full_context = _build_smart_pick_context_strings(db, ctx)
+
+    user_msg = message or (
+        "Based on this scan, what are your top 10 stock picks I should buy RIGHT NOW? "
+        "For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, "
+        "position size, and your confidence level. Rank them by conviction."
+    )
 
     from ...prompts import load_prompt
+
     system_prompt = load_prompt("trading_analyst")
 
     ticker_names = ", ".join(p["ticker"] for p in top_picks)
@@ -2085,6 +2335,7 @@ End with portfolio allocation advice and any general market context warnings.
     try:
         from ... import openai_client
         from ...logger import new_trace_id
+
         trace_id = new_trace_id()
 
         result = openai_client.chat(
@@ -2102,9 +2353,10 @@ End with portfolio allocation advice and any general market context warnings.
         "ok": True,
         "reply": reply,
         "picks_scanned": total_scanned,
-        "picks_qualified": len(scored_results),
+        "picks_qualified": ctx.get("picks_qualified", len(top_picks)),
         "top_picks": [
             {"ticker": p["ticker"], "score": p["score"], "signal": p["signal"], "price": p["price"]}
             for p in top_picks
         ],
     }
+

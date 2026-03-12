@@ -7,3 +7,9 @@ continue to work.
 """
 from .trading import *  # noqa: F401, F403
 from .trading import signal_shutdown  # noqa: F811 — explicit re-export
+
+# Private helper used by Smart Pick streaming endpoint.
+# Explicitly re-exported so callers can use ts._build_smart_pick_context_strings(...)
+from .trading.scanner import (  # type: ignore[F401]
+    _build_smart_pick_context_strings,
+)

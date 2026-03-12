@@ -12,6 +12,7 @@ from ..deps import get_db, get_identity_ctx
 from ..logger import log_info, new_trace_id
 from ..prompts import load_prompt
 from ..services import trading_service as ts
+from ..services.trading.scanner import _validate_live_prices as _smart_pick_validate_live_prices
 from ..services import trading_scheduler
 from ..services import ticker_universe
 from ..services import broker_service
@@ -20,6 +21,7 @@ from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
     JournalCreate,
+    PickRecheckRequest,
     ScanRequest,
     SmartPickRequest,
     TradeClose,
@@ -458,6 +460,144 @@ def api_smart_pick(body: SmartPickRequest, request: Request, db: Session = Depen
     return JSONResponse(result)
 
 
+@router.get("/api/trading/smart-pick/stream")
+def api_smart_pick_stream(
+    request: Request,
+    db: Session = Depends(get_db),
+    risk_tolerance: str = Query("medium"),
+    budget: float | None = Query(None),
+):
+    """SSE streaming endpoint for Smart Pick recommendations."""
+    ctx = get_identity_ctx(request, db)
+    trace_id = new_trace_id()
+
+    # Build or reuse cached Smart Pick context, then refresh prices live.
+    sp_ctx = ts.smart_pick_context(
+        db,
+        ctx["user_id"],
+        budget=budget,
+        risk_tolerance=risk_tolerance,
+    )
+    raw_top_picks = [dict(p) for p in sp_ctx.get("top_picks") or []]
+    total_scanned = sp_ctx.get("total_scanned", 0)
+
+    if not raw_top_picks:
+        # Nothing qualified – stream a single explanatory message.
+        def _empty_stream():
+            msg = (
+                f"I scanned {total_scanned:,} stocks and crypto and none have a strong enough setup right now. "
+                "The best trade is sometimes no trade. I'll keep watching and flag opportunities as they appear."
+            )
+            yield f"data: {json.dumps({'token': msg})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _empty_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    # Live price validation (drop picks that have moved too far, update prices)
+    top_picks = _smart_pick_validate_live_prices(raw_top_picks, drift_threshold_pct=5.0)
+    if not top_picks:
+        def _moved_stream():
+            msg = (
+                f"I scanned {total_scanned:,} stocks and crypto and all previously-good setups have moved too far "
+                "from their ideal entries. Right now it's safer to wait for new clean setups. "
+                "I'll keep scanning and surface fresh trades as they appear."
+            )
+            yield f"data: {json.dumps({'token': msg})}\n\n"
+            yield "data: [DONE]\n\n"
+
+        return StreamingResponse(
+            _moved_stream(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    sp_ctx["top_picks"] = top_picks
+    sp_ctx["picks_qualified"] = len(top_picks)
+
+    full_context = ts._build_smart_pick_context_strings(db, sp_ctx)  # type: ignore[attr-defined]
+
+    user_msg = (
+        "Based on this scan, what are your top 10 stock picks I should buy RIGHT NOW? "
+        "For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, "
+        "position size, and your confidence level. Rank them by conviction."
+    )
+
+    system_prompt = load_prompt("trading_analyst")
+    ticker_names = ", ".join(p["ticker"] for p in top_picks)
+
+    smart_pick_addendum = f"""
+
+SPECIAL INSTRUCTION — SMART PICK MODE:
+You scanned {total_scanned:,} stocks and crypto. The TOP candidates are: {ticker_names}
+Their full indicator data and scores are in the MARKET SCAN RESULTS section below.
+
+ABSOLUTE RULES (NEVER VIOLATE):
+- You MUST list the top picks immediately. Do NOT ask the user to choose a universe, narrow down, or pick a letter. The scan is ALREADY DONE — your ONLY job is to rank and present the results.
+- You MUST reference tickers BY NAME (e.g. "AAPL", "BTC-USD", "NVDA") — NEVER give a generic recommendation without naming specific tickers.
+- Use the ACTUAL prices and indicator values from the data provided — do NOT make up numbers.
+- If the user asked about crypto specifically, prioritize crypto tickers from the scan.
+- If the user asked about stocks specifically, prioritize stock tickers.
+- Do NOT refuse to list picks. If some candidates are weaker, still list them with appropriate caveats and lower confidence — the user wants a ranked list, not a refusal.
+
+Your job: Rank and present UP TO 10 trades from this scan as a clear, specific action plan. If fewer than 10 candidates have viable setups, list only those that do — but you MUST list at least the top candidates provided.
+
+For EACH recommended trade, format it EXACTLY like this:
+
+## 1. TICKER — Company/Coin Name
+- **Verdict**: STRONG BUY / BUY
+- **Confidence**: X%
+- **Current Price**: $X.XX (from the data)
+- **Buy-in Price**: $X.XX (entry level)
+- **Stop-Loss**: $X.XX (reason)
+- **Target 1**: $X.XX (conservative)
+- **Target 2**: $X.XX (optimistic)
+- **Risk/Reward**: X:1
+- **Hold Duration**: X days/weeks
+- **Position Size**: X% of portfolio
+- **Why NOW**: 2-3 bullet points using the ACTUAL indicator values
+- **Exit Signal**: what would invalidate this trade
+
+End with portfolio allocation advice and any general market context warnings.
+"""
+
+    system_prompt_full = f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}"
+
+    def _generate():
+        from .. import openai_client
+
+        try:
+            # First send metadata so the UI can show counts immediately
+            meta = {
+                "scanned": int(total_scanned),
+                "qualified": int(sp_ctx.get("picks_qualified", len(top_picks))),
+            }
+            yield f"data: {json.dumps({'meta': meta})}\n\n"
+
+            for tok, model in openai_client.chat_stream(
+                messages=[{"role": "user", "content": user_msg}],
+                system_prompt=system_prompt_full,
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=4096,
+            ):
+                yield f"data: {json.dumps({'token': tok})}\n\n"
+            yield "data: [DONE]\n\n"
+        except Exception as e:
+            log_info(trace_id, f"[trading] smart-pick stream error: {e}")
+            err_msg = f"\n\n*Smart Pick error: {e}*"
+            yield f"data: {json.dumps({'token': err_msg})}\n\n"
+            yield "data: [DONE]\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
 @router.get("/api/trading/insights")
 def api_get_insights(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
@@ -604,7 +744,14 @@ def api_signals(request: Request, db: Session = Depends(get_db)):
 def api_top_picks(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     picks = ts.generate_top_picks(db, ctx["user_id"])
-    return JSONResponse({"ok": True, "picks": picks})
+    freshness = ts.get_top_picks_freshness(stale_threshold_seconds=600)
+    return JSONResponse({
+        "ok": True,
+        "picks": picks,
+        "as_of": freshness["as_of"],
+        "age_seconds": freshness["age_seconds"],
+        "is_stale": freshness["is_stale"],
+    })
 
 
 # ── Strategy Proposals ─────────────────────────────────────────────────
@@ -639,6 +786,26 @@ def api_reject_proposal(
 ):
     ctx = get_identity_ctx(request, db)
     result = ts.reject_proposal(db, proposal_id, ctx["user_id"])
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/top-picks/recheck")
+def api_recheck_pick(body: PickRecheckRequest, request: Request, db: Session = Depends(get_db)):
+    """Revalidate a single pick with live price. Expects JSON body: { ticker, entry_price }."""
+    ctx = get_identity_ctx(request, db)
+    result = ts.recheck_pick(body.ticker, body.entry_price)
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/proposals/{proposal_id}/recheck")
+def api_recheck_proposal(
+    proposal_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Revalidate a proposal with live price. Auto-expires if drift > 30%."""
+    ctx = get_identity_ctx(request, db)
+    result = ts.recheck_proposal(db, proposal_id, ctx["user_id"])
     return JSONResponse(result)
 
 
@@ -706,6 +873,49 @@ def api_take_snapshots(
 
     background_tasks.add_task(_bg_learn, ctx["user_id"])
     return JSONResponse({"ok": True, "message": "Full learning cycle started in background"})
+
+
+# ── Data Provider Status ──────────────────────────────────────────────
+
+@router.get("/api/trading/data-provider/status")
+def api_data_provider_status():
+    """Return data-provider usage metrics and feature-flag status."""
+    from ..config import settings
+
+    massive_enabled = bool(settings.massive_api_key)
+    massive_metrics = {}
+    if massive_enabled:
+        try:
+            from ..services.massive_client import get_metrics as get_massive_metrics
+            massive_metrics = get_massive_metrics()
+        except Exception:
+            pass
+
+    polygon_enabled = settings.use_polygon and bool(settings.polygon_api_key)
+    polygon_metrics = {}
+    if polygon_enabled:
+        try:
+            from ..services.polygon_client import get_metrics
+            polygon_metrics = get_metrics()
+        except Exception:
+            pass
+
+    return JSONResponse({
+        "massive_enabled": massive_enabled,
+        "massive_base_url": settings.massive_base_url if massive_enabled else None,
+        "massive_websocket": settings.massive_use_websocket if massive_enabled else False,
+        "massive_metrics": massive_metrics,
+        "polygon_enabled": polygon_enabled,
+        "polygon_base_url": settings.polygon_base_url if polygon_enabled else None,
+        "polygon_metrics": polygon_metrics,
+        "provider_order": [
+            p for p, enabled in [
+                ("massive", massive_enabled),
+                ("polygon", polygon_enabled),
+                ("yfinance", True),
+            ] if enabled
+        ],
+    })
 
 
 # ── Brain Dashboard ───────────────────────────────────────────────────

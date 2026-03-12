@@ -11,9 +11,9 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import BacktestResult, Trade, StrategyProposal
-from ..yf_session import get_fundamentals, batch_download
+from ..yf_session import get_fundamentals
 from .market_data import (
-    compute_indicators, fetch_quote,
+    compute_indicators, fetch_quote, _use_massive, _use_polygon,
     DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
@@ -375,11 +375,13 @@ def _build_market_context_fresh(db: Session, user_id: int | None) -> str:
     """
     sample_tickers = DEFAULT_SCAN_TICKERS[:15] + DEFAULT_CRYPTO_TICKERS[:5]
 
-    # Pre-warm OHLCV cache in one batched yfinance download
-    try:
-        batch_download(sample_tickers + ["SPY"], period="6mo", interval="1d")
-    except Exception:
-        pass
+    # Pre-warm OHLCV cache (Massive/Polygon handle their own caching; yfinance needs batch_download)
+    if not (_use_massive() or _use_polygon()):
+        try:
+            from ..yf_session import batch_download
+            batch_download(sample_tickers + ["SPY"], period="6mo", interval="1d")
+        except Exception:
+            pass
 
     parts: list[str] = []
     bullish = 0

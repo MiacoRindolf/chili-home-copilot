@@ -115,3 +115,8 @@ class SmartPickRequest(BaseModel):
     message: Optional[str] = None
     budget: Optional[float] = None
     risk_tolerance: str = Field("medium", pattern=r"^(low|medium|high)$")
+
+
+class PickRecheckRequest(BaseModel):
+    ticker: str = Field(..., max_length=20)
+    entry_price: float = Field(..., gt=0)

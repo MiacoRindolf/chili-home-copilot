@@ -18,8 +18,9 @@ from ...models.trading import (
 )
 from ..yf_session import get_history as _yf_history
 from .market_data import (
-    fetch_quote, fetch_quotes_batch, get_indicator_snapshot, get_vix,
-    get_volatility_regime, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
+    fetch_quote, fetch_quotes_batch, fetch_ohlcv_df, get_indicator_snapshot,
+    get_vix, get_volatility_regime, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
+    _use_massive, _use_polygon,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
 
@@ -269,8 +270,7 @@ def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None, float | 
     """
     try:
         snap = get_indicator_snapshot(ticker, "1d")
-        from ..yf_session import get_history as _yf_hist
-        df = _yf_hist(ticker, period="3mo", interval="1d")
+        df = fetch_ohlcv_df(ticker, period="3mo", interval="1d")
         price = float(df.iloc[-1]["Close"]) if df is not None and not df.empty else 0
         quote = {"price": price}
         sent_score, sent_count = _fetch_news_sentiment(ticker)
@@ -291,17 +291,18 @@ def take_snapshots_parallel(
     calling thread to avoid SQLAlchemy session issues.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from ..yf_session import batch_download
 
     # Pre-warm the OHLCV cache so indicator computation hits cache.
-    # batch_download also seeds the quote: cache from the last OHLCV row,
-    # eliminating the need for per-ticker get_fast_info calls.
-    BATCH = 50
-    for i in range(0, len(tickers), BATCH):
-        try:
-            batch_download(tickers[i:i + BATCH], period="3mo", interval="1d")
-        except Exception:
-            pass
+    # When Massive or Polygon is active the per-ticker cache inside the
+    # respective client handles this automatically.
+    if not (_use_massive() or _use_polygon()):
+        from ..yf_session import batch_download
+        BATCH = 50
+        for i in range(0, len(tickers), BATCH):
+            try:
+                batch_download(tickers[i:i + BATCH], period="3mo", interval="1d")
+            except Exception:
+                pass
 
     fetched: list[tuple[str, dict | None, dict | None]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -375,16 +376,19 @@ def backfill_future_returns(db: Session) -> int:
         return 0
 
     tickers = list({s.ticker for s in unfilled})
-    from ..yf_session import batch_download as _bd
-    BATCH = 50
-    for i in range(0, len(tickers), BATCH):
-        try:
-            _bd(tickers[i:i + BATCH], period="1mo", interval="1d")
-        except Exception:
-            pass
+    if not (_use_massive() or _use_polygon()):
+        from ..yf_session import batch_download as _bd
+        BATCH = 50
+        for i in range(0, len(tickers), BATCH):
+            try:
+                _bd(tickers[i:i + BATCH], period="1mo", interval="1d")
+            except Exception:
+                pass
 
     def _fetch_returns(snap):
         try:
+            # Needs start-date-based fetch for historical backfill;
+            # falls through to yfinance which supports the start= parameter.
             df = _yf_history(snap.ticker, start=snap.snapshot_date, period="15d", interval="1d")
             if len(df) < 2:
                 return None
@@ -440,8 +444,7 @@ def _mine_from_history(ticker: str) -> list[dict]:
     from ta.volatility import BollingerBands, AverageTrueRange
 
     try:
-        # Use 6mo to hit the cache populated by the scan phase
-        df = _yf_history(ticker, period="6mo", interval="1d")
+        df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 60:
             return []
     except Exception:

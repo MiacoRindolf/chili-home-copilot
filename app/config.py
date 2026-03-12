@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     robinhood_password: str = ""
     robinhood_totp_secret: str = ""  # optional: base32 TOTP secret; if empty, SMS-based MFA is used
 
+    # Massive.com market data (primary — real-time quotes & aggregates)
+    massive_api_key: str = ""
+    massive_base_url: str = "https://api.massive.com"
+    massive_ws_url: str = "wss://socket.massive.com"
+    massive_use_websocket: bool = True
+    massive_max_rps: int = 100
+
+    # Polygon.io market data (secondary fallback — replaces yfinance for speed)
+    polygon_api_key: str = ""
+    polygon_base_url: str = "https://api.polygon.io"
+    use_polygon: bool = False  # feature flag: set USE_POLYGON=true in .env to enable
+    polygon_max_rps: int = 5  # soft cap; governor will smooth bursts around this
+
+    # Trading freshness / staleness guardrails
+    top_picks_warn_age_min: int = 15   # warn when picks batch is older than N minutes
+    proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes
+    pick_warn_drift_pct: float = 10.0  # warn when price has drifted >N% from entry
+
     @property
     def primary_api_key(self) -> str:
         """Primary LLM key: LLM_API_KEY or OPENAI_API_KEY."""

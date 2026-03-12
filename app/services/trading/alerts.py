@@ -410,6 +410,65 @@ def reject_proposal(
     return {"ok": True, "proposal": _proposal_to_dict(proposal)}
 
 
+def recheck_proposal(
+    db: Session,
+    proposal_id: int,
+    user_id: int | None,
+    *,
+    drift_expire_pct: float = 30.0,
+) -> dict[str, Any]:
+    """Revalidate a proposal with live price. Returns drift info; expires if drifted past threshold."""
+    from ...models.trading import StrategyProposal
+    from sqlalchemy import or_
+    from .market_data import fetch_quote
+
+    q = db.query(StrategyProposal).filter(StrategyProposal.id == proposal_id)
+    if user_id is not None:
+        q = q.filter(or_(StrategyProposal.user_id == user_id, StrategyProposal.user_id.is_(None)))
+    proposal = q.first()
+
+    if not proposal:
+        return {"ok": False, "error": "Proposal not found"}
+
+    quote = fetch_quote(proposal.ticker)
+    live_price = quote.get("price") if quote else None
+
+    if not live_price or live_price <= 0:
+        return {
+            "ok": True,
+            "proposal": _proposal_to_dict(proposal),
+            "live_price": None,
+            "drift_pct": None,
+            "status": "unavailable",
+            "message": "Could not fetch current price.",
+        }
+
+    drift_pct = abs(live_price - proposal.entry_price) / proposal.entry_price * 100
+
+    if drift_pct > drift_expire_pct and proposal.status in ("pending", "approved"):
+        proposal.status = "expired"
+        proposal.thesis = (proposal.thesis or "") + f" [Auto-expired: price drifted {drift_pct:.0f}% from entry]"
+        db.commit()
+        return {
+            "ok": True,
+            "proposal": _proposal_to_dict(proposal),
+            "live_price": live_price,
+            "drift_pct": round(drift_pct, 2),
+            "status": "invalidated",
+            "expired": True,
+        }
+
+    status = "valid" if drift_pct <= 5 else ("moved_but_ok" if drift_pct <= 15 else "invalidated")
+    return {
+        "ok": True,
+        "proposal": _proposal_to_dict(proposal),
+        "live_price": live_price,
+        "drift_pct": round(drift_pct, 2),
+        "status": status,
+        "expired": False,
+    }
+
+
 # ── Price Monitor ─────────────────────────────────────────────────────
 
 
@@ -773,6 +832,27 @@ def _expire_proposals(db: Session) -> int:
 
 
 def _proposal_to_dict(p) -> dict[str, Any]:
+    now = datetime.utcnow()
+    proposed_at = p.proposed_at
+    expires_at = p.expires_at
+
+    age_seconds = (
+        round((now - proposed_at).total_seconds()) if proposed_at else None
+    )
+    expires_in_seconds = (
+        round((expires_at - now).total_seconds()) if expires_at else None
+    )
+    is_expired = p.status == "expired" or (
+        expires_at is not None and expires_at < now
+    )
+
+    expiry_reason = None
+    if p.status == "expired" and p.thesis:
+        if "[Auto-expired: price drifted" in p.thesis:
+            expiry_reason = "price_drift"
+        else:
+            expiry_reason = "time"
+
     return {
         "id": p.id,
         "ticker": p.ticker,
@@ -794,10 +874,14 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         "brain_score": p.brain_score,
         "ml_probability": p.ml_probability,
         "scan_score": p.scan_score,
-        "proposed_at": p.proposed_at.isoformat() if p.proposed_at else None,
+        "proposed_at": proposed_at.isoformat() if proposed_at else None,
         "reviewed_at": p.reviewed_at.isoformat() if p.reviewed_at else None,
         "executed_at": p.executed_at.isoformat() if p.executed_at else None,
-        "expires_at": p.expires_at.isoformat() if p.expires_at else None,
+        "expires_at": expires_at.isoformat() if expires_at else None,
+        "age_seconds": age_seconds,
+        "expires_in_seconds": expires_in_seconds,
+        "is_expired": is_expired,
+        "expiry_reason": expiry_reason,
         "broker_order_id": p.broker_order_id,
         "trade_id": p.trade_id,
     }
