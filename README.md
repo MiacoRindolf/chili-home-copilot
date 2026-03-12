@@ -42,6 +42,22 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 
 ## Features
 
+### Trading & AI Analysis
+- **Full-featured trading terminal** at `/trading` with interactive charts (LightweightCharts), watchlist, portfolio, and journal
+- **AI Analyze**: One-click streaming AI analysis of any ticker with rich context (indicators, fundamentals, patterns, market pulse) — powered by free-tier LLM cascade (Groq → Gemini → OpenAI last resort)
+- **AI Brain**: Self-learning pattern discovery engine that mines market snapshots, tests hypotheses, and evolves scoring weights over time
+  - 30+ technical indicators (RSI, MACD, EMA stack, Bollinger Bands, Stochastic, ADX, ATR, etc.)
+  - **News sentiment analysis** via VADER — aggregated sentiment scored per ticker and used in pattern mining
+  - **Fundamental data integration** — P/E ratio, market cap fed into ML features and pattern discovery
+  - Machine learning predictions (GradientBoosting) with technical + sentiment + fundamental features
+  - Novel pattern discovery, hypothesis testing, adaptive weight evolution, and confidence decay
+- **Scanner & Screener**: Batch scoring of 100+ tickers with parallel processing, breakout detection, and momentum scanning
+- **CHILI's Top Picks**: Cached market-wide recommendations with stale-while-revalidate for instant load
+- **News cards** with sentiment badges (bullish/bearish/neutral), embedded article reader modal, and horizontal scroll
+- **Strategy proposals**: AI-generated trade setups with approve/reject workflow
+- **Alerts**: Price target and percent-change alerts with SMS delivery (Twilio) and DB logging
+- **Performance optimizations**: Batch yfinance downloads, parallel ticker scoring, 5-minute market-context cache, ThreadPoolExecutor throughout
+
 ### LLM Tool Calling
 - Natural language mapped to structured actions (`add_chore`, `mark_chore_done`, `add_birthday`, `list_chores`, `answer_from_docs`, etc.)
 - Planner returns strict JSON `{type, data, reply}` validated by Pydantic discriminated-union schemas
@@ -56,11 +72,9 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - Graceful degradation: if ChromaDB is empty or embeddings are unavailable, CHILI falls back to normal tool-calling
 
 ### Smart Multi-Model Routing
+- **Free-tier LLM cascade**: Groq (primary) → secondary Groq model → Gemini (free) → OpenAI (paid last resort)
 - Local-first: tool actions (chores, birthdays, RAG) always use llama3 locally (free, private)
-- OpenAI fallback: general conversation routes to OpenAI API when the local planner returns `type=unknown`
-- **Streaming responses**: OpenAI fallback streams tokens via SSE for real-time ChatGPT-like typing experience
-- Cost-aware: defaults to `gpt-4o-mini` (~$0.15/1M tokens). Configurable via `.env`
-- Graceful: works without an API key (existing help message). Zero breaking changes
+- **Streaming responses**: all LLM tiers stream tokens via SSE for real-time ChatGPT-like typing experience
 - `model_used` tracked on every message for observability (`/admin`, `/metrics`)
 
 ### Housemate Personality Profiles
@@ -118,8 +132,10 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 | Backend | Python 3.11, FastAPI |
 | Database | SQLite via SQLAlchemy |
 | LLM (local) | Ollama (llama3 for planning, nomic-embed-text for embeddings) |
-| LLM (cloud) | OpenAI API (gpt-4o-mini for general chat + personality extraction) |
+| LLM (cloud) | Tiered cascade: Groq (free) → Gemini (free) → OpenAI (paid last resort) |
 | Vector Store | ChromaDB (local, persistent) |
+| ML / NLP | scikit-learn (GradientBoosting), ta (technical analysis), vaderSentiment |
+| Charts | LightweightCharts (TradingView), yfinance for market data |
 | Validation | Pydantic v2 (strict schemas, discriminated unions) |
 | Frontend | Server-rendered HTML + vanilla JS (`fetch()` for chat) |
 | Container | Docker + Docker Compose (Ollama sidecar) |
@@ -193,55 +209,60 @@ CHILI is designed for household use. Run with `--host 0.0.0.0` and access from a
 
 ```
 app/
-├── main.py              # FastAPI app creation, router mounting (~25 lines)
+├── main.py              # FastAPI app creation, router mounting, migrations
 ├── deps.py              # Shared FastAPI dependencies (get_db, identity resolution)
+├── config.py            # App settings (env vars, module flags)
 ├── routers/
 │   ├── chat.py          # Chat page, /api/chat, streaming, conversations
+│   ├── trading.py       # Trading page + AI analysis/smart-pick endpoints
+│   ├── trading_sub/     # Trading sub-routers (ai, scanner, alerts, broker)
 │   ├── admin.py         # Admin dashboard, user management, exports
 │   ├── pages.py         # Home, profile, pair pages + form handlers
 │   └── health_routes.py # /health and /metrics endpoints
 ├── services/
-│   └── chat_service.py  # Unified chat logic: tool execution, planning, SSE
+│   ├── chat_service.py  # Unified chat logic: tool execution, planning, SSE
+│   ├── yf_session.py    # Yahoo Finance wrapper (rate-limited, cached, sentiment-enriched)
+│   └── trading/         # Trading business logic
+│       ├── ai_context.py    # Rich AI context assembly (parallel, cached market pulse)
+│       ├── learning.py      # AI Brain: pattern mining, snapshots, ML predictions
+│       ├── ml_engine.py     # GradientBoosting model (tech + sentiment + fundamentals)
+│       ├── scanner.py       # Ticker scoring, screener, momentum scanner, smart pick
+│       ├── sentiment.py     # VADER news sentiment scoring
+│       ├── market_data.py   # Indicators, quotes, regime detection
+│       ├── portfolio.py     # Watchlist, trades, insights
+│       ├── journal.py       # Trading journal entries
+│       └── alerts.py        # Price alert monitoring and dispatch
+├── models/
+│   └── trading.py       # Trading SQLAlchemy models (MarketSnapshot, Trade, etc.)
 ├── templates/
 │   ├── base.html        # Shared layout (PWA meta, theme vars, dark mode)
 │   ├── chat.html        # Chat UI (sidebar, streaming, voice, search)
+│   ├── trading.html     # Trading terminal (charts, brain dashboard, news)
 │   ├── home.html        # Home page (chores + birthdays)
 │   ├── admin.html       # Admin dashboard
-│   ├── admin_users.html # User management + pairing
-│   ├── profile.html     # Housemate personality profile
-│   └── pair.html        # Device pairing page
-├── models.py            # SQLAlchemy models (incl. HousemateProfile)
-├── db.py                # Database engine and session setup
+│   └── ...              # profile, pair, admin_users, marketplace
+├── migrations.py        # Lightweight SQLite migrations
+├── openai_client.py     # Tiered LLM cascade (Groq → Gemini → OpenAI)
 ├── llm_planner.py       # Ollama planner (accepts RAG + personality context)
-├── openai_client.py     # OpenAI API wrapper for general chat fallback
+├── rag.py               # RAG module: chunking, embedding, ChromaDB search
 ├── personality.py       # Personality profiling: extraction, context injection
 ├── planner_schema.py    # Pydantic validation schemas (incl. answer_from_docs)
-├── rag.py               # RAG module: chunking, embedding, ChromaDB search
-├── ingest.py            # CLI script: python -m app.ingest
-├── chili_nlu.py         # Rule-based fallback parser
+├── db.py                # Database engine and session setup
+├── models.py            # Core SQLAlchemy models (User, Chore, Birthday, etc.)
 ├── pairing.py           # Device pairing and identity resolution
-├── email_service.py     # Gmail SMTP for self-service pairing codes
-├── schemas.py           # API-level Pydantic schemas
 ├── logger.py            # Structured logging with trace_id
-├── health.py            # Health checks (DB + Ollama) and demo reset
-├── metrics.py           # Latency tracking, count aggregation, model stats
 ├── static/              # PWA assets (manifest, service worker, icons)
+├── prompts/             # LLM system prompts (planner, trading analyst)
 docs/
+├── momentum-trading-strategy.txt  # Trading strategy (evolving, brain-tested)
+├── modules.md           # Module system & marketplace docs
+├── TOOLING.md           # Tool-calling architecture deep dive
 ├── house-info.txt       # Example: WiFi, landlord, trash, parking
 ├── house-rules.txt      # Example: quiet hours, kitchen, guests
 ├── recipes.txt          # Example: household favorite recipes
-data/
-├── chili.db             # SQLite database (auto-created, gitignored)
-├── chroma/              # ChromaDB vector store (auto-created, gitignored)
-tests/
-├── conftest.py               # Shared fixtures (in-memory DB, test client)
-├── test_api.py               # API integration tests
-├── test_conversations.py     # Conversation CRUD, streaming, sidebar tests
-├── test_openai_routing.py    # OpenAI fallback routing + model tracking
-├── test_personality.py       # Personality extraction and profile tests
-├── test_rag.py               # Chunking, search, and ingestion tests
-├── test_planner_schema.py    # Schema validation tests
-├── test_fallback_parser.py   # Fallback parser tests
+data/                    # SQLite DB, ChromaDB, uploads, ticker cache (gitignored)
+tests/                   # pytest suite with in-memory SQLite fixtures
+chili_mobile/            # Flutter mobile app (Android/iOS)
 Dockerfile               # Container image for CHILI app
 docker-compose.yml       # Full stack: CHILI + Ollama
 scripts/
@@ -249,7 +270,6 @@ scripts/
 ├── start-https.ps1      # HTTPS setup for LAN (mkcert)
 requirements.txt         # Pinned Python dependencies
 .env.example             # Template for environment variables
-TOOLING.md               # Deep dive into guardrails and tool-calling design
 ```
 
 ## Design Decisions
@@ -321,6 +341,13 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 - [x] Guest chat visibility and housemate replies
 - [x] Streaming LLM responses via SSE + ChatGPT-style UI (markdown, sidebar, conversations)
 - [x] Docker containerization (`docker compose up` one-liner)
+- [x] Trading terminal with interactive charts, watchlist, portfolio, and journal
+- [x] AI Brain: self-learning pattern mining with hypothesis testing and adaptive weights
+- [x] News sentiment analysis (VADER) integrated into Brain learning and ML features
+- [x] Fundamental data (P/E, market cap) as ML features for predictions
+- [x] Parallel AI context assembly with cached market pulse (5-min stale-while-revalidate)
+- [x] Free-tier LLM cascade (Groq → Gemini → OpenAI last resort)
+- [x] Flutter mobile app with voice chat
 - [ ] Expanded tool actions (shopping list, edit/delete, chore assignment)
 - [ ] Image & file understanding (GPT-4o vision, PDF ingestion)
 - [ ] Scheduled reminders & push notifications
@@ -330,4 +357,6 @@ TOOLING.md               # Deep dive into guardrails and tool-calling design
 
 ## Further Reading
 
-See [TOOLING.md](TOOLING.md) for a detailed walkthrough of the tool-calling architecture, guardrail layers, and observability design.
+- [TOOLING.md](docs/TOOLING.md) — Tool-calling architecture, guardrail layers, and observability design
+- [momentum-trading-strategy.txt](docs/momentum-trading-strategy.txt) — CHILI's evolving trading strategy (brain-tested)
+- [modules.md](docs/modules.md) — Module system & marketplace documentation

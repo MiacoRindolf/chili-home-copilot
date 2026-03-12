@@ -115,6 +115,10 @@ class MarketSnapshot(Base):
     future_return_3d: Optional[float] = Column(Float, nullable=True)
     future_return_5d: Optional[float] = Column(Float, nullable=True)  # filled later
     future_return_10d: Optional[float] = Column(Float, nullable=True)
+    news_sentiment: Optional[float] = Column(Float, nullable=True)
+    news_count: Optional[int] = Column(Integer, nullable=True)
+    pe_ratio: Optional[float] = Column(Float, nullable=True)
+    market_cap_b: Optional[float] = Column(Float, nullable=True)  # billions
 
 
 class LearningEvent(Base):

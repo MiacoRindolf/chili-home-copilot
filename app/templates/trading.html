@@ -97,7 +97,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tf-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 /* Chart + indicator sub-panes */
-.t-chart-area { flex: 1; position: relative; min-height: 180px; }
+.t-chart-area { flex: 1; position: relative; min-height: 180px; padding-right: 4px; }
 #main-chart { width: 100%; height: 100%; }
 .chart-loading-overlay {
   position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -431,15 +431,19 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
 /* ── Ticker detail + news strip ─────────────────────────────────────────── */
 .ticker-detail-section {
-  display: flex; flex-direction: column; padding: 0; margin: 0;
+  display: flex; flex-direction: row; align-items: stretch; padding: 0; margin: 0;
   font-size: 11px; flex-shrink: 0; border-bottom: 1px solid var(--border);
-  background: var(--bg-header);
+  background: var(--bg-header); overflow: hidden;
 }
 .ticker-detail-info {
-  display: flex; align-items: center; gap: 8px; padding: 4px 12px;
-  overflow: hidden; min-width: 0;
+  width: 280px; flex-shrink: 0; padding: 6px 12px;
+  border-right: 1px solid var(--border); min-width: 0;
+  display: flex; flex-direction: column; gap: 2px; justify-content: center;
 }
+.td-row { display: flex; align-items: center; gap: 6px; min-width: 0; flex-wrap: wrap; }
+.td-ticker { font-weight: 700; color: var(--accent, #6366f1); font-size: 12px; flex-shrink: 0; }
 .td-company { font-weight: 600; color: var(--text); font-size: 11px; flex-shrink: 0; }
+.td-sector { font-size: 9px; color: var(--text-muted); background: rgba(99,102,241,.08); padding: 1px 6px; border-radius: 4px; flex-shrink: 0; }
 .td-dot { color: var(--border); font-size: 8px; flex-shrink: 0; }
 .td-tag {
   display: inline-flex; align-items: center; gap: 3px; font-size: 10px;
@@ -447,10 +451,17 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 .td-tag b { color: var(--text-secondary); font-weight: 600; }
 .td-desc-text {
-  color: var(--text-muted); font-size: 10px; line-height: 1.25;
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  min-width: 0; flex: 1 1 auto; cursor: help; opacity: .7;
+  color: var(--text-muted); font-size: 10px; line-height: 1.35;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; min-width: 0; opacity: .7;
 }
+.td-desc-text.expanded { -webkit-line-clamp: unset; }
+.td-readmore {
+  font-size: 9px; color: var(--accent, #6366f1); cursor: pointer;
+  border: none; background: none; padding: 0; margin-top: 1px;
+  opacity: .8; flex-shrink: 0;
+}
+.td-readmore:hover { opacity: 1; text-decoration: underline; }
 .td-loading, .td-muted { font-size: 10px; color: var(--text-muted); }
 .td-skeleton { display: inline-flex; gap: 10px; align-items: center; flex: 1; }
 .td-bone {
@@ -460,25 +471,26 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 @keyframes boneShimmer { 0%{background-position:200% 0} 100%{background-position:-200% 0} }
 .ticker-news-row {
-  display: flex; align-items: stretch; gap: 0; overflow-x: auto;
-  -webkit-overflow-scrolling: touch; border-top: 1px solid var(--border);
+  flex: 1; display: flex; align-items: center; gap: 6px; padding: 6px 8px;
+  overflow-x: auto; -webkit-overflow-scrolling: touch; min-width: 0;
 }
 .ticker-news-row:empty { display: none; }
 .ticker-news-row::-webkit-scrollbar { height: 0; }
-.news-pill {
-  flex-shrink: 0; padding: 4px 14px; font-size: 10px;
-  border-right: 1px solid var(--border); color: var(--text-secondary);
-  transition: background .12s, color .12s; display: flex; align-items: center; gap: 6px;
-  max-width: 320px; min-width: 0;
+.news-card {
+  flex-shrink: 0; min-width: 180px; max-width: 240px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: 8px; font-size: 10px;
+  color: var(--text-secondary); background: var(--bg, #fff);
+  transition: box-shadow .15s, border-color .15s;
 }
-.news-pill:last-child { border-right: none; }
-.news-pill:hover { background: rgba(99,102,241,.05); color: var(--text); }
-.news-pill a { text-decoration: none; color: inherit; display: flex; align-items: center; gap: 6px; min-width: 0; }
-.news-pill .np-title {
-  font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+.news-card:hover { border-color: var(--accent, #6366f1); box-shadow: 0 2px 8px rgba(99,102,241,.1); }
+.news-card a { text-decoration: none; color: inherit; display: flex; flex-direction: column; gap: 3px; }
+.news-card .nc-title {
+  font-weight: 500; line-height: 1.3;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden; min-width: 0;
 }
-.news-pill .np-src {
-  font-size: 9px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0;
+.news-card .nc-meta {
+  font-size: 9px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 
 /* ── Top Picks Banner ──────────────────────────── */
@@ -880,9 +892,77 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 .brain-modal-footer button:hover { opacity: .85; }
 
+/* News reader modal */
+.news-reader-overlay {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+  z-index: 10000; align-items: center; justify-content: center; backdrop-filter: blur(2px);
+}
+.news-reader-overlay.active { display: flex; }
+.news-reader-card {
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: 14px; width: 94vw; max-width: 900px; height: 85vh;
+  display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.25);
+  animation: brainModalIn .2s ease;
+}
+.news-reader-header {
+  display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+  border-bottom: 1px solid var(--border); flex-shrink: 0;
+}
+.news-reader-header .nr-title { font-size: 13px; font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.news-reader-header .nr-source { font-size: 10px; color: var(--text-muted); flex-shrink: 0; }
+.news-reader-header .nr-open {
+  padding: 4px 12px; border: 1px solid var(--border); border-radius: 6px;
+  background: none; color: var(--text); font-size: 10px; cursor: pointer;
+  text-decoration: none; flex-shrink: 0; transition: background .15s;
+}
+.news-reader-header .nr-open:hover { background: rgba(99,102,241,.08); }
+.news-reader-header .nr-close {
+  background: none; border: none; cursor: pointer; color: var(--text-muted);
+  font-size: 20px; line-height: 1; padding: 0 4px; flex-shrink: 0;
+}
+.news-reader-header .nr-close:hover { color: var(--text); }
+.news-reader-body { flex: 1; overflow: hidden; }
+.news-reader-body iframe { width: 100%; height: 100%; border: none; border-radius: 0 0 14px 14px; }
+
+/* Sentiment badge */
+.news-card { position: relative; }
+.nc-badge {
+  position: absolute; top: 4px; right: 4px; font-size: 8px; font-weight: 700;
+  padding: 1px 5px; border-radius: 4px; line-height: 1.4; letter-spacing: .3px;
+  text-transform: uppercase;
+}
+.nc-badge.bullish { background: rgba(34,197,94,.15); color: #22c55e; }
+.nc-badge.bearish { background: rgba(239,68,68,.15); color: #ef4444; }
+.nc-badge.neutral { background: rgba(156,163,175,.12); color: var(--text-muted); }
+
 /* Clickable KPI tiles */
 .brain-kpi.clickable { cursor: pointer; transition: border-color .2s, box-shadow .2s; }
 .brain-kpi.clickable:hover { border-color: var(--accent); box-shadow: 0 2px 8px rgba(139,92,246,.12); }
+.brain-kpi.no-data { opacity: .55; }
+.brain-kpi.no-data .bk-val, .brain-kpi.no-data .ring-label { color: var(--text-muted) !important; }
+
+/* Pipeline indicator */
+.brain-pipeline { display: flex; align-items: center; gap: 4px; font-size: 9px; color: var(--text-muted); margin-bottom: 6px; flex-wrap: wrap; }
+.brain-pipeline .bp-step { display: flex; align-items: center; gap: 3px; }
+.brain-pipeline .bp-num { font-weight: 700; color: var(--text); font-size: 10px; }
+.brain-pipeline .bp-arrow { color: var(--border); }
+.brain-pipeline .bp-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.brain-pipeline .bp-dot.active { background: #22c55e; }
+.brain-pipeline .bp-dot.pending { background: #f59e0b; animation: bpPulse 1.5s ease-in-out infinite; }
+.brain-pipeline .bp-dot.empty { background: var(--border); }
+@keyframes bpPulse { 0%,100% { opacity: 1; } 50% { opacity: .4; } }
+
+/* Skeleton loading for KPI tiles */
+.brain-kpi-skeleton { min-height: 70px; background: linear-gradient(90deg, var(--bg) 25%, rgba(139,92,246,.06) 50%, var(--bg) 75%); background-size: 200% 100%; animation: brainShimmer 1.5s ease-in-out infinite; border: 1px solid var(--border); border-radius: 10px; }
+@keyframes brainShimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
+
+/* KPI tooltip */
+.brain-kpi { position: relative; }
+.brain-kpi .bk-tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px; font-size: 10px; color: var(--text); white-space: nowrap; z-index: 100; box-shadow: 0 4px 12px rgba(0,0,0,.2); pointer-events: none; max-width: 220px; white-space: normal; line-height: 1.4; }
+.brain-kpi:hover .bk-tooltip { display: block; }
+.brain-kpi .bk-tooltip::after { content: ''; position: absolute; top: 100%; left: 50%; transform: translateX(-50%); border: 5px solid transparent; border-top-color: var(--border); }
+.brain-btn { display: inline-block; padding: 6px 16px; border: none; border-radius: 8px; background: linear-gradient(135deg,#8b5cf6,#6d28d9); color: #fff; font-size: 11px; font-weight: 600; cursor: pointer; transition: opacity .2s; }
+.brain-btn:hover { opacity: .85; }
 
 /* Reflection content */
 #brain-reflection-content h3 { font-size: 12px; font-weight: 700; margin: 8px 0 4px; color: var(--text); }
@@ -1291,6 +1371,8 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 @media (max-width: 1024px) {
   .t-sidebar { width: 180px; min-width: 150px; }
   .t-ai { width: 320px; min-width: 260px; }
+  .ticker-detail-info { width: 240px; }
+  .news-card { min-width: 160px; max-width: 210px; }
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1358,9 +1440,12 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .stats-grid { grid-template-columns: 1fr 1fr; }
 
   /* Ticker detail & banner compact on mobile */
-  .ticker-detail-info { padding: 3px 8px; gap: 5px; font-size: 10px; }
+  .ticker-detail-section { flex-direction: column; }
+  .ticker-detail-info { width: 100%; border-right: none; border-bottom: 1px solid var(--border); padding: 3px 8px; gap: 3px; }
   .td-desc-text { display: none; }
-  .news-pill { padding: 3px 10px; font-size: 9px; }
+  .td-readmore { display: none; }
+  .ticker-news-row { padding: 3px 6px; gap: 4px; }
+  .news-card { min-width: 150px; max-width: 200px; padding: 4px 8px; font-size: 9px; }
   .signals-banner { padding: 6px 8px; }
   .signals-banner .sb-title { font-size: 11px; }
   .sb-actions button { font-size: 9px; padding: 3px 8px; }
@@ -1645,13 +1730,14 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <span class="tb-divider"></span>
       <button id="btn-multiview" class="mv-btn" onclick="toggleMultiView()" title="Multi-timeframe view (M)">&#x25A6; Multi</button>
       <button id="btn-analyze" class="tb-action" onclick="runAnalysis()">&#x1F916; AI Analyze</button>
-      <button onclick="runBacktest()" title="Backtest current ticker">&#x1F9EA; Backtest</button>
     </div>
 
-    <!-- Ticker detail + news (full-width strip under toolbar) -->
+    <!-- Ticker detail + news (two-column strip under toolbar) -->
     <div id="ticker-detail-section" class="ticker-detail-section" style="display:flex">
       <div id="ticker-detail-bar" class="ticker-detail-info">
-        <span class="td-skeleton"><span class="td-bone" style="width:70px"></span><span class="td-bone" style="width:50px"></span><span class="td-bone" style="width:100px"></span></span>
+        <div class="td-row">
+          <span class="td-skeleton"><span class="td-bone" style="width:70px"></span><span class="td-bone" style="width:50px"></span><span class="td-bone" style="width:100px"></span></span>
+        </div>
       </div>
       <div id="ticker-news-cards" class="ticker-news-row"></div>
     </div>
@@ -1942,6 +2028,21 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     </div>
   </div>
 
+  <!-- News Reader Modal -->
+  <div class="news-reader-overlay" id="news-reader-overlay" onclick="if(event.target===this)closeNewsReader()">
+    <div class="news-reader-card">
+      <div class="news-reader-header">
+        <span class="nr-title" id="nr-title"></span>
+        <span class="nr-source" id="nr-source"></span>
+        <a class="nr-open" id="nr-open" href="#" target="_blank" rel="noopener">Open in new tab</a>
+        <button class="nr-close" onclick="closeNewsReader()">&times;</button>
+      </div>
+      <div class="news-reader-body">
+        <iframe id="nr-iframe" sandbox="allow-scripts allow-same-origin allow-popups" referrerpolicy="no-referrer"></iframe>
+      </div>
+    </div>
+  </div>
+
   <!-- Right Panel: Chat + Brain -->
   <div class="t-ai" id="ai-panel">
     <div class="t-ai-view-tabs">
@@ -2023,7 +2124,13 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       <!-- Performance Scorecard -->
       <div class="brain-section brain-compact">
         <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Performance</div>
-        <div class="brain-kpis" id="brain-kpis"></div>
+        <div class="brain-pipeline" id="brain-pipeline"></div>
+        <div class="brain-kpis" id="brain-kpis">
+          <div class="brain-kpi brain-kpi-skeleton"></div>
+          <div class="brain-kpi brain-kpi-skeleton"></div>
+          <div class="brain-kpi brain-kpi-skeleton"></div>
+          <div class="brain-kpi brain-kpi-skeleton"></div>
+        </div>
       </div>
 
       <!-- Live Predictions -->
@@ -2148,6 +2255,7 @@ function toggleAiPanel() {
     backdrop.classList.remove('open');
     if (window.innerWidth <= 768) fab.style.display = 'flex';
   }
+  setTimeout(function(){ window.dispatchEvent(new Event('resize')); }, 300);
 }
 
 function closeAllDrawers() {
@@ -2448,49 +2556,69 @@ function loadTickerDetail(ticker) {
   var bar = document.getElementById('ticker-detail-bar');
   if (!section || !bar) return;
   section.style.display = 'flex';
-  bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>' +
-    '<span class="td-skeleton"><span class="td-bone" style="width:60px"></span><span class="td-bone" style="width:45px"></span><span class="td-bone" style="width:80px"></span><span class="td-bone" style="width:140px"></span></span>';
+  bar.innerHTML = '<div class="td-row"><span class="td-ticker">' + escHtml(ticker) + '</span>' +
+    '<span class="td-skeleton"><span class="td-bone" style="width:60px"></span><span class="td-bone" style="width:45px"></span></span></div>';
   fetch('/api/trading/ticker-info?ticker=' + encodeURIComponent(ticker))
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (!d.ok || !d.info) {
-        bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>';
+        bar.innerHTML = '<div class="td-row"><span class="td-ticker">' + escHtml(ticker) + '</span></div>';
         return;
       }
       var i = d.info;
-      var h = '<span class="td-company">' + escHtml(i.name || ticker) + '</span>';
-      var tags = [];
-      if (i.sector_or_type && i.sector_or_type !== '—') tags.push(escHtml(i.sector_or_type));
-      if (i.market_cap_fmt) tags.push('MCap <b>' + escHtml(i.market_cap_fmt) + '</b>');
-      if (i.pe != null && i.pe > 0) tags.push('P/E <b>' + i.pe.toFixed(1) + '</b>');
-      tags.forEach(function(t) { h += '<span class="td-dot">&middot;</span><span class="td-tag">' + t + '</span>'; });
-      if (i.description) h += '<span class="td-dot">&middot;</span><span class="td-desc-text" title="' + escHtml(i.description) + '">' + escHtml(i.description) + '</span>';
-      bar.innerHTML = h;
+      var row1 = '<div class="td-row"><span class="td-ticker">' + escHtml(ticker) + '</span>';
+      row1 += '<span class="td-company">' + escHtml(i.name || ticker) + '</span>';
+      if (i.sector_or_type && i.sector_or_type !== '\u2014') row1 += '<span class="td-sector">' + escHtml(i.sector_or_type) + '</span>';
+      row1 += '</div>';
+      var row2 = '<div class="td-row">';
+      if (i.market_cap_fmt) row2 += '<span class="td-tag">MCap <b>' + escHtml(i.market_cap_fmt) + '</b></span>';
+      if (i.pe != null && i.pe > 0) row2 += '<span class="td-tag">P/E <b>' + i.pe.toFixed(1) + '</b></span>';
+      row2 += '</div>';
+      var descBlock = '';
+      if (i.description) {
+        var descId = 'td-desc-' + Date.now();
+        descBlock = '<div class="td-desc-text" id="' + descId + '">' + escHtml(i.description) + '</div>' +
+          '<button class="td-readmore" onclick="toggleTickerDesc(\'' + descId + '\', this)">Read more</button>';
+      }
+      bar.innerHTML = row1 + row2 + descBlock;
     })
     .catch(function() {
-      bar.innerHTML = '<span class="td-company">' + escHtml(ticker) + '</span>';
+      bar.innerHTML = '<div class="td-row"><span class="td-ticker">' + escHtml(ticker) + '</span></div>';
     });
+}
+
+function toggleTickerDesc(id, btn) {
+  var el = document.getElementById(id);
+  if (!el) return;
+  var expanded = el.classList.toggle('expanded');
+  btn.textContent = expanded ? 'Show less' : 'Read more';
 }
 
 function loadTickerNews(ticker) {
   var container = document.getElementById('ticker-news-cards');
   if (!container) return;
-  container.innerHTML = '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:120px;height:8px"></span><span class="td-bone" style="width:60px;height:8px"></span></div>' +
-    '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:100px;height:8px"></span><span class="td-bone" style="width:50px;height:8px"></span></div>' +
-    '<div class="news-pill" style="gap:6px"><span class="td-bone" style="width:130px;height:8px"></span></div>';
+  container.innerHTML = '<div class="news-card" style="min-height:40px"><span class="td-bone" style="width:140px;height:8px;display:block;margin-bottom:6px"></span><span class="td-bone" style="width:70px;height:6px;display:block"></span></div>' +
+    '<div class="news-card" style="min-height:40px"><span class="td-bone" style="width:120px;height:8px;display:block;margin-bottom:6px"></span><span class="td-bone" style="width:60px;height:6px;display:block"></span></div>' +
+    '<div class="news-card" style="min-height:40px"><span class="td-bone" style="width:150px;height:8px;display:block;margin-bottom:6px"></span><span class="td-bone" style="width:50px;height:6px;display:block"></span></div>';
   fetch('/api/trading/news?ticker=' + encodeURIComponent(ticker) + '&limit=8')
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (!d.ok || !d.news || !d.news.length) { container.innerHTML = ''; return; }
       var html = '';
       d.news.forEach(function(n) {
-        var url = (n.url || '#').replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;');
-        var title = escHtml((n.title || '').substring(0, 90));
+        var url = (n.url || '#').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;');
+        var rawTitle = (n.title || '').substring(0, 100);
+        var title = escHtml(rawTitle);
         var src = n.publisher ? escHtml(n.publisher) : '';
-        html += '<div class="news-pill"><a href="' + url + '" target="_blank" rel="noopener">';
-        html += '<span class="np-title">' + title + '</span>';
-        if (src) html += '<span class="np-src">' + src + '</span>';
-        html += '</a></div>';
+        var safeTitle = rawTitle.replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        var safeSrc = (n.publisher || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        var sent = n.sentiment || 'neutral';
+        var badge = sent !== 'neutral' ? '<span class="nc-badge ' + sent + '">' + sent + '</span>' : '';
+        html += '<div class="news-card" onclick="openNewsReader(\'' + url + '\',\'' + safeTitle + '\',\'' + safeSrc + '\')" style="cursor:pointer">';
+        html += badge;
+        html += '<div class="nc-title">' + title + '</div>';
+        if (src) html += '<div class="nc-meta">' + src + '</div>';
+        html += '</div>';
       });
       container.innerHTML = html;
     })
@@ -2819,14 +2947,53 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('brain-modal-overlay').classList.contains('active')) {
     closeBrainModal();
   }
+  if (e.key === 'Escape' && document.getElementById('news-reader-overlay').classList.contains('active')) {
+    closeNewsReader();
+  }
 });
+
+function openNewsReader(url, title, source) {
+  document.getElementById('nr-title').textContent = title || 'Article';
+  document.getElementById('nr-source').textContent = source || '';
+  var openBtn = document.getElementById('nr-open');
+  openBtn.href = url;
+  document.getElementById('nr-iframe').src = url;
+  document.getElementById('news-reader-overlay').classList.add('active');
+}
+function closeNewsReader() {
+  document.getElementById('news-reader-overlay').classList.remove('active');
+  document.getElementById('nr-iframe').src = '';
+}
 
 function showAccuracyDetail(type) {
   var labels = {all:'Overall',strong:'Strong Signal',stock:'Stock',crypto:'Crypto'};
   openBrainModal(labels[type]+' Accuracy Detail', '<div style="text-align:center;padding:20px"><div class="brain-pulse"></div> Loading predictions...</div>');
   fetch('/api/trading/brain/accuracy-detail?type=' + type + '&limit=20').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok || !d.rows.length) {
-      document.getElementById('brain-modal-body').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">No evaluated predictions yet for this category. Run scans and wait for outcomes.</div>';
+    if (!d.ok || !d.rows || !d.rows.length) {
+      var bs = window._brainStats || {};
+      var pending = bs.pending_predictions || 0;
+      var snaps = bs.total_snapshots || 0;
+      var ps = bs.pipeline_status || 'no_data';
+      var days = bs.days_until_first_result;
+      var zeroHtml = '<div style="text-align:center;padding:24px">';
+      zeroHtml += '<div style="font-size:28px;margin-bottom:8px;opacity:.4">&#x1F50D;</div>';
+      if (ps === 'no_data') {
+        zeroHtml += '<div style="color:var(--text-muted);margin-bottom:12px">No market data collected yet. Run a scan to start building predictions.</div>';
+        zeroHtml += '<button onclick="runFullScan(); closeBrainModal();" class="brain-btn" style="margin-top:8px">Run Scan Now</button>';
+      } else if (ps === 'collecting' || ps === 'pending_verification') {
+        zeroHtml += '<div style="color:var(--text-muted);margin-bottom:10px">CHILI has recorded <strong>' + snaps.toLocaleString() + '</strong> snapshots';
+        if (pending > 0) zeroHtml += ' with <strong style="color:#f59e0b">' + pending + '</strong> predictions awaiting 5-day verification';
+        zeroHtml += '.</div>';
+        if (days != null && days > 0) {
+          zeroHtml += '<div style="font-size:11px;color:var(--text-muted)">First results expected in ~<strong>' + days + '</strong> trading day' + (days !== 1 ? 's' : '') + '.</div>';
+        } else if (days === 0) {
+          zeroHtml += '<div style="font-size:11px;color:#22c55e">Results should appear after the next learning cycle.</div>';
+        }
+      } else {
+        zeroHtml += '<div style="color:var(--text-muted)">No evaluated predictions yet for ' + labels[type] + '. Keep scanning to collect more data.</div>';
+      }
+      zeroHtml += '</div>';
+      document.getElementById('brain-modal-body').innerHTML = zeroHtml;
       return;
     }
     var hits = d.rows.filter(function(r){return r.hit;}).length;
@@ -2909,12 +3076,19 @@ function showKpiInfo(type) {
     },
     snapshots: {
       title: 'Market Snapshots',
-      html: '<p>Snapshots record indicator values at a point in time. After 5 days, CHILI checks the actual price movement to build its training dataset.</p>' +
-        '<div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center">' +
-          '<div style="font-size:20px;font-weight:800">' + d.total_snapshots.toLocaleString() + '</div>' +
-          '<div style="font-size:10px;color:var(--text-muted)">total snapshots</div>' +
+      html: '<p>Snapshots record indicator values at a point in time. After ~5 trading days, CHILI checks the actual price movement to build its training dataset.</p>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:6px;margin:10px 0">' +
+          '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center">' +
+            '<div style="font-size:16px;font-weight:800">' + d.total_snapshots.toLocaleString() + '</div>' +
+            '<div style="font-size:9px;color:var(--text-muted)">Total</div></div>' +
+          '<div style="padding:8px;background:rgba(245,158,11,.06);border-radius:8px;text-align:center">' +
+            '<div style="font-size:16px;font-weight:800;color:#f59e0b">' + (d.pending_predictions||0).toLocaleString() + '</div>' +
+            '<div style="font-size:9px;color:var(--text-muted)">Pending</div></div>' +
+          '<div style="padding:8px;background:rgba(34,197,94,.06);border-radius:8px;text-align:center">' +
+            '<div style="font-size:16px;font-weight:800;color:#22c55e">' + (d.evaluated_snapshots||0).toLocaleString() + '</div>' +
+            '<div style="font-size:9px;color:var(--text-muted)">Verified</div></div>' +
         '</div>' +
-        '<p>Universe: <strong>' + (d.universe_stocks||0) + '</strong> stocks, <strong>' + (d.universe_crypto||0) + '</strong> crypto tickers. More snapshots = better ML training data.</p>'
+        '<p>Universe: <strong>' + (d.universe_stocks||0) + '</strong> stocks, <strong>' + (d.universe_crypto||0) + '</strong> crypto. More snapshots = better ML training data.</p>'
     }
   };
   var entry = info[type] || {title:'Info',html:'<p>No additional details.</p>'};
@@ -2926,54 +3100,113 @@ function loadBrainDashboard() {
   fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var kpis = document.getElementById('brain-kpis');
-    var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
-    var accCls = d.prediction_accuracy >= 55 ? 'good' : d.prediction_accuracy >= 40 ? 'warn' : 'danger';
-    var accColor = d.prediction_accuracy >= 55 ? '#22c55e' : d.prediction_accuracy >= 40 ? '#f59e0b' : '#ef4444';
-    var strongAccCls = (d.strong_accuracy||0) >= 55 ? 'good' : (d.strong_accuracy||0) >= 40 ? 'warn' : 'danger';
-    var strongAccColor = (d.strong_accuracy||0) >= 55 ? '#22c55e' : (d.strong_accuracy||0) >= 40 ? '#f59e0b' : '#ef4444';
-    var weekTrend = d.patterns_this_week > 0
-      ? '<div class="bk-trend up">▲ +' + d.patterns_this_week + ' this week</div>'
-      : '<div class="bk-trend flat">— no new this week</div>';
-    var predNote = d.total_predictions > 0
-      ? '<div class="bk-trend flat">' + (d.strong_predictions||0) + ' high-conviction</div>'
-      : '<div class="bk-trend flat">Run scans to gather data</div>';
-
+    var pipeline = document.getElementById('brain-pipeline');
     window._brainStats = d;
+
+    var hasData = d.total_predictions > 0;
+    var pending = d.pending_predictions || 0;
+    var evaluated = d.evaluated_snapshots || 0;
+    var ps = d.pipeline_status || 'no_data';
+
+    // Pipeline indicator
+    var snapDot = d.total_snapshots > 0 ? 'active' : 'empty';
+    var pendDot = pending > 0 ? 'pending' : 'empty';
+    var verDot = evaluated > 0 ? 'active' : 'empty';
+    var pipeHtml =
+      '<span class="bp-step"><span class="bp-dot ' + snapDot + '"></span> Snapshots: <span class="bp-num">' + (d.total_snapshots||0).toLocaleString() + '</span></span>' +
+      '<span class="bp-arrow">&rarr;</span>' +
+      '<span class="bp-step"><span class="bp-dot ' + pendDot + '"></span> Pending: <span class="bp-num">' + pending.toLocaleString() + '</span></span>' +
+      '<span class="bp-arrow">&rarr;</span>' +
+      '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + evaluated.toLocaleString() + '</span></span>';
+    pipeline.innerHTML = pipeHtml;
+
+    // Accuracy display helpers
+    function _accDisp(acc, count) {
+      if (count > 0) return acc + '%';
+      return '--';
+    }
+    function _accCls(acc, count) {
+      if (count === 0) return '';
+      return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger';
+    }
+    function _accColor(acc, count) {
+      if (count === 0) return 'var(--text-muted)';
+      return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444';
+    }
+    function _noDataCls(count) { return count > 0 ? '' : ' no-data'; }
+
+    // Contextual subtitle for accuracy tiles when no data
+    function _accSub(count, label) {
+      if (count > 0) return '<div class="bk-trend flat">' + count + ' predictions</div>';
+      if (ps === 'pending_verification') return '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting verification</div>';
+      if (ps === 'collecting') return '<div class="bk-trend flat">Collecting snapshots&hellip;</div>';
+      return '<div class="bk-trend flat">Run scans to start</div>';
+    }
+
+    var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
+    var weekTrend = d.patterns_this_week > 0
+      ? '<div class="bk-trend up">&#9650; +' + d.patterns_this_week + ' this week</div>'
+      : '<div class="bk-trend flat">&mdash; no new this week</div>';
+
+    var strongSub = '';
+    if ((d.strong_predictions||0) > 0) {
+      strongSub = '<div class="bk-trend flat">' + d.strong_predictions + ' high-conviction</div>';
+    } else if (pending > 0) {
+      strongSub = '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting results</div>';
+    } else {
+      strongSub = '<div class="bk-trend flat">Run scans to gather data</div>';
+    }
+
+    var accRingPct = hasData ? d.prediction_accuracy : 0;
+    var strRingPct = (d.strong_predictions||0) > 0 ? (d.strong_accuracy||0) : 0;
+
     kpis.innerHTML =
-      '<div class="brain-kpi clickable" onclick="showAccuracyDetail(\'all\')" title="Click for details">' +
-        '<div class="brain-ring">' + _makeRingSvg(d.prediction_accuracy, accColor) +
-          '<div class="ring-label ' + accCls + '">' + d.prediction_accuracy + '%</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.total_predictions) + '" onclick="showAccuracyDetail(\'all\')">' +
+        '<div class="bk-tooltip">Percentage of 5-day direction predictions that were correct. Needs verified outcomes to calculate.</div>' +
+        '<div class="brain-ring">' + _makeRingSvg(accRingPct, _accColor(d.prediction_accuracy, d.total_predictions)) +
+          '<div class="ring-label ' + _accCls(d.prediction_accuracy, d.total_predictions) + '">' + _accDisp(d.prediction_accuracy, d.total_predictions) + '</div>' +
         '</div>' +
         '<div class="bk-lbl">Overall Accuracy</div>' +
-        '<div class="bk-trend flat">' + d.total_predictions + ' predictions</div>' +
+        _accSub(d.total_predictions, 'all') +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showAccuracyDetail(\'strong\')" title="Click for details">' +
-        '<div class="brain-ring">' + _makeRingSvg(d.strong_accuracy||0, strongAccColor) +
-          '<div class="ring-label ' + strongAccCls + '">' + (d.strong_accuracy||0) + '%</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.strong_predictions||0) + '" onclick="showAccuracyDetail(\'strong\')">' +
+        '<div class="bk-tooltip">Accuracy of high-conviction predictions (score &ge; 3.0). These are CHILI\'s most confident calls.</div>' +
+        '<div class="brain-ring">' + _makeRingSvg(strRingPct, _accColor(d.strong_accuracy||0, d.strong_predictions||0)) +
+          '<div class="ring-label ' + _accCls(d.strong_accuracy||0, d.strong_predictions||0) + '">' + _accDisp(d.strong_accuracy||0, d.strong_predictions||0) + '</div>' +
         '</div>' +
         '<div class="bk-lbl">Strong Signal Accuracy</div>' +
-        predNote +
+        strongSub +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')" title="Click for details">' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')">' +
+        '<div class="bk-tooltip">Total active patterns discovered by the AI brain through market analysis.</div>' +
         '<div class="bk-val" style="color:#8b5cf6">' + d.total_patterns + '</div>' +
         '<div class="bk-lbl">Patterns Learned</div>' +
         weekTrend +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')" title="Click for details">' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')">' +
+        '<div class="bk-tooltip">Weighted average confidence across all active patterns. Higher means more reliable signals.</div>' +
         '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
         '<div class="bk-lbl">Avg Confidence</div>' +
+        (d.confidence_trend > 0
+          ? '<div class="bk-trend up">&#9650; +' + d.confidence_trend + '% vs last week</div>'
+          : d.confidence_trend < 0
+            ? '<div class="bk-trend down">&#9660; ' + d.confidence_trend + '% vs last week</div>'
+            : '<div class="bk-trend flat">&mdash; stable</div>') +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showAccuracyDetail(\'stock\')" title="Click for details">' +
-        '<div class="bk-val">' + (d.stock_accuracy||0) + '%</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.stock_predictions||0) + '" onclick="showAccuracyDetail(\'stock\')">' +
+        '<div class="bk-tooltip">Prediction accuracy for stock tickers only.</div>' +
+        '<div class="bk-val ' + _accCls(d.stock_accuracy||0, d.stock_predictions||0) + '">' + _accDisp(d.stock_accuracy||0, d.stock_predictions||0) + '</div>' +
         '<div class="bk-lbl">Stock Accuracy</div>' +
-        '<div class="bk-trend flat">' + (d.stock_predictions||0) + ' predictions</div>' +
+        _accSub(d.stock_predictions||0, 'stock') +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showAccuracyDetail(\'crypto\')" title="Click for details">' +
-        '<div class="bk-val">' + (d.crypto_accuracy||0) + '%</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.crypto_predictions||0) + '" onclick="showAccuracyDetail(\'crypto\')">' +
+        '<div class="bk-tooltip">Prediction accuracy for crypto tickers only.</div>' +
+        '<div class="bk-val ' + _accCls(d.crypto_accuracy||0, d.crypto_predictions||0) + '">' + _accDisp(d.crypto_accuracy||0, d.crypto_predictions||0) + '</div>' +
         '<div class="bk-lbl">Crypto Accuracy</div>' +
-        '<div class="bk-trend flat">' + (d.crypto_predictions||0) + ' predictions</div>' +
+        _accSub(d.crypto_predictions||0, 'crypto') +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showMLDetail()" title="Click for details">' +
+      '<div class="brain-kpi clickable" onclick="showMLDetail()">' +
+        '<div class="bk-tooltip">Machine learning model accuracy from cross-validation. Blended with rule-based signals for predictions.</div>' +
         (d.ml_ready
           ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div>' +
             '<div class="bk-lbl">ML Accuracy (CV)</div>' +
@@ -2982,7 +3215,8 @@ function loadBrainDashboard() {
             '<div class="bk-lbl">ML Model</div>' +
             '<div class="bk-trend flat">Not trained yet</div>') +
       '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')" title="Click for details">' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')">' +
+        '<div class="bk-tooltip">Total market indicator snapshots recorded. Each captures a moment-in-time view of all indicators for a ticker.</div>' +
         '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
         '<div class="bk-lbl">Snapshots Taken</div>' +
         '<div class="bk-trend flat">' + (d.universe_total||0).toLocaleString() + ' tickers</div>' +

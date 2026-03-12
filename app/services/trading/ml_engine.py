@@ -30,6 +30,7 @@ FEATURE_NAMES = [
     "bb_position", "stoch_k", "adx", "atr_pct",
     "obv_direction", "vol_ratio", "is_crypto", "vix",
     "spy_momentum_5d", "regime_numeric",
+    "news_sentiment", "news_count", "pe_ratio_log",
 ]
 
 
@@ -108,6 +109,13 @@ def extract_features(
         spy_mom = float(indicator_data["spy_momentum_5d"])
         regime_num = float(indicator_data.get("regime_numeric", 0))
 
+    import math
+    news_sent = indicator_data.get("news_sentiment")
+    news_cnt = indicator_data.get("news_count")
+    pe_raw = indicator_data.get("pe_ratio")
+    mcap_raw = indicator_data.get("market_cap_b")
+    pe_log = math.log1p(pe_raw) if pe_raw and pe_raw > 0 else 0.0
+
     return {
         "rsi": rsi if rsi is not None else 50.0,
         "macd_hist": macd_hist if macd_hist is not None else 0.0,
@@ -123,6 +131,9 @@ def extract_features(
         "vix": vix if vix is not None else 18.0,
         "spy_momentum_5d": spy_mom,
         "regime_numeric": regime_num,
+        "news_sentiment": float(news_sent) if news_sent is not None else 0.0,
+        "news_count": float(news_cnt) if news_cnt is not None else 0.0,
+        "pe_ratio_log": pe_log,
     }
 
 
@@ -164,6 +175,14 @@ def train_model(db) -> dict[str, Any]:
             if not ind_data:
                 continue
             ind_data["ticker"] = snap.ticker
+            if getattr(snap, "news_sentiment", None) is not None:
+                ind_data["news_sentiment"] = snap.news_sentiment
+            if getattr(snap, "news_count", None) is not None:
+                ind_data["news_count"] = snap.news_count
+            if getattr(snap, "pe_ratio", None) is not None:
+                ind_data["pe_ratio"] = snap.pe_ratio
+            if getattr(snap, "market_cap_b", None) is not None:
+                ind_data["market_cap_b"] = snap.market_cap_b
             features = extract_features(
                 ind_data,
                 close_price=snap.close_price,

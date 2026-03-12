@@ -193,6 +193,36 @@ def _extract_and_store_patterns(
 
 # ── Market Snapshots ──────────────────────────────────────────────────
 
+def _fetch_news_sentiment(ticker: str) -> tuple[float | None, int | None]:
+    """Fetch news for a ticker and return (avg_sentiment, news_count)."""
+    try:
+        from .sentiment import aggregate_sentiment
+        from ..yf_session import get_ticker_news
+        news = get_ticker_news(ticker, limit=10)
+        titles = [n.get("title", "") for n in news if n.get("title")]
+        if not titles:
+            return None, 0
+        agg = aggregate_sentiment(titles)
+        return agg["avg_score"], agg["count"]
+    except Exception:
+        return None, None
+
+
+def _fetch_fundamentals(ticker: str) -> tuple[float | None, float | None]:
+    """Return (pe_ratio, market_cap_billions) for a ticker."""
+    try:
+        quote = fetch_quote(ticker)
+        if not quote:
+            return None, None
+        pe = quote.get("pe") or quote.get("trailingPE")
+        mcap = quote.get("marketCap") or quote.get("market_cap")
+        pe_f = float(pe) if pe else None
+        mcap_b = float(mcap) / 1e9 if mcap else None
+        return pe_f, mcap_b
+    except Exception:
+        return None, None
+
+
 def take_market_snapshot(db: Session, ticker: str) -> None:
     try:
         snap = get_indicator_snapshot(ticker, "1d")
@@ -201,6 +231,8 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
         ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
         pred_score = compute_prediction(ind_data) if ind_data else None
         vix = get_vix()
+        sent_score, sent_count = _fetch_news_sentiment(ticker)
+        pe_ratio, mcap_b = _fetch_fundamentals(ticker)
 
         record = MarketSnapshot(
             ticker=ticker.upper(),
@@ -209,6 +241,10 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
             indicator_data=json.dumps(snap),
             predicted_score=pred_score,
             vix_at_snapshot=vix,
+            news_sentiment=sent_score,
+            news_count=sent_count,
+            pe_ratio=pe_ratio,
+            market_cap_b=mcap_b,
         )
         db.add(record)
         db.commit()
@@ -216,24 +252,25 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
         pass
 
 
-def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None]:
+def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None, float | None, int | None, float | None, float | None]:
     """Fetch snapshot data in a thread (no DB access).
 
     Uses the prewarmed OHLCV cache for the price instead of calling
     fetch_quote (which hits get_fast_info with a 30s TTL and triggers
     individual API requests when the TTL expires during a long batch).
+    Returns (ticker, snap, quote, news_sentiment, news_count, pe_ratio, market_cap_b).
     """
     try:
         snap = get_indicator_snapshot(ticker, "1d")
-        # Extract price from the already-cached OHLCV history to avoid
-        # a per-ticker API call through the rate limiter.
         from ..yf_session import get_history as _yf_hist
         df = _yf_hist(ticker, period="3mo", interval="1d")
         price = float(df.iloc[-1]["Close"]) if df is not None and not df.empty else 0
         quote = {"price": price}
-        return ticker, snap, quote
+        sent_score, sent_count = _fetch_news_sentiment(ticker)
+        pe, mcap = _fetch_fundamentals(ticker)
+        return ticker, snap, quote, sent_score, sent_count, pe, mcap
     except Exception:
-        return ticker, None, None
+        return ticker, None, None, None, None, None, None
 
 
 def take_snapshots_parallel(
@@ -273,7 +310,12 @@ def take_snapshots_parallel(
 
     vix = get_vix()
     count = 0
-    for ticker, snap, quote in fetched:
+    for row in fetched:
+        ticker, snap, quote = row[0], row[1], row[2]
+        sent_score = row[3] if len(row) > 3 else None
+        sent_count = row[4] if len(row) > 4 else None
+        pe = row[5] if len(row) > 5 else None
+        mcap = row[6] if len(row) > 6 else None
         if snap is None:
             continue
         try:
@@ -287,6 +329,10 @@ def take_snapshots_parallel(
                 indicator_data=json.dumps(snap),
                 predicted_score=pred_score,
                 vix_at_snapshot=vix,
+                news_sentiment=sent_score,
+                news_count=sent_count,
+                pe_ratio=pe,
+                market_cap_b=mcap,
             )
             db.add(record)
             count += 1
@@ -558,6 +604,10 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                                 if sma20_data and price else False),
                 "ema_stack": ema_stack,
                 "is_crypto": s.ticker.endswith("-USD"),
+                "news_sentiment": getattr(s, "news_sentiment", None),
+                "news_count": getattr(s, "news_count", None) or 0,
+                "pe_ratio": getattr(s, "pe_ratio", None),
+                "market_cap_b": getattr(s, "market_cap_b", None),
             })
         except Exception:
             continue
@@ -740,6 +790,27 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     _check([r for r in all_rows
             if r.get("stoch_bull_div") and r["rsi"] < 40 and r["bb_pct"] < 0.25],
            "Multi-signal reversal: stoch bull divergence + RSI<40 + near lower BB")
+
+    # ── News sentiment + technical confluence patterns ──
+    sent_rows = [r for r in all_rows if r.get("news_sentiment") is not None]
+    if len(sent_rows) >= 5:
+        _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["rsi"] < 35],
+               "Bullish news + RSI oversold (<35) — contrarian catalyst")
+        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["rsi"] > 70],
+               "Bearish news + RSI overbought (>70) — sell signal confluence")
+        _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["macd_hist"] > 0
+                and r["ema_stack"]],
+               "Bullish news + MACD positive + EMA stack — momentum confirmation")
+        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["macd_hist"] < 0],
+               "Bearish news + MACD negative — downtrend confirmation")
+        _check([r for r in sent_rows if r.get("news_count", 0) >= 5
+                and r.get("vol_ratio") is not None and r["vol_ratio"] > 2],
+               "High news volume (5+) + high trading volume (2x) — event-driven breakout")
+        _check([r for r in sent_rows if r["news_sentiment"] > 0.2 and r["stoch_k"] < 25],
+               "Strong bullish news + stochastic oversold — high-probability bounce")
+        _check([r for r in sent_rows if abs(r["news_sentiment"]) < 0.05
+                and r["adx"] > 30 and r["rsi"] < 40],
+               "Neutral news + strong trend (ADX>30) + RSI<40 — trend pullback, no catalyst fear")
 
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
@@ -1993,6 +2064,33 @@ def _explain_prediction(ind_data: dict, score: float) -> list[str]:
 
 # ── Brain Dashboard Stats ────────────────────────────────────────────
 
+def backfill_predicted_scores(db: Session, limit: int = 500) -> int:
+    """Batch-fill predicted_score on snapshots that have indicator_data but no score."""
+    unfilled = db.query(MarketSnapshot).filter(
+        MarketSnapshot.predicted_score.is_(None),
+        MarketSnapshot.indicator_data.isnot(None),
+    ).limit(limit).all()
+
+    filled = 0
+    for snap in unfilled:
+        try:
+            ind_data = json.loads(snap.indicator_data) if snap.indicator_data else {}
+            if not ind_data:
+                continue
+            clean = {k: v for k, v in ind_data.items() if k not in ("ticker", "interval")}
+            snap.predicted_score = compute_prediction(clean)
+            filled += 1
+        except Exception:
+            continue
+
+    if filled > 0:
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
+    return filled
+
+
 def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     from ..ticker_universe import get_ticker_count
     from .scanner import get_scan_status
@@ -2007,19 +2105,39 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     avg_confidence = round(float(avg_confidence_row or 0) * 100, 1)
 
     week_ago = datetime.utcnow() - timedelta(days=7)
+    two_weeks_ago = datetime.utcnow() - timedelta(days=14)
     patterns_this_week = db.query(TradingInsight).filter(
         TradingInsight.user_id == user_id,
         TradingInsight.created_at >= week_ago,
     ).count()
 
+    recent_conf = db.query(func.avg(TradingInsight.confidence)).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.active.is_(True),
+        TradingInsight.created_at >= week_ago,
+    ).scalar()
+    prior_conf = db.query(func.avg(TradingInsight.confidence)).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.active.is_(True),
+        TradingInsight.created_at >= two_weeks_ago,
+        TradingInsight.created_at < week_ago,
+    ).scalar()
+    if recent_conf and prior_conf:
+        conf_delta = round((float(recent_conf) - float(prior_conf)) * 100, 1)
+    else:
+        conf_delta = 0.0
+
     total_snapshots = db.query(MarketSnapshot).count()
+
+    # Backfill predicted_score on snapshots that have indicator_data but no score
+    backfill_predicted_scores(db, limit=500)
 
     filled_snaps = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
     ).order_by(MarketSnapshot.snapshot_date.desc()).limit(2000).all()
     correct = 0
-    strong_correct = 0
-    strong_total = 0
+    medium_correct = medium_total = 0
+    strong_correct = strong_total = 0
     total_predictions = 0
     stock_correct = stock_total = crypto_correct = crypto_total = 0
     for snap in filled_snaps:
@@ -2033,7 +2151,7 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
                 pred_score = compute_prediction(ind_data)
                 snap.predicted_score = pred_score
 
-            if abs(pred_score) < 0.5:
+            if abs(pred_score) < 0.1:
                 continue
 
             predicted_up = pred_score > 0
@@ -2053,6 +2171,11 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
                 if is_hit:
                     stock_correct += 1
 
+            if abs(pred_score) >= 1.0:
+                medium_total += 1
+                if is_hit:
+                    medium_correct += 1
+
             if abs(pred_score) >= 3.0:
                 strong_total += 1
                 if is_hit:
@@ -2065,9 +2188,43 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         except Exception:
             db.rollback()
     accuracy = round(correct / total_predictions * 100, 1) if total_predictions > 0 else 0
+    medium_accuracy = round(medium_correct / medium_total * 100, 1) if medium_total > 0 else 0
     strong_accuracy = round(strong_correct / strong_total * 100, 1) if strong_total > 0 else 0
     stock_accuracy = round(stock_correct / stock_total * 100, 1) if stock_total > 0 else 0
     crypto_accuracy = round(crypto_correct / crypto_total * 100, 1) if crypto_total > 0 else 0
+
+    # Pipeline status: pending predictions (have predicted_score, awaiting outcome)
+    pending_predictions = db.query(MarketSnapshot).filter(
+        MarketSnapshot.predicted_score.isnot(None),
+        MarketSnapshot.future_return_5d.is_(None),
+    ).count()
+
+    evaluated_snapshots = db.query(MarketSnapshot).filter(
+        MarketSnapshot.predicted_score.isnot(None),
+        MarketSnapshot.future_return_5d.isnot(None),
+    ).count()
+
+    oldest_unevaluated = None
+    days_until_first_result = None
+    if pending_predictions > 0:
+        oldest_pending = db.query(MarketSnapshot.snapshot_date).filter(
+            MarketSnapshot.predicted_score.isnot(None),
+            MarketSnapshot.future_return_5d.is_(None),
+        ).order_by(MarketSnapshot.snapshot_date.asc()).first()
+        if oldest_pending and oldest_pending[0]:
+            oldest_unevaluated = oldest_pending[0].isoformat()
+            days_elapsed = (datetime.utcnow() - oldest_pending[0]).days
+            remaining = max(0, 7 - days_elapsed)
+            days_until_first_result = remaining
+
+    if total_snapshots == 0:
+        pipeline_status = "no_data"
+    elif pending_predictions > 0 and total_predictions == 0:
+        pipeline_status = "pending_verification"
+    elif total_predictions > 0:
+        pipeline_status = "active"
+    else:
+        pipeline_status = "collecting"
 
     total_events = db.query(LearningEvent).filter(
         LearningEvent.user_id == user_id,
@@ -2084,16 +2241,24 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     return {
         "total_patterns": total_patterns,
         "avg_confidence": avg_confidence,
+        "confidence_trend": conf_delta,
         "patterns_this_week": patterns_this_week,
         "total_snapshots": total_snapshots,
         "prediction_accuracy": accuracy,
+        "medium_accuracy": medium_accuracy,
         "strong_accuracy": strong_accuracy,
         "total_predictions": total_predictions,
+        "medium_predictions": medium_total,
         "strong_predictions": strong_total,
         "stock_accuracy": stock_accuracy,
         "stock_predictions": stock_total,
         "crypto_accuracy": crypto_accuracy,
         "crypto_predictions": crypto_total,
+        "pending_predictions": pending_predictions,
+        "evaluated_snapshots": evaluated_snapshots,
+        "oldest_unevaluated": oldest_unevaluated,
+        "days_until_first_result": days_until_first_result,
+        "pipeline_status": pipeline_status,
         "total_events": total_events,
         "universe_stocks": universe_counts["stocks"],
         "universe_crypto": universe_counts["crypto"],
@@ -2183,7 +2348,7 @@ def get_accuracy_detail(
     results: list[dict[str, Any]] = []
     for snap in filled_snaps:
         pred_score = snap.predicted_score
-        if abs(pred_score) < 0.5:
+        if abs(pred_score) < 0.1:
             continue
 
         is_crypto = snap.ticker.endswith("-USD")
@@ -2349,12 +2514,14 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 3
         _step_time("snapshots", step_start)
 
-        # Step 4: Backfill future returns
+        # Step 4: Backfill future returns + predicted scores
         step_start = time.time()
         _learning_status["current_step"] = "Backfilling future returns"
         _learning_status["phase"] = "backfilling"
         filled = backfill_future_returns(db)
+        scores_filled = backfill_predicted_scores(db, limit=1000)
         report["returns_backfilled"] = filled
+        report["scores_backfilled"] = scores_filled
         _learning_status["steps_completed"] = 4
         _step_time("backfill", step_start)
 

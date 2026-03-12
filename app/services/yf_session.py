@@ -583,5 +583,14 @@ def get_ticker_news(symbol: str, limit: int = 5) -> list[dict[str, Any]]:
         except Exception as e:
             logger.debug(f"[yf_session] DDG news fallback failed: {e}")
 
+    try:
+        from .trading.sentiment import score_news_sentiment
+        for item in out:
+            s = score_news_sentiment(item.get("title", ""))
+            item["sentiment"] = s["label"]
+            item["sentiment_score"] = s["score"]
+    except Exception as e:
+        logger.debug(f"[yf_session] sentiment scoring failed: {e}")
+
     _cache_set(cache_key, out)
     return out

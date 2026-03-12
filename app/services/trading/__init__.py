@@ -95,6 +95,7 @@ from .learning import (
     take_market_snapshot,
     take_all_snapshots,
     backfill_future_returns,
+    backfill_predicted_scores,
     mine_patterns,
     seek_pattern_data,
     deep_study,

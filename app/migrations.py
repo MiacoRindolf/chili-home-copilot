@@ -122,6 +122,17 @@ def _migration_011_trade_pattern_tags(conn) -> None:
         conn.commit()
 
 
+def _migration_012_snapshot_sentiment_fundamentals(conn) -> None:
+    if "trading_snapshots" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_snapshots")
+    for col, typ in [("news_sentiment", "REAL"), ("news_count", "INTEGER"),
+                     ("pe_ratio", "REAL"), ("market_cap_b", "REAL")]:
+        if col not in cols:
+            conn.execute(text(f"ALTER TABLE trading_snapshots ADD COLUMN {col} {typ}"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -135,6 +146,7 @@ MIGRATIONS = [
     ("009_snapshot_predicted_score", _migration_009_snapshot_predicted_score),
     ("010_snapshot_extra_columns", _migration_010_snapshot_extra_columns),
     ("011_trade_pattern_tags", _migration_011_trade_pattern_tags),
+    ("012_snapshot_sentiment_fundamentals", _migration_012_snapshot_sentiment_fundamentals),
 ]
 
 

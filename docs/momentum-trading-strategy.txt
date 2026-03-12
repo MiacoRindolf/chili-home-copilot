@@ -185,7 +185,58 @@ If CHILI's brain learns that 7.5-score setups with 4x volume consistently
 outperform 8.0-score setups with 3x volume, it will adjust accordingly.
 
 
-9. HOW CHILI EVOLVES BEYOND THIS
+9. NEWS SENTIMENT INTEGRATION
+-------------------------------
+
+CHILI enriches every market snapshot with news sentiment data, adding a
+qualitative dimension to its purely technical analysis:
+
+a) **VADER Sentiment Scoring**: Each ticker's recent news headlines are
+   scored using the VADER (Valence Aware Dictionary and sEntiment Reasoner)
+   NLP model. Headlines receive a compound score from -1.0 (very bearish)
+   to +1.0 (very bullish), with labels: bullish (>=0.15), bearish (<=-0.15),
+   or neutral.
+
+b) **Aggregated News Sentiment**: For each snapshot, CHILI computes the
+   average sentiment score across all recent headlines and stores:
+   - news_sentiment (float): average compound score
+   - news_count (int): number of headlines analyzed
+
+c) **News-Based Patterns**: The brain mines for combined technical +
+   sentiment patterns, including:
+   - Bullish news + RSI oversold (<35) — contrarian catalyst bounce
+   - Bearish news + RSI overbought (>70) — sell signal confluence
+   - Bullish news + MACD positive + EMA stack — momentum confirmation
+   - Bearish news + MACD negative — downtrend confirmation
+   - High news volume (5+) + high trading volume (2x) — event-driven breakout
+   - Strong bullish news + stochastic oversold — high-probability bounce
+   - Neutral news + strong trend (ADX>30) + RSI<40 — trend pullback, no fear
+
+d) **ML Feature Integration**: News sentiment and news count are fed as
+   features into the GradientBoosting ML model alongside technical indicators,
+   giving the predictor a richer view of the market state.
+
+
+10. FUNDAMENTAL DATA INTEGRATION
+----------------------------------
+
+CHILI supplements technical and sentiment data with key fundamentals:
+
+a) **Stored Per Snapshot**: Each market snapshot records:
+   - pe_ratio (float): trailing P/E ratio
+   - market_cap_b (float): market cap in billions
+
+b) **ML Features**: P/E ratio is log-transformed (to handle wide ranges)
+   and included as a feature in the GradientBoosting model.
+
+c) **AI Context**: When running AI Analyze, CHILI assembles a rich
+   fundamentals section including P/E (trailing + forward), EPS, PEG,
+   P/S, P/B, EV/EBITDA, revenue + growth, margins, FCF, D/E, ROE, and
+   dividend yield — giving the LLM full fundamental context for its
+   verdict alongside technical indicators.
+
+
+11. HOW CHILI EVOLVES BEYOND THIS
 ----------------------------------
 
 This strategy document represents CHILI's starting knowledge. Here's how
@@ -201,7 +252,8 @@ b) **Novel Pattern Discovery**: CHILI doesn't just test existing rules —
    it explores combinations that no human taught it. For example, it might
    discover that "Bollinger Band oversold + MACD negative" is actually a
    profitable contrarian bounce setup, even though conventional wisdom
-   says to avoid MACD-negative entries.
+   says to avoid MACD-negative entries. It also discovers news+technical
+   combinations that no trader has explicitly formalized.
 
 c) **Adaptive Weight Evolution**: All scoring weights (MACD bonus, float
    bonus, volume thresholds, etc.) start at defaults but continuously
@@ -216,6 +268,11 @@ d) **Cross-Validation**: Discovered patterns are backtested across
 e) **Decay & Demotion**: Patterns that haven't been seen in 30+ days
    gradually lose confidence. Patterns with lots of evidence but low
    win rates are deactivated. The brain prunes what doesn't work.
+
+f) **Multi-Signal Confluence**: CHILI combines technical indicators,
+   news sentiment, and fundamental data to form richer hypotheses.
+   A bullish pattern backed by positive sentiment and strong fundamentals
+   receives higher conviction than one standing on technicals alone.
 
 The result: CHILI starts with a solid foundation but continuously tests,
 challenges, and improves every aspect of its trading logic. No single

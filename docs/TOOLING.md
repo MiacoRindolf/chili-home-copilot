@@ -122,6 +122,45 @@ It makes the system safer, more predictable, and easier to test.
 
 ---
 
+## Trading AI Architecture
+
+CHILI's trading module (`app/services/trading/`) extends the core "LLM plans, code executes" pattern into a full trading analysis system:
+
+### AI Analyze Flow
+
+1. User clicks "AI Analyze" on a ticker
+2. Backend assembles rich context via `build_ai_context()`:
+   - **Parallel phase** (ThreadPoolExecutor, 6 workers): technical indicators, quote, fundamentals, scanner score, market pulse, portfolio context — all concurrently
+   - **Market pulse** is cached for 5 minutes (stale-while-revalidate at 10 min) to avoid re-scoring 20 tickers on every call
+   - DB queries: backtests, trades, stats, learned patterns, journal notes
+3. Context + user message sent to **free-tier LLM cascade** (Groq → Gemini → OpenAI) via SSE streaming
+4. Tokens stream to the frontend in real-time
+
+### AI Brain (Self-Learning)
+
+The brain runs periodic learning cycles (`run_learning_cycle()`) that:
+
+1. **Take market snapshots** — parallel capture of 100+ tickers with technical indicators, news sentiment (VADER), and fundamentals (P/E, market cap)
+2. **Mine patterns** — scan snapshots for technical + sentiment + fundamental confluences, tag them, and store as `TradingInsight` records
+3. **Test hypotheses** — validate assumptions (e.g. "MACD negative = bad") against actual returns
+4. **Discover novel patterns** — find combinations no strategy taught
+5. **Train ML model** — GradientBoosting classifier with 15+ features (RSI, MACD, EMA, ADX, Stochastic, news sentiment, news count, P/E ratio)
+6. **Adapt weights** — scoring weights evolve based on pattern confidence
+7. **Decay & prune** — stale or underperforming patterns lose confidence
+
+### Performance Optimizations
+
+| Optimization | Effect |
+|-------------|--------|
+| `batch_download()` pre-warming | 20 tickers fetched in 1 HTTP call instead of 20 |
+| Parallel `_score_ticker()` | 10 concurrent threads instead of serial loop |
+| Market context cache (5-min TTL) | Repeat Analyze calls return instantly |
+| Stale-while-revalidate | Serves stale data while background thread refreshes |
+| `ThreadPoolExecutor(max_workers=6)` in `build_ai_context` | All 6 data sources fetched concurrently |
+| yfinance rate-limiter + multi-tier cache | 30s quotes, 30min history, 24h fundamentals |
+
+---
+
 ## Intercom: Tier 2 native wrapper (future)
 
 **Goal:** PTT audio plays on mobile even when the screen is locked, with push notifications for incoming messages. The PWA cannot do this (browsers suspend JS and close WebSockets when the screen locks).

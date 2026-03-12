@@ -3,13 +3,15 @@ from __future__ import annotations
 
 import json
 import logging
-from concurrent.futures import ThreadPoolExecutor
+import threading
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from sqlalchemy.orm import Session
 
 from ...models.trading import BacktestResult, Trade
-from ..yf_session import get_fundamentals
+from ..yf_session import get_fundamentals, batch_download
 from .market_data import (
     compute_indicators, fetch_quote,
     DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
@@ -19,6 +21,15 @@ from .journal import get_journal
 from .scanner import _score_ticker
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Market-context cache (avoids re-scoring 20 tickers on every analyze call)
+# ---------------------------------------------------------------------------
+_market_ctx_cache: dict[str, Any] = {"text": "", "ts": 0.0}
+_MARKET_CTX_TTL = 300          # 5 min fresh
+_MARKET_CTX_STALE_TTL = 600    # 10 min — serve stale while refreshing
+_market_ctx_lock = threading.Lock()
+_market_ctx_refreshing = False
 
 
 def _format_fundamentals(ticker_up: str, fund: dict) -> str | None:
@@ -81,8 +92,9 @@ def build_ai_context(
 ) -> str:
     """Assemble rich context for the trading AI.
 
-    External API calls (indicators, quote, fundamentals, scanner) run in parallel
-    via ThreadPoolExecutor to avoid serial rate-limiter delays.
+    External API calls (indicators, quote, fundamentals, scanner, market context)
+    all run in parallel via ThreadPoolExecutor.  ``build_market_context`` is also
+    cached for 5 minutes so back-to-back Analyze calls don't re-score 20 tickers.
     """
     parts: list[str] = []
     ticker_up = ticker.upper()
@@ -107,12 +119,24 @@ def build_ai_context(
             return None
         return get_fundamentals(ticker)
 
+    def _fetch_market_ctx():
+        return build_market_context(db, user_id)
+
+    def _fetch_portfolio_ctx():
+        try:
+            from .. import broker_service
+            return broker_service.build_portfolio_context()
+        except Exception:
+            return None
+
     futures = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=6) as pool:
         futures["indicators"] = pool.submit(_fetch_indicators)
         futures["quote"] = pool.submit(fetch_quote, ticker)
         futures["fundamentals"] = pool.submit(_fetch_fundamentals)
         futures["score"] = pool.submit(_score_ticker, ticker)
+        futures["market_ctx"] = pool.submit(_fetch_market_ctx)
+        futures["portfolio_ctx"] = pool.submit(_fetch_portfolio_ctx)
 
     try:
         full_indicators = futures["indicators"].result(timeout=15)
@@ -230,13 +254,15 @@ def build_ai_context(
             lines.append(f"- {j.created_at.strftime('%Y-%m-%d')}: {j.content[:300]}")
         parts.append("\n".join(lines))
 
-    market_ctx = build_market_context(db, user_id)
-    if market_ctx:
-        parts.insert(0, market_ctx)
+    try:
+        market_ctx = futures["market_ctx"].result(timeout=20)
+        if market_ctx:
+            parts.insert(0, market_ctx)
+    except Exception:
+        pass
 
     try:
-        from .. import broker_service
-        portfolio_ctx = broker_service.build_portfolio_context()
+        portfolio_ctx = futures["portfolio_ctx"].result(timeout=10)
         if portfolio_ctx:
             parts.insert(0, portfolio_ctx)
     except Exception:
@@ -245,36 +271,71 @@ def build_ai_context(
     return "\n\n".join(parts)
 
 
-def build_market_context(db: Session, user_id: int | None) -> str:
-    """Build a market-wide sentiment summary."""
-    parts: list[str] = []
+def _build_market_context_fresh(db: Session, user_id: int | None) -> str:
+    """Heavy-lift: score sample tickers + fetch macro quotes.
 
-    spy_quote = fetch_quote("SPY")
-    if spy_quote:
-        spy_dir = "UP" if (spy_quote.get("change_pct") or 0) >= 0 else "DOWN"
-        parts.append(
-            f"S&P 500 (SPY): ${spy_quote.get('price')} ({spy_dir} {spy_quote.get('change_pct')}% today)"
-        )
-
+    All network I/O is parallelized:
+    - Batch pre-warm downloads 20 tickers in a single HTTP call
+    - Individual _score_ticker calls then hit the warm cache
+    - SPY / BTC / ETH quotes fetched in parallel with scoring
+    """
     sample_tickers = DEFAULT_SCAN_TICKERS[:15] + DEFAULT_CRYPTO_TICKERS[:5]
+
+    # Pre-warm OHLCV cache in one batched yfinance download
+    try:
+        batch_download(sample_tickers + ["SPY"], period="6mo", interval="1d")
+    except Exception:
+        pass
+
+    parts: list[str] = []
     bullish = 0
     bearish = 0
     neutral = 0
     rsi_vals: list[float] = []
 
-    for ticker in sample_tickers:
-        scored = _score_ticker(ticker)
-        if scored is None:
-            continue
-        if scored["signal"] == "buy":
-            bullish += 1
-        elif scored["signal"] == "sell":
-            bearish += 1
-        else:
-            neutral += 1
-        rsi_v = scored["indicators"].get("rsi")
-        if rsi_v is not None:
-            rsi_vals.append(rsi_v)
+    with ThreadPoolExecutor(max_workers=10) as pool:
+        # Kick off all scoring + quote fetches concurrently
+        score_futures = {pool.submit(_score_ticker, t): t for t in sample_tickers}
+        spy_fut = pool.submit(fetch_quote, "SPY")
+        btc_fut = pool.submit(fetch_quote, "BTC-USD")
+        eth_fut = pool.submit(fetch_quote, "ETH-USD")
+
+        for fut in as_completed(score_futures):
+            scored = None
+            try:
+                scored = fut.result(timeout=10)
+            except Exception:
+                pass
+            if scored is None:
+                continue
+            if scored["signal"] == "buy":
+                bullish += 1
+            elif scored["signal"] == "sell":
+                bearish += 1
+            else:
+                neutral += 1
+            rsi_v = scored["indicators"].get("rsi")
+            if rsi_v is not None:
+                rsi_vals.append(rsi_v)
+
+        try:
+            spy_quote = spy_fut.result(timeout=10)
+        except Exception:
+            spy_quote = None
+        try:
+            btc_quote = btc_fut.result(timeout=10)
+        except Exception:
+            btc_quote = None
+        try:
+            eth_quote = eth_fut.result(timeout=10)
+        except Exception:
+            eth_quote = None
+
+    if spy_quote:
+        spy_dir = "UP" if (spy_quote.get("change_pct") or 0) >= 0 else "DOWN"
+        parts.append(
+            f"S&P 500 (SPY): ${spy_quote.get('price')} ({spy_dir} {spy_quote.get('change_pct')}% today)"
+        )
 
     total = bullish + bearish + neutral
     if total:
@@ -291,8 +352,6 @@ def build_market_context(db: Session, user_id: int | None) -> str:
         )
         parts.append(f"Average RSI across sample: {avg_rsi:.0f}")
 
-    btc_quote = fetch_quote("BTC-USD")
-    eth_quote = fetch_quote("ETH-USD")
     if btc_quote:
         parts.append(f"BTC: ${btc_quote.get('price')} ({btc_quote.get('change_pct')}%)")
     if eth_quote:
@@ -301,6 +360,45 @@ def build_market_context(db: Session, user_id: int | None) -> str:
     if not parts:
         return ""
     return "## MARKET PULSE (live)\n" + "\n".join(parts)
+
+
+def build_market_context(db: Session, user_id: int | None) -> str:
+    """Cached market-wide sentiment summary.
+
+    Returns a cached string for up to 5 minutes.  Between 5-10 minutes, serves
+    stale data and triggers a background refresh so the caller isn't blocked.
+    """
+    global _market_ctx_refreshing
+
+    now = _time.time()
+    age = now - _market_ctx_cache["ts"]
+
+    # Fresh cache hit
+    if _market_ctx_cache["text"] and age < _MARKET_CTX_TTL:
+        return _market_ctx_cache["text"]
+
+    # Stale-while-revalidate: serve stale, refresh in background
+    if _market_ctx_cache["text"] and age < _MARKET_CTX_STALE_TTL:
+        if not _market_ctx_refreshing:
+            _market_ctx_refreshing = True
+            def _bg_refresh():
+                global _market_ctx_refreshing
+                try:
+                    text = _build_market_context_fresh(db, user_id)
+                    with _market_ctx_lock:
+                        _market_ctx_cache["text"] = text
+                        _market_ctx_cache["ts"] = _time.time()
+                finally:
+                    _market_ctx_refreshing = False
+            threading.Thread(target=_bg_refresh, daemon=True).start()
+        return _market_ctx_cache["text"]
+
+    # Cold or expired — must compute synchronously
+    text = _build_market_context_fresh(db, user_id)
+    with _market_ctx_lock:
+        _market_ctx_cache["text"] = text
+        _market_ctx_cache["ts"] = _time.time()
+    return text
 
 
 def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
