@@ -3018,10 +3018,6 @@ function _wlAcSelect(el) {
 function _wlInputHandler(e) {
   if (e.key === 'Enter') { document.getElementById('wl-ac').classList.remove('open'); addToWatchlist(); return; }
   if (e.key === 'Escape') { document.getElementById('wl-ac').classList.remove('open'); return; }
-  clearTimeout(_wlAcDebounce);
-  _wlAcDebounce = setTimeout(function() {
-    _wlAcSearch(document.getElementById('wl-input').value.trim());
-  }, 300);
 }
 
 /* ── Trades ─────────────────────────────────────── */
