@@ -4625,7 +4625,7 @@ function askLearn(question) {
 }
 
 function askSmartPick() {
-  var msg = 'What are your top 3 stock picks I should buy RIGHT NOW? For each give me exact buy-in price, sell target, stop-loss, hold duration, position size, and confidence level. Rank by conviction.';
+  var msg = 'What are your top 10 stock picks I should buy RIGHT NOW? For each give me exact buy-in price, sell target, stop-loss, hold duration, position size, and confidence level. Rank by conviction.';
   appendAiMsg('user', 'What stocks should I buy right now?');
   _streamAnalyze(msg, true);
 }
@@ -5944,7 +5944,7 @@ function renderTradeProposal(data) {
   var proposalId = 'tp_' + Date.now() + '_' + Math.random().toString(36).substring(2,7);
   html += '<div class="tp-actions">';
   html += '<button class="tp-btn-confirm" onclick="confirmProposal(\'' + proposalId + '\',\'' + ticker + '\',\'' + direction + '\',' + (data.entry_price||0) + ',' + (data.quantity||1) + ')">Confirm & Track</button>';
-  html += '<button class="tp-btn-reject" onclick="rejectProposal(this)">Dismiss</button>';
+  html += '<button class="tp-btn-reject" onclick="dismissTradeProposal(this)">Dismiss</button>';
   html += '<button class="tp-btn-rh" onclick="openInRobinhood(\'' + ticker + '\')" title="Open in Robinhood">RH</button>';
   html += '</div>';
   html += '</div>';
@@ -5985,7 +5985,7 @@ function confirmProposal(proposalId, ticker, direction, entryPrice, quantity) {
   });
 }
 
-function rejectProposal(btn) {
+function dismissTradeProposal(btn) {
   var card = btn.closest('.trade-proposal');
   if (card) {
     card.style.opacity = '0.4';

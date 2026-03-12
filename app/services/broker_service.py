@@ -749,32 +749,15 @@ def place_buy_order(
     try:
         import robin_stocks.robinhood as rh
 
-        if order_type == "limit" and limit_price:
-            result = rh.orders.order(
-                symbol=ticker,
-                quantity=quantity,
-                side="buy",
-                limitPrice=round(limit_price, 2),
-                stopPrice=None,
-                timeInForce="gtc",
-                trigger="immediate",
-                orderType="limit",
-                extendedHours=False,
-                jsonify=True,
-            )
-        else:
-            result = rh.orders.order(
-                symbol=ticker,
-                quantity=quantity,
-                side="buy",
-                limitPrice=None,
-                stopPrice=None,
-                timeInForce="gtc",
-                trigger="immediate",
-                orderType="market",
-                extendedHours=False,
-                jsonify=True,
-            )
+        result = rh.orders.order(
+            symbol=ticker,
+            quantity=quantity,
+            side="buy",
+            limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+            timeInForce="gtc",
+            extendedHours=False,
+            jsonify=True,
+        )
 
         if result and isinstance(result, dict):
             order_id = result.get("id", "")
@@ -818,32 +801,15 @@ def place_sell_order(
     try:
         import robin_stocks.robinhood as rh
 
-        if order_type == "limit" and limit_price:
-            result = rh.orders.order(
-                symbol=ticker,
-                quantity=quantity,
-                side="sell",
-                limitPrice=round(limit_price, 2),
-                stopPrice=None,
-                timeInForce="gtc",
-                trigger="immediate",
-                orderType="limit",
-                extendedHours=False,
-                jsonify=True,
-            )
-        else:
-            result = rh.orders.order(
-                symbol=ticker,
-                quantity=quantity,
-                side="sell",
-                limitPrice=None,
-                stopPrice=None,
-                timeInForce="gtc",
-                trigger="immediate",
-                orderType="market",
-                extendedHours=False,
-                jsonify=True,
-            )
+        result = rh.orders.order(
+            symbol=ticker,
+            quantity=quantity,
+            side="sell",
+            limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+            timeInForce="gtc",
+            extendedHours=False,
+            jsonify=True,
+        )
 
         if result and isinstance(result, dict):
             order_id = result.get("id", "")

@@ -1968,7 +1968,7 @@ def smart_pick(
     if risk_tolerance == "low":
         scored_results = [s for s in scored_results if s["risk_level"] in ("low", "medium")]
 
-    top_picks = scored_results[:8]
+    top_picks = scored_results[:12]
 
     if not top_picks:
         return {
@@ -2040,7 +2040,7 @@ def smart_pick(
 
     full_context = "\n\n".join(context_parts)
 
-    user_msg = message or "Based on this scan, what are your top 3 stock picks I should buy RIGHT NOW? For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, position size, and your confidence level. Rank them by conviction."
+    user_msg = message or "Based on this scan, what are your top 10 stock picks I should buy RIGHT NOW? For each one, give me the exact buy-in price, sell target, stop-loss, expected hold duration, position size, and your confidence level. Rank them by conviction."
 
     from ...prompts import load_prompt
     system_prompt = load_prompt("trading_analyst")
@@ -2053,13 +2053,15 @@ SPECIAL INSTRUCTION — SMART PICK MODE:
 You scanned {total_scanned:,} stocks and crypto. The TOP candidates are: {ticker_names}
 Their full indicator data and scores are in the MARKET SCAN RESULTS section below.
 
-CRITICAL RULES:
+ABSOLUTE RULES (NEVER VIOLATE):
+- You MUST list the top picks immediately. Do NOT ask the user to choose a universe, narrow down, or pick a letter. The scan is ALREADY DONE — your ONLY job is to rank and present the results.
 - You MUST reference tickers BY NAME (e.g. "AAPL", "BTC-USD", "NVDA") — NEVER give a generic recommendation without naming specific tickers.
 - Use the ACTUAL prices and indicator values from the data provided — do NOT make up numbers.
 - If the user asked about crypto specifically, prioritize crypto tickers from the scan.
 - If the user asked about stocks specifically, prioritize stock tickers.
+- Do NOT refuse to list picks. If some candidates are weaker, still list them with appropriate caveats and lower confidence — the user wants a ranked list, not a refusal.
 
-Your job: Pick the BEST 1-3 trades from this scan and present them as a clear, specific action plan.
+Your job: Rank and present UP TO 10 trades from this scan as a clear, specific action plan. If fewer than 10 candidates have viable setups, list only those that do — but you MUST list at least the top candidates provided.
 
 For EACH recommended trade, format it EXACTLY like this:
 
@@ -2077,7 +2079,7 @@ For EACH recommended trade, format it EXACTLY like this:
 - **Why NOW**: 2-3 bullet points using the ACTUAL indicator values
 - **Exit Signal**: what would invalidate this trade
 
-If NONE have a strong enough setup, say so clearly. End with portfolio allocation advice.
+End with portfolio allocation advice and any general market context warnings.
 """
 
     try:
@@ -2090,7 +2092,7 @@ If NONE have a strong enough setup, say so clearly. End with portfolio allocatio
             system_prompt=f"{system_prompt}\n{smart_pick_addendum}\n\n---\n\n{full_context}",
             trace_id=trace_id,
             user_message=user_msg,
-            max_tokens=2048,
+            max_tokens=4096,
         )
         reply = result.get("reply", "Could not generate recommendation.")
     except Exception as e:
