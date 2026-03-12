@@ -80,6 +80,20 @@ def get_adaptive_weight(key: str) -> float:
         return _adaptive_weights.get(key, _DEFAULT_WEIGHTS.get(key, 0.0))
 
 
+def _brain_meta() -> dict[str, Any]:
+    """Lightweight brain metadata to attach to every scan response."""
+    with _weights_lock:
+        adjusted = {k for k, v in _adaptive_weights.items() if v != _DEFAULT_WEIGHTS.get(k)}
+    return {
+        "brain_adjusted_weights": len(adjusted),
+        "immaculate_thresholds": {
+            "min_score": get_adaptive_weight("immaculate_min_score"),
+            "min_vol": get_adaptive_weight("immaculate_min_vol"),
+            "min_rr": get_adaptive_weight("immaculate_min_rr"),
+        },
+    }
+
+
 def get_all_weights() -> dict[str, float]:
     """Snapshot of current adaptive weights for diagnostics."""
     with _weights_lock:
@@ -187,13 +201,42 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
 
 # ── Single ticker scoring ─────────────────────────────────────────────
 
+_score_cache: dict[tuple, tuple[float, dict | None]] = {}
+_score_cache_lock = threading.Lock()
+_SCORE_CACHE_TTL = 180  # 3 min
+_SCORE_CACHE_MAX = 300
+
+
 def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
     """Score a single ticker using multi-signal confluence (1-10).
 
     When *skip_fundamentals* is True the expensive ``get_fundamentals()``
     call is skipped — used during bulk scans where FinViz already
     pre-filtered for fundamental quality.
+
+    Results are cached for 3 minutes keyed on (ticker, skip_fundamentals).
     """
+    cache_key = (ticker.upper(), skip_fundamentals)
+    now = time.time()
+    with _score_cache_lock:
+        entry = _score_cache.get(cache_key)
+        if entry and now - entry[0] < _SCORE_CACHE_TTL:
+            return entry[1]
+
+    result = _score_ticker_impl(ticker, skip_fundamentals=skip_fundamentals)
+
+    with _score_cache_lock:
+        if len(_score_cache) >= _SCORE_CACHE_MAX:
+            cutoff = now - _SCORE_CACHE_TTL
+            stale = [k for k, v in _score_cache.items() if v[0] < cutoff]
+            for k in stale:
+                del _score_cache[k]
+        _score_cache[cache_key] = (now, result)
+    return result
+
+
+def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
+    """Actual scoring logic (no cache)."""
     try:
         from ta.momentum import RSIIndicator, StochasticOscillator
         from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
@@ -1008,8 +1051,8 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     from .prescreener import get_daytrade_candidates
 
     start = time.time()
-    candidates = get_daytrade_candidates()
-    logger.info(f"[trading] Day-trade scan: {len(candidates)} candidates")
+    candidates, total_sourced = get_daytrade_candidates()
+    logger.info(f"[trading] Day-trade scan: {len(candidates)}/{total_sourced} candidates")
     _prewarm_cache_intraday(candidates)
 
     results: list[dict[str, Any]] = []
@@ -1034,9 +1077,11 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
         "ok": True,
         "scan_type": "day_trade",
         "candidates_scanned": len(candidates),
+        "total_sourced": total_sourced,
         "matches": len(results),
         "elapsed_s": elapsed,
         "results": results,
+        "brain": _brain_meta(),
     }
 
 
@@ -1045,8 +1090,8 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
     from .prescreener import get_breakout_candidates
 
     start = time.time()
-    candidates = get_breakout_candidates()
-    logger.info(f"[trading] Breakout scan: {len(candidates)} candidates")
+    candidates, total_sourced = get_breakout_candidates()
+    logger.info(f"[trading] Breakout scan: {len(candidates)}/{total_sourced} candidates")
 
     # Pre-warm the OHLCV cache for breakout scoring (uses 6mo daily)
     _prewarm_cache(candidates)
@@ -1073,9 +1118,11 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
         "ok": True,
         "scan_type": "breakout",
         "candidates_scanned": len(candidates),
+        "total_sourced": total_sourced,
         "matches": len(results),
         "elapsed_s": elapsed,
         "results": results,
+        "brain": _brain_meta(),
     }
 
 
@@ -1098,15 +1145,17 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
             "ok": True,
             "scan_type": "momentum",
             "cached": True,
+            "candidates_scanned": _momentum_cache.get("total_sourced"),
             "matches": len(_momentum_cache["results"]),
             "results": _momentum_cache["results"],
+            "brain": _brain_meta(),
         }
 
     from .prescreener import get_daytrade_candidates
 
     start = time.time()
-    candidates = get_daytrade_candidates()
-    logger.info(f"[trading] Momentum scanner: {len(candidates)} candidates")
+    candidates, total_sourced = get_daytrade_candidates()
+    logger.info(f"[trading] Momentum scanner: {len(candidates)}/{total_sourced} candidates")
     _prewarm_cache_intraday(candidates)
 
     scored: list[dict[str, Any]] = []
@@ -1150,7 +1199,7 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
     else:
         results = immaculate
 
-    _momentum_cache = {"results": results, "ts": time.time()}
+    _momentum_cache = {"results": results, "ts": time.time(), "total_sourced": total_sourced}
     elapsed = round(time.time() - start, 1)
 
     return {
@@ -1158,10 +1207,12 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
         "scan_type": "momentum",
         "cached": False,
         "candidates_scanned": len(candidates),
+        "total_sourced": total_sourced,
         "immaculate_count": len(immaculate),
         "matches": len(results),
         "elapsed_s": elapsed,
         "results": results,
+        "brain": _brain_meta(),
     }
 
 
@@ -1253,6 +1304,7 @@ def run_custom_screen(
         "total_scanned": len(scored_all),
         "matches": len(matches),
         "results": matches,
+        "brain": _brain_meta(),
     }
 
 
@@ -1544,6 +1596,17 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
 
     picks = list(candidates.values())
 
+    # Bulk-fetch best backtest per ticker (single query instead of N)
+    pick_tickers = [p["ticker"] for p in picks]
+    bt_rows = db.query(BacktestResult).filter(
+        BacktestResult.ticker.in_(pick_tickers),
+    ).all() if pick_tickers else []
+    bt_map: dict[str, BacktestResult] = {}
+    for bt in bt_rows:
+        prev = bt_map.get(bt.ticker)
+        if prev is None or (bt.return_pct or 0) > (prev.return_pct or 0):
+            bt_map[bt.ticker] = bt
+
     for pick in picks:
         combined = pick["score"]
         if pick.get("brain_confidence"):
@@ -1563,10 +1626,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             if risk_amt > 0:
                 pick["position_size_pct"] = round(min(5.0, 1.0 / (risk_amt / price * 100)) * 100 / 100, 2)
 
-        # Backtest validation
-        best_bt = db.query(BacktestResult).filter(
-            BacktestResult.ticker == pick["ticker"],
-        ).order_by(BacktestResult.return_pct.desc()).first()
+        best_bt = bt_map.get(pick["ticker"])
         if best_bt:
             pick["best_strategy"] = best_bt.strategy_name
             pick["backtest_return"] = best_bt.return_pct

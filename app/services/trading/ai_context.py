@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import BacktestResult, Trade
+from ...models.trading import BacktestResult, Trade, StrategyProposal
 from ..yf_session import get_fundamentals, batch_download
 from .market_data import (
     compute_indicators, fetch_quote,
@@ -188,6 +188,64 @@ def build_ai_context(
             f"Risk: {scored['risk_level'].upper()}\n"
             f"Signals: {', '.join(scored['signals']) if scored['signals'] else 'None strong'}"
         )
+
+    # Active / pending strategy proposals — prevent contradictions
+    from datetime import datetime, timedelta
+    recent_cutoff = datetime.utcnow() - timedelta(hours=24)
+    proposals = db.query(StrategyProposal).filter(
+        StrategyProposal.ticker == ticker_up,
+        StrategyProposal.status.in_(["pending", "approved", "executed"]),
+        StrategyProposal.proposed_at >= recent_cutoff,
+    ).order_by(StrategyProposal.proposed_at.desc()).limit(3).all()
+    if proposals:
+        lines = [f"## CHILI'S OWN STRATEGY PROPOSALS FOR {ticker_up} (active)"]
+        lines.append(
+            "IMPORTANT: These are recommendations CHILI already made to the user. "
+            "If your analysis disagrees, you MUST explicitly acknowledge the proposal "
+            "and explain WHY your view differs. Do NOT silently contradict yourself."
+        )
+        for p in proposals:
+            lines.append(
+                f"- [{p.status.upper()}] {p.direction.upper()} @ ${p.entry_price:.2f} | "
+                f"Stop: ${p.stop_loss:.2f} | Target: ${p.take_profit:.2f} | "
+                f"R:R {p.risk_reward_ratio:.1f}:1 | Confidence: {p.confidence:.0%} | "
+                f"Timeframe: {p.timeframe}"
+            )
+            if p.thesis:
+                lines.append(f"  Thesis: {p.thesis[:300]}")
+        parts.append("\n".join(lines))
+
+    # Brain prediction for this ticker
+    try:
+        from .learning import compute_prediction
+        from .ml_engine import predict_ml, extract_features, is_model_ready
+        full_indicators_for_pred = futures["indicators"].result(timeout=1) if "indicators" in futures else {}
+        ind_flat = {}
+        for ind_name, records in full_indicators_for_pred.items():
+            if records:
+                latest = records[-1]
+                for k, v in latest.items():
+                    if k != "time":
+                        ind_flat[f"{ind_name}_{k}" if k != "value" else ind_name] = v
+        if ind_flat:
+            rule_score = compute_prediction(full_indicators_for_pred)
+            ml_prob = None
+            if is_model_ready():
+                feats = extract_features(ind_flat)
+                if feats:
+                    ml_prob = predict_ml(feats)
+            brain_lines = [f"## CHILI BRAIN PREDICTION — {ticker_up}"]
+            direction = "BULLISH" if rule_score > 1 else "BEARISH" if rule_score < -1 else "NEUTRAL"
+            brain_lines.append(f"Rule-based score: {rule_score:+.1f}/10 ({direction})")
+            if ml_prob is not None:
+                ml_dir = "bullish" if ml_prob > 0.55 else "bearish" if ml_prob < 0.45 else "neutral"
+                brain_lines.append(f"ML probability (5-day up): {ml_prob:.1%} ({ml_dir})")
+            brain_lines.append(
+                "Factor the Brain's view into your analysis. If you disagree with it, explain why."
+            )
+            parts.append("\n".join(brain_lines))
+    except Exception:
+        pass
 
     backtests = db.query(BacktestResult).filter(
         BacktestResult.ticker == ticker_up,

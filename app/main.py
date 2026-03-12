@@ -39,8 +39,24 @@ async def lifespan(app: FastAPI):
         load_model()
     except Exception:
         pass
+    _prewarm_market_context()
     yield
     stop_scheduler()
+
+
+def _prewarm_market_context():
+    """Warm the market context cache in a background thread so the first
+    AI Analyze call doesn't block on a cold 20-ticker scoring run."""
+    import threading
+
+    def _warm():
+        try:
+            from .services.trading.ai_context import build_market_context
+            build_market_context(None, None)
+        except Exception:
+            pass
+
+    threading.Thread(target=_warm, daemon=True).start()
 
 
 app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)

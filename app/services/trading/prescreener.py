@@ -528,8 +528,8 @@ def get_trending_crypto() -> list[str]:
     return merged
 
 
-def get_daytrade_candidates(max_total: int = 300) -> list[str]:
-    """Return tickers suited for intraday / day-trade scanning.
+def get_daytrade_candidates(max_total: int = 300) -> tuple[list[str], int]:
+    """Return (tickers, total_found) suited for intraday / day-trade scanning.
 
     Combines high-activity FinViz signals (most active, top gainers,
     top losers, most volatile, unusual volume) for stocks that are
@@ -538,8 +538,9 @@ def get_daytrade_candidates(max_total: int = 300) -> list[str]:
     """
     cached = _cache_get("daytrade_candidates")
     if cached is not None:
-        logger.info(f"[prescreener] Returning {len(cached)} cached day-trade candidates")
-        return cached
+        tickers, total = cached
+        logger.info(f"[prescreener] Returning {len(tickers)} cached day-trade candidates")
+        return tickers, total
 
     start = time.time()
     sources: dict[str, Any] = {
@@ -580,13 +581,14 @@ def get_daytrade_candidates(max_total: int = 300) -> list[str]:
             except Exception as e:
                 logger.warning(f"[prescreener] Day-trade source '{name}' failed: {e}")
 
+    total_found = len(combined)
     combined = combined[:max_total]
     elapsed = time.time() - start
-    logger.info(f"[prescreener] Day-trade pre-screen: {len(combined)} candidates in {elapsed:.1f}s")
+    logger.info(f"[prescreener] Day-trade pre-screen: {len(combined)}/{total_found} candidates in {elapsed:.1f}s")
 
     with _cache_lock:
-        _cache["daytrade_candidates"] = (time.time(), combined)
-    return combined
+        _cache["daytrade_candidates"] = (time.time(), (combined, total_found))
+    return combined, total_found
 
 
 # ── Breakout Candidates ───────────────────────────────────────────────
@@ -625,8 +627,8 @@ def _finviz_near_52w_high() -> list[str]:
     )
 
 
-def get_breakout_candidates(max_total: int = 300) -> list[str]:
-    """Return tickers suited for breakout / consolidation scanning.
+def get_breakout_candidates(max_total: int = 300) -> tuple[list[str], int]:
+    """Return (tickers, total_found) suited for breakout / consolidation scanning.
 
     Combines low-volatility stocks near resistance, channel patterns,
     wedges, near-52-week-high stocks, and crypto (which can consolidate
@@ -634,8 +636,9 @@ def get_breakout_candidates(max_total: int = 300) -> list[str]:
     """
     cached = _cache_get("breakout_candidates")
     if cached is not None:
-        logger.info(f"[prescreener] Returning {len(cached)} cached breakout candidates")
-        return cached
+        tickers, total = cached
+        logger.info(f"[prescreener] Returning {len(tickers)} cached breakout candidates")
+        return tickers, total
 
     start = time.time()
     sources: dict[str, Any] = {
@@ -671,10 +674,11 @@ def get_breakout_candidates(max_total: int = 300) -> list[str]:
             except Exception as e:
                 logger.warning(f"[prescreener] Breakout source '{name}' failed: {e}")
 
+    total_found = len(combined)
     combined = combined[:max_total]
     crypto_count = sum(1 for t in combined if t.endswith("-USD"))
     elapsed = time.time() - start
-    logger.info(f"[prescreener] Breakout pre-screen: {len(combined)} candidates ({crypto_count} crypto) in {elapsed:.1f}s")
+    logger.info(f"[prescreener] Breakout pre-screen: {len(combined)}/{total_found} candidates ({crypto_count} crypto) in {elapsed:.1f}s")
 
-    _cache_set("breakout_candidates", combined)
-    return combined
+    _cache_set("breakout_candidates", (combined, total_found))
+    return combined, total_found

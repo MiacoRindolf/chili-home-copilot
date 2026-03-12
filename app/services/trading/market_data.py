@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time as _time
 from typing import Any
 
 import pandas as pd
@@ -205,6 +207,12 @@ def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
 
 # ── Technical indicators ──────────────────────────────────────────────
 
+_ind_cache: dict[tuple, tuple[float, dict]] = {}
+_ind_cache_lock = threading.Lock()
+_IND_CACHE_TTL = 300  # 5 min — OHLCV underneath is cached 30 min
+_IND_CACHE_MAX = 500
+
+
 def compute_indicators(
     ticker: str,
     interval: str = "1d",
@@ -215,11 +223,37 @@ def compute_indicators(
 
     Uses the ``ta`` library (technical-analysis).  Returns a dict keyed by
     indicator name, each value a list of {time, value} or multi-key dicts.
+
+    Results are cached for 5 minutes keyed on (ticker, interval, period,
+    indicators) since the underlying OHLCV data is itself cached for 30 min.
     """
     if indicators is None:
         indicators = ["rsi", "macd", "sma_20", "ema_20", "bbands"]
     period = _clamp_period(interval, period)
+    cache_key = (ticker.upper(), interval, period, frozenset(indicators))
 
+    now = _time.time()
+    with _ind_cache_lock:
+        entry = _ind_cache.get(cache_key)
+        if entry and now - entry[0] < _IND_CACHE_TTL:
+            return entry[1]
+
+    result = _compute_indicators_fresh(ticker, interval, period, indicators)
+
+    with _ind_cache_lock:
+        if len(_ind_cache) >= _IND_CACHE_MAX:
+            cutoff = now - _IND_CACHE_TTL
+            stale = [k for k, v in _ind_cache.items() if v[0] < cutoff]
+            for k in stale:
+                del _ind_cache[k]
+        _ind_cache[cache_key] = (now, result)
+    return result
+
+
+def _compute_indicators_fresh(
+    ticker: str, interval: str, period: str, indicators: list[str],
+) -> dict[str, Any]:
+    """Actual indicator computation (no cache)."""
     df = _yf_history(ticker, period=period, interval=interval)
     if df.empty:
         return {}

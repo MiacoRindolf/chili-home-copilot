@@ -46,7 +46,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   transition: transform .25s cubic-bezier(.4,0,.2,1);
 }
 .t-sidebar h3 { font-size: 12px; padding: 10px 12px 6px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: .5px; }
-.wl-search { display: flex; padding: 0 8px 8px; gap: 4px; }
+.wl-search { display: flex; padding: 0 8px 8px; gap: 4px; position: relative; }
+.wl-ac { position: absolute; top: 100%; left: 8px; right: 40px; background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; max-height: 180px; overflow-y: auto; z-index: 200; display: none; box-shadow: 0 4px 12px rgba(0,0,0,.2); }
+.wl-ac.open { display: block; }
+.wl-ac-item { padding: 6px 10px; cursor: pointer; font-size: 11px; display: flex; gap: 6px; align-items: center; transition: background .1s; }
+.wl-ac-item:hover { background: rgba(99,102,241,.08); }
+.wl-ac-item .wac-sym { font-weight: 700; min-width: 50px; }
+.wl-ac-item .wac-name { color: var(--text-secondary); font-size: 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wl-search input {
   flex: 1; padding: 6px 10px; font-size: 12px; border: 1px solid var(--input-border);
   border-radius: 8px; background: var(--input-bg); color: var(--text); outline: none;
@@ -73,14 +79,44 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .wl-crypto-grid { padding: 0 8px 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ── Main area ───────────────────────────────────── */
-.t-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+.t-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 
 /* Toolbar */
 .t-toolbar {
   display: flex; align-items: center; gap: 4px; padding: 5px 10px;
   background: var(--bg-header); border-bottom: 1px solid var(--border); flex-wrap: wrap;
 }
-.t-toolbar .ticker-display { font-weight: 800; font-size: 14px; min-width: 50px; letter-spacing: .3px; }
+.t-toolbar .ticker-display { font-weight: 800; font-size: 14px; min-width: 50px; letter-spacing: .3px; cursor: pointer; }
+.t-toolbar .ticker-display:hover { color: var(--accent); }
+
+/* Toolbar search overlay */
+.toolbar-search { display: none; position: relative; }
+.toolbar-search.open { display: flex; align-items: center; }
+.toolbar-search input {
+  width: 220px; padding: 5px 10px; font-size: 13px; font-weight: 600;
+  border: 1px solid var(--accent); border-radius: 8px;
+  background: var(--input-bg); color: var(--text); outline: none;
+}
+.toolbar-search-results {
+  position: absolute; top: 100%; left: 0; width: 320px; margin-top: 4px;
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  max-height: 300px; overflow-y: auto; z-index: 500; display: none;
+  box-shadow: 0 8px 24px rgba(0,0,0,.25);
+}
+.toolbar-search-results.open { display: block; }
+.tsr-item {
+  padding: 8px 12px; cursor: pointer; font-size: 12px; display: flex; align-items: center; gap: 8px;
+  transition: background .1s; border-bottom: 1px solid var(--border);
+}
+.tsr-item:last-child { border-bottom: none; }
+.tsr-item:hover, .tsr-item.active { background: rgba(99,102,241,.08); }
+.tsr-item .tsr-sym { font-weight: 700; min-width: 65px; font-size: 13px; }
+.tsr-item .tsr-name { color: var(--text-secondary); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+.tsr-item .tsr-type { font-size: 9px; color: var(--text-muted); text-transform: uppercase; }
+.tsr-item .tsr-add { width: 22px; height: 22px; border-radius: 5px; border: 1px solid var(--border); background: transparent; color: var(--text-muted); font-size: 14px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .12s; flex-shrink: 0; }
+.tsr-item .tsr-add:hover { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
+.tsr-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 12px; }
+.tsr-hint { padding: 8px 12px; color: var(--text-muted); font-size: 10px; border-top: 1px solid var(--border); text-align: center; }
 .t-toolbar .price-display { font-size: 12px; margin-right: 6px; font-family: monospace; }
 .t-toolbar .price-display .change.up { color: #22c55e; font-weight: 600; }
 .t-toolbar .price-display .change.down { color: #ef4444; font-weight: 600; }
@@ -97,7 +133,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tf-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 
 /* Chart + indicator sub-panes */
-.t-chart-area { flex: 1; position: relative; min-height: 180px; padding-right: 4px; }
+.t-chart-area { flex: 1; position: relative; min-height: 180px; }
 #main-chart { width: 100%; height: 100%; }
 .chart-loading-overlay {
   position: absolute; inset: 0; display: flex; flex-direction: column;
@@ -166,6 +202,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .t-bottom {
   height: 260px; min-height: 140px; border-top: none;
   display: flex; flex-direction: column; background: var(--bg-header);
+  overflow: hidden;
 }
 .t-tabs {
   display: flex; overflow-x: auto; -webkit-overflow-scrolling: touch;
@@ -706,6 +743,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 .sig-btn-ghost { padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px; background: transparent; color: var(--text-muted); }
 .sig-btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
 .sig-status { font-size: 10px; color: var(--text-muted); }
+.scr-refresh-btn { width:26px;height:26px;border-radius:6px;border:1px solid var(--border);background:transparent;color:var(--text-muted);font-size:14px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;transition:all .15s; }
+.scr-refresh-btn:hover { border-color:var(--accent);color:var(--accent);background:rgba(99,102,241,.08); }
+.scr-brain-tag { font-size:9px;color:var(--accent);font-weight:600;margin-left:4px;opacity:.85; }
 .sig-badge-count { font-size: 10px; color: var(--text-muted); font-weight: 400; }
 .sig-settings-wrap { margin-bottom: 8px; }
 .sig-section-label {
@@ -1272,7 +1312,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 #draw-canvas.drawing { pointer-events: auto; cursor: crosshair; }
 .t-chart-area { position: relative; }
-#main-chart { margin-left: 34px; }
+#main-chart { margin-left: 34px; width: calc(100% - 34px); }
 
 /* ── Multi-chart grid ────────────────────────────── */
 .multi-chart-grid {
@@ -1671,8 +1711,9 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     </div>
     <h3>Watchlist</h3>
     <div class="wl-search">
-      <input type="text" id="wl-input" placeholder="Add ticker..." />
+      <input type="text" id="wl-input" placeholder="Add ticker..." autocomplete="off" />
       <button onclick="addToWatchlist()">+</button>
+      <div class="wl-ac" id="wl-ac"></div>
     </div>
     <div class="wl-list" id="wl-list"></div>
     <h3 class="wl-crypto-heading">Quick Add Crypto</h3>
@@ -1711,7 +1752,11 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
     </div>
 
     <div class="t-toolbar">
-      <span class="ticker-display" id="ticker-label">AAPL</span>
+      <span class="ticker-display" id="ticker-label" onclick="openToolbarSearch()" title="Click to search (/)">AAPL</span>
+      <div class="toolbar-search" id="toolbar-search">
+        <input type="text" id="toolbar-search-input" placeholder="Search ticker or name..." autocomplete="off" />
+        <div class="toolbar-search-results" id="toolbar-search-results"></div>
+      </div>
       <span class="price-display" id="price-label"></span>
       <span class="tb-divider"></span>
       <select id="interval-select" onchange="changeInterval(this.value)">
@@ -1842,6 +1887,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
               <option value="">-- Select a pattern --</option>
             </select>
             <button onclick="runScreener()" id="btn-screen" class="sig-btn sig-btn-primary">Scan Market</button>
+            <button onclick="runScreener()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
             <span id="screen-status" class="sig-status"></span>
           </div>
           <div id="screen-desc" class="scr-desc-hint" style="display:none"></div>
@@ -1863,6 +1909,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
         <div class="screen-panel" id="screen-panel-daytrade" style="display:none">
           <div class="scr-action-row">
             <button onclick="runDaytradeScan()" id="btn-daytrade" class="sig-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff">Scan Day Trades</button>
+            <button onclick="runDaytradeScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
             <span id="daytrade-status" class="sig-status"></span>
           </div>
           <div class="scr-filter-bar" id="dt-filter-bar" style="display:none">
@@ -1883,6 +1930,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
         <div class="screen-panel" id="screen-panel-breakouts" style="display:none">
           <div class="scr-action-row">
             <button onclick="runBreakoutScan()" id="btn-breakout" class="sig-btn" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff">Scan Breakouts</button>
+            <button onclick="runBreakoutScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
             <span id="breakout-status" class="sig-status"></span>
           </div>
           <div class="scr-filter-bar" id="bo-filter-bar" style="display:none">
@@ -1904,6 +1952,7 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
         <div class="screen-panel" id="screen-panel-momentum" style="display:none">
           <div class="scr-action-row">
             <button onclick="runMomentumScan()" id="btn-momentum" class="sig-btn" style="background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff">Scan Momentum</button>
+            <button onclick="runMomentumScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
             <span id="momentum-status" class="sig-status"></span>
           </div>
           <div id="momentum-results" class="scr-results-area">
@@ -2337,14 +2386,26 @@ document.addEventListener('DOMContentLoaded', function() {
   document.getElementById('ai-input').addEventListener('keydown', _onAiInputKey);
   _loadChatHistory();
   _refreshKnownTickers();
-  document.getElementById('wl-input').addEventListener('keydown', function(e) {
-    if (e.key === 'Enter') addToWatchlist();
+  document.getElementById('toolbar-search-input').addEventListener('keydown', _tsKeydown);
+  document.getElementById('toolbar-search-input').addEventListener('blur', function() {
+    setTimeout(closeToolbarSearch, 200);
+  });
+  document.getElementById('wl-input').addEventListener('keydown', _wlInputHandler);
+  document.getElementById('wl-input').addEventListener('input', function() {
+    clearTimeout(_wlAcDebounce);
+    _wlAcDebounce = setTimeout(function() {
+      _wlAcSearch(document.getElementById('wl-input').value.trim());
+    }, 300);
+  });
+  document.getElementById('wl-input').addEventListener('blur', function() {
+    setTimeout(function() { document.getElementById('wl-ac').classList.remove('open'); }, 200);
   });
   document.getElementById('j-input').addEventListener('keydown', function(e) {
     if (e.key === 'Enter') addJournal();
   });
   setInterval(refreshPrice, 15000);
   setTimeout(prefetchWatchlistPrices, 2000);
+  setTimeout(_autoLoadScreeners, 1500);
 });
 
 function initChart() {
@@ -2818,6 +2879,149 @@ function addCrypto(ticker) {
 
 function removeWatchlist(ticker) {
   fetch('/api/trading/watchlist?ticker='+encodeURIComponent(ticker), {method:'DELETE'}).then(function() { loadWatchlist(); });
+}
+
+/* ── Toolbar Ticker Search ─────────────────────── */
+var _tsDebounce = null;
+var _tsIdx = -1;
+
+function openToolbarSearch() {
+  var label = document.getElementById('ticker-label');
+  var box = document.getElementById('toolbar-search');
+  var inp = document.getElementById('toolbar-search-input');
+  label.style.display = 'none';
+  box.classList.add('open');
+  inp.value = '';
+  inp.focus();
+}
+
+function closeToolbarSearch() {
+  var label = document.getElementById('ticker-label');
+  var box = document.getElementById('toolbar-search');
+  var results = document.getElementById('toolbar-search-results');
+  box.classList.remove('open');
+  results.classList.remove('open');
+  results.innerHTML = '';
+  label.style.display = '';
+  _tsIdx = -1;
+}
+
+function _tsSearch(query) {
+  if (!query || query.length < 1) {
+    document.getElementById('toolbar-search-results').classList.remove('open');
+    document.getElementById('toolbar-search-results').innerHTML = '';
+    return;
+  }
+  fetch('/api/trading/search?q=' + encodeURIComponent(query) + '&limit=8')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) return;
+      _tsRender(d.results || []);
+    }).catch(function() {});
+}
+
+function _tsRender(results) {
+  var el = document.getElementById('toolbar-search-results');
+  _tsIdx = -1;
+  if (!results.length) {
+    el.innerHTML = '<div class="tsr-empty">No results found</div>';
+    el.classList.add('open');
+    return;
+  }
+  var html = '';
+  results.forEach(function(r, i) {
+    html += '<div class="tsr-item" data-idx="' + i + '" data-ticker="' + escHtml(r.ticker) + '" onclick="_tsSelect(this)">' +
+      '<span class="tsr-sym">' + escHtml(r.ticker) + '</span>' +
+      '<span class="tsr-name">' + escHtml(r.name || '') + '</span>' +
+      '<span class="tsr-type">' + escHtml(r.type || '') + '</span>' +
+      '<button class="tsr-add" onclick="event.stopPropagation();_tsAddWl(this)" title="Add to watchlist">+</button>' +
+      '</div>';
+  });
+  html += '<div class="tsr-hint">Click to view chart &middot; + to add to watchlist</div>';
+  el.innerHTML = html;
+  el.classList.add('open');
+}
+
+function _tsSelect(el) {
+  var ticker = el.dataset.ticker;
+  closeToolbarSearch();
+  selectTicker(ticker);
+}
+
+function _tsAddWl(btn) {
+  var item = btn.closest('.tsr-item');
+  var ticker = item.dataset.ticker;
+  btn.textContent = '\u2713';
+  btn.style.color = '#22c55e';
+  btn.style.borderColor = '#22c55e';
+  fetch('/api/trading/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticker: ticker }) })
+    .then(function() { loadWatchlist(); });
+}
+
+function _tsKeydown(e) {
+  var items = document.querySelectorAll('#toolbar-search-results .tsr-item');
+  if (e.key === 'Escape') { closeToolbarSearch(); e.preventDefault(); return; }
+  if (e.key === 'ArrowDown') { _tsIdx = Math.min(_tsIdx + 1, items.length - 1); _tsHighlight(items); e.preventDefault(); return; }
+  if (e.key === 'ArrowUp') { _tsIdx = Math.max(_tsIdx - 1, 0); _tsHighlight(items); e.preventDefault(); return; }
+  if (e.key === 'Enter') {
+    if (_tsIdx >= 0 && items[_tsIdx]) {
+      _tsSelect(items[_tsIdx]);
+    } else if (items.length === 1) {
+      _tsSelect(items[0]);
+    } else {
+      var val = document.getElementById('toolbar-search-input').value.trim().toUpperCase();
+      if (val) { closeToolbarSearch(); selectTicker(val); }
+    }
+    e.preventDefault();
+    return;
+  }
+  clearTimeout(_tsDebounce);
+  _tsDebounce = setTimeout(function() {
+    _tsSearch(document.getElementById('toolbar-search-input').value.trim());
+  }, 250);
+}
+
+function _tsHighlight(items) {
+  items.forEach(function(el, i) { el.classList.toggle('active', i === _tsIdx); });
+  if (items[_tsIdx]) items[_tsIdx].scrollIntoView({ block: 'nearest' });
+}
+
+/* ── Sidebar Watchlist Autocomplete ────────────── */
+var _wlAcDebounce = null;
+
+function _wlAcSearch(query) {
+  var ac = document.getElementById('wl-ac');
+  if (!query || query.length < 1) { ac.classList.remove('open'); ac.innerHTML = ''; return; }
+  fetch('/api/trading/search?q=' + encodeURIComponent(query) + '&limit=5')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.results || !d.results.length) { ac.classList.remove('open'); ac.innerHTML = ''; return; }
+      var html = '';
+      d.results.forEach(function(r) {
+        html += '<div class="wl-ac-item" data-ticker="' + escHtml(r.ticker) + '" onclick="_wlAcSelect(this)">' +
+          '<span class="wac-sym">' + escHtml(r.ticker) + '</span>' +
+          '<span class="wac-name">' + escHtml(r.name || '') + '</span></div>';
+      });
+      ac.innerHTML = html;
+      ac.classList.add('open');
+    }).catch(function() {});
+}
+
+function _wlAcSelect(el) {
+  var ticker = el.dataset.ticker;
+  var inp = document.getElementById('wl-input');
+  inp.value = ticker;
+  document.getElementById('wl-ac').classList.remove('open');
+  addToWatchlist();
+}
+
+function _wlInputHandler(e) {
+  if (e.key === 'Enter') { document.getElementById('wl-ac').classList.remove('open'); addToWatchlist(); return; }
+  if (e.key === 'Escape') { document.getElementById('wl-ac').classList.remove('open'); return; }
+  clearTimeout(_wlAcDebounce);
+  _wlAcDebounce = setTimeout(function() {
+    _wlAcSearch(document.getElementById('wl-input').value.trim());
+  }, 300);
 }
 
 /* ── Trades ─────────────────────────────────────── */
@@ -4703,6 +4907,21 @@ function _renderBoResults() {
   container.innerHTML = html;
 }
 
+function _brainTag(brain) {
+  if (!brain) return '';
+  var parts = [];
+  if (brain.brain_adjusted_weights > 0) parts.push(brain.brain_adjusted_weights + ' weights tuned');
+  var thr = brain.immaculate_thresholds;
+  if (thr) parts.push('imm\u2265' + thr.min_score + '/' + thr.min_vol + 'x/' + thr.min_rr + 'R');
+  return parts.length ? '<span class="scr-brain-tag" title="CHILI Brain: ' + escHtml(parts.join(', ')) + '">&#x1F9E0; Brain</span>' : '';
+}
+function _candidateLabel(d) {
+  var scanned = d.candidates_scanned || 0;
+  var total = d.total_sourced || 0;
+  if (total && total > scanned) return scanned.toLocaleString() + ' of ' + total.toLocaleString() + ' sourced';
+  return scanned ? scanned.toLocaleString() + ' sourced' : 'cached';
+}
+
 function runScreener() {
   var sid = document.getElementById('screen-preset').value;
   if (!sid) { alert('Select a screening pattern first'); return; }
@@ -4721,7 +4940,8 @@ function runScreener() {
     btn.disabled = false;
     btn.textContent = 'Scan Market';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+escHtml(d.error||'Screener error')+'</em>'; status.textContent = ''; return; }
-    status.textContent = d.screen_name + ': ' + d.matches + ' matches out of ' + d.total_scanned.toLocaleString() + ' scanned';
+    var brainTag = _brainTag(d.brain);
+    status.innerHTML = escHtml(d.screen_name + ': ' + d.matches + ' matches out of ' + d.total_scanned.toLocaleString() + ' scanned') + brainTag;
     _cachedScanTickers = (d.results || []).map(function(r) { return r.ticker; });
     _swingResults = d.results || [];
     document.getElementById('swing-filter-bar').style.display = _swingResults.length ? 'flex' : 'none';
@@ -4735,12 +4955,24 @@ function runScreener() {
   });
 }
 
+var _screenerLoaded = { swing: false, daytrade: false, breakouts: false, momentum: false };
+
+function _autoLoadScreeners() {
+  runDaytradeScan();
+  _screenerLoaded.daytrade = true;
+  setTimeout(function() { runBreakoutScan(); _screenerLoaded.breakouts = true; }, 200);
+  setTimeout(function() { runMomentumScan(); _screenerLoaded.momentum = true; }, 400);
+}
+
 function switchScreenType(btn, stype) {
   document.querySelectorAll('.screen-type-btn').forEach(function(b){ b.classList.remove('active'); });
   btn.classList.add('active');
   document.querySelectorAll('.screen-panel').forEach(function(p){ p.style.display = 'none'; });
   var panel = document.getElementById('screen-panel-' + stype);
   if (panel) panel.style.display = 'block';
+  if (stype === 'daytrade' && !_screenerLoaded.daytrade) { runDaytradeScan(); _screenerLoaded.daytrade = true; }
+  if (stype === 'breakouts' && !_screenerLoaded.breakouts) { runBreakoutScan(); _screenerLoaded.breakouts = true; }
+  if (stype === 'momentum' && !_screenerLoaded.momentum) { runMomentumScan(); _screenerLoaded.momentum = true; }
 }
 
 function runDaytradeScan() {
@@ -4757,7 +4989,8 @@ function runDaytradeScan() {
     btn.disabled = false;
     btn.textContent = 'Scan Day Trades';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
-    status.textContent = d.matches + ' setups from ' + d.candidates_scanned + ' candidates (' + d.elapsed_s + 's)';
+    var brainTag = _brainTag(d.brain);
+    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + ' (' + d.elapsed_s + 's)') + brainTag;
     var dtTickers = (d.results || []).map(function(r) { return r.ticker; });
     _cachedScanTickers = _cachedScanTickers.concat(dtTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     _dtResults = d.results || [];
@@ -4787,7 +5020,8 @@ function runBreakoutScan() {
     btn.disabled = false;
     btn.textContent = 'Scan Breakouts';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
-    status.textContent = d.matches + ' setups from ' + d.candidates_scanned + ' candidates (' + d.elapsed_s + 's)';
+    var brainTag = _brainTag(d.brain);
+    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + ' (' + d.elapsed_s + 's)') + brainTag;
     var boTickers = (d.results || []).map(function(r) { return r.ticker; });
     _cachedScanTickers = _cachedScanTickers.concat(boTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     _boResults = d.results || [];
@@ -4819,7 +5053,9 @@ function runMomentumScan() {
     btn.textContent = 'Scan Momentum';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
     var ic = d.immaculate_count || 0;
-    status.textContent = d.matches + ' setups' + (ic ? ' (' + ic + ' immaculate)' : '') + ' from ' + (d.candidates_scanned||'cached') + ' candidates' + (d.elapsed_s ? ' (' + d.elapsed_s + 's)' : '') + (d.cached ? ' [cached]' : '');
+    var brainTag = _brainTag(d.brain);
+    var txt = d.matches + ' setups' + (ic ? ' (' + ic + ' immaculate)' : '') + ' from ' + _candidateLabel(d) + (d.elapsed_s ? ' (' + d.elapsed_s + 's)' : '') + (d.cached ? ' [cached]' : '');
+    status.innerHTML = escHtml(txt) + brainTag;
     _renderMomentumResults(d.results || []);
   }).catch(function() {
     btn.disabled = false;
@@ -5052,12 +5288,13 @@ function loadTopPicks() {
         '<div class="pe-icon">&#x1F50D;</div>' +
         '<div class="pe-title">No Top Picks Yet</div>' +
         '<div class="pe-sub">Run a Full Market Scan to generate AI-driven trade ideas with entry, exit, risk, and projected returns.</div></div>';
-      return;
+    } else {
+      if (label) { label.style.display = 'flex'; }
+      if (count) count.textContent = d.picks.length + ' picks';
+      el.innerHTML = '';
+      d.picks.forEach(function(p) { el.innerHTML += _renderPickCard(p, false); });
     }
-    if (label) { label.style.display = 'flex'; }
-    if (count) count.textContent = d.picks.length + ' picks';
-    el.innerHTML = '';
-    d.picks.forEach(function(p) { el.innerHTML += _renderPickCard(p, false); });
+    _loadTopPicksBanner(d);
   }).catch(function() {
     if (status) status.textContent = '';
     var el = document.getElementById('signals-list');
@@ -5066,11 +5303,10 @@ function loadTopPicks() {
       '<div class="pe-title">Could not load picks</div>' +
       '<div class="pe-sub">The server may still be computing predictions. Try refreshing in a moment.</div></div>';
   });
-  _loadTopPicksBanner();
 }
 
-function _loadTopPicksBanner() {
-  fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(function(d) {
+function _loadTopPicksBanner(prefetched) {
+  function _apply(d) {
     var scroll = document.getElementById('signals-scroll');
     var timeEl = document.getElementById('signals-time');
     if (!scroll) return;
@@ -5083,7 +5319,9 @@ function _loadTopPicksBanner() {
     if (timeEl) timeEl.textContent = d.picks.length + ' picks';
     scroll.innerHTML = '';
     d.picks.slice(0, 8).forEach(function(p) { scroll.innerHTML += _renderPickCard(p, true); });
-  }).catch(function() {});
+  }
+  if (prefetched) { _apply(prefetched); return; }
+  fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(_apply).catch(function() {});
 }
 
 function loadSignals() { loadTopPicks(); loadProposals(); }
@@ -6832,6 +7070,7 @@ document.addEventListener('keydown', function(e) {
     clearAnnotations();
     return;
   }
+  if (e.key === '/') { openToolbarSearch(); e.preventDefault(); return; }
   if (e.key === 'm' || e.key === 'M') { toggleMultiView(); e.preventDefault(); return; }
   if (e.key === 'r' || e.key === 'R') { loadChart(); e.preventDefault(); return; }
 

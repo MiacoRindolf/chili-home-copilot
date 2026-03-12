@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 
 _shutting_down = threading.Event()
 
+# Stale-while-revalidate cache for get_current_predictions
+_pred_cache: dict[str, Any] = {"results": [], "ts": 0.0}
+_PRED_CACHE_TTL = 180       # 3 min fresh
+_PRED_CACHE_STALE_TTL = 600  # 10 min stale-while-revalidate
+_pred_refreshing = False
+_pred_refresh_lock = threading.Lock()
+
 
 def signal_shutdown():
     _shutting_down.set()
@@ -1973,7 +1980,52 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
     Blends rule-based scores with ML probabilities and adjusts for
     volatility regime. Includes risk-management fields (stop, target, R:R).
     Uses ThreadPoolExecutor to process tickers in parallel for speed.
+
+    When *tickers* is None (the common case from Top Picks), results are
+    cached with stale-while-revalidate: 3 min fresh, 10 min stale.
+    Explicit ticker lists bypass the cache.
     """
+    global _pred_cache, _pred_refreshing
+
+    if tickers is not None:
+        return _get_current_predictions_impl(db, tickers)
+
+    now = time.time()
+    age = now - _pred_cache["ts"]
+
+    if _pred_cache["results"] and age < _PRED_CACHE_TTL:
+        return _pred_cache["results"]
+
+    if _pred_cache["results"] and age < _PRED_CACHE_STALE_TTL:
+        with _pred_refresh_lock:
+            if not _pred_refreshing:
+                _pred_refreshing = True
+
+                def _bg_refresh():
+                    global _pred_cache, _pred_refreshing
+                    try:
+                        from ...db import SessionLocal
+                        s = SessionLocal()
+                        try:
+                            fresh = _get_current_predictions_impl(s, None)
+                            _pred_cache = {"results": fresh, "ts": time.time()}
+                        finally:
+                            s.close()
+                    except Exception:
+                        logger.debug("Background prediction refresh failed", exc_info=True)
+                    finally:
+                        _pred_refreshing = False
+
+                threading.Thread(target=_bg_refresh, daemon=True).start()
+        return _pred_cache["results"]
+
+    results = _get_current_predictions_impl(db, None)
+    _pred_cache = {"results": results, "ts": time.time()}
+    return results
+
+
+def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> list[dict]:
+    """Core prediction logic (no cache)."""
     from .ml_engine import predict_ml, extract_features, is_model_ready
 
     tickers = _build_prediction_tickers(db, tickers)
