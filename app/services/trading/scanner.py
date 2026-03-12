@@ -1678,9 +1678,37 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
         else:
             pick["timeframe"] = "3-10 days (swing)"
 
-    picks.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
+    # Filter out picks whose price has drifted >25% from the scored price
+    # (stale scan results from DB where the stock has since crashed/spiked)
+    from .market_data import fetch_quotes_batch
+    _pick_tickers_for_check = [p["ticker"] for p in picks if p.get("price")]
+    _live_quotes = {}
+    try:
+        _live_quotes = fetch_quotes_batch(_pick_tickers_for_check) if _pick_tickers_for_check else {}
+    except Exception:
+        pass
 
-    top = picks[:15]
+    validated = []
+    for pick in picks:
+        scored_price = pick.get("price") or 0
+        if scored_price > 0 and _live_quotes:
+            lq = _live_quotes.get(pick["ticker"])
+            live_price = lq.get("price", 0) if lq else 0
+            if live_price and live_price > 0:
+                drift = abs(live_price - scored_price) / scored_price * 100
+                if drift > 25:
+                    logger.debug(
+                        f"[scanner] Dropping stale pick {pick['ticker']}: "
+                        f"scored at ${scored_price} but now ${live_price} ({drift:.0f}% drift)"
+                    )
+                    continue
+                pick["price"] = live_price
+                pick["entry_price"] = live_price
+        validated.append(pick)
+
+    validated.sort(key=lambda x: x.get("combined_score", 0), reverse=True)
+
+    top = validated[:15]
 
     for i, pick in enumerate(top):
         pick["rank"] = i + 1

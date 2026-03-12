@@ -679,11 +679,18 @@ def _get_buying_power() -> float:
     return 10000.0  # default for position sizing when broker is not connected
 
 
-def _expire_proposals(db: Session) -> int:
-    """Mark expired pending proposals."""
-    from ...models.trading import StrategyProposal
+_PRICE_DRIFT_EXPIRE_PCT = 30  # expire proposals when price drifts >30% from entry
 
-    expired = (
+
+def _expire_proposals(db: Session) -> int:
+    """Mark expired pending proposals (time-based + price-drift)."""
+    from ...models.trading import StrategyProposal
+    from .market_data import fetch_quote
+
+    count = 0
+
+    # 1. Time-based expiry
+    time_expired = (
         db.query(StrategyProposal)
         .filter(
             StrategyProposal.status == "pending",
@@ -691,12 +698,38 @@ def _expire_proposals(db: Session) -> int:
         )
         .all()
     )
-    count = 0
-    for p in expired:
+    for p in time_expired:
         p.status = "expired"
         count += 1
+
+    # 2. Price-drift expiry: if price moved far from entry, the setup is invalid
+    active = (
+        db.query(StrategyProposal)
+        .filter(StrategyProposal.status.in_(["pending", "approved"]))
+        .all()
+    )
+    for p in active:
+        try:
+            quote = fetch_quote(p.ticker)
+            price = quote.get("price", 0) if quote else 0
+            if price and p.entry_price and p.entry_price > 0:
+                drift_pct = abs(price - p.entry_price) / p.entry_price * 100
+                if drift_pct > _PRICE_DRIFT_EXPIRE_PCT:
+                    p.status = "expired"
+                    p.thesis = (p.thesis or "") + f" [Auto-expired: price drifted {drift_pct:.0f}% from entry]"
+                    count += 1
+                    logger.info(
+                        f"[alerts] Price-drift expired {p.ticker}: "
+                        f"entry ${p.entry_price:.2f} → ${price:.2f} ({drift_pct:.0f}%)"
+                    )
+        except Exception:
+            pass
+
     if count:
-        db.commit()
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
     return count
 
 
