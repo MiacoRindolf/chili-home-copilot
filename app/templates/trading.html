@@ -5442,15 +5442,40 @@ function approveProposal(id, btn) {
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
-        loadProposals();
-        loadTopPicks();
+        var exec = d.execution || {};
+        var st = exec.status || 'unknown';
+        if (st === 'executed') {
+          btn.textContent = 'Executed!';
+          btn.style.background = '#22c55e';
+        } else if (st === 'recorded') {
+          btn.textContent = 'Recorded';
+          btn.style.background = '#3b82f6';
+        } else if (st === 'failed') {
+          btn.textContent = 'Order Failed';
+          btn.style.background = '#ef4444';
+          alert('Order failed: ' + (exec.error || 'Unknown error'));
+        } else {
+          btn.textContent = 'Approved';
+        }
+        if (exec.reason) {
+          var row = btn.closest('.proposal-card') || btn.parentElement;
+          var note = document.createElement('div');
+          note.style.cssText = 'color:#94a3b8;font-size:11px;margin-top:4px;';
+          note.textContent = exec.reason;
+          row.appendChild(note);
+        }
+        setTimeout(function() { loadProposals(); loadTopPicks(); }, 1500);
       } else {
         btn.disabled = false;
         btn.textContent = 'Approve & Execute';
         alert(d.error || 'Failed to approve proposal');
       }
     })
-    .catch(function() { btn.disabled = false; btn.textContent = 'Approve & Execute'; });
+    .catch(function(e) {
+      btn.disabled = false;
+      btn.textContent = 'Approve & Execute';
+      alert('Network error: ' + (e.message || 'Could not reach server'));
+    });
 }
 
 function rejectProposal(id, btn) {

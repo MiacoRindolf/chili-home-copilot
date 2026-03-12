@@ -328,13 +328,17 @@ def get_proposals(
     limit: int = 20,
 ) -> list[dict[str, Any]]:
     from ...models.trading import StrategyProposal
+    from sqlalchemy import or_
 
     # Expire old pending proposals
     _expire_proposals(db)
 
-    q = db.query(StrategyProposal).filter(
-        StrategyProposal.user_id == user_id,
-    )
+    if user_id is not None:
+        q = db.query(StrategyProposal).filter(
+            or_(StrategyProposal.user_id == user_id, StrategyProposal.user_id.is_(None))
+        )
+    else:
+        q = db.query(StrategyProposal).filter(StrategyProposal.user_id.is_(None))
     if status:
         q = q.filter(StrategyProposal.status == status)
     else:
@@ -353,11 +357,12 @@ def approve_proposal(
 ) -> dict[str, Any]:
     """Approve a proposal and execute via Robinhood if connected."""
     from ...models.trading import StrategyProposal
+    from sqlalchemy import or_
 
-    proposal = db.query(StrategyProposal).filter(
-        StrategyProposal.id == proposal_id,
-        StrategyProposal.user_id == user_id,
-    ).first()
+    q = db.query(StrategyProposal).filter(StrategyProposal.id == proposal_id)
+    if user_id is not None:
+        q = q.filter(or_(StrategyProposal.user_id == user_id, StrategyProposal.user_id.is_(None)))
+    proposal = q.first()
 
     if not proposal:
         return {"ok": False, "error": "Proposal not found"}
@@ -388,11 +393,12 @@ def reject_proposal(
     user_id: int | None,
 ) -> dict[str, Any]:
     from ...models.trading import StrategyProposal
+    from sqlalchemy import or_
 
-    proposal = db.query(StrategyProposal).filter(
-        StrategyProposal.id == proposal_id,
-        StrategyProposal.user_id == user_id,
-    ).first()
+    q = db.query(StrategyProposal).filter(StrategyProposal.id == proposal_id)
+    if user_id is not None:
+        q = q.filter(or_(StrategyProposal.user_id == user_id, StrategyProposal.user_id.is_(None)))
+    proposal = q.first()
 
     if not proposal:
         return {"ok": False, "error": "Proposal not found"}
@@ -591,17 +597,50 @@ def _execute_proposal(
     proposal,
     user_id: int | None,
 ) -> dict[str, Any]:
-    """Execute an approved proposal via Robinhood."""
+    """Execute an approved proposal via Robinhood (or record locally)."""
     from ..broker_service import is_connected, place_buy_order
     from ...models.trading import Trade
 
-    if not is_connected():
-        return {"status": "skipped", "reason": "Robinhood not connected"}
-
     ticker = proposal.ticker
     quantity = proposal.quantity
+
+    # Compute quantity if missing
     if not quantity or quantity <= 0:
-        return {"status": "skipped", "reason": "No quantity calculated"}
+        buying_power = _get_buying_power()
+        risk_per_share = abs(proposal.entry_price - proposal.stop_loss) if proposal.stop_loss else 0
+        if buying_power > 0 and risk_per_share > 0:
+            risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
+            quantity = max(1, int(risk_dollars / risk_per_share))
+            proposal.quantity = quantity
+        else:
+            quantity = 1
+            proposal.quantity = 1
+
+    if not is_connected():
+        # Record as a local (manual) trade so alerts can track it
+        trade = Trade(
+            user_id=user_id,
+            ticker=ticker,
+            direction="long",
+            entry_price=proposal.entry_price,
+            quantity=quantity,
+            status="open",
+            broker_source="manual",
+            indicator_snapshot=json.dumps({
+                "stop_loss": proposal.stop_loss,
+                "take_profit": proposal.take_profit,
+                "proposal_id": proposal.id,
+            }),
+            tags="proposal-approved",
+            notes=f"Approved from proposal #{proposal.id} (manual — broker not connected)",
+        )
+        db.add(trade)
+        db.flush()
+        proposal.status = "executed"
+        proposal.executed_at = datetime.utcnow()
+        proposal.trade_id = trade.id
+        db.commit()
+        return {"status": "recorded", "trade_id": trade.id, "reason": "Broker not connected — trade recorded locally"}
 
     try:
         result = place_buy_order(
