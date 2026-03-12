@@ -43,6 +43,59 @@ def _get_trading_prompt() -> str:
     return _TRADING_PROMPT
 
 
+def _get_proposal_reminder(db: Session, ticker: str, user_id: int | None) -> str:
+    """Build a user-message-level reminder about active CHILI proposals.
+
+    Injected into the user message (not just system context) so the LLM
+    cannot overlook it — LLMs are much more likely to address content in
+    the user message than in a long system prompt.
+    """
+    from datetime import datetime, timedelta
+    from ..models.trading import StrategyProposal
+
+    ticker_up = ticker.upper()
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    proposals = db.query(StrategyProposal).filter(
+        StrategyProposal.ticker == ticker_up,
+        StrategyProposal.status.in_(["pending", "approved", "executed"]),
+        StrategyProposal.proposed_at >= cutoff,
+    ).order_by(StrategyProposal.proposed_at.desc()).limit(3).all()
+    if not proposals:
+        return ""
+
+    lines = [
+        "IMPORTANT — CHILI already recommended this ticker to me. "
+        "You MUST start your analysis by acknowledging this and explain "
+        "whether you agree or disagree and WHY:"
+    ]
+    for p in proposals:
+        score_parts = []
+        if p.scan_score is not None:
+            score_parts.append(f"Scanner {p.scan_score:.1f}/10")
+        if p.brain_score is not None:
+            score_parts.append(f"Brain {p.brain_score:.1f}")
+        if p.ml_probability is not None:
+            score_parts.append(f"ML {p.ml_probability:.1%}")
+        score_str = f", Scores: {', '.join(score_parts)}" if score_parts else ""
+        lines.append(
+            f"  - {p.direction.upper()} @ ${p.entry_price:.2f}, "
+            f"Stop ${p.stop_loss:.2f}, Target ${p.take_profit:.2f}, "
+            f"R:R {p.risk_reward_ratio:.1f}:1, "
+            f"Confidence {p.confidence:.0f}%{score_str}, Status: {p.status}"
+        )
+        if p.signals_json:
+            try:
+                import json as _json
+                _sigs = _json.loads(p.signals_json) if isinstance(p.signals_json, str) else p.signals_json
+                if isinstance(_sigs, list) and _sigs:
+                    lines.append(f"    Signals: {'; '.join(str(s) for s in _sigs[:5])}")
+            except Exception:
+                pass
+        if p.thesis:
+            lines.append(f"    Thesis: {p.thesis[:200]}")
+    return "\n".join(lines)
+
+
 # ── Page ────────────────────────────────────────────────────────────────
 
 @router.get("/trading", response_class=HTMLResponse)
@@ -301,7 +354,10 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
 
     ai_context = ts.build_ai_context(db, ctx["user_id"], body.ticker, body.interval)
 
+    proposal_reminder = _get_proposal_reminder(db, body.ticker, ctx.get("user_id"))
     user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. Give me a clear verdict: should I buy, sell, or hold? Include exact entry price, stop-loss, targets, hold duration, and confidence level."
+    if proposal_reminder:
+        user_msg += "\n\n" + proposal_reminder
 
     messages = []
     if body.history:
@@ -341,11 +397,15 @@ def api_analyze_stream(
     trace_id = new_trace_id()
 
     ai_context = ts.build_ai_context(db, ctx["user_id"], ticker, interval)
+
+    proposal_reminder = _get_proposal_reminder(db, ticker, ctx.get("user_id"))
     user_msg = message or (
         f"Analyze {ticker} on the {interval} timeframe. "
         "Give me a clear verdict: should I buy, sell, or hold? "
         "Include exact entry price, stop-loss, targets, hold duration, and confidence level."
     )
+    if proposal_reminder:
+        user_msg += "\n\n" + proposal_reminder
 
     try:
         hist_list = json.loads(history) if history else []

@@ -54,6 +54,39 @@ def _extract_pattern_keywords(signals: list[str]) -> list[str]:
 _PROPOSAL_EXPIRE_HOURS = 24
 _MIN_SCORE_FOR_PROPOSAL = 7.5
 _MAX_RISK_PCT = 2.0  # max 2% of portfolio per trade
+_MIN_RR_FOR_PROPOSAL = 1.5  # minimum risk:reward ratio
+_MIN_PRICE_FOR_PROPOSAL = 1.0  # skip sub-$1 penny stocks
+
+
+def _expire_proposals_on_stop(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+) -> None:
+    """Expire any active proposals for *ticker* after a stop-hit alert."""
+    from ...models.trading import StrategyProposal
+
+    try:
+        active = (
+            db.query(StrategyProposal)
+            .filter(
+                StrategyProposal.ticker == ticker,
+                StrategyProposal.status.in_(["pending", "approved"]),
+            )
+        )
+        if user_id is not None:
+            active = active.filter(StrategyProposal.user_id == user_id)
+        proposals = active.all()
+        for p in proposals:
+            p.status = "expired"
+            p.thesis = (p.thesis or "") + " [Auto-expired: stop-loss hit]"
+        if proposals:
+            db.commit()
+            logger.info(
+                f"[alerts] Auto-expired {len(proposals)} proposal(s) for {ticker} on stop hit"
+            )
+    except Exception as e:
+        logger.warning(f"[alerts] Failed to expire proposals for {ticker}: {e}")
 
 
 def dispatch_alert(
@@ -201,6 +234,12 @@ def generate_strategy_proposals(
             continue
 
         rr_ratio = round(reward_per_share / risk_per_share, 2)
+
+        if rr_ratio < _MIN_RR_FOR_PROPOSAL:
+            continue
+        if price < _MIN_PRICE_FOR_PROPOSAL:
+            continue
+
         projected_profit_pct = round((target - price) / price * 100, 2)
         projected_loss_pct = round((price - stop) / price * 100, 2)
 
@@ -445,6 +484,7 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
                         f"Consider cutting losses"
                     )
                     dispatch_alert(db, user_id, STOP_HIT, trade.ticker, msg)
+                    _expire_proposals_on_stop(db, user_id, trade.ticker)
                     stops_hit += 1
 
         except Exception as e:

@@ -341,8 +341,24 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             signals.append(f"Strong trend (ADX {adx_val:.0f})")
 
         if vol_avg > 0 and vol_latest > vol_avg * 1.5:
-            score += 0.5
-            signals.append("Volume surge")
+            latest_close = float(df["Close"].iloc[-1])
+            latest_open = float(df["Open"].iloc[-1])
+            if latest_close >= latest_open:
+                score += 0.5
+                signals.append("Volume surge (accumulation)")
+            else:
+                score -= 0.5
+                signals.append("Volume surge (distribution)")
+
+        # ── Recent price trend — penalise falling knives ──
+        if len(df) >= 6:
+            _ret_5d = (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1) * 100
+            if _ret_5d < -15:
+                score -= 2.0
+                signals.append(f"Sharp decline ({_ret_5d:.1f}% in 5 days)")
+            elif _ret_5d < -8:
+                score -= 1.0
+                signals.append(f"Falling ({_ret_5d:.1f}% in 5 days)")
 
         # ── Stochastic scoring (brain-adaptive) ──
         if pd.notna(stoch_k):
@@ -405,6 +421,13 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
         except Exception:
             pass
 
+        # ── Falling-knife gate: below major MAs = extra penalty ──
+        _below_sma50 = pd.notna(sma_50) and price < float(sma_50)
+        _below_ema50 = pd.notna(ema_50) and price < float(ema_50)
+        if _below_sma50 and _below_ema50:
+            score -= 1.0
+            signals.append("Below SMA50 & EMA50 — falling-knife risk")
+
         score = max(1.0, min(10.0, score))
 
         if score >= 7:
@@ -416,10 +439,11 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
         _cr = is_crypto_ticker
-        stop_loss = smart_round(price - 2 * atr_f, crypto=_cr)
-        take_profit = smart_round(price + 3 * atr_f, crypto=_cr)
 
         volatility_pct = (atr_f / price * 100) if price > 0 else 5
+        _stop_mult = 2.5 if volatility_pct > 3 else 2.0
+        stop_loss = smart_round(price - _stop_mult * atr_f, crypto=_cr)
+        take_profit = smart_round(price + 3 * atr_f, crypto=_cr)
         if volatility_pct > 3:
             risk = "high"
         elif volatility_pct > 1.5:

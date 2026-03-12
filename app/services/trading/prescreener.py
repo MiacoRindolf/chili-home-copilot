@@ -105,7 +105,11 @@ def _finviz_new_high() -> list[str]:
 
 
 def _finviz_oversold() -> list[str]:
-    return _finviz_screen(signal="Oversold", limit=100)
+    return _finviz_screen(
+        signal="Oversold",
+        filters_dict={"Price": "Over $1"},
+        limit=100,
+    )
 
 
 def _finviz_unusual_volume() -> list[str]:
@@ -139,7 +143,11 @@ def _finviz_overbought() -> list[str]:
 
 
 def _finviz_most_volatile() -> list[str]:
-    return _finviz_screen(signal="Most Volatile", limit=100)
+    return _finviz_screen(
+        signal="Most Volatile",
+        filters_dict={"Price": "Over $1"},
+        limit=100,
+    )
 
 
 def _finviz_top_losers() -> list[str]:
@@ -353,7 +361,6 @@ def get_prescreened_candidates(
     sources: dict[str, Any] = {
         "finviz_most_active": _finviz_most_active,
         "finviz_top_gainers": _finviz_top_gainers,
-        "finviz_top_losers": _finviz_top_losers,
         "finviz_new_high": _finviz_new_high,
         "finviz_oversold": _finviz_oversold,
         "finviz_overbought": _finviz_overbought,
@@ -370,7 +377,6 @@ def get_prescreened_candidates(
         "finviz_smallcap_momentum": _finviz_small_cap_momentum,
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
-        "yf_day_losers": _yf_day_losers,
         "yf_undervalued_growth": _yf_undervalued_growth,
         "yf_small_caps": _yf_aggressive_small_caps,
         "yf_growth_tech": _yf_growth_tech,
@@ -546,13 +552,10 @@ def get_daytrade_candidates(max_total: int = 300) -> tuple[list[str], int]:
     sources: dict[str, Any] = {
         "finviz_most_active": _finviz_most_active,
         "finviz_top_gainers": _finviz_top_gainers,
-        "finviz_top_losers": _finviz_top_losers,
-        "finviz_most_volatile": _finviz_most_volatile,
         "finviz_unusual_volume": _finviz_unusual_volume,
         "finviz_momentum_gappers": _finviz_momentum_gappers,
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
-        "yf_day_losers": _yf_day_losers,
         "yf_small_cap_gainers": _yf_small_cap_gainers,
         "crypto_movers": _crypto_top_movers,
         "crypto_base": _crypto_candidates,

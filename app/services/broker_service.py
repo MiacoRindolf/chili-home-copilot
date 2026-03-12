@@ -567,6 +567,24 @@ def get_recent_orders(limit: int = 20) -> list[dict[str, Any]]:
         return []
 
 
+def _compute_trade_snapshot(ticker: str, entry_price: float) -> str | None:
+    """Compute ATR-based stop/target for a trade and return JSON snapshot."""
+    import json
+    try:
+        from .trading.scanner import _score_ticker
+        result = _score_ticker(ticker)
+        if result and result.get("stop_loss") and result.get("take_profit"):
+            return json.dumps({
+                "stop_loss": result["stop_loss"],
+                "take_profit": result["take_profit"],
+                "score": result.get("score"),
+                "signal": result.get("signal"),
+            })
+    except Exception as e:
+        logger.debug(f"[broker] Could not compute snapshot for {ticker}: {e}")
+    return None
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
     from ..models.trading import Trade
@@ -604,8 +622,11 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         if existing:
             existing.quantity = qty
             existing.entry_price = avg_price
+            if not existing.indicator_snapshot:
+                existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
         else:
+            snapshot = _compute_trade_snapshot(ticker, avg_price)
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
@@ -615,6 +636,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 status="open",
                 broker_source="robinhood",
                 tags="robinhood-sync",
+                indicator_snapshot=snapshot,
                 notes=f"Auto-synced from Robinhood on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)

@@ -54,6 +54,19 @@ def create_trade(db: Session, user_id: int | None, **kwargs) -> Trade:
     trade = Trade(user_id=user_id, **kwargs)
     if trade.entry_date is None:
         trade.entry_date = datetime.utcnow()
+    if not trade.indicator_snapshot and trade.ticker:
+        try:
+            from .scanner import _score_ticker
+            result = _score_ticker(trade.ticker)
+            if result and result.get("stop_loss") and result.get("take_profit"):
+                trade.indicator_snapshot = json.dumps({
+                    "stop_loss": result["stop_loss"],
+                    "take_profit": result["take_profit"],
+                    "score": result.get("score"),
+                    "signal": result.get("signal"),
+                })
+        except Exception:
+            pass
     db.add(trade)
     db.commit()
     db.refresh(trade)

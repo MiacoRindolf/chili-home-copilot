@@ -205,12 +205,27 @@ def build_ai_context(
             "and explain WHY your view differs. Do NOT silently contradict yourself."
         )
         for p in proposals:
+            score_parts = []
+            if p.scan_score is not None:
+                score_parts.append(f"Scanner: {p.scan_score:.1f}/10")
+            if p.brain_score is not None:
+                score_parts.append(f"Brain: {p.brain_score:.1f}")
+            if p.ml_probability is not None:
+                score_parts.append(f"ML: {p.ml_probability:.1%}")
+            score_str = f" | Scores: {', '.join(score_parts)}" if score_parts else ""
             lines.append(
                 f"- [{p.status.upper()}] {p.direction.upper()} @ ${p.entry_price:.2f} | "
                 f"Stop: ${p.stop_loss:.2f} | Target: ${p.take_profit:.2f} | "
-                f"R:R {p.risk_reward_ratio:.1f}:1 | Confidence: {p.confidence:.0%} | "
+                f"R:R {p.risk_reward_ratio:.1f}:1 | Confidence: {p.confidence:.0f}%{score_str} | "
                 f"Timeframe: {p.timeframe}"
             )
+            if p.signals_json:
+                try:
+                    _sigs = json.loads(p.signals_json) if isinstance(p.signals_json, str) else p.signals_json
+                    if isinstance(_sigs, list) and _sigs:
+                        lines.append(f"  Signals: {'; '.join(str(s) for s in _sigs[:6])}")
+                except Exception:
+                    pass
             if p.thesis:
                 lines.append(f"  Thesis: {p.thesis[:300]}")
         parts.append("\n".join(lines))
@@ -240,6 +255,27 @@ def build_ai_context(
             if ml_prob is not None:
                 ml_dir = "bullish" if ml_prob > 0.55 else "bearish" if ml_prob < 0.45 else "neutral"
                 brain_lines.append(f"ML probability (5-day up): {ml_prob:.1%} ({ml_dir})")
+
+            # Reconciliation: compare brain vs scanner
+            if scored:
+                scanner_signal = scored["signal"].upper()
+                scanner_score_val = scored["score"]
+                brain_dir_upper = direction
+                if brain_dir_upper == scanner_signal or (brain_dir_upper == "BULLISH" and scanner_signal == "BUY"):
+                    brain_lines.append(
+                        f"CONFLUENCE: Brain ({direction}) and Scanner ({scanner_signal}, {scanner_score_val}/10) AGREE. "
+                        "Give this strong weight in your analysis."
+                    )
+                elif brain_dir_upper == "NEUTRAL":
+                    brain_lines.append(
+                        f"Brain is NEUTRAL while Scanner says {scanner_signal} ({scanner_score_val}/10). "
+                        "The scanner has stronger conviction — weigh technical signals more heavily."
+                    )
+                else:
+                    brain_lines.append(
+                        f"DIVERGENCE: Brain says {direction} but Scanner says {scanner_signal} ({scanner_score_val}/10). "
+                        "Explain this conflict and which view you trust more based on the indicators."
+                    )
             brain_lines.append(
                 "Factor the Brain's view into your analysis. If you disagree with it, explain why."
             )

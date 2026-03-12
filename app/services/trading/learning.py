@@ -1942,12 +1942,14 @@ def _predict_single_ticker(
         _cr = ticker.upper().endswith("-USD")
         _rd = 8 if _cr else 6
         stop = target = rr = pos_size_pct = None
+        _vol_pct = (atr_val / price * 100) if price and atr_val else 0
+        _stop_mult = 2.5 if _vol_pct > 3 else 2.0
         if price and atr_val and atr_val > 0:
             if blended_score > 0:
-                stop = round(price - atr_val * 1.5, _rd)
+                stop = round(price - atr_val * _stop_mult, _rd)
                 target = round(price + atr_val * 3.0, _rd)
             elif blended_score < 0:
-                stop = round(price + atr_val * 1.5, _rd)
+                stop = round(price + atr_val * _stop_mult, _rd)
                 target = round(price - atr_val * 3.0, _rd)
             if stop is not None and target is not None:
                 risk = abs(price - stop)
