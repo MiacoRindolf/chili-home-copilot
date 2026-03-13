@@ -69,9 +69,11 @@ async def api_broker_sync(
     pos_result = broker_service.sync_positions_to_db(db, user_id)
     live_tickers = pos_result.pop("_live_tickers", set())
     manual_result = broker_service.cleanup_manual_trades(db, user_id, live_tickers)
+    backfilled = broker_service.backfill_closed_trade_pnl(db, user_id)
     return JSONResponse({
         "ok": True,
         "orders": order_result,
         "positions": pos_result,
         "manual": manual_result,
+        "backfilled_pnl": backfilled,
     })

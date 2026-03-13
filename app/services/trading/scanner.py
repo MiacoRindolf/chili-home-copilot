@@ -1075,24 +1075,114 @@ PRESET_SCREENS: dict[str, dict[str, Any]] = {
 }
 
 
+# ── Quick first-pass filter using batch quotes ────────────────────────
+
+_intraday_scan_progress: dict[str, Any] = {
+    "running": False,
+    "scan_type": "",
+    "total_sourced": 0,
+    "passed_filter": 0,
+    "scored_so_far": 0,
+    "started_at": 0.0,
+}
+_intraday_progress_lock = threading.Lock()
+
+_MAX_HEAVY_CANDIDATES = 500
+
+
+def get_intraday_scan_progress() -> dict[str, Any]:
+    with _intraday_progress_lock:
+        snap = dict(_intraday_scan_progress)
+    if snap["started_at"]:
+        snap["elapsed_s"] = round(time.time() - snap["started_at"], 1)
+    return snap
+
+
+def _quick_filter_candidates(
+    tickers: list[str],
+    *,
+    min_price: float = 1.0,
+    max_price: float = 500.0,
+    min_abs_change_pct: float = 0.0,
+    max_heavy: int = _MAX_HEAVY_CANDIDATES,
+) -> list[str]:
+    """Use Massive/Polygon batch quotes to cheaply rank and trim the full
+    candidate universe before heavy intraday scoring.
+
+    Returns at most *max_heavy* tickers, ranked by a simple activity
+    score = volume * abs(change_pct).
+    """
+    quotes = fetch_quotes_batch(tickers)
+    if not quotes:
+        logger.warning("[scanner] Quick filter: no batch quotes returned, using all candidates")
+        return tickers[:max_heavy]
+
+    scored: list[tuple[str, float]] = []
+    for t in tickers:
+        q = quotes.get(t) or quotes.get(t.upper())
+        if not q:
+            continue
+        price = q.get("price") or 0
+        if price < min_price or price > max_price:
+            continue
+        change = abs(q.get("change_pct") or 0)
+        if change < min_abs_change_pct:
+            continue
+        vol = q.get("volume") or q.get("avg_volume") or 0
+        activity = vol * change if change else vol
+        scored.append((t, activity))
+
+    scored.sort(key=lambda x: x[1], reverse=True)
+    filtered = [t for t, _ in scored[:max_heavy]]
+
+    for t in tickers:
+        if t not in set(filtered) and t not in quotes:
+            filtered.append(t)
+        if len(filtered) >= max_heavy:
+            break
+
+    logger.info(
+        f"[scanner] Quick filter: {len(tickers)} -> {len(filtered)} "
+        f"(quotes obtained for {len(quotes)})"
+    )
+    return filtered
+
+
 # ── Batch runners for day-trade / breakout scans ──────────────────────
 
 def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
-    """Pre-filter with FinViz day-trade signals, then score intraday."""
+    """Full-universe day-trade scan: prescreen -> batch-quote filter -> intraday scoring."""
     from .prescreener import get_daytrade_candidates
 
     start = time.time()
-    candidates, total_sourced = get_daytrade_candidates()
-    logger.info(f"[trading] Day-trade scan: {len(candidates)}/{total_sourced} candidates")
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(
+            running=True, scan_type="day_trade", scored_so_far=0,
+            total_sourced=0, passed_filter=0, started_at=start,
+        )
+
+    all_candidates, total_sourced = get_daytrade_candidates()
+    with _intraday_progress_lock:
+        _intraday_scan_progress["total_sourced"] = total_sourced
+
+    candidates = _quick_filter_candidates(all_candidates, max_heavy=_MAX_HEAVY_CANDIDATES)
+    with _intraday_progress_lock:
+        _intraday_scan_progress["passed_filter"] = len(candidates)
+
+    logger.info(f"[trading] Day-trade scan: {len(candidates)}/{total_sourced} candidates (after filter)")
     _prewarm_cache_intraday(candidates)
 
     results: list[dict[str, Any]] = []
+    scored_count = 0
     with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
         futures = {executor.submit(_score_ticker_intraday, t): t for t in candidates}
         for future in as_completed(futures):
             if _shutting_down.is_set():
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
+            scored_count += 1
+            with _intraday_progress_lock:
+                _intraday_scan_progress["scored_so_far"] = scored_count
             try:
                 scored = future.result()
                 if scored is not None:
@@ -1103,6 +1193,9 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     results.sort(key=lambda r: r["score"], reverse=True)
     results = results[:max_results]
     elapsed = round(time.time() - start, 1)
+
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(running=False, scan_type="")
 
     return {
         "ok": True,
@@ -1117,23 +1210,41 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
 
 
 def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
-    """Pre-filter with FinViz consolidation signals, then score for breakout readiness."""
+    """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
     from .prescreener import get_breakout_candidates
 
     start = time.time()
-    candidates, total_sourced = get_breakout_candidates()
-    logger.info(f"[trading] Breakout scan: {len(candidates)}/{total_sourced} candidates")
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(
+            running=True, scan_type="breakout", scored_so_far=0,
+            total_sourced=0, passed_filter=0, started_at=start,
+        )
 
-    # Pre-warm the OHLCV cache for breakout scoring (uses 6mo daily)
+    all_candidates, total_sourced = get_breakout_candidates()
+    with _intraday_progress_lock:
+        _intraday_scan_progress["total_sourced"] = total_sourced
+
+    candidates = _quick_filter_candidates(
+        all_candidates, max_heavy=_MAX_HEAVY_CANDIDATES,
+        min_abs_change_pct=0.0, max_price=1000.0,
+    )
+    with _intraday_progress_lock:
+        _intraday_scan_progress["passed_filter"] = len(candidates)
+
+    logger.info(f"[trading] Breakout scan: {len(candidates)}/{total_sourced} candidates (after filter)")
     _prewarm_cache(candidates)
 
     results: list[dict[str, Any]] = []
+    scored_count = 0
     with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
         futures = {executor.submit(_score_breakout, t): t for t in candidates}
         for future in as_completed(futures):
             if _shutting_down.is_set():
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
+            scored_count += 1
+            with _intraday_progress_lock:
+                _intraday_scan_progress["scored_so_far"] = scored_count
             try:
                 scored = future.result()
                 if scored is not None:
@@ -1144,6 +1255,9 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
     results.sort(key=lambda r: r["score"], reverse=True)
     results = results[:max_results]
     elapsed = round(time.time() - start, 1)
+
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(running=False, scan_type="")
 
     return {
         "ok": True,
@@ -1176,7 +1290,8 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
             "ok": True,
             "scan_type": "momentum",
             "cached": True,
-            "candidates_scanned": _momentum_cache.get("total_sourced"),
+            "candidates_scanned": _momentum_cache.get("candidates_scanned", 0),
+            "total_sourced": _momentum_cache.get("total_sourced", 0),
             "matches": len(_momentum_cache["results"]),
             "results": _momentum_cache["results"],
             "brain": _brain_meta(),
@@ -1185,17 +1300,34 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
     from .prescreener import get_daytrade_candidates
 
     start = time.time()
-    candidates, total_sourced = get_daytrade_candidates()
-    logger.info(f"[trading] Momentum scanner: {len(candidates)}/{total_sourced} candidates")
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(
+            running=True, scan_type="momentum", scored_so_far=0,
+            total_sourced=0, passed_filter=0, started_at=start,
+        )
+
+    all_candidates, total_sourced = get_daytrade_candidates()
+    with _intraday_progress_lock:
+        _intraday_scan_progress["total_sourced"] = total_sourced
+
+    candidates = _quick_filter_candidates(all_candidates, max_heavy=_MAX_HEAVY_CANDIDATES)
+    with _intraday_progress_lock:
+        _intraday_scan_progress["passed_filter"] = len(candidates)
+
+    logger.info(f"[trading] Momentum scanner: {len(candidates)}/{total_sourced} candidates (after filter)")
     _prewarm_cache_intraday(candidates)
 
     scored: list[dict[str, Any]] = []
+    scored_count = 0
     with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
         futures = {executor.submit(_score_ticker_intraday, t): t for t in candidates}
         for future in as_completed(futures):
             if _shutting_down.is_set():
                 executor.shutdown(wait=False, cancel_futures=True)
                 break
+            scored_count += 1
+            with _intraday_progress_lock:
+                _intraday_scan_progress["scored_so_far"] = scored_count
             try:
                 result = future.result()
                 if result is not None:
@@ -1230,8 +1362,11 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
     else:
         results = immaculate
 
-    _momentum_cache = {"results": results, "ts": time.time(), "total_sourced": total_sourced}
+    _momentum_cache = {"results": results, "ts": time.time(), "total_sourced": total_sourced, "candidates_scanned": len(candidates)}
     elapsed = round(time.time() - start, 1)
+
+    with _intraday_progress_lock:
+        _intraday_scan_progress.update(running=False, scan_type="")
 
     return {
         "ok": True,

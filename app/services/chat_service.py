@@ -33,6 +33,8 @@ from .. import personality as personality_module
 from .. import web_search as web_search_module
 from .. import memory as memory_module
 from .. import openai_client
+from .code_brain import learning as code_learning
+from .reasoning_brain import learning as reasoning_learning
 from ..modules import is_module_enabled
 from . import project_file_service as pfs_module
 from . import planner_service
@@ -101,8 +103,31 @@ def resolve_response(
 
         if openai_client.is_configured():
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-            openai_system = build_openai_prompt(user_name, None, None, openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
-            result = openai_client.chat(messages=openai_messages, system_prompt=openai_system, trace_id=trace_id, user_message=message)
+            # Include Code + Reasoning context when available so answers are project-aware and user-aware.
+            code_ctx = ""
+            reasoning_ctx = ""
+            try:
+                if user_id and not is_guest:
+                    code_ctx = code_learning.get_code_chat_context(db, user_id=user_id)
+                    reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
+            except Exception:
+                code_ctx = ""
+                reasoning_ctx = ""
+            openai_system = build_openai_prompt(
+                user_name,
+                None,
+                None,
+                openai_client.SYSTEM_PROMPT,
+                planner_context=on_planner_page,
+                code_context=code_ctx or None,
+                reasoning_context=reasoning_ctx or None,
+            )
+            result = openai_client.chat(
+                messages=openai_messages,
+                system_prompt=openai_system,
+                trace_id=trace_id,
+                user_message=message,
+            )
             if result.get("reply"):
                 return {"reply": result["reply"], "action_type": "general_chat", "executed": True, "model_used": result["model"], "rag_sources": [], "personality_used": False, "client_action": None}
 
@@ -190,7 +215,25 @@ def resolve_response(
 
     elif action_type == "unknown" and openai_client.is_configured():
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        openai_system = build_openai_prompt(user_name, ctx["personality_context"], ctx["rag_context"], openai_client.SYSTEM_PROMPT, planner_context=on_planner_page)
+        # Pull Code + Reasoning context so the fallback LLM answer understands the user's codebases and style.
+        code_ctx = ""
+        reasoning_ctx = ""
+        try:
+            if user_id and not is_guest:
+                code_ctx = code_learning.get_code_chat_context(db, user_id=user_id)
+                reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
+        except Exception:
+            code_ctx = ""
+            reasoning_ctx = ""
+        openai_system = build_openai_prompt(
+            user_name,
+            ctx["personality_context"],
+            ctx["rag_context"],
+            openai_client.SYSTEM_PROMPT,
+            planner_context=on_planner_page,
+            code_context=code_ctx or None,
+            reasoning_context=reasoning_ctx or None,
+        )
         if llm_reply and llm_reply.strip():
             openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
         if stream:
@@ -461,8 +504,10 @@ def build_openai_prompt(
     rag_context: str | None,
     base_system_prompt: str = "",
     planner_context: bool = False,
+    code_context: str | None = None,
+    reasoning_context: str | None = None,
 ) -> str:
-    """Build the OpenAI system prompt with personality, RAG, and optional planner-page context."""
+    """Build the OpenAI system prompt with personality, RAG, planner, code, and reasoning context."""
     openai_system = base_system_prompt
     openai_system += f"\n\nYou are talking to: {user_name}."
     if personality_context:
@@ -471,6 +516,18 @@ def build_openai_prompt(
         openai_system += f"\n\nHousehold document context (use ONLY if the user asks about these topics -- do NOT volunteer this info unprompted):\n{rag_context}"
     if planner_context:
         openai_system += "\n\n" + _get_planner_page_context()
+    if code_context:
+        openai_system += (
+            "\n\nProject codebase context (use this when the user asks coding, refactoring, or debugging questions; "
+            "otherwise ignore it):\n"
+            f"{code_context}"
+        )
+    if reasoning_context:
+        openai_system += (
+            "\n\nUser reasoning and preference snapshot (use this to match their style, anticipate needs, and frame answers "
+            "in terms of their active goals; do NOT overfit or make creepy predictions):\n"
+            f"{reasoning_context}"
+        )
     return openai_system
 
 

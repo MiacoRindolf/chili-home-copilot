@@ -84,6 +84,18 @@ class Settings(BaseSettings):
     # Learning schedule
     learning_interval_hours: int = 2  # how often to run learning cycle (hours)
 
+    # Code Brain
+    code_brain_repos: str = ""         # comma-separated local repo paths to index
+    code_brain_interval_hours: int = 4  # how often to run code learning cycle
+    code_brain_max_files: int = 5000    # safety cap per repo
+
+    # Reasoning Brain
+    reasoning_interval_hours: int = 6     # how often to run reasoning cycle
+    reasoning_max_web_searches: int = 10  # cap per cycle to avoid abuse
+    reasoning_enabled: bool = True        # feature flag
+    reasoning_insight_chat_enabled: bool = True  # enable proactive Insight Chat
+    reasoning_max_goals: int = 5                 # max concurrent learning goals
+
     # Trading freshness / staleness guardrails
     top_picks_warn_age_min: int = 15   # warn when picks batch is older than N minutes
     proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes

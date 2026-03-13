@@ -123,6 +123,47 @@ def _run_momentum_scanner_job():
         logger.error(f"[scheduler] Momentum scanner failed: {e}")
 
 
+def _run_code_learning_job():
+    """Executed by APScheduler: Code Brain learning cycle."""
+    from ..db import SessionLocal
+    from .code_brain.learning import run_code_learning_cycle
+
+    logger.info("[scheduler] Starting Code Brain learning cycle")
+    db = SessionLocal()
+    try:
+        result = run_code_learning_cycle(db, user_id=None)
+        logger.info("[scheduler] Code Brain learning result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Code Brain learning failed: %s", e)
+    finally:
+        db.close()
+
+
+def _run_reasoning_learning_job():
+    """Executed by APScheduler: Reasoning Brain cycle for the primary user (if any)."""
+    from ..db import SessionLocal
+    from ..models import User
+    from .reasoning_brain.learning import run_reasoning_cycle
+    from ..config import settings as _settings
+
+    if not _settings.reasoning_enabled:
+        return
+
+    logger.info("[scheduler] Starting Reasoning Brain cycle")
+    db = SessionLocal()
+    try:
+        user = db.query(User).order_by(User.id.asc()).first()
+        if not user:
+            logger.info("[scheduler] No users found; skipping Reasoning Brain cycle")
+            return
+        result = run_reasoning_cycle(db, user.id, trace_id="scheduler")
+        logger.info("[scheduler] Reasoning Brain result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Reasoning Brain failed: %s", e)
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -194,9 +235,31 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _code_hours = max(1, settings.code_brain_interval_hours)
+        _scheduler.add_job(
+            _run_code_learning_job,
+            trigger=IntervalTrigger(hours=_code_hours),
+            id="code_learning_cycle",
+            name=f"Code Brain learning cycle (every {_code_hours}h)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+        _reasoning_hours = max(1, settings.reasoning_interval_hours)
+        _scheduler.add_job(
+            _run_reasoning_learning_job,
+            trigger=IntervalTrigger(hours=_reasoning_hours),
+            id="reasoning_cycle",
+            name=f"Reasoning Brain cycle (every {_reasoning_hours}h)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _scheduler.start()
         logger.info(
             f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
+            f"code brain every {_code_hours}h, "
+            f"reasoning brain every {_reasoning_hours}h, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET market hours)"
         )

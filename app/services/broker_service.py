@@ -596,6 +596,18 @@ def _compute_trade_snapshot(ticker: str, entry_price: float) -> str | None:
     return None
 
 
+def _get_exit_price(ticker: str, fallback_entry: float | None) -> float:
+    """Fetch current market price for *ticker*, falling back to entry price."""
+    try:
+        from .trading.market_data import fetch_quote
+        quote = fetch_quote(ticker)
+        if quote and quote.get("price"):
+            return float(quote["price"])
+    except Exception as exc:
+        logger.debug(f"[broker] Could not fetch exit quote for {ticker}: {exc}")
+    return float(fallback_entry or 0.0)
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
     from ..models.trading import Trade
@@ -667,7 +679,20 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     for trade in stale:
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
-        trade.notes = (trade.notes or "") + f"\nAuto-closed: position no longer on Robinhood ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})"
+        entry = trade.entry_price or 0.0
+        qty = trade.quantity or 0.0
+        exit_price = _get_exit_price(trade.ticker, entry)
+        trade.exit_price = exit_price
+        if trade.direction == "short":
+            trade.pnl = round((entry - exit_price) * qty, 2)
+        else:
+            trade.pnl = round((exit_price - entry) * qty, 2)
+        trade.notes = (
+            (trade.notes or "")
+            + f"\nAuto-closed: position no longer on Robinhood "
+            f"({datetime.utcnow().strftime('%Y-%m-%d %H:%M')}). "
+            f"Exit ~${exit_price:.2f} (market quote)."
+        )
         closed += 1
 
     db.commit()
@@ -702,10 +727,19 @@ def cleanup_manual_trades(
         if trade.ticker not in live_tickers:
             trade.status = "closed"
             trade.exit_date = datetime.utcnow()
+            entry = trade.entry_price or 0.0
+            qty = trade.quantity or 0.0
+            exit_price = _get_exit_price(trade.ticker, entry)
+            trade.exit_price = exit_price
+            if trade.direction == "short":
+                trade.pnl = round((entry - exit_price) * qty, 2)
+            else:
+                trade.pnl = round((exit_price - entry) * qty, 2)
             trade.notes = (
                 (trade.notes or "")
                 + f"\nAuto-closed during RH sync (no matching Robinhood position) "
-                f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+                f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}. "
+                f"Exit ~${exit_price:.2f} (market quote)."
             )
             closed_manual += 1
 
@@ -714,6 +748,40 @@ def cleanup_manual_trades(
         logger.info(f"[broker] Manual cleanup: {closed_manual} manual trade(s) auto-closed")
 
     return {"closed_manual": closed_manual}
+
+
+def backfill_closed_trade_pnl(db: Session, user_id: int | None) -> int:
+    """One-time patch: set exit_price and pnl on closed trades that are missing them."""
+    from ..models.trading import Trade
+
+    missing = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.status == "closed",
+            Trade.pnl.is_(None),
+        )
+        .all()
+    )
+    if not missing:
+        return 0
+
+    patched = 0
+    for trade in missing:
+        entry = trade.entry_price or 0.0
+        qty = trade.quantity or 0.0
+        exit_price = trade.exit_price or _get_exit_price(trade.ticker, entry)
+        trade.exit_price = exit_price
+        if trade.direction == "short":
+            trade.pnl = round((entry - exit_price) * qty, 2)
+        else:
+            trade.pnl = round((exit_price - entry) * qty, 2)
+        patched += 1
+
+    if patched:
+        db.commit()
+        logger.info(f"[broker] Backfilled exit_price/pnl for {patched} closed trade(s)")
+    return patched
 
 
 def build_portfolio_context() -> str:

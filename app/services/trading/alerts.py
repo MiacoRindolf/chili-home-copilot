@@ -364,6 +364,15 @@ def generate_strategy_proposals(
         quantity, position_size_pct = _compute_position_size(
             price, stop, buying_power, pick,
         )
+        # If no buying power (e.g. broker returned 0), use default so we still suggest a size
+        if quantity is None and position_size_pct is None:
+            quantity, position_size_pct = _compute_position_size(
+                price, stop, 10000.0, pick,
+            )
+        if quantity is None:
+            quantity = 1
+        if position_size_pct is None:
+            position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(buying_power, 10000.0) * 100), 2)
 
         confidence = pick.get("brain_confidence") or (combined * 10)
 
@@ -515,6 +524,13 @@ def create_proposal_from_pick(
 
     buying_power = _get_buying_power()
     quantity, position_size_pct = _compute_position_size(price, stop, buying_power, pick)
+    # Use default buying power so we never default to 1 share without brain math
+    if quantity is None and position_size_pct is None:
+        quantity, position_size_pct = _compute_position_size(price, stop, 10000.0, pick)
+    if quantity is None:
+        quantity = max(1, int((buying_power or 10000.0) * (_MAX_RISK_PCT / 100) / risk_per_share))
+    if position_size_pct is None:
+        position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(buying_power or 10000.0, 1) * 100), 2)
     confidence = pick.get("brain_confidence") or (combined * 10)
     signals = pick.get("signals", [])
     indicators = pick.get("indicators", {})
@@ -909,11 +925,29 @@ def _execute_proposal(
     ticker = proposal.ticker
     quantity = proposal.quantity
 
-    # Compute quantity if missing
+    # Compute quantity using Chili's brain (regime, volatility, caps) when missing
     if not quantity or quantity <= 0:
         buying_power = _get_buying_power()
-        risk_per_share = abs(proposal.entry_price - proposal.stop_loss) if proposal.stop_loss else 0
-        if buying_power > 0 and risk_per_share > 0:
+        stop = proposal.stop_loss or proposal.entry_price
+        risk_per_share = abs(proposal.entry_price - stop) if stop else 0
+        # Build minimal pick from proposal for position-size overlays
+        pick = {}
+        if proposal.signals_json:
+            try:
+                _s = proposal.signals_json
+                pick["signals"] = json.loads(_s) if isinstance(_s, str) else _s
+            except Exception:
+                pass
+        pick["is_crypto"] = proposal.ticker.endswith("-USD")
+        bp = buying_power if buying_power > 0 else 10000.0
+        quantity, position_size_pct = _compute_position_size(
+            proposal.entry_price, stop, bp, pick,
+        )
+        if quantity is not None and quantity > 0:
+            proposal.quantity = quantity
+            if position_size_pct is not None:
+                proposal.position_size_pct = position_size_pct
+        elif buying_power > 0 and risk_per_share > 0:
             risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
             quantity = max(1, int(risk_dollars / risk_per_share))
             proposal.quantity = quantity

@@ -26,6 +26,17 @@ from .trading import (
     TradingInsight,
     WatchlistItem,
 )
+from .code_brain import CodeHotspot, CodeInsight, CodeLearningEvent, CodeRepo, CodeSnapshot
+from .reasoning_brain import (
+    ReasoningAnticipation,
+    ReasoningConfidenceSnapshot,
+    ReasoningEvent,
+    ReasoningHypothesis,
+    ReasoningInterest,
+    ReasoningLearningGoal,
+    ReasoningResearch,
+    ReasoningUserModel,
+)
 
 __all__ = [
     "User",
@@ -61,5 +72,18 @@ __all__ = [
     "BacktestResult",
     "MarketSnapshot",
     "LearningEvent",
+    "CodeRepo",
+    "CodeInsight",
+    "CodeSnapshot",
+    "CodeHotspot",
+    "CodeLearningEvent",
+    "ReasoningUserModel",
+    "ReasoningInterest",
+    "ReasoningResearch",
+    "ReasoningAnticipation",
+    "ReasoningEvent",
+    "ReasoningLearningGoal",
+    "ReasoningHypothesis",
+    "ReasoningConfidenceSnapshot",
 ]
 

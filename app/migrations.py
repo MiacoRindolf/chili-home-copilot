@@ -148,6 +148,219 @@ def _migration_013_trade_order_sync_columns(conn) -> None:
     conn.commit()
 
 
+def _migration_014_code_brain_tables(conn) -> None:
+    """Create Code Brain tables if they don't exist (SQLAlchemy create_all handles
+    this at startup too, but this migration ensures the schema_version record)."""
+    tables = _tables(conn)
+    if "code_repos" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_repos (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER, path TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
+                language_stats TEXT, framework_tags TEXT,
+                file_count INTEGER DEFAULT 0, total_lines INTEGER DEFAULT 0,
+                last_indexed TEXT, last_commit_hash TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                active INTEGER DEFAULT 1
+            )
+        """))
+    if "code_insights" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_insights (
+                id INTEGER PRIMARY KEY,
+                repo_id INTEGER, user_id INTEGER, category TEXT NOT NULL,
+                description TEXT NOT NULL, confidence REAL DEFAULT 0.5,
+                evidence_count INTEGER DEFAULT 1, evidence_files TEXT,
+                active INTEGER DEFAULT 1,
+                last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+    if "code_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_snapshots (
+                id INTEGER PRIMARY KEY,
+                repo_id INTEGER NOT NULL, file_path TEXT NOT NULL,
+                language TEXT, line_count INTEGER DEFAULT 0,
+                function_count INTEGER DEFAULT 0, class_count INTEGER DEFAULT 0,
+                complexity_score REAL DEFAULT 0.0, last_modified TEXT,
+                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+    if "code_hotspots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_hotspots (
+                id INTEGER PRIMARY KEY,
+                repo_id INTEGER NOT NULL, file_path TEXT NOT NULL,
+                churn_score REAL DEFAULT 0.0, complexity_score REAL DEFAULT 0.0,
+                combined_score REAL DEFAULT 0.0, commit_count INTEGER DEFAULT 0,
+                last_commit_date TEXT,
+                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+    if "code_learning_events" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_learning_events (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER, repo_id INTEGER, event_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """))
+    conn.commit()
+
+
+def _migration_015_reasoning_brain_tables(conn) -> None:
+    """Create Reasoning Brain tables if they don't exist."""
+    tables = _tables(conn)
+    if "reasoning_user_models" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_user_models (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                decision_style TEXT,
+                risk_tolerance TEXT,
+                communication_prefs TEXT,
+                active_goals TEXT,
+                knowledge_gaps TEXT,
+                source_memory_count INTEGER DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """
+            )
+        )
+    if "reasoning_interests" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_interests (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                category TEXT NOT NULL,
+                weight REAL NOT NULL DEFAULT 0.0,
+                related_topics TEXT,
+                source TEXT,
+                last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """
+            )
+        )
+    if "reasoning_research" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_research (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                topic TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                sources TEXT,
+                relevance_score REAL NOT NULL DEFAULT 0.0,
+                searched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                stale INTEGER NOT NULL DEFAULT 0
+            )
+        """
+            )
+        )
+    if "reasoning_anticipations" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_anticipations (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                description TEXT NOT NULL,
+                domain TEXT,
+                context TEXT,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                acted_on INTEGER NOT NULL DEFAULT 0,
+                dismissed INTEGER NOT NULL DEFAULT 0
+            )
+        """
+            )
+        )
+    if "reasoning_events" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_events (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER,
+                event_type TEXT NOT NULL,
+                description TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """
+            )
+        )
+    conn.commit()
+
+
+def _migration_016_reasoning_learning_structures(conn) -> None:
+    """Create Reasoning learning goal / hypothesis / confidence tables."""
+    tables = _tables(conn)
+    if "reasoning_learning_goals" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_learning_goals (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                dimension TEXT NOT NULL,
+                description TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                confidence_before REAL,
+                confidence_after REAL,
+                evidence_count INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                completed_at TEXT
+            )
+        """
+            )
+        )
+    if "reasoning_hypotheses" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_hypotheses (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                claim TEXT NOT NULL,
+                domain TEXT,
+                confidence REAL NOT NULL DEFAULT 0.5,
+                evidence_for INTEGER NOT NULL DEFAULT 0,
+                evidence_against INTEGER NOT NULL DEFAULT 0,
+                tested_at TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                active INTEGER NOT NULL DEFAULT 1
+            )
+        """
+            )
+        )
+    if "reasoning_confidence_snapshots" not in tables:
+        conn.execute(
+            text(
+                """
+            CREATE TABLE reasoning_confidence_snapshots (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                dimension TEXT NOT NULL,
+                confidence_value REAL NOT NULL DEFAULT 0.0,
+                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+        """
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -163,6 +376,9 @@ MIGRATIONS = [
     ("011_trade_pattern_tags", _migration_011_trade_pattern_tags),
     ("012_snapshot_sentiment_fundamentals", _migration_012_snapshot_sentiment_fundamentals),
     ("013_trade_order_sync_columns", _migration_013_trade_order_sync_columns),
+    ("014_code_brain_tables", _migration_014_code_brain_tables),
+    ("015_reasoning_brain_tables", _migration_015_reasoning_brain_tables),
+    ("016_reasoning_learning_structures", _migration_016_reasoning_learning_structures),
 ]
 
 

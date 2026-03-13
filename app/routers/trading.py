@@ -853,6 +853,12 @@ def api_run_screener(body: ScreenRequest):
 
 # ── Day-Trade & Breakout Scans ────────────────────────────────────────
 
+@router.get("/api/trading/scan/progress")
+def api_scan_progress():
+    """Lightweight poll endpoint for live scan progress."""
+    return JSONResponse(ts.get_intraday_scan_progress())
+
+
 @router.post("/api/trading/scan/daytrade")
 def api_run_daytrade_scan():
     """Scan for day-trade opportunities using intraday data."""

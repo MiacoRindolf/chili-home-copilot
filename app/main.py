@@ -12,7 +12,7 @@ from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, chat, health_routes, pages, marketplace, mobile, trading
+from .routers import admin, brain, chat, health_routes, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import MarketplaceModule
 from .services.trading_scheduler import start_scheduler, stop_scheduler
@@ -124,6 +124,7 @@ app.state.nav_modules = get_nav_modules()
 
 app.include_router(chat.router)
 app.include_router(admin.router)
+app.include_router(brain.router)
 app.include_router(pages.router)
 app.include_router(health_routes.router)
 app.include_router(marketplace.router)

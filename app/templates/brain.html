@@ -1,0 +1,1688 @@
+{% extends "base.html" %}
+{% block title %}Chili Brain{% endblock %}
+
+{% block head_extra %}
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; min-height: 100vh; background: var(--bg); color: var(--text); overflow-x: hidden; }
+
+/* ── Layout ────────────────────────────────────── */
+.b-header {
+  background: var(--bg-header); border-bottom: 1px solid var(--border);
+  padding: 8px 20px; display: flex; justify-content: space-between; align-items: center;
+  position: sticky; top: 0; z-index: 100;
+}
+.b-header h1 { font-size: 16px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
+.b-header nav { display: flex; align-items: center; gap: 2px; }
+.b-header nav a {
+  color: var(--text-secondary); text-decoration: none; padding: 5px 12px; font-size: 11px;
+  border-radius: 6px; transition: all .15s; font-weight: 500;
+}
+.b-header nav a:hover { color: var(--accent); background: rgba(99,102,241,.06); }
+.b-header nav a.active { color: var(--accent); background: rgba(99,102,241,.08); }
+
+.b-body { display: flex; min-height: calc(100vh - 45px); }
+
+/* Domain sidebar */
+.b-sidebar {
+  width: 200px; min-width: 160px; background: var(--bg-header); border-right: 1px solid var(--border);
+  padding: 12px 0; flex-shrink: 0;
+}
+.b-sidebar h3 { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); padding: 0 14px 8px; }
+.b-domain {
+  display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer;
+  font-size: 12px; font-weight: 600; color: var(--text-secondary); transition: all .15s;
+  border-left: 3px solid transparent;
+}
+.b-domain:hover { background: rgba(99,102,241,.04); color: var(--text); }
+.b-domain.active { border-left-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.06); }
+.b-domain-icon { font-size: 16px; }
+.b-domain-dot { width: 6px; height: 6px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
+.b-domain-dot.idle { background: #6b7280; }
+.b-domain-dot.learning { background: #22c55e; animation: bpulse 1.2s infinite ease-in-out; }
+
+.b-status-banner {
+  padding: 8px 14px; font-size: 10px; color: var(--text-muted); border-top: 1px solid var(--border);
+  margin-top: auto;
+}
+
+/* Main content */
+.b-main { flex: 1; padding: 20px 24px; overflow-y: auto; }
+.b-main-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.b-main-header h2 { font-size: 18px; font-weight: 700; }
+
+/* Action row */
+.brain-action-row {
+  display: flex; align-items: center; gap: 6px; padding: 8px 0;
+  border-bottom: 1px solid var(--border); margin-bottom: 12px; flex-shrink: 0;
+}
+.brain-act-btn {
+  padding: 6px 14px; border: none; border-radius: 6px; color: #fff;
+  cursor: pointer; font-size: 11px; font-weight: 600; white-space: nowrap; transition: opacity .15s;
+}
+.brain-act-btn:hover { opacity: .9; }
+.brain-act-primary { background: linear-gradient(135deg,#8b5cf6,#6d28d9); }
+.brain-act-study { background: linear-gradient(135deg,#f59e0b,#d97706); }
+.brain-act-ml { background: linear-gradient(135deg,#06b6d4,#0891b2); }
+
+/* Brain sections */
+.brain-section { margin-bottom: 16px; }
+.brain-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
+.brain-section-title .bs-icon { font-size: 14px; }
+
+/* Thesis card */
+.brain-thesis-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; position: relative; overflow: hidden; }
+.brain-thesis-card::before { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 3px; }
+.brain-thesis-card.bullish::before { background: linear-gradient(90deg, #22c55e, #4ade80); }
+.brain-thesis-card.bearish::before { background: linear-gradient(90deg, #ef4444, #f87171); }
+.brain-thesis-card.neutral::before { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+.thesis-stance { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 20px; font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; }
+.thesis-stance.bullish { background: rgba(34,197,94,.15); color: #16a34a; }
+.thesis-stance.bearish { background: rgba(239,68,68,.15); color: #dc2626; }
+.thesis-stance.neutral { background: rgba(245,158,11,.15); color: #d97706; }
+.thesis-gauge { width: 100%; height: 6px; background: var(--border); border-radius: 3px; margin-top: 8px; position: relative; overflow: hidden; }
+.thesis-gauge-fill { height: 100%; border-radius: 3px; transition: width .6s ease; }
+.thesis-text { font-size: 12px; line-height: 1.6; margin-top: 8px; color: var(--text); }
+
+/* KPI gauges */
+.brain-kpis { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
+.brain-kpi { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 12px; text-align: center; position: relative; }
+.brain-kpi.clickable { cursor: pointer; transition: border-color .15s; }
+.brain-kpi.clickable:hover { border-color: var(--accent); }
+.brain-kpi .bk-val { font-size: 22px; font-weight: 800; }
+.brain-kpi .bk-val.good { color: #22c55e; }
+.brain-kpi .bk-val.warn { color: #f59e0b; }
+.brain-kpi .bk-val.danger { color: #ef4444; }
+.brain-kpi .bk-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+.brain-kpi .bk-trend { font-size: 10px; margin-top: 2px; }
+.brain-kpi .bk-trend.up { color: #22c55e; }
+.brain-kpi .bk-trend.down { color: #ef4444; }
+.brain-kpi .bk-trend.flat { color: var(--text-muted); }
+.brain-kpi .bk-tooltip { display: none; position: absolute; bottom: calc(100% + 6px); left: 50%; transform: translateX(-50%); background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-size: 10px; color: var(--text-secondary); min-width: 180px; max-width: 240px; z-index: 10; box-shadow: 0 4px 12px rgba(0,0,0,.15); text-align: left; }
+.brain-kpi:hover .bk-tooltip { display: block; }
+.brain-kpi.no-data .bk-val { color: var(--text-muted); }
+
+.brain-ring { width: 64px; height: 64px; margin: 0 auto 4px; position: relative; }
+.brain-ring svg { transform: rotate(-90deg); }
+.brain-ring .ring-label { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 800; }
+
+/* Live pipeline */
+.brain-pulse { width: 10px; height: 10px; border-radius: 50%; background: #4ade80; animation: bpulse 1.2s infinite ease-in-out; }
+@keyframes bpulse { 0%,100% { opacity:1; transform:scale(1); } 50% { opacity:.4; transform:scale(.8); } }
+.brain-live-pipeline { display: flex; align-items: center; gap: 3px; flex-wrap: wrap; padding: 8px 0; }
+.blp-step { display: flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 6px; font-size: 10px; font-weight: 600; background: var(--bg); border: 1px solid var(--border); white-space: nowrap; }
+.blp-step.running { background: rgba(139,92,246,.1); border-color: #8b5cf6; color: #8b5cf6; animation: bpulse 1.2s infinite ease-in-out; }
+.blp-step.done { background: rgba(34,197,94,.08); border-color: #22c55e; color: #22c55e; }
+.blp-step.pending { opacity: .5; }
+.blp-arrow { color: var(--text-muted); font-size: 10px; }
+.bp-step { display: flex; align-items: center; gap: 4px; font-size: 10px; }
+.bp-dot { width: 6px; height: 6px; border-radius: 50%; }
+.bp-dot.active { background: #22c55e; }
+.bp-dot.pending { background: #f59e0b; }
+.bp-dot.empty { background: var(--border); }
+.bp-num { font-weight: 700; }
+.bp-arrow { color: var(--text-muted); font-size: 10px; }
+
+/* Pattern cards */
+.pattern-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--bg-header); transition: border-color .2s; }
+.pattern-card:hover { border-color: var(--accent); }
+.pattern-card .pc-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.pattern-card .pc-signal { padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.pc-signal.bullish { background: rgba(34,197,94,.15); color: #16a34a; }
+.pc-signal.bearish { background: rgba(239,68,68,.15); color: #dc2626; }
+.pc-signal.neutral { background: rgba(107,114,128,.15); color: #6b7280; }
+.pattern-card .pc-desc { font-size: 11px; font-weight: 600; color: var(--text); line-height: 1.4; }
+.pattern-card .pc-stats { display: flex; gap: 10px; font-size: 10px; color: var(--text-muted); margin-top: 4px; flex-wrap: wrap; }
+.pattern-card .pc-stats span { display: flex; align-items: center; gap: 3px; }
+.pattern-card .pc-tickers { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
+.pattern-card .pc-ticker { padding: 1px 6px; border-radius: 4px; background: rgba(139,92,246,.1); color: #8b5cf6; font-size: 9px; font-weight: 600; cursor: pointer; }
+.pattern-bar-bg { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; }
+.pattern-bar { height: 100%; border-radius: 2px; transition: width .4s; }
+
+/* Prediction cards */
+.pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
+.pred-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-header); cursor: pointer; transition: all .15s; }
+.pred-card:hover { border-color: var(--accent); transform: translateY(-1px); box-shadow: 0 2px 8px rgba(0,0,0,.08); }
+.pred-card .pred-top { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
+.pred-card .pred-ticker { font-weight: 700; font-size: 13px; }
+.pred-card .pred-price { font-family: monospace; font-size: 11px; color: var(--text-secondary); }
+.pred-card .pred-dir { padding: 1px 7px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; margin-left: auto; }
+.pred-dir.bullish { background: rgba(34,197,94,.12); color: #22c55e; }
+.pred-dir.slightly_bullish { background: rgba(34,197,94,.08); color: #4ade80; }
+.pred-dir.bearish { background: rgba(239,68,68,.12); color: #ef4444; }
+.pred-dir.slightly_bearish { background: rgba(239,68,68,.08); color: #f87171; }
+.pred-dir.neutral { background: rgba(245,158,11,.1); color: #f59e0b; }
+.pred-score-bar { height: 4px; border-radius: 2px; background: var(--border); margin: 4px 0; position: relative; }
+.pred-score-fill { height: 100%; border-radius: 2px; transition: width .4s; }
+.pred-score-mid { position: absolute; left: 50%; top: -2px; width: 1px; height: 8px; background: var(--text-muted); opacity: .3; }
+.pred-signals { font-size: 10px; color: var(--text-muted); line-height: 1.4; }
+.pred-conf { font-size: 10px; font-weight: 700; }
+
+/* Timeline */
+.brain-filter-bar { display: flex; gap: 4px; margin-bottom: 8px; }
+.brain-filter-btn { padding: 3px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text-muted); font-size: 10px; font-weight: 600; cursor: pointer; transition: all .12s; }
+.brain-filter-btn:hover { border-color: var(--accent); color: var(--text); }
+.brain-filter-btn.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.brain-timeline { max-height: 350px; overflow-y: auto; }
+.bt-date-group { margin-bottom: 8px; }
+.bt-date-label { font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase; letter-spacing: .3px; margin-bottom: 4px; padding: 0 2px; }
+.brain-event { display: flex; gap: 8px; padding: 6px 8px; border-radius: 6px; transition: background .12s; }
+.brain-event:hover { background: rgba(99,102,241,.04); }
+.be-icon { width: 24px; height: 24px; display: flex; align-items: center; justify-content: center; border-radius: 6px; font-size: 12px; flex-shrink: 0; background: var(--bg); border: 1px solid var(--border); }
+.be-body { flex: 1; min-width: 0; }
+.be-desc { font-size: 11px; line-height: 1.4; }
+.be-conf { font-size: 10px; color: var(--text-muted); }
+.be-time { font-size: 9px; color: var(--text-muted); }
+
+/* Brain modal */
+.brain-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 9999; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
+.brain-modal-overlay.active { display: flex; }
+.brain-modal-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 14px; width: 92vw; max-width: 640px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); animation: brainModalIn .2s ease; }
+@keyframes brainModalIn { from { opacity:0; transform: translateY(20px) scale(.97); } to { opacity:1; transform: none; } }
+.brain-modal-header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; }
+.brain-modal-header .bm-close { margin-left: auto; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 20px; line-height: 1; padding: 0 4px; }
+.brain-modal-header .bm-close:hover { color: var(--text); }
+.brain-modal-body { padding: 16px 18px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+.brain-modal-body h4 { font-size: 12px; font-weight: 700; margin: 10px 0 4px; color: var(--text); }
+.brain-modal-body table { width: 100%; border-collapse: collapse; font-size: 11px; margin: 6px 0; }
+.brain-modal-body th { text-align: left; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .3px; }
+.brain-modal-body td { padding: 4px 6px; border-bottom: 1px solid rgba(128,128,128,.1); }
+.brain-modal-body .bm-tag { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 9px; font-weight: 600; }
+.brain-modal-body .bm-hit { background: rgba(34,197,94,.12); color: #22c55e; }
+.brain-modal-body .bm-miss { background: rgba(239,68,68,.12); color: #ef4444; }
+.brain-modal-footer { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
+.brain-modal-footer button { padding: 6px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; transition: opacity .15s; }
+.brain-modal-footer button:hover { opacity: .85; }
+
+/* Reflection box */
+.brain-reflection-box { display: none; padding: 10px 14px; background: var(--bg-header); border: 1px solid rgba(139,92,246,.3); border-radius: 8px; font-size: 11px; line-height: 1.5; margin-bottom: 12px; }
+
+/* Theme toggle */
+.b-theme-btn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; color: var(--text); font-size: 16px; }
+
+/* ── Code Brain styles ────────────────────────── */
+.code-repos-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+.code-repo-card {
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  padding: 14px 16px; position: relative; transition: border-color .15s;
+}
+.code-repo-card:hover { border-color: var(--accent); }
+.code-repo-name { font-size: 14px; font-weight: 700; margin-bottom: 4px; display: flex; align-items: center; gap: 6px; }
+.code-repo-path { font-size: 10px; color: var(--text-muted); word-break: break-all; margin-bottom: 8px; }
+.code-repo-stats { display: flex; gap: 12px; font-size: 10px; color: var(--text-secondary); flex-wrap: wrap; }
+.code-repo-stats span { display: flex; align-items: center; gap: 3px; }
+.code-repo-langs { display: flex; gap: 3px; margin-top: 6px; flex-wrap: wrap; }
+.code-repo-lang-tag { padding: 1px 7px; border-radius: 10px; font-size: 9px; font-weight: 600; background: rgba(99,102,241,.1); color: var(--accent); }
+.code-repo-fw-tag { padding: 1px 7px; border-radius: 10px; font-size: 9px; font-weight: 600; background: rgba(34,197,94,.1); color: #22c55e; }
+.code-repo-remove { position: absolute; top: 8px; right: 8px; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 14px; opacity: 0; transition: opacity .15s; }
+.code-repo-card:hover .code-repo-remove { opacity: 1; }
+.code-repo-remove:hover { color: #ef4444; }
+.code-repo-meta { font-size: 9px; color: var(--text-muted); margin-top: 6px; }
+
+.code-hotspot-row {
+  display: flex; align-items: center; gap: 10px; padding: 8px 10px;
+  border-radius: 6px; transition: background .12s; font-size: 11px;
+}
+.code-hotspot-row:hover { background: rgba(99,102,241,.04); }
+.code-hotspot-file { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-hotspot-bar { width: 80px; height: 6px; background: var(--border); border-radius: 3px; flex-shrink: 0; }
+.code-hotspot-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+.code-hotspot-score { font-size: 10px; font-weight: 700; width: 40px; text-align: right; flex-shrink: 0; }
+.code-hotspot-commits { font-size: 10px; color: var(--text-muted); width: 60px; text-align: right; flex-shrink: 0; }
+
+.code-insight-card {
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  margin-bottom: 6px; background: var(--bg-header); transition: border-color .15s;
+}
+.code-insight-card:hover { border-color: var(--accent); }
+.code-insight-header { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.code-insight-cat { padding: 1px 8px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.code-insight-cat.convention { background: rgba(99,102,241,.12); color: #8b5cf6; }
+.code-insight-cat.architecture { background: rgba(34,197,94,.12); color: #22c55e; }
+.code-insight-cat.quality { background: rgba(245,158,11,.12); color: #d97706; }
+.code-insight-cat.dependency { background: rgba(239,68,68,.12); color: #ef4444; }
+.code-insight-cat.pattern { background: rgba(6,182,212,.12); color: #06b6d4; }
+.code-insight-desc { font-size: 11px; font-weight: 600; line-height: 1.4; }
+.code-insight-meta { font-size: 10px; color: var(--text-muted); margin-top: 3px; display: flex; gap: 10px; }
+
+.code-agent-panel { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 16px; }
+.code-agent-result-box {
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 14px;
+  font-size: 12px; line-height: 1.6; overflow-x: auto;
+}
+.code-agent-result-box pre { background: rgba(0,0,0,.15); border-radius: 6px; padding: 10px; overflow-x: auto; font-size: 11px; }
+.code-agent-result-box code { font-family: 'Fira Code', 'JetBrains Mono', monospace; }
+.code-agent-context-bar { display: flex; gap: 10px; font-size: 10px; color: var(--text-muted); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
+
+/* Responsive */
+@media (max-width: 768px) {
+  .b-sidebar { display: none; }
+  .b-main { padding: 12px 14px; }
+  .brain-kpis { grid-template-columns: repeat(2, 1fr); }
+  .pred-grid { grid-template-columns: 1fr; }
+  .code-repos-grid { grid-template-columns: 1fr; }
+}
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="b-header">
+  <div style="display:flex;align-items:center;gap:8px">
+    <h1>&#x1F9E0; Chili Brain</h1>
+  </div>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/chat">Chat</a>
+    <a href="/trading">Trading</a>
+    <a href="/brain" class="active">Brain</a>
+    {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
+  </nav>
+  <div>
+    <button id="theme-toggle" onclick="toggleTheme()" class="b-theme-btn" title="Toggle theme">&#127769;</button>
+  </div>
+</div>
+
+<div class="b-body">
+  <!-- Domain sidebar -->
+  <div class="b-sidebar">
+    <h3>Domains</h3>
+    <div class="b-domain active" data-domain="trading" onclick="switchDomain('trading')">
+      <span class="b-domain-icon">&#x1F4C8;</span>
+      Trading
+      <span class="b-domain-dot idle" id="trading-status-dot"></span>
+    </div>
+    <div class="b-domain" data-domain="code" onclick="switchDomain('code')">
+      <span class="b-domain-icon">&#x1F4BB;</span>
+      Code
+      <span class="b-domain-dot idle" id="code-status-dot"></span>
+    </div>
+    <div class="b-domain" data-domain="reasoning" onclick="switchDomain('reasoning')">
+      <span class="b-domain-icon">&#x1F9E0;</span>
+      Reasoning
+      <span class="b-domain-dot idle" id="reasoning-status-dot"></span>
+    </div>
+    <div class="b-status-banner" id="sidebar-status">Checking status...</div>
+  </div>
+
+  <!-- Main -->
+  <div class="b-main">
+
+    <!-- ═══ Trading Domain ═══ -->
+    <div id="domain-trading">
+      <div class="b-main-header">
+        <h2>Trading Brain</h2>
+        <span id="brain-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
+      </div>
+
+      <div class="brain-section" id="brain-pipeline-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Learning In Progress</div>
+        <div class="brain-live-pipeline" id="brain-pipeline-steps"></div>
+        <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
+          <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
+          <span id="brain-learning-step"></span>
+          <span id="brain-learning-progress"></span>
+        </div>
+      </div>
+
+      <div class="brain-action-row">
+        <button onclick="triggerFullScan()" id="btn-full-scan" class="brain-act-btn brain-act-primary">&#x1F310; Scan Market</button>
+        <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
+        <button onclick="triggerRetrainML()" id="btn-retrain-ml" class="brain-act-btn brain-act-ml">&#x1F9E0; Retrain ML</button>
+      </div>
+
+      <div class="brain-reflection-box" id="brain-reflection">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+          <span>&#x1F52C;</span><strong style="font-size:11px">AI Learning Report</strong>
+          <button onclick="document.getElementById('brain-reflection').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px">&times;</button>
+        </div>
+        <div id="brain-reflection-content"></div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Market Thesis</div>
+        <div class="brain-thesis-card neutral" id="brain-thesis-card">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+            <span class="thesis-stance neutral" id="thesis-stance">Loading...</span>
+            <span style="font-size:9px;color:var(--text-muted)" id="thesis-meta"></span>
+          </div>
+          <div class="thesis-gauge"><div class="thesis-gauge-fill" id="thesis-gauge" style="width:50%;background:#f59e0b"></div></div>
+          <div class="thesis-text" id="thesis-text" style="font-size:11px;color:var(--text-muted)">Generating...</div>
+        </div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Performance</div>
+        <div class="brain-pipeline" id="brain-pipeline"></div>
+        <div class="brain-kpis" id="brain-kpis">
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+        </div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+          <span class="bs-icon">&#x1F52E;</span> Live Predictions
+          <button onclick="loadBrainPredictions()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-predictions" style="font-size:11px;color:var(--text-muted)">Loading predictions...</div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F9E9;</span> Discovered Patterns</div>
+        <div id="brain-patterns" style="max-height:400px;overflow-y:auto"></div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
+        <div class="brain-filter-bar" id="brain-filter-bar">
+          <button class="brain-filter-btn active" data-filter="all" onclick="filterBrainEvents('all',this)">All</button>
+          <button class="brain-filter-btn" data-filter="discovery" onclick="filterBrainEvents('discovery',this)">Discovery</button>
+          <button class="brain-filter-btn" data-filter="scan" onclick="filterBrainEvents('scan',this)">Scan</button>
+          <button class="brain-filter-btn" data-filter="review" onclick="filterBrainEvents('review',this)">Review</button>
+        </div>
+        <div class="brain-timeline" id="brain-activity"></div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence History</div>
+        <div id="brain-chart" style="width:100%;height:180px"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Code Domain ═══ -->
+    <div id="domain-code" style="display:none">
+      <div class="b-main-header">
+        <h2>Code Brain</h2>
+        <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
+      </div>
+
+      <!-- Code learning pipeline -->
+      <div class="brain-section" id="code-pipeline-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Code Learning In Progress</div>
+        <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
+          <div id="code-progress-bar" style="height:100%;background:linear-gradient(90deg,#06b6d4,#0891b2);border-radius:2px;transition:width .3s;width:0%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
+          <span id="code-learning-step"></span>
+          <span id="code-learning-phase"></span>
+        </div>
+      </div>
+
+      <!-- Code action row -->
+      <div class="brain-action-row">
+        <button onclick="triggerCodeLearn()" id="btn-code-learn" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4BB; Reindex All</button>
+        <button onclick="showAddRepoModal()" class="brain-act-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x2795; Add Repo</button>
+        <button onclick="codeAgentOpen()" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F916; Dev Assistant</button>
+      </div>
+
+      <!-- Repos -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C1;</span> Repositories</div>
+        <div id="code-repos" class="code-repos-grid">
+          <div style="font-size:11px;color:var(--text-muted)">Loading repos...</div>
+        </div>
+      </div>
+
+      <!-- Code KPIs -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Quality Metrics</div>
+        <div class="brain-kpis" id="code-kpis">
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+          <div class="brain-kpi" style="opacity:.3"></div>
+        </div>
+      </div>
+
+      <!-- Hotspots -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Hotspots (High Churn + Complexity)</div>
+        <div id="code-hotspots" style="max-height:350px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Loading hotspots...</div>
+        </div>
+      </div>
+
+      <!-- Insights / Conventions -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Discovered Conventions &amp; Patterns</div>
+        <div id="code-insights" style="max-height:400px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Loading insights...</div>
+        </div>
+      </div>
+
+      <!-- Code Activity Timeline -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
+        <div class="brain-timeline" id="code-activity">
+          <div style="font-size:11px;color:var(--text-muted)">No activity yet. Add a repo and run indexing.</div>
+        </div>
+      </div>
+
+      <!-- Dev Assistant Panel -->
+      <div class="brain-section" id="code-agent-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F916;</span> Dev Assistant</div>
+        <div class="code-agent-panel">
+          <div class="code-agent-input-row">
+            <textarea id="code-agent-prompt" placeholder="Ask Chili to analyze, refactor, or implement something... e.g. 'Add input validation to the user registration endpoint'" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:12px;resize:vertical;font-family:inherit"></textarea>
+            <button onclick="runCodeAgent()" id="btn-code-agent" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);margin-top:6px">&#x1F680; Run Agent</button>
+          </div>
+          <div id="code-agent-result" style="display:none;margin-top:12px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══ Reasoning Domain ═══ -->
+    <div id="domain-reasoning" style="display:none">
+      <div class="b-main-header">
+        <h2>Reasoning Brain</h2>
+        <span id="reasoning-status-info" style="font-size:10px;color:var(--text-muted)"></span>
+      </div>
+
+      <!-- Insight Chat -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4AC;</span> Insight Chat</div>
+        <div class="brain-thesis-card neutral" id="reasoning-insight-card">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <span style="font-size:11px;font-weight:600">Exploring:</span>
+            <span id="reasoning-current-goal" style="font-size:11px;color:var(--text-muted)">Loading...</span>
+          </div>
+          <div id="reasoning-insight-thread" style="font-size:11px;line-height:1.5;max-height:160px;overflow-y:auto;margin-bottom:8px">
+            <div style="color:var(--text-muted)">Waiting for Chili to start the conversation...</div>
+          </div>
+          <div style="display:flex;gap:6px;align-items:flex-end">
+            <textarea id="reasoning-insight-input" rows="2" placeholder="Type your reply..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px;font-size:11px;resize:vertical;font-family:inherit"></textarea>
+            <button onclick="sendReasoningInsightReply()" id="btn-reasoning-insight-send" class="brain-act-btn brain-act-primary">&#x27A4;</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Learning Goals + Hypotheses + Metrics -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Learning Goals & Hypotheses</div>
+        <div style="display:grid;grid-template-columns:2fr 2fr 1.5fr;gap:10px">
+          <div>
+            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Active Goals</div>
+            <div id="reasoning-goals" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading goals...</div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Hypothesis Board</div>
+            <div id="reasoning-hypotheses" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading hypotheses...</div>
+          </div>
+          <div>
+            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Snapshot</div>
+            <div id="reasoning-metrics" style="font-size:11px;color:var(--text-muted)">Loading metrics...</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Confidence evolution chart -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence Evolution</div>
+        <div id="reasoning-chart" style="width:100%;height:160px"></div>
+      </div>
+
+      <!-- Lower-level detail: model, interests, research, anticipations -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F464;</span> User Model</div>
+        <div class="brain-thesis-card neutral" id="reasoning-user-model-card">
+          <div id="reasoning-user-model-content" style="font-size:11px;color:var(--text-muted)">Loading user model...</div>
+        </div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Interest Graph</div>
+        <div id="reasoning-interests" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">
+          Loading interests...
+        </div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4DA;</span> Research Feed</div>
+        <div id="reasoning-research" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">
+          Loading research...
+        </div>
+      </div>
+
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F52E;</span> Anticipations</div>
+        <div id="reasoning-anticipations" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">
+          Loading anticipations...
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- Brain Detail Modal -->
+<div class="brain-modal-overlay" id="brain-modal-overlay" onclick="if(event.target===this)closeBrainModal()">
+  <div class="brain-modal-card">
+    <div class="brain-modal-header">
+      <span id="brain-modal-title">Details</span>
+      <button class="bm-close" onclick="closeBrainModal()">&times;</button>
+    </div>
+    <div class="brain-modal-body" id="brain-modal-body"></div>
+    <div class="brain-modal-footer" id="brain-modal-footer" style="display:none"></div>
+  </div>
+</div>
+
+<script>
+function toggleTheme() {
+  var html = document.documentElement;
+  var current = html.getAttribute('data-theme');
+  var next = current === 'dark' ? 'light' : 'dark';
+  html.setAttribute('data-theme', next);
+  localStorage.setItem('chili-theme', next);
+}
+
+function escHtml(s) {
+  var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
+}
+
+function openBrainModal(title, bodyHtml, footerHtml) {
+  document.getElementById('brain-modal-title').textContent = title;
+  document.getElementById('brain-modal-body').innerHTML = bodyHtml;
+  var footer = document.getElementById('brain-modal-footer');
+  if (footerHtml) { footer.innerHTML = footerHtml; footer.style.display = ''; }
+  else { footer.innerHTML = ''; footer.style.display = 'none'; }
+  document.getElementById('brain-modal-overlay').classList.add('active');
+}
+function closeBrainModal() { document.getElementById('brain-modal-overlay').classList.remove('active'); }
+document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape' && document.getElementById('brain-modal-overlay').classList.contains('active')) closeBrainModal();
+});
+
+function goToTicker(ticker) { window.open('/trading?ticker=' + encodeURIComponent(ticker), '_blank'); }
+
+/* ── Ring SVG helper ──────────────────────────── */
+function _makeRingSvg(pct, color) {
+  var r = 26, c = Math.PI * 2 * r;
+  var dash = c * (pct / 100);
+  return '<svg width="64" height="64" viewBox="0 0 64 64">' +
+    '<circle cx="32" cy="32" r="' + r + '" fill="none" stroke="var(--border)" stroke-width="5"/>' +
+    '<circle cx="32" cy="32" r="' + r + '" fill="none" stroke="' + (color || '#8b5cf6') + '" stroke-width="5" ' +
+    'stroke-dasharray="' + dash + ' ' + (c - dash) + '" stroke-linecap="round"/></svg>';
+}
+
+/* ── Sidebar status polling ───────────────────── */
+function updateSidebarStatus() {
+  fetch('/api/brain/status').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var t = d.trading || {};
+    var dot = document.getElementById('trading-status-dot');
+    var banner = document.getElementById('sidebar-status');
+    if (t.running) {
+      dot.className = 'b-domain-dot learning';
+      banner.textContent = 'Trading: ' + (t.phase || 'learning') + '...';
+    } else {
+      dot.className = 'b-domain-dot idle';
+      var lastRun = t.last_run ? timeSince(new Date(t.last_run)) + ' ago' : 'never';
+      banner.textContent = 'Trading: ' + lastRun;
+    }
+    var c = d.code || {};
+    var codeDot = document.getElementById('code-status-dot');
+    if (codeDot) {
+      codeDot.className = c.running ? 'b-domain-dot learning' : 'b-domain-dot idle';
+    }
+    if (c.running) {
+      banner.textContent += ' | Code: ' + (c.phase || 'learning') + '...';
+    } else if (c.last_run) {
+      banner.textContent += ' | Code: ' + timeSince(new Date(c.last_run)) + ' ago';
+    }
+    var r = d.reasoning || {};
+    var rDot = document.getElementById('reasoning-status-dot');
+    if (rDot) {
+      rDot.className = r.running ? 'b-domain-dot learning' : 'b-domain-dot idle';
+    }
+    if (r.running) {
+      banner.textContent += ' | Reasoning: ' + (r.phase || 'learning') + '...';
+    } else if (r.last_run) {
+      banner.textContent += ' | Reasoning: ' + timeSince(new Date(r.last_run)) + ' ago';
+    }
+  }).catch(function(){});
+}
+
+function timeSince(date) {
+  var seconds = Math.floor((new Date() - date) / 1000);
+  if (seconds < 60) return seconds + 's';
+  var minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return minutes + 'm';
+  var hours = Math.floor(minutes / 60);
+  if (hours < 24) return hours + 'h';
+  return Math.floor(hours / 24) + 'd';
+}
+
+/* ── Brain Dashboard (reuses /api/trading/brain/* endpoints) ─── */
+var brainChart = null, brainConfSeries = null;
+var _brainEventsRaw = [], _brainActiveFilter = 'all';
+var brainPollInterval = null;
+var _predShowAll = false, _PRED_INITIAL = 30;
+
+function loadBrainDashboard() {
+  fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    window._brainStats = d;
+    var kpis = document.getElementById('brain-kpis');
+    var pipeline = document.getElementById('brain-pipeline');
+
+    var hasData = d.total_predictions > 0;
+    var pending = d.pending_predictions || 0;
+    var evaluated = d.evaluated_snapshots || 0;
+    var ps = d.pipeline_status || 'no_data';
+
+    var snapDot = d.total_snapshots > 0 ? 'active' : 'empty';
+    var pendDot = pending > 0 ? 'pending' : 'empty';
+    var verDot = evaluated > 0 ? 'active' : 'empty';
+    pipeline.innerHTML =
+      '<span class="bp-step"><span class="bp-dot ' + snapDot + '"></span> Snapshots: <span class="bp-num">' + (d.total_snapshots||0).toLocaleString() + '</span></span>' +
+      '<span class="bp-arrow">&rarr;</span>' +
+      '<span class="bp-step"><span class="bp-dot ' + pendDot + '"></span> Pending: <span class="bp-num">' + pending.toLocaleString() + '</span></span>' +
+      '<span class="bp-arrow">&rarr;</span>' +
+      '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + evaluated.toLocaleString() + '</span></span>';
+
+    function _accDisp(acc, count) { return count > 0 ? acc + '%' : '--'; }
+    function _accCls(acc, count) { if (count === 0) return ''; return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger'; }
+    function _accColor(acc, count) { if (count === 0) return 'var(--text-muted)'; return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444'; }
+    function _noDataCls(count) { return count > 0 ? '' : ' no-data'; }
+    function _accSub(count) {
+      if (count > 0) return '<div class="bk-trend flat">' + count + ' predictions</div>';
+      if (ps === 'pending_verification') return '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting verification</div>';
+      if (ps === 'collecting') return '<div class="bk-trend flat">Collecting snapshots&hellip;</div>';
+      return '<div class="bk-trend flat">Run scans to start</div>';
+    }
+
+    var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
+    var weekTrend = d.patterns_this_week > 0
+      ? '<div class="bk-trend up">&#9650; +' + d.patterns_this_week + ' this week</div>'
+      : '<div class="bk-trend flat">&mdash; no new this week</div>';
+
+    var strongSub = (d.strong_predictions||0) > 0
+      ? '<div class="bk-trend flat">' + d.strong_predictions + ' high-conviction</div>'
+      : pending > 0
+        ? '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting results</div>'
+        : '<div class="bk-trend flat">Run scans to gather data</div>';
+
+    var accRingPct = hasData ? d.prediction_accuracy : 0;
+    var strRingPct = (d.strong_predictions||0) > 0 ? (d.strong_accuracy||0) : 0;
+
+    kpis.innerHTML =
+      '<div class="brain-kpi clickable' + _noDataCls(d.total_predictions) + '" onclick="showAccuracyDetail(\'all\')">' +
+        '<div class="bk-tooltip">Percentage of 5-day direction predictions that were correct.</div>' +
+        '<div class="brain-ring">' + _makeRingSvg(accRingPct, _accColor(d.prediction_accuracy, d.total_predictions)) +
+          '<div class="ring-label ' + _accCls(d.prediction_accuracy, d.total_predictions) + '">' + _accDisp(d.prediction_accuracy, d.total_predictions) + '</div></div>' +
+        '<div class="bk-lbl">Overall Accuracy</div>' + _accSub(d.total_predictions) + '</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.strong_predictions||0) + '" onclick="showAccuracyDetail(\'strong\')">' +
+        '<div class="bk-tooltip">Accuracy of high-conviction predictions (score &ge; 3.0).</div>' +
+        '<div class="brain-ring">' + _makeRingSvg(strRingPct, _accColor(d.strong_accuracy||0, d.strong_predictions||0)) +
+          '<div class="ring-label ' + _accCls(d.strong_accuracy||0, d.strong_predictions||0) + '">' + _accDisp(d.strong_accuracy||0, d.strong_predictions||0) + '</div></div>' +
+        '<div class="bk-lbl">Strong Signal</div>' + strongSub + '</div>' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')">' +
+        '<div class="bk-tooltip">Active patterns discovered through market analysis.</div>' +
+        '<div class="bk-val" style="color:#8b5cf6">' + d.total_patterns + '</div>' +
+        '<div class="bk-lbl">Patterns Learned</div>' + weekTrend + '</div>' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')">' +
+        '<div class="bk-tooltip">Weighted average confidence across all active patterns.</div>' +
+        '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
+        '<div class="bk-lbl">Avg Confidence</div>' +
+        (d.confidence_trend > 0
+          ? '<div class="bk-trend up">&#9650; +' + d.confidence_trend + '% vs last week</div>'
+          : d.confidence_trend < 0
+            ? '<div class="bk-trend down">&#9660; ' + d.confidence_trend + '% vs last week</div>'
+            : '<div class="bk-trend flat">&mdash; stable</div>') + '</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.stock_predictions||0) + '" onclick="showAccuracyDetail(\'stock\')">' +
+        '<div class="bk-val ' + _accCls(d.stock_accuracy||0, d.stock_predictions||0) + '">' + _accDisp(d.stock_accuracy||0, d.stock_predictions||0) + '</div>' +
+        '<div class="bk-lbl">Stock Accuracy</div>' + _accSub(d.stock_predictions||0) + '</div>' +
+      '<div class="brain-kpi clickable' + _noDataCls(d.crypto_predictions||0) + '" onclick="showAccuracyDetail(\'crypto\')">' +
+        '<div class="bk-val ' + _accCls(d.crypto_accuracy||0, d.crypto_predictions||0) + '">' + _accDisp(d.crypto_accuracy||0, d.crypto_predictions||0) + '</div>' +
+        '<div class="bk-lbl">Crypto Accuracy</div>' + _accSub(d.crypto_predictions||0) + '</div>' +
+      '<div class="brain-kpi clickable" onclick="showMLDetail()">' +
+        (d.ml_ready
+          ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div class="bk-lbl">ML Accuracy (CV)</div><div class="bk-trend flat">' + (d.ml_samples||0) + ' samples</div>'
+          : '<div class="bk-val" style="color:var(--text-muted)">--</div><div class="bk-lbl">ML Model</div><div class="bk-trend flat">Not trained yet</div>') + '</div>' +
+      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')">' +
+        '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Snapshots</div>' +
+        '<div class="bk-trend flat">' + (d.universe_total||0).toLocaleString() + ' tickers</div></div>';
+  });
+  loadBrainThesis();
+  fetch('/api/trading/brain/confidence-history').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.data || !d.data.length) return;
+    var el = document.getElementById('brain-chart');
+    el.innerHTML = '';
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    brainChart = LightweightCharts.createChart(el, {
+      width: el.clientWidth, height: el.clientHeight || 180,
+      layout: { background: {type:'solid', color: isDark ? '#0f172a' : '#f8fafc'}, textColor: isDark ? '#9ca3af' : '#6b7280' },
+      grid: { vertLines:{visible:false}, horzLines:{color: isDark ? '#1f2937' : '#f3f4f6'} },
+      rightPriceScale: { borderVisible:false }, timeScale: { borderVisible:false }, handleScroll:false, handleScale:false,
+    });
+    brainConfSeries = brainChart.addAreaSeries({ lineColor: '#8b5cf6', topColor: 'rgba(139,92,246,.3)', bottomColor: 'rgba(139,92,246,.02)', lineWidth: 2 });
+    brainConfSeries.setData(d.data);
+    brainChart.timeScale().fitContent();
+    new ResizeObserver(function() { if (brainChart) brainChart.applyOptions({width:el.clientWidth}); }).observe(el);
+  });
+  loadBrainActivity();
+  loadLearnedPatterns();
+  loadBrainPredictions();
+  pollLearningStatus();
+  if (brainPollInterval) clearInterval(brainPollInterval);
+  brainPollInterval = setInterval(pollLearningStatus, 3000);
+}
+
+function showAccuracyDetail(type) {
+  var labels = {all:'Overall',strong:'Strong Signal',stock:'Stock',crypto:'Crypto'};
+  openBrainModal(labels[type]+' Accuracy Detail', '<div style="text-align:center;padding:20px"><div class="brain-pulse"></div> Loading...</div>');
+  fetch('/api/trading/brain/accuracy-detail?type=' + type + '&limit=20').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.rows || !d.rows.length) {
+      document.getElementById('brain-modal-body').innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">No verified predictions yet for this category. Keep scanning to collect data.</div>';
+      return;
+    }
+    var hits = d.rows.filter(function(r){return r.hit;}).length;
+    var html = '<div style="margin-bottom:10px;font-size:11px"><strong>Accuracy:</strong> ' + Math.round(hits/d.rows.length*100) + '% (' + hits + '/' + d.rows.length + ')</div>' +
+      '<table><thead><tr><th>Ticker</th><th>Date</th><th>Predicted</th><th>Actual 5d</th><th>Result</th></tr></thead><tbody>';
+    d.rows.forEach(function(r) {
+      var predColor = r.predicted_direction === 'bullish' ? '#22c55e' : '#ef4444';
+      var retColor = r.actual_return_5d > 0 ? '#22c55e' : '#ef4444';
+      html += '<tr><td><strong style="cursor:pointer;color:var(--accent)" onclick="goToTicker(\'' + r.ticker + '\');closeBrainModal()">' + r.ticker + '</strong></td>' +
+        '<td style="font-size:10px;color:var(--text-muted)">' + (r.date ? new Date(r.date).toLocaleDateString() : '-') + '</td>' +
+        '<td><span class="bm-tag" style="background:' + predColor + '20;color:' + predColor + '">' + r.predicted_direction + ' (' + r.predicted_score + ')</span></td>' +
+        '<td style="color:' + retColor + ';font-weight:600">' + (r.actual_return_5d > 0 ? '+' : '') + r.actual_return_5d + '%</td>' +
+        '<td><span class="bm-tag ' + (r.hit ? 'bm-hit' : 'bm-miss') + '">' + (r.hit ? '&#x2705; Hit' : '&#x274C; Miss') + '</span></td></tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('brain-modal-body').innerHTML = html;
+  });
+}
+
+function showMLDetail() {
+  var d = window._brainStats || {};
+  if (!d.ml_ready) { openBrainModal('ML Model', '<div style="text-align:center;padding:20px;color:var(--text-muted)">ML model not trained yet. Click <strong>Retrain ML</strong> when you have enough data.</div>'); return; }
+  var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">' +
+    '<div style="padding:8px;background:rgba(6,182,212,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div style="font-size:10px;color:var(--text-muted)">CV Accuracy</div></div>' +
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#8b5cf6">' + (d.ml_samples||0) + '</div><div style="font-size:10px;color:var(--text-muted)">Training Samples</div></div></div>';
+  var imps = d.ml_feature_importances || {};
+  var entries = Object.entries(imps).sort(function(a,b){return b[1]-a[1];});
+  if (entries.length) {
+    html += '<h4>Feature Importances</h4>';
+    var maxVal = entries[0][1] || 1;
+    entries.forEach(function(e) {
+      var pct = Math.round(e[1] / maxVal * 100);
+      html += '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="width:100px;font-size:10px;font-weight:600;text-align:right">' + e[0] + '</span><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#06b6d4,#8b5cf6);border-radius:3px"></div></div><span style="font-size:10px;color:var(--text-muted);width:40px">' + (e[1]*100).toFixed(1) + '%</span></div>';
+    });
+  }
+  openBrainModal('ML Model Details', html);
+}
+
+function showKpiInfo(type) {
+  var d = window._brainStats || {};
+  var info = {
+    patterns: { title: 'Patterns Learned', html: '<p>CHILI discovers patterns by analyzing historical indicator snapshots.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800;color:#8b5cf6">' + d.total_patterns + '</div><div style="font-size:10px;color:var(--text-muted)">active patterns</div></div>' },
+    confidence: { title: 'Average Confidence', html: '<p>Average confidence across all active patterns.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800">' + d.avg_confidence + '%</div></div>' },
+    snapshots: { title: 'Market Snapshots', html: '<p>Snapshots record indicator values at a point in time. After ~5 days, CHILI checks actual price movement.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800">' + (d.total_snapshots||0).toLocaleString() + '</div><div style="font-size:10px;color:var(--text-muted)">total snapshots</div></div>' },
+  };
+  var entry = info[type] || {title:'Info',html:'<p>No additional details.</p>'};
+  openBrainModal(entry.title, entry.html);
+}
+
+function loadBrainThesis() {
+  fetch('/api/trading/brain/thesis').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    window._brainThesisData = d;
+    var card = document.getElementById('brain-thesis-card');
+    var stanceEl = document.getElementById('thesis-stance');
+    var gaugeEl = document.getElementById('thesis-gauge');
+    var textEl = document.getElementById('thesis-text');
+    var metaEl = document.getElementById('thesis-meta');
+    card.className = 'brain-thesis-card ' + d.stance;
+    card.style.cursor = 'pointer';
+    card.onclick = function() { showThesisDetail(); };
+    stanceEl.className = 'thesis-stance ' + d.stance;
+    var stanceLabels = {bullish:'&#x1F7E2; Bullish', bearish:'&#x1F534; Bearish', neutral:'&#x1F7E1; Neutral'};
+    stanceEl.innerHTML = stanceLabels[d.stance] || 'Neutral';
+    var gaugePct = d.stance === 'bullish' ? 75 : d.stance === 'bearish' ? 25 : 50;
+    var gaugeColor = d.stance === 'bullish' ? '#22c55e' : d.stance === 'bearish' ? '#ef4444' : '#f59e0b';
+    gaugeEl.style.width = gaugePct + '%'; gaugeEl.style.background = gaugeColor;
+    var truncated = d.thesis.length > 300 ? d.thesis.substring(0, 300) + '...' : d.thesis;
+    if (typeof marked !== 'undefined') { try { textEl.innerHTML = marked.parse(truncated); } catch(e) { textEl.textContent = truncated; } }
+    else { textEl.innerHTML = truncated; }
+    textEl.style.color = 'var(--text)';
+    var metaParts = [];
+    if (d.patterns_count) metaParts.push(d.patterns_count + ' patterns');
+    if (d.total_predictions) metaParts.push(d.accuracy + '% accuracy (' + d.total_predictions + ')');
+    metaEl.innerHTML = metaParts.join(' &middot; ');
+  }).catch(function() { document.getElementById('thesis-text').textContent = 'Could not load thesis.'; });
+  fetch('/api/trading/brain/volatility').then(function(r){return r.json();}).then(function(v) {
+    if (!v.ok) return;
+    window._brainVixData = v;
+    var stanceEl = document.getElementById('thesis-stance');
+    if (!stanceEl) return;
+    var regimeColors = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
+    stanceEl.innerHTML += ' <span style="font-size:9px;padding:1px 6px;border-radius:8px;background:' + (regimeColors[v.regime]||'#6b7280') + '20;color:' + (regimeColors[v.regime]||'#6b7280') + ';font-weight:700;vertical-align:middle">VIX ' + (v.vix||'?') + ' ' + (v.label||'') + '</span>';
+  });
+}
+
+function showThesisDetail() {
+  var d = window._brainThesisData; if (!d) return;
+  var v = window._brainVixData || {};
+  var sc = {bullish:'#22c55e', bearish:'#ef4444', neutral:'#f59e0b'}[d.stance] || '#f59e0b';
+  var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:10px"><span class="bm-tag" style="background:' + sc + '20;color:' + sc + ';font-size:12px;padding:3px 12px">' + (d.stance||'neutral') + '</span>';
+  if (v.regime) { var rc = {low:'#22c55e',normal:'#f59e0b',elevated:'#f97316',extreme:'#ef4444'}[v.regime]||'#6b7280'; html += '<span class="bm-tag" style="background:' + rc + '20;color:' + rc + '">VIX ' + (v.vix||'?') + '</span>'; }
+  html += '</div>';
+  if (typeof marked !== 'undefined') { try { html += '<div style="line-height:1.7">' + marked.parse(d.thesis||'') + '</div>'; } catch(e) { html += '<pre>' + escHtml(d.thesis) + '</pre>'; } }
+  else html += '<pre>' + escHtml(d.thesis) + '</pre>';
+  openBrainModal('Market Thesis', html, '<button onclick="closeBrainModal();loadBrainThesis()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff">&#x1F504; Regenerate</button>');
+}
+
+function loadBrainPredictions() {
+  var container = document.getElementById('brain-predictions'); if (!container) return;
+  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:12px"><div class="brain-pulse"></div> Computing predictions...</div>';
+  fetch('/api/trading/brain/predictions').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.predictions || !d.predictions.length) { container.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">No predictions yet. Run a scan first.</div>'; return; }
+    window._brainPredictions = d.predictions; _predShowAll = false;
+    _renderPredCards(container, d.predictions);
+  }).catch(function() { container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load.</div>'; });
+}
+
+function _renderPredCards(container, preds) {
+  var limit = _predShowAll ? preds.length : Math.min(_PRED_INITIAL, preds.length);
+  var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px"><span style="font-size:11px;color:var(--text-muted)">' + preds.length + ' predictions</span></div><div class="pred-grid">';
+  for (var i = 0; i < limit; i++) {
+    var p = preds[i]; var dirLabel = p.direction.replace('_',' ');
+    var scoreNorm = ((p.score+10)/20)*100; var fillColor = p.score > 0 ? '#22c55e' : p.score < 0 ? '#ef4444' : '#f59e0b';
+    var confColor = p.confidence >= 60 ? '#22c55e' : p.confidence >= 30 ? '#f59e0b' : '#6b7280';
+    var riskLine = '';
+    if (p.suggested_stop != null && p.suggested_target != null) {
+      riskLine = '<div style="display:flex;gap:8px;font-size:9px;margin-top:3px;color:var(--text-muted)"><span style="color:#ef4444">SL $' + (p.suggested_stop||0).toFixed(2) + '</span><span style="color:#22c55e">TP $' + (p.suggested_target||0).toFixed(2) + '</span></div>';
+    }
+    html += '<div class="pred-card" onclick="showPredDetail(' + i + ')">' +
+      '<div class="pred-top"><span class="pred-ticker">' + p.ticker.replace('-USD','') + '</span><span class="pred-dir ' + p.direction + '">' + dirLabel + '</span></div>' +
+      '<div style="display:flex;align-items:center;gap:6px"><span class="pred-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
+        '<div class="pred-score-bar" style="flex:1"><div class="pred-score-mid"></div><div class="pred-score-fill" style="width:' + Math.max(2,scoreNorm) + '%;background:' + fillColor + '"></div></div>' +
+        '<span style="font-size:10px;font-weight:700;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</span></div>' +
+      '<div class="pred-signals">' + p.signals.join(' &middot; ') + '</div>' + riskLine + '</div>';
+  }
+  html += '</div>';
+  if (!_predShowAll && preds.length > _PRED_INITIAL) html += '<div style="text-align:center;margin-top:8px"><button onclick="_predShowAll=true;_renderPredCards(document.getElementById(\'brain-predictions\'),window._brainPredictions)" style="font-size:11px;padding:4px 16px;border-radius:6px;background:rgba(99,102,241,.15);color:#818cf8;border:1px solid rgba(129,140,248,.2);cursor:pointer">Show All</button></div>';
+  container.innerHTML = html;
+}
+
+function showPredDetail(idx) {
+  var p = (window._brainPredictions||[])[idx]; if (!p) return;
+  var fillColor = p.score > 0 ? '#22c55e' : p.score < 0 ? '#ef4444' : '#f59e0b';
+  var html = '<div style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><span style="font-size:20px;font-weight:800">' + p.ticker + '</span><span class="bm-tag" style="background:' + fillColor + '20;color:' + fillColor + '">' + p.direction.replace('_',' ') + '</span></div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">' +
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</div><div style="font-size:9px;color:var(--text-muted)">Score</div></div>' +
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div>' +
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800;color:#06b6d4">' + (p.ml_probability != null ? Math.round(p.ml_probability*100) + '%' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)">ML Prob</div></div></div>';
+  html += '<h4>Signals</h4><ul style="margin:4px 0;padding-left:18px">';
+  (p.signals||[]).forEach(function(s) { html += '<li>' + s + '</li>'; });
+  html += '</ul>';
+  var footer = '<button onclick="goToTicker(\'' + p.ticker + '\');closeBrainModal()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff">&#x1F4CA; View in Trading</button>';
+  openBrainModal(p.ticker + ' Prediction', html, footer);
+}
+
+function _eventIcon(type) {
+  var icons = {discovery:'&#x1F4A1;',update:'&#x1F504;',demotion:'&#x1F4C9;',review:'&#x1F4DD;',journal:'&#x270F;',scan:'&#x1F50D;',error:'&#x26A0;',reflection:'&#x1F52C;'};
+  return icons[type] || '&#x1F4CC;';
+}
+
+function loadBrainActivity() {
+  fetch('/api/trading/brain/activity').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return; _brainEventsRaw = d.events || []; renderBrainTimeline(_brainEventsRaw);
+  });
+}
+
+function renderBrainTimeline(events) {
+  var el = document.getElementById('brain-activity');
+  if (!events.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px 0">No learning events yet.</div>'; return; }
+  var filtered = _brainActiveFilter === 'all' ? events : events.filter(function(e) { return e.event_type === _brainActiveFilter; });
+  var groups = {};
+  filtered.forEach(function(e, idx) { e._idx = idx; var dk = new Date(e.created_at).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric'}); if (!groups[dk]) groups[dk]=[]; groups[dk].push(e); });
+  var html = '';
+  Object.keys(groups).forEach(function(dk) {
+    html += '<div class="bt-date-group"><div class="bt-date-label">' + dk + '</div>';
+    groups[dk].forEach(function(e) {
+      var desc = e.description || ''; var short = desc.length > 80 ? escHtml(desc.substring(0,80)) + '...' : escHtml(desc);
+      html += '<div class="brain-event" style="cursor:pointer"><div class="be-icon">' + _eventIcon(e.event_type) + '</div><div class="be-body"><div class="be-desc">' + short + '</div><div class="be-time">' + new Date(e.created_at).toLocaleTimeString() + '</div></div></div>';
+    });
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function filterBrainEvents(filter, btn) {
+  _brainActiveFilter = filter;
+  document.querySelectorAll('.brain-filter-btn').forEach(function(b) { b.classList.remove('active'); });
+  if (btn) btn.classList.add('active');
+  renderBrainTimeline(_brainEventsRaw);
+}
+
+function loadLearnedPatterns() {
+  fetch('/api/trading/learn/patterns').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    window._brainPatterns = {active: d.active, demoted: d.demoted};
+    var el = document.getElementById('brain-patterns');
+    if (!d.active.length && !d.demoted.length) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px;text-align:center;background:var(--bg-header);border:1px dashed var(--border);border-radius:8px"><div style="font-size:24px;margin-bottom:6px">&#x1F50D;</div>No patterns discovered yet.<br><strong style="color:#8b5cf6">Click "Deep Study" to start.</strong></div>';
+      return;
+    }
+    var html = '';
+    d.active.forEach(function(p, idx) {
+      var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+      html += '<div class="pattern-card" style="cursor:pointer" onclick="showPatternDetail(' + idx + ',true)"><div class="pc-header"><span class="pc-signal ' + (p.signal_type||'neutral') + '">' + (p.signal_type||'neutral') + '</span><span style="font-weight:700;color:' + barColor + '">' + p.confidence + '%</span></div>' +
+        '<div class="pc-desc">' + escHtml(p.pattern) + '</div>' +
+        '<div class="pc-stats"><span>&#x1F4CA; ' + p.evidence_count + ' evidence</span>' + (p.win_rate != null ? '<span>&#x1F3AF; ' + p.win_rate + '% win</span>' : '') + '</div>' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px"><div class="pattern-bar-bg" style="flex:1"><div class="pattern-bar" style="width:' + p.confidence + '%;background:' + barColor + '"></div></div></div></div>';
+    });
+    el.innerHTML = html;
+  });
+}
+
+function showPatternDetail(idx, isActive) {
+  var list = (window._brainPatterns || {})[isActive ? 'active' : 'demoted'] || [];
+  var p = list[idx]; if (!p) return;
+  var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+  var html = '<div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(p.pattern) + '</div>';
+  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence</div></div>' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + (p.win_rate != null ? p.win_rate + '%' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)">Win Rate</div></div>' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700;color:' + barColor + '">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div></div>';
+  if (p.example_tickers && p.example_tickers.length) {
+    html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
+    p.example_tickers.forEach(function(t) { html += '<span class="pc-ticker" onclick="goToTicker(\'' + t + '\');closeBrainModal()" style="cursor:pointer">' + t + '</span>'; });
+    html += '</div>';
+  }
+  var footer = p.active ? '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">&#x1F4C9; Demote</button>' : '';
+  openBrainModal('Pattern Detail', html, footer);
+}
+
+function demotePattern(patternId) {
+  if (!confirm('Demote this pattern?')) return;
+  fetch('/api/trading/learn/patterns/' + patternId + '/demote', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) { closeBrainModal(); loadLearnedPatterns(); loadBrainActivity(); }
+  });
+}
+
+/* ── Learning pipeline status polling ─────────── */
+var _PIPELINE_STEPS = [
+  {id:'pre-filter',label:'Pre-Filter',icon:'&#x26A1;'},{id:'scan',label:'Deep Score',icon:'&#x1F50D;'},{id:'snapshot',label:'Snapshots',icon:'&#x1F4F8;'},
+  {id:'backfill',label:'Backfill',icon:'&#x1F4CA;'},{id:'mine',label:'Patterns',icon:'&#x1F4A1;'},{id:'backtest',label:'Validate',icon:'&#x1F9EA;'},
+  {id:'journal',label:'Journal',icon:'&#x1F4DD;'},{id:'signal',label:'Signals',icon:'&#x1F4E1;'},{id:'ml_train',label:'ML Train',icon:'&#x1F9E0;'},{id:'final',label:'Done',icon:'&#x2705;'}
+];
+
+function pollLearningStatus() {
+  fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var learning = d.learning, scan = d.scan, scheduler = d.scheduler;
+    var pipelineSection = document.getElementById('brain-pipeline-section');
+    var btn = document.getElementById('btn-full-scan');
+
+    if (learning.running) {
+      pipelineSection.style.display = 'block';
+      var phase = (learning.phase||'').toLowerCase();
+      var stepsHtml = '';
+      _PIPELINE_STEPS.forEach(function(step, i) {
+        var status = 'pending';
+        if (phase === step.id || phase.indexOf(step.id) !== -1) status = 'running';
+        else { var pIdx = _PIPELINE_STEPS.findIndex(function(s){return phase === s.id || phase.indexOf(s.id)!==-1;}); if (pIdx >= 0 && i < pIdx) status = 'done'; }
+        if (i > 0) stepsHtml += '<span class="blp-arrow">&#x2192;</span>';
+        stepsHtml += '<div class="blp-step ' + status + '">' + (status==='running'?'<div class="brain-pulse" style="width:6px;height:6px"></div>':status==='done'?'&#x2713;':'') + ' ' + step.icon + ' ' + step.label + '</div>';
+      });
+      document.getElementById('brain-pipeline-steps').innerHTML = stepsHtml;
+      document.getElementById('brain-learning-step').textContent = learning.current_step || '';
+      var pct = Math.round(learning.steps_completed / learning.total_steps * 100);
+      document.getElementById('brain-learning-progress').textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
+      document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
+      btn.disabled = true; btn.textContent = '&#x23F3; Learning...';
+    } else {
+      pipelineSection.style.display = 'none';
+      btn.disabled = false; btn.textContent = '&#x1F310; Scan Market';
+    }
+
+    var infoEl = document.getElementById('brain-scheduler-info');
+    var parts = [];
+    if (scan.last_run) { parts.push('Last: ' + timeSince(new Date(scan.last_run)) + ' ago'); if (scan.tickers_scored) parts.push(scan.tickers_scored.toLocaleString() + ' scored'); }
+    else parts.push('No scans yet');
+    if (scheduler.jobs && scheduler.jobs.length) {
+      var nextJob = scheduler.jobs.find(function(j){return j.id==='learning_cycle';});
+      if (nextJob && nextJob.next_run) parts.push('Next: ' + new Date(nextJob.next_run).toLocaleTimeString());
+    }
+    infoEl.textContent = parts.join(' · ');
+
+    if (!learning.running && pipelineSection._wasRunning) loadBrainDashboard();
+    pipelineSection._wasRunning = learning.running;
+  }).catch(function(){});
+  updateSidebarStatus();
+}
+
+/* ── Action triggers ──────────────────────────── */
+function triggerFullScan() {
+  var btn = document.getElementById('btn-full-scan'); btn.disabled = true; btn.textContent = '&#x1F310; Starting...';
+  fetch('/api/trading/scan/full', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) btn.textContent = '&#x1F310; Scanning...';
+    else { btn.textContent = d.message || 'Already running'; setTimeout(function(){btn.disabled=false;btn.textContent='&#x1F310; Scan Market';},3000); }
+  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F310; Scan Market';});
+}
+
+function triggerDeepStudy() {
+  var btn = document.getElementById('btn-deep-study'); btn.disabled = true; btn.textContent = '&#x1F52C; Studying...';
+  fetch('/api/trading/learn/deep-study', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    btn.disabled = false; btn.textContent = '&#x1F52C; Deep Study';
+    if (d.ok) {
+      var panel = document.getElementById('brain-reflection'); var content = document.getElementById('brain-reflection-content');
+      panel.style.display = 'block';
+      if (typeof marked !== 'undefined') { try { content.innerHTML = marked.parse(d.reflection); } catch(e) { content.textContent = d.reflection; } }
+      else content.textContent = d.reflection;
+      loadBrainDashboard();
+    }
+  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F52C; Deep Study';});
+}
+
+function triggerRetrainML() {
+  var btn = document.getElementById('btn-retrain-ml'); btn.disabled = true; btn.textContent = '&#x1F9E0; Training...';
+  fetch('/api/trading/learn/retrain-ml', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    btn.disabled = false; btn.textContent = '&#x1F9E0; Retrain ML';
+    var panel = document.getElementById('brain-reflection'); var content = document.getElementById('brain-reflection-content');
+    panel.style.display = 'block';
+    if (d.ok && d.cv_accuracy) {
+      content.innerHTML = '<h3 style="color:#22c55e">&#x2705; ML Model Trained</h3><p><strong>Samples:</strong> ' + (d.samples||0) + ' | <strong>CV:</strong> ' + (d.cv_accuracy||0) + '%</p>';
+      loadBrainDashboard();
+    } else {
+      content.innerHTML = '<h3 style="color:#f59e0b">&#x26A0; Not Enough Data</h3><p>' + (d.reason||'Need more labeled snapshots') + '</p>';
+    }
+  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F9E0; Retrain ML';});
+}
+
+/* ══════════════════════════════════════════════════
+   Code Brain JavaScript
+   ══════════════════════════════════════════════════ */
+var _activeDomain = 'trading';
+var _codeDashboardLoaded = false;
+var _reasoningDashboardLoaded = false;
+
+function switchDomain(domain) {
+  _activeDomain = domain;
+  document.querySelectorAll('.b-domain').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.domain === domain);
+  });
+  document.getElementById('domain-trading').style.display = domain === 'trading' ? '' : 'none';
+  document.getElementById('domain-code').style.display = domain === 'code' ? '' : 'none';
+  var rd = document.getElementById('domain-reasoning');
+  if (rd) rd.style.display = domain === 'reasoning' ? '' : 'none';
+
+  if (domain === 'code' && !_codeDashboardLoaded) {
+    _codeDashboardLoaded = true;
+    loadCodeDashboard();
+  }
+  if (domain === 'reasoning' && !_reasoningDashboardLoaded) {
+    _reasoningDashboardLoaded = true;
+    loadReasoningDashboard();
+  }
+}
+
+function loadCodeDashboard() {
+  loadCodeRepos();
+  loadCodeMetrics();
+  loadCodeHotspots();
+  loadCodeInsights();
+  pollCodeLearningStatus();
+}
+
+/* ══════════════════════════════════════════════════
+   Reasoning Brain JavaScript
+   ══════════════════════════════════════════════════ */
+
+function loadReasoningDashboard() {
+  loadReasoningMetrics();
+  loadReasoningInsightChat();
+  loadReasoningGoals();
+  loadReasoningHypotheses();
+  loadReasoningConfidenceHistory();
+  loadReasoningModel();
+  loadReasoningInterests();
+  loadReasoningResearch();
+  loadReasoningAnticipations();
+}
+
+function loadReasoningMetrics() {
+  fetch('/api/brain/reasoning/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('reasoning-status-info');
+    if (!el) return;
+    var st = d.status || {};
+    var txt = [];
+    if (st.running) {
+      txt.push('Learning: ' + (st.phase || 'running'));
+    } else if (st.last_run) {
+      txt.push('Last run ' + timeSince(new Date(st.last_run)) + ' ago');
+    } else {
+      txt.push('Never run');
+    }
+    txt.push('Interests ' + (d.interest_count||0));
+    txt.push('Research ' + (d.research_count||0));
+    txt.push('Anticipations ' + (d.anticipation_count||0));
+    el.textContent = txt.join(' • ');
+  }).catch(function(){});
+}
+
+function loadReasoningInsightChat() {
+  fetch('/api/brain/reasoning/insight-chat/opener').then(function(r){return r.json();}).then(function(d) {
+    var thread = document.getElementById('reasoning-insight-thread');
+    var goalEl = document.getElementById('reasoning-current-goal');
+    if (!thread || !goalEl) return;
+    if (!d.ok || !d.opener) {
+      thread.innerHTML = '<div style="color:var(--text-muted)">Chili will start a conversation here once it has a new question for you.</div>';
+      goalEl.textContent = 'No active goal yet';
+      return;
+    }
+    var o = d.opener;
+    goalEl.textContent = o.goal_description || o.goal_id || 'Reasoning';
+    thread.innerHTML = '<div style="margin-bottom:6px"><strong style="color:var(--accent)">Chili</strong>: ' + escHtml(o.message) + '</div>';
+    thread.dataset.goalId = o.goal_id;
+  }).catch(function(){});
+}
+
+function sendReasoningInsightReply() {
+  var input = document.getElementById('reasoning-insight-input');
+  var thread = document.getElementById('reasoning-insight-thread');
+  if (!input || !thread) return;
+  var msg = input.value.trim();
+  if (!msg) return;
+  var goalId = parseInt(thread.dataset.goalId || '0', 10);
+  if (!goalId) {
+    alert('No active learning goal for this conversation yet.');
+    return;
+  }
+  var html = thread.innerHTML + '<div style="margin-bottom:6px"><strong>You</strong>: ' + escHtml(msg) + '</div>';
+  thread.innerHTML = html;
+  input.value = '';
+  fetch('/api/brain/reasoning/insight-chat/reply', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({message: msg, goal_id: goalId}),
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    loadReasoningGoals();
+  }).catch(function(){});
+}
+
+function loadReasoningGoals() {
+  fetch('/api/brain/reasoning/goals').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-goals');
+    if (!el) return;
+    if (!d.ok || !d.goals) {
+      el.textContent = 'No goals yet.';
+      return;
+    }
+    if (!d.goals.length) {
+      el.textContent = 'No goals yet.';
+      return;
+    }
+    var html = '';
+    d.goals.forEach(function(g){
+      var pct = Math.min(100, (g.evidence_count || 0) * 20);
+      html += '<div style="margin-bottom:6px">' +
+        '<div style="font-size:11px;font-weight:600">' + escHtml(g.dimension) + '</div>' +
+        '<div style="font-size:10px;color:var(--text-muted);margin-bottom:3px">' + escHtml(g.description) + '</div>' +
+        '<div style="height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#8b5cf6,#6366f1)"></div></div>' +
+        '<div style="font-size:9px;color:var(--text-muted);margin-top:2px">' + escHtml(g.status) + ' • evidence ' + (g.evidence_count||0) + '</div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function loadReasoningHypotheses() {
+  fetch('/api/brain/reasoning/hypotheses').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-hypotheses');
+    if (!el) return;
+    if (!d.ok || !d.hypotheses || !d.hypotheses.length) {
+      el.textContent = 'No hypotheses yet.';
+      return;
+    }
+    var html = '';
+    d.hypotheses.forEach(function(h){
+      var conf = (h.confidence || 0).toFixed(2);
+      html += '<div class="pattern-card" style="margin-bottom:4px">' +
+        '<div class="pc-header"><span class="pc-signal neutral">Hypothesis</span><span class="pc-desc" style="font-size:11px">' + escHtml(h.claim) + '</span></div>' +
+        '<div class="pc-stats"><span><span>&#x1F4C8;</span>' + conf + '</span><span>for ' + (h.evidence_for||0) + '</span><span>against ' + (h.evidence_against||0) + '</span></div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function loadReasoningConfidenceHistory() {
+  fetch('/api/brain/reasoning/confidence-history').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok || !d.data || !d.data.length) return;
+    var el = document.getElementById('reasoning-chart');
+    if (!el) return;
+    el.innerHTML = '';
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+    var chart = LightweightCharts.createChart(el, {
+      width: el.clientWidth, height: el.clientHeight || 160,
+      layout: { background: {type:'solid', color: isDark ? '#020617' : '#f8fafc'}, textColor: isDark ? '#9ca3af' : '#6b7280' },
+      grid: { vertLines:{visible:false}, horzLines:{color: isDark ? '#111827' : '#e5e7eb'} },
+      rightPriceScale: { borderVisible:false }, timeScale: { borderVisible:false }, handleScroll:false, handleScale:false,
+    });
+    var series = chart.addAreaSeries({ lineColor: '#22c55e', topColor: 'rgba(34,197,94,.3)', bottomColor: 'rgba(34,197,94,.02)', lineWidth: 2 });
+    var pts = d.data.map(function(p){ return {time:p.time, value:p.value}; });
+    series.setData(pts);
+    chart.timeScale().fitContent();
+    new ResizeObserver(function() { if (chart) chart.applyOptions({width:el.clientWidth}); }).observe(el);
+  }).catch(function(){});
+}
+
+function triggerReasoningLearn() {
+  var btn = document.getElementById('btn-reasoning-learn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Running...'; }
+  fetch('/api/brain/reasoning/learn', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) { alert(d.message || 'Failed to start reasoning cycle'); }
+    setTimeout(function(){ if (btn) { btn.disabled = false; btn.textContent = 'Refresh Model'; } loadReasoningMetrics(); }, 2000);
+  }).catch(function(e){
+    if (btn) { btn.disabled = false; btn.textContent = 'Refresh Model'; }
+  });
+}
+
+function triggerReasoningResearch() {
+  // Shortcut: reasoning cycle already runs research; just call learn
+  triggerReasoningLearn();
+}
+
+function loadReasoningModel() {
+  fetch('/api/brain/reasoning/model').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-user-model-content');
+    if (!el) return;
+    if (!d.ok || !d.model) {
+      el.textContent = 'No user model yet. Run a reasoning cycle to let Chili study your behaviour.';
+      return;
+    }
+    var m = d.model;
+    var html = '';
+    html += '<div style="font-size:11px;margin-bottom:4px"><strong>Decision style:</strong> ' + escHtml(m.decision_style || 'unknown') + '</div>';
+    html += '<div style="font-size:11px;margin-bottom:4px"><strong>Risk tolerance:</strong> ' + escHtml(m.risk_tolerance || 'unknown') + '</div>';
+    if (m.communication_prefs) {
+      try {
+        var cp = JSON.parse(m.communication_prefs);
+        html += '<div style="font-size:11px;margin-bottom:4px"><strong>Communication:</strong> ' +
+          escHtml((cp.detail_level || 'normal') + ' detail, ' + (cp.tone || 'friendly') + ' tone') + '</div>';
+      } catch(e) {}
+    }
+    if (m.active_goals) {
+      try {
+        var goals = JSON.parse(m.active_goals) || [];
+        if (goals.length) {
+          html += '<div style="font-size:11px;margin-top:4px"><strong>Active goals:</strong></div><ul style="margin:4px 0 0 16px;font-size:11px">';
+          goals.slice(0,5).forEach(function(g){
+            html += '<li>[' + escHtml(g.area || 'general') + '] ' + escHtml(g.goal || '') + ' (' + escHtml(g.horizon || '?') + ')</li>';
+          });
+          html += '</ul>';
+        }
+      } catch(e) {}
+    }
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function loadReasoningInterests() {
+  fetch('/api/brain/reasoning/interests').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-interests');
+    if (!el) return;
+    if (!d.ok || !d.interests || !d.interests.length) {
+      el.textContent = 'No interests tracked yet.';
+      return;
+    }
+    var html = '<table style="width:100%;border-collapse:collapse"><tbody>';
+    d.interests.forEach(function(it){
+      html += '<tr>' +
+        '<td style="padding:3px 4px;font-weight:600">' + escHtml(it.topic) + '</td>' +
+        '<td style="padding:3px 4px;font-size:10px;color:var(--text-muted)">' + escHtml(it.category) + '</td>' +
+        '<td style="padding:3px 4px;font-size:10px;text-align:right;color:var(--text-secondary)">' + it.weight.toFixed(2) + '</td>' +
+      '</tr>';
+    });
+    html += '</tbody></table>';
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function loadReasoningResearch() {
+  fetch('/api/brain/reasoning/research').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-research');
+    if (!el) return;
+    if (!d.ok || !d.research || !d.research.length) {
+      el.textContent = 'No background research yet. Chili will start researching once interests are known.';
+      return;
+    }
+    var html = '';
+    d.research.forEach(function(r){
+      html += '<div class="pattern-card" style="margin-bottom:6px">' +
+        '<div class="pc-header"><span class="pc-signal neutral">Topic</span><span style="font-weight:600;font-size:11px">' + escHtml(r.topic) + '</span></div>' +
+        '<div class="pc-desc" style="font-size:11px">' + escHtml(r.summary) + '</div>';
+      try {
+        var sources = JSON.parse(r.sources || '[]');
+        if (sources && sources.length) {
+          html += '<div style="margin-top:4px;font-size:10px;color:var(--text-muted)">';
+          sources.slice(0,3).forEach(function(s, idx){
+            if (s.url) {
+              html += (idx>0?' • ':'') + '<a href="' + s.url + '" target="_blank" style="color:var(--accent);text-decoration:none">' + escHtml(s.title || s.url) + '</a>';
+            }
+          });
+          html += '</div>';
+        }
+      } catch(e) {}
+      html += '</div>';
+    });
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function loadReasoningAnticipations() {
+  fetch('/api/brain/reasoning/anticipations').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('reasoning-anticipations');
+    if (!el) return;
+    if (!d.ok || !d.anticipations || !d.anticipations.length) {
+      el.textContent = 'No active anticipations. Chili will start predicting once enough data is gathered.';
+      return;
+    }
+    var html = '';
+    d.anticipations.forEach(function(a){
+      var conf = (a.confidence || 0).toFixed(2);
+      html += '<div class="pred-card" style="margin-bottom:6px">' +
+        '<div class="pred-top"><span class="pred-ticker">' + escHtml(a.domain || 'general') + '</span>' +
+        '<span class="pred-dir neutral">' + conf + '</span></div>' +
+        '<div class="pred-signals">' + escHtml(a.description) + '</div>' +
+        '<div style="margin-top:6px;display:flex;gap:6px;justify-content:flex-end">' +
+        '<button onclick="dismissAnticipation(' + a.id + ')" style="padding:3px 8px;font-size:10px;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text-muted);cursor:pointer">Dismiss</button>' +
+        '</div>' +
+        '</div>';
+    });
+    el.innerHTML = html;
+  }).catch(function(){});
+}
+
+function dismissAnticipation(id) {
+  fetch('/api/brain/reasoning/anticipations/' + id + '/dismiss', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      loadReasoningAnticipations();
+      loadReasoningMetrics();
+    }
+  }).catch(function(){});
+}
+
+/* ── Repos ──────────────────────────────────────── */
+function loadCodeRepos() {
+  fetch('/api/brain/code/repos').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var container = document.getElementById('code-repos');
+    if (!d.repos || d.repos.length === 0) {
+      container.innerHTML = '<div style="text-align:center;padding:20px;color:var(--text-muted)">' +
+        '<div style="font-size:32px;margin-bottom:8px">&#x1F4C1;</div>' +
+        '<div style="font-size:12px;font-weight:600;margin-bottom:4px">No repositories registered</div>' +
+        '<div style="font-size:11px">Click <strong>+ Add Repo</strong> above to get started</div></div>';
+      return;
+    }
+    var html = '';
+    d.repos.forEach(function(r) {
+      var langs = Object.entries(r.language_stats || {}).sort(function(a,b){return b[1]-a[1];}).slice(0, 6);
+      var langTags = langs.map(function(l){return '<span class="code-repo-lang-tag">' + escHtml(l[0]) + ' (' + l[1] + ')</span>';}).join('');
+      var fwTags = (r.framework_tags || []).map(function(f){return '<span class="code-repo-fw-tag">' + escHtml(f) + '</span>';}).join('');
+      html += '<div class="code-repo-card">' +
+        '<button class="code-repo-remove" onclick="removeCodeRepo(' + r.id + ')" title="Remove">&times;</button>' +
+        '<div class="code-repo-name">&#x1F4C2; ' + escHtml(r.name) + '</div>' +
+        '<div class="code-repo-path">' + escHtml(r.path) + '</div>' +
+        '<div class="code-repo-stats">' +
+          '<span>&#x1F4C4; ' + (r.file_count||0).toLocaleString() + ' files</span>' +
+          '<span>&#x1F4DD; ' + (r.total_lines||0).toLocaleString() + ' lines</span>' +
+        '</div>' +
+        '<div class="code-repo-langs">' + langTags + fwTags + '</div>' +
+        '<div class="code-repo-meta">' + (r.last_indexed ? 'Last indexed: ' + timeSince(new Date(r.last_indexed)) + ' ago' : 'Not yet indexed') + '</div>' +
+      '</div>';
+    });
+    container.innerHTML = html;
+  }).catch(function(){});
+}
+
+function showAddRepoModal() {
+  var bodyHtml = '<div style="margin-bottom:12px">' +
+    '<label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Local Path</label>' +
+    '<input type="text" id="add-repo-path" placeholder="C:\\dev\\my-project" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px">' +
+    '</div>' +
+    '<div>' +
+    '<label style="font-size:11px;font-weight:600;display:block;margin-bottom:4px">Name (optional)</label>' +
+    '<input type="text" id="add-repo-name" placeholder="my-project" style="width:100%;padding:8px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--text);font-size:12px">' +
+    '</div>';
+  var footerHtml = '<button onclick="doAddRepo()" style="background:var(--accent);color:#fff;border-radius:6px;padding:6px 20px">Add Repository</button>';
+  openBrainModal('Add Repository', bodyHtml, footerHtml);
+}
+
+function doAddRepo() {
+  var path = document.getElementById('add-repo-path').value.trim();
+  var name = document.getElementById('add-repo-name').value.trim();
+  if (!path) return;
+  fetch('/api/brain/code/repos', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({path: path, name: name || null}),
+  }).then(function(r){return r.json();}).then(function(d) {
+    closeBrainModal();
+    if (d.ok) { loadCodeRepos(); }
+    else { alert(d.message || 'Failed to add repo'); }
+  }).catch(function(e){ alert('Error: ' + e.message); });
+}
+
+function removeCodeRepo(repoId) {
+  if (!confirm('Remove this repository from Code Brain?')) return;
+  fetch('/api/brain/code/repos/' + repoId, {method:'DELETE'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) loadCodeRepos();
+  }).catch(function(){});
+}
+
+/* ── Code Metrics ───────────────────────────────── */
+function loadCodeMetrics() {
+  fetch('/api/brain/code/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var kpis = document.getElementById('code-kpis');
+
+    var langList = Object.entries(d.languages || {}).sort(function(a,b){return b[1]-a[1];}).slice(0,3);
+    var topLangs = langList.map(function(l){return l[0];}).join(', ') || 'N/A';
+
+    kpis.innerHTML =
+      '<div class="brain-kpi">' +
+        '<div class="bk-val" style="color:#8b5cf6">' + (d.total_files||0).toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Total Files</div>' +
+        '<div class="bk-trend flat">' + (d.repos||0) + ' repo(s)</div></div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val" style="color:#06b6d4">' + (d.total_lines||0).toLocaleString() + '</div>' +
+        '<div class="bk-lbl">Lines of Code</div>' +
+        '<div class="bk-trend flat">' + topLangs + '</div></div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val ' + (d.avg_complexity > 30 ? 'warn' : d.avg_complexity > 50 ? 'danger' : 'good') + '">' + (d.avg_complexity||0).toFixed(1) + '</div>' +
+        '<div class="bk-lbl">Avg Complexity</div>' +
+        '<div class="bk-trend flat">' + (d.hotspot_count||0) + ' hotspots</div></div>' +
+      '<div class="brain-kpi">' +
+        '<div class="bk-val" style="color:#22c55e">' + (d.insight_count||0) + '</div>' +
+        '<div class="bk-lbl">Insights Discovered</div>' +
+        '<div class="bk-trend flat">patterns &amp; conventions</div></div>';
+
+    var events = d.recent_events || [];
+    if (events.length > 0) {
+      var timelineHtml = '';
+      events.forEach(function(ev) {
+        var icon = ev.type === 'error' ? '&#x274C;' : ev.type === 'insight' ? '&#x1F4A1;' : ev.type === 'index' ? '&#x1F4C1;' : '&#x1F504;';
+        timelineHtml += '<div class="brain-event">' +
+          '<div class="be-icon">' + icon + '</div>' +
+          '<div class="be-body">' +
+            '<div class="be-desc">' + escHtml(ev.description) + '</div>' +
+            '<div class="be-time">' + (ev.created_at ? timeSince(new Date(ev.created_at)) + ' ago' : '') + '</div>' +
+          '</div></div>';
+      });
+      document.getElementById('code-activity').innerHTML = timelineHtml;
+    }
+  }).catch(function(){});
+}
+
+/* ── Hotspots ───────────────────────────────────── */
+function loadCodeHotspots() {
+  fetch('/api/brain/code/hotspots').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var container = document.getElementById('code-hotspots');
+    if (!d.hotspots || d.hotspots.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px">No hotspots yet. Run indexing to analyze your code.</div>';
+      return;
+    }
+    var maxCombined = d.hotspots[0].combined || 0.01;
+    var html = '';
+    d.hotspots.slice(0, 20).forEach(function(h) {
+      var pct = Math.round((h.combined / maxCombined) * 100);
+      var color = pct > 70 ? '#ef4444' : pct > 40 ? '#f59e0b' : '#22c55e';
+      html += '<div class="code-hotspot-row">' +
+        '<div class="code-hotspot-file" title="' + escHtml(h.file) + '">' + escHtml(h.file) + '</div>' +
+        '<div class="code-hotspot-bar"><div class="code-hotspot-fill" style="width:' + pct + '%;background:' + color + '"></div></div>' +
+        '<div class="code-hotspot-score" style="color:' + color + '">' + (h.combined * 100).toFixed(0) + '</div>' +
+        '<div class="code-hotspot-commits">' + h.commits + ' commits</div>' +
+      '</div>';
+    });
+    container.innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ── Insights ───────────────────────────────────── */
+function loadCodeInsights() {
+  fetch('/api/brain/code/insights').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var container = document.getElementById('code-insights');
+    if (!d.insights || d.insights.length === 0) {
+      container.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:8px">No insights yet. Run indexing to discover patterns.</div>';
+      return;
+    }
+    var html = '';
+    d.insights.forEach(function(ins) {
+      html += '<div class="code-insight-card">' +
+        '<div class="code-insight-header">' +
+          '<span class="code-insight-cat ' + escHtml(ins.category) + '">' + escHtml(ins.category) + '</span>' +
+          '<span style="font-size:10px;color:var(--text-muted)">' + Math.round(ins.confidence * 100) + '% confidence</span>' +
+        '</div>' +
+        '<div class="code-insight-desc">' + escHtml(ins.description) + '</div>' +
+        '<div class="code-insight-meta">' +
+          '<span>Evidence: ' + (ins.evidence_count||0) + ' files</span>' +
+          '<span>' + (ins.last_seen ? timeSince(new Date(ins.last_seen)) + ' ago' : '') + '</span>' +
+        '</div></div>';
+    });
+    container.innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ── Code Learning ──────────────────────────────── */
+function triggerCodeLearn() {
+  var btn = document.getElementById('btn-code-learn');
+  btn.disabled = true; btn.innerHTML = '&#x1F4BB; Starting...';
+  fetch('/api/brain/code/learn', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      btn.innerHTML = '&#x1F4BB; Learning...';
+      pollCodeLearningStatus();
+    } else {
+      btn.innerHTML = d.message || 'Already running';
+      setTimeout(function(){btn.disabled=false;btn.innerHTML='&#x1F4BB; Reindex All';}, 3000);
+    }
+  }).catch(function(){btn.disabled=false;btn.innerHTML='&#x1F4BB; Reindex All';});
+}
+
+var _codePollTimer = null;
+function pollCodeLearningStatus() {
+  fetch('/api/brain/status').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var code = d.code || {};
+    var section = document.getElementById('code-pipeline-section');
+    var dot = document.getElementById('code-status-dot');
+    var btn = document.getElementById('btn-code-learn');
+
+    if (code.running) {
+      section.style.display = '';
+      dot.className = 'b-domain-dot learning';
+      document.getElementById('code-learning-step').textContent = code.current_step || '';
+      document.getElementById('code-learning-phase').textContent = code.phase || '';
+      var pct = code.repos_processed && code.total_steps ? Math.round((code.repos_processed / code.total_steps) * 100) : 0;
+      document.getElementById('code-progress-bar').style.width = pct + '%';
+      btn.disabled = true; btn.innerHTML = '&#x1F4BB; Learning...';
+      if (!_codePollTimer) _codePollTimer = setInterval(pollCodeLearningStatus, 3000);
+    } else {
+      section.style.display = 'none';
+      dot.className = 'b-domain-dot idle';
+      btn.disabled = false; btn.innerHTML = '&#x1F4BB; Reindex All';
+      if (_codePollTimer) { clearInterval(_codePollTimer); _codePollTimer = null; }
+      if (section._wasRunning) loadCodeDashboard();
+      section._wasRunning = code.running;
+    }
+    section._wasRunning = code.running;
+  }).catch(function(){});
+}
+
+/* ── Dev Assistant (Code Agent) ─────────────────── */
+function codeAgentOpen() {
+  var section = document.getElementById('code-agent-section');
+  section.style.display = section.style.display === 'none' ? '' : 'none';
+  if (section.style.display !== 'none') {
+    document.getElementById('code-agent-prompt').focus();
+  }
+}
+
+function runCodeAgent() {
+  var prompt = document.getElementById('code-agent-prompt').value.trim();
+  if (!prompt) return;
+  var btn = document.getElementById('btn-code-agent');
+  var resultDiv = document.getElementById('code-agent-result');
+  btn.disabled = true; btn.innerHTML = '&#x1F9E0; Thinking...';
+  resultDiv.style.display = '';
+  resultDiv.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px">Chili is analyzing your request...</div>';
+
+  fetch('/api/brain/code/agent', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({prompt: prompt}),
+  }).then(function(r){return r.json();}).then(function(d) {
+    btn.disabled = false; btn.innerHTML = '&#x1F680; Run Agent';
+    if (!d.ok) {
+      resultDiv.innerHTML = '<div style="color:#ef4444;font-size:11px;padding:8px">' + escHtml(d.message || 'Error') + '</div>';
+      return;
+    }
+    var html = '<div class="code-agent-result-box">';
+    if (typeof marked !== 'undefined') {
+      try { html += marked.parse(d.response); } catch(e) { html += '<pre>' + escHtml(d.response) + '</pre>'; }
+    } else {
+      html += '<pre>' + escHtml(d.response) + '</pre>';
+    }
+    html += '</div>';
+
+    var ctx = d.context_used || {};
+    html += '<div class="code-agent-context-bar">' +
+      '<span>Model: ' + escHtml(d.model || 'unknown') + '</span>' +
+      '<span>Repos: ' + (ctx.repos||0) + '</span>' +
+      '<span>Insights: ' + (ctx.insights||0) + '</span>' +
+      '<span>Files read: ' + (ctx.file_contents_included||0) + '</span>' +
+      '</div>';
+
+    if (d.files_changed && d.files_changed.length > 0) {
+      html += '<div style="margin-top:8px;font-size:10px;color:var(--text-muted)">Files referenced: ' +
+        d.files_changed.map(function(f){return '<code>' + escHtml(f) + '</code>';}).join(', ') + '</div>';
+    }
+
+    resultDiv.innerHTML = html;
+  }).catch(function(e){
+    btn.disabled = false; btn.innerHTML = '&#x1F680; Run Agent';
+    resultDiv.innerHTML = '<div style="color:#ef4444;font-size:11px;padding:8px">' + escHtml(e.message) + '</div>';
+  });
+}
+
+/* ── Init ─────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', function() {
+  loadBrainDashboard();
+  updateSidebarStatus();
+});
+</script>
+{% endblock %}

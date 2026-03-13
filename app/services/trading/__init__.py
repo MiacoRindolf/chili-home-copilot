@@ -83,6 +83,7 @@ from .scanner import (
     get_top_picks_freshness,
     recheck_pick,
     get_scan_status,
+    get_intraday_scan_progress,
     batch_score_tickers,
     run_full_market_scan,
     smart_pick,
