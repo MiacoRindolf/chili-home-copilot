@@ -34,7 +34,7 @@ _cache_lock = threading.Lock()
 _TTL_BARS = 1800       # 30 min for OHLCV bars
 _TTL_QUOTE = 30        # 30 sec for live quotes
 _TTL_SNAPSHOT = 60     # 1 min for snapshots
-_MAX_CACHE = 4000
+_MAX_CACHE = 8000      # support heavy learning runs (500+ tickers × multiple endpoints)
 
 _metrics_lock = threading.Lock()
 _metrics: dict[str, int] = {
@@ -210,18 +210,34 @@ def _period_to_dates(period: str) -> tuple[str, str]:
 
 
 def get_aggregates(
-    ticker: str, interval: str = "1d", period: str = "6mo",
+    ticker: str,
+    interval: str = "1d",
+    period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV bars from Massive aggregates endpoint."""
+    """Fetch OHLCV bars from Massive aggregates endpoint.
+
+    Either *period* **or** explicit *start*/*end* (YYYY-MM-DD) can be used.
+    When *start* is given it takes precedence over *period*.
+    """
     m_ticker = to_massive_ticker(ticker)
-    cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
+
+    if start:
+        from_date = start if isinstance(start, str) else str(start)
+        to_date = end or date.today().strftime("%Y-%m-%d")
+        cache_key = f"massive:agg:{m_ticker}:{interval}:{from_date}:{to_date}"
+    else:
+        from_date, to_date = _period_to_dates(period)
+        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
+
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
     timespan, multiplier = mapping
-    from_date, to_date = _period_to_dates(period)
 
     url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
     data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
@@ -244,12 +260,21 @@ def get_aggregates(
 
 
 def get_aggregates_df(
-    ticker: str, interval: str = "1d", period: str = "6mo",
+    ticker: str,
+    interval: str = "1d",
+    period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ):
-    """Fetch OHLCV as a pandas DataFrame (Open/High/Low/Close/Volume columns)."""
+    """Fetch OHLCV as a pandas DataFrame (Open/High/Low/Close/Volume columns).
+
+    Accepts the same *start*/*end* overrides as :func:`get_aggregates`.
+    """
     import pandas as pd
 
-    bars = get_aggregates(ticker, interval=interval, period=period)
+    bars = get_aggregates(ticker, interval=interval, period=period,
+                          start=start, end=end)
     if not bars:
         return pd.DataFrame()
 

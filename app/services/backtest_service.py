@@ -6,12 +6,11 @@ from datetime import datetime
 from typing import Any
 
 import pandas as pd
-import yfinance as yf
 from backtesting import Backtest, Strategy
 from backtesting.lib import crossover
 from sqlalchemy.orm import Session
 
-from .yf_session import get_history as _yf_history
+from .trading.market_data import fetch_ohlcv_df as _fetch_ohlcv_df
 
 from ..models.trading import BacktestResult
 
@@ -219,7 +218,7 @@ def run_backtest(
     if strategy_id not in STRATEGIES:
         return {"ok": False, "error": f"Unknown strategy: {strategy_id}"}
 
-    df = _yf_history(ticker, period=period, interval="1d")
+    df = _fetch_ohlcv_df(ticker, period=period, interval="1d")
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 

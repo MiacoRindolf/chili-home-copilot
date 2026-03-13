@@ -205,9 +205,14 @@ def _finviz_momentum_gappers() -> list[str]:
     small/micro floats gapping up on volume with potential for 20-100%
     intraday moves.
     """
-    return _finviz_screen(
+    # FinViz does not support "$2 to $20" directly, so we request the
+    # slightly wider "$1 to $20" band and clamp to 2–20 using our own
+    # price data afterwards.
+    from .market_data import fetch_quote
+
+    tickers = _finviz_screen(
         filters_dict={
-            "Price": "$2 to $20",
+            "Price": "$1 to $20",
             "Change": "Up more than 5%",
             "Relative Volume": "Over 3",
             "Float Short": "Under 20%",
@@ -215,6 +220,20 @@ def _finviz_momentum_gappers() -> list[str]:
         },
         limit=100,
     )
+
+    filtered: list[str] = []
+    for t in tickers:
+        try:
+            q = fetch_quote(t)
+            price = q.get("price") if q else None
+            if price is None:
+                continue
+            if 2.0 <= float(price) <= 20.0:
+                filtered.append(t)
+        except Exception:
+            continue
+
+    return filtered
 
 
 # ── Yahoo Finance Screener ────────────────────────────────────────────

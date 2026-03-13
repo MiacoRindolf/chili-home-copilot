@@ -111,6 +111,21 @@ def get_trades(
     return q.order_by(Trade.entry_date.desc()).limit(limit).all()
 
 
+def delete_trade(db: Session, trade_id: int, user_id: int | None) -> str | None:
+    """Delete a trade and clear journal references. Returns None on success, or error code: 'not_found' / 'forbidden'."""
+    trade = db.query(Trade).filter(Trade.id == trade_id).first()
+    if not trade:
+        return "not_found"
+    if trade.user_id != user_id:
+        return "forbidden"
+    db.query(JournalEntry).filter(JournalEntry.trade_id == trade_id).update(
+        {JournalEntry.trade_id: None}
+    )
+    db.delete(trade)
+    db.commit()
+    return None
+
+
 def _calc_pnl(trade: Trade) -> float:
     if trade.exit_price is None:
         return 0.0
@@ -122,26 +137,18 @@ def _calc_pnl(trade: Trade) -> float:
 
 # ── P&L Analytics ─────────────────────────────────────────────────────
 
-def get_trade_stats(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Aggregate performance stats from closed trades."""
-    closed = db.query(Trade).filter(
-        Trade.user_id == user_id, Trade.status == "closed",
-    ).all()
-
+def _compute_stats_from_trades(closed: list[Trade]) -> dict[str, Any]:
+    """Compute aggregate stats from a list of closed trades."""
     if not closed:
         return {"total_trades": 0}
-
     pnls = [t.pnl or 0.0 for t in closed]
     wins = [p for p in pnls if p > 0]
-    losses = [p for p in pnls if p < 0]
-
     total_pnl = sum(pnls)
     cumulative = []
     running = 0.0
     for p in pnls:
         running += p
         cumulative.append(round(running, 2))
-
     max_dd = 0.0
     peak = 0.0
     for c in cumulative:
@@ -150,19 +157,77 @@ def get_trade_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         dd = peak - c
         if dd > max_dd:
             max_dd = dd
-
     return {
         "total_trades": len(closed),
         "wins": len(wins),
-        "losses": len(losses),
+        "losses": len(pnls) - len(wins),
         "win_rate": round(len(wins) / len(closed) * 100, 1) if closed else 0,
         "total_pnl": round(total_pnl, 2),
-        "avg_pnl": round(total_pnl / len(closed), 2),
+        "avg_pnl": round(total_pnl / len(closed), 2) if closed else 0,
         "best_trade": round(max(pnls), 2) if pnls else 0,
         "worst_trade": round(min(pnls), 2) if pnls else 0,
         "max_drawdown": round(max_dd, 2),
         "equity_curve": cumulative,
     }
+
+
+def get_trade_stats(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Aggregate performance stats from closed trades."""
+    closed = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "closed",
+    ).all()
+    return _compute_stats_from_trades(closed)
+
+
+def get_trade_stats_by_source(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Stats split by broker source: all, real (Robinhood), paper (manual/null)."""
+    closed = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "closed",
+    ).all()
+    real = [t for t in closed if t.broker_source == "robinhood"]
+    paper = [t for t in closed if t.broker_source != "robinhood"]
+    return {
+        "all": _compute_stats_from_trades(closed),
+        "real": _compute_stats_from_trades(real),
+        "paper": _compute_stats_from_trades(paper),
+    }
+
+
+def get_daily_pnl(
+    db: Session, user_id: int | None,
+    start_date: datetime, end_date: datetime,
+) -> list[dict[str, Any]]:
+    """Daily P&L and trade count for calendar. Groups by exit_date (UTC date)."""
+    from collections import defaultdict
+
+    closed = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "closed",
+        Trade.exit_date.isnot(None),
+        Trade.exit_date >= start_date,
+        Trade.exit_date < end_date,
+    ).order_by(Trade.exit_date.asc()).all()
+
+    by_date: dict[str, list[Trade]] = defaultdict(list)
+    for t in closed:
+        day = t.exit_date.date().isoformat() if t.exit_date else None
+        if day:
+            by_date[day].append(t)
+
+    result = []
+    for day in sorted(by_date.keys()):
+        trades = by_date[day]
+        pnl = sum(t.pnl or 0.0 for t in trades)
+        result.append({
+            "date": day,
+            "trade_count": len(trades),
+            "pnl": round(pnl, 2),
+            "trades": [
+                {"id": t.id, "ticker": t.ticker, "direction": t.direction, "pnl": round(t.pnl or 0, 2)}
+                for t in trades
+            ],
+        })
+    return result
 
 
 def get_trade_stats_by_pattern(

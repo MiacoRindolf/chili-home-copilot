@@ -37,6 +37,11 @@ class TradeClose(BaseModel):
     notes: Optional[str] = None
 
 
+class TradeSell(BaseModel):
+    quantity: float = Field(..., gt=0)
+    limit_price: Optional[float] = Field(None, gt=0)
+
+
 class TradeUpdate(BaseModel):
     tags: Optional[str] = None
     notes: Optional[str] = None

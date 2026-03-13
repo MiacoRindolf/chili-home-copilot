@@ -55,7 +55,105 @@ _PROPOSAL_EXPIRE_HOURS = 24
 _MIN_SCORE_FOR_PROPOSAL = 7.5
 _MAX_RISK_PCT = 2.0  # max 2% of portfolio per trade
 _MIN_RR_FOR_PROPOSAL = 1.5  # minimum risk:reward ratio
+_MIN_RR_FOR_FROM_PICK = 0.8  # lower threshold when user explicitly creates from pick (price may have drifted)
 _MIN_PRICE_FOR_PROPOSAL = 1.0  # skip sub-$1 penny stocks
+
+# ── Position sizing caps ───────────────────────────────────────────────
+_POS_PCT_HARD_CAP = 10.0
+_POS_PCT_RISK_OFF_CAP = 7.0
+_POS_PCT_SPECULATIVE_CAP = 5.0
+
+_SPECULATIVE_KEYWORDS = [
+    "float_micro", "float_low", "micro", "microcap", "penny",
+    "high risk", "high volatility", "leveraged",
+]
+
+
+def _compute_position_size(
+    price: float,
+    stop: float,
+    buying_power: float,
+    pick: dict[str, Any],
+) -> tuple[int | None, float | None]:
+    """Risk-based position sizing with regime, volatility, and instrument overlays.
+
+    Returns (quantity, position_size_pct).  Both are None when buying_power
+    is zero or inputs are invalid.
+    """
+    risk_per_share = abs(price - stop)
+    if buying_power <= 0 or risk_per_share <= 0 or price <= 0:
+        return None, None
+
+    risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
+    raw_shares = risk_dollars / risk_per_share
+    raw_pct = (raw_shares * price) / buying_power * 100
+
+    # ── 1. Market-regime overlay ──────────────────────────────────────
+    regime_label = "cautious"
+    vix_regime = "normal"
+    try:
+        from .market_data import get_market_regime
+        _mr = get_market_regime()
+        regime_label = _mr.get("regime", "cautious")
+        vix_regime = _mr.get("vix_regime", "normal")
+    except Exception:
+        pass
+
+    regime_mult = 1.0
+    if regime_label == "risk_off":
+        regime_mult = 0.50
+    elif regime_label == "cautious":
+        regime_mult = 0.75
+
+    if vix_regime == "elevated":
+        regime_mult *= 0.85
+    elif vix_regime == "extreme":
+        regime_mult *= 0.70
+
+    # ── 2. Volatility overlay (wide stop → more volatile) ─────────────
+    stop_dist_pct = risk_per_share / price * 100
+    vol_mult = 1.0
+    if stop_dist_pct > 10:
+        vol_mult = 0.70
+    elif stop_dist_pct > 8:
+        vol_mult = 0.80
+    elif stop_dist_pct > 5:
+        vol_mult = 0.90
+
+    # ── 3. Instrument-quality / speculative overlay ───────────────────
+    signals_text = " ".join(s.lower() for s in pick.get("signals", []))
+    risk_level = (pick.get("risk_level") or "").lower()
+
+    is_speculative = risk_level in ("high", "very_high") or pick.get("is_crypto", False)
+    if not is_speculative:
+        for kw in _SPECULATIVE_KEYWORDS:
+            if kw in signals_text:
+                is_speculative = True
+                break
+
+    spec_mult = 0.60 if is_speculative else 1.0
+
+    # ── 4. Apply multiplicative overlays ──────────────────────────────
+    adjusted_pct = raw_pct * regime_mult * vol_mult * spec_mult
+
+    # ── 5. Scanner/brain soft cap — stay near their suggestion ────────
+    pick_pct = pick.get("position_size_pct")
+    if pick_pct and pick_pct > 0:
+        adjusted_pct = min(adjusted_pct, pick_pct * 1.25)
+
+    # ── 6. Hard caps (regime-aware) ───────────────────────────────────
+    cap = _POS_PCT_HARD_CAP
+    if regime_label == "risk_off" or vix_regime in ("elevated", "extreme"):
+        cap = min(cap, _POS_PCT_RISK_OFF_CAP)
+    if is_speculative:
+        cap = min(cap, _POS_PCT_SPECULATIVE_CAP)
+
+    final_pct = round(min(adjusted_pct, cap), 2)
+
+    position_dollars = buying_power * (final_pct / 100)
+    quantity = max(1, int(position_dollars / price))
+
+    return quantity, final_pct
 
 
 def _expire_proposals_on_stop(
@@ -181,6 +279,33 @@ def get_alert_history(
 # ── Strategy Proposals ────────────────────────────────────────────────
 
 
+def _supersede_proposals(db: Session, user_id: int | None, ticker: str) -> int:
+    """Reject any existing pending/approved/working proposals for *ticker* so
+    only the newest proposal remains active. Returns count of superseded rows."""
+    from ...models.trading import StrategyProposal
+    from sqlalchemy import or_
+
+    user_filter = (
+        or_(StrategyProposal.user_id == user_id, StrategyProposal.user_id.is_(None))
+        if user_id is not None
+        else StrategyProposal.user_id.is_(None)
+    )
+    stale = (
+        db.query(StrategyProposal)
+        .filter(
+            user_filter,
+            StrategyProposal.ticker == ticker,
+            StrategyProposal.status.in_(["pending", "approved", "working"]),
+        )
+        .all()
+    )
+    now = datetime.utcnow()
+    for p in stale:
+        p.status = "rejected"
+        p.reviewed_at = now
+    return len(stale)
+
+
 def generate_strategy_proposals(
     db: Session,
     user_id: int | None,
@@ -192,6 +317,7 @@ def generate_strategy_proposals(
     """
     from ...models.trading import StrategyProposal, ScanResult
     from .scanner import generate_top_picks
+    from .market_data import fetch_quote
 
     picks = generate_top_picks(db, user_id)
     created = []
@@ -207,20 +333,12 @@ def generate_strategy_proposals(
 
         ticker = pick["ticker"]
 
-        # Don't duplicate proposals for the same ticker within 12 hours
-        recent = (
-            db.query(StrategyProposal)
-            .filter(
-                StrategyProposal.ticker == ticker,
-                StrategyProposal.status.in_(["pending", "approved", "executed"]),
-                StrategyProposal.proposed_at >= datetime.utcnow() - timedelta(hours=12),
-            )
-            .first()
-        )
-        if recent:
-            continue
+        # Supersede any existing non-executed proposal for this ticker
+        _supersede_proposals(db, user_id, ticker)
 
-        price = pick.get("price") or pick.get("entry_price") or 0
+        # Use latest Massive-backed price for entry
+        quote = fetch_quote(ticker) or {}
+        price = quote.get("price") or pick.get("price") or pick.get("entry_price") or 0
         stop = pick.get("stop_loss") or pick.get("brain_stop") or 0
         target = pick.get("take_profit") or pick.get("brain_target") or 0
 
@@ -243,15 +361,9 @@ def generate_strategy_proposals(
         projected_profit_pct = round((target - price) / price * 100, 2)
         projected_loss_pct = round((price - stop) / price * 100, 2)
 
-        # Position sizing: risk at most _MAX_RISK_PCT of buying power
-        if buying_power > 0 and risk_per_share > 0:
-            risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
-            quantity = max(1, int(risk_dollars / risk_per_share))
-            position_size = quantity * price
-            position_size_pct = round(position_size / buying_power * 100, 2) if buying_power else 0
-        else:
-            quantity = None
-            position_size_pct = None
+        quantity, position_size_pct = _compute_position_size(
+            price, stop, buying_power, pick,
+        )
 
         confidence = pick.get("brain_confidence") or (combined * 10)
 
@@ -321,6 +433,133 @@ def generate_strategy_proposals(
     return created
 
 
+def create_proposal_from_pick(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+    pick: dict[str, Any] | None = None,
+    override_levels: dict[str, float] | None = None,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Create (or replace) a single strategy proposal for *ticker* using the
+    latest Massive-backed price and the pick's or override stop/target levels.
+
+    override_levels may contain entry_price, stop_loss, take_profit (used when
+    ticker is not in top picks cache).
+
+    Returns (proposal_dict, None) on success, (None, error_message) on failure.
+    """
+    from ...models.trading import StrategyProposal
+    from .market_data import fetch_quote
+    from .scanner import generate_top_picks
+
+    ticker = ticker.upper()
+    override_levels = override_levels or {}
+
+    if pick is None:
+        from .scanner import _top_picks_cache
+        cached = _top_picks_cache.get("picks") or []
+        pick = next((p for p in cached if (p.get("ticker") or "").upper() == ticker), None)
+        if pick is None:
+            picks = generate_top_picks(db, user_id)
+            pick = next((p for p in picks if (p.get("ticker") or "").upper() == ticker), None)
+    if not pick and override_levels:
+        quote = fetch_quote(ticker) or {}
+        entry = override_levels.get("entry_price") or quote.get("price")
+        stop = override_levels.get("stop_loss")
+        target = override_levels.get("take_profit")
+        if stop and target and (entry or quote.get("price")):
+            entry = entry or quote.get("price")
+            pick = {
+                "ticker": ticker,
+                "price": entry,
+                "entry_price": entry,
+                "stop_loss": stop,
+                "brain_stop": stop,
+                "take_profit": target,
+                "brain_target": target,
+                "combined_score": 5.0,
+                "timeframe": "swing",
+                "thesis": f"Proposal from pick for {ticker} (levels from request).",
+            }
+    if not pick:
+        return None, f"{ticker} is not in current top picks. Run a Full Scan or refresh, or the pick may have expired."
+
+    combined = pick.get("combined_score", 0)
+
+    quote = fetch_quote(ticker) or {}
+    price = quote.get("price") or pick.get("price") or pick.get("entry_price") or 0
+    stop = pick.get("stop_loss") or pick.get("brain_stop") or 0
+    target = pick.get("take_profit") or pick.get("brain_target") or 0
+
+    if not price or price <= 0:
+        return None, "Could not get current price for this ticker."
+    if not stop or not target:
+        return None, "Missing stop loss or take profit; cannot create proposal."
+
+    risk_per_share = abs(price - stop)
+    reward_per_share = abs(target - price)
+    if risk_per_share <= 0:
+        return None, "Stop loss must be different from entry."
+
+    rr_ratio = round(reward_per_share / risk_per_share, 2)
+    min_rr = _MIN_RR_FOR_FROM_PICK  # use lower threshold for explicit "create from pick"
+    if rr_ratio < min_rr:
+        return None, f"Risk:reward ratio {rr_ratio}:1 is below minimum {min_rr}:1."
+    if price < _MIN_PRICE_FOR_PROPOSAL:
+        return None, f"Price ${price} is below minimum ${_MIN_PRICE_FOR_PROPOSAL}."
+
+    _supersede_proposals(db, user_id, ticker)
+
+    projected_profit_pct = round((target - price) / price * 100, 2)
+    projected_loss_pct = round((price - stop) / price * 100, 2)
+
+    buying_power = _get_buying_power()
+    quantity, position_size_pct = _compute_position_size(price, stop, buying_power, pick)
+    confidence = pick.get("brain_confidence") or (combined * 10)
+    signals = pick.get("signals", [])
+    indicators = pick.get("indicators", {})
+    timeframe = pick.get("timeframe", "swing")
+    thesis = pick.get("thesis", "")
+    if not thesis:
+        thesis = f"AI-identified bullish setup for {ticker} with score {combined:.1f}/10."
+
+    proposal = StrategyProposal(
+        user_id=user_id,
+        ticker=ticker,
+        direction="long",
+        status="pending",
+        entry_price=price,
+        stop_loss=stop,
+        take_profit=target,
+        quantity=quantity,
+        position_size_pct=position_size_pct,
+        projected_profit_pct=projected_profit_pct,
+        projected_loss_pct=projected_loss_pct,
+        risk_reward_ratio=rr_ratio,
+        confidence=round(confidence, 1),
+        timeframe=timeframe,
+        thesis=thesis,
+        signals_json=json.dumps(signals) if signals else None,
+        indicator_json=json.dumps(indicators) if indicators else None,
+        brain_score=pick.get("brain_score"),
+        ml_probability=pick.get("ml_probability"),
+        scan_score=pick.get("score"),
+        proposed_at=datetime.utcnow(),
+        expires_at=datetime.utcnow() + timedelta(hours=_PROPOSAL_EXPIRE_HOURS),
+    )
+    db.add(proposal)
+    try:
+        db.commit()
+        db.refresh(proposal)
+    except Exception as e:
+        db.rollback()
+        logger.exception("create_proposal_from_pick commit failed")
+        return None, f"Database error: {e!s}"
+
+    logger.info(f"[alerts] Created proposal from pick: {ticker} @ ${price}")
+    return _proposal_to_dict(proposal), None
+
+
 def get_proposals(
     db: Session,
     user_id: int | None,
@@ -343,7 +582,7 @@ def get_proposals(
         q = q.filter(StrategyProposal.status == status)
     else:
         q = q.filter(
-            StrategyProposal.status.in_(["pending", "approved", "executed", "rejected"]),
+            StrategyProposal.status.in_(["pending", "approved", "working", "executed", "rejected"]),
         )
 
     rows = q.order_by(StrategyProposal.proposed_at.desc()).limit(limit).all()
@@ -632,7 +871,7 @@ def _check_top_picks_for_proposals(
             db.query(StrategyProposal)
             .filter(
                 StrategyProposal.ticker == ticker,
-                StrategyProposal.status.in_(["pending", "approved", "executed"]),
+                StrategyProposal.status.in_(["pending", "approved", "working", "executed"]),
                 StrategyProposal.proposed_at >= datetime.utcnow() - timedelta(hours=12),
             )
             .first()
@@ -656,8 +895,15 @@ def _execute_proposal(
     proposal,
     user_id: int | None,
 ) -> dict[str, Any]:
-    """Execute an approved proposal via Robinhood (or record locally)."""
-    from ..broker_service import is_connected, place_buy_order
+    """Place a Robinhood order for an approved proposal (or record locally).
+
+    When Robinhood is connected the order is placed and both the proposal
+    and trade start in **working** status.  Only the periodic order-sync
+    job will flip them to *executed* / *open* once Robinhood confirms a
+    fill — this prevents marking trades as "executed" when the limit order
+    is still sitting unfilled.
+    """
+    from ..broker_service import is_connected, place_buy_order, map_rh_status
     from ...models.trading import Trade
 
     ticker = proposal.ticker
@@ -676,7 +922,6 @@ def _execute_proposal(
             proposal.quantity = 1
 
     if not is_connected():
-        # Record as a local (manual) trade so alerts can track it
         trade = Trade(
             user_id=user_id,
             ticker=ticker,
@@ -710,11 +955,17 @@ def _execute_proposal(
         )
 
         if result.get("ok"):
-            proposal.status = "executed"
-            proposal.executed_at = datetime.utcnow()
-            proposal.broker_order_id = result.get("order_id")
+            rh_state = (result.get("raw") or {}).get("state", "queued")
+            chili_status = map_rh_status(rh_state)
+            is_already_filled = rh_state == "filled"
 
-            # Extract pattern tags from proposal signals for per-pattern tracking
+            proposal.broker_order_id = result.get("order_id")
+            if is_already_filled:
+                proposal.status = "executed"
+                proposal.executed_at = datetime.utcnow()
+            else:
+                proposal.status = "working"
+
             _ptags = ""
             if proposal.signals_json:
                 try:
@@ -724,15 +975,21 @@ def _execute_proposal(
                 except Exception:
                     pass
 
+            avg_price = _safe_float((result.get("raw") or {}).get("average_price"))
+
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
                 direction="long",
-                entry_price=proposal.entry_price,
+                entry_price=avg_price if is_already_filled and avg_price else proposal.entry_price,
                 quantity=quantity,
-                status="open",
+                status="open" if is_already_filled else "working",
                 broker_source="robinhood",
                 broker_order_id=result.get("order_id"),
+                broker_status=rh_state,
+                last_broker_sync=datetime.utcnow(),
+                filled_at=datetime.utcnow() if is_already_filled else None,
+                avg_fill_price=avg_price if is_already_filled else None,
                 indicator_snapshot=json.dumps({
                     "stop_loss": proposal.stop_loss,
                     "take_profit": proposal.take_profit,
@@ -740,20 +997,27 @@ def _execute_proposal(
                 }),
                 tags="auto-trade,proposal",
                 pattern_tags=_ptags or None,
-                notes=f"Auto-executed from proposal #{proposal.id}: {proposal.thesis[:100]}",
+                notes=f"Order placed from proposal #{proposal.id}: {proposal.thesis[:100]}",
             )
             db.add(trade)
             db.flush()
             proposal.trade_id = trade.id
             db.commit()
 
-            msg = (
-                f"ORDER PLACED: BUY {quantity} {ticker} @ ${proposal.entry_price:,.2f} "
-                f"(limit) via Robinhood | Proposal #{proposal.id}"
-            )
-            dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-
-            return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id}
+            if is_already_filled:
+                msg = (
+                    f"ORDER FILLED: BUY {quantity} {ticker} @ ${trade.entry_price:,.2f} "
+                    f"via Robinhood | Proposal #{proposal.id}"
+                )
+                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+                return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id}
+            else:
+                msg = (
+                    f"ORDER PLACED: BUY {quantity} {ticker} @ ${proposal.entry_price:,.2f} "
+                    f"(limit, waiting for fill) via Robinhood | Proposal #{proposal.id}"
+                )
+                dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+                return {"status": "working", "order_id": result.get("order_id"), "trade_id": trade.id}
         else:
             error = result.get("error", "Unknown error")
             msg = f"ORDER FAILED: {ticker} — {error}"
@@ -763,6 +1027,15 @@ def _execute_proposal(
     except Exception as e:
         logger.error(f"[alerts] Execution failed for {ticker}: {e}")
         return {"status": "error", "error": str(e)}
+
+
+def _safe_float(val) -> float:
+    if val is None:
+        return 0.0
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return 0.0
 
 
 def _get_buying_power() -> float:

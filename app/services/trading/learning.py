@@ -16,7 +16,6 @@ from sqlalchemy import func
 from ...models.trading import (
     LearningEvent, MarketSnapshot, ScanResult, TradingInsight, Trade,
 )
-from ..yf_session import get_history as _yf_history
 from .market_data import (
     fetch_quote, fetch_quotes_batch, fetch_ohlcv_df, get_indicator_snapshot,
     get_vix, get_volatility_regime, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
@@ -283,7 +282,7 @@ def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None, float | 
 def take_snapshots_parallel(
     db: Session,
     tickers: list[str],
-    max_workers: int = 16,
+    max_workers: int = 24,
 ) -> int:
     """Take snapshots for many tickers using a thread pool.
 
@@ -304,6 +303,7 @@ def take_snapshots_parallel(
             except Exception:
                 pass
 
+    _t0 = time.time()
     fetched: list[tuple[str, dict | None, dict | None]] = []
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_snapshot_data, t): t for t in tickers}
@@ -316,6 +316,11 @@ def take_snapshots_parallel(
             except Exception:
                 pass
 
+    _fetch_elapsed = round(time.time() - _t0, 1)
+    logger.info(
+        f"[learning] Snapshot data fetch: {len(fetched)}/{len(tickers)} tickers "
+        f"in {_fetch_elapsed}s ({max_workers} workers)"
+    )
     vix = get_vix()
     count = 0
     for row in fetched:
@@ -387,9 +392,10 @@ def backfill_future_returns(db: Session) -> int:
 
     def _fetch_returns(snap):
         try:
-            # Needs start-date-based fetch for historical backfill;
-            # falls through to yfinance which supports the start= parameter.
-            df = _yf_history(snap.ticker, start=snap.snapshot_date, period="15d", interval="1d")
+            df = fetch_ohlcv_df(
+                snap.ticker, interval="1d", period="15d",
+                start=str(snap.snapshot_date)[:10],
+            )
             if len(df) < 2:
                 return None
             base_price = snap.close_price
@@ -405,8 +411,10 @@ def backfill_future_returns(db: Session) -> int:
         except Exception:
             return None
 
+    _workers = 24 if (_use_massive() or _use_polygon()) else 16
+    _t0 = time.time()
     results = []
-    with ThreadPoolExecutor(max_workers=16) as executor:
+    with ThreadPoolExecutor(max_workers=_workers) as executor:
         futures = {executor.submit(_fetch_returns, s): s for s in unfilled}
         for f in as_completed(futures):
             if _shutting_down.is_set():
@@ -415,6 +423,11 @@ def backfill_future_returns(db: Session) -> int:
             if r:
                 results.append(r)
 
+    logger.info(
+        f"[learning] Backfill returns fetch: {len(results)}/{len(unfilled)} snapshots "
+        f"in {time.time() - _t0:.1f}s ({_workers} workers, "
+        f"{len(tickers)} unique tickers)"
+    )
     updated = 0
     snap_map = {s.id: s for s in unfilled}
     for snap_id, r1, r3, r5, r10 in results:
@@ -552,8 +565,10 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     mine_tickers = mine_tickers[:500]
 
+    _workers = 20 if (_use_massive() or _use_polygon()) else 12
+    _t0 = time.time()
     all_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=12) as executor:
+    with ThreadPoolExecutor(max_workers=_workers) as executor:
         futures = {}
         for ticker in mine_tickers:
             if _shutting_down.is_set():
@@ -568,6 +583,11 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                 all_rows.extend(rows)
             except Exception:
                 continue
+
+    logger.info(
+        f"[learning] Pattern mining OHLCV fetch: {len(mine_tickers)} tickers → "
+        f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s ({_workers} workers)"
+    )
 
     snapshots = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
@@ -944,8 +964,9 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         seek_tickers = list(ALL_SCAN_TICKERS)
 
     seek_tickers = seek_tickers[:400]
+    _workers = 20 if (_use_massive() or _use_polygon()) else 12
     extra_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=12) as pool:
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in seek_tickers}
         for f in as_completed(futs):
             if _shutting_down.is_set():
@@ -1100,11 +1121,12 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     """
     from .market_data import ALL_SCAN_TICKERS
 
-    mine_tickers = list(ALL_SCAN_TICKERS)[:120]
+    mine_tickers = list(ALL_SCAN_TICKERS)[:200]
 
     rows: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    _workers = 20 if (_use_massive() or _use_polygon()) else 10
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
         for f in as_completed(futs):
             try:
@@ -1409,9 +1431,10 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if not top_patterns:
         return {"refined": 0, "note": "no patterns to refine"}
 
-    mine_tickers = list(ALL_SCAN_TICKERS)[:200]
+    mine_tickers = list(ALL_SCAN_TICKERS)[:300]
+    _workers = 20 if (_use_massive() or _use_polygon()) else 10
     all_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
         for f in as_completed(futs):
             if _shutting_down.is_set():
@@ -2034,7 +2057,7 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
     from .ml_engine import predict_ml, extract_features, is_model_ready
 
     tickers = _build_prediction_tickers(db, tickers)
-    ticker_batch = tickers[:100]
+    ticker_batch = tickers[:150]
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
@@ -2048,8 +2071,9 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
 
     quotes_map = fetch_quotes_batch(ticker_batch)
 
+    _workers = 16 if (_use_massive() or _use_polygon()) else 10
     results = []
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {
             pool.submit(
                 _predict_single_ticker,
@@ -2473,10 +2497,11 @@ _learning_status: dict[str, Any] = {
     "phase": "idle",
     "current_step": "",
     "steps_completed": 0,
-    "total_steps": 9,
+    "total_steps": 14,
     "patterns_found": 0,
     "tickers_processed": 0,
     "step_timings": {},
+    "data_provider": None,
 }
 
 
@@ -2521,10 +2546,19 @@ def run_learning_cycle(
     start = time.time()
     report: dict[str, Any] = {}
 
-    def _step_time(name: str, t0: float) -> None:
+    _provider = (
+        "Massive" if _use_massive() else
+        "Polygon" if _use_polygon() else
+        "yfinance"
+    )
+    _learning_status["data_provider"] = _provider
+    logger.info(f"[learning] Starting learning cycle — primary data provider: {_provider}")
+
+    def _step_time(name: str, t0: float, extra: str = "") -> None:
         elapsed = round(time.time() - t0, 1)
         _learning_status["step_timings"][name] = elapsed
-        logger.info(f"[trading] Step '{name}' took {elapsed}s")
+        suffix = f" | {extra}" if extra else ""
+        logger.info(f"[learning] Step '{name}' took {elapsed}s{suffix}")
 
     try:
         # Step 1: Pre-filter with FinViz + yfinance screener
@@ -2540,7 +2574,7 @@ def run_learning_cycle(
         report["prescreen_sources"] = ps.get("sources", {})
         _learning_status["tickers_processed"] = len(candidates)
         _learning_status["steps_completed"] = 1
-        _step_time("pre-filter", step_start)
+        _step_time("pre-filter", step_start, f"{len(candidates)} candidates")
 
         # Step 2: Deep-score candidates
         if _shutting_down.is_set():
@@ -2553,7 +2587,7 @@ def run_learning_cycle(
         report["tickers_scored"] = len(scan_results)
         _learning_status["tickers_processed"] = len(scan_results)
         _learning_status["steps_completed"] = 2
-        _step_time("scan", step_start)
+        _step_time("scan", step_start, f"{len(scan_results)} scored via {_provider}")
 
         # Step 3: Snapshots (parallel, top 500 + watchlist)
         if _shutting_down.is_set():
@@ -2569,7 +2603,8 @@ def run_learning_cycle(
         snap_count = take_snapshots_parallel(db, top_tickers)
         report["snapshots_taken"] = snap_count
         _learning_status["steps_completed"] = 3
-        _step_time("snapshots", step_start)
+        _step_time("snapshots", step_start,
+                    f"{snap_count}/{len(top_tickers)} tickers via {_provider}")
 
         # Step 4: Backfill future returns + predicted scores
         step_start = time.time()
@@ -2580,7 +2615,8 @@ def run_learning_cycle(
         report["returns_backfilled"] = filled
         report["scores_backfilled"] = scores_filled
         _learning_status["steps_completed"] = 4
-        _step_time("backfill", step_start)
+        _step_time("backfill", step_start,
+                    f"{filled} returns + {scores_filled} scores via {_provider}")
 
         # Step 5: Mine patterns
         _learning_status["current_step"] = "Mining patterns"
@@ -2590,7 +2626,8 @@ def run_learning_cycle(
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
         _learning_status["steps_completed"] = 5
-        _step_time("mine", step_start)
+        _step_time("mine", step_start,
+                    f"{len(discoveries)} patterns from OHLCV via {_provider}")
 
         # Step 5b: Active pattern seeking (boost under-sampled patterns)
         if _shutting_down.is_set():
@@ -2601,7 +2638,8 @@ def run_learning_cycle(
         seek_result = seek_pattern_data(db, user_id)
         report["patterns_boosted"] = seek_result.get("sought", 0)
         _learning_status["steps_completed"] = 6
-        _step_time("active_seek", step_start)
+        _step_time("active_seek", step_start,
+                    f"{seek_result.get('sought', 0)} boosted")
 
         # Step 6: Backtest discovered patterns (expanded)
         if _shutting_down.is_set():
@@ -2612,7 +2650,7 @@ def run_learning_cycle(
         bt_count = _auto_backtest_patterns(db, user_id)
         report["backtests_run"] = bt_count
         _learning_status["steps_completed"] = 7
-        _step_time("backtest", step_start)
+        _step_time("backtest", step_start, f"{bt_count} backtests via {_provider}")
 
         # Step 8: Self-validation & weight evolution (with dynamic hypotheses)
         if _shutting_down.is_set():
@@ -2626,7 +2664,9 @@ def run_learning_cycle(
         report["real_trade_adjustments"] = evolve_result.get("real_trade_adjustments", 0)
         report["weights_evolved"] = evolve_result.get("weights_evolved", 0)
         _learning_status["steps_completed"] = 8
-        _step_time("evolve", step_start)
+        _step_time("evolve", step_start,
+                    f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
+                    f"{evolve_result.get('weights_evolved', 0)} weights evolved")
 
         # Step 8b: Refine patterns (parameter sweeping)
         if _shutting_down.is_set():
@@ -2637,7 +2677,8 @@ def run_learning_cycle(
         refine_result = refine_patterns(db, user_id)
         report["patterns_refined"] = refine_result.get("refined", 0)
         _learning_status["steps_completed"] = 9
-        _step_time("refine", step_start)
+        _step_time("refine", step_start,
+                    f"{refine_result.get('refined', 0)} patterns refined")
 
         # Step 9: Market journal
         if _shutting_down.is_set():
@@ -2659,7 +2700,7 @@ def run_learning_cycle(
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
         _learning_status["steps_completed"] = 11
-        _step_time("signals", step_start)
+        _step_time("signals", step_start, f"{len(events)} events")
 
         # Step 11: Train ML model (with regime features)
         if _shutting_down.is_set():
@@ -2672,7 +2713,9 @@ def run_learning_cycle(
         report["ml_trained"] = ml_result.get("ok", False)
         report["ml_accuracy"] = ml_result.get("cv_accuracy", 0)
         _learning_status["steps_completed"] = 12
-        _step_time("ml_train", step_start)
+        _step_time("ml_train", step_start,
+                    f"acc={ml_result.get('cv_accuracy', 0):.3f}"
+                    if ml_result.get("ok") else "skipped")
 
         # Step 12: Generate strategy proposals
         if _shutting_down.is_set():
@@ -2688,15 +2731,18 @@ def run_learning_cycle(
             logger.warning(f"[trading] Strategy proposal generation failed: {e}")
             report["proposals_generated"] = 0
         _learning_status["steps_completed"] = 13
-        _step_time("proposals", step_start)
+        _step_time("proposals", step_start,
+                    f"{report.get('proposals_generated', 0)} generated")
 
         # Step 13: Finalize + log
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start
+        report["data_provider"] = _provider
         log_learning_event(
             db, user_id, "scan",
-            f"Learning cycle: {report.get('prescreen_candidates', 0)} pre-screened, "
+            f"Learning cycle ({_provider}): "
+            f"{report.get('prescreen_candidates', 0)} pre-screened, "
             f"scored {report['tickers_scored']}, {report['snapshots_taken']} snapshots, "
             f"{report['patterns_discovered']} patterns, "
             f"{report.get('patterns_boosted', 0)} boosted, "
@@ -2732,7 +2778,10 @@ def run_learning_cycle(
         report["elapsed_s"] = round(elapsed, 1)
         report["step_timings"] = dict(_learning_status.get("step_timings", {}))
 
-    logger.info(f"[trading] Learning cycle finished in {elapsed:.0f}s: {report}")
+    logger.info(
+        f"[learning] Learning cycle finished in {elapsed:.0f}s "
+        f"(provider={report.get('data_provider', 'unknown')}): {report}"
+    )
     return {"ok": True, **report}
 
 
@@ -2743,7 +2792,9 @@ def should_run_learning() -> bool:
     if last is None:
         return True
     try:
+        from ...config import settings
+        cooldown = max(1, settings.learning_interval_hours)
         last_dt = datetime.fromisoformat(last)
-        return datetime.utcnow() - last_dt > timedelta(hours=1)
+        return datetime.utcnow() - last_dt > timedelta(hours=cooldown)
     except Exception:
         return True

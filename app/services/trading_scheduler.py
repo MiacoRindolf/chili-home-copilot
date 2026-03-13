@@ -51,18 +51,20 @@ def _run_weekly_review_job():
 
 
 def _run_broker_sync_job():
-    """Sync Robinhood positions to local DB during market hours."""
+    """Sync Robinhood orders + positions to local DB during market hours."""
     from . import broker_service
 
     if not broker_service.is_connected():
         return
 
     from ..db import SessionLocal
-    logger.info("[scheduler] Starting Robinhood position sync")
+    logger.info("[scheduler] Starting Robinhood order + position sync")
     db = SessionLocal()
     try:
-        result = broker_service.sync_positions_to_db(db, user_id=None)
-        logger.info(f"[scheduler] Broker sync result: {result}")
+        order_result = broker_service.sync_orders_to_db(db, user_id=None)
+        logger.info(f"[scheduler] Order sync result: {order_result}")
+        pos_result = broker_service.sync_positions_to_db(db, user_id=None)
+        logger.info(f"[scheduler] Position sync result: {pos_result}")
     except Exception as e:
         logger.error(f"[scheduler] Broker sync failed: {e}")
     finally:
@@ -128,13 +130,16 @@ def start_scheduler():
         if _scheduler is not None:
             return
 
+        from ..config import settings
+        _learning_hours = max(1, settings.learning_interval_hours)
+
         _scheduler = BackgroundScheduler(daemon=True)
 
         _scheduler.add_job(
             _run_learning_job,
-            trigger=IntervalTrigger(hours=4),
+            trigger=IntervalTrigger(hours=_learning_hours),
             id="learning_cycle",
-            name="Full market learning cycle",
+            name=f"Full market learning cycle (every {_learning_hours}h)",
             replace_existing=True,
             max_instances=1,
             next_run_time=datetime.now(),  # run immediately on startup
@@ -154,10 +159,10 @@ def start_scheduler():
             trigger=CronTrigger(
                 day_of_week="mon-fri",
                 hour="9-16",
-                minute="*/15",
+                minute="*/2",
             ),
             id="broker_sync",
-            name="Robinhood position sync (market hours)",
+            name="Robinhood order+position sync (market hours every 2min)",
             replace_existing=True,
             max_instances=1,
         )
@@ -190,7 +195,11 @@ def start_scheduler():
         )
 
         _scheduler.start()
-        logger.info("[scheduler] Trading scheduler started (learning every 4h, weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, momentum scanner 9:30-11AM ET market hours)")
+        logger.info(
+            f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
+            "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
+            "momentum scanner 9:30-11AM ET market hours)"
+        )
 
 
 def stop_scheduler():

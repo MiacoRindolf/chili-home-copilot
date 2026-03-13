@@ -234,17 +234,102 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .trade-form input, .trade-form select { padding: 5px 8px; font-size: 12px; border: 1px solid var(--input-border); border-radius: 6px; background: var(--input-bg); color: var(--text); }
 .trade-form input { width: 80px; }
 .trade-form button { padding: 5px 12px; border: none; border-radius: 6px; background: #22c55e; color: #fff; cursor: pointer; font-size: 12px; }
+.trades-toolbar { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 8px; }
+.trades-toolbar select, .trades-toolbar label { font-size: 11px; color: var(--text-secondary); }
+.trades-toolbar select { padding: 3px 6px; border: 1px solid var(--input-border); border-radius: 5px; background: var(--input-bg); color: var(--text); }
+.trades-toolbar label { display: flex; align-items: center; gap: 3px; cursor: pointer; }
 table.trades { width: 100%; border-collapse: collapse; font-size: 11px; }
-table.trades th { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 600; }
-table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
+table.trades th { text-align: left; padding: 6px 6px; border-bottom: 2px solid var(--border); color: var(--text-secondary); font-weight: 600; font-size: 10px; text-transform: uppercase; letter-spacing: 0.3px; }
+table.trades td { padding: 6px 6px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+table.trades tr:hover { background: rgba(255,255,255,0.02); }
 .pnl-pos { color: #22c55e; font-weight: 600; }
 .pnl-neg { color: #ef4444; font-weight: 600; }
+.trade-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.3px; }
+.trade-badge.rh { background: rgba(0,200,5,0.12); color: #22c55e; }
+.trade-badge.manual { background: rgba(245,158,11,0.12); color: #f59e0b; }
+.trade-status-badge { display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 600; }
+.trade-status-badge.open { background: rgba(34,197,94,0.12); color: #22c55e; }
+.trade-status-badge.working { background: rgba(59,130,246,0.12); color: #3b82f6; }
+.trade-status-badge.closed { background: rgba(107,114,128,0.12); color: #9ca3af; }
+.trade-status-badge.cancelled { background: rgba(239,68,68,0.12); color: #ef4444; }
+.trade-actions { display: flex; gap: 3px; flex-wrap: nowrap; }
+.trade-actions button { font-size: 10px; padding: 2px 7px; border: none; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.trade-actions .btn-sell { background: #3b82f6; color: #fff; }
+.trade-actions .btn-sell:hover { background: #2563eb; }
+.trade-actions .btn-close-all { background: #ef4444; color: #fff; }
+.trade-actions .btn-close-all:hover { background: #dc2626; }
+.trade-actions .btn-delete { background: transparent; color: var(--text-secondary); border: 1px solid var(--border); }
+.trade-actions .btn-delete:hover { border-color: #ef4444; color: #ef4444; }
+.sell-dialog-overlay { display: none; position: fixed; top: 0; left: 0; right: 0; bottom: 0; z-index: 9999; background: rgba(0,0,0,0.5); backdrop-filter: blur(3px); justify-content: center; align-items: center; }
+.sell-dialog-overlay.active { display: flex; }
+.sell-dialog { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 16px 20px; width: 320px; max-width: 90vw; }
+.sell-dialog h4 { margin: 0 0 10px; font-size: 14px; }
+.sell-dialog .sell-row { display: flex; gap: 6px; margin-bottom: 8px; }
+.sell-dialog .sell-row label { font-size: 11px; color: var(--text-secondary); min-width: 60px; }
+.sell-dialog .sell-row input { flex: 1; padding: 5px 8px; font-size: 12px; border: 1px solid var(--input-border); border-radius: 6px; background: var(--input-bg); color: var(--text); }
+.sell-dialog .sell-buttons { display: flex; gap: 6px; justify-content: flex-end; margin-top: 10px; }
+.sell-dialog .sell-buttons button { padding: 5px 14px; border: none; border-radius: 6px; cursor: pointer; font-size: 12px; }
+.sell-dialog .sell-buttons .btn-confirm { background: #3b82f6; color: #fff; }
+.sell-dialog .sell-buttons .btn-cancel { background: var(--input-bg); color: var(--text-secondary); border: 1px solid var(--border); }
 
 /* Stats */
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(120px, 1fr)); gap: 6px; margin-bottom: 10px; }
+.stats-grid { display: grid; grid-template-columns: repeat(6, minmax(100px, 140px)); gap: 6px; margin-bottom: 10px; justify-content: center; }
+.stats-grid .stat-card { text-align: center; width: 100%; }
+.stats-grid .stat-card .stat-val,
+.stats-grid .stat-card .stat-lbl { text-align: center; display: block; }
 .stat-card { background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px; text-align: center; }
 .stat-card .stat-val { font-size: 18px; font-weight: 700; }
 .stat-card .stat-lbl { font-size: 10px; color: var(--text-secondary); margin-top: 2px; }
+.stats-section { margin-bottom: 16px; }
+.stats-section-title { font-size: 11px; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px; }
+
+/* Overview hero row — centered, narrow cards */
+.stats-overview { display: flex; justify-content: center; gap: 12px; flex-wrap: nowrap; max-width: 560px; margin: 0 auto 14px; }
+.stats-overview .stat-card.stat-hero { flex: 0 0 auto; min-width: 130px; max-width: 170px; padding: 10px 18px; border-radius: 10px; }
+.stats-overview .stat-card.stat-hero .stat-val { font-size: 20px; font-weight: 800; }
+.stats-overview .stat-card.stat-hero .stat-lbl { font-size: 10px; color: var(--text-secondary); margin-top: 3px; }
+.stats-overview .stat-card.stat-hero.pnl-pos .stat-val { color: #22c55e; }
+.stats-overview .stat-card.stat-hero.pnl-neg .stat-val { color: #ef4444; }
+
+/* Calendar + Day-detail 50/50 row — same fixed height, day-detail scrollable */
+.stats-calendar-row { display: flex; gap: 12px; align-items: flex-start; --stats-cal-height: 380px; }
+.stats-calendar-row .stats-calendar-wrap { flex: 1 1 50%; min-width: 0; box-sizing: border-box; height: var(--stats-cal-height); max-height: var(--stats-cal-height); overflow: hidden; display: flex; flex-direction: column; }
+.stats-calendar-row .stats-calendar-wrap .stats-calendar-grid { overflow-y: auto; min-height: 0; flex: 1; }
+.stats-calendar-row .stats-day-detail { flex: 1 1 50%; min-width: 0; box-sizing: border-box; margin-top: 0; height: var(--stats-cal-height); max-height: var(--stats-cal-height); overflow-y: auto; }
+.stats-day-detail-placeholder { color: var(--text-muted); font-size: 12px; text-align: center; padding: 28px 12px; }
+.stats-day-detail .stats-day-trades tbody tr { cursor: pointer; }
+.stats-day-detail .stats-day-trades tbody tr:hover { background: rgba(255,255,255,0.06); }
+
+.stats-calendar-wrap { background: var(--bg); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+.stats-calendar-wrap .stats-calendar-header { flex-shrink: 0; }
+.stats-calendar-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.stats-calendar-title { font-size: 14px; font-weight: 700; }
+.stats-calendar-nav { display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%; }
+.stats-calendar-nav button { padding: 6px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--input-bg); color: var(--text); cursor: pointer; font-size: 12px; }
+.stats-calendar-nav button:hover { border-color: var(--accent); }
+.stats-calendar-day .stats-cal-day-num,
+.stats-calendar-day .stats-cal-day-pnl,
+.stats-calendar-day .stats-cal-day-count { display: block; font-size: 10px; }
+.stats-calendar-day .stats-cal-day-num { font-weight: 700; }
+.stats-calendar-day.pnl-pos .stats-cal-day-pnl,
+.stats-calendar-day.pnl-neg .stats-cal-day-pnl { font-weight: 600; }
+.stats-calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 2px; font-size: 10px; }
+.stats-calendar-dow { text-align: center; padding: 4px; color: var(--text-secondary); font-weight: 600; }
+.stats-calendar-day { min-height: 36px; padding: 4px; border-radius: 6px; cursor: pointer; text-align: center; background: var(--input-bg); border: 1px solid transparent; }
+.stats-calendar-day:hover { border-color: var(--accent); }
+.stats-calendar-day.other-month { opacity: 0.4; }
+.stats-calendar-day.has-trades { font-weight: 700; }
+.stats-calendar-day.pnl-pos { background: rgba(34,197,94,0.15); color: #22c55e; }
+.stats-calendar-day.pnl-neg { background: rgba(239,68,68,0.15); color: #ef4444; }
+.stats-day-num { font-size: 11px; }
+.stats-day-pnl { font-size: 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.stats-day-detail { padding: 10px; background: var(--input-bg); border: 1px solid var(--border); border-radius: 10px; font-size: 11px; }
+.stats-day-detail-title { font-weight: 700; margin-bottom: 8px; }
+.stats-day-detail table.stats-day-trades { width: 100%; border-collapse: collapse; font-size: 11px; margin-bottom: 8px; }
+.stats-day-detail table.stats-day-trades th, .stats-day-detail table.stats-day-trades td { padding: 4px 8px; text-align: left; border-bottom: 1px solid var(--border); }
+.stats-day-summary { font-size: 11px; font-weight: 600; }
+.stats-day-trade { display: flex; justify-content: space-between; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.stats-day-trade:last-child { border-bottom: none; }
 
 /* ── AI Chat panel ───────────────────────────────── */
 .t-ai {
@@ -704,6 +789,66 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 }
 .prop-btn-reject:hover { border-color: #ef4444; color: #ef4444; }
 .prop-expiry { font-size: 9px; color: var(--text-muted); }
+.prop-btn-recheck {
+  padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px; font-weight: 600;
+  font-size: 12px; background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.prop-btn-recheck:hover { color: var(--accent); border-color: var(--accent); }
+.prop-btn-create-proposal {
+  padding: 6px 16px; border: none; border-radius: 8px; font-weight: 700; font-size: 12px;
+  background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: #fff; cursor: pointer;
+  transition: transform .1s;
+}
+.prop-btn-create-proposal:hover { transform: scale(1.03); }
+
+/* ── Best ideas list ──────────────────────────────── */
+.best-ideas-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 6px;
+}
+.best-ideas-list {
+  display: flex; flex-direction: column; gap: 8px;
+}
+.best-ideas-list .picks-empty { text-align: center; padding: 24px 12px; color: var(--text-muted); }
+.best-idea-row {
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px;
+  background: var(--bg); position: relative; overflow: hidden;
+  transition: box-shadow .2s; cursor: pointer;
+}
+.best-idea-row:hover { box-shadow: 0 3px 14px rgba(139,92,246,.1); }
+.best-idea-row.is-proposal { border-left: 3px solid #8b5cf6; }
+.best-idea-row.is-pick { border-left: 3px solid #3b82f6; }
+.bi-top { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+.bi-ticker { font-weight: 800; font-size: 15px; letter-spacing: .3px; }
+.bi-type-badge {
+  font-size: 9px; font-weight: 700; padding: 2px 8px; border-radius: 20px; text-transform: uppercase;
+}
+.bi-type-badge.proposal { background: #f3e8ff; color: #7c3aed; }
+.bi-type-badge.pick { background: #dbeafe; color: #2563eb; }
+.bi-body { display: grid; grid-template-columns: 1fr 1fr 1fr auto; gap: 8px; align-items: center; }
+.bi-levels {
+  display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px;
+  background: var(--bg-header); border-radius: 8px; padding: 6px;
+  grid-column: 1 / -1;
+}
+.bi-lv { text-align: center; }
+.bi-lbl { font-size: 8px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); }
+.bi-val { font-weight: 700; font-family: monospace; font-size: 12px; }
+.bi-val.entry { color: #3b82f6; }
+.bi-val.stop { color: #ef4444; }
+.bi-val.target { color: #22c55e; }
+.bi-metrics { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 6px; }
+.bi-metric { display: flex; flex-direction: column; align-items: center; font-size: 9px; }
+.bi-metric-lbl { color: var(--text-muted); font-size: 8px; text-transform: uppercase; }
+.bi-metric-val { font-weight: 700; font-size: 13px; }
+.bi-metric-val.profit { color: #22c55e; }
+.bi-metric-val.loss { color: #ef4444; }
+.bi-metric-val.rr { color: #3b82f6; }
+.bi-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+.bi-conf { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.bi-conf-bar { flex: 1; height: 5px; background: var(--border); border-radius: 3px; overflow: hidden; max-width: 100px; }
+.bi-conf-fill { height: 100%; border-radius: 3px; }
+.bi-meta { font-size: 9px; color: var(--text-muted); display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
 
 /* ── Alerts settings ──────────────────────────────── */
 .alerts-settings-bar {
@@ -1507,6 +1652,8 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
   .trade-form input { width: 60px; }
   table.trades { font-size: 10px; }
   table.trades th, table.trades td { padding: 3px 4px; }
+  .trades-toolbar { gap: 4px; }
+  .trade-badge, .trade-status-badge { font-size: 8px; padding: 1px 3px; }
 }
 
 /* ═══════════════════════════════════════════════════
@@ -1829,22 +1976,22 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
 
     <!-- Bottom tabs -->
     <div class="t-bottom">
-      <div class="t-tabs">
-        <div class="t-tab active" data-tab="signals" onclick="switchTab(this)">&#x1F7E2; Signals</div>
-        <div class="t-tab" data-tab="screener" onclick="switchTab(this)">&#x1F50D; Screener</div>
-        <div class="t-tab" data-tab="portfolio" onclick="switchTab(this)">&#x1F4B0; Portfolio</div>
-        <div class="t-tab" data-tab="backtest" onclick="switchTab(this)">&#x1F9EA; Backtest</div>
-        <div class="t-tab" data-tab="trades" onclick="switchTab(this)">Trades</div>
-        <div class="t-tab" data-tab="journal" onclick="switchTab(this)">Journal</div>
-        <div class="t-tab" data-tab="stats" onclick="switchTab(this)">Stats</div>
-        <div class="t-tab" data-tab="swap" onclick="switchTab(this)">&#x1F98A; Swap</div>
+      <div class="t-tabs" role="tablist" id="t-tabs">
+        <div class="t-tab active" role="tab" draggable="true" data-tab="signals" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">&#x1F7E2; Signals</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="screener" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">&#x1F50D; Screener</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="portfolio" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">&#x1F4B0; Portfolio</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="backtest" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">&#x1F9EA; Backtest</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="trades" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">Trades</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="journal" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">Journal</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="stats" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">Stats</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="swap" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)">&#x1F98A; Swap</div>
       </div>
 
       <!-- Signals -->
       <div class="t-tab-content active" id="tab-signals">
         <div class="sig-toolbar">
           <button class="sig-btn sig-btn-primary" onclick="runFullScan()" id="btn-refresh-picks">&#x1F50D; Full Market Scan</button>
-          <button class="sig-btn sig-btn-ghost" onclick="loadTopPicks()">&#x21BB; Refresh Picks</button>
+          <button class="sig-btn sig-btn-ghost" onclick="loadBestIdeas()">&#x21BB; Refresh</button>
           <button class="sig-btn sig-btn-ghost" onclick="toggleAlertSettings()" title="Alert Settings">&#x2699; Alerts</button>
           <span id="picks-status" class="sig-status"></span>
         </div>
@@ -1858,19 +2005,14 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
           </div>
         </div>
 
-        <div id="proposals-section" class="proposals-section" style="display:none">
-          <h4>&#x1F4CB; Strategy Proposals <span id="proposals-count" class="sig-badge-count"></span></h4>
-          <div id="proposals-list"></div>
-        </div>
-
-        <div class="sig-section-label" id="picks-section-label" style="display:none">
+        <div class="best-ideas-header" id="best-ideas-header" style="display:none">
           <div>
-            <span>&#x1F9E0; AI Top Picks</span>
-            <span class="sig-section-count" id="picks-total-count"></span>
+            <span style="font-weight:700;font-size:13px">Best Ideas</span>
+            <span class="sig-section-count" id="best-ideas-count"></span>
           </div>
-          <span id="picks-freshness" class="picks-freshness" style="font-size:11px;color:var(--text-muted);font-weight:400"></span>
+          <span id="best-ideas-freshness" class="picks-freshness" style="font-size:11px;color:var(--text-muted);font-weight:400"></span>
         </div>
-        <div id="signals-list" class="picks-grid">
+        <div id="best-ideas-list" class="best-ideas-list">
           <div class="picks-empty">
             <div class="pe-icon">&#x1F50D;</div>
             <div class="pe-title">Run a Full Market Scan</div>
@@ -2008,10 +2150,35 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
           <input id="tf-price" type="number" step="0.01" placeholder="Entry $" />
           <input id="tf-qty" type="number" step="0.01" value="1" placeholder="Qty" />
           <button onclick="createTrade()">Open Trade</button>
+          <button class="broker-sync-btn" id="trades-tab-sync-btn" onclick="syncBroker()" style="display:none">Sync with Robinhood</button>
+        </div>
+        <div class="trades-toolbar">
+          <select id="trades-filter-status" onchange="applyTradesFilter()">
+            <option value="all">All Statuses</option>
+            <option value="open" selected>Open</option>
+            <option value="closed">Closed</option>
+            <option value="working">Working</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <label><input type="checkbox" id="trades-filter-rh" onchange="applyTradesFilter()"> Robinhood only</label>
         </div>
         <table class="trades"><thead><tr>
-          <th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th></th>
+          <th>Ticker</th><th>Source</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th>Actions</th>
         </tr></thead><tbody id="trades-body"></tbody></table>
+      </div>
+
+      <!-- Sell Dialog -->
+      <div class="sell-dialog-overlay" id="sell-dialog-overlay">
+        <div class="sell-dialog">
+          <h4 id="sell-dialog-title">Sell</h4>
+          <div class="sell-row"><label>Qty</label><input type="number" id="sell-qty" step="0.01" min="0.01" /></div>
+          <div class="sell-row"><label>Limit $</label><input type="number" id="sell-limit" step="0.01" placeholder="Market (blank)" /></div>
+          <div style="font-size:10px;color:var(--text-secondary)" id="sell-dialog-info"></div>
+          <div class="sell-buttons">
+            <button class="btn-cancel" onclick="closeSellDialog()">Cancel</button>
+            <button class="btn-confirm" onclick="confirmSell()">Place Sell</button>
+          </div>
+        </div>
       </div>
       <!-- Journal -->
       <div class="t-tab-content" id="tab-journal">
@@ -2023,7 +2190,17 @@ table.trades td { padding: 4px 6px; border-bottom: 1px solid var(--border); }
       </div>
       <!-- Stats -->
       <div class="t-tab-content" id="tab-stats">
-        <div class="stats-grid" id="stats-grid"></div>
+        <div id="stats-empty" style="display:none"></div>
+        <div class="stats-overview" id="stats-overview"></div>
+        <div id="stats-real" style="display:none"></div>
+        <div id="stats-paper" style="display:none"></div>
+        <div class="stats-calendar-row">
+          <div class="stats-calendar-wrap">
+            <div class="stats-calendar-header" id="stats-cal-header"></div>
+            <div class="stats-calendar-grid" id="stats-cal-grid"></div>
+          </div>
+          <div id="stats-day-detail" class="stats-day-detail" style="display:none"></div>
+        </div>
       </div>
 
       <!-- Swap -->
@@ -2378,6 +2555,7 @@ var btChart = null;
 var btEquitySeries = null;
 
 document.addEventListener('DOMContentLoaded', function() {
+  initTabOrder();
   initChart();
   _initDrawingListeners();
   buildIndicatorPanel();
@@ -3032,16 +3210,68 @@ function _wlInputHandler(e) {
 }
 
 /* ── Trades ─────────────────────────────────────── */
+var _allTrades = [];
+var _sellTradeId = null;
+
 function loadTrades() {
   fetch('/api/trading/trades').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var body = document.getElementById('trades-body');
-    body.innerHTML = '';
-    d.trades.forEach(function(t) {
-      var pnlCls = t.pnl > 0 ? 'pnl-pos' : (t.pnl < 0 ? 'pnl-neg' : '');
-      var closeBtn = t.status === 'open' ? '<button onclick="promptClose('+t.id+')" style="font-size:11px;padding:2px 8px;border:none;border-radius:4px;background:#ef4444;color:#fff;cursor:pointer">Close</button>' : '';
-      body.innerHTML += '<tr><td>'+t.ticker+'</td><td>'+t.direction+'</td><td>$'+t.entry_price+'</td><td>'+(t.exit_price?'$'+t.exit_price:'-')+'</td><td>'+t.quantity+'</td><td class="'+pnlCls+'">'+(t.pnl!=null?'$'+t.pnl:'-')+'</td><td>'+t.status+'</td><td>'+closeBtn+'</td></tr>';
-    });
+    _allTrades = d.trades;
+    applyTradesFilter();
+  });
+}
+
+function applyTradesFilter() {
+  var statusFilter = document.getElementById('trades-filter-status').value;
+  var rhOnly = document.getElementById('trades-filter-rh').checked;
+  var body = document.getElementById('trades-body');
+  body.innerHTML = '';
+
+  var filtered = _allTrades.filter(function(t) {
+    if (statusFilter !== 'all' && t.status !== statusFilter) return false;
+    if (rhOnly && t.broker_source !== 'robinhood') return false;
+    return true;
+  });
+
+  if (!filtered.length) {
+    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:16px">No trades match the current filter.</td></tr>';
+    return;
+  }
+
+  filtered.forEach(function(t) {
+    var pnlCls = t.pnl > 0 ? 'pnl-pos' : (t.pnl < 0 ? 'pnl-neg' : '');
+    var pnlStr = t.pnl != null ? '$' + t.pnl.toFixed(2) : '-';
+
+    var srcBadge = t.broker_source === 'robinhood'
+      ? '<span class="trade-badge rh">RH</span>'
+      : '<span class="trade-badge manual">Manual</span>';
+
+    var statusCls = t.status === 'open' ? 'open' : (t.status === 'working' ? 'working' : (t.status === 'closed' ? 'closed' : 'cancelled'));
+    var statusLabel = t.status;
+    if (t.status === 'working' && t.broker_status) statusLabel = 'Working (' + t.broker_status + ')';
+    var statusBadge = '<span class="trade-status-badge ' + statusCls + '">' + statusLabel + '</span>';
+
+    var entryStr = t.entry_price < 1 ? '$' + t.entry_price.toFixed(6) : '$' + t.entry_price.toFixed(2);
+    var exitStr = t.exit_price ? (t.exit_price < 1 ? '$' + t.exit_price.toFixed(6) : '$' + t.exit_price.toFixed(2)) : '-';
+
+    var actions = '<div class="trade-actions">';
+    if (t.status === 'open') {
+      actions += '<button class="btn-sell" onclick="openSellDialog(' + t.id + ',\'' + t.ticker + '\',' + t.quantity + ',' + t.entry_price + ',\'' + (t.broker_source || '') + '\')">Sell</button>'
+        + '<button class="btn-close-all" onclick="promptClose(' + t.id + ')">Close</button>';
+    }
+    actions += '<button class="btn-delete" onclick="deleteTrade(' + t.id + ',\'' + (t.ticker || '').replace(/'/g, "\\'") + '\')" title="Remove this trade">Delete</button></div>';
+
+    body.innerHTML += '<tr>'
+      + '<td style="font-weight:600">' + t.ticker + '</td>'
+      + '<td>' + srcBadge + '</td>'
+      + '<td>' + t.direction + '</td>'
+      + '<td>' + entryStr + '</td>'
+      + '<td>' + exitStr + '</td>'
+      + '<td>' + t.quantity + '</td>'
+      + '<td class="' + pnlCls + '">' + pnlStr + '</td>'
+      + '<td>' + statusBadge + '</td>'
+      + '<td>' + actions + '</td>'
+      + '</tr>';
   });
 }
 
@@ -3061,6 +3291,77 @@ function promptClose(id) {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ exit_price: parseFloat(price) })
   }).then(function() { loadTrades(); loadStats(); loadInsights(); });
+}
+
+function deleteTrade(id, ticker) {
+  if (!confirm('Remove trade ' + (ticker ? ticker + ' ' : '') + '(ID ' + id + ')? This cannot be undone.')) return;
+  var opts = { method: 'DELETE', credentials: 'same-origin' };
+  fetch('/api/trading/trades/' + id, opts).then(function(r) {
+    return r.text().then(function(t) {
+      var d = null;
+      try { d = t ? JSON.parse(t) : {}; } catch(e) {}
+      return { status: r.status, data: d };
+    });
+  }).then(function(res) {
+    if (res.data && res.data.ok) { loadTrades(); loadStats(); return; }
+    if (res.status === 403) { alert(res.data && res.data.error ? res.data.error : 'You don\'t have permission to delete this trade.'); return; }
+    if (res.status === 404) {
+      loadTrades();
+      alert(res.data && res.data.error ? res.data.error : 'Trade not found. It may have been deleted already.');
+      return;
+    }
+    alert(res.data && res.data.error ? res.data.error : 'Could not delete trade');
+  }).catch(function() { alert('Could not delete trade'); });
+}
+
+function openSellDialog(tradeId, ticker, maxQty, entryPrice, brokerSrc) {
+  _sellTradeId = tradeId;
+  document.getElementById('sell-dialog-title').textContent = 'Sell ' + ticker;
+  document.getElementById('sell-qty').value = maxQty;
+  document.getElementById('sell-qty').max = maxQty;
+  document.getElementById('sell-limit').value = '';
+  var info = 'Max qty: ' + maxQty + ' | Entry: $' + entryPrice.toFixed(2);
+  if (brokerSrc === 'robinhood') info += ' | Routed to Robinhood';
+  else info += ' | Simulated (manual trade)';
+  document.getElementById('sell-dialog-info').textContent = info;
+  document.getElementById('sell-dialog-overlay').classList.add('active');
+}
+
+function closeSellDialog() {
+  _sellTradeId = null;
+  document.getElementById('sell-dialog-overlay').classList.remove('active');
+}
+
+function confirmSell() {
+  if (!_sellTradeId) return;
+  var qty = parseFloat(document.getElementById('sell-qty').value);
+  var limit = document.getElementById('sell-limit').value ? parseFloat(document.getElementById('sell-limit').value) : null;
+  if (!qty || qty <= 0) { alert('Enter a valid quantity'); return; }
+  var payload = { quantity: qty };
+  if (limit) payload.limit_price = limit;
+
+  var btn = document.querySelector('.sell-dialog .btn-confirm');
+  btn.textContent = 'Selling...'; btn.disabled = true;
+
+  fetch('/api/trading/trades/' + _sellTradeId + '/sell', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(payload)
+  }).then(function(r){ return r.json(); }).then(function(d) {
+    btn.textContent = 'Place Sell'; btn.disabled = false;
+    closeSellDialog();
+    if (d.ok) {
+      var msg = 'Sold ' + d.sold_qty + ' shares';
+      if (d.rh_state) msg += ' (RH: ' + d.rh_state + ')';
+      if (d.remaining_qty > 0) msg += ', ' + d.remaining_qty + ' remaining';
+      appendAiMsg('assistant', msg);
+      loadTrades(); loadStats(); loadRhPortfolio(); loadPortfolio();
+    } else {
+      alert(d.error || 'Sell failed');
+    }
+  }).catch(function() {
+    btn.textContent = 'Place Sell'; btn.disabled = false;
+    closeSellDialog();
+  });
 }
 
 /* ── Journal ────────────────────────────────────── */
@@ -3085,25 +3386,158 @@ function addJournal() {
 }
 
 /* ── Stats ──────────────────────────────────────── */
+var _statsCalendarYear = new Date().getFullYear();
+var _statsCalendarMonth = new Date().getMonth() + 1;
+
 function loadStats() {
   fetch('/api/trading/journal/stats').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var grid = document.getElementById('stats-grid');
-    grid.innerHTML = '';
-    if (!d.total_trades) { grid.innerHTML = '<div style="color:var(--text-muted)">No closed trades yet</div>'; return; }
-    var cards = [
-      ['Total Trades', d.total_trades],
-      ['Win Rate', d.win_rate + '%'],
-      ['Total P&L', '$' + d.total_pnl],
-      ['Avg P&L', '$' + d.avg_pnl],
-      ['Best Trade', '$' + d.best_trade],
-      ['Worst Trade', '$' + d.worst_trade],
-      ['Max Drawdown', '$' + d.max_drawdown],
-    ];
-    cards.forEach(function(c) {
-      grid.innerHTML += '<div class="stat-card"><div class="stat-val">'+c[1]+'</div><div class="stat-lbl">'+c[0]+'</div></div>';
-    });
+    var bySource = d.by_source || {};
+    var all = bySource.all || d;
+    var real = bySource.real || { total_trades: 0 };
+    var paper = bySource.paper || { total_trades: 0 };
+
+    var overview = document.getElementById('stats-overview');
+    var realEl = document.getElementById('stats-real');
+    var paperEl = document.getElementById('stats-paper');
+    var emptyEl = document.getElementById('stats-empty');
+
+    if (!all.total_trades) {
+      overview.style.display = 'none';
+      realEl.style.display = 'none';
+      paperEl.style.display = 'none';
+      emptyEl.style.display = 'block';
+      emptyEl.innerHTML = '<div class="stats-empty-msg">No closed trades yet. Close a trade to see your stats here.</div>';
+      loadStatsCalendar();
+      return;
+    }
+    emptyEl.style.display = 'none';
+    overview.style.display = '';
+
+    var pnlCls = (all.total_pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg';
+    overview.innerHTML =
+      '<div class="stat-card stat-hero"><div class="stat-val">' + all.total_trades + '</div><div class="stat-lbl">Total Trades</div></div>' +
+      '<div class="stat-card stat-hero"><div class="stat-val">' + (all.win_rate || 0) + '%</div><div class="stat-lbl">Win Rate</div></div>' +
+      '<div class="stat-card stat-hero ' + pnlCls + '"><div class="stat-val">$' + (all.total_pnl || 0) + '</div><div class="stat-lbl">Total P&L</div></div>';
+
+    if (real.total_trades > 0) {
+      realEl.style.display = '';
+      var rPnlCls = (real.total_pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg';
+      realEl.innerHTML =
+        '<h4 class="stats-section-title">Real (Robinhood)</h4>' +
+        '<div class="stats-grid">' +
+        '<div class="stat-card"><div class="stat-val">' + real.total_trades + '</div><div class="stat-lbl">Trades</div></div>' +
+        '<div class="stat-card"><div class="stat-val">' + (real.win_rate || 0) + '%</div><div class="stat-lbl">Win Rate</div></div>' +
+        '<div class="stat-card ' + rPnlCls + '"><div class="stat-val">$' + (real.total_pnl || 0) + '</div><div class="stat-lbl">P&L</div></div>' +
+        '<div class="stat-card pnl-pos"><div class="stat-val">$' + (real.best_trade || 0) + '</div><div class="stat-lbl">Best</div></div>' +
+        '<div class="stat-card pnl-neg"><div class="stat-val">$' + (real.worst_trade || 0) + '</div><div class="stat-lbl">Worst</div></div>' +
+        '<div class="stat-card"><div class="stat-val">$' + (real.max_drawdown || 0) + '</div><div class="stat-lbl">Max DD</div></div>' +
+        '</div>';
+    } else {
+      realEl.style.display = 'none';
+    }
+
+    if (paper.total_trades > 0) {
+      paperEl.style.display = '';
+      var pPnlCls = (paper.total_pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg';
+      paperEl.innerHTML =
+        '<h4 class="stats-section-title">Paper / Manual</h4>' +
+        '<div class="stats-grid">' +
+        '<div class="stat-card"><div class="stat-val">' + paper.total_trades + '</div><div class="stat-lbl">Trades</div></div>' +
+        '<div class="stat-card"><div class="stat-val">' + (paper.win_rate || 0) + '%</div><div class="stat-lbl">Win Rate</div></div>' +
+        '<div class="stat-card ' + pPnlCls + '"><div class="stat-val">$' + (paper.total_pnl || 0) + '</div><div class="stat-lbl">P&L</div></div>' +
+        '<div class="stat-card pnl-pos"><div class="stat-val">$' + (paper.best_trade || 0) + '</div><div class="stat-lbl">Best</div></div>' +
+        '<div class="stat-card pnl-neg"><div class="stat-val">$' + (paper.worst_trade || 0) + '</div><div class="stat-lbl">Worst</div></div>' +
+        '<div class="stat-card"><div class="stat-val">$' + (paper.max_drawdown || 0) + '</div><div class="stat-lbl">Max DD</div></div>' +
+        '</div>';
+    } else {
+      paperEl.style.display = 'none';
+    }
+
+    loadStatsCalendar();
   });
+}
+
+function loadStatsCalendar() {
+  var url = '/api/trading/journal/calendar?year=' + _statsCalendarYear + '&month=' + _statsCalendarMonth;
+  fetch(url).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    renderStatsCalendar(d.days || [], d.year || _statsCalendarYear, d.month || _statsCalendarMonth);
+  });
+}
+
+var _statsDayMap = {};
+
+function renderStatsCalendar(days, year, month) {
+  var header = document.getElementById('stats-cal-header');
+  var grid = document.getElementById('stats-cal-grid');
+  var dayDetail = document.getElementById('stats-day-detail');
+
+  _statsDayMap = {};
+  (days || []).forEach(function(day) { _statsDayMap[day.date] = day; });
+
+  var monthNames = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  header.innerHTML =
+    '<div class="stats-calendar-nav">' +
+    '<button type="button" onclick="statsCalPrevMonth()">&#x276E;</button>' +
+    '<span class="stats-calendar-title">' + monthNames[month - 1] + ' ' + year + '</span>' +
+    '<button type="button" onclick="statsCalNextMonth()">&#x276F;</button></div>';
+
+  var firstDay = new Date(year, month - 1, 1);
+  var lastDay = new Date(year, month, 0);
+  var startPad = firstDay.getDay();
+  var numDays = lastDay.getDate();
+
+  var html = '<div class="stats-calendar-dow">Sun</div><div class="stats-calendar-dow">Mon</div><div class="stats-calendar-dow">Tue</div><div class="stats-calendar-dow">Wed</div><div class="stats-calendar-dow">Thu</div><div class="stats-calendar-dow">Fri</div><div class="stats-calendar-dow">Sat</div>';
+  for (var i = 0; i < startPad; i++) html += '<div class="stats-calendar-day other-month"></div>';
+  for (var d = 1; d <= numDays; d++) {
+    var dateStr = year + '-' + String(month).padStart(2,'0') + '-' + String(d).padStart(2,'0');
+    var info = _statsDayMap[dateStr];
+    var cls = 'stats-calendar-day';
+    var content = '<span class="stats-cal-day-num">' + d + '</span>';
+    var title = '';
+    if (info && (info.trade_count > 0 || info.pnl !== 0)) {
+      cls += ' has-trades ' + (info.pnl >= 0 ? 'pnl-pos' : 'pnl-neg');
+      content += '<span class="stats-cal-day-pnl">' + (info.pnl >= 0 ? '+' : '') + '$' + info.pnl + '</span>';
+      content += '<span class="stats-cal-day-count">' + info.trade_count + ' trade' + (info.trade_count !== 1 ? 's' : '') + '</span>';
+      title = info.trade_count + ' trade(s), ' + (info.pnl >= 0 ? '+' : '') + '$' + info.pnl;
+    }
+    html += '<div class="' + cls + '" data-date="' + dateStr + '" title="' + title + '" onclick="showDayDetail(\'' + dateStr + '\')">' + content + '</div>';
+  }
+  grid.innerHTML = html;
+  dayDetail.style.display = 'none';
+  dayDetail.innerHTML = '';
+}
+
+function statsCalPrevMonth() {
+  _statsCalendarMonth--;
+  if (_statsCalendarMonth < 1) { _statsCalendarMonth = 12; _statsCalendarYear--; }
+  loadStatsCalendar();
+}
+
+function statsCalNextMonth() {
+  _statsCalendarMonth++;
+  if (_statsCalendarMonth > 12) { _statsCalendarMonth = 1; _statsCalendarYear++; }
+  loadStatsCalendar();
+}
+
+function showDayDetail(dateStr) {
+  var info = _statsDayMap[dateStr];
+  var panel = document.getElementById('stats-day-detail');
+  panel.style.display = 'block';
+  if (!info || !info.trades || info.trades.length === 0) {
+    panel.innerHTML = '<div class="stats-day-detail-placeholder">No trades on ' + dateStr + '</div>';
+    return;
+  }
+  var rows = info.trades.map(function(t) {
+    var pcls = (t.pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg';
+    var tickerEsc = (t.ticker || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+    return '<tr class="stats-day-trade-row" data-ticker="' + (t.ticker || '').replace(/"/g, '&quot;') + '" onclick="selectTicker(\'' + tickerEsc + '\')"><td>' + (t.ticker || '') + '</td><td>' + t.direction + '</td><td class="' + pcls + '">$' + t.pnl + '</td></tr>';
+  }).join('');
+  panel.innerHTML =
+    '<h5>Closed on ' + dateStr + '</h5>' +
+    '<table class="stats-day-trades"><thead><tr><th>Ticker</th><th>Dir</th><th>P&L</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+    '<div class="stats-day-summary"><strong>Total:</strong> ' + info.trade_count + ' trade(s), <span class="' + ((info.pnl || 0) >= 0 ? 'pnl-pos' : 'pnl-neg') + '">$' + info.pnl + '</span></div>';
 }
 
 /* ── Brain Dashboard (Insights alias) ────────────── */
@@ -5250,7 +5684,82 @@ function _selectDaytrade(idx) {
   setTimeout(function() { drawDaytradeAnnotations(r); }, 600);
 }
 
-/* ── Tab switching ──────────────────────────────── */
+/* ── Tab switching and draggable order ──────────── */
+var _tabDragging = false;
+var _tabDragSrc = null;
+
+function handleTabClick(el) {
+  if (_tabDragging) return;
+  switchTab(el);
+}
+
+function tabDragStart(ev) {
+  _tabDragging = true;
+  _tabDragSrc = ev.target;
+  ev.dataTransfer.effectAllowed = 'move';
+  ev.dataTransfer.setData('text/plain', ev.target.dataset.tab);
+  ev.target.classList.add('t-tab-dragging');
+}
+
+function tabDragOver(ev) {
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = 'move';
+  if (ev.target.classList.contains('t-tab') && ev.target !== _tabDragSrc) {
+    ev.target.classList.add('t-tab-drop-target');
+  }
+}
+
+function tabDrop(ev) {
+  ev.preventDefault();
+  document.querySelectorAll('.t-tab').forEach(function(t){
+    t.classList.remove('t-tab-drop-target');
+  });
+  var tabName = ev.dataTransfer.getData('text/plain');
+  var target = ev.target.closest('.t-tab');
+  if (!target || !tabName) return;
+  var tabs = document.getElementById('t-tabs');
+  var src = tabs.querySelector('.t-tab[data-tab="'+tabName+'"]');
+  if (!src || src === target) return;
+  if (target.nextSibling) {
+    tabs.insertBefore(src, target);
+  } else {
+    tabs.appendChild(src);
+  }
+  _saveTabOrder();
+}
+
+function tabDragEnd(ev) {
+  _tabDragging = false;
+  _tabDragSrc = null;
+  ev.target.classList.remove('t-tab-dragging');
+  document.querySelectorAll('.t-tab').forEach(function(t){
+    t.classList.remove('t-tab-drop-target');
+  });
+}
+
+function _saveTabOrder() {
+  var tabs = document.querySelectorAll('#t-tabs .t-tab');
+  var order = Array.prototype.map.call(tabs, function(t){ return t.dataset.tab; });
+  localStorage.setItem('chili_tab_order', JSON.stringify(order));
+}
+
+function initTabOrder() {
+  var saved = localStorage.getItem('chili_tab_order');
+  if (!saved) return;
+  try {
+    var order = JSON.parse(saved);
+    var tabs = document.getElementById('t-tabs');
+    if (!tabs || !order.length) return;
+    var byTab = {};
+    Array.prototype.forEach.call(tabs.querySelectorAll('.t-tab'), function(t){
+      byTab[t.dataset.tab] = t;
+    });
+    order.forEach(function(name){
+      if (byTab[name]) tabs.appendChild(byTab[name]);
+    });
+  } catch (e) { /**/ }
+}
+
 function switchTab(el) {
   var tabName = el.dataset.tab;
   document.querySelectorAll('.t-tab').forEach(function(t){t.classList.remove('active');});
@@ -5426,48 +5935,222 @@ function recheckPick(ticker, entryPrice, btnEl) {
     .catch(function(){ btnEl.disabled = false; btnEl.textContent = 'Recheck'; });
 }
 
-function loadTopPicks() {
+function loadBestIdeas() {
   var status = document.getElementById('picks-status');
   if (status) status.textContent = 'Loading…';
-  fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(function(d) {
+  Promise.all([
+    fetch('/api/trading/top-picks').then(function(r){return r.json();}),
+    fetch('/api/trading/proposals').then(function(r){return r.json();})
+  ]).then(function(results) {
     if (status) status.textContent = '';
-    if (!d.ok) return;
-    var el = document.getElementById('signals-list');
-    var label = document.getElementById('picks-section-label');
-    var count = document.getElementById('picks-total-count');
-    if (!d.picks || !d.picks.length) {
-      if (label) label.style.display = 'none';
-      el.innerHTML = '<div class="picks-empty">' +
-        '<div class="pe-icon">&#x1F50D;</div>' +
-        '<div class="pe-title">No Top Picks Yet</div>' +
-        '<div class="pe-sub">Run a Full Market Scan to generate AI-driven trade ideas with entry, exit, risk, and projected returns.</div></div>';
-    } else {
-      if (label) { label.style.display = 'flex'; }
-      if (count) count.textContent = d.picks.length + ' picks';
-      var freshness = document.getElementById('picks-freshness');
-      if (freshness) {
-        var ageSec = d.age_seconds || 0;
-        var ageMin = Math.floor(ageSec / 60);
-        var ageStr = ageMin < 1 ? 'just now' : (ageMin === 1 ? '1 min ago' : ageMin + ' min ago');
-        var asOf = d.as_of ? new Date(d.as_of).toLocaleTimeString(undefined, {hour:'2-digit',minute:'2-digit'}) : '';
-        freshness.textContent = asOf ? 'As of ' + asOf + ' (' + ageStr + ')' : ageStr;
-        freshness.className = 'picks-freshness' + (d.is_stale ? ' picks-stale' : '');
-        if (d.is_stale && ageMin >= 15) {
-          freshness.title = 'May be stale — generated ' + ageMin + ' minutes ago. Consider refreshing.';
+    var picksData = results[0];
+    var propsData = results[1];
+    var picks = (picksData.ok && picksData.picks) ? picksData.picks : [];
+    var proposals = (propsData.ok && propsData.proposals) ? propsData.proposals : [];
+
+    var activeProposals = {};
+    proposals.forEach(function(p) {
+      if (['pending','approved','working'].indexOf(p.status) !== -1) {
+        if (!activeProposals[p.ticker] || (p.id > activeProposals[p.ticker].id)) {
+          activeProposals[p.ticker] = p;
         }
       }
-      el.innerHTML = '';
-      d.picks.forEach(function(p) { el.innerHTML += _renderPickCard(p, false); });
+    });
+
+    var merged = [];
+    var seen = {};
+    picks.forEach(function(pk) {
+      var t = pk.ticker;
+      seen[t] = true;
+      if (activeProposals[t]) {
+        merged.push({type:'proposal', proposal: activeProposals[t], pick: pk});
+      } else {
+        merged.push({type:'pick', pick: pk});
+      }
+    });
+    Object.keys(activeProposals).forEach(function(t) {
+      if (!seen[t]) merged.push({type:'proposal', proposal: activeProposals[t], pick: null});
+    });
+
+    merged.sort(function(a, b) {
+      var sa = a.proposal ? (a.proposal.confidence || 0) : (a.pick ? ((a.pick.brain_confidence || (a.pick.combined_score || 0) * 10)) : 0);
+      var sb = b.proposal ? (b.proposal.confidence || 0) : (b.pick ? ((b.pick.brain_confidence || (b.pick.combined_score || 0) * 10)) : 0);
+      return sb - sa;
+    });
+
+    var listEl = document.getElementById('best-ideas-list');
+    var header = document.getElementById('best-ideas-header');
+    var countEl = document.getElementById('best-ideas-count');
+    var freshness = document.getElementById('best-ideas-freshness');
+
+    if (!merged.length) {
+      if (header) header.style.display = 'none';
+      listEl.innerHTML = '<div class="picks-empty">' +
+        '<div class="pe-icon">&#x1F50D;</div>' +
+        '<div class="pe-title">No Ideas Yet</div>' +
+        '<div class="pe-sub">Run a Full Market Scan to generate AI-driven trade ideas with entry, exit, risk, and projected returns.</div></div>';
+    } else {
+      if (header) header.style.display = 'flex';
+      if (countEl) countEl.textContent = merged.length + ' ideas';
+      if (freshness && picksData.age_seconds != null) {
+        var ageSec = picksData.age_seconds || 0;
+        var ageMin = Math.floor(ageSec / 60);
+        var ageStr = ageMin < 1 ? 'just now' : (ageMin === 1 ? '1 min ago' : ageMin + ' min ago');
+        var asOf = picksData.as_of ? new Date(picksData.as_of).toLocaleTimeString(undefined, {hour:'2-digit',minute:'2-digit'}) : '';
+        freshness.textContent = asOf ? 'As of ' + asOf + ' (' + ageStr + ')' : ageStr;
+        freshness.className = 'picks-freshness' + (picksData.is_stale ? ' picks-stale' : '');
+      }
+      listEl.innerHTML = '';
+      merged.forEach(function(item) { listEl.innerHTML += _renderBestIdeaRow(item); });
     }
-    _loadTopPicksBanner(d);
+
+    _loadTopPicksBanner(picksData);
+    loadAlertHistory();
+    loadAlertSettings();
   }).catch(function() {
     if (status) status.textContent = '';
-    var el = document.getElementById('signals-list');
-    if (el) el.innerHTML = '<div class="picks-empty">' +
+    var listEl = document.getElementById('best-ideas-list');
+    if (listEl) listEl.innerHTML = '<div class="picks-empty">' +
       '<div class="pe-icon">&#x26A0;</div>' +
-      '<div class="pe-title">Could not load picks</div>' +
+      '<div class="pe-title">Could not load ideas</div>' +
       '<div class="pe-sub">The server may still be computing predictions. Try refreshing in a moment.</div></div>';
   });
+}
+
+function _renderBestIdeaRow(item) {
+  var isProposal = item.type === 'proposal';
+  var p = isProposal ? item.proposal : null;
+  var pk = item.pick || {};
+  var ticker = isProposal ? p.ticker : pk.ticker;
+  var isCr = (ticker || '').indexOf('-USD') !== -1;
+
+  var price = isProposal ? p.entry_price : (pk.price || pk.entry_price || 0);
+  var stop = isProposal ? p.stop_loss : (pk.stop_loss || pk.brain_stop || 0);
+  var target = isProposal ? p.take_profit : (pk.take_profit || pk.brain_target || 0);
+  var rr = isProposal ? p.risk_reward_ratio : (pk.risk_reward || 0);
+  var conf = isProposal ? (p.confidence || 0) : (pk.brain_confidence || Math.round((pk.combined_score || pk.score || 5) * 10));
+  var confColor = conf >= 70 ? '#22c55e' : (conf >= 50 ? '#f59e0b' : '#ef4444');
+  var profitPct = isProposal ? p.projected_profit_pct : pk.projected_profit_pct;
+  var lossPct = isProposal ? p.projected_loss_pct : null;
+  var rrText = rr ? rr.toFixed(1) + ':1' : '--';
+  var profText = profitPct ? ((profitPct > 0 ? '+' : '') + profitPct.toFixed(1) + '%') : '--';
+  var lossText = lossPct ? ('-' + Math.abs(lossPct).toFixed(1) + '%') : '--';
+  var direction = isProposal ? (p.direction || 'long') : (pk.signal || 'buy');
+
+  var html = '<div class="best-idea-row ' + (isProposal ? 'is-proposal' : 'is-pick') + '" onclick="selectTicker(\'' + ticker + '\')">';
+  html += '<div class="bi-top">';
+  html += '<div style="display:flex;align-items:center;gap:8px">';
+  html += '<span class="bi-ticker">' + ticker + '</span>';
+  html += '<span style="font-size:10px;color:var(--text-muted)">' + direction.toUpperCase() + '</span>';
+  if (isProposal) {
+    html += '<span class="bi-type-badge proposal">Proposal</span>';
+    html += '<span class="prop-status ' + (p.status || 'pending') + '">' + (p.status || 'pending') + '</span>';
+  } else {
+    html += '<span class="bi-type-badge pick">Pick</span>';
+  }
+  var swapBtn = isCr ? ' <button onclick="event.stopPropagation();prefillSwap(\'' + ticker.replace('-USD','') + '\')" style="font-size:9px;padding:1px 5px;border:1px solid var(--accent);border-radius:4px;background:transparent;color:var(--accent);cursor:pointer;font-weight:700">Swap</button>' : '';
+  if (swapBtn) html += swapBtn;
+  html += '</div>';
+  html += '<div class="bi-conf"><span style="font-size:9px;color:var(--text-muted)">Confidence</span>';
+  html += '<div class="bi-conf-bar"><div class="bi-conf-fill" style="width:' + Math.round(conf) + '%;background:' + confColor + '"></div></div>';
+  html += '<span style="font-size:11px;font-weight:700;color:' + confColor + '">' + Math.round(conf) + '%</span></div>';
+  html += '</div>';
+
+  html += '<div class="bi-levels">';
+  html += '<div class="bi-lv"><div class="bi-lbl">Entry</div><div class="bi-val entry">$' + smartPrice(price, isCr) + '</div></div>';
+  html += '<div class="bi-lv"><div class="bi-lbl">Stop Loss</div><div class="bi-val stop">$' + smartPrice(stop, isCr) + '</div></div>';
+  html += '<div class="bi-lv"><div class="bi-lbl">Target</div><div class="bi-val target">$' + smartPrice(target, isCr) + '</div></div>';
+  html += '</div>';
+
+  html += '<div class="bi-metrics">';
+  html += '<div class="bi-metric"><span class="bi-metric-lbl">Profit</span><span class="bi-metric-val profit">' + profText + '</span></div>';
+  if (isProposal) html += '<div class="bi-metric"><span class="bi-metric-lbl">Max Loss</span><span class="bi-metric-val loss">' + lossText + '</span></div>';
+  html += '<div class="bi-metric"><span class="bi-metric-lbl">R:R</span><span class="bi-metric-val rr">' + rrText + '</span></div>';
+  if (isProposal && p.quantity) html += '<div class="bi-metric"><span class="bi-metric-lbl">Qty</span><span class="bi-metric-val">' + p.quantity + '</span></div>';
+  if (isProposal && p.position_size_pct) html += '<div class="bi-metric"><span class="bi-metric-lbl">Position</span><span class="bi-metric-val">' + p.position_size_pct + '%</span></div>';
+  if (!isProposal && pk.combined_score) html += '<div class="bi-metric"><span class="bi-metric-lbl">Score</span><span class="bi-metric-val">' + (pk.combined_score || pk.score) + '/10</span></div>';
+  html += '</div>';
+
+  var thesis = isProposal ? p.thesis : pk.thesis;
+  if (thesis) {
+    html += '<div class="prop-thesis collapsed" onclick="event.stopPropagation();this.classList.toggle(\'collapsed\')">' + escHtml(thesis) + '</div>';
+  }
+
+  html += '<div class="bi-meta">';
+  if (isProposal) {
+    if (p.age_seconds != null) {
+      var asec = p.age_seconds;
+      var proposedAgo = asec < 60 ? 'just now' : (asec < 3600 ? Math.floor(asec/60) + ' min ago' : Math.floor(asec/3600) + 'h ago');
+      html += '<span>Proposed ' + proposedAgo + '</span>';
+    }
+    if (p.expires_in_seconds != null) {
+      var tl = '';
+      if (p.expires_in_seconds <= 0) tl = 'Expired';
+      else {
+        var m = Math.floor(p.expires_in_seconds / 60);
+        var h = Math.floor(m / 60);
+        m = m % 60;
+        tl = h ? h + 'h ' + m + 'm left' : m + 'm left';
+      }
+      html += '<span class="prop-expiry">' + tl + '</span>';
+    }
+    if (p.timeframe) html += '<span>Timeframe: ' + p.timeframe + '</span>';
+    if (p.brain_score) html += '<span>Brain: ' + (p.brain_score > 0 ? '+' : '') + p.brain_score.toFixed(1) + '</span>';
+    if (p.ml_probability) html += '<span>ML: ' + (p.ml_probability * 100).toFixed(0) + '%</span>';
+  } else {
+    if (pk.timeframe) html += '<span>' + pk.timeframe + (pk.best_strategy ? ' &middot; ' + pk.best_strategy : '') + '</span>';
+    if (pk.risk_level) html += '<span class="pc-risk ' + pk.risk_level + '">' + pk.risk_level.toUpperCase() + '</span>';
+    if (pk.scanned_at) html += '<span>Scan: ' + _formatRelativeTime(new Date(pk.scanned_at)) + '</span>';
+  }
+  html += '</div>';
+
+  html += '<div class="bi-actions" onclick="event.stopPropagation()">';
+  if (isProposal && p.status === 'pending') {
+    html += '<button class="prop-btn-approve" onclick="approveProposal(' + p.id + ', this)">Approve & Execute</button>';
+    html += '<button class="prop-btn-reject" onclick="rejectProposal(' + p.id + ', this)">Reject</button>';
+    html += '<button class="prop-btn-recheck" onclick="recheckProposal(' + p.id + ', this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
+  } else if (!isProposal) {
+    var entryVal = pk.entry_price || pk.price || 0;
+    var stopVal = pk.stop_loss || pk.brain_stop || 0;
+    var targetVal = pk.take_profit || pk.brain_target || 0;
+    html += '<button class="prop-btn-create-proposal" onclick="createProposalFromPick(\'' + escAttr(ticker) + '\', this, ' + entryVal + ', ' + stopVal + ', ' + targetVal + ')">Create Proposal</button>';
+    html += '<button class="prop-btn-recheck" onclick="recheckPick(\'' + escAttr(ticker) + '\',' + entryVal + ',this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
+  }
+  if (isProposal && p.status === 'executed' && p.broker_order_id) {
+    html += '<span style="font-size:10px;color:#22c55e">Order ID: ' + p.broker_order_id + '</span>';
+  }
+  html += '</div>';
+
+  html += '</div>';
+  return html;
+}
+
+function createProposalFromPick(ticker, btn, entryPrice, stopLoss, takeProfit) {
+  if (!btn || !ticker) return;
+  btn.disabled = true;
+  btn.textContent = 'Creating…';
+  var body = { ticker: ticker };
+  if (entryPrice != null && entryPrice > 0) body.entry_price = entryPrice;
+  if (stopLoss != null && stopLoss > 0) body.stop_loss = stopLoss;
+  if (takeProfit != null && takeProfit > 0) body.take_profit = takeProfit;
+  fetch('/api/trading/proposals/from-pick', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok) {
+        btn.textContent = 'Created!';
+        btn.style.background = '#22c55e';
+        setTimeout(function() { loadBestIdeas(); }, 800);
+      } else {
+        btn.disabled = false;
+        btn.textContent = 'Create Proposal';
+        alert(d.error || 'Could not create proposal');
+      }
+    })
+    .catch(function() { btn.disabled = false; btn.textContent = 'Create Proposal'; });
 }
 
 function _loadTopPicksBanner(prefetched) {
@@ -5489,8 +6172,10 @@ function _loadTopPicksBanner(prefetched) {
   fetch('/api/trading/top-picks').then(function(r){return r.json();}).then(_apply).catch(function() {});
 }
 
-function loadSignals() { loadTopPicks(); loadProposals(); }
+function loadSignals() { loadBestIdeas(); }
 function loadSignalsBanner() { _loadTopPicksBanner(); }
+function loadTopPicks() { loadBestIdeas(); }
+function loadProposals() { /* now handled by loadBestIdeas */ }
 
 function runFullScan() {
   var btn = event.target;
@@ -5506,121 +6191,7 @@ function runFullScan() {
     }).catch(function() { btn.textContent = '\uD83D\uDD0D Run Full Scan'; btn.disabled = false; });
 }
 
-/* ── Strategy Proposals ──────────────────────────── */
-
-function loadProposals() {
-  fetch('/api/trading/proposals').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    var section = document.getElementById('proposals-section');
-    var list = document.getElementById('proposals-list');
-    var count = document.getElementById('proposals-count');
-    var pending = (d.proposals || []).filter(function(p) { return p.status === 'pending'; });
-    if (count) count.textContent = pending.length ? '(' + pending.length + ' pending)' : '';
-    if (!d.proposals || !d.proposals.length) {
-      section.style.display = 'block';
-      list.innerHTML = '<div style="text-align:center;padding:16px;color:var(--text-muted);font-size:12px">No strategy proposals yet. AI Brain will generate proposals during the next learning cycle when high-confidence opportunities are found.</div>';
-      return;
-    }
-    section.style.display = 'block';
-    list.innerHTML = '';
-    d.proposals.forEach(function(p) { list.innerHTML += _renderProposalCard(p); });
-  }).catch(function() {
-    var section = document.getElementById('proposals-section');
-    if (section) section.style.display = 'none';
-  });
-  loadAlertHistory();
-  loadAlertSettings();
-}
-
-function _renderProposalCard(p) {
-  var isCr = (p.ticker || '').indexOf('-USD') !== -1;
-  var statusCls = p.status || 'pending';
-  var confPct = Math.round(p.confidence || 0);
-  var confColor = confPct >= 70 ? '#22c55e' : (confPct >= 50 ? '#f59e0b' : '#ef4444');
-  var profitPct = p.projected_profit_pct ? (p.projected_profit_pct > 0 ? '+' : '') + p.projected_profit_pct.toFixed(1) + '%' : '--';
-  var lossPct = p.projected_loss_pct ? '-' + Math.abs(p.projected_loss_pct).toFixed(1) + '%' : '--';
-  var rrText = p.risk_reward_ratio ? p.risk_reward_ratio.toFixed(1) + ':1' : '--';
-
-  var timeLeft = '';
-  if (p.expires_in_seconds != null) {
-    if (p.expires_in_seconds <= 0) timeLeft = 'Expired';
-    else {
-      var m = Math.floor(p.expires_in_seconds / 60);
-      var h = Math.floor(m / 60);
-      m = m % 60;
-      timeLeft = h ? h + 'h ' + m + 'm left' : m + 'm left';
-    }
-  } else if (p.status === 'pending' && p.expires_at) {
-    var exp = new Date(p.expires_at);
-    var now = new Date();
-    var diffMs = exp - now;
-    if (diffMs > 0) {
-      var hrs = Math.floor(diffMs / 3600000);
-      var mins = Math.floor((diffMs % 3600000) / 60000);
-      timeLeft = hrs + 'h ' + mins + 'm left';
-    } else timeLeft = 'Expired';
-  }
-  var proposedAgo = '';
-  if (p.age_seconds != null) {
-    var asec = p.age_seconds;
-    proposedAgo = asec < 60 ? 'just now' : (asec < 3600 ? Math.floor(asec/60) + ' min ago' : Math.floor(asec/3600) + 'h ago');
-  }
-  var expiryBadge = '';
-  if (p.status === 'expired' && p.expiry_reason) {
-    expiryBadge = '<span class="prop-expiry-badge" title="' + (p.expiry_reason === 'price_drift' ? 'Price moved too far from entry' : 'Time limit reached') + '">' + (p.expiry_reason === 'price_drift' ? 'Expired (drift)' : 'Expired (time)') + '</span>';
-  }
-
-  var html = '<div class="proposal-card ' + statusCls + '">';
-  html += '<div class="prop-header">';
-  html += '<div><span class="prop-ticker">' + p.ticker + '</span> <span style="font-size:11px;color:var(--text-muted)">' + (p.direction || 'long').toUpperCase() + '</span></div>';
-  html += '<span class="prop-status ' + statusCls + '">' + statusCls + '</span></div>';
-
-  html += '<div class="prop-price-ladder">';
-  html += '<div class="pl-item"><div class="pl-label">Entry</div><div class="pl-value entry">$' + smartPrice(p.entry_price, isCr) + '</div></div>';
-  html += '<div class="pl-item"><div class="pl-label">Stop Loss</div><div class="pl-value stop">$' + smartPrice(p.stop_loss, isCr) + '</div></div>';
-  html += '<div class="pl-item"><div class="pl-label">Target</div><div class="pl-value target">$' + smartPrice(p.take_profit, isCr) + '</div></div>';
-  html += '</div>';
-
-  html += '<div class="prop-pnl-row">';
-  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Projected Profit</span><span class="prop-pnl-val profit">' + profitPct + '</span></div>';
-  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Max Loss</span><span class="prop-pnl-val loss">' + lossPct + '</span></div>';
-  html += '<div class="prop-pnl-item"><span class="prop-pnl-label">R:R Ratio</span><span class="prop-pnl-val rr">' + rrText + '</span></div>';
-  if (p.quantity) html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Qty</span><span class="prop-pnl-val">' + p.quantity + '</span></div>';
-  if (p.position_size_pct) html += '<div class="prop-pnl-item"><span class="prop-pnl-label">Position</span><span class="prop-pnl-val">' + p.position_size_pct + '%</span></div>';
-  html += '</div>';
-
-  html += '<div class="prop-conf"><span style="font-size:10px;color:var(--text-muted)">Confidence</span>';
-  html += '<div class="prop-conf-bar"><div class="prop-conf-fill" style="width:' + confPct + '%;background:' + confColor + '"></div></div>';
-  html += '<span style="font-size:11px;font-weight:700;color:' + confColor + '">' + confPct + '%</span></div>';
-
-  if (p.thesis) {
-    html += '<div class="prop-thesis collapsed" onclick="this.classList.toggle(\'collapsed\')">' + escHtml(p.thesis) + '</div>';
-  }
-
-  html += '<div class="prop-meta">';
-  if (proposedAgo) html += '<span class="prop-proposed">Proposed ' + proposedAgo + '</span>';
-  if (timeLeft) html += '<span class="prop-expiry">' + timeLeft + '</span>';
-  if (expiryBadge) html += expiryBadge;
-  if (p.timeframe) html += '<span>Timeframe: ' + p.timeframe + '</span>';
-  if (p.brain_score) html += '<span>Brain: ' + (p.brain_score > 0 ? '+' : '') + p.brain_score.toFixed(1) + '</span>';
-  if (p.ml_probability) html += '<span>ML: ' + (p.ml_probability * 100).toFixed(0) + '%</span>';
-  if (p.scan_score) html += '<span>Scan: ' + p.scan_score.toFixed(1) + '/10</span>';
-  html += '</div>';
-
-  if (p.status === 'pending') {
-    html += '<div class="prop-actions">';
-    html += '<button class="prop-btn-approve" onclick="approveProposal(' + p.id + ', this)">Approve & Execute</button>';
-    html += '<button class="prop-btn-reject" onclick="rejectProposal(' + p.id + ', this)">Reject</button>';
-    html += '<button class="prop-btn-recheck" onclick="recheckProposal(' + p.id + ', this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
-    html += '</div>';
-  }
-  if (p.status === 'executed' && p.broker_order_id) {
-    html += '<div style="font-size:10px;color:#22c55e;margin-top:4px">Order ID: ' + p.broker_order_id + '</div>';
-  }
-
-  html += '</div>';
-  return html;
-}
+/* ── Strategy Proposals (actions) ─────────────────── */
 
 function approveProposal(id, btn) {
   btn.disabled = true;
@@ -5651,7 +6222,7 @@ function approveProposal(id, btn) {
           note.textContent = exec.reason;
           row.appendChild(note);
         }
-        setTimeout(function() { loadProposals(); loadTopPicks(); }, 1500);
+        setTimeout(function() { loadBestIdeas(); }, 1500);
       } else {
         btn.disabled = false;
         btn.textContent = 'Approve & Execute';
@@ -5671,7 +6242,7 @@ function rejectProposal(id, btn) {
   fetch('/api/trading/proposals/' + id + '/reject', {method: 'POST'})
     .then(function(r) { return r.json(); })
     .then(function(d) {
-      if (d.ok) loadProposals();
+      if (d.ok) loadBestIdeas();
       else { btn.disabled = false; btn.textContent = 'Reject'; }
     })
     .catch(function() { btn.disabled = false; btn.textContent = 'Reject'; });
@@ -5686,7 +6257,7 @@ function recheckProposal(id, btnEl) {
     .then(function(d) {
       btnEl.disabled = false;
       btnEl.textContent = '\u21BB Recheck';
-      if (d.ok && d.expired) loadProposals();
+      if (d.ok && d.expired) loadBestIdeas();
       else if (d.ok && d.status) {
         btnEl.title = d.live_price ? 'Now $' + d.live_price + ' (' + (d.drift_pct || 0) + '% drift) — ' + d.status : d.message || d.status;
       }
@@ -5876,25 +6447,29 @@ function loadBrokerStatus() {
     var syncBtn = document.getElementById('broker-sync-btn');
 
     var statusEl = document.getElementById('broker-status');
+    var tradesTabSyncBtn = document.getElementById('trades-tab-sync-btn');
     if (d.connected) {
       _brokerConnected = true;
       dot.className = 'broker-dot connected';
       label.textContent = 'Robinhood Connected';
       sub.textContent = d.username || 'Linked account';
-      syncBtn.style.display = 'inline-block';
+      if (syncBtn) syncBtn.style.display = 'inline-block';
+      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'inline-block';
       statusEl.classList.remove('compact');
       loadRhPortfolio();
     } else if (d.configured) {
       dot.className = 'broker-dot disconnected';
       label.textContent = 'Robinhood';
       sub.textContent = 'Click to connect';
-      syncBtn.style.display = 'none';
+      if (syncBtn) syncBtn.style.display = 'none';
+      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'none';
       statusEl.classList.add('compact');
     } else {
       dot.className = 'broker-dot disconnected';
       label.textContent = 'Robinhood';
       sub.textContent = 'Set credentials in .env';
-      syncBtn.style.display = 'none';
+      if (syncBtn) syncBtn.style.display = 'none';
+      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'none';
       statusEl.classList.add('compact');
     }
   }).catch(function() {});
@@ -6036,22 +6611,38 @@ function verifySmsCode() {
 
 function syncBroker() {
   var syncBtn = document.getElementById('broker-sync-btn');
-  syncBtn.textContent = 'Syncing...';
-  syncBtn.disabled = true;
+  var tradesTabSyncBtn = document.getElementById('trades-tab-sync-btn');
+  function setSyncing(v) {
+    var t = v ? 'Syncing...' : 'Sync';
+    if (syncBtn) { syncBtn.textContent = t; syncBtn.disabled = v; }
+    if (tradesTabSyncBtn) { tradesTabSyncBtn.textContent = v ? 'Syncing...' : 'Sync with Robinhood'; tradesTabSyncBtn.disabled = v; }
+  }
+  setSyncing(true);
   fetch('/api/trading/broker/sync', { method: 'POST' })
     .then(function(r){return r.json();})
     .then(function(d) {
-      syncBtn.textContent = 'Sync';
-      syncBtn.disabled = false;
+      setSyncing(false);
       if (d.ok) {
         loadRhPortfolio();
         loadPortfolio();
-        var msg = 'Synced! ' + d.created + ' new, ' + d.updated + ' updated, ' + d.closed + ' closed.';
-        appendAiMsg('assistant', msg);
+        loadTrades();
+        var parts = [];
+        if (d.orders) {
+          var o = d.orders;
+          if (o.synced || o.filled || o.cancelled) parts.push('Orders: ' + (o.filled || 0) + ' filled, ' + (o.cancelled || 0) + ' cancelled');
+        }
+        if (d.positions) {
+          var p = d.positions;
+          if (p.created || p.updated || p.closed) parts.push('Positions: ' + (p.created || 0) + ' new, ' + (p.updated || 0) + ' updated, ' + (p.closed || 0) + ' closed');
+        }
+        if (d.manual && d.manual.closed_manual) {
+          parts.push('Cleaned up ' + d.manual.closed_manual + ' manual trade(s) with no RH position');
+        }
+        if (parts.length) appendAiMsg('assistant', 'Synced with Robinhood. ' + parts.join('; ') + '.');
+        else appendAiMsg('assistant', 'Trades tab synced with Robinhood. Everything is up to date.');
       }
     }).catch(function() {
-      syncBtn.textContent = 'Sync';
-      syncBtn.disabled = false;
+      setSyncing(false);
     });
 }
 

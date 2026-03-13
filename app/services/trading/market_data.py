@@ -141,17 +141,30 @@ def fetch_ohlcv(
     ticker: str,
     interval: str = "1d",
     period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Fetch OHLCV candle data.  Massive → Polygon → yfinance."""
+    """Fetch OHLCV candle data.  Massive → Polygon → yfinance.
+
+    Either *period* **or** explicit *start*/*end* (YYYY-MM-DD or datetime)
+    can be used.  When *start* is given it takes precedence over *period*.
+    """
     if interval not in _VALID_INTERVALS:
         interval = "1d"
-    if period not in _VALID_PERIODS:
+    if not start and period not in _VALID_PERIODS:
         period = "6mo"
+
+    _start_str = str(start)[:10] if start else None
+    _end_str = str(end)[:10] if end else None
 
     # --- Massive path (primary) ---
     if _use_massive():
         try:
-            bars = _massive.get_aggregates(ticker, interval=interval, period=period)
+            bars = _massive.get_aggregates(
+                ticker, interval=interval, period=period,
+                start=_start_str, end=_end_str,
+            )
             if bars:
                 return bars
             logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
@@ -161,7 +174,10 @@ def fetch_ohlcv(
     # --- Polygon path (secondary) ---
     if _use_polygon():
         try:
-            bars = _poly.get_aggregates(ticker, interval=interval, period=period)
+            bars = _poly.get_aggregates(
+                ticker, interval=interval, period=period,
+                start=_start_str, end=_end_str,
+            )
             if bars:
                 return bars
             logger.debug(f"[market_data] Polygon returned empty for {ticker}, falling back to yfinance")
@@ -169,8 +185,11 @@ def fetch_ohlcv(
             logger.warning(f"[market_data] Polygon OHLCV failed for {ticker}: {e}")
 
     # --- yfinance fallback ---
-    period = _clamp_period(interval, period)
-    df = _yf_history(ticker, period=period, interval=interval)
+    if _start_str:
+        df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
+    else:
+        period = _clamp_period(interval, period)
+        df = _yf_history(ticker, period=period, interval=interval)
 
     if df.empty:
         return []
@@ -193,21 +212,33 @@ def fetch_ohlcv_df(
     ticker: str,
     interval: str = "1d",
     period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV as a pandas DataFrame (Open/High/Low/Close/Volume columns).
 
     Provider order: Massive → Polygon → yfinance.
     This is the preferred entry-point for indicator computation and scanner scoring.
+
+    Either *period* **or** explicit *start*/*end* (YYYY-MM-DD or datetime)
+    can be used.  When *start* is given it takes precedence over *period*.
     """
     if interval not in _VALID_INTERVALS:
         interval = "1d"
-    if period not in _VALID_PERIODS:
+    if not start and period not in _VALID_PERIODS:
         period = "6mo"
+
+    _start_str = str(start)[:10] if start else None
+    _end_str = str(end)[:10] if end else None
 
     # --- Massive path (primary) ---
     if _use_massive():
         try:
-            df = _massive.get_aggregates_df(ticker, interval=interval, period=period)
+            df = _massive.get_aggregates_df(
+                ticker, interval=interval, period=period,
+                start=_start_str, end=_end_str,
+            )
             if not df.empty:
                 return df
         except Exception as e:
@@ -216,15 +247,21 @@ def fetch_ohlcv_df(
     # --- Polygon path (secondary) ---
     if _use_polygon():
         try:
-            df = _poly.get_aggregates_df(ticker, interval=interval, period=period)
+            df = _poly.get_aggregates_df(
+                ticker, interval=interval, period=period,
+                start=_start_str, end=_end_str,
+            )
             if not df.empty:
                 return df
         except Exception as e:
             logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
 
     # --- yfinance fallback ---
-    period = _clamp_period(interval, period)
-    df = _yf_history(ticker, period=period, interval=interval)
+    if _start_str:
+        df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
+    else:
+        period = _clamp_period(interval, period)
+        df = _yf_history(ticker, period=period, interval=interval)
     return df if df is not None else pd.DataFrame()
 
 
@@ -388,8 +425,8 @@ def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
 
 _ind_cache: dict[tuple, tuple[float, dict]] = {}
 _ind_cache_lock = threading.Lock()
-_IND_CACHE_TTL = 300  # 5 min — OHLCV underneath is cached 30 min
-_IND_CACHE_MAX = 500
+_IND_CACHE_TTL = 900   # 15 min — learning cycles may take 10+ min; reuse within a session
+_IND_CACHE_MAX = 1200  # support 500+ ticker learning runs without thrashing
 
 
 def compute_indicators(

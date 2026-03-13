@@ -81,6 +81,9 @@ class Settings(BaseSettings):
     use_polygon: bool = False  # feature flag: set USE_POLYGON=true in .env to enable
     polygon_max_rps: int = 5  # soft cap; governor will smooth bursts around this
 
+    # Learning schedule
+    learning_interval_hours: int = 2  # how often to run learning cycle (hours)
+
     # Trading freshness / staleness guardrails
     top_picks_warn_age_min: int = 15   # warn when picks batch is older than N minutes
     proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes

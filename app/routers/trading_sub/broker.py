@@ -58,12 +58,20 @@ async def api_broker_portfolio():
 
 @router.post("/api/trading/broker/sync")
 async def api_broker_sync(
-    bg: BackgroundTasks,
     db: Session = Depends(get_db),
     identity: dict = Depends(get_identity_ctx),
 ):
+    """Sync trades tab with Robinhood: orders, positions, and manual cleanup."""
     if not broker_service.is_connected():
         return JSONResponse({"ok": False, "error": "Not connected to Robinhood"})
     user_id = identity.get("user_id")
-    result = broker_service.sync_positions_to_db(db, user_id)
-    return JSONResponse({"ok": True, **result})
+    order_result = broker_service.sync_orders_to_db(db, user_id)
+    pos_result = broker_service.sync_positions_to_db(db, user_id)
+    live_tickers = pos_result.pop("_live_tickers", set())
+    manual_result = broker_service.cleanup_manual_trades(db, user_id, live_tickers)
+    return JSONResponse({
+        "ok": True,
+        "orders": order_result,
+        "positions": pos_result,
+        "manual": manual_result,
+    })

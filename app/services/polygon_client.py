@@ -245,22 +245,35 @@ def get_aggregates(
     ticker: str,
     interval: str = "1d",
     period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch OHLCV bars from Polygon Aggregates endpoint.
 
     Returns a list of ``{time, open, high, low, close, volume}`` dicts
     compatible with the rest of CHILI's data pipeline.  Returns ``[]`` on
     failure.
+
+    Either *period* **or** explicit *start*/*end* (YYYY-MM-DD) can be used.
+    When *start* is given it takes precedence over *period*.
     """
     poly_ticker = to_polygon_ticker(ticker)
-    cache_key = f"poly:agg:{poly_ticker}:{interval}:{period}"
+
+    if start:
+        from_date = start if isinstance(start, str) else str(start)
+        to_date = end or date.today().strftime("%Y-%m-%d")
+        cache_key = f"poly:agg:{poly_ticker}:{interval}:{from_date}:{to_date}"
+    else:
+        from_date, to_date = _period_to_dates(period)
+        cache_key = f"poly:agg:{poly_ticker}:{interval}:{period}"
+
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
     mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
     timespan, multiplier = mapping
-    from_date, to_date = _period_to_dates(period)
 
     url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
     data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
@@ -287,15 +300,21 @@ def get_aggregates_df(
     ticker: str,
     interval: str = "1d",
     period: str = "6mo",
+    *,
+    start: str | None = None,
+    end: str | None = None,
 ):
     """Fetch OHLCV bars and return as a pandas DataFrame matching yfinance format.
 
     Column names: Open, High, Low, Close, Volume.
     Index: DatetimeIndex (UTC).
+
+    Accepts the same *start*/*end* overrides as :func:`get_aggregates`.
     """
     import pandas as pd
 
-    bars = get_aggregates(ticker, interval=interval, period=period)
+    bars = get_aggregates(ticker, interval=interval, period=period,
+                          start=start, end=end)
     if not bars:
         return pd.DataFrame()
 

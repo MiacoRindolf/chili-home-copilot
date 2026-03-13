@@ -29,13 +29,17 @@ class Trade(Base):
     quantity: float = Column(Float, nullable=False, default=1.0)
     entry_date: datetime = Column(DateTime, nullable=False, default=datetime.utcnow)
     exit_date: Optional[datetime] = Column(DateTime, nullable=True)
-    status: str = Column(String(10), nullable=False, default="open")  # open / closed
+    status: str = Column(String(20), nullable=False, default="open")  # open / working / closed / cancelled / rejected
     pnl: Optional[float] = Column(Float, nullable=True)
     tags: Optional[str] = Column(String(500), nullable=True)
     notes: Optional[str] = Column(Text, nullable=True)
     indicator_snapshot: Optional[str] = Column(Text, nullable=True)  # JSON blob
     broker_source: Optional[str] = Column(String(20), nullable=True)  # "robinhood" / "manual" / None
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
+    broker_status: Optional[str] = Column(String(30), nullable=True)  # raw RH state: queued / confirmed / partially_filled / filled / cancelled / rejected / failed
+    last_broker_sync: Optional[datetime] = Column(DateTime, nullable=True)
+    filled_at: Optional[datetime] = Column(DateTime, nullable=True)
+    avg_fill_price: Optional[float] = Column(Float, nullable=True)
     pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
 
 

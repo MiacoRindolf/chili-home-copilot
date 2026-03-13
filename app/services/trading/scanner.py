@@ -2014,7 +2014,7 @@ def _bg_refresh_smart_pick_context(
     """Background refresh for the Smart Pick context cache."""
     try:
         # Local import to avoid circulars at import time
-        from ...database import SessionLocal
+        from ...db import SessionLocal
 
         db = SessionLocal()
         try:

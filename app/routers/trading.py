@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
+from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -26,6 +30,7 @@ from ..schemas.trading import (
     SmartPickRequest,
     TradeClose,
     TradeCreate,
+    TradeSell,
     WatchlistAdd,
 )
 from ..services import backtest_service as bt_svc
@@ -241,6 +246,9 @@ def api_get_trades(
             "entry_date": t.entry_date.isoformat() if t.entry_date else None,
             "exit_date": t.exit_date.isoformat() if t.exit_date else None,
             "status": t.status, "pnl": t.pnl, "tags": t.tags, "notes": t.notes,
+            "broker_source": t.broker_source,
+            "broker_status": t.broker_status,
+            "broker_order_id": t.broker_order_id,
         }
         for t in trades
     ]})
@@ -316,6 +324,117 @@ def api_close_trade(
     })
 
 
+@router.delete("/api/trading/trades/{trade_id}")
+@router.post("/api/trading/trades/{trade_id}/delete")
+def api_delete_trade(
+    trade_id: int,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Delete a trade (e.g. wrong or duplicate entry). Removes the trade and clears journal refs."""
+    ctx = get_identity_ctx(request, db)
+    err = ts.delete_trade(db, trade_id, ctx["user_id"])
+    if err == "not_found":
+        return JSONResponse({"ok": False, "error": "Trade not found"}, status_code=404)
+    if err == "forbidden":
+        return JSONResponse({"ok": False, "error": "You don't have permission to delete this trade"}, status_code=403)
+    return JSONResponse({"ok": True, "id": trade_id})
+
+
+@router.post("/api/trading/trades/{trade_id}/sell")
+def api_sell_trade(
+    trade_id: int,
+    body: TradeSell,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Partial or full sell of an open position, routed through Robinhood when connected."""
+    from ..models.trading import Trade
+    from datetime import datetime
+
+    ctx = get_identity_ctx(request, db)
+    trade = db.query(Trade).filter(
+        Trade.id == trade_id, Trade.user_id == ctx["user_id"],
+    ).first()
+    if not trade:
+        return JSONResponse({"ok": False, "error": "Trade not found"}, status_code=404)
+    if trade.status != "open":
+        return JSONResponse({"ok": False, "error": f"Trade is {trade.status}, not open"}, status_code=400)
+    if body.quantity > trade.quantity:
+        return JSONResponse({"ok": False, "error": f"Cannot sell {body.quantity}, only {trade.quantity} held"}, status_code=400)
+
+    is_full_exit = abs(body.quantity - trade.quantity) < 0.0001
+
+    if trade.broker_source == "robinhood" and broker_service.is_connected():
+        order_type = "limit" if body.limit_price else "market"
+        result = broker_service.place_sell_order(
+            ticker=trade.ticker,
+            quantity=body.quantity,
+            order_type=order_type,
+            limit_price=body.limit_price,
+        )
+        if not result.get("ok"):
+            return JSONResponse({"ok": False, "error": result.get("error", "Sell failed")}, status_code=500)
+
+        rh_state = (result.get("state") or "queued").lower()
+        order_id = result.get("order_id", "")
+
+        if is_full_exit:
+            if rh_state == "filled":
+                trade.status = "closed"
+                trade.exit_price = body.limit_price or trade.entry_price
+                trade.exit_date = datetime.utcnow()
+                trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
+            else:
+                trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), RH order {order_id} ({rh_state})"
+        else:
+            remaining = round(trade.quantity - body.quantity, 6)
+            exit_price = body.limit_price or trade.entry_price
+            realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
+            trade.quantity = remaining
+            trade.notes = (
+                (trade.notes or "")
+                + f"\nPartial sell: {body.quantity} shares"
+                + (f" @ ${body.limit_price}" if body.limit_price else " (market)")
+                + f", RH order {order_id} ({rh_state}), realized ~${realized_pnl}"
+            )
+
+        db.commit()
+        return JSONResponse({
+            "ok": True,
+            "trade_id": trade.id,
+            "sold_qty": body.quantity,
+            "remaining_qty": round(trade.quantity, 6),
+            "rh_state": rh_state,
+            "order_id": order_id,
+            "status": trade.status,
+        })
+
+    # Manual / paper trade — immediate simulated close
+    exit_price = body.limit_price or trade.entry_price
+    if is_full_exit:
+        trade.status = "closed"
+        trade.exit_price = exit_price
+        trade.exit_date = datetime.utcnow()
+        trade.pnl = round((exit_price - trade.entry_price) * trade.quantity, 2)
+    else:
+        realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
+        trade.quantity = round(trade.quantity - body.quantity, 6)
+        trade.notes = (
+            (trade.notes or "")
+            + f"\nPartial close: {body.quantity} @ ${exit_price}, realized ${realized_pnl}"
+        )
+
+    db.commit()
+    return JSONResponse({
+        "ok": True,
+        "trade_id": trade.id,
+        "sold_qty": body.quantity,
+        "remaining_qty": round(trade.quantity, 6),
+        "status": trade.status,
+    })
+
+
 # ── Journal ─────────────────────────────────────────────────────────────
 
 @router.get("/api/trading/journal")
@@ -342,8 +461,42 @@ def api_add_journal(body: JournalCreate, request: Request, db: Session = Depends
 @router.get("/api/trading/journal/stats")
 def api_trade_stats(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-    stats = ts.get_trade_stats(db, ctx["user_id"])
-    return JSONResponse({"ok": True, **stats})
+    by_source = ts.get_trade_stats_by_source(db, ctx["user_id"])
+    all_stats = by_source["all"]
+    return JSONResponse({
+        "ok": True,
+        **all_stats,
+        "by_source": by_source,
+    })
+
+
+def _api_stats_calendar_impl(
+    request: Request,
+    db: Session,
+    year: int,
+    month: int,
+):
+    from datetime import datetime
+    ctx = get_identity_ctx(request, db)
+    start = datetime(year, month, 1, 0, 0, 0)
+    if month == 12:
+        end = datetime(year + 1, 1, 1, 0, 0, 0)
+    else:
+        end = datetime(year, month + 1, 1, 0, 0, 0)
+    days = ts.get_daily_pnl(db, ctx["user_id"], start, end)
+    return JSONResponse({"ok": True, "days": days, "year": year, "month": month})
+
+
+@router.get("/api/trading/stats/calendar")
+@router.get("/api/trading/journal/calendar")
+def api_stats_calendar(
+    request: Request,
+    db: Session = Depends(get_db),
+    year: int = Query(...),
+    month: int = Query(...),
+):
+    """Daily P&L for a given month. Returns { ok, days: [{ date, trade_count, pnl, trades }] }."""
+    return _api_stats_calendar_impl(request, db, year, month)
 
 
 # ── AI Analysis ─────────────────────────────────────────────────────────
@@ -787,6 +940,44 @@ def api_reject_proposal(
     ctx = get_identity_ctx(request, db)
     result = ts.reject_proposal(db, proposal_id, ctx["user_id"])
     return JSONResponse(result)
+
+
+@router.post("/api/trading/proposals/from-pick")
+async def api_create_proposal_from_pick(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Create a strategy proposal from a top pick, using the latest price.
+    Body: { "ticker": "DHC" } or { "ticker": "DHC", "entry_price", "stop_loss", "take_profit" }.
+    """
+    ctx = get_identity_ctx(request, db)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    ticker = (body.get("ticker") or "").strip().upper()
+    if not ticker:
+        return JSONResponse({"ok": False, "error": "ticker is required"}, status_code=400)
+    override = {}
+    for key in ("entry_price", "stop_loss", "take_profit"):
+        v = body.get(key)
+        if v is not None and v != "":
+            try:
+                override[key] = float(v)
+            except (TypeError, ValueError):
+                pass
+    logger.info("[from-pick] ticker=%s, override=%s, user_id=%s", ticker, override, ctx.get("user_id"))
+    try:
+        result, err = ts.create_proposal_from_pick(
+            db, ctx["user_id"], ticker, override_levels=override if override else None
+        )
+    except Exception as exc:
+        logger.exception("[from-pick] unexpected error for %s", ticker)
+        return JSONResponse({"ok": False, "error": f"Server error: {exc!s}"}, status_code=500)
+    if err:
+        logger.warning("[from-pick] 400 for %s: %s", ticker, err)
+        return JSONResponse({"ok": False, "error": err}, status_code=400)
+    return JSONResponse({"ok": True, "proposal": result})
 
 
 @router.post("/api/trading/top-picks/recheck")

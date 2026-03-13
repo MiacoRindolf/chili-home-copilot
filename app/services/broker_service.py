@@ -25,6 +25,14 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+# Check robin_stocks availability at module level (import is lazy elsewhere)
+_rh_available = True
+try:
+    import robin_stocks.robinhood  # noqa: F401
+except ImportError:
+    _rh_available = False
+    logger.info("[broker] robin_stocks not installed — Robinhood integration disabled")
+
 _login_lock = threading.Lock()
 _logged_in = False
 _last_login: float = 0
@@ -62,7 +70,7 @@ def login(force: bool = False) -> bool:
     """Auto-login with TOTP, or check if an active session exists."""
     global _logged_in, _last_login
 
-    if not _credentials_configured():
+    if not _rh_available or not _credentials_configured():
         return False
 
     # If session still valid, reuse it
@@ -108,6 +116,8 @@ def login_step1_sms() -> dict[str, Any]:
     """
     global _logged_in, _last_login, _sms_state
 
+    if not _rh_available:
+        return {"status": "error", "message": "robin_stocks is not installed. Run: pip install robin_stocks"}
     if not _credentials_configured():
         return {"status": "error", "message": "Set ROBINHOOD_USERNAME and ROBINHOOD_PASSWORD in .env"}
 
@@ -392,7 +402,7 @@ def poll_app_approval() -> dict[str, Any]:
 
 def is_connected() -> bool:
     """Check if we have an active Robinhood session."""
-    if not _credentials_configured():
+    if not _rh_available or not _credentials_configured():
         return False
     if _logged_in and (time.time() - _last_login) < _LOGIN_TTL:
         return True
@@ -409,6 +419,7 @@ def get_connection_status() -> dict[str, Any]:
     return {
         "configured": configured,
         "connected": connected,
+        "rh_available": _rh_available,
         "awaiting_code": bool(_sms_state),
         "auth_method": "totp" if _has_totp() else "sms",
         "username": settings.robinhood_username if configured else None,
@@ -661,7 +672,48 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     db.commit()
     logger.info(f"[broker] Position sync: {created} created, {updated} updated, {closed} closed")
-    return {"created": created, "updated": updated, "closed": closed}
+    return {"created": created, "updated": updated, "closed": closed, "_live_tickers": rh_tickers}
+
+
+def cleanup_manual_trades(
+    db: Session, user_id: int | None, live_tickers: set[str],
+) -> dict[str, int]:
+    """Auto-close manual-only trades whose ticker has no matching RH position.
+
+    A manual trade is one with no broker_order_id AND broker_source is
+    either NULL or 'manual'.
+    """
+    from ..models.trading import Trade
+    from sqlalchemy import or_
+
+    manual_open = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.status == "open",
+            Trade.broker_order_id.is_(None),
+            or_(Trade.broker_source.is_(None), Trade.broker_source == "manual"),
+        )
+        .all()
+    )
+
+    closed_manual = 0
+    for trade in manual_open:
+        if trade.ticker not in live_tickers:
+            trade.status = "closed"
+            trade.exit_date = datetime.utcnow()
+            trade.notes = (
+                (trade.notes or "")
+                + f"\nAuto-closed during RH sync (no matching Robinhood position) "
+                f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+            )
+            closed_manual += 1
+
+    if closed_manual:
+        db.commit()
+        logger.info(f"[broker] Manual cleanup: {closed_manual} manual trade(s) auto-closed")
+
+    return {"closed_manual": closed_manual}
 
 
 def build_portfolio_context() -> str:
@@ -733,16 +785,12 @@ def place_buy_order(
 ) -> dict[str, Any]:
     """Place a buy order via Robinhood.
 
-    Args:
-        ticker: Stock symbol (e.g. "AAPL")
-        quantity: Number of shares
-        order_type: "market" or "limit"
-        limit_price: Required for limit orders
-
     Returns:
-        {"ok": True, "order_id": "...", "state": "..."} on success,
+        {"ok": True, "order_id": "...", "state": "...", "raw": {...}} on success,
         {"ok": False, "error": "..."} on failure.
     """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
     if not is_connected():
         return {"ok": False, "error": "Not connected to Robinhood"}
 
@@ -785,16 +833,12 @@ def place_sell_order(
 ) -> dict[str, Any]:
     """Place a sell order via Robinhood.
 
-    Args:
-        ticker: Stock symbol (e.g. "AAPL")
-        quantity: Number of shares
-        order_type: "market" or "limit"
-        limit_price: Required for limit orders
-
     Returns:
-        {"ok": True, "order_id": "...", "state": "..."} on success,
+        {"ok": True, "order_id": "...", "state": "...", "raw": {...}} on success,
         {"ok": False, "error": "..."} on failure.
     """
+    if not _rh_available:
+        return {"ok": False, "error": "robin_stocks not installed"}
     if not is_connected():
         return {"ok": False, "error": "Not connected to Robinhood"}
 
@@ -857,6 +901,204 @@ def _safe_float(val: Any) -> float:
         return float(val)
     except (ValueError, TypeError):
         return 0.0
+
+
+# ── Robinhood → Chili status mapping ──────────────────────────────────
+
+# Robinhood order states from robin_stocks:
+#   queued, unconfirmed, confirmed, partially_filled, filled,
+#   cancelled, rejected, failed
+_RH_TO_CHILI_STATUS = {
+    "queued":           "working",
+    "unconfirmed":      "working",
+    "confirmed":        "working",
+    "partially_filled": "working",
+    "filled":           "open",       # fully filled → open position
+    "cancelled":        "cancelled",
+    "canceled":         "cancelled",  # alternate spelling
+    "rejected":         "rejected",
+    "failed":           "rejected",
+}
+
+_RH_TERMINAL_STATES = {"filled", "cancelled", "canceled", "rejected", "failed"}
+
+
+def map_rh_status(rh_state: str | None) -> str:
+    """Map a raw Robinhood order state to a Chili Trade status."""
+    if not rh_state:
+        return "working"
+    return _RH_TO_CHILI_STATUS.get(rh_state.lower(), "working")
+
+
+def is_rh_terminal(rh_state: str | None) -> bool:
+    """True if the Robinhood order is in a final state (filled/cancelled/rejected)."""
+    return (rh_state or "").lower() in _RH_TERMINAL_STATES
+
+
+# ── Order sync (Robinhood → local DB) ────────────────────────────────
+
+def get_order_by_id(order_id: str) -> dict[str, Any] | None:
+    """Fetch a single order from Robinhood by ID."""
+    if not is_connected() or not order_id:
+        return None
+    try:
+        import robin_stocks.robinhood as rh
+        data = rh.orders.get_stock_order_info(order_id)
+        if data and isinstance(data, dict):
+            return data
+    except Exception as e:
+        logger.debug(f"[broker] get_order_by_id({order_id}) failed: {e}")
+    return None
+
+
+def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
+    """Reconcile local trades (with broker_order_id) against Robinhood.
+
+    For each local trade that has a broker_order_id and is still in a
+    non-terminal state, we look up the order on Robinhood and update
+    local status, fill price, and timestamps accordingly.
+    """
+    from ..models.trading import Trade, StrategyProposal
+
+    if not is_connected():
+        return {"synced": 0, "filled": 0, "cancelled": 0, "errors": 0}
+
+    # Sync trades that are still "working" (limit order pending)
+    working_trades = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.broker_source == "robinhood",
+            Trade.broker_order_id.isnot(None),
+            Trade.status.in_(["working"]),
+        )
+        .all()
+    )
+    # Also reconcile "open" trades that have broker_order_id (e.g. manually marked
+    # open but order was cancelled on RH — correct local state from RH)
+    open_with_order_id = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.broker_order_id.isnot(None),
+            Trade.status == "open",
+        )
+        .all()
+    )
+
+    synced = filled = cancelled = errors = 0
+
+    for trade in working_trades:
+        try:
+            rh_order = get_order_by_id(trade.broker_order_id)
+            if not rh_order:
+                errors += 1
+                continue
+
+            rh_state = (rh_order.get("state") or "").lower()
+            new_status = map_rh_status(rh_state)
+            now = datetime.utcnow()
+
+            trade.broker_status = rh_state
+            trade.last_broker_sync = now
+
+            if rh_state == "filled":
+                trade.status = "open"
+                trade.avg_fill_price = _safe_float(rh_order.get("average_price"))
+                if trade.avg_fill_price:
+                    trade.entry_price = trade.avg_fill_price
+                filled_qty = _safe_float(rh_order.get("cumulative_quantity"))
+                if filled_qty:
+                    trade.quantity = filled_qty
+                trade.filled_at = now
+                filled += 1
+                logger.info(
+                    f"[broker] Order {trade.broker_order_id} for {trade.ticker} FILLED "
+                    f"@ ${trade.avg_fill_price} x{trade.quantity}"
+                )
+
+                # Update linked proposal if any
+                if trade.notes:
+                    _update_proposal_on_fill(db, trade)
+
+            elif rh_state in ("cancelled", "canceled", "rejected", "failed"):
+                trade.status = "cancelled"
+                cancelled += 1
+                logger.info(
+                    f"[broker] Order {trade.broker_order_id} for {trade.ticker} {rh_state}"
+                )
+                _update_proposal_on_cancel(db, trade, rh_state)
+
+            synced += 1
+
+        except Exception as e:
+            logger.warning(f"[broker] Order sync failed for {trade.ticker}: {e}")
+            errors += 1
+
+    # Reconcile "open" trades that have broker_order_id: if RH says cancelled, fix local
+    for trade in open_with_order_id:
+        try:
+            rh_order = get_order_by_id(trade.broker_order_id)
+            if not rh_order:
+                continue
+            rh_state = (rh_order.get("state") or "").lower()
+            trade.broker_status = rh_state
+            trade.last_broker_sync = datetime.utcnow()
+            if rh_state in ("cancelled", "canceled", "rejected", "failed"):
+                trade.status = "cancelled"
+                cancelled += 1
+                synced += 1
+                logger.info(
+                    f"[broker] Reconcile: {trade.ticker} (open locally) was {rh_state} on RH -> set cancelled"
+                )
+                _update_proposal_on_cancel(db, trade, rh_state)
+        except Exception as e:
+            logger.debug(f"[broker] Reconcile open trade {trade.ticker}: {e}")
+
+    if synced:
+        db.commit()
+
+    logger.info(
+        f"[broker] Order sync: {synced} checked, {filled} filled, "
+        f"{cancelled} cancelled, {errors} errors"
+    )
+    return {"synced": synced, "filled": filled, "cancelled": cancelled, "errors": errors}
+
+
+def _update_proposal_on_fill(db: Session, trade) -> None:
+    """When an order fills, update the linked StrategyProposal to 'executed'."""
+    from ..models.trading import StrategyProposal
+
+    if not trade.broker_order_id:
+        return
+    proposal = (
+        db.query(StrategyProposal)
+        .filter(StrategyProposal.broker_order_id == trade.broker_order_id)
+        .first()
+    )
+    if proposal and proposal.status == "working":
+        proposal.status = "executed"
+        proposal.executed_at = datetime.utcnow()
+
+
+def _update_proposal_on_cancel(db: Session, trade, rh_state: str) -> None:
+    """When an order is cancelled/rejected, revert proposal to 'approved'."""
+    from ..models.trading import StrategyProposal
+
+    if not trade.broker_order_id:
+        return
+    proposal = (
+        db.query(StrategyProposal)
+        .filter(StrategyProposal.broker_order_id == trade.broker_order_id)
+        .first()
+    )
+    if proposal and proposal.status == "working":
+        proposal.status = "approved"
+        proposal.reviewed_at = datetime.utcnow()
+        logger.info(
+            f"[broker] Proposal #{proposal.id} reverted to 'approved' "
+            f"after order {rh_state}"
+        )
 
 
 def clear_cache() -> None:

@@ -194,7 +194,7 @@ def build_ai_context(
     recent_cutoff = datetime.utcnow() - timedelta(hours=24)
     proposals = db.query(StrategyProposal).filter(
         StrategyProposal.ticker == ticker_up,
-        StrategyProposal.status.in_(["pending", "approved", "executed"]),
+        StrategyProposal.status.in_(["pending", "approved", "working", "executed"]),
         StrategyProposal.proposed_at >= recent_cutoff,
     ).order_by(StrategyProposal.proposed_at.desc()).limit(3).all()
     if proposals:
