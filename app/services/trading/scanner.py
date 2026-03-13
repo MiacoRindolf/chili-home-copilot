@@ -1748,6 +1748,80 @@ def recheck_pick(
     }
 
 
+_SIGNAL_TRANSLATIONS: dict[str, str] = {
+    "rsi oversold": "RSI has dipped into oversold territory, suggesting a potential bounce.",
+    "rsi overbought": "RSI is elevated in overbought territory -- momentum may be fading.",
+    "macd bullish cross": "MACD just crossed bullish, signalling rising momentum.",
+    "macd bearish cross": "MACD has crossed bearish, hinting at weakening momentum.",
+    "macd positive": "MACD histogram is positive, confirming upward momentum.",
+    "ema stacking bullish": "Moving averages are stacking upward -- a classic bullish alignment.",
+    "ema stacking bearish": "Moving averages are stacking downward -- bearish alignment.",
+    "golden cross": "A golden cross (50-day crossing above 200-day MA) has formed.",
+    "death cross": "A death cross has formed, a longer-term bearish signal.",
+    "volume surge": "Volume is surging well above average, showing strong participation.",
+    "above vwap": "Price is trading above VWAP, indicating intraday bullish control.",
+    "below vwap": "Price has slipped below VWAP, suggesting intraday selling pressure.",
+    "breakout": "Price is breaking out of a consolidation range.",
+    "gap up": "The stock gapped up at open, showing overnight demand.",
+    "bollinger squeeze": "Bollinger Bands are squeezing -- a big move may be imminent.",
+    "adx trending": "ADX is elevated, confirming a strong directional trend.",
+}
+
+
+def _build_conversational_thesis(pick: dict[str, Any]) -> str:
+    """Produce a 2-4 sentence plain-English thesis that 'sells' the pick."""
+    ticker = pick.get("ticker", "")
+    direction = pick.get("signal", "buy")
+    signals = pick.get("signals") or []
+    indicators = pick.get("indicators") or {}
+    rr = pick.get("risk_reward")
+    bt_strategy = pick.get("best_strategy")
+    bt_return = pick.get("backtest_return")
+    bt_wr = pick.get("backtest_win_rate")
+
+    parts: list[str] = []
+
+    if direction == "buy":
+        rsi = indicators.get("rsi")
+        if rsi and rsi < 35:
+            parts.append(f"{ticker} is flashing a bullish setup with RSI pulling back to {rsi:.0f}.")
+        else:
+            parts.append(f"{ticker} is showing a strong bullish setup.")
+    elif direction == "sell":
+        parts.append(f"{ticker} is displaying bearish signals that warrant caution.")
+    else:
+        parts.append(f"{ticker} has a developing setup worth watching.")
+
+    translated: list[str] = []
+    for sig in signals[:4]:
+        sig_lower = sig.lower().strip()
+        matched = False
+        for key, sentence in _SIGNAL_TRANSLATIONS.items():
+            if key in sig_lower:
+                translated.append(sentence)
+                matched = True
+                break
+        if not matched and len(sig) > 10:
+            translated.append(sig.rstrip(".") + ".")
+    if translated:
+        parts.append(" ".join(translated[:2]))
+
+    if rr and rr > 1:
+        parts.append(
+            f"With a {rr:.1f}:1 risk-to-reward ratio, "
+            f"the potential upside meaningfully outweighs the downside."
+        )
+
+    if bt_strategy and bt_wr:
+        ret_str = f" returning {bt_return:+.1f}%" if bt_return else ""
+        parts.append(
+            f"Historical backtesting of the {bt_strategy} strategy shows "
+            f"a {bt_wr:.0f}% win rate{ret_str}."
+        )
+
+    return " ".join(parts)
+
+
 def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     """Core logic — scan DB + optionally merge Brain predictions."""
     from ...models.trading import ScanResult, BacktestResult
@@ -1875,17 +1949,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             pick["backtest_return"] = None
             pick["backtest_win_rate"] = None
 
-        # Build trade thesis
-        thesis_parts = []
-        if pick["signal"] == "buy":
-            thesis_parts.append("Bullish setup identified by CHILI's AI.")
-        for sig in (pick.get("signals") or [])[:3]:
-            thesis_parts.append(sig)
-        if pick.get("brain_confidence"):
-            thesis_parts.append(f"AI Brain confidence: {pick['brain_confidence']:.0f}%")
-        if pick.get("risk_reward"):
-            thesis_parts.append(f"Risk:Reward ratio {pick['risk_reward']:.1f}:1")
-        pick["thesis"] = " ".join(thesis_parts)
+        pick["thesis"] = _build_conversational_thesis(pick)
 
         # Timeframe suggestion
         if pick.get("indicators", {}).get("adx") and pick["indicators"]["adx"] > 25:

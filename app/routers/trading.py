@@ -792,6 +792,74 @@ def api_run_backtest(
     return JSONResponse(result)
 
 
+@router.get("/api/trading/backtest/quick")
+def api_quick_backtest(
+    ticker: str = Query(...),
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Return a cached recent backtest or run the best-performing strategy."""
+    from datetime import timedelta
+    from ..models.trading import BacktestResult
+
+    ctx = get_identity_ctx(request, db)
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    cached = (
+        db.query(BacktestResult)
+        .filter(
+            BacktestResult.ticker == ticker.upper(),
+            BacktestResult.ran_at >= cutoff,
+        )
+        .order_by(BacktestResult.return_pct.desc())
+        .first()
+    )
+    if cached:
+        import json as _json
+        eq = []
+        try:
+            eq = _json.loads(cached.equity_curve) if cached.equity_curve else []
+        except Exception:
+            pass
+        return JSONResponse({
+            "ok": True, "cached": True,
+            "ticker": cached.ticker,
+            "strategy_name": cached.strategy_name,
+            "return_pct": cached.return_pct,
+            "win_rate": cached.win_rate,
+            "sharpe": cached.sharpe,
+            "max_drawdown": cached.max_drawdown,
+            "trade_count": cached.trade_count,
+            "equity_curve": eq,
+        })
+
+    best_result = None
+    for sid in bt_svc.STRATEGIES:
+        try:
+            r = bt_svc.run_backtest(ticker=ticker, strategy_id=sid, period="1y")
+            if r.get("ok"):
+                if best_result is None or r.get("return_pct", -999) > best_result.get("return_pct", -999):
+                    best_result = r
+        except Exception:
+            continue
+
+    if not best_result:
+        return JSONResponse({"ok": False, "error": "All strategies failed"}, status_code=400)
+
+    bt_svc.save_backtest(db, ctx["user_id"], best_result)
+    return JSONResponse({
+        "ok": True, "cached": False,
+        "ticker": best_result["ticker"],
+        "strategy_name": best_result.get("strategy", ""),
+        "return_pct": best_result.get("return_pct", 0),
+        "win_rate": best_result.get("win_rate", 0),
+        "sharpe": best_result.get("sharpe"),
+        "max_drawdown": best_result.get("max_drawdown", 0),
+        "trade_count": best_result.get("trade_count", 0),
+        "equity_curve": best_result.get("equity_curve", []),
+        "trades": best_result.get("trades", []),
+    })
+
+
 # ── Scanner ────────────────────────────────────────────────────────────
 
 @router.post("/api/trading/scan")

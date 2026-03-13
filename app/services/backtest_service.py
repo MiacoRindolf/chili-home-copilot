@@ -204,6 +204,49 @@ def list_strategies() -> list[dict[str, str]]:
     ]
 
 
+def _extract_indicators(strat_cls, strategy_id: str, df: pd.DataFrame) -> dict:
+    """Compute indicator overlays for charting based on the strategy used."""
+    result = {}
+    close = df["Close"]
+    timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
+
+    def _series_to_points(series):
+        pts = []
+        for i, val in enumerate(series):
+            if pd.notna(val):
+                pts.append({"time": timestamps[i], "value": round(float(val), 4)})
+        return pts
+
+    if strategy_id == "sma_cross":
+        result["SMA 10"] = _series_to_points(_sma(close, 10))
+        result["SMA 30"] = _series_to_points(_sma(close, 30))
+    elif strategy_id == "ema_cross":
+        result["EMA 12"] = _series_to_points(_ema(close, 12))
+        result["EMA 26"] = _series_to_points(_ema(close, 26))
+    elif strategy_id == "rsi_reversal":
+        result["RSI 14"] = _series_to_points(_rsi(close, 14))
+    elif strategy_id == "bb_bounce":
+        result["BB Upper"] = _series_to_points(_bollinger_upper(close, 20, 2))
+        result["BB Mid"] = _series_to_points(_bollinger_mid(close, 20))
+        result["BB Lower"] = _series_to_points(_bollinger_lower(close, 20, 2))
+    elif strategy_id == "macd":
+        ema_f = _ema(close, 12)
+        ema_s = _ema(close, 26)
+        macd_line = pd.Series(ema_f.values - ema_s.values, index=close.index)
+        signal_line = _ema(macd_line, 9)
+        histogram = macd_line - signal_line
+        result["MACD"] = _series_to_points(macd_line)
+        result["Signal"] = _series_to_points(signal_line)
+        result["Histogram"] = _series_to_points(histogram)
+    elif strategy_id == "trend_follow":
+        result["SMA 50"] = _series_to_points(_sma(close, 50))
+        result["EMA 12"] = _series_to_points(_ema(close, 12))
+        result["EMA 26"] = _series_to_points(_ema(close, 26))
+        result["RSI 14"] = _series_to_points(_rsi(close, 14))
+
+    return result
+
+
 # ── Run backtest ────────────────────────────────────────────────────────
 
 def run_backtest(
@@ -255,6 +298,45 @@ def run_backtest(
                 "value": round(float(row["Equity"]), 2),
             })
 
+    # OHLC candlestick data
+    ohlc_data = []
+    for ts, row in df.iterrows():
+        ohlc_data.append({
+            "time": int(pd.Timestamp(ts).timestamp()),
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+        })
+
+    # Trade entries/exits from backtesting.py
+    # Use bar indices to get timestamps that exactly match the OHLC series
+    trades_list = []
+    raw_trades = stats.get("_trades")
+    if raw_trades is not None and not raw_trades.empty:
+        idx_timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
+        for _, t in raw_trades.iterrows():
+            entry_bar = int(t.get("EntryBar", 0))
+            exit_bar = int(t.get("ExitBar", 0))
+            entry_ts = idx_timestamps[entry_bar] if entry_bar < len(idx_timestamps) else None
+            exit_ts = idx_timestamps[exit_bar] if exit_bar < len(idx_timestamps) else None
+            entry_price = float(t.get("EntryPrice", 0))
+            exit_price = float(t.get("ExitPrice", 0))
+            pnl = float(t.get("PnL", 0))
+            ret_pct = float(t.get("ReturnPct", 0)) * 100
+            trades_list.append({
+                "entry_time": entry_ts,
+                "exit_time": exit_ts,
+                "entry_price": round(entry_price, 4),
+                "exit_price": round(exit_price, 4),
+                "pnl": round(pnl, 2),
+                "return_pct": round(ret_pct, 2),
+                "size": int(t.get("Size", 0)),
+            })
+
+    # Indicator overlays (strategy-specific)
+    indicators = _extract_indicators(strat_cls, strategy_id, df)
+
     return {
         "ok": True,
         "ticker": ticker.upper(),
@@ -271,6 +353,9 @@ def run_backtest(
         "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
         "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
         "equity_curve": equity_data,
+        "ohlc": ohlc_data,
+        "trades": trades_list,
+        "indicators": indicators,
     }
 
 
