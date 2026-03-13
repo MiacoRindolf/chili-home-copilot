@@ -678,21 +678,28 @@ function loadBrainDashboard() {
 
     var snapDot = d.total_snapshots > 0 ? 'active' : 'empty';
     var pendDot = pending > 0 ? 'pending' : 'empty';
-    var verDot = evaluated > 0 ? 'active' : 'empty';
+    var verDot = evaluated > 0 ? 'active' : (d.early_predictions > 0 ? 'pending' : 'empty');
+    var verLabel = evaluated > 0 ? evaluated.toLocaleString() : (d.early_predictions > 0 ? d.early_predictions.toLocaleString() + ' (3d)' : '0');
     pipeline.innerHTML =
       '<span class="bp-step"><span class="bp-dot ' + snapDot + '"></span> Snapshots: <span class="bp-num">' + (d.total_snapshots||0).toLocaleString() + '</span></span>' +
       '<span class="bp-arrow">&rarr;</span>' +
       '<span class="bp-step"><span class="bp-dot ' + pendDot + '"></span> Pending: <span class="bp-num">' + pending.toLocaleString() + '</span></span>' +
       '<span class="bp-arrow">&rarr;</span>' +
-      '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + evaluated.toLocaleString() + '</span></span>';
+      '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + verLabel + '</span></span>';
 
     function _accDisp(acc, count) { return count > 0 ? acc + '%' : '--'; }
     function _accCls(acc, count) { if (count === 0) return ''; return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger'; }
     function _accColor(acc, count) { if (count === 0) return 'var(--text-muted)'; return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444'; }
     function _noDataCls(count) { return count > 0 ? '' : ' no-data'; }
+    var daysLeft = d.days_until_first_result;
     function _accSub(count) {
       if (count > 0) return '<div class="bk-trend flat">' + count + ' predictions</div>';
-      if (ps === 'pending_verification') return '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting verification</div>';
+      if (ps === 'pending_verification') {
+        var eta = (daysLeft != null && daysLeft > 0)
+          ? '<br><span style="font-size:9px;color:var(--text-muted)">~' + daysLeft + ' day' + (daysLeft === 1 ? '' : 's') + ' until first results</span>'
+          : (daysLeft === 0 ? '<br><span style="font-size:9px;color:#22c55e">Results ready next cycle</span>' : '');
+        return '<div class="bk-trend flat" style="color:#f59e0b">' + pending.toLocaleString() + ' awaiting verification' + eta + '</div>';
+      }
       if (ps === 'collecting') return '<div class="bk-trend flat">Collecting snapshots&hellip;</div>';
       return '<div class="bk-trend flat">Run scans to start</div>';
     }
@@ -705,18 +712,35 @@ function loadBrainDashboard() {
     var strongSub = (d.strong_predictions||0) > 0
       ? '<div class="bk-trend flat">' + d.strong_predictions + ' high-conviction</div>'
       : pending > 0
-        ? '<div class="bk-trend flat" style="color:#f59e0b">' + pending + ' awaiting results</div>'
+        ? '<div class="bk-trend flat" style="color:#f59e0b">' + pending.toLocaleString() + ' awaiting results' +
+          ((daysLeft != null && daysLeft > 0) ? '<br><span style="font-size:9px;color:var(--text-muted)">~' + daysLeft + 'd until verification</span>' : '') + '</div>'
         : '<div class="bk-trend flat">Run scans to gather data</div>';
 
-    var accRingPct = hasData ? d.prediction_accuracy : 0;
+    var earlyAcc = d.early_accuracy || 0;
+    var earlyPred = d.early_predictions || 0;
+    var hasEarly = !hasData && earlyPred > 0;
+    var accRingPct = hasData ? d.prediction_accuracy : (hasEarly ? earlyAcc : 0);
     var strRingPct = (d.strong_predictions||0) > 0 ? (d.strong_accuracy||0) : 0;
 
+    var accKpiCls = hasData ? _noDataCls(d.total_predictions) : (hasEarly ? '' : _noDataCls(0));
+    var accDispVal = hasData ? _accDisp(d.prediction_accuracy, d.total_predictions) : (hasEarly ? earlyAcc + '%' : '--');
+    var accClsVal = hasData ? _accCls(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accCls(earlyAcc, earlyPred) : '');
+    var accColorVal = hasData ? _accColor(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accColor(earlyAcc, earlyPred) : 'var(--text-muted)');
+    var accTooltip = hasData
+      ? 'Percentage of 5-day direction predictions that were correct.'
+      : (hasEarly ? 'Early preview using 3-day returns. Full 5-day accuracy available soon.' : 'Percentage of 5-day direction predictions that were correct.');
+    var accLabel = hasEarly ? 'Overall Accuracy <span style="font-size:9px;color:var(--text-muted)">(3d preview)</span>' : 'Overall Accuracy';
+    var accSubText = hasData ? _accSub(d.total_predictions) : (hasEarly
+      ? '<div class="bk-trend flat">' + earlyPred + ' early results' +
+        ((daysLeft != null && daysLeft > 0) ? ' &middot; ' + daysLeft + 'd to 5d' : '') + '</div>'
+      : _accSub(0));
+
     kpis.innerHTML =
-      '<div class="brain-kpi clickable' + _noDataCls(d.total_predictions) + '" onclick="showAccuracyDetail(\'all\')">' +
-        '<div class="bk-tooltip">Percentage of 5-day direction predictions that were correct.</div>' +
-        '<div class="brain-ring">' + _makeRingSvg(accRingPct, _accColor(d.prediction_accuracy, d.total_predictions)) +
-          '<div class="ring-label ' + _accCls(d.prediction_accuracy, d.total_predictions) + '">' + _accDisp(d.prediction_accuracy, d.total_predictions) + '</div></div>' +
-        '<div class="bk-lbl">Overall Accuracy</div>' + _accSub(d.total_predictions) + '</div>' +
+      '<div class="brain-kpi clickable' + accKpiCls + '" onclick="showAccuracyDetail(\'all\')">' +
+        '<div class="bk-tooltip">' + accTooltip + '</div>' +
+        '<div class="brain-ring">' + _makeRingSvg(accRingPct, accColorVal) +
+          '<div class="ring-label ' + accClsVal + '">' + accDispVal + '</div></div>' +
+        '<div class="bk-lbl">' + accLabel + '</div>' + accSubText + '</div>' +
       '<div class="brain-kpi clickable' + _noDataCls(d.strong_predictions||0) + '" onclick="showAccuracyDetail(\'strong\')">' +
         '<div class="bk-tooltip">Accuracy of high-conviction predictions (score &ge; 3.0).</div>' +
         '<div class="brain-ring">' + _makeRingSvg(strRingPct, _accColor(d.strong_accuracy||0, d.strong_predictions||0)) +
@@ -1039,10 +1063,10 @@ function pollLearningStatus() {
       var pct = Math.round(learning.steps_completed / learning.total_steps * 100);
       document.getElementById('brain-learning-progress').textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
       document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
-      btn.disabled = true; btn.textContent = '&#x23F3; Learning...';
+      btn.disabled = true; btn.innerHTML = '&#x23F3; Learning...';
     } else {
       pipelineSection.style.display = 'none';
-      btn.disabled = false; btn.textContent = '&#x1F310; Scan Market';
+      btn.disabled = false; btn.innerHTML = '&#x1F310; Scan Market';
     }
 
     var infoEl = document.getElementById('brain-scheduler-info');
@@ -1063,11 +1087,11 @@ function pollLearningStatus() {
 
 /* ── Action triggers ──────────────────────────── */
 function triggerFullScan() {
-  var btn = document.getElementById('btn-full-scan'); btn.disabled = true; btn.textContent = '&#x1F310; Starting...';
+  var btn = document.getElementById('btn-full-scan'); btn.disabled = true; btn.innerHTML = '&#x1F310; Starting...';
   fetch('/api/trading/scan/full', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
-    if (d.ok) btn.textContent = '&#x1F310; Scanning...';
-    else { btn.textContent = d.message || 'Already running'; setTimeout(function(){btn.disabled=false;btn.textContent='&#x1F310; Scan Market';},3000); }
-  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F310; Scan Market';});
+    if (d.ok) btn.innerHTML = '&#x1F310; Scanning...';
+    else { btn.innerHTML = d.message || 'Already running'; setTimeout(function(){btn.disabled=false;btn.innerHTML='&#x1F310; Scan Market';},3000); }
+  }).catch(function(){btn.disabled=false;btn.innerHTML='&#x1F310; Scan Market';});
 }
 
 function triggerDeepStudy() {

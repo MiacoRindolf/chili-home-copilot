@@ -2274,6 +2274,30 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     stock_accuracy = round(stock_correct / stock_total * 100, 1) if stock_total > 0 else 0
     crypto_accuracy = round(crypto_correct / crypto_total * 100, 1) if crypto_total > 0 else 0
 
+    # Early accuracy using 3-day returns (available sooner than 5-day)
+    early_accuracy = 0
+    early_predictions = 0
+    if total_predictions == 0:
+        early_snaps = db.query(MarketSnapshot).filter(
+            MarketSnapshot.future_return_3d.isnot(None),
+            MarketSnapshot.predicted_score.isnot(None),
+            MarketSnapshot.future_return_5d.is_(None),
+        ).order_by(MarketSnapshot.snapshot_date.desc()).limit(2000).all()
+        e_correct = 0
+        for snap in early_snaps:
+            try:
+                pred_score = snap.predicted_score
+                if abs(pred_score) < 0.1:
+                    continue
+                predicted_up = pred_score > 0
+                actual_up = (snap.future_return_3d or 0) > 0
+                if predicted_up == actual_up:
+                    e_correct += 1
+                early_predictions += 1
+            except Exception:
+                continue
+        early_accuracy = round(e_correct / early_predictions * 100, 1) if early_predictions > 0 else 0
+
     # Pipeline status: pending predictions (have predicted_score, awaiting outcome)
     pending_predictions = db.query(MarketSnapshot).filter(
         MarketSnapshot.predicted_score.isnot(None),
@@ -2335,6 +2359,8 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         "stock_predictions": stock_total,
         "crypto_accuracy": crypto_accuracy,
         "crypto_predictions": crypto_total,
+        "early_accuracy": early_accuracy,
+        "early_predictions": early_predictions,
         "pending_predictions": pending_predictions,
         "evaluated_snapshots": evaluated_snapshots,
         "oldest_unevaluated": oldest_unevaluated,
