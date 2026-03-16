@@ -67,6 +67,29 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-act-study { background: linear-gradient(135deg,#f59e0b,#d97706); }
 .brain-act-ml { background: linear-gradient(135deg,#06b6d4,#0891b2); }
 
+/* Project lens tab bar */
+.proj-lens-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; padding: 4px 0; border-bottom: 1px solid var(--border); }
+.proj-lens-tab { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .15s; white-space: nowrap; }
+.proj-lens-tab:hover { background: var(--bg-header); color: var(--text); }
+.proj-lens-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
+.proj-lens-tab .plt-icon { font-size: 13px; }
+.proj-lens-panel { display: none; }
+.proj-lens-panel.active { display: block; }
+.proj-lens-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 14px; }
+.proj-lens-kpi { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; text-align: center; }
+.proj-lens-kpi .plk-val { font-size: 20px; font-weight: 800; }
+.proj-lens-kpi .plk-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-top: 2px; }
+.proj-hotspot-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.proj-hotspot-row:last-child { border-bottom: none; }
+.proj-hotspot-file { flex: 1; font-family: var(--font-mono, monospace); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.proj-hotspot-score { font-weight: 700; min-width: 50px; text-align: right; }
+.proj-insight-row { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; line-height: 1.5; }
+.proj-insight-row:last-child { border-bottom: none; }
+.proj-insight-cat { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; background: rgba(6,182,212,.12); color: #06b6d4; margin-right: 6px; }
+.proj-event-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 10px; color: var(--text-muted); }
+.proj-event-type { font-weight: 700; color: var(--text); text-transform: uppercase; min-width: 60px; }
+.proj-planner-summary { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
+
 /* Brain sections */
 .brain-section { margin-bottom: 16px; }
 .brain-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
@@ -1211,6 +1234,211 @@ function loadCodeDashboard() {
   loadCodeReviews();
   loadCodeDeps();
   pollCodeLearningStatus();
+}
+
+/* ── Project Lens Functions ─────────────────────── */
+var _lensCache = {};
+var _lensListLoaded = false;
+var _lensList = [];
+
+function initProjectLensBar() {
+  fetch('/api/brain/project/lenses').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    _lensList = d.lenses || [];
+    _lensListLoaded = true;
+    var bar = document.getElementById('proj-lens-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+    _lensList.forEach(function(l) {
+      var tab = document.createElement('div');
+      tab.className = 'proj-lens-tab' + (l.name === _activeProjectLens ? ' active' : '');
+      tab.dataset.lens = l.name;
+      tab.innerHTML = '<span class="plt-icon">' + l.icon + '</span> ' + l.label;
+      tab.onclick = function() { switchProjectLens(l.name); };
+      bar.appendChild(tab);
+    });
+    _ensureLensPanelContainer();
+    switchProjectLens(_activeProjectLens);
+  });
+}
+
+function _ensureLensPanelContainer() {
+  if (document.getElementById('proj-lens-panels')) return;
+  var dp = document.getElementById('domain-project');
+  if (!dp) return;
+  var codeContent = dp.querySelector('#code-pipeline-section');
+  var container = document.createElement('div');
+  container.id = 'proj-lens-panels';
+  if (codeContent) {
+    dp.insertBefore(container, codeContent);
+  } else {
+    dp.appendChild(container);
+  }
+}
+
+function switchProjectLens(lensName) {
+  _activeProjectLens = lensName;
+  document.querySelectorAll('.proj-lens-tab').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.lens === lensName);
+  });
+  document.querySelectorAll('.proj-lens-panel').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.lens === lensName);
+  });
+  var existing = document.querySelector('.proj-lens-panel[data-lens="' + lensName + '"]');
+  if (!existing) {
+    _createLensPanel(lensName);
+  }
+  loadLensMetrics(lensName);
+}
+
+function _createLensPanel(lensName) {
+  var container = document.getElementById('proj-lens-panels');
+  if (!container) return;
+  var panel = document.createElement('div');
+  panel.className = 'proj-lens-panel active';
+  panel.dataset.lens = lensName;
+  panel.id = 'lens-panel-' + lensName;
+  panel.innerHTML =
+    '<div class="proj-lens-kpis" id="lens-kpis-' + lensName + '"></div>' +
+    '<div id="lens-extra-' + lensName + '"></div>' +
+    '<div class="brain-section" id="lens-hotspots-' + lensName + '">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Hotspots</div>' +
+      '<div id="lens-hotspots-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
+    '</div>' +
+    '<div class="brain-section" id="lens-insights-' + lensName + '">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Insights</div>' +
+      '<div id="lens-insights-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
+    '</div>' +
+    '<div class="brain-section" id="lens-activity-' + lensName + '">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x23F1;</span> Recent Activity</div>' +
+      '<div id="lens-activity-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
+    '</div>';
+  container.appendChild(panel);
+}
+
+function loadLensMetrics(lensName) {
+  fetch('/api/brain/project/lens/' + lensName + '/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    _lensCache[lensName] = d;
+    _renderLensKpis(lensName, d);
+    _renderLensHotspots(lensName, d.top_hotspots || []);
+    _renderLensInsights(lensName, d.top_insights || []);
+    _renderLensActivity(lensName, d.recent_events || []);
+    _renderLensExtras(lensName, d);
+  });
+}
+
+function _renderLensKpis(lensName, d) {
+  var el = document.getElementById('lens-kpis-' + lensName);
+  if (!el) return;
+  var kpis = [
+    {val: (d.total_files || 0).toLocaleString(), lbl: 'Files'},
+    {val: (d.total_lines || 0).toLocaleString(), lbl: 'Lines'},
+    {val: d.avg_complexity || '0', lbl: 'Avg Complexity'},
+    {val: d.hotspot_count || 0, lbl: 'Hotspots'},
+    {val: d.insight_count || 0, lbl: 'Insights'},
+  ];
+  if (lensName === 'qa') {
+    kpis.push({val: d.test_file_count || 0, lbl: 'Test Files'});
+    var ratio = d.total_files ? ((d.test_file_count || 0) / d.total_files * 100).toFixed(1) + '%' : '0%';
+    kpis.push({val: ratio, lbl: 'Test Ratio'});
+  }
+  if (d.circular_dep_count) {
+    kpis.push({val: d.circular_dep_count, lbl: 'Circular Deps'});
+  }
+  if (d.dep_alert_count) {
+    kpis.push({val: d.dep_alert_count, lbl: 'Dep Alerts'});
+  }
+  kpis.push({val: d.review_count || 0, lbl: 'Reviews'});
+  el.innerHTML = kpis.map(function(k) {
+    return '<div class="proj-lens-kpi"><div class="plk-val">' + k.val + '</div><div class="plk-lbl">' + k.lbl + '</div></div>';
+  }).join('');
+}
+
+function _renderLensHotspots(lensName, hotspots) {
+  var el = document.getElementById('lens-hotspots-list-' + lensName);
+  if (!el) return;
+  if (!hotspots.length) { el.textContent = 'No hotspots in this scope.'; return; }
+  el.innerHTML = hotspots.slice(0, 10).map(function(h) {
+    var scoreClass = h.combined > 0.7 ? 'danger' : h.combined > 0.4 ? 'warn' : 'good';
+    return '<div class="proj-hotspot-row">' +
+      '<span class="proj-hotspot-file">' + h.file + '</span>' +
+      '<span class="proj-hotspot-score" style="color:var(--' + scoreClass + ',inherit)">' + h.combined.toFixed(3) + '</span>' +
+      '<span style="color:var(--text-muted)">' + h.commits + ' commits</span>' +
+    '</div>';
+  }).join('');
+}
+
+function _renderLensInsights(lensName, insights) {
+  var el = document.getElementById('lens-insights-list-' + lensName);
+  if (!el) return;
+  if (!insights.length) { el.textContent = 'No insights yet. Run a learning cycle.'; return; }
+  el.innerHTML = insights.slice(0, 10).map(function(i) {
+    return '<div class="proj-insight-row">' +
+      '<span class="proj-insight-cat">' + i.category + '</span>' +
+      i.description +
+      '<span style="margin-left:6px;font-size:9px;color:var(--text-muted)">' + (i.confidence * 100).toFixed(0) + '% conf</span>' +
+    '</div>';
+  }).join('');
+}
+
+function _renderLensActivity(lensName, events) {
+  var el = document.getElementById('lens-activity-list-' + lensName);
+  if (!el) return;
+  if (!events.length) { el.textContent = 'No recent activity.'; return; }
+  el.innerHTML = events.slice(0, 8).map(function(e) {
+    var ago = e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '';
+    return '<div class="proj-event-row">' +
+      '<span class="proj-event-type">' + e.type + '</span>' +
+      '<span style="flex:1">' + e.description + '</span>' +
+      '<span>' + ago + '</span>' +
+    '</div>';
+  }).join('');
+}
+
+function _renderLensExtras(lensName, d) {
+  var el = document.getElementById('lens-extra-' + lensName);
+  if (!el) return;
+  el.innerHTML = '';
+  if ((lensName === 'pm' || lensName === 'po') && d.planner) {
+    var summaries = d.planner || [];
+    if (summaries.length) {
+      var html = '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Planner Summary</div>';
+      html += '<div class="proj-planner-summary">';
+      summaries.forEach(function(s) {
+        html += '<div style="margin-bottom:8px">';
+        html += '<strong>' + (s.user_name || 'User') + '</strong>';
+        html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + (s.summary || 'No tasks') + '</div>';
+        html += '</div>';
+      });
+      html += '</div></div>';
+      el.innerHTML = html;
+    }
+  }
+  if (lensName === 'architect' && d.circular_dep_count) {
+    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x26A0;</span> Architecture Warnings</div>' +
+      '<div style="font-size:11px;padding:8px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:6px">' +
+      d.circular_dep_count + ' circular dependency edge(s) detected. Check the Architecture Graph below for details.' +
+      '</div></div>';
+  }
+  if ((lensName === 'devops' || lensName === 'security') && d.dep_alert_count) {
+    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F6A8;</span> Dependency Health</div>' +
+      '<div style="font-size:11px;padding:8px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px">' +
+      d.dep_alert_count + ' package alert(s) require attention.' +
+      '</div></div>';
+  }
+  if (lensName === 'qa') {
+    var total = d.total_files || 0;
+    var tests = d.test_file_count || 0;
+    var ratio = total ? (tests / total * 100).toFixed(1) : '0.0';
+    var barColor = parseFloat(ratio) > 20 ? '#22c55e' : parseFloat(ratio) > 10 ? '#f59e0b' : '#ef4444';
+    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F9EA;</span> Test Coverage</div>' +
+      '<div style="background:var(--bg-header);border:1px solid var(--border);border-radius:8px;padding:10px">' +
+      '<div style="font-size:12px;margin-bottom:6px">' + tests + ' test files out of ' + total + ' total (' + ratio + '%)</div>' +
+      '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">' +
+      '<div style="height:100%;width:' + Math.min(parseFloat(ratio), 100) + '%;background:' + barColor + ';border-radius:4px;transition:width .5s"></div>' +
+      '</div></div></div>';
+  }
 }
 
 /* ══════════════════════════════════════════════════

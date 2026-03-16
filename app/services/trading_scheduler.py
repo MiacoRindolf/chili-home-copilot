@@ -494,17 +494,21 @@ def _check_breakout_outcomes():
             logger.info("[scheduler] No pending breakout alerts to check")
             return
 
+        from .trading.market_data import fetch_quotes_batch
+        unique_tickers = list({a.ticker for a in pending})
+        try:
+            quotes_map = fetch_quotes_batch(unique_tickers)
+        except Exception:
+            quotes_map = {}
+
         updated = 0
         closed = 0
         for alert in pending:
             age = now - alert.alerted_at
             age_hours = age.total_seconds() / 3600
 
-            try:
-                q = fetch_quote(alert.ticker)
-                current_price = q.get("price") if q else None
-            except Exception:
-                current_price = None
+            q = quotes_map.get(alert.ticker)
+            current_price = q.get("price") if q else None
 
             if current_price is None:
                 continue

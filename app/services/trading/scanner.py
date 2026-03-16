@@ -22,8 +22,11 @@ from .portfolio import get_watchlist, get_trade_stats, get_insights
 
 logger = logging.getLogger(__name__)
 
+import os as _os
+
 _shutting_down = threading.Event()
-_MAX_SCAN_WORKERS = 12
+_CPU_COUNT = _os.cpu_count() or 4
+_MAX_SCAN_WORKERS = min(40, max(16, _CPU_COUNT * 2))
 
 _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
 _TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster
@@ -1804,7 +1807,7 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
     errors = 0
     t0 = time.time()
 
-    with ThreadPoolExecutor(max_workers=min(10, _MAX_SCAN_WORKERS)) as pool:
+    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as pool:
         future_map = {
             pool.submit(_score_crypto_breakout, t): t
             for t in ticker_list
@@ -2801,7 +2804,7 @@ def run_scan(
 
 
 def _prewarm_cache(tickers: list[str]) -> None:
-    """Pre-warm OHLCV cache.
+    """Pre-warm OHLCV cache with parallel chunk downloads.
 
     When Massive or Polygon is enabled the per-ticker cache inside the
     respective client handles this automatically, so we skip the yfinance
@@ -2810,25 +2813,29 @@ def _prewarm_cache(tickers: list[str]) -> None:
     if _use_massive() or _use_polygon():
         return
     BATCH_SIZE = 50
-    for i in range(0, len(tickers), BATCH_SIZE):
-        chunk = tickers[i:i + BATCH_SIZE]
+    chunks = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
+    def _dl(chunk: list[str]) -> None:
         try:
             batch_download(chunk, period="6mo", interval="1d")
         except Exception:
             pass
+    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as pool:
+        list(pool.map(_dl, chunks))
 
 
 def _prewarm_cache_intraday(tickers: list[str]) -> None:
-    """Pre-warm 5d/15m intraday cache for day-trade scoring."""
+    """Pre-warm 5d/15m intraday cache with parallel chunk downloads."""
     if _use_massive() or _use_polygon():
         return
     BATCH_SIZE = 50
-    for i in range(0, len(tickers), BATCH_SIZE):
-        chunk = tickers[i:i + BATCH_SIZE]
+    chunks = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
+    def _dl(chunk: list[str]) -> None:
         try:
             batch_download(chunk, period="5d", interval="15m")
         except Exception:
             pass
+    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as pool:
+        list(pool.map(_dl, chunks))
 
 
 def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[dict]:

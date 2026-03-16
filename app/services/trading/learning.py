@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -24,6 +25,11 @@ from .market_data import (
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
 
 logger = logging.getLogger(__name__)
+
+_CPU_COUNT = os.cpu_count() or 4
+_IO_WORKERS_HIGH = min(48, max(24, _CPU_COUNT * 2))  # IO-heavy data fetching
+_IO_WORKERS_MED = min(32, max(16, _CPU_COUNT))       # mixed IO/CPU work
+_IO_WORKERS_LOW = min(20, max(10, _CPU_COUNT))       # lighter parallel tasks
 
 _shutting_down = threading.Event()
 
@@ -257,7 +263,7 @@ def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None, float | 
 def take_snapshots_parallel(
     db: Session,
     tickers: list[str],
-    max_workers: int = 24,
+    max_workers: int = _IO_WORKERS_HIGH,
 ) -> int:
     """Take snapshots for many tickers using a thread pool.
 
@@ -386,7 +392,7 @@ def backfill_future_returns(db: Session) -> int:
         except Exception:
             return None
 
-    _workers = 24 if (_use_massive() or _use_polygon()) else 16
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     _t0 = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=_workers) as executor:
@@ -594,7 +600,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     mine_tickers = mine_tickers[:500]
 
-    _workers = 20 if (_use_massive() or _use_polygon()) else 12
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     _t0 = time.time()
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as executor:
@@ -993,7 +999,7 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         seek_tickers = list(ALL_SCAN_TICKERS)
 
     seek_tickers = seek_tickers[:400]
-    _workers = 20 if (_use_massive() or _use_polygon()) else 12
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     extra_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in seek_tickers}
@@ -1089,7 +1095,21 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
 
     test_tickers = list(DEFAULT_SCAN_TICKERS[:18]) + list(DEFAULT_CRYPTO_TICKERS[:7])
 
+    def _run_single_bt(args: tuple) -> dict[str, Any] | None:
+        ticker, strategy_id = args
+        if _shutting_down.is_set():
+            return None
+        try:
+            result = run_backtest(ticker, strategy_id=strategy_id, period="1y")
+            if result.get("ok") and result.get("trade_count", 0) > 0:
+                return result
+        except Exception:
+            pass
+        return None
+
     backtests_run = 0
+    _bt_workers = max(8, (os.cpu_count() or 4) * 2)
+
     for ins in insights[:10]:
         desc_lower = ins.pattern_description.lower()
         strategy_id = None
@@ -1100,21 +1120,18 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
         if not strategy_id:
             strategy_id = "trend_follow"
 
+        jobs = [(t, strategy_id) for t in test_tickers[:10]]
         wins = 0
         total = 0
-        for ticker in test_tickers[:10]:
-            if _shutting_down.is_set():
-                break
-            try:
-                result = run_backtest(ticker, strategy_id=strategy_id, period="1y")
-                if result.get("ok") and result.get("trade_count", 0) > 0:
-                    save_backtest(db, user_id, result)
-                    total += 1
-                    if result.get("return_pct", 0) > 0:
-                        wins += 1
-                    backtests_run += 1
-            except Exception:
-                continue
+        with ThreadPoolExecutor(max_workers=_bt_workers) as pool:
+            for result in pool.map(_run_single_bt, jobs):
+                if result is None:
+                    continue
+                save_backtest(db, user_id, result)
+                total += 1
+                if result.get("return_pct", 0) > 0:
+                    wins += 1
+                backtests_run += 1
 
         if total >= 3:
             bt_win_rate = wins / total
@@ -1154,7 +1171,7 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
 
     rows: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    _workers = 20 if (_use_massive() or _use_polygon()) else 10
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
         for f in as_completed(futs):
@@ -1561,7 +1578,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     tickers = list(DEFAULT_CRYPTO_TICKERS)[:30] + list(DEFAULT_SCAN_TICKERS)[:30]
 
     rows: list[dict] = []
-    _workers = 10
+    _workers = _IO_WORKERS_LOW
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_intraday_breakout_patterns, t): t for t in tickers}
         for f in as_completed(futs):
@@ -2309,7 +2326,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
         return {"refined": 0, "note": "no patterns to refine"}
 
     mine_tickers = list(ALL_SCAN_TICKERS)[:300]
-    _workers = 20 if (_use_massive() or _use_polygon()) else 10
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
@@ -2948,7 +2965,7 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
 
     quotes_map = fetch_quotes_batch(ticker_batch)
 
-    _workers = 16 if (_use_massive() or _use_polygon()) else 10
+    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     results = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {

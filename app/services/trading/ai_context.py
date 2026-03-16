@@ -170,7 +170,7 @@ def build_ai_context(
             return None
 
     futures = {}
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=12) as pool:
         futures["indicators"] = pool.submit(_fetch_indicators)
         futures["quote"] = pool.submit(fetch_quote, ticker)
         futures["fundamentals"] = pool.submit(_fetch_fundamentals)
@@ -591,7 +591,7 @@ def _build_market_context_fresh(db: Session, user_id: int | None) -> str:
     neutral = 0
     rsi_vals: list[float] = []
 
-    with ThreadPoolExecutor(max_workers=10) as pool:
+    with ThreadPoolExecutor(max_workers=16) as pool:
         # Kick off all scoring + quote fetches concurrently
         score_futures = {pool.submit(_score_ticker, t): t for t in sample_tickers}
         spy_fut = pool.submit(fetch_quote, "SPY")

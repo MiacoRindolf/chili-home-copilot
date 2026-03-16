@@ -590,7 +590,7 @@ def get_daytrade_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
@@ -683,7 +683,7 @@ def get_breakout_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=6) as executor:
+    with ThreadPoolExecutor(max_workers=10) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]

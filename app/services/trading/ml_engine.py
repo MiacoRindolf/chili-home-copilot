@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import pickle
 import threading
 from datetime import datetime
@@ -167,32 +168,51 @@ def train_model(db) -> dict[str, Any]:
                    "Snapshots need at least 5 trading days before their predictions can be checked.",
         }
 
-    X_rows = []
-    y_rows = []
-    for snap in snaps:
+    def _extract_one(snap_data: dict) -> tuple[list[float], int] | None:
         try:
-            ind_data = json.loads(snap.indicator_data) if snap.indicator_data else {}
+            ind_data = json.loads(snap_data["indicator_data"]) if snap_data["indicator_data"] else {}
             if not ind_data:
-                continue
-            ind_data["ticker"] = snap.ticker
-            if getattr(snap, "news_sentiment", None) is not None:
-                ind_data["news_sentiment"] = snap.news_sentiment
-            if getattr(snap, "news_count", None) is not None:
-                ind_data["news_count"] = snap.news_count
-            if getattr(snap, "pe_ratio", None) is not None:
-                ind_data["pe_ratio"] = snap.pe_ratio
-            if getattr(snap, "market_cap_b", None) is not None:
-                ind_data["market_cap_b"] = snap.market_cap_b
+                return None
+            ind_data["ticker"] = snap_data["ticker"]
+            for k in ("news_sentiment", "news_count", "pe_ratio", "market_cap_b"):
+                if snap_data.get(k) is not None:
+                    ind_data[k] = snap_data[k]
             features = extract_features(
                 ind_data,
-                close_price=snap.close_price,
-                vix=getattr(snap, "vix_at_snapshot", None),
+                close_price=snap_data["close_price"],
+                vix=snap_data.get("vix_at_snapshot"),
                 regime=None,
             )
-            X_rows.append([features.get(f, 0.0) for f in FEATURE_NAMES])
-            y_rows.append(1 if (snap.future_return_5d or 0) > 0 else 0)
+            x = [features.get(f, 0.0) for f in FEATURE_NAMES]
+            y = 1 if (snap_data.get("future_return_5d") or 0) > 0 else 0
+            return (x, y)
         except Exception:
-            continue
+            return None
+
+    snap_dicts = [
+        {
+            "indicator_data": s.indicator_data,
+            "ticker": s.ticker,
+            "close_price": s.close_price,
+            "future_return_5d": s.future_return_5d,
+            "news_sentiment": getattr(s, "news_sentiment", None),
+            "news_count": getattr(s, "news_count", None),
+            "pe_ratio": getattr(s, "pe_ratio", None),
+            "market_cap_b": getattr(s, "market_cap_b", None),
+            "vix_at_snapshot": getattr(s, "vix_at_snapshot", None),
+        }
+        for s in snaps
+    ]
+
+    from concurrent.futures import ThreadPoolExecutor
+    X_rows = []
+    y_rows = []
+    _n_workers = min(max(4, (os.cpu_count() or 4)), len(snap_dicts) // 50 + 1)
+    with ThreadPoolExecutor(max_workers=_n_workers) as pool:
+        for result in pool.map(_extract_one, snap_dicts):
+            if result is not None:
+                X_rows.append(result[0])
+                y_rows.append(result[1])
 
     if len(X_rows) < _MIN_SAMPLES:
         return {
@@ -216,7 +236,7 @@ def train_model(db) -> dict[str, Any]:
         random_state=42,
     )
 
-    cv_scores = cross_val_score(clf, X, y, cv=min(5, max(2, len(X) // 20)), scoring="accuracy")
+    cv_scores = cross_val_score(clf, X, y, cv=min(5, max(2, len(X) // 20)), scoring="accuracy", n_jobs=-1)
 
     clf.fit(X, y)
 

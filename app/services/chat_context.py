@@ -118,6 +118,15 @@ def gather_context_only(
     }
 
 
+def get_project_context_for_chat(db: Session, user_id: int | None, lens: str | None = None) -> str:
+    """Get project/code context, optionally filtered through a role lens."""
+    try:
+        from .code_brain.learning import get_project_chat_context
+        return get_project_chat_context(db, user_id=user_id, lens=lens)
+    except Exception:
+        return ""
+
+
 def build_openai_prompt(
     user_name: str,
     personality_context: str | None,

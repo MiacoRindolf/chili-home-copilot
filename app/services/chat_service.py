@@ -34,6 +34,7 @@ from .. import web_search as web_search_module
 from .. import memory as memory_module
 from .. import openai_client
 from .code_brain import learning as code_learning
+from .chat_context import get_project_context_for_chat
 from .reasoning_brain import learning as reasoning_learning
 from ..modules import is_module_enabled
 from . import project_file_service as pfs_module
@@ -103,12 +104,11 @@ def resolve_response(
 
         if openai_client.is_configured():
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-            # Include Code + Reasoning context when available so answers are project-aware and user-aware.
             code_ctx = ""
             reasoning_ctx = ""
             try:
                 if user_id and not is_guest:
-                    code_ctx = code_learning.get_code_chat_context(db, user_id=user_id)
+                    code_ctx = get_project_context_for_chat(db, user_id=user_id)
                     reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
             except Exception:
                 code_ctx = ""
@@ -215,12 +215,11 @@ def resolve_response(
 
     elif action_type == "unknown" and openai_client.is_configured():
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
-        # Pull Code + Reasoning context so the fallback LLM answer understands the user's codebases and style.
         code_ctx = ""
         reasoning_ctx = ""
         try:
             if user_id and not is_guest:
-                code_ctx = code_learning.get_code_chat_context(db, user_id=user_id)
+                code_ctx = get_project_context_for_chat(db, user_id=user_id)
                 reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
         except Exception:
             code_ctx = ""
