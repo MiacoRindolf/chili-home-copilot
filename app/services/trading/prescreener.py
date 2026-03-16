@@ -16,6 +16,24 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+# Crypto symbols to exclude: stablecoins, wrapped USD, tokenized treasuries,
+# money-market funds, and other non-tradeable / illiquid tokens that always
+# 404 on Massive and waste API calls.
+_CRYPTO_EXCLUDE: set[str] = {
+    # stablecoins
+    "usdt", "usdc", "dai", "busd", "tusd", "usdp", "frax", "gusd",
+    "fdusd", "pyusd", "eurc", "crvusd", "usde", "usad", "usdq",
+    "usd0", "usd1", "usdon", "usdg", "gho", "rlusd", "bfusd",
+    "usdd", "eurs", "xsgd", "bidr", "idrt", "lusd",
+    # tokenized treasuries / money-market / RWA that have no exchange data
+    "ustb", "jaaa", "jtrsy", "ylds", "eutbl", "stable", "clbr-u",
+    # wrapped / bridged duplicates
+    "wbtc", "weth", "steth", "wsteth", "cbeth", "reth",
+    "wbnb", "wmatic", "wavax", "wtrx",
+    # gold-backed / commodity tokens
+    "xaut", "paxg",
+}
+
 # ── Cache ──────────────────────────────────────────────────────────────
 
 _cache: dict[str, Any] = {}
@@ -286,13 +304,14 @@ def _yf_small_cap_gainers() -> list[str]:
 # ── Crypto candidates ─────────────────────────────────────────────────
 
 def _crypto_candidates() -> list[str]:
-    """Top crypto tickers by market cap."""
+    """Top crypto tickers by market cap, excluding stablecoins and junk."""
     from .market_data import DEFAULT_CRYPTO_TICKERS
     from ..ticker_universe import get_all_crypto_tickers
     try:
-        return get_all_crypto_tickers(n=200)
+        raw = get_all_crypto_tickers(n=200)
     except Exception:
-        return list(DEFAULT_CRYPTO_TICKERS)
+        raw = list(DEFAULT_CRYPTO_TICKERS)
+    return [t for t in raw if t.split("-")[0].lower() not in _CRYPTO_EXCLUDE]
 
 
 # ── Static fallback pool (used when live sources underperform) ────────
@@ -489,11 +508,10 @@ def _crypto_top_movers() -> list[str]:
         )
         resp.raise_for_status()
         data = resp.json()
-        stables = {"usdt", "usdc", "dai", "busd", "tusd", "usdp", "frax", "gusd"}
         tickers = []
         for coin in data:
             sym = coin.get("symbol", "").lower()
-            if sym in stables:
+            if sym in _CRYPTO_EXCLUDE:
                 continue
             tickers.append(sym.upper() + "-USD")
         _cache_set("crypto_top_movers", tickers)
@@ -516,7 +534,6 @@ def get_trending_crypto() -> list[str]:
         return cached
 
     trending: list[str] = []
-    stables = {"usdt", "usdc", "dai", "busd", "tusd", "usdp", "frax", "gusd"}
     try:
         import requests
         resp = requests.get(
@@ -528,7 +545,7 @@ def get_trending_crypto() -> list[str]:
         for item in data.get("coins", []):
             coin = item.get("item", {})
             sym = coin.get("symbol", "").lower()
-            if sym and sym not in stables:
+            if sym and sym not in _CRYPTO_EXCLUDE:
                 trending.append(sym.upper() + "-USD")
     except Exception as e:
         logger.warning(f"[prescreener] CoinGecko trending failed: {e}")

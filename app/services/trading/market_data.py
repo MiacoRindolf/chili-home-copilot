@@ -159,6 +159,7 @@ def fetch_ohlcv(
     _end_str = str(end)[:10] if end else None
 
     # --- Massive path (primary) ---
+    _massive_dead = False
     if _use_massive():
         try:
             bars = _massive.get_aggregates(
@@ -167,9 +168,15 @@ def fetch_ohlcv(
             )
             if bars:
                 return bars
-            logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
+            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+                _massive_dead = True
+            if not _massive_dead:
+                logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
         except Exception as e:
             logger.warning(f"[market_data] Massive OHLCV failed for {ticker}: {e}")
+
+    if _massive_dead:
+        return []
 
     # --- Polygon path (secondary) ---
     if _use_polygon():
@@ -233,6 +240,7 @@ def fetch_ohlcv_df(
     _end_str = str(end)[:10] if end else None
 
     # --- Massive path (primary) ---
+    _massive_dead = False
     if _use_massive():
         try:
             df = _massive.get_aggregates_df(
@@ -241,8 +249,13 @@ def fetch_ohlcv_df(
             )
             if not df.empty:
                 return df
+            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+                _massive_dead = True
         except Exception as e:
             logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
+
+    if _massive_dead:
+        return pd.DataFrame()
 
     # --- Polygon path (secondary) ---
     if _use_polygon():
@@ -286,7 +299,11 @@ def fetch_ohlcv_batch(
         except Exception as e:
             logger.warning(f"[market_data] Massive batch OHLCV failed: {e}")
 
-        missing = [t for t in tickers if t not in results]
+        missing = [
+            t for t in tickers
+            if t not in results
+            and not _massive._is_dead_ticker(_massive.to_massive_ticker(t))
+        ]
         if not missing:
             return results
         tickers = missing
@@ -343,15 +360,22 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
             pass
 
     # --- Massive REST (primary) ---
+    _massive_dead = False
     if _use_massive():
         try:
             fi = _massive.get_last_quote(ticker)
             if fi and fi.get("last_price") is not None:
                 return _build_quote_result(ticker, fi)
-            logger.debug(f"[market_data] Massive quote empty for {ticker}, falling back")
+            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+                _massive_dead = True
+            if not _massive_dead:
+                logger.debug(f"[market_data] Massive quote empty for {ticker}, falling back")
             fi = None
         except Exception as e:
             logger.warning(f"[market_data] Massive quote failed for {ticker}: {e}")
+
+    if _massive_dead:
+        return None
 
     # --- Polygon path (secondary) ---
     if _use_polygon():

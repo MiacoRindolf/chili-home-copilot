@@ -148,6 +148,8 @@ class AlertHistory(Base):
     alert_type: str = Column(String(30), nullable=False)
     ticker: str = Column(String(20), nullable=True)
     message: str = Column(Text, nullable=False)
+    trade_type: Optional[str] = Column(String(30), nullable=True)
+    duration_estimate: Optional[str] = Column(String(60), nullable=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

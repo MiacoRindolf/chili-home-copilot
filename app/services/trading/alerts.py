@@ -194,6 +194,8 @@ def dispatch_alert(
     message: str = "",
     *,
     price: float | None = None,
+    trade_type: str | None = None,
+    duration_estimate: str | None = None,
 ) -> bool:
     """Log an alert to the DB and optionally send via SMS.
 
@@ -230,6 +232,8 @@ def dispatch_alert(
             alert_type=alert_type,
             ticker=ticker,
             message=message,
+            trade_type=trade_type,
+            duration_estimate=duration_estimate,
             sent_via=sent_via,
             success=sent,
         )
@@ -267,6 +271,8 @@ def get_alert_history(
             "alert_type": r.alert_type,
             "ticker": r.ticker,
             "message": r.message,
+            "trade_type": r.trade_type,
+            "duration_estimate": r.duration_estimate,
             "sent_via": r.sent_via,
             "success": r.success,
             "created_at": r.created_at.isoformat() if r.created_at else None,
@@ -378,18 +384,28 @@ def generate_strategy_proposals(
         signals = pick.get("signals", [])
         indicators = pick.get("indicators", {})
 
-        # Determine timeframe with hold duration estimate
-        timeframe = pick.get("timeframe", "swing")
-        _hold_est = pick.get("hold_estimate", {}).get("label")
-        if not _hold_est and indicators.get("atr") and price and target:
-            from .scanner import _estimate_hold_duration
+        # Classify trade type and estimate hold duration
+        from .scanner import _estimate_hold_duration, classify_trade_type
+        hold_est = pick.get("hold_estimate") or {}
+        if not hold_est.get("label") and indicators.get("atr") and price and target:
             _tf = "15m" if pick.get("is_crypto") else "1d"
-            _hold_est = _estimate_hold_duration(
+            hold_est = _estimate_hold_duration(
                 price, target, indicators["atr"], _tf,
                 indicators.get("adx"),
-            ).get("label")
-        if _hold_est:
-            timeframe = f"{timeframe} ({_hold_est})"
+            )
+
+        trade_class = classify_trade_type(
+            signals, hold_est, indicators,
+            is_crypto=pick.get("is_crypto", False),
+        )
+        trade_type_label = trade_class["label"]
+        duration_label = trade_class["duration"] or hold_est.get("label", "")
+
+        timeframe = pick.get("timeframe", "swing")
+        if duration_label:
+            timeframe = f"{trade_type_label} ({duration_label})"
+        else:
+            timeframe = trade_type_label
 
         thesis = pick.get("thesis", "")
         if not thesis:
@@ -425,15 +441,20 @@ def generate_strategy_proposals(
         # Send SMS about the new proposal
         _cr = ticker.endswith("-USD")
         price_fmt = f"${price:,.6f}" if _cr and price < 1 else f"${price:,.2f}"
+        _dur_part = f" | ETA {duration_label}" if duration_label else ""
         sms_msg = (
-            f"CHILI Strategy: BUY {ticker} @ {price_fmt} | "
+            f"CHILI {trade_type_label}: BUY {ticker} @ {price_fmt} | "
             f"Stop ${stop:,.2f} | Target ${target:,.2f} | "
             f"R:R {rr_ratio:.1f}:1 | "
             f"+{projected_profit_pct:.1f}% profit | "
-            f"Conf {confidence:.0f}% | "
+            f"Conf {confidence:.0f}%{_dur_part} | "
             f"Review in app"
         )
-        dispatch_alert(db, user_id, STRATEGY_PROPOSED, ticker, sms_msg)
+        dispatch_alert(
+            db, user_id, STRATEGY_PROPOSED, ticker, sms_msg,
+            trade_type=trade_class["type"],
+            duration_estimate=duration_label or None,
+        )
 
         created.append({
             "id": proposal.id,
@@ -544,17 +565,28 @@ def create_proposal_from_pick(
     confidence = pick.get("brain_confidence") or (combined * 10)
     signals = pick.get("signals", [])
     indicators = pick.get("indicators", {})
-    timeframe = pick.get("timeframe", "swing")
-    _hold_est = pick.get("hold_estimate", {}).get("label")
-    if not _hold_est and indicators.get("atr") and price and target:
-        from .scanner import _estimate_hold_duration
+
+    from .scanner import _estimate_hold_duration, classify_trade_type
+    hold_est = pick.get("hold_estimate") or {}
+    if not hold_est.get("label") and indicators.get("atr") and price and target:
         _tf = "15m" if pick.get("is_crypto") else "1d"
-        _hold_est = _estimate_hold_duration(
+        hold_est = _estimate_hold_duration(
             price, target, indicators["atr"], _tf,
             indicators.get("adx"),
-        ).get("label")
-    if _hold_est:
-        timeframe = f"{timeframe} ({_hold_est})"
+        )
+
+    trade_class = classify_trade_type(
+        signals, hold_est, indicators,
+        is_crypto=pick.get("is_crypto", False),
+    )
+    trade_type_label = trade_class["label"]
+    duration_label = trade_class["duration"] or hold_est.get("label", "")
+
+    timeframe = pick.get("timeframe", "swing")
+    if duration_label:
+        timeframe = f"{trade_type_label} ({duration_label})"
+    else:
+        timeframe = trade_type_label
     thesis = pick.get("thesis", "")
     if not thesis:
         thesis = f"AI-identified bullish setup for {ticker} with score {combined:.1f}/10."
@@ -805,25 +837,38 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
             target = snapshot.get("take_profit") or (trade.entry_price * 1.10)
 
             if trade.direction == "long":
+                # Derive trade type context from the stored snapshot
+                _tt_label = ""
+                _tt_type = None
+                try:
+                    _ind = snapshot.get("indicators") or {}
+                    _sigs_raw = snapshot.get("signals") or []
+                    if _sigs_raw or _ind:
+                        from .scanner import classify_trade_type
+                        _tc = classify_trade_type(_sigs_raw, None, _ind)
+                        _tt_label = f" [{_tc['label']}]"
+                        _tt_type = _tc["type"]
+                except Exception:
+                    pass
+
                 if price >= target:
-                    _cr = trade.ticker.endswith("-USD")
                     pnl_pct = round((price - trade.entry_price) / trade.entry_price * 100, 2)
                     msg = (
-                        f"TARGET HIT: {trade.ticker} reached ${price:,.2f} "
+                        f"TARGET HIT{_tt_label}: {trade.ticker} reached ${price:,.2f} "
                         f"(target ${target:,.2f}) | +{pnl_pct:.1f}% | "
                         f"Consider taking profits"
                     )
-                    dispatch_alert(db, user_id, TARGET_HIT, trade.ticker, msg)
+                    dispatch_alert(db, user_id, TARGET_HIT, trade.ticker, msg, trade_type=_tt_type)
                     targets_hit += 1
 
                 elif price <= stop:
                     pnl_pct = round((price - trade.entry_price) / trade.entry_price * 100, 2)
                     msg = (
-                        f"STOP HIT: {trade.ticker} dropped to ${price:,.2f} "
+                        f"STOP HIT{_tt_label}: {trade.ticker} dropped to ${price:,.2f} "
                         f"(stop ${stop:,.2f}) | {pnl_pct:.1f}% | "
                         f"Consider cutting losses"
                     )
-                    dispatch_alert(db, user_id, STOP_HIT, trade.ticker, msg)
+                    dispatch_alert(db, user_id, STOP_HIT, trade.ticker, msg, trade_type=_tt_type)
                     _expire_proposals_on_stop(db, user_id, trade.ticker)
                     stops_hit += 1
 
@@ -872,12 +917,35 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
             # Check if price has broken above the resistance (take_profit level as proxy)
             resistance = scan.take_profit or (scan.entry_price * 1.03 if scan.entry_price else 0)
             if resistance and price > resistance and scan.signal == "buy":
+                _dur = ""
+                _bk_trade_type = "breakout"
+                _bk_duration = None
+                if scan.entry_price and resistance and scan.entry_price > 0:
+                    try:
+                        from .scanner import _estimate_hold_duration, classify_trade_type
+                        _inds = json.loads(scan.indicator_data) if scan.indicator_data else {}
+                        _atr = _inds.get("atr", 0)
+                        _adx = _inds.get("adx")
+                        _sigs = _inds.get("signals", [])
+                        if _atr > 0:
+                            _he = _estimate_hold_duration(price, resistance * 1.05, _atr, "1d", _adx)
+                            _tc = classify_trade_type(_sigs, _he, _inds)
+                            _bk_trade_type = _tc["type"]
+                            _bk_duration = _tc["duration"] or None
+                            _dur = f" | {_tc['label']}"
+                            if _tc["duration"]:
+                                _dur += f" ETA {_tc['duration']}"
+                    except Exception:
+                        pass
                 msg = (
                     f"BREAKOUT: {scan.ticker} broke ${resistance:,.2f} "
-                    f"now at ${price:,.2f} | Score {scan.score:.1f}/10 | "
+                    f"now at ${price:,.2f} | Score {scan.score:.1f}/10{_dur} | "
                     f"{scan.rationale[:60] if scan.rationale else ''}"
                 )
-                dispatch_alert(db, user_id, BREAKOUT_TRIGGERED, scan.ticker, msg)
+                dispatch_alert(
+                    db, user_id, BREAKOUT_TRIGGERED, scan.ticker, msg,
+                    trade_type=_bk_trade_type, duration_estimate=_bk_duration,
+                )
                 breakouts += 1
 
         except Exception as e:
@@ -1191,6 +1259,26 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         else:
             expiry_reason = "time"
 
+    # Derive trade_type and duration from signals + indicators stored on the proposal
+    trade_type_info = {"type": "swing", "label": "Swing Trade", "duration": ""}
+    try:
+        _sigs = json.loads(p.signals_json) if p.signals_json else []
+        _inds = json.loads(p.indicator_json) if p.indicator_json else {}
+        from .scanner import classify_trade_type, _estimate_hold_duration
+        _he = {}
+        if _inds.get("atr") and p.entry_price and p.take_profit and p.entry_price > 0:
+            _tf = "15m" if (p.ticker or "").endswith("-USD") else "1d"
+            _he = _estimate_hold_duration(
+                p.entry_price, p.take_profit, _inds["atr"], _tf,
+                _inds.get("adx"),
+            )
+        trade_type_info = classify_trade_type(
+            _sigs, _he, _inds,
+            is_crypto=(p.ticker or "").endswith("-USD"),
+        )
+    except Exception:
+        pass
+
     return {
         "id": p.id,
         "ticker": p.ticker,
@@ -1206,6 +1294,9 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         "risk_reward_ratio": p.risk_reward_ratio,
         "confidence": p.confidence,
         "timeframe": p.timeframe,
+        "trade_type": trade_type_info["type"],
+        "trade_type_label": trade_type_info["label"],
+        "duration_estimate": trade_type_info["duration"],
         "thesis": p.thesis,
         "signals": json.loads(p.signals_json) if p.signals_json else [],
         "indicators": json.loads(p.indicator_json) if p.indicator_json else {},

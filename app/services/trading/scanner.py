@@ -1299,6 +1299,71 @@ def _estimate_hold_duration(
     }
 
 
+def classify_trade_type(
+    signals: list[str],
+    hold_estimate: dict[str, Any] | None = None,
+    indicators: dict[str, Any] | None = None,
+    is_crypto: bool = False,
+) -> dict[str, str]:
+    """Classify a trade into a type with a human-readable label.
+
+    Returns {"type": "swing", "label": "Swing Trade", "duration": "~3-5 days"}
+    """
+    indicators = indicators or {}
+    signals_text = " ".join(s.lower() for s in (signals or []))
+
+    hours_high = (hold_estimate or {}).get("hours_high", 0)
+    hours_low = (hold_estimate or {}).get("hours_low", 0)
+    duration_label = (hold_estimate or {}).get("label", "")
+
+    adx = indicators.get("adx")
+
+    if "breakout" in signals_text or "gap_up" in signals_text or "vcp" in signals_text:
+        trade_type = "breakout"
+        label = "Breakout"
+    elif "reversal" in signals_text or "divergence" in signals_text or "rsi_oversold" in signals_text:
+        trade_type = "reversal"
+        label = "Reversal"
+    elif "momentum" in signals_text or "squeeze" in signals_text:
+        trade_type = "momentum"
+        label = "Momentum"
+    elif hours_high > 0 and hours_high < 4:
+        trade_type = "scalp"
+        label = "Scalp"
+    elif hours_high > 0 and hours_high < 8:
+        trade_type = "daytrade"
+        label = "Day Trade"
+    elif hours_high > 0 and hours_high <= 5 * 24:
+        trade_type = "swing"
+        label = "Swing Trade"
+    elif hours_high > 5 * 24:
+        trade_type = "position"
+        label = "Position Trade"
+    elif adx and adx > 30:
+        trade_type = "trend_follow"
+        label = "Trend Follow"
+    else:
+        trade_type = "swing"
+        label = "Swing Trade"
+
+    if not duration_label:
+        if hours_high > 0:
+            if hours_high < 1:
+                duration_label = f"~{max(1, int(hours_low * 60))}-{int(hours_high * 60)} min"
+            elif hours_high < 24:
+                duration_label = f"~{max(1, round(hours_low))}-{round(hours_high)} hours"
+            else:
+                days_low = max(1, round(hours_low / 24))
+                days_high = max(days_low, round(hours_high / 24))
+                duration_label = f"~{days_low}-{days_high} days"
+
+    return {
+        "type": trade_type,
+        "label": label,
+        "duration": duration_label,
+    }
+
+
 def _detect_vcp(high: pd.Series, low: pd.Series, volume: pd.Series,
                 lookback: int = 40) -> int:
     """Detect Volume Contraction Pattern (Minervini).
@@ -1491,6 +1556,8 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
         ind = _compute_indicators(df, crypto=True)
         if ind is None:
+            with _cbo_score_lock:
+                _cbo_score_cache[key] = (time.time(), None)
             return None
 
         close = ind["close"]
@@ -1878,6 +1945,8 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         return result
     except Exception as e:
         logger.debug(f"[crypto_breakout] {ticker} failed: {e}")
+        with _cbo_score_lock:
+            _cbo_score_cache[key] = (time.time(), None)
         return None
 
 
@@ -1901,6 +1970,7 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
         }
 
     from .prescreener import get_trending_crypto, _crypto_top_movers
+    from ..massive_client import get_dead_tickers as _get_massive_dead
 
     tickers = set(DEFAULT_CRYPTO_TICKERS)
     try:
@@ -1911,6 +1981,12 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
         tickers.update(_crypto_top_movers())
     except Exception:
         pass
+
+    dead = _get_massive_dead()
+    before = len(tickers)
+    tickers = {t for t in tickers if f"X:{t.upper()}" not in dead}
+    if before != len(tickers):
+        logger.info(f"[crypto_breakout] Pruned {before - len(tickers)} dead tickers (Massive 404 cache)")
 
     ticker_list = sorted(tickers)
     total = len(ticker_list)
@@ -2008,6 +2084,8 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         ind = _compute_indicators(df, crypto=False)
         if ind is None:
+            with _bo_score_lock:
+                _bo_score_cache[key] = (time.time(), None)
             return None
 
         close = ind["close"]
@@ -2366,6 +2444,8 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             _bo_score_cache[key] = (time.time(), result)
         return result
     except Exception:
+        with _bo_score_lock:
+            _bo_score_cache[key] = (time.time(), None)
         return None
 
 
@@ -3372,12 +3452,13 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
 
         pick["thesis"] = _build_conversational_thesis(pick)
 
-        # Timeframe suggestion with hold duration estimate
+        # Timeframe suggestion with hold duration and trade type classification
         _ind = pick.get("indicators", {})
         _p_entry = pick.get("entry_price") or pick.get("price", 0)
         _p_target = pick.get("take_profit") or pick.get("brain_target", 0)
         _p_atr = _ind.get("atr", 0)
         _is_crypto = pick.get("ticker", "").endswith("-USD")
+        _he = {}
         if _p_entry and _p_target and _p_atr and _p_target > _p_entry:
             _he = _estimate_hold_duration(
                 _p_entry, _p_target, _p_atr,
@@ -3385,14 +3466,18 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                 _ind.get("adx"),
             )
             pick["hold_estimate"] = _he
-            if _ind.get("adx") and _ind["adx"] > 25:
-                pick["timeframe"] = f"trending ({_he['label']})"
-            else:
-                pick["timeframe"] = f"swing ({_he['label']})"
-        elif _ind.get("adx") and _ind["adx"] > 25:
-            pick["timeframe"] = "1-5 days (trending)"
+
+        _tc = classify_trade_type(
+            pick.get("signals", []), _he, _ind,
+            is_crypto=_is_crypto,
+        )
+        pick["trade_type"] = _tc["type"]
+        pick["trade_type_label"] = _tc["label"]
+        pick["duration_estimate"] = _tc["duration"]
+        if _tc["duration"]:
+            pick["timeframe"] = f"{_tc['label']} ({_tc['duration']})"
         else:
-            pick["timeframe"] = "3-10 days (swing)"
+            pick["timeframe"] = _tc["label"]
 
     # Filter out picks whose price has drifted >25% from the scored price
     # (stale scan results from DB where the stock has since crashed/spiked)

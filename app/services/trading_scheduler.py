@@ -290,9 +290,15 @@ def _run_crypto_breakout_job():
             flag_line = " + ".join(flags) if flags else ""
             sig_text = "; ".join(setup.get("signals", [])[:3])
 
-            _hold = setup.get("hold_estimate", {}).get("label", "")
+            _hold_est = setup.get("hold_estimate") or {}
+            _hold = _hold_est.get("label", "")
+            from .trading.scanner import classify_trade_type
+            _tc = classify_trade_type(
+                setup.get("signals", []), _hold_est,
+                setup, is_crypto=True,
+            )
             msg = (
-                f"{prefix}: {ticker}\n"
+                f"{_tc['label']}: {ticker}\n"
                 f"Score {setup['score']}/10 | ${setup['price']} "
                 f"({setup.get('change_24h', 0):+.1f}% 24h)\n"
                 f"RVOL {setup.get('rvol', 0):.1f}x | "
@@ -301,7 +307,7 @@ def _run_crypto_breakout_job():
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                + (f"Hold: {_hold}\n" if _hold else "")
+                + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
             )
 
@@ -310,6 +316,8 @@ def _run_crypto_breakout_job():
                 alert_type=alert_type,
                 message=msg,
                 price=setup["price"],
+                trade_type=_tc["type"],
+                duration_estimate=_tc["duration"] or None,
             )
             _crypto_alert_cooldown[ticker] = now
             _record_breakout_alert(setup, prefix, "crypto",
@@ -403,16 +411,22 @@ def _run_stock_breakout_job():
             flag_line = " + ".join(flags) if flags else ""
             sig_text = "; ".join(setup.get("signals", [])[:3])
 
-            _hold = setup.get("hold_estimate", {}).get("label", "")
+            _hold_est = setup.get("hold_estimate") or {}
+            _hold = _hold_est.get("label", "")
+            from .trading.scanner import classify_trade_type
+            _tc = classify_trade_type(
+                setup.get("signals", []), _hold_est,
+                setup, is_crypto=False,
+            )
             msg = (
-                f"{prefix}: {ticker}\n"
+                f"{_tc['label']}: {ticker}\n"
                 f"Score {setup['score']}/10 | ${setup['price']}\n"
                 f"Dist to breakout: {setup.get('dist_to_breakout', 0):.1f}%\n"
                 + (f"{flag_line}\n" if flag_line else "")
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                + (f"Hold: {_hold}\n" if _hold else "")
+                + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
             )
 
@@ -421,6 +435,8 @@ def _run_stock_breakout_job():
                 alert_type=alert_type,
                 message=msg,
                 price=setup["price"],
+                trade_type=_tc["type"],
+                duration_estimate=_tc["duration"] or None,
             )
             _stock_alert_cooldown[ticker] = now
             _record_breakout_alert(setup, prefix, "stock",
@@ -447,12 +463,18 @@ def _run_momentum_scanner_job():
         immaculate = [r for r in result.get("results", []) if r.get("immaculate")]
         if immaculate:
             for setup in immaculate:
+                from .trading.scanner import classify_trade_type
+                _hold_est = setup.get("hold_estimate") or {}
+                _tc = classify_trade_type(
+                    setup.get("signals", []), _hold_est, setup,
+                )
+                _dur_part = f" | ETA {_tc['duration']}" if _tc["duration"] else ""
                 msg = (
-                    f"MOMENTUM ALERT: {setup['ticker']} "
+                    f"MOMENTUM {_tc['label']}: {setup['ticker']} "
                     f"Score {setup['score']}/10 | "
                     f"${setup['price']} | "
                     f"Vol {setup.get('vol_ratio', 0):.1f}x | "
-                    f"R:R {setup.get('risk_reward', 0):.1f} | "
+                    f"R:R {setup.get('risk_reward', 0):.1f}{_dur_part} | "
                     f"{', '.join(setup.get('signals', [])[:3])}"
                 )
                 dispatch_alert(
@@ -460,6 +482,8 @@ def _run_momentum_scanner_job():
                     alert_type="momentum_immaculate",
                     message=msg,
                     price=setup["price"],
+                    trade_type=_tc["type"],
+                    duration_estimate=_tc["duration"] or None,
                 )
             logger.info(
                 f"[scheduler] Momentum scanner found {len(immaculate)} immaculate setup(s)"

@@ -945,6 +945,16 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 .alert-type-badge.position_closed { background: #fef9c3; color: #a16207; }
 .alert-type-badge.weekly_review { background: var(--bg-header); color: var(--text-muted); }
 .alert-type-badge.test { background: var(--bg-header); color: var(--text-muted); }
+.alert-trade-type { padding: 1px 5px; border-radius: 4px; font-size: 8px; font-weight: 600; text-transform: uppercase; white-space: nowrap; background: #e0e7ff; color: #3730a3; }
+.alert-trade-type.tt-breakout { background: #dbeafe; color: #1e40af; }
+.alert-trade-type.tt-daytrade { background: #fef3c7; color: #92400e; }
+.alert-trade-type.tt-scalp { background: #fce7f3; color: #9d174d; }
+.alert-trade-type.tt-swing { background: #e0e7ff; color: #3730a3; }
+.alert-trade-type.tt-position { background: #d1fae5; color: #065f46; }
+.alert-trade-type.tt-momentum { background: #ffedd5; color: #9a3412; }
+.alert-trade-type.tt-reversal { background: #ede9fe; color: #5b21b6; }
+.alert-trade-type.tt-trend_follow { background: #ccfbf1; color: #134e4a; }
+.alert-eta { padding: 1px 5px; border-radius: 4px; font-size: 8px; font-weight: 600; white-space: nowrap; background: #f0fdf4; color: #15803d; }
 .alert-ticker { font-weight: 700; min-width: 60px; }
 .alert-msg { flex: 1; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alert-time { font-size: 9px; color: var(--text-muted); white-space: nowrap; }
@@ -5798,8 +5808,15 @@ function loadAlertHistory() {
       var time = a.created_at ? new Date(a.created_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
       html += '<div class="alert-row">';
       html += '<span class="alert-type-badge ' + typeCls + '">' + typeCls.replace(/_/g, ' ') + '</span>';
+      if (a.trade_type) {
+        var ttCls = 'tt-' + a.trade_type;
+        html += '<span class="alert-trade-type ' + ttCls + '">' + a.trade_type.replace(/_/g, ' ') + '</span>';
+      }
       html += '<span class="alert-ticker">' + (a.ticker || '') + '</span>';
       html += '<span class="alert-msg" title="' + escHtml(a.message) + '">' + escHtml(a.message) + '</span>';
+      if (a.duration_estimate) {
+        html += '<span class="alert-eta" title="Estimated time to target">' + a.duration_estimate + '</span>';
+      }
       html += '<span class="alert-time">' + time + '</span>';
       html += '</div>';
     });

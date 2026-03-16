@@ -644,6 +644,16 @@ def _migration_021_broker_credentials_table(conn) -> None:
         conn.commit()
 
 
+def _migration_022_alert_trade_type_cols(conn) -> None:
+    """Add trade_type and duration_estimate columns to trading_alerts."""
+    cols = _columns(conn, "trading_alerts")
+    if "trade_type" not in cols:
+        conn.execute(text("ALTER TABLE trading_alerts ADD COLUMN trade_type TEXT"))
+    if "duration_estimate" not in cols:
+        conn.execute(text("ALTER TABLE trading_alerts ADD COLUMN duration_estimate TEXT"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -667,6 +677,7 @@ MIGRATIONS = [
     ("019_project_brain_tables", _migration_019_project_brain_tables),
     ("020_user_google_oauth_cols", _migration_020_user_google_oauth_cols),
     ("021_broker_credentials_table", _migration_021_broker_credentials_table),
+    ("022_alert_trade_type_cols", _migration_022_alert_trade_type_cols),
 ]
 
 

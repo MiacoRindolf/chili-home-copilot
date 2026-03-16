@@ -89,6 +89,7 @@ from .scanner import (
     batch_score_tickers,
     run_full_market_scan,
     smart_pick,
+    classify_trade_type,
 )
 
 # AI context

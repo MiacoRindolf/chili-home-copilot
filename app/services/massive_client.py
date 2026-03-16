@@ -36,6 +36,36 @@ _TTL_QUOTE = 30        # 30 sec for live quotes
 _TTL_SNAPSHOT = 60     # 1 min for snapshots
 _MAX_CACHE = 8000      # support heavy learning runs (500+ tickers × multiple endpoints)
 
+_dead_tickers: dict[str, float] = {}
+_dead_lock = threading.Lock()
+_TTL_DEAD = 14400      # 4 hours — skip tickers that 404'd
+
+_NOT_FOUND = object()  # sentinel returned by _get() on HTTP 404
+
+
+def _is_dead_ticker(m_ticker: str) -> bool:
+    with _dead_lock:
+        ts = _dead_tickers.get(m_ticker)
+        if ts is None:
+            return False
+        if time.time() - ts > _TTL_DEAD:
+            del _dead_tickers[m_ticker]
+            return False
+        return True
+
+
+def _mark_dead_ticker(m_ticker: str) -> None:
+    with _dead_lock:
+        _dead_tickers[m_ticker] = time.time()
+
+
+def get_dead_tickers() -> set[str]:
+    """Return the set of Massive-format tickers currently in the dead cache."""
+    now = time.time()
+    with _dead_lock:
+        alive_cutoff = now - _TTL_DEAD
+        return {t for t, ts in _dead_tickers.items() if ts > alive_cutoff}
+
 _metrics_lock = threading.Lock()
 _metrics: dict[str, int] = {
     "requests": 0,
@@ -151,6 +181,9 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
                 time.sleep(wait)
                 continue
             _bump("errors")
+            if resp.status_code == 404:
+                logger.debug(f"[massive] 404 for {url}")
+                return _NOT_FOUND
             logger.warning(f"[massive] {resp.status_code} for {url}: {resp.text[:200]}")
             return None
         except requests.RequestException as e:
@@ -224,6 +257,9 @@ def get_aggregates(
     """
     m_ticker = to_massive_ticker(ticker)
 
+    if _is_dead_ticker(m_ticker):
+        return []
+
     if start:
         from_date = start if isinstance(start, str) else str(start)
         to_date = end or date.today().strftime("%Y-%m-%d")
@@ -241,6 +277,9 @@ def get_aggregates(
 
     url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
     data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+    if data is _NOT_FOUND:
+        _mark_dead_ticker(m_ticker)
+        return []
     if not data or data.get("resultsCount", 0) == 0:
         return []
 
@@ -296,6 +335,10 @@ def get_aggregates_df(
 def get_last_quote(ticker: str) -> dict[str, Any] | None:
     """Fetch the latest quote/price for a ticker via snapshot endpoint."""
     m_ticker = to_massive_ticker(ticker)
+
+    if _is_dead_ticker(m_ticker):
+        return None
+
     cache_key = f"massive:quote:{m_ticker}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -314,6 +357,9 @@ def get_last_quote(ticker: str) -> dict[str, Any] | None:
 def _get_stock_snapshot(m_ticker: str) -> dict[str, Any] | None:
     url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers/{m_ticker}"
     data = _get(url)
+    if data is _NOT_FOUND:
+        _mark_dead_ticker(m_ticker)
+        return None
     if not data or not data.get("ticker"):
         return _get_prev_close(m_ticker)
 
@@ -344,6 +390,9 @@ def _get_stock_snapshot(m_ticker: str) -> dict[str, Any] | None:
 def _get_crypto_snapshot(m_ticker: str, orig_ticker: str) -> dict[str, Any] | None:
     url = f"{_base()}/v2/snapshot/locale/global/markets/crypto/tickers/{m_ticker}"
     data = _get(url)
+    if data is _NOT_FOUND:
+        _mark_dead_ticker(m_ticker)
+        return None
     if not data or not data.get("ticker"):
         return _get_crypto_quote_from_aggs(orig_ticker)
 
@@ -371,7 +420,7 @@ def _get_crypto_snapshot(m_ticker: str, orig_ticker: str) -> dict[str, Any] | No
 def _get_prev_close(m_ticker: str) -> dict[str, Any] | None:
     url = f"{_base()}/v2/aggs/ticker/{m_ticker}/prev"
     data = _get(url)
-    if not data or not data.get("results"):
+    if data is _NOT_FOUND or not data or not data.get("results"):
         return None
     bar = data["results"][0]
     return {
@@ -427,6 +476,8 @@ def get_aggregates_batch(
     results: dict[str, list[dict[str, Any]]] = {}
     for t in tickers:
         m_ticker = to_massive_ticker(t)
+        if _is_dead_ticker(m_ticker):
+            continue
         cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -531,7 +582,7 @@ def _get_stock_snapshots_bulk(tickers: list[str]) -> dict[str, dict[str, Any]]:
     ticker_param = ",".join(t.upper() for t in tickers)
     url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers"
     data = _get(url, {"tickers": ticker_param})
-    if not data or not data.get("tickers"):
+    if data is _NOT_FOUND or not data or not data.get("tickers"):
         return {}
 
     results: dict[str, dict[str, Any]] = {}
