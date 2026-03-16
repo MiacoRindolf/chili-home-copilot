@@ -332,8 +332,9 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   display: flex; flex-direction: column; background: var(--bg-header);
   border-radius: 12px; box-shadow: 0 14px 40px rgba(0,0,0,.35);
   z-index: 400; transition: opacity .2s ease-out, transform .2s ease-out;
-  opacity: 0; transform: scale(.96);
+  opacity: 0; transform: scale(.96); pointer-events: none;
   resize: both; overflow: hidden;
+  max-height: calc(100vh - 20px);
 }
 .ai-resize-handle {
   position: absolute; left: -4px; top: 0; bottom: 0; width: 8px;
@@ -342,12 +343,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 .ai-resize-handle:hover, .ai-resize-handle:active {
   background: rgba(99,102,241,.25);
 }
-.t-ai.open { opacity: 1; transform: scale(1); }
-.t-ai-drawer-backdrop {
-  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.25);
-  z-index: 399; backdrop-filter: blur(2px);
-}
-.t-ai-drawer-backdrop.open { display: block; }
+.t-ai.open { opacity: 1; transform: scale(1); pointer-events: auto; }
 .t-ai-header { display: none; }
 .ai-quick-actions { padding: 6px 10px; display: flex; gap: 5px; flex-wrap: wrap; }
 .ai-quick-actions button {
@@ -1529,6 +1525,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   .t-ai {
     position: fixed; top: 45px; right: 0; bottom: 0; width: 100%;
     transform: translateX(100%); box-shadow: -4px 0 20px rgba(0,0,0,.15);
+    transition: transform .25s ease-out;
   }
   .t-ai.open { transform: translateX(0); }
   .t-ai-view-tabs .close-ai { display: block; }
@@ -2337,9 +2334,11 @@ function _positionAiPanelNearFab() {
   if (left + panelWidth > window.innerWidth - 10) {
     left = window.innerWidth - panelWidth - 10;
   }
+  if (top < 10) top = 10;
   if (top + panelHeight > window.innerHeight - 10) {
     top = window.innerHeight - panelHeight - 10;
   }
+  if (top < 10) top = 10;
   panel.style.left = left + 'px';
   panel.style.top = top + 'px';
   panel.style.right = 'auto';
@@ -2394,7 +2393,8 @@ function closeAllDrawers() {
   });
   document.addEventListener('mousemove', function(e) {
     if (!dragging) return;
-    var newWidth = window.innerWidth - e.clientX;
+    var rect = panel.getBoundingClientRect();
+    var newWidth = rect.right - e.clientX;
     if (newWidth < 280) newWidth = 280;
     if (newWidth > 700) newWidth = 700;
     panel.style.width = newWidth + 'px';
@@ -2437,10 +2437,9 @@ function closeAllDrawers() {
     var margin = 10;
     var maxLeft = window.innerWidth - panel.offsetWidth - margin;
     var maxTop = window.innerHeight - panel.offsetHeight - margin;
-    if (newLeft < margin) newLeft = margin;
-    if (newTop < margin) newTop = margin;
-    if (newLeft > maxLeft) newLeft = maxLeft;
-    if (newTop > maxTop) newTop = maxTop;
+    if (maxTop < margin) maxTop = margin;
+    newLeft = Math.max(margin, Math.min(maxLeft, newLeft));
+    newTop = Math.max(margin, Math.min(maxTop, newTop));
     panel.style.left = newLeft + 'px';
     panel.style.top = newTop + 'px';
     panel.style.right = 'auto';
@@ -3599,6 +3598,12 @@ var _acIdx = -1;
 
 function _loadChatHistory() {
   try { var s = sessionStorage.getItem('chili_trade_chat'); if (s) chatHistory = JSON.parse(s); } catch(e) {}
+  var msgs = document.getElementById('ai-msgs');
+  if (msgs && chatHistory.length) {
+    msgs.innerHTML = chatHistory.map(function(m) {
+      return _buildMsgHtml(m.role, m.text);
+    }).join('');
+  }
 }
 function _saveChatHistory() {
   try { sessionStorage.setItem('chili_trade_chat', JSON.stringify(chatHistory.slice(-30))); } catch(e) {}
@@ -3610,7 +3615,8 @@ function _historyPayload() {
 function clearChatHistory() {
   chatHistory = [];
   _saveChatHistory();
-  document.getElementById('ai-msgs').innerHTML = '';
+  var el = document.getElementById('ai-msgs');
+  if (el) el.innerHTML = '';
 }
 
 function _timeStr() {
@@ -4246,6 +4252,7 @@ function _onAiInputKey(e) {
       var items = document.querySelectorAll('.ticker-ac-item');
       if (items[_acIdx]) { _selectAcItem(items[_acIdx]); e.preventDefault(); return; }
     }
+    e.preventDefault();
     sendAiChat();
     return;
   }

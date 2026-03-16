@@ -156,8 +156,8 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "crypto_bo_macd_neg_cap": 8.0,
     "crypto_bo_signal_long": 7.0,
     "crypto_bo_signal_short": 3.5,
-    "crypto_bo_stop_atr_mult": 1.5,
-    "crypto_bo_target_atr_mult": 2.5,
+    "crypto_bo_stop_atr_mult": 2.0,
+    "crypto_bo_target_atr_mult": 5.0,
 
     # ── _score_breakout (stocks) ───────────────────────────────────────
     "bo_squeeze": 2.0,
@@ -173,8 +173,8 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "bo_macd_building": 0.5,
     "bo_signal_ready": 7.0,
     "bo_signal_watch": 5.0,
-    "bo_stop_atr_mult": 2.0,
-    "bo_target_atr_mult": 3.0,
+    "bo_stop_atr_mult": 2.5,
+    "bo_target_atr_mult": 5.0,
 
     # ── Alert / proposal thresholds ────────────────────────────────────
     "alert_min_score_proposal": 7.5,
