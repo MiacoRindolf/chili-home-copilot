@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
@@ -689,7 +689,7 @@ def start_scheduler():
             name=f"Full market learning cycle (every {_learning_hours}h)",
             replace_existing=True,
             max_instances=1,
-            next_run_time=datetime.now(),  # run immediately on startup
+            next_run_time=datetime.now() + timedelta(minutes=3),
         )
 
         _scheduler.add_job(
@@ -748,6 +748,7 @@ def start_scheduler():
             name="Crypto breakout scanner (every 15min, 24/7)",
             replace_existing=True,
             max_instances=1,
+            next_run_time=datetime.now() + timedelta(seconds=10),
         )
 
         _scheduler.add_job(
@@ -762,6 +763,7 @@ def start_scheduler():
             name="Stock breakout scanner (market hours every 15min)",
             replace_existing=True,
             max_instances=1,
+            next_run_time=datetime.now() + timedelta(seconds=15),
         )
 
         _scheduler.add_job(

@@ -972,13 +972,14 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             score += get_adaptive_weight("daily_gainer_5pct")
             signals.append(f"Strong gainer today (+{daily_change_pct:.1f}%)")
 
-        # ── Float factor (brain-adaptive — learns its own float preferences) ──
+        # ── Float factor (only uses cached fundamentals — never blocks on API call) ──
         _cr = ticker.upper().endswith("-USD")
         if not _cr:
             try:
-                fund = get_fundamentals(ticker)
-                if fund and fund.get("market_cap") and price > 0:
-                    shares = fund["market_cap"] / price
+                from ..yf_session import _cache_get as _yf_cache_get
+                _fund_cached = _yf_cache_get(f"fund:{ticker}")
+                if _fund_cached and _fund_cached != "EMPTY" and isinstance(_fund_cached, dict) and _fund_cached.get("market_cap") and price > 0:
+                    shares = _fund_cached["market_cap"] / price
                     if shares < 5_000_000:
                         score += get_adaptive_weight("float_micro_bonus")
                         signals.append(f"Micro float ({shares/1e6:.1f}M) — explosive potential")
@@ -1098,6 +1099,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
 
 _crypto_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _CRYPTO_BREAKOUT_TTL = 900  # 15 minutes
+_crypto_scan_running = False
 
 
 # ── Vectorised indicator computation ──────────────────────────────────
@@ -1238,8 +1240,12 @@ def _get_sector_for_ticker(ticker: str) -> str:
         return cached[0]
 
     try:
-        fund = get_fundamentals(ticker)
-        sector = fund.get("sector", "unknown") if fund else "unknown"
+        from ..yf_session import _cache_get as _yf_cache_get
+        _fund_cached = _yf_cache_get(f"fund:{ticker}")
+        if _fund_cached and _fund_cached != "EMPTY" and isinstance(_fund_cached, dict):
+            sector = _fund_cached.get("sector", "unknown")
+        else:
+            sector = "unknown"
     except Exception:
         sector = "unknown"
 
@@ -1815,7 +1821,8 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
 
         # ── Momentum Divergence Filter ──
         rsi_series = RSIIndicator(close=close, window=14).rsi()
-        macd_hist_series = macd_obj.macd_diff()
+        _macd_obj = MACD(close=close)
+        macd_hist_series = _macd_obj.macd_diff()
         rsi_div = _detect_divergence(close, rsi_series)
         if rsi_div == "bearish":
             score += get_adaptive_weight("crypto_bo_rsi_divergence_penalty")
@@ -1891,6 +1898,19 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         else:
             signal = "watch"
 
+        # Resistance & distance (use 20-bar rolling high on 15m candles)
+        resistance = float(high.rolling(20).max().iloc[-1])
+        dist_to_breakout = round((resistance - price) / price * 100, 2) if resistance and price else 0.0
+
+        if dist_to_breakout <= 0:
+            status = "breaking_out"
+        elif score >= get_adaptive_weight("bo_signal_ready"):
+            status = "ready"
+        elif score >= get_adaptive_weight("bo_signal_watch"):
+            status = "watch"
+        else:
+            status = "wait"
+
         # Entry / stop / target
         _c_stop_m = get_adaptive_weight("crypto_bo_stop_atr_mult")
         _c_tgt_m = get_adaptive_weight("crypto_bo_target_atr_mult")
@@ -1899,11 +1919,17 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         target = smart_round(price + _c_tgt_m * atr_val, crypto=True)
         rr = round(_c_tgt_m / _c_stop_m, 2)
 
+        bb_width_pct_rank = ind.get("bb_width_pct_rank", 0.0 if bb_squeeze else 50.0)
+
         result = {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
+            "status": status,
             "price": entry,
+            "resistance": smart_round(resistance, crypto=True),
+            "dist_to_breakout": dist_to_breakout,
+            "bb_width_pctile": round(bb_width_pct_rank, 0),
             "entry_price": entry,
             "stop_loss": stop,
             "take_profit": target,
@@ -1956,10 +1982,10 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
     Results are cached for 15 minutes. Runs all crypto candidates through
     _score_crypto_breakout() and returns the top setups sorted by score.
     """
-    global _crypto_breakout_cache
+    global _crypto_breakout_cache, _crypto_scan_running
 
     now = time.time()
-    if (now - _crypto_breakout_cache["ts"]) < _CRYPTO_BREAKOUT_TTL and _crypto_breakout_cache["results"]:
+    if _crypto_breakout_cache["ts"] > 0 and (now - _crypto_breakout_cache["ts"]) < _CRYPTO_BREAKOUT_TTL:
         return {
             "ok": True,
             "cached": True,
@@ -1969,88 +1995,96 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
             "age_seconds": int(now - _crypto_breakout_cache["ts"]),
         }
 
+    if _crypto_scan_running:
+        return {"ok": True, "warming_up": True, "results": [], "total_scanned": 0}
+    _crypto_scan_running = True
+
     from .prescreener import get_trending_crypto, _crypto_top_movers
     from ..massive_client import get_dead_tickers as _get_massive_dead
 
-    tickers = set(DEFAULT_CRYPTO_TICKERS)
     try:
-        tickers.update(get_trending_crypto())
-    except Exception:
-        pass
-    try:
-        tickers.update(_crypto_top_movers())
-    except Exception:
-        pass
+        tickers = set(DEFAULT_CRYPTO_TICKERS)
+        try:
+            tickers.update(get_trending_crypto())
+        except Exception:
+            pass
+        try:
+            tickers.update(_crypto_top_movers())
+        except Exception:
+            pass
 
-    dead = _get_massive_dead()
-    before = len(tickers)
-    tickers = {t for t in tickers if f"X:{t.upper()}" not in dead}
-    if before != len(tickers):
-        logger.info(f"[crypto_breakout] Pruned {before - len(tickers)} dead tickers (Massive 404 cache)")
+        dead = _get_massive_dead()
+        before = len(tickers)
+        tickers = {t for t in tickers if f"X:{t.upper()}" not in dead}
+        if before != len(tickers):
+            logger.info(f"[crypto_breakout] Pruned {before - len(tickers)} dead tickers (Massive 404 cache)")
 
-    ticker_list = sorted(tickers)
-    total = len(ticker_list)
-    logger.info(f"[crypto_breakout] Scanning {total} crypto pairs...")
+        ticker_list = sorted(tickers)
+        total = len(ticker_list)
+        logger.info(f"[crypto_breakout] Scanning {total} crypto pairs...")
 
-    t_pw = time.time()
-    try:
-        fetch_ohlcv_batch(ticker_list, interval="15m", period="5d")
-    except Exception as e:
-        logger.warning(f"[crypto_breakout] Batch pre-warm failed (will fetch individually): {e}")
-    logger.info(f"[crypto_breakout] Pre-warm {len(ticker_list)} tickers in {time.time()-t_pw:.1f}s")
+        t_pw = time.time()
+        try:
+            fetch_ohlcv_batch(ticker_list, interval="15m", period="5d")
+        except Exception as e:
+            logger.warning(f"[crypto_breakout] Batch pre-warm failed (will fetch individually): {e}")
+        logger.info(f"[crypto_breakout] Pre-warm {len(ticker_list)} tickers in {time.time()-t_pw:.1f}s")
 
-    results = []
-    errors = 0
-    t0 = time.time()
+        results = []
+        errors = 0
+        t0 = time.time()
 
-    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as pool:
-        future_map = {
-            pool.submit(_score_crypto_breakout, t): t
-            for t in ticker_list
-            if not _shutting_down.is_set()
+        with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as pool:
+            future_map = {
+                pool.submit(_score_crypto_breakout, t): t
+                for t in ticker_list
+                if not _shutting_down.is_set()
+            }
+            for future in as_completed(future_map):
+                if _shutting_down.is_set():
+                    break
+                try:
+                    r = future.result(timeout=30)
+                    if r is not None:
+                        results.append(r)
+                except Exception:
+                    errors += 1
+
+        results.sort(key=lambda x: x["score"], reverse=True)
+        elapsed = round(time.time() - t0, 1)
+
+        _crypto_breakout_cache.update(
+            results=results, ts=time.time(),
+            total_scanned=total,
+            scan_time=datetime.utcnow().isoformat(),
+            elapsed_s=elapsed, errors=errors,
+        )
+
+        above_6 = sum(1 for r in results if r["score"] >= 6)
+        above_7 = sum(1 for r in results if r["score"] >= 7)
+        squeezes = sum(1 for r in results if r.get("bb_squeeze"))
+        logger.info(
+            f"[crypto_breakout] Done: {len(results)}/{total} scored, "
+            f"{errors} errors, {elapsed}s, "
+            f"score>=6: {above_6}, score>=7: {above_7}, squeezes: {squeezes}, "
+            f"top: "
+            + (results[0]["ticker"] + f" ({results[0]['score']})" if results else "none")
+        )
+
+        return {
+            "ok": True,
+            "cached": False,
+            "results": results[:max_results],
+            "total_scanned": total,
+            "scan_time": _crypto_breakout_cache["scan_time"],
+            "elapsed_s": elapsed,
+            "age_seconds": 0,
         }
-        for future in as_completed(future_map):
-            if _shutting_down.is_set():
-                break
-            try:
-                r = future.result(timeout=30)
-                if r is not None:
-                    results.append(r)
-            except Exception:
-                errors += 1
-
-    results.sort(key=lambda x: x["score"], reverse=True)
-    elapsed = round(time.time() - t0, 1)
-
-    _crypto_breakout_cache = {
-        "results": results,
-        "ts": time.time(),
-        "total_scanned": total,
-        "scan_time": datetime.utcnow().isoformat(),
-        "elapsed_s": elapsed,
-        "errors": errors,
-    }
-
-    above_6 = sum(1 for r in results if r["score"] >= 6)
-    above_7 = sum(1 for r in results if r["score"] >= 7)
-    squeezes = sum(1 for r in results if r.get("bb_squeeze"))
-    logger.info(
-        f"[crypto_breakout] Done: {len(results)}/{total} scored, "
-        f"{errors} errors, {elapsed}s, "
-        f"score>=6: {above_6}, score>=7: {above_7}, squeezes: {squeezes}, "
-        f"top: "
-        + (results[0]["ticker"] + f" ({results[0]['score']})" if results else "none")
-    )
-
-    return {
-        "ok": True,
-        "cached": False,
-        "results": results[:max_results],
-        "total_scanned": total,
-        "scan_time": _crypto_breakout_cache["scan_time"],
-        "elapsed_s": elapsed,
-        "age_seconds": 0,
-    }
+    except Exception as exc:
+        logger.exception(f"[crypto_breakout] Scan failed: {exc}")
+        return {"ok": False, "error": str(exc), "results": [], "total_scanned": 0}
+    finally:
+        _crypto_scan_running = False
 
 
 def get_crypto_breakout_cache() -> dict[str, Any]:
@@ -2195,12 +2229,13 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             elif price < 1.0 or price > 50.0:
                 score += get_adaptive_weight("price_out_of_range_penalty")
 
-        # ── Float size (brain-adaptive — CHILI learns its own float preferences) ──
+        # ── Float size (only uses cached fundamentals — never blocks on API call) ──
         if not _is_crypto:
             try:
-                fund = get_fundamentals(ticker)
-                if fund and fund.get("market_cap"):
-                    shares = fund["market_cap"] / price if price > 0 else None
+                from ..yf_session import _cache_get as _yf_cache_get
+                _fund_cached = _yf_cache_get(f"fund:{ticker}")
+                if _fund_cached and _fund_cached != "EMPTY" and isinstance(_fund_cached, dict) and _fund_cached.get("market_cap"):
+                    shares = _fund_cached["market_cap"] / price if price > 0 else None
                     if shares:
                         if shares < 5_000_000:
                             score += get_adaptive_weight("float_micro_bonus")
@@ -2370,10 +2405,10 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             pass
 
         # ── Fakeout Penalties (learned from outcome data) ──
-        if bb_squeeze and rsi is not None and rsi > 65:
+        if is_squeeze and rsi_val is not None and rsi_val > 65:
             score += get_adaptive_weight("bo_fakeout_rsi_high_penalty")
             signals.append("RSI high during squeeze — historically higher fakeout rate")
-        if bb_squeeze and adx is not None and adx > 30:
+        if is_squeeze and adx_val is not None and adx_val > 30:
             score += get_adaptive_weight("bo_fakeout_trending_adx_penalty")
             signals.append("ADX trending during squeeze — squeeze may not resolve cleanly")
 
@@ -2443,7 +2478,8 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         with _bo_score_lock:
             _bo_score_cache[key] = (time.time(), result)
         return result
-    except Exception:
+    except Exception as exc:
+        logger.debug(f"[scanner] _score_breakout({ticker}) failed: {exc}")
         with _bo_score_lock:
             _bo_score_cache[key] = (time.time(), None)
         return None
@@ -2528,7 +2564,7 @@ _intraday_scan_progress: dict[str, Any] = {
 }
 _intraday_progress_lock = threading.Lock()
 
-_MAX_HEAVY_CANDIDATES = 500
+_MAX_HEAVY_CANDIDATES = 200
 
 
 def get_intraday_scan_progress() -> dict[str, Any]:
@@ -2593,8 +2629,11 @@ def _quick_filter_candidates(
 
 _daytrade_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _DAYTRADE_CACHE_TTL = 600  # 10 min
+_daytrade_scan_running = False
+
 _breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _BREAKOUT_CACHE_TTL = 600  # 10 min
+_breakout_scan_running = False
 
 
 def get_daytrade_cache() -> dict[str, Any]:
@@ -2610,23 +2649,38 @@ def get_daytrade_cache() -> dict[str, Any]:
 
 
 def get_breakout_cache() -> dict[str, Any]:
-    """Return cached breakout scan results (for API layer)."""
+    """Return merged stock + crypto breakout results (for API layer)."""
     now = time.time()
-    age = int(now - _breakout_cache["ts"]) if _breakout_cache["ts"] > 0 else None
+    stock_age = int(now - _breakout_cache["ts"]) if _breakout_cache["ts"] > 0 else None
+    crypto_age = int(now - _crypto_breakout_cache["ts"]) if _crypto_breakout_cache["ts"] > 0 else None
+    age = min(a for a in (stock_age, crypto_age) if a is not None) if (stock_age is not None or crypto_age is not None) else None
+
+    merged = list(_breakout_cache.get("results", []))
+    crypto_results = _crypto_breakout_cache.get("results", [])
+    if crypto_results:
+        existing_tickers = {r["ticker"] for r in merged}
+        for cr in crypto_results:
+            if cr["ticker"] not in existing_tickers:
+                merged.append(cr)
+        merged.sort(key=lambda r: r.get("score", 0), reverse=True)
+
     return {
-        "results": _breakout_cache.get("results", []),
+        "results": merged,
         "scan_time": _breakout_cache.get("scan_time"),
         "age_seconds": age,
-        "total_scanned": _breakout_cache.get("candidates_scanned", 0),
+        "total_scanned": (
+            _breakout_cache.get("candidates_scanned", 0)
+            + _crypto_breakout_cache.get("total_scanned", 0)
+        ),
     }
 
 
 def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     """Full-universe day-trade scan: prescreen -> batch-quote filter -> intraday scoring."""
-    global _daytrade_cache
+    global _daytrade_cache, _daytrade_scan_running
 
     now = time.time()
-    if _daytrade_cache["results"] and (now - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
+    if _daytrade_cache["ts"] > 0 and (now - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
         return {
             "ok": True,
             "scan_type": "day_trade",
@@ -2637,6 +2691,10 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
             "results": _daytrade_cache["results"][:max_results],
             "brain": _brain_meta(),
         }
+
+    if _daytrade_scan_running:
+        return {"ok": True, "scan_type": "day_trade", "warming_up": True, "matches": 0, "results": []}
+    _daytrade_scan_running = True
 
     from .prescreener import get_daytrade_candidates
 
@@ -2685,6 +2743,7 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
         total_sourced=total_sourced,
         scan_time=elapsed,
     )
+    _daytrade_scan_running = False
     logger.info(f"[trading] Day-trade cache filled: {len(results)} results in {elapsed}s")
 
     with _intraday_progress_lock:
@@ -2704,10 +2763,10 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
 
 def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
     """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
-    global _breakout_cache
+    global _breakout_cache, _breakout_scan_running
 
     now = time.time()
-    if _breakout_cache["results"] and (now - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
+    if _breakout_cache["ts"] > 0 and (now - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
         return {
             "ok": True,
             "scan_type": "breakout",
@@ -2719,6 +2778,10 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
             "brain": _brain_meta(),
         }
 
+    if _breakout_scan_running:
+        return {"ok": True, "scan_type": "breakout", "warming_up": True, "matches": 0, "results": []}
+    _breakout_scan_running = True
+
     from .prescreener import get_breakout_candidates
 
     start = time.time()
@@ -2728,51 +2791,57 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
             total_sourced=0, passed_filter=0, started_at=start,
         )
 
-    all_candidates, total_sourced = get_breakout_candidates()
-    with _intraday_progress_lock:
-        _intraday_scan_progress["total_sourced"] = total_sourced
+    try:
+        all_candidates, total_sourced = get_breakout_candidates()
 
-    candidates = _quick_filter_candidates(
-        all_candidates, max_heavy=_MAX_HEAVY_CANDIDATES,
-        min_abs_change_pct=0.0, max_price=1000.0,
-    )
-    with _intraday_progress_lock:
-        _intraday_scan_progress["passed_filter"] = len(candidates)
+        stock_candidates = [t for t in all_candidates if not t.upper().endswith("-USD")]
+        with _intraday_progress_lock:
+            _intraday_scan_progress["total_sourced"] = len(stock_candidates)
 
-    logger.info(f"[trading] Breakout scan: {len(candidates)}/{total_sourced} candidates (after filter)")
-    _prewarm_cache(candidates)
+        candidates = _quick_filter_candidates(
+            stock_candidates, max_heavy=_MAX_HEAVY_CANDIDATES,
+            min_abs_change_pct=0.0, max_price=1000.0,
+        )
+        with _intraday_progress_lock:
+            _intraday_scan_progress["passed_filter"] = len(candidates)
 
-    results: list[dict[str, Any]] = []
-    scored_count = 0
-    with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
-        futures = {executor.submit(_score_breakout, t): t for t in candidates}
-        for future in as_completed(futures):
-            if _shutting_down.is_set():
-                executor.shutdown(wait=False, cancel_futures=True)
-                break
-            scored_count += 1
-            with _intraday_progress_lock:
-                _intraday_scan_progress["scored_so_far"] = scored_count
-            try:
-                scored = future.result()
-                if scored is not None:
-                    results.append(scored)
-            except Exception:
-                pass
+        logger.info(f"[trading] Breakout scan: {len(candidates)}/{len(stock_candidates)} candidates (after filter)")
+        _prewarm_cache(candidates)
 
-    results.sort(key=lambda r: r["score"], reverse=True)
-    elapsed = round(time.time() - start, 1)
+        results: list[dict[str, Any]] = []
+        scored_count = 0
+        with ThreadPoolExecutor(max_workers=_MAX_SCAN_WORKERS) as executor:
+            futures = {executor.submit(_score_breakout, t): t for t in candidates}
+            for future in as_completed(futures):
+                if _shutting_down.is_set():
+                    executor.shutdown(wait=False, cancel_futures=True)
+                    break
+                scored_count += 1
+                with _intraday_progress_lock:
+                    _intraday_scan_progress["scored_so_far"] = scored_count
+                try:
+                    scored = future.result()
+                    if scored is not None:
+                        results.append(scored)
+                except Exception:
+                    pass
 
-    _breakout_cache.update(
-        results=results, ts=time.time(),
-        candidates_scanned=len(candidates),
-        total_sourced=total_sourced,
-        scan_time=elapsed,
-    )
-    logger.info(f"[trading] Breakout cache filled: {len(results)} results in {elapsed}s")
+        results.sort(key=lambda r: r["score"], reverse=True)
+        elapsed = round(time.time() - start, 1)
 
-    with _intraday_progress_lock:
-        _intraday_scan_progress.update(running=False, scan_type="")
+        _breakout_cache.update(
+            results=results, ts=time.time(),
+            candidates_scanned=len(candidates),
+            total_sourced=len(stock_candidates),
+            scan_time=elapsed,
+        )
+        logger.info(f"[trading] Breakout cache filled: {len(results)} results in {elapsed}s")
+    except Exception as exc:
+        logger.exception(f"[trading] Breakout scan failed: {exc}")
+    finally:
+        _breakout_scan_running = False
+        with _intraday_progress_lock:
+            _intraday_scan_progress.update(running=False, scan_type="")
 
     return {
         "ok": True,

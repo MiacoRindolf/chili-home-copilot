@@ -2710,6 +2710,7 @@ var _chartAnnotations = [];
 var _savedAnnotationSpecs = [];
 var _lastBreakoutData = null;
 var _lastDaytradeData = null;
+var _cachedScanTickers = [];
 var _multiViewActive = false;
 var _multiCharts = {};
 var _multiTimeframes = ['1wk', '1d', '1h', '15m'];
@@ -4701,20 +4702,24 @@ function runDaytradeScan() {
   btn.textContent = 'Scanning...';
   status.textContent = 'Scanning full market for momentum plays...';
   _injectSkeletons(results, 5, '70px 58px 42px 50px 55px 55px 50px 1fr');
+  _stopScanProgressPoll();
   _startScanProgressPoll(status);
-
-  // #region agent log
-  fetch('http://127.0.0.1:7886/ingest/d4f16b0a-da9c-42fb-8afe-c7bac5d2ace8',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'09998c'},body:JSON.stringify({sessionId:'09998c',runId:'pre-fix',hypothesisId:'H-all',location:'trading.html:4193',message:'runDaytradeScan-start',data:{},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   fetch('/api/trading/scan/daytrade', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d) {
+    if (d.warming_up) {
+      status.textContent = 'Brain is computing day-trade data — refreshing in 5s...';
+      results.innerHTML = '';
+      setTimeout(function(){ runDaytradeScan(); }, 5000);
+      return;
+    }
     _stopScanProgressPoll();
     btn.disabled = false;
     btn.textContent = 'Scan Day Trades';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
     var brainTag = _brainTag(d.brain);
-    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + ' (' + d.elapsed_s + 's)') + brainTag;
+    var elapsed = d.elapsed_s ? ' (' + d.elapsed_s + 's)' : (d.cached ? ' (cached)' : '');
+    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + elapsed) + brainTag;
     var dtTickers = (d.results || []).map(function(r) { return r.ticker; });
     _cachedScanTickers = _cachedScanTickers.concat(dtTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     _dtResults = d.results || [];
@@ -4723,14 +4728,12 @@ function runDaytradeScan() {
     _renderDtResults();
     _attachScoreTooltips();
   }).catch(function(err) {
+    console.error('[runDaytradeScan] error:', err);
     _stopScanProgressPoll();
     btn.disabled = false;
     btn.textContent = 'Scan Day Trades';
-    status.textContent = 'Error';
-    results.innerHTML = '<em style="color:#ef4444">Network error</em>';
-  // #region agent log
-  fetch('http://127.0.0.1:7886/ingest/d4f16b0a-da9c-42fb-8afe-c7bac5d2ace8',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'09998c'},body:JSON.stringify({sessionId:'09998c',runId:'pre-fix',hypothesisId:'H-daytrade',location:'trading.html:4219',message:'runDaytradeScan-error',data:{error:err&&err.message?err.message:String(err)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
+    status.textContent = '';
+    results.innerHTML = '<em style="color:#ef4444">' + escHtml(err && err.message ? err.message : String(err)) + '</em>';
   });
 }
 
@@ -4742,20 +4745,24 @@ function runBreakoutScan() {
   btn.textContent = 'Scanning...';
   status.textContent = 'Finding consolidation and squeeze patterns...';
   _injectSkeletons(results, 5, '70px 58px 42px 60px 55px 55px 50px 1fr');
+  _stopScanProgressPoll();
   _startScanProgressPoll(status);
-
-  // #region agent log
-  fetch('http://127.0.0.1:7886/ingest/d4f16b0a-da9c-42fb-8afe-c7bac5d2ace8',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'09998c'},body:JSON.stringify({sessionId:'09998c',runId:'pre-fix',hypothesisId:'H-all',location:'trading.html:4227',message:'runBreakoutScan-start',data:{},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
 
   fetch('/api/trading/scan/breakouts', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d) {
+    if (d.warming_up) {
+      status.textContent = 'Brain is computing breakout data — refreshing in 5s...';
+      results.innerHTML = '';
+      setTimeout(function(){ runBreakoutScan(); }, 5000);
+      return;
+    }
     _stopScanProgressPoll();
     btn.disabled = false;
     btn.textContent = 'Scan Breakouts';
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+(d.error||'Scan error')+'</em>'; status.textContent = ''; return; }
     var brainTag = _brainTag(d.brain);
-    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + ' (' + d.elapsed_s + 's)') + brainTag;
+    var elapsed = d.elapsed_s ? ' (' + d.elapsed_s + 's)' : (d.cached ? ' (cached)' : '');
+    status.innerHTML = escHtml(d.matches + ' setups from ' + _candidateLabel(d) + elapsed) + brainTag;
     var boTickers = (d.results || []).map(function(r) { return r.ticker; });
     _cachedScanTickers = _cachedScanTickers.concat(boTickers.filter(function(t) { return _cachedScanTickers.indexOf(t) === -1; }));
     _boResults = d.results || [];
@@ -4764,14 +4771,12 @@ function runBreakoutScan() {
     _renderBoResults();
     _attachScoreTooltips();
   }).catch(function(err) {
+    console.error('[runBreakoutScan] error:', err);
     _stopScanProgressPoll();
     btn.disabled = false;
     btn.textContent = 'Scan Breakouts';
-    status.textContent = 'Error';
-    results.innerHTML = '<em style="color:#ef4444">Network error</em>';
-  // #region agent log
-  fetch('http://127.0.0.1:7886/ingest/d4f16b0a-da9c-42fb-8afe-c7bac5d2ace8',{method:'POST',headers:{'Content-Type':'application/json','X-Debug-Session-Id':'09998c'},body:JSON.stringify({sessionId:'09998c',runId:'pre-fix',hypothesisId:'H-breakouts',location:'trading.html:4252',message:'runBreakoutScan-error',data:{error:err&&err.message?err.message:String(err)},timestamp:Date.now()})}).catch(()=>{});
-  // #endregion
+    status.textContent = '';
+    results.innerHTML = '<em style="color:#ef4444">' + escHtml(err && err.message ? err.message : String(err)) + '</em>';
   });
 }
 

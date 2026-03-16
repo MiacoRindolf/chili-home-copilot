@@ -140,6 +140,9 @@ def _cache_set(key: str, val: Any) -> None:
 # ---------------------------------------------------------------------------
 _session = requests.Session()
 _session.headers.update({"Accept": "application/json"})
+from requests.adapters import HTTPAdapter
+_session.mount("https://", HTTPAdapter(pool_connections=40, pool_maxsize=40))
+_session.mount("http://", HTTPAdapter(pool_connections=40, pool_maxsize=40))
 
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 1.0

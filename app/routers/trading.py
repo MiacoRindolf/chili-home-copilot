@@ -928,23 +928,23 @@ def api_crypto_breakouts(
     """Return cached crypto breakout scan or trigger a fresh scan."""
     from ..services.trading.scanner import run_crypto_breakout_scan, get_crypto_breakout_cache
 
+    cache = get_crypto_breakout_cache()
+    has_data = cache.get("age_seconds") is not None
+
     if refresh:
         background_tasks.add_task(run_crypto_breakout_scan, 20)
-        cache = get_crypto_breakout_cache()
-        if cache["results"]:
-            return JSONResponse({
-                "ok": True,
-                "refreshing": True,
-                **cache,
-            })
+        if has_data:
+            return JSONResponse({"ok": True, "refreshing": True, **cache})
         return JSONResponse({"ok": True, "refreshing": True, "results": [], "message": "Scan started"})
 
-    cache = get_crypto_breakout_cache()
-    if cache["results"]:
+    if has_data:
         return JSONResponse({"ok": True, **cache})
 
-    result = run_crypto_breakout_scan(max_results=20)
-    return JSONResponse(result)
+    background_tasks.add_task(run_crypto_breakout_scan, 20)
+    return JSONResponse({
+        "ok": True, "warming_up": True,
+        "results": [], "message": "Crypto scan started — results will appear shortly",
+    })
 
 
 @router.post("/api/trading/crypto-breakouts/scan")
@@ -1027,50 +1027,64 @@ def api_scan_progress():
 
 @router.post("/api/trading/scan/daytrade")
 def api_run_daytrade_scan(background_tasks: BackgroundTasks):
-    """Return cached day-trade results if fresh, else serve stale + refresh in BG."""
+    """Return cached day-trade results if fresh, else kick off BG scan and return fast."""
     from ..services.trading.scanner import (
         get_daytrade_cache, run_daytrade_scan, _brain_meta,
     )
     cache = get_daytrade_cache()
-    if cache["results"] and cache["age_seconds"] is not None and cache["age_seconds"] < 600:
+    age = cache.get("age_seconds")
+    has_data = age is not None
+
+    if has_data and age < 600:
         return JSONResponse({
             "ok": True, "scan_type": "day_trade", "cached": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
             "brain": _brain_meta(),
         })
-    if cache["results"]:
+    if has_data:
         background_tasks.add_task(run_daytrade_scan, 30)
         return JSONResponse({
             "ok": True, "scan_type": "day_trade", "cached": True, "refreshing": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
             "brain": _brain_meta(),
         })
-    result = run_daytrade_scan()
-    return JSONResponse(result)
+    background_tasks.add_task(run_daytrade_scan, 30)
+    return JSONResponse({
+        "ok": True, "scan_type": "day_trade", "warming_up": True,
+        "matches": 0, "results": [],
+        "message": "Scan started — results will appear shortly",
+    })
 
 
 @router.post("/api/trading/scan/breakouts")
 def api_run_breakout_scan(background_tasks: BackgroundTasks):
-    """Return cached breakout results if fresh, else serve stale + refresh in BG."""
+    """Return cached breakout results if fresh, else kick off BG scan and return fast."""
     from ..services.trading.scanner import (
         get_breakout_cache, run_breakout_scan, _brain_meta,
     )
     cache = get_breakout_cache()
-    if cache["results"] and cache["age_seconds"] is not None and cache["age_seconds"] < 600:
+    age = cache.get("age_seconds")
+    has_data = age is not None
+
+    if has_data and age < 600:
         return JSONResponse({
             "ok": True, "scan_type": "breakout", "cached": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
             "brain": _brain_meta(),
         })
-    if cache["results"]:
+    if has_data:
         background_tasks.add_task(run_breakout_scan, 30)
         return JSONResponse({
             "ok": True, "scan_type": "breakout", "cached": True, "refreshing": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
             "brain": _brain_meta(),
         })
-    result = run_breakout_scan()
-    return JSONResponse(result)
+    background_tasks.add_task(run_breakout_scan, 30)
+    return JSONResponse({
+        "ok": True, "scan_type": "breakout", "warming_up": True,
+        "matches": 0, "results": [],
+        "message": "Scan started — results will appear shortly",
+    })
 
 
 @router.get("/api/trading/scan/momentum")
