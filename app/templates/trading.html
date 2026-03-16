@@ -4864,7 +4864,13 @@ function _attachScoreTooltips() {
 function _selectBreakout(idx) {
   if (!_lastBreakoutData || !_lastBreakoutData[idx]) return;
   var r = _lastBreakoutData[idx];
+  var isCrypto = r.ticker.indexOf('-USD') !== -1;
   selectTicker(r.ticker);
+  if (isCrypto) {
+    changeInterval('15m');
+  } else if (currentInterval !== '1d') {
+    changeInterval('1d');
+  }
   setTimeout(function() { drawBreakoutAnnotations(r); }, 600);
 }
 
