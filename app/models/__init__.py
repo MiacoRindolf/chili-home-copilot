@@ -49,6 +49,16 @@ from .reasoning_brain import (
     ReasoningResearch,
     ReasoningUserModel,
 )
+from .project_brain import (
+    AgentEvolution,
+    AgentFinding,
+    AgentGoal,
+    AgentMessage,
+    AgentResearch,
+    POQuestion,
+    PORequirement,
+    ProjectAgentState,
+)
 
 __all__ = [
     "User",
@@ -102,5 +112,13 @@ __all__ = [
     "ReasoningLearningGoal",
     "ReasoningHypothesis",
     "ReasoningConfidenceSnapshot",
+    "ProjectAgentState",
+    "AgentFinding",
+    "AgentResearch",
+    "AgentGoal",
+    "AgentEvolution",
+    "AgentMessage",
+    "POQuestion",
+    "PORequirement",
 ]
 

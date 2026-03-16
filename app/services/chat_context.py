@@ -127,6 +127,26 @@ def get_project_context_for_chat(db: Session, user_id: int | None, lens: str | N
         return ""
 
 
+def get_project_brain_context_for_chat(db: Session, user_id: int | None) -> str:
+    """Get active Project Brain agent context for the LLM system prompt."""
+    if not user_id:
+        return ""
+    try:
+        from ..config import settings
+        if not getattr(settings, "project_brain_enabled", True):
+            return ""
+        from .project_brain.registry import AGENT_REGISTRY
+        parts = []
+        for name, agent in AGENT_REGISTRY.items():
+            if agent.active:
+                ctx = agent.get_chat_context(db, user_id)
+                if ctx:
+                    parts.append(ctx)
+        return "\n\n".join(parts) if parts else ""
+    except Exception:
+        return ""
+
+
 def build_openai_prompt(
     user_name: str,
     personality_context: str | None,
@@ -135,8 +155,9 @@ def build_openai_prompt(
     planner_context: bool = False,
     code_context: str | None = None,
     reasoning_context: str | None = None,
+    project_brain_context: str | None = None,
 ) -> str:
-    """Build the OpenAI system prompt with personality, RAG, planner, code, and reasoning context."""
+    """Build the OpenAI system prompt with personality, RAG, planner, code, reasoning, and project brain context."""
     openai_system = base_system_prompt
     openai_system += f"\n\nYou are talking to: {user_name}."
     if personality_context:
@@ -157,5 +178,11 @@ def build_openai_prompt(
             "\n\nUser reasoning and preference snapshot (use this to match their style, anticipate needs, and frame answers "
             "in terms of their active goals; do NOT overfit or make creepy predictions):\n"
             f"{reasoning_context}"
+        )
+    if project_brain_context:
+        openai_system += (
+            "\n\nProject Brain agents snapshot (use to inform answers about the project, its requirements, "
+            "status, and architecture when relevant):\n"
+            f"{project_brain_context}"
         )
     return openai_system

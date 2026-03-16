@@ -24,6 +24,8 @@ from ..services.code_brain import deps_scanner as cb_deps
 from ..services.code_brain import search as cb_search
 from ..services.code_brain import lenses as cb_lenses
 from ..services.reasoning_brain import learning as rb_learning
+from ..services.project_brain import registry as pb_registry
+from ..services.project_brain import learning as pb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
 from ..models import (
     ReasoningAnticipation,
@@ -81,6 +83,7 @@ def api_brain_domains():
                 "last_run": code_st.get("last_run"),
                 "phase": code_st.get("phase", "idle"),
                 "lenses": [l["name"] for l in cb_lenses.list_lenses()],
+                "agents": pb_registry.list_agents(),
             },
             {
                 "id": "reasoning",
@@ -713,3 +716,287 @@ def api_brain_project_lens_insights(
         return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
     data = cb_lenses.get_lens_insights(db, lens_name, repo_id=repo_id)
     return JSONResponse({"ok": True, "insights": data})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Project Brain — Autonomous Agents
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/api/brain/project/agents")
+def api_brain_project_agents(request: Request, db: Session = Depends(get_db)):
+    """List all agents with their status and metrics."""
+    ctx = get_identity_ctx(request, db)
+    agents = []
+    for name, agent in pb_registry.AGENT_REGISTRY.items():
+        agents.append(agent.get_metrics(db, ctx["user_id"]))
+    return JSONResponse({"ok": True, "agents": agents})
+
+
+@router.get("/api/brain/project/agent/{name}/metrics")
+def api_brain_project_agent_metrics(name: str, request: Request, db: Session = Depends(get_db)):
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    ctx = get_identity_ctx(request, db)
+    return JSONResponse({"ok": True, **agent.get_metrics(db, ctx["user_id"])})
+
+
+@router.get("/api/brain/project/agent/{name}/findings")
+def api_brain_project_agent_findings(name: str, request: Request, db: Session = Depends(get_db)):
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    ctx = get_identity_ctx(request, db)
+    findings = agent.get_findings(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "findings": [
+        {
+            "id": f.id, "category": f.category, "title": f.title,
+            "description": f.description, "severity": f.severity,
+            "status": f.status,
+            "created_at": f.created_at.isoformat() if f.created_at else None,
+        }
+        for f in findings
+    ]})
+
+
+@router.get("/api/brain/project/agent/{name}/goals")
+def api_brain_project_agent_goals(name: str, request: Request, db: Session = Depends(get_db)):
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    ctx = get_identity_ctx(request, db)
+    goals = agent.get_goals(db, ctx["user_id"], active_only=False)
+    return JSONResponse({"ok": True, "goals": [
+        {
+            "id": g.id, "description": g.description, "goal_type": g.goal_type,
+            "status": g.status, "progress": g.progress, "evidence_count": g.evidence_count,
+            "created_at": g.created_at.isoformat() if g.created_at else None,
+        }
+        for g in goals
+    ]})
+
+
+@router.get("/api/brain/project/agent/{name}/research")
+def api_brain_project_agent_research(name: str, request: Request, db: Session = Depends(get_db)):
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    ctx = get_identity_ctx(request, db)
+    research = agent.get_research(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "research": [
+        {
+            "id": r.id, "topic": r.topic, "summary": r.summary,
+            "sources_json": r.sources_json,
+            "relevance_score": r.relevance_score,
+            "searched_at": r.searched_at.isoformat() if r.searched_at else None,
+        }
+        for r in research
+    ]})
+
+
+@router.get("/api/brain/project/agent/{name}/evolution")
+def api_brain_project_agent_evolution(name: str, request: Request, db: Session = Depends(get_db)):
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    ctx = get_identity_ctx(request, db)
+    evolutions = agent.get_evolution(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "evolution": [
+        {
+            "id": e.id, "dimension": e.dimension, "description": e.description,
+            "confidence_before": e.confidence_before, "confidence_after": e.confidence_after,
+            "trigger": e.trigger,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in evolutions
+    ]})
+
+
+@router.post("/api/brain/project/agent/{name}/cycle")
+def api_brain_project_agent_cycle(
+    name: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Trigger a learning cycle for a specific agent."""
+    agent = pb_registry.get_agent(name)
+    if not agent:
+        return JSONResponse({"ok": False, "message": f"Unknown agent: {name}"}, status_code=404)
+    status = pb_learning.get_project_brain_status()
+    if status.get("running"):
+        return JSONResponse({"ok": False, "message": "A cycle is already running"})
+    ctx = get_identity_ctx(request, db)
+
+    from ..db import SessionLocal
+
+    def _bg(user_id, agent_name):
+        sdb = SessionLocal()
+        try:
+            pb_learning.run_project_brain_cycle(sdb, user_id, agent_name=agent_name)
+        finally:
+            sdb.close()
+
+    background_tasks.add_task(_bg, ctx["user_id"], name)
+    return JSONResponse({"ok": True, "message": f"{agent.label} learning cycle started"})
+
+
+@router.get("/api/brain/project/messages")
+def api_brain_project_messages(request: Request, db: Session = Depends(get_db)):
+    """Inter-agent message feed."""
+    ctx = get_identity_ctx(request, db)
+    feed = pb_registry.get_message_feed(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "messages": feed})
+
+
+# ── Product Owner specific endpoints ──────────────────────────────────
+
+@router.get("/api/brain/project/agent/product_owner/question")
+def api_brain_po_next_question(request: Request, db: Session = Depends(get_db)):
+    """Get the next pending PO question for the user."""
+    ctx = get_identity_ctx(request, db)
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    q = po.get_next_question(db, ctx["user_id"])
+    if not q:
+        return JSONResponse({"ok": True, "question": None})
+    return JSONResponse({"ok": True, "question": {
+        "id": q.id, "question": q.question, "context": q.context,
+        "category": q.category, "priority": q.priority,
+    }})
+
+
+@router.get("/api/brain/project/agent/product_owner/questions")
+def api_brain_po_questions(
+    request: Request,
+    db: Session = Depends(get_db),
+    status: str | None = Query(None),
+):
+    """List PO questions with optional status filter."""
+    ctx = get_identity_ctx(request, db)
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    questions = po.get_questions(db, ctx["user_id"], status=status)
+    return JSONResponse({"ok": True, "questions": [
+        {
+            "id": q.id, "question": q.question, "context": q.context,
+            "category": q.category, "priority": q.priority,
+            "status": q.status, "answer": q.answer,
+            "asked_at": q.asked_at.isoformat() if q.asked_at else None,
+            "answered_at": q.answered_at.isoformat() if q.answered_at else None,
+        }
+        for q in questions
+    ]})
+
+
+class _POAnswerBody(BaseModel):
+    answer: str
+
+
+@router.post("/api/brain/project/agent/product_owner/question/{question_id}/answer")
+def api_brain_po_answer(question_id: int, body: _POAnswerBody, db: Session = Depends(get_db)):
+    """Submit an answer to a PO question."""
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    q = po.answer_question(db, question_id, body.answer)
+    if not q:
+        return JSONResponse({"ok": False, "message": "Question not found"}, status_code=404)
+    return JSONResponse({"ok": True, "question": {
+        "id": q.id, "status": q.status, "answer": q.answer,
+    }})
+
+
+@router.post("/api/brain/project/agent/product_owner/question/{question_id}/skip")
+def api_brain_po_skip(question_id: int, db: Session = Depends(get_db)):
+    """Skip a PO question."""
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    q = po.skip_question(db, question_id)
+    if not q:
+        return JSONResponse({"ok": False, "message": "Question not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@router.get("/api/brain/project/agent/product_owner/requirements")
+def api_brain_po_requirements(request: Request, db: Session = Depends(get_db)):
+    """List PO-gathered requirements."""
+    ctx = get_identity_ctx(request, db)
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    reqs = po.get_requirements(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "requirements": [
+        {
+            "id": r.id, "title": r.title, "description": r.description,
+            "priority": r.priority, "status": r.status,
+            "acceptance_criteria": r.acceptance_criteria,
+            "created_at": r.created_at.isoformat() if r.created_at else None,
+        }
+        for r in reqs
+    ]})
+
+
+@router.post("/api/brain/project/agent/product_owner/requirement/{requirement_id}/to-task")
+def api_brain_po_req_to_task(
+    requirement_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Push a PO requirement to the Planner as a task."""
+    ctx = get_identity_ctx(request, db)
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    result = po.push_requirement_to_planner(db, ctx["user_id"], requirement_id)
+    status_code = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status_code)
+
+
+# ── Project Manager specific endpoints ────────────────────────────────
+
+@router.get("/api/brain/project/agent/project_manager/velocity")
+def api_brain_pm_velocity(request: Request, db: Session = Depends(get_db)):
+    """Current velocity and project health metrics."""
+    ctx = get_identity_ctx(request, db)
+    pm = pb_registry.get_agent("project_manager")
+    if not pm:
+        return JSONResponse({"ok": False, "message": "PM agent not found"}, status_code=404)
+    return JSONResponse({"ok": True, **pm.get_velocity(db, ctx["user_id"])})
+
+
+@router.get("/api/brain/project/agent/project_manager/health")
+def api_brain_pm_health(request: Request, db: Session = Depends(get_db)):
+    """Comprehensive project health report."""
+    ctx = get_identity_ctx(request, db)
+    pm = pb_registry.get_agent("project_manager")
+    if not pm:
+        return JSONResponse({"ok": False, "message": "PM agent not found"}, status_code=404)
+    health = pm.get_project_health(db, ctx["user_id"])
+    health.pop("projects", None)
+    return JSONResponse({"ok": True, **health})
+
+
+@router.get("/api/brain/project/agent/project_manager/breakdown")
+def api_brain_pm_breakdown(request: Request, db: Session = Depends(get_db)):
+    """Task status breakdown by project."""
+    ctx = get_identity_ctx(request, db)
+    pm = pb_registry.get_agent("project_manager")
+    if not pm:
+        return JSONResponse({"ok": False, "message": "PM agent not found"}, status_code=404)
+    return JSONResponse({"ok": True, **pm.get_task_breakdown(db, ctx["user_id"])})
+
+
+# ── Architect specific endpoints ──────────────────────────────────────
+
+@router.get("/api/brain/project/agent/architect/health")
+def api_brain_arch_health(request: Request, db: Session = Depends(get_db)):
+    """Comprehensive architecture health report."""
+    ctx = get_identity_ctx(request, db)
+    arch = pb_registry.get_agent("architect")
+    if not arch:
+        return JSONResponse({"ok": False, "message": "Architect agent not found"}, status_code=404)
+    return JSONResponse({"ok": True, **arch.get_architecture_health(db, ctx["user_id"])})

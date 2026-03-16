@@ -290,6 +290,7 @@ def _run_crypto_breakout_job():
             flag_line = " + ".join(flags) if flags else ""
             sig_text = "; ".join(setup.get("signals", [])[:3])
 
+            _hold = setup.get("hold_estimate", {}).get("label", "")
             msg = (
                 f"{prefix}: {ticker}\n"
                 f"Score {setup['score']}/10 | ${setup['price']} "
@@ -300,7 +301,8 @@ def _run_crypto_breakout_job():
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                f"{sig_text}"
+                + (f"Hold: {_hold}\n" if _hold else "")
+                + f"{sig_text}"
             )
 
             dispatch_alert(
@@ -401,6 +403,7 @@ def _run_stock_breakout_job():
             flag_line = " + ".join(flags) if flags else ""
             sig_text = "; ".join(setup.get("signals", [])[:3])
 
+            _hold = setup.get("hold_estimate", {}).get("label", "")
             msg = (
                 f"{prefix}: {ticker}\n"
                 f"Score {setup['score']}/10 | ${setup['price']}\n"
@@ -409,7 +412,8 @@ def _run_stock_breakout_job():
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                f"{sig_text}"
+                + (f"Hold: {_hold}\n" if _hold else "")
+                + f"{sig_text}"
             )
 
             dispatch_alert(

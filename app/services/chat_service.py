@@ -34,7 +34,7 @@ from .. import web_search as web_search_module
 from .. import memory as memory_module
 from .. import openai_client
 from .code_brain import learning as code_learning
-from .chat_context import get_project_context_for_chat
+from .chat_context import get_project_context_for_chat, get_project_brain_context_for_chat
 from .reasoning_brain import learning as reasoning_learning
 from ..modules import is_module_enabled
 from . import project_file_service as pfs_module
@@ -106,13 +106,16 @@ def resolve_response(
             openai_messages = [{"role": m.role, "content": m.content} for m in recent]
             code_ctx = ""
             reasoning_ctx = ""
+            pb_ctx = ""
             try:
                 if user_id and not is_guest:
                     code_ctx = get_project_context_for_chat(db, user_id=user_id)
                     reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
+                    pb_ctx = get_project_brain_context_for_chat(db, user_id=user_id)
             except Exception:
                 code_ctx = ""
                 reasoning_ctx = ""
+                pb_ctx = ""
             openai_system = build_openai_prompt(
                 user_name,
                 None,
@@ -121,6 +124,7 @@ def resolve_response(
                 planner_context=on_planner_page,
                 code_context=code_ctx or None,
                 reasoning_context=reasoning_ctx or None,
+                project_brain_context=pb_ctx or None,
             )
             result = openai_client.chat(
                 messages=openai_messages,
@@ -217,13 +221,16 @@ def resolve_response(
         openai_messages = [{"role": m.role, "content": m.content} for m in recent]
         code_ctx = ""
         reasoning_ctx = ""
+        pb_ctx = ""
         try:
             if user_id and not is_guest:
                 code_ctx = get_project_context_for_chat(db, user_id=user_id)
                 reasoning_ctx = reasoning_learning.get_reasoning_chat_context(db, user_id=user_id)
+                pb_ctx = get_project_brain_context_for_chat(db, user_id=user_id)
         except Exception:
             code_ctx = ""
             reasoning_ctx = ""
+            pb_ctx = ""
         openai_system = build_openai_prompt(
             user_name,
             ctx["personality_context"],
@@ -232,6 +239,7 @@ def resolve_response(
             planner_context=on_planner_page,
             code_context=code_ctx or None,
             reasoning_context=reasoning_ctx or None,
+            project_brain_context=pb_ctx or None,
         )
         if llm_reply and llm_reply.strip():
             openai_system += f'\n\nThe planner suggested asking the user for more info. You may use or expand this naturally: "{llm_reply.strip()}"'
@@ -505,8 +513,9 @@ def build_openai_prompt(
     planner_context: bool = False,
     code_context: str | None = None,
     reasoning_context: str | None = None,
+    project_brain_context: str | None = None,
 ) -> str:
-    """Build the OpenAI system prompt with personality, RAG, planner, code, and reasoning context."""
+    """Build the OpenAI system prompt with personality, RAG, planner, code, reasoning, and project brain context."""
     openai_system = base_system_prompt
     openai_system += f"\n\nYou are talking to: {user_name}."
     if personality_context:
@@ -526,6 +535,12 @@ def build_openai_prompt(
             "\n\nUser reasoning and preference snapshot (use this to match their style, anticipate needs, and frame answers "
             "in terms of their active goals; do NOT overfit or make creepy predictions):\n"
             f"{reasoning_context}"
+        )
+    if project_brain_context:
+        openai_system += (
+            "\n\nProject Brain agents snapshot (use to inform answers about the project, its requirements, "
+            "status, and architecture when relevant):\n"
+            f"{project_brain_context}"
         )
     return openai_system
 

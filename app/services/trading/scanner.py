@@ -1147,6 +1147,58 @@ def _get_sector_for_ticker(ticker: str) -> str:
     return sector
 
 
+_TIME_PER_BAR: dict[str, float] = {
+    "1m": 1 / 60, "5m": 5 / 60, "15m": 0.25, "30m": 0.5,
+    "1h": 1.0, "4h": 4.0, "1d": 6.5, "1wk": 32.5,
+}
+
+
+def _estimate_hold_duration(
+    entry: float, target: float, atr: float,
+    timeframe: str = "1d", adx: float | None = None,
+) -> dict[str, Any]:
+    """Estimate how long a position should be held to reach the target.
+
+    Uses ATR-based distance, chart timeframe, and ADX trend strength
+    to produce a human-readable hold duration range.
+    """
+    if atr <= 0 or entry <= 0 or target <= entry:
+        return {"hours_low": 0, "hours_high": 0, "label": "n/a"}
+
+    atr_multiples = (target - entry) / atr
+    hours_per_bar = _TIME_PER_BAR.get(timeframe, 6.5)
+    raw_hours = atr_multiples * hours_per_bar
+
+    if adx is not None and adx > 30:
+        adx_factor = 0.7
+    elif adx is not None and adx > 20:
+        adx_factor = 0.85
+    else:
+        adx_factor = 1.2
+
+    center = raw_hours * adx_factor
+    hours_low = max(0.25, center * 0.6)
+    hours_high = center * 1.5
+
+    if hours_high < 1:
+        label = f"~{max(1, int(hours_low * 60))}-{int(hours_high * 60)} min"
+    elif hours_high < 24:
+        label = f"~{max(1, round(hours_low))}-{round(hours_high)} hours"
+    else:
+        days_low = max(1, round(hours_low / 24))
+        days_high = max(days_low, round(hours_high / 24))
+        if days_low == days_high:
+            label = f"~{days_low} day{'s' if days_low > 1 else ''}"
+        else:
+            label = f"~{days_low}-{days_high} days"
+
+    return {
+        "hours_low": round(hours_low, 2),
+        "hours_high": round(hours_high, 2),
+        "label": label,
+    }
+
+
 def _detect_vcp(high: pd.Series, low: pd.Series, volume: pd.Series,
                 lookback: int = 40) -> int:
     """Detect Volume Contraction Pattern (Minervini).
@@ -1754,6 +1806,10 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
             },
             "news_sentiment": _news_score,
             "sector": "crypto",
+            "hold_estimate": _estimate_hold_duration(
+                entry, target, atr_val, "15m",
+                float(adx_val) if pd.notna(adx_val) else None,
+            ),
         }
     except Exception as e:
         logger.debug(f"[crypto_breakout] {ticker} failed: {e}")
@@ -2258,6 +2314,11 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             },
             "news_sentiment": _news_score,
             "sector": _get_sector_for_ticker(ticker),
+            "hold_estimate": _estimate_hold_duration(
+                resistance, smart_round(resistance + _bo_tgt_m * atr_f, crypto=_cr),
+                atr_f, "1d",
+                float(adx_val) if pd.notna(adx_val) else None,
+            ),
         }
     except Exception:
         return None
@@ -3147,8 +3208,24 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
 
         pick["thesis"] = _build_conversational_thesis(pick)
 
-        # Timeframe suggestion
-        if pick.get("indicators", {}).get("adx") and pick["indicators"]["adx"] > 25:
+        # Timeframe suggestion with hold duration estimate
+        _ind = pick.get("indicators", {})
+        _p_entry = pick.get("entry_price") or pick.get("price", 0)
+        _p_target = pick.get("take_profit") or pick.get("brain_target", 0)
+        _p_atr = _ind.get("atr", 0)
+        _is_crypto = pick.get("ticker", "").endswith("-USD")
+        if _p_entry and _p_target and _p_atr and _p_target > _p_entry:
+            _he = _estimate_hold_duration(
+                _p_entry, _p_target, _p_atr,
+                "15m" if _is_crypto else "1d",
+                _ind.get("adx"),
+            )
+            pick["hold_estimate"] = _he
+            if _ind.get("adx") and _ind["adx"] > 25:
+                pick["timeframe"] = f"trending ({_he['label']})"
+            else:
+                pick["timeframe"] = f"swing ({_he['label']})"
+        elif _ind.get("adx") and _ind["adx"] > 25:
             pick["timeframe"] = "1-5 days (trending)"
         else:
             pick["timeframe"] = "3-10 days (swing)"

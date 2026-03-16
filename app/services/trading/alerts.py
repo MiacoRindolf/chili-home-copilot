@@ -378,8 +378,18 @@ def generate_strategy_proposals(
         signals = pick.get("signals", [])
         indicators = pick.get("indicators", {})
 
-        # Determine timeframe
+        # Determine timeframe with hold duration estimate
         timeframe = pick.get("timeframe", "swing")
+        _hold_est = pick.get("hold_estimate", {}).get("label")
+        if not _hold_est and indicators.get("atr") and price and target:
+            from .scanner import _estimate_hold_duration
+            _tf = "15m" if pick.get("is_crypto") else "1d"
+            _hold_est = _estimate_hold_duration(
+                price, target, indicators["atr"], _tf,
+                indicators.get("adx"),
+            ).get("label")
+        if _hold_est:
+            timeframe = f"{timeframe} ({_hold_est})"
 
         thesis = pick.get("thesis", "")
         if not thesis:
@@ -535,6 +545,16 @@ def create_proposal_from_pick(
     signals = pick.get("signals", [])
     indicators = pick.get("indicators", {})
     timeframe = pick.get("timeframe", "swing")
+    _hold_est = pick.get("hold_estimate", {}).get("label")
+    if not _hold_est and indicators.get("atr") and price and target:
+        from .scanner import _estimate_hold_duration
+        _tf = "15m" if pick.get("is_crypto") else "1d"
+        _hold_est = _estimate_hold_duration(
+            price, target, indicators["atr"], _tf,
+            indicators.get("adx"),
+        ).get("label")
+    if _hold_est:
+        timeframe = f"{timeframe} ({_hold_est})"
     thesis = pick.get("thesis", "")
     if not thesis:
         thesis = f"AI-identified bullish setup for {ticker} with score {combined:.1f}/10."

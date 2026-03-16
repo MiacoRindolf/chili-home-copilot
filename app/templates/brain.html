@@ -70,6 +70,75 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Project lens tab bar */
 .proj-lens-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; padding: 4px 0; border-bottom: 1px solid var(--border); }
 .proj-lens-tab { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .15s; white-space: nowrap; }
+
+/* Project Agent tab bar */
+.proj-agent-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 16px; padding: 6px 0; border-bottom: 1px solid var(--border); }
+.proj-agent-tab { display: inline-flex; align-items: center; gap: 5px; padding: 6px 14px; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .2s; white-space: nowrap; }
+.proj-agent-tab:hover { background: rgba(139,92,246,.08); color: var(--text); }
+.proj-agent-tab.active { background: rgba(139,92,246,.12); color: #a78bfa; border-color: rgba(139,92,246,.25); }
+.proj-agent-tab.inactive { opacity: .4; cursor: default; }
+.proj-agent-tab .agt-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+.proj-agent-tab.active .agt-dot { background: #22c55e; }
+.proj-agent-tab.inactive .agt-dot { background: transparent; }
+
+.proj-agent-panel { display: none; }
+.proj-agent-panel.active { display: block; }
+
+/* PO Status card */
+.po-status-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 16px; }
+.po-stat { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+.po-stat-val { font-size: 18px; font-weight: 700; color: #a78bfa; }
+.po-stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+
+/* PO Questions */
+.po-q-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
+.po-q-text { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
+.po-q-ctx { font-size: 10px; color: var(--text-muted); margin-bottom: 8px; }
+.po-q-badge { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 600; display: inline-block; margin-right: 4px; }
+.po-q-badge.pending { background: rgba(245,158,11,.15); color: #f59e0b; }
+.po-q-badge.answered { background: rgba(34,197,94,.15); color: #22c55e; }
+.po-q-badge.skipped { background: rgba(148,163,184,.15); color: #94a3b8; }
+.po-q-input-row { display: flex; gap: 6px; margin-top: 8px; }
+.po-q-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 11px; font-family: inherit; }
+.po-q-btn { padding: 6px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 10px; font-weight: 600; color: #fff; }
+.po-q-btn.submit { background: linear-gradient(135deg,#8b5cf6,#6d28d9); }
+.po-q-btn.skip { background: var(--border); color: var(--text-muted); }
+
+/* PO Requirements */
+.po-req-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; }
+.po-req-row:last-child { border-bottom: none; }
+.po-req-pri { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
+.po-req-pri.critical { background: rgba(239,68,68,.15); color: #ef4444; }
+.po-req-pri.high { background: rgba(245,158,11,.15); color: #f59e0b; }
+.po-req-pri.medium { background: rgba(34,197,94,.15); color: #22c55e; }
+.po-req-pri.low { background: rgba(148,163,184,.15); color: #94a3b8; }
+.po-req-title { flex: 1; font-weight: 600; }
+.po-req-status { font-size: 9px; color: var(--text-muted); }
+.po-req-push { padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(139,92,246,.3); background: transparent; color: #a78bfa; font-size: 9px; font-weight: 600; cursor: pointer; }
+.po-req-push:hover { background: rgba(139,92,246,.12); }
+
+/* Agent findings */
+.agt-finding-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.agt-finding-row:last-child { border-bottom: none; }
+.agt-finding-sev { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 700; text-transform: uppercase; flex-shrink: 0; }
+.agt-finding-sev.info { background: rgba(6,182,212,.12); color: #06b6d4; }
+.agt-finding-sev.warn { background: rgba(245,158,11,.12); color: #f59e0b; }
+.agt-finding-sev.critical { background: rgba(239,68,68,.12); color: #ef4444; }
+
+/* Agent research */
+.agt-research-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.agt-research-topic { font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+.agt-research-summary { font-size: 10px; color: var(--text-muted); line-height: 1.5; }
+.agt-research-sources { font-size: 9px; margin-top: 4px; }
+.agt-research-sources a { color: #a78bfa; text-decoration: none; }
+.agt-research-sources a:hover { text-decoration: underline; }
+
+/* Agent evolution timeline */
+.agt-evo-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.agt-evo-row:last-child { border-bottom: none; }
+.agt-evo-dim { font-weight: 600; min-width: 80px; }
+.agt-evo-conf { display: flex; align-items: center; gap: 4px; font-size: 10px; }
+.agt-evo-arrow { color: #22c55e; font-weight: 700; }
 .proj-lens-tab:hover { background: var(--bg-header); color: var(--text); }
 .proj-lens-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
 .proj-lens-tab .plt-icon { font-size: 13px; }
@@ -425,7 +494,159 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
       </div>
 
-      <!-- Subdomain lens tabs -->
+      <!-- Agent tabs -->
+      <div class="proj-agent-bar" id="proj-agent-bar"></div>
+
+      <!-- Agent panels container -->
+      <div id="proj-agent-panels">
+        <!-- PO Agent Panel -->
+        <div class="proj-agent-panel" id="agent-panel-product_owner" data-agent="product_owner">
+          <div class="po-status-card" id="po-status-card"></div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x2753;</span> Questions for You</div>
+            <div id="po-questions" style="max-height:400px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Run a PO learning cycle to generate questions...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Requirements</div>
+            <div id="po-requirements" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Requirements will appear after answering questions...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Research</div>
+            <div id="po-research" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Research results will appear after a learning cycle...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Findings &amp; Recommendations</div>
+            <div id="po-findings" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Findings will appear after a learning cycle...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Goals</div>
+            <div id="po-goals" style="max-height:250px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Learning goals will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Evolution Timeline</div>
+            <div id="po-evolution" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Evolution events will appear as the PO learns...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- PM Agent Panel -->
+        <div class="proj-agent-panel" id="agent-panel-project_manager" data-agent="project_manager">
+          <div class="po-status-card" id="pm-status-card"></div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Velocity &amp; Health</div>
+            <div id="pm-velocity" style="font-size:11px;color:var(--text-muted)">Run a PM cycle to see velocity metrics...</div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4DD;</span> Task Breakdown</div>
+            <div id="pm-breakdown" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Task breakdown will appear after a learning cycle...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Findings &amp; Recommendations</div>
+            <div id="pm-findings" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Findings will appear after a learning cycle...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Research</div>
+            <div id="pm-research" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">PM research results will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Goals</div>
+            <div id="pm-goals" style="max-height:250px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">PM goals will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Evolution Timeline</div>
+            <div id="pm-evolution" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Evolution events will appear as the PM learns...</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Architect Agent Panel -->
+        <div class="proj-agent-panel" id="agent-panel-architect" data-agent="architect">
+          <div class="po-status-card" id="arch-status-card"></div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Health</div>
+            <div id="arch-health">
+              <div style="font-size:11px;color:var(--text-muted)">Run an Architect cycle to analyze the codebase...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F504;</span> Circular Dependencies</div>
+            <div id="arch-circular" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Circular dependency analysis will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F517;</span> Module Coupling</div>
+            <div id="arch-coupling" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Coupling analysis will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Complexity Hotspots</div>
+            <div id="arch-hotspots" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Hotspot analysis will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Architectural Recommendations</div>
+            <div id="arch-findings" style="max-height:350px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Findings will appear after a cycle...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Research</div>
+            <div id="arch-research" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Architecture research will appear...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Evolution Timeline</div>
+            <div id="arch-evolution" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Evolution events will appear...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Subdomain lens tabs (Code Brain data views) -->
       <div class="proj-lens-bar" id="proj-lens-bar"></div>
 
       <!-- Code learning pipeline -->
@@ -1215,6 +1436,7 @@ function switchDomain(domain) {
 
   if (domain === 'project' && !_projectDashboardLoaded) {
     _projectDashboardLoaded = true;
+    initProjectAgentBar();
     initProjectLensBar();
     loadCodeDashboard();
   }
@@ -1234,6 +1456,667 @@ function loadCodeDashboard() {
   loadCodeReviews();
   loadCodeDeps();
   pollCodeLearningStatus();
+}
+
+/* ══════════════════════════════════════════════════
+   Project Brain — Autonomous Agents
+   ══════════════════════════════════════════════════ */
+var _agentList = [];
+var _activeAgent = 'product_owner';
+var _agentPanelLoaded = {};
+
+function initProjectAgentBar() {
+  fetch('/api/brain/project/agents').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    _agentList = d.agents || [];
+    var bar = document.getElementById('proj-agent-bar');
+    if (!bar) return;
+    bar.innerHTML = '';
+
+    var allAgentDefs = [
+      {name:'product_owner',label:'Product Owner',icon:'\uD83D\uDC51'},
+      {name:'project_manager',label:'PM',icon:'\uD83D\uDCCB'},
+      {name:'architect',label:'Architect',icon:'\uD83C\uDFD7'},
+      {name:'backend',label:'Backend',icon:'\u2699'},
+      {name:'frontend',label:'Frontend',icon:'\uD83C\uDFA8'},
+      {name:'ux',label:'UX',icon:'\uD83D\uDC41'},
+      {name:'qa',label:'QA',icon:'\uD83E\uDDEA'},
+      {name:'devops',label:'DevOps',icon:'\uD83D\uDE80'},
+      {name:'security',label:'Security',icon:'\uD83D\uDD12'},
+      {name:'ai_eng',label:'AI Eng',icon:'\uD83E\uDD16'},
+    ];
+
+    var activeNames = {};
+    _agentList.forEach(function(a) { if(a.active) activeNames[a.agent || a.name] = a; });
+
+    allAgentDefs.forEach(function(def) {
+      var tab = document.createElement('div');
+      var isActive = !!activeNames[def.name];
+      tab.className = 'proj-agent-tab' + (def.name === _activeAgent ? ' active' : '') + (!isActive ? ' inactive' : '');
+      tab.dataset.agent = def.name;
+      tab.innerHTML = '<span class="agt-dot"></span> ' + def.icon + ' ' + def.label;
+      if (isActive) {
+        tab.onclick = function() { switchProjectAgent(def.name); };
+      } else {
+        tab.title = 'Coming soon';
+      }
+      bar.appendChild(tab);
+    });
+
+    if (activeNames[_activeAgent]) {
+      switchProjectAgent(_activeAgent);
+    }
+  });
+}
+
+function switchProjectAgent(agentName) {
+  _activeAgent = agentName;
+  document.querySelectorAll('.proj-agent-tab').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.agent === agentName);
+  });
+  document.querySelectorAll('.proj-agent-panel').forEach(function(el) {
+    el.classList.toggle('active', el.dataset.agent === agentName);
+  });
+  if (agentName === 'product_owner' && !_agentPanelLoaded['product_owner']) {
+    _agentPanelLoaded['product_owner'] = true;
+    loadPODashboard();
+  }
+  if (agentName === 'project_manager' && !_agentPanelLoaded['project_manager']) {
+    _agentPanelLoaded['project_manager'] = true;
+    loadPMDashboard();
+  }
+  if (agentName === 'architect' && !_agentPanelLoaded['architect']) {
+    _agentPanelLoaded['architect'] = true;
+    loadArchDashboard();
+  }
+}
+
+/* ── Product Owner Panel ─────────────────────── */
+
+function loadPODashboard() {
+  loadPOMetrics();
+  loadPOQuestions();
+  loadPORequirements();
+  loadPOResearch();
+  loadPOFindings();
+  loadPOGoals();
+  loadPOEvolution();
+}
+
+function loadPOMetrics() {
+  fetch('/api/brain/project/agent/product_owner/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-status-card');
+    if (!el) return;
+    var kpis = [
+      {val: (d.confidence * 100).toFixed(0) + '%', lbl: 'Confidence'},
+      {val: d.pending_questions || 0, lbl: 'Pending Qs'},
+      {val: d.answered_questions || 0, lbl: 'Answered'},
+      {val: d.total_requirements || 0, lbl: 'Requirements'},
+      {val: d.finding_count || 0, lbl: 'Findings'},
+      {val: d.research_count || 0, lbl: 'Research'},
+      {val: d.evolution_count || 0, lbl: 'Evolutions'},
+    ];
+    el.innerHTML = kpis.map(function(k) {
+      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+    }).join('');
+  });
+}
+
+function loadPOQuestions() {
+  fetch('/api/brain/project/agent/product_owner/questions').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-questions');
+    if (!el) return;
+    var qs = d.questions || [];
+    if (!qs.length) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No questions yet. Click the button below to run a PO learning cycle.</div>' +
+        '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
+      return;
+    }
+    el.innerHTML = qs.map(function(q) {
+      var badge = '<span class="po-q-badge ' + q.status + '">' + q.status + '</span>';
+      var catBadge = '<span class="po-q-badge" style="background:rgba(139,92,246,.1);color:#a78bfa">' + q.category + '</span>';
+      var html = '<div class="po-q-card">';
+      html += '<div class="po-q-text">' + badge + catBadge + ' ' + q.question + '</div>';
+      if (q.context) html += '<div class="po-q-ctx">' + q.context + '</div>';
+      if (q.status === 'pending') {
+        html += '<div class="po-q-input-row">' +
+          '<input type="text" class="po-q-input" id="po-answer-' + q.id + '" placeholder="Type your answer...">' +
+          '<button class="po-q-btn submit" onclick="submitPOAnswer(' + q.id + ')">Submit</button>' +
+          '<button class="po-q-btn skip" onclick="skipPOQuestion(' + q.id + ')">Skip</button>' +
+        '</div>';
+      } else if (q.status === 'answered' && q.answer) {
+        html += '<div style="font-size:11px;margin-top:6px;padding:6px 8px;background:rgba(34,197,94,.05);border-radius:6px;border:1px solid rgba(34,197,94,.15)"><strong>Answer:</strong> ' + q.answer + '</div>';
+      }
+      html += '</div>';
+      return html;
+    }).join('');
+    el.innerHTML += '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
+  });
+}
+
+function submitPOAnswer(questionId) {
+  var input = document.getElementById('po-answer-' + questionId);
+  if (!input || !input.value.trim()) return;
+  fetch('/api/brain/project/agent/product_owner/question/' + questionId + '/answer', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({answer: input.value.trim()})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      loadPOQuestions();
+      loadPOMetrics();
+    }
+  });
+}
+
+function skipPOQuestion(questionId) {
+  fetch('/api/brain/project/agent/product_owner/question/' + questionId + '/skip', {method: 'POST'})
+  .then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) loadPOQuestions();
+  });
+}
+
+function loadPORequirements() {
+  fetch('/api/brain/project/agent/product_owner/requirements').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-requirements');
+    if (!el) return;
+    var reqs = d.requirements || [];
+    if (!reqs.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No requirements yet.</div>'; return; }
+    el.innerHTML = reqs.map(function(r) {
+      return '<div class="po-req-row">' +
+        '<span class="po-req-pri ' + r.priority + '">' + r.priority + '</span>' +
+        '<span class="po-req-title">' + r.title + '</span>' +
+        '<span class="po-req-status">' + r.status + '</span>' +
+        (r.status !== 'in_planner' && r.status !== 'done' ?
+          '<button class="po-req-push" onclick="pushReqToPlanner(' + r.id + ')">&#x1F4CB; To Planner</button>' : '') +
+      '</div>';
+    }).join('');
+  });
+}
+
+function pushReqToPlanner(reqId) {
+  fetch('/api/brain/project/agent/product_owner/requirement/' + reqId + '/to-task', {method: 'POST'})
+  .then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) loadPORequirements();
+  });
+}
+
+function loadPOResearch() {
+  fetch('/api/brain/project/agent/product_owner/research').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-research');
+    if (!el) return;
+    var items = d.research || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No research yet.</div>'; return; }
+    el.innerHTML = items.map(function(r) {
+      var sources = '';
+      try {
+        var s = JSON.parse(r.sources_json || '[]');
+        if (s.length) {
+          sources = '<div class="agt-research-sources">' + s.map(function(src) {
+            return '<a href="' + (src.url || '#') + '" target="_blank">' + (src.title || src.url || 'source') + '</a>';
+          }).join(' &middot; ') + '</div>';
+        }
+      } catch(e) {}
+      return '<div class="agt-research-card">' +
+        '<div class="agt-research-topic">' + r.topic + '</div>' +
+        '<div class="agt-research-summary">' + r.summary + '</div>' +
+        sources +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPOFindings() {
+  fetch('/api/brain/project/agent/product_owner/findings').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-findings');
+    if (!el) return;
+    var items = d.findings || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No findings yet.</div>'; return; }
+    el.innerHTML = items.map(function(f) {
+      return '<div class="agt-finding-row">' +
+        '<span class="agt-finding-sev ' + f.severity + '">' + f.severity + '</span>' +
+        '<div style="flex:1"><strong>' + f.title + '</strong><div style="color:var(--text-muted);margin-top:2px">' + f.description + '</div></div>' +
+        '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPOGoals() {
+  fetch('/api/brain/project/agent/product_owner/goals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-goals');
+    if (!el) return;
+    var items = d.goals || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No goals yet.</div>'; return; }
+    el.innerHTML = items.map(function(g) {
+      var statusColor = g.status === 'active' ? '#22c55e' : g.status === 'completed' ? '#a78bfa' : 'var(--text-muted)';
+      var pct = Math.round(g.progress * 100);
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">' +
+        '<span style="color:' + statusColor + ';font-weight:600;text-transform:uppercase;font-size:9px;min-width:55px">' + g.status + '</span>' +
+        '<span style="flex:1">' + g.description + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + pct + '%</span>' +
+        '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#a78bfa;border-radius:2px"></div></div>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPOEvolution() {
+  fetch('/api/brain/project/agent/product_owner/evolution').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('po-evolution');
+    if (!el) return;
+    var items = d.evolution || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No evolution events yet.</div>'; return; }
+    el.innerHTML = items.map(function(e) {
+      var before = (e.confidence_before * 100).toFixed(0);
+      var after = (e.confidence_after * 100).toFixed(0);
+      var delta = after - before;
+      var arrow = delta >= 0 ? '\u2191' : '\u2193';
+      var color = delta >= 0 ? '#22c55e' : '#ef4444';
+      return '<div class="agt-evo-row">' +
+        '<span class="agt-evo-dim">' + e.dimension + '</span>' +
+        '<div class="agt-evo-conf">' + before + '%<span style="color:' + color + ';font-weight:700">' + arrow + '</span>' + after + '%</div>' +
+        '<span style="flex:1;color:var(--text-muted)">' + e.description.substring(0, 100) + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+/* ── Project Manager Panel ────────────────────── */
+
+function loadPMDashboard() {
+  loadPMMetrics();
+  loadPMVelocity();
+  loadPMBreakdown();
+  loadPMFindings();
+  loadPMResearch();
+  loadPMGoals();
+  loadPMEvolution();
+}
+
+function loadPMMetrics() {
+  fetch('/api/brain/project/agent/project_manager/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-status-card');
+    if (!el) return;
+    var healthColor = d.health === 'healthy' ? '#22c55e' : d.health === 'at_risk' ? '#f59e0b' : d.health === 'critical' ? '#ef4444' : 'var(--text-muted)';
+    var kpis = [
+      {val: (d.confidence * 100).toFixed(0) + '%', lbl: 'Confidence'},
+      {val: '<span style="color:' + healthColor + '">' + (d.health || 'unknown') + '</span>', lbl: 'Health'},
+      {val: d.done_tasks || 0, lbl: 'Done'},
+      {val: d.in_progress_tasks || 0, lbl: 'In Progress'},
+      {val: d.blocked_tasks || 0, lbl: 'Blocked'},
+      {val: d.overdue_tasks || 0, lbl: 'Overdue'},
+      {val: (d.completion_pct || 0) + '%', lbl: 'Completion'},
+      {val: d.finding_count || 0, lbl: 'Findings'},
+    ];
+    el.innerHTML = kpis.map(function(k) {
+      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+    }).join('');
+  });
+}
+
+function loadPMVelocity() {
+  fetch('/api/brain/project/agent/project_manager/velocity').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-velocity');
+    if (!el) return;
+    var healthColor = d.health === 'healthy' ? '#22c55e' : d.health === 'at_risk' ? '#f59e0b' : '#ef4444';
+    var pct = d.completion_pct || 0;
+    el.innerHTML =
+      '<div style="display:flex;align-items:center;gap:14px;margin-bottom:10px">' +
+        '<div style="flex:1">' +
+          '<div style="font-size:11px;color:var(--text-muted);margin-bottom:4px">Overall Completion</div>' +
+          '<div style="height:10px;background:var(--border);border-radius:5px;overflow:hidden">' +
+            '<div style="height:100%;width:' + pct + '%;background:' + healthColor + ';border-radius:5px;transition:width .5s"></div>' +
+          '</div>' +
+          '<div style="font-size:10px;color:var(--text-muted);margin-top:2px">' + pct + '% complete</div>' +
+        '</div>' +
+        '<div style="text-align:center;padding:8px 16px;background:var(--bg-header);border:1px solid var(--border);border-radius:8px">' +
+          '<div style="font-size:20px;font-weight:700;color:' + healthColor + '">' + (d.health || 'N/A').toUpperCase() + '</div>' +
+          '<div style="font-size:9px;color:var(--text-muted)">Project Health</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">' +
+        '<div class="po-stat"><div class="po-stat-val" style="color:#22c55e">' + (d.done || 0) + '</div><div class="po-stat-lbl">Done</div></div>' +
+        '<div class="po-stat"><div class="po-stat-val" style="color:#06b6d4">' + (d.in_progress || 0) + '</div><div class="po-stat-lbl">In Progress</div></div>' +
+        '<div class="po-stat"><div class="po-stat-val" style="color:#f59e0b">' + (d.blocked || 0) + '</div><div class="po-stat-lbl">Blocked</div></div>' +
+        '<div class="po-stat"><div class="po-stat-val" style="color:#ef4444">' + (d.overdue || 0) + '</div><div class="po-stat-lbl">Overdue</div></div>' +
+      '</div>';
+  });
+}
+
+function loadPMBreakdown() {
+  fetch('/api/brain/project/agent/project_manager/breakdown').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-breakdown');
+    if (!el) return;
+    var projects = d.projects || [];
+    if (!projects.length) {
+      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No projects in Planner yet. Run a PM cycle to auto-create one.</div>' +
+        '<button onclick="triggerAgentCycle(\'project_manager\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#06b6d4,#0891b2)">\uD83D\uDCCB Run PM Cycle</button>';
+      return;
+    }
+    el.innerHTML = projects.map(function(p) {
+      var statusBars = '';
+      var statuses = ['done', 'in_progress', 'todo', 'blocked'];
+      var statusColors = {done: '#22c55e', in_progress: '#06b6d4', todo: 'var(--text-muted)', blocked: '#f59e0b'};
+      var total = p.total || 1;
+      statuses.forEach(function(s) {
+        var count = (p.by_status || {})[s] || 0;
+        if (count > 0) {
+          var pct = (count / total * 100).toFixed(1);
+          statusBars += '<div style="display:flex;align-items:center;gap:6px;font-size:10px;margin-top:2px">' +
+            '<span style="width:65px;color:var(--text-muted)">' + s.replace('_', ' ') + '</span>' +
+            '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden">' +
+              '<div style="height:100%;width:' + pct + '%;background:' + (statusColors[s] || 'var(--text-muted)') + ';border-radius:3px"></div>' +
+            '</div>' +
+            '<span style="min-width:30px;text-align:right;color:var(--text-muted)">' + count + '</span>' +
+          '</div>';
+        }
+      });
+      var priBadges = '';
+      var priorities = ['critical', 'high', 'medium', 'low'];
+      var priColors = {critical: '#ef4444', high: '#f59e0b', medium: '#22c55e', low: '#94a3b8'};
+      priorities.forEach(function(pr) {
+        var count = (p.by_priority || {})[pr] || 0;
+        if (count > 0) {
+          priBadges += '<span style="font-size:9px;padding:2px 6px;border-radius:8px;background:rgba(0,0,0,.1);color:' + (priColors[pr] || 'inherit') + ';font-weight:600">' + pr + ': ' + count + '</span> ';
+        }
+      });
+      return '<div style="background:var(--bg-header);border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px">' +
+        '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">' +
+          '<strong style="font-size:12px">' + p.project_name + '</strong>' +
+          '<span style="font-size:10px;color:var(--text-muted)">' + p.total + ' tasks</span>' +
+        '</div>' +
+        statusBars +
+        '<div style="margin-top:6px">' + priBadges + '</div>' +
+      '</div>';
+    }).join('');
+    el.innerHTML += '<button onclick="triggerAgentCycle(\'project_manager\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#06b6d4,#0891b2)">\uD83D\uDCCB Run PM Cycle</button>';
+  });
+}
+
+function loadPMFindings() {
+  fetch('/api/brain/project/agent/project_manager/findings').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-findings');
+    if (!el) return;
+    var items = d.findings || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No findings yet.</div>'; return; }
+    el.innerHTML = items.map(function(f) {
+      return '<div class="agt-finding-row">' +
+        '<span class="agt-finding-sev ' + f.severity + '">' + f.severity + '</span>' +
+        '<div style="flex:1"><strong>' + f.title + '</strong><div style="color:var(--text-muted);margin-top:2px">' + f.description + '</div></div>' +
+        '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPMResearch() {
+  fetch('/api/brain/project/agent/project_manager/research').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-research');
+    if (!el) return;
+    var items = d.research || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No research yet.</div>'; return; }
+    el.innerHTML = items.map(function(r) {
+      var sources = '';
+      try {
+        var s = JSON.parse(r.sources_json || '[]');
+        if (s.length) {
+          sources = '<div class="agt-research-sources">' + s.map(function(src) {
+            return '<a href="' + (src.url || '#') + '" target="_blank">' + (src.title || src.url || 'source') + '</a>';
+          }).join(' &middot; ') + '</div>';
+        }
+      } catch(e) {}
+      return '<div class="agt-research-card">' +
+        '<div class="agt-research-topic">' + r.topic + '</div>' +
+        '<div class="agt-research-summary">' + r.summary + '</div>' +
+        sources +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPMGoals() {
+  fetch('/api/brain/project/agent/project_manager/goals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-goals');
+    if (!el) return;
+    var items = d.goals || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No goals yet.</div>'; return; }
+    el.innerHTML = items.map(function(g) {
+      var statusColor = g.status === 'active' ? '#22c55e' : g.status === 'completed' ? '#a78bfa' : 'var(--text-muted)';
+      var pct = Math.round(g.progress * 100);
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">' +
+        '<span style="color:' + statusColor + ';font-weight:600;text-transform:uppercase;font-size:9px;min-width:55px">' + g.status + '</span>' +
+        '<span style="flex:1">' + g.description + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + pct + '%</span>' +
+        '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#06b6d4;border-radius:2px"></div></div>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadPMEvolution() {
+  fetch('/api/brain/project/agent/project_manager/evolution').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('pm-evolution');
+    if (!el) return;
+    var items = d.evolution || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No evolution events yet.</div>'; return; }
+    el.innerHTML = items.map(function(e) {
+      var before = (e.confidence_before * 100).toFixed(0);
+      var after = (e.confidence_after * 100).toFixed(0);
+      var delta = after - before;
+      var arrow = delta >= 0 ? '\u2191' : '\u2193';
+      var color = delta >= 0 ? '#22c55e' : '#ef4444';
+      return '<div class="agt-evo-row">' +
+        '<span class="agt-evo-dim">' + e.dimension + '</span>' +
+        '<div class="agt-evo-conf">' + before + '%<span style="color:' + color + ';font-weight:700">' + arrow + '</span>' + after + '%</div>' +
+        '<span style="flex:1;color:var(--text-muted)">' + e.description.substring(0, 100) + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+/* ── Architect Panel ──────────────────────────── */
+
+function loadArchDashboard() {
+  loadArchMetrics();
+  loadArchHealth();
+  loadArchFindings();
+  loadArchResearch();
+  loadArchEvolution();
+}
+
+function loadArchMetrics() {
+  fetch('/api/brain/project/agent/architect/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('arch-status-card');
+    if (!el) return;
+    var hs = d.health_score || 0;
+    var hsColor = hs > 0.7 ? '#22c55e' : hs > 0.4 ? '#f59e0b' : '#ef4444';
+    var kpis = [
+      {val: (d.confidence * 100).toFixed(0) + '%', lbl: 'Confidence'},
+      {val: '<span style="color:' + hsColor + '">' + (hs * 100).toFixed(0) + '%</span>', lbl: 'Health Score'},
+      {val: d.circular_deps || 0, lbl: 'Circular Deps'},
+      {val: d.critical_hotspots || 0, lbl: 'Critical Hotspots'},
+      {val: d.high_coupling_pairs || 0, lbl: 'High Coupling'},
+      {val: d.trend_direction || 'N/A', lbl: 'Trend'},
+      {val: d.finding_count || 0, lbl: 'Findings'},
+      {val: d.research_count || 0, lbl: 'Research'},
+    ];
+    el.innerHTML = kpis.map(function(k) {
+      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+    }).join('');
+  });
+}
+
+function loadArchHealth() {
+  fetch('/api/brain/project/agent/architect/health').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var healthEl = document.getElementById('arch-health');
+    var circEl = document.getElementById('arch-circular');
+    var coupEl = document.getElementById('arch-coupling');
+    var hotEl = document.getElementById('arch-hotspots');
+
+    var snap = d.snapshot || {};
+    if (healthEl) {
+      healthEl.innerHTML =
+        '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">' +
+          '<div class="po-stat"><div class="po-stat-val">' + (snap.repo_count || 0) + '</div><div class="po-stat-lbl">Repos</div></div>' +
+          '<div class="po-stat"><div class="po-stat-val">' + (snap.total_deps || 0) + '</div><div class="po-stat-lbl">Dependencies</div></div>' +
+          '<div class="po-stat"><div class="po-stat-val">' + (snap.total_hotspots || 0) + '</div><div class="po-stat-lbl">Hotspots</div></div>' +
+        '</div>' +
+        '<button onclick="triggerAgentCycle(\'architect\')" class="brain-act-btn" style="margin-top:10px;background:linear-gradient(135deg,#f59e0b,#d97706)">\uD83C\uDFD7 Run Architect Cycle</button>';
+    }
+
+    var circ = d.circular || {};
+    if (circEl) {
+      if (!circ.total) {
+        circEl.innerHTML = '<div style="font-size:11px;color:#22c55e;font-weight:600">No circular dependencies detected.</div>';
+      } else {
+        var cycleHtml = (circ.top_cycles || []).map(function(c) {
+          return '<div style="padding:4px 0;border-bottom:1px solid var(--border);font-size:10px;font-family:monospace;color:#f59e0b">' + c + '</div>';
+        }).join('');
+        circEl.innerHTML =
+          '<div style="font-size:12px;font-weight:700;color:#ef4444;margin-bottom:6px">' + circ.total + ' circular edge(s) in ' + circ.unique_cycles + ' unique cycle(s)</div>' +
+          cycleHtml;
+      }
+    }
+
+    var coup = d.coupling || {};
+    if (coupEl) {
+      var pairs = coup.top_coupling || [];
+      if (!pairs.length) {
+        coupEl.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No cross-module coupling data yet.</div>';
+      } else {
+        coupEl.innerHTML = pairs.map(function(p) {
+          var barW = Math.min(100, (p.count / (pairs[0].count || 1)) * 100);
+          var color = p.count > 20 ? '#ef4444' : p.count > 10 ? '#f59e0b' : '#22c55e';
+          return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:10px">' +
+            '<span style="min-width:180px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + p.source + ' → ' + p.target + '">' + p.source + ' → ' + p.target + '</span>' +
+            '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + barW + '%;background:' + color + ';border-radius:3px"></div></div>' +
+            '<span style="min-width:25px;text-align:right;color:var(--text-muted)">' + p.count + '</span>' +
+          '</div>';
+        }).join('');
+      }
+    }
+
+    var hots = d.hotspots || {};
+    if (hotEl) {
+      var files = hots.top_files || [];
+      if (!files.length) {
+        hotEl.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No hotspot data yet.</div>';
+      } else {
+        hotEl.innerHTML = '<div style="margin-bottom:6px;font-size:11px"><span style="color:#ef4444;font-weight:600">' + (hots.critical_count || 0) + '</span> critical, <span style="color:#f59e0b;font-weight:600">' + (hots.moderate_count || 0) + '</span> moderate</div>' +
+          files.map(function(h) {
+            var barW = Math.min(100, h.score * 100);
+            var color = h.score > 0.7 ? '#ef4444' : h.score > 0.4 ? '#f59e0b' : '#22c55e';
+            return '<div style="display:flex;align-items:center;gap:8px;padding:3px 0;font-size:10px">' +
+              '<span style="min-width:200px;font-family:monospace;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + h.file + '">' + h.file + '</span>' +
+              '<div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + barW + '%;background:' + color + ';border-radius:3px"></div></div>' +
+              '<span style="min-width:40px;text-align:right;color:var(--text-muted)">' + h.score + '</span>' +
+              '<span style="min-width:50px;text-align:right;font-size:9px;color:var(--text-muted)">' + h.commits + ' commits</span>' +
+            '</div>';
+          }).join('');
+      }
+    }
+  });
+}
+
+function loadArchFindings() {
+  fetch('/api/brain/project/agent/architect/findings').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('arch-findings');
+    if (!el) return;
+    var items = d.findings || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No findings yet.</div>'; return; }
+    el.innerHTML = items.map(function(f) {
+      return '<div class="agt-finding-row">' +
+        '<span class="agt-finding-sev ' + f.severity + '">' + f.severity + '</span>' +
+        '<div style="flex:1"><strong>' + f.title + '</strong><div style="color:var(--text-muted);margin-top:2px">' + f.description + '</div></div>' +
+        '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadArchResearch() {
+  fetch('/api/brain/project/agent/architect/research').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('arch-research');
+    if (!el) return;
+    var items = d.research || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No research yet.</div>'; return; }
+    el.innerHTML = items.map(function(r) {
+      var sources = '';
+      try {
+        var s = JSON.parse(r.sources_json || '[]');
+        if (s.length) {
+          sources = '<div class="agt-research-sources">' + s.map(function(src) {
+            return '<a href="' + (src.url || '#') + '" target="_blank">' + (src.title || src.url || 'source') + '</a>';
+          }).join(' &middot; ') + '</div>';
+        }
+      } catch(e) {}
+      return '<div class="agt-research-card">' +
+        '<div class="agt-research-topic">' + r.topic + '</div>' +
+        '<div class="agt-research-summary">' + r.summary + '</div>' +
+        sources +
+      '</div>';
+    }).join('');
+  });
+}
+
+function loadArchEvolution() {
+  fetch('/api/brain/project/agent/architect/evolution').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('arch-evolution');
+    if (!el) return;
+    var items = d.evolution || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No evolution events yet.</div>'; return; }
+    el.innerHTML = items.map(function(e) {
+      var before = (e.confidence_before * 100).toFixed(0);
+      var after = (e.confidence_after * 100).toFixed(0);
+      var delta = after - before;
+      var arrow = delta >= 0 ? '\u2191' : '\u2193';
+      var color = delta >= 0 ? '#22c55e' : '#ef4444';
+      return '<div class="agt-evo-row">' +
+        '<span class="agt-evo-dim">' + e.dimension + '</span>' +
+        '<div class="agt-evo-conf">' + before + '%<span style="color:' + color + ';font-weight:700">' + arrow + '</span>' + after + '%</div>' +
+        '<span style="flex:1;color:var(--text-muted)">' + e.description.substring(0, 100) + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function triggerAgentCycle(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/cycle', {method: 'POST'})
+  .then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      alert(d.message || 'Cycle started');
+      setTimeout(function() {
+        if (agentName === 'product_owner') loadPODashboard();
+        if (agentName === 'project_manager') loadPMDashboard();
+        if (agentName === 'architect') loadArchDashboard();
+      }, 5000);
+    } else {
+      alert(d.message || 'Could not start cycle');
+    }
+  });
 }
 
 /* ── Project Lens Functions ─────────────────────── */

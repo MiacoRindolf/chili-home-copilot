@@ -473,6 +473,143 @@ def _migration_018_breakout_alert_outcome_cols(conn) -> None:
     conn.commit()
 
 
+def _migration_019_project_brain_tables(conn) -> None:
+    """Create tables for the autonomous Project Brain agent framework."""
+    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+
+    if "project_agent_states" not in tables:
+        conn.execute(text("""
+            CREATE TABLE project_agent_states (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                state_json TEXT,
+                confidence REAL DEFAULT 0.0,
+                last_cycle_at DATETIME,
+                created_at DATETIME DEFAULT (datetime('now')),
+                updated_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_pas_agent ON project_agent_states(agent_name)"))
+
+    if "agent_findings" not in tables:
+        conn.execute(text("""
+            CREATE TABLE agent_findings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                category VARCHAR(50) NOT NULL,
+                title VARCHAR(300) NOT NULL,
+                description TEXT NOT NULL,
+                severity VARCHAR(20) NOT NULL DEFAULT 'info',
+                evidence_json TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'new',
+                created_at DATETIME DEFAULT (datetime('now')),
+                updated_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_af_agent ON agent_findings(agent_name)"))
+
+    if "agent_research" not in tables:
+        conn.execute(text("""
+            CREATE TABLE agent_research (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                topic VARCHAR(300) NOT NULL,
+                query VARCHAR(500) NOT NULL,
+                summary TEXT NOT NULL,
+                sources_json TEXT,
+                relevance_score REAL DEFAULT 0.0,
+                searched_at DATETIME DEFAULT (datetime('now')),
+                stale BOOLEAN DEFAULT 0
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_ar_agent ON agent_research(agent_name)"))
+
+    if "agent_goals" not in tables:
+        conn.execute(text("""
+            CREATE TABLE agent_goals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                description TEXT NOT NULL,
+                goal_type VARCHAR(30) NOT NULL DEFAULT 'learn',
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
+                progress REAL DEFAULT 0.0,
+                evidence_count INTEGER DEFAULT 0,
+                created_at DATETIME DEFAULT (datetime('now')),
+                completed_at DATETIME
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_ag_agent ON agent_goals(agent_name)"))
+
+    if "agent_evolutions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE agent_evolutions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                agent_name VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                dimension VARCHAR(100) NOT NULL,
+                description TEXT NOT NULL,
+                confidence_before REAL DEFAULT 0.0,
+                confidence_after REAL DEFAULT 0.0,
+                trigger VARCHAR(200) NOT NULL DEFAULT 'cycle',
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_ae_agent ON agent_evolutions(agent_name)"))
+
+    if "agent_messages" not in tables:
+        conn.execute(text("""
+            CREATE TABLE agent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                from_agent VARCHAR(50) NOT NULL,
+                to_agent VARCHAR(50) NOT NULL,
+                user_id INTEGER,
+                message_type VARCHAR(50) NOT NULL,
+                content_json TEXT NOT NULL,
+                acknowledged BOOLEAN DEFAULT 0,
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_am_to ON agent_messages(to_agent)"))
+
+    if "po_questions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE po_questions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                question TEXT NOT NULL,
+                context TEXT,
+                category VARCHAR(50) NOT NULL DEFAULT 'general',
+                priority INTEGER DEFAULT 5,
+                status VARCHAR(20) NOT NULL DEFAULT 'pending',
+                answer TEXT,
+                asked_at DATETIME DEFAULT (datetime('now')),
+                answered_at DATETIME
+            )
+        """))
+
+    if "po_requirements" not in tables:
+        conn.execute(text("""
+            CREATE TABLE po_requirements (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                title VARCHAR(300) NOT NULL,
+                description TEXT NOT NULL,
+                priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+                status VARCHAR(20) NOT NULL DEFAULT 'draft',
+                acceptance_criteria TEXT,
+                source_questions_json TEXT,
+                created_at DATETIME DEFAULT (datetime('now')),
+                updated_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -493,6 +630,7 @@ MIGRATIONS = [
     ("016_reasoning_learning_structures", _migration_016_reasoning_learning_structures),
     ("017_code_brain_innovation", _migration_017_code_brain_innovation),
     ("018_breakout_alert_outcome_cols", _migration_018_breakout_alert_outcome_cols),
+    ("019_project_brain_tables", _migration_019_project_brain_tables),
 ]
 
 
