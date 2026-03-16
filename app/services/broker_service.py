@@ -93,7 +93,7 @@ def login(force: bool = False) -> bool:
                 settings.robinhood_username,
                 settings.robinhood_password,
                 mfa_code=totp.now(),
-                store_session=False,
+                store_session=True,
             )
             _logged_in = True
             _last_login = time.time()
@@ -103,6 +103,146 @@ def login(force: bool = False) -> bool:
             _logged_in = False
             logger.error(f"[broker] Robinhood TOTP login failed: {e}")
             return False
+
+
+# ── Session restore (startup) ────────────────────────────────────────────
+
+def try_restore_session() -> bool:
+    """Attempt to restore a persisted Robinhood session from disk.
+
+    robin_stocks saves a pickle in ~/.tokens/ when store_session=True.
+    If a valid token file exists, this reuses it without re-authenticating.
+    Called once at server startup.
+    """
+    global _logged_in, _last_login
+    if not _rh_available or not _credentials_configured():
+        return False
+
+    with _login_lock:
+        if _logged_in:
+            return True
+        try:
+            import robin_stocks.robinhood as rh
+
+            if _has_totp():
+                import pyotp
+                totp = pyotp.TOTP(settings.robinhood_totp_secret)
+                rh.login(
+                    settings.robinhood_username,
+                    settings.robinhood_password,
+                    mfa_code=totp.now(),
+                    store_session=True,
+                )
+            else:
+                rh.login(
+                    settings.robinhood_username,
+                    settings.robinhood_password,
+                    store_session=True,
+                )
+
+            _logged_in = True
+            _last_login = time.time()
+            logger.info("[broker] Robinhood session restored from disk")
+            return True
+        except Exception as e:
+            logger.info(f"[broker] No saved Robinhood session to restore: {e}")
+            return False
+
+
+# ── Login with explicit credentials (per-user from DB) ──────────────────
+
+def login_with_credentials(username: str, password: str, totp_secret: str | None = None) -> dict[str, Any]:
+    """Connect to Robinhood using explicitly provided credentials (from DB vault).
+
+    Returns the same status dict as login_step1_sms().
+    """
+    global _logged_in, _last_login, _sms_state
+
+    if not _rh_available:
+        return {"status": "error", "message": "robin_stocks is not installed"}
+    if not username or not password:
+        return {"status": "error", "message": "Username and password are required"}
+
+    if totp_secret:
+        with _login_lock:
+            try:
+                import pyotp
+                import robin_stocks.robinhood as rh
+
+                totp = pyotp.TOTP(totp_secret)
+                rh.login(username, password, mfa_code=totp.now(), store_session=True)
+                _logged_in = True
+                _last_login = time.time()
+                logger.info("[broker] Robinhood login successful (TOTP, user creds)")
+                return {"status": "connected", "message": "Connected via TOTP"}
+            except Exception as e:
+                _logged_in = False
+                logger.error(f"[broker] Robinhood TOTP login failed (user creds): {e}")
+                return {"status": "error", "message": f"TOTP login failed: {e}"}
+
+    with _login_lock:
+        try:
+            from robin_stocks.robinhood.authentication import (
+                generate_device_token, login_url,
+            )
+            from robin_stocks.robinhood.helper import request_post
+
+            device_token = generate_device_token()
+            payload = {
+                "client_id": "c82SH0WZOsabOXGP2sxqcj34FxkvfnWRZBKlBjFS",
+                "expires_in": 86400,
+                "grant_type": "password",
+                "password": password,
+                "scope": "internal",
+                "username": username,
+                "device_token": device_token,
+                "try_passkeys": False,
+                "token_request_path": "/login",
+                "create_read_only_secondary_token": True,
+            }
+
+            data = request_post(login_url(), payload)
+
+            if data and "access_token" in data:
+                _complete_login(data)
+                return {"status": "connected", "message": "Connected (no MFA required)"}
+
+            if data and "verification_workflow" in data:
+                workflow_id = data["verification_workflow"]["id"]
+                pathfinder_url = "https://api.robinhood.com/pathfinder/user_machine/"
+                machine_payload = {
+                    "device_id": device_token,
+                    "flow": "suv",
+                    "input": {"workflow_id": workflow_id},
+                }
+                machine_data = request_post(url=pathfinder_url, payload=machine_payload, json=True)
+                machine_id = _extract_machine_id(machine_data)
+                if not machine_id:
+                    return {"status": "error", "message": "Could not start verification flow"}
+
+                inquiries_url = f"https://api.robinhood.com/pathfinder/inquiries/{machine_id}/user_view/"
+                challenge_info = _poll_for_challenge(inquiries_url)
+
+                if challenge_info:
+                    _sms_state = {
+                        "device_token": device_token,
+                        "login_payload": payload,
+                        "machine_id": machine_id,
+                        "challenge_id": challenge_info["id"],
+                        "challenge_type": challenge_info["type"],
+                        "inquiries_url": inquiries_url,
+                    }
+                    ctype = challenge_info["type"]
+                    if ctype == "prompt":
+                        return {"status": "app_approval", "message": "Check your Robinhood app and approve the login request."}
+                    return {"status": "sms_sent", "message": f"A verification code was sent via {ctype.upper()}. Enter it below."}
+
+                return {"status": "error", "message": "Could not determine verification method. Try again."}
+
+            return {"status": "error", "message": "Unexpected response from Robinhood. Check credentials."}
+        except Exception as e:
+            logger.error(f"[broker] Login failed (user creds): {e}", exc_info=True)
+            return {"status": "error", "message": f"Login failed: {e}"}
 
 
 # ── Login: SMS two-step ──────────────────────────────────────────────────
@@ -119,7 +259,7 @@ def login_step1_sms() -> dict[str, Any]:
     if not _rh_available:
         return {"status": "error", "message": "robin_stocks is not installed. Run: pip install robin_stocks"}
     if not _credentials_configured():
-        return {"status": "error", "message": "Set ROBINHOOD_USERNAME and ROBINHOOD_PASSWORD in .env"}
+        return {"status": "needs_credentials", "message": "Click to set up your Robinhood account."}
 
     # If TOTP is available, use the fast path
     if _has_totp():
@@ -285,7 +425,7 @@ def login_step2_verify(sms_code: str) -> dict[str, Any]:
 
 
 def _complete_login(data: dict) -> None:
-    """Set session state after a successful login response."""
+    """Set session state after a successful login response and persist to disk."""
     global _logged_in, _last_login
     from robin_stocks.robinhood.helper import update_session
     from robin_stocks.robinhood.authentication import set_login_state
@@ -295,6 +435,19 @@ def _complete_login(data: dict) -> None:
     set_login_state(True)
     _logged_in = True
     _last_login = time.time()
+
+    try:
+        import pickle
+        from pathlib import Path
+        token_dir = Path.home() / ".tokens"
+        token_dir.mkdir(exist_ok=True)
+        token_file = token_dir / f"{settings.robinhood_username}.pickle"
+        with open(token_file, "wb") as f:
+            pickle.dump({"Authorization": token, **data}, f)
+        logger.info("[broker] Robinhood session persisted to disk")
+    except Exception as e:
+        logger.warning(f"[broker] Could not persist session: {e}")
+
     logger.info("[broker] Robinhood session established")
 
 

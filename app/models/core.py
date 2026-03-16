@@ -1,5 +1,5 @@
-"""Core identity: User, Device, PairCode."""
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey
+"""Core identity: User, Device, PairCode, BrokerCredential."""
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -12,6 +12,8 @@ class User(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String, unique=True, nullable=False)
     email = Column(String, unique=True, nullable=True)
+    google_id = Column(String, unique=True, nullable=True, index=True)
+    avatar_url = Column(String, nullable=True)
 
     devices = relationship("Device", back_populates="user")
 
@@ -36,3 +38,15 @@ class PairCode(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     expires_at = Column(DateTime, nullable=False)
     used = Column(Boolean, default=False)
+
+
+class BrokerCredential(Base):
+    __tablename__ = "broker_credentials"
+    __table_args__ = (UniqueConstraint("user_id", "broker", name="uq_user_broker"),)
+
+    id = Column(Integer, primary_key=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    broker = Column(String, nullable=False)
+    encrypted_data = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

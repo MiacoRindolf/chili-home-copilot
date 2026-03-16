@@ -1613,25 +1613,77 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 /* ═══════════════════════════════════════════════════
    BROKER STATUS & TRADE PROPOSALS
    ═══════════════════════════════════════════════════ */
-.broker-status {
-  display: flex; align-items: center; gap: 6px;
-  padding: 8px 10px; margin: 0 0 4px;
-  border-radius: 8px; font-size: 11px;
-  background: var(--bg); border: 1px solid var(--border);
-  cursor: pointer; transition: all 0.2s;
+/* ═══════════════════════════════════════════════════
+   SIDEBAR ACCOUNT (Google SSO)
+   ═══════════════════════════════════════════════════ */
+.sidebar-account { padding: 8px 10px 4px; }
+.google-signin-btn {
+  display: flex; align-items: center; justify-content: center;
+  width: 100%; padding: 8px 12px; border-radius: 8px;
+  background: var(--card-bg); border: 1px solid var(--border);
+  color: var(--text); font-size: 13px; font-weight: 500;
+  text-decoration: none; cursor: pointer; transition: background .15s;
 }
-.broker-status:hover { border-color: var(--accent); }
+.google-signin-btn:hover { background: var(--hover-bg); }
+.user-profile-row {
+  display: flex; align-items: center; gap: 8px;
+}
+.user-avatar {
+  width: 32px; height: 32px; border-radius: 50%; object-fit: cover;
+  border: 2px solid var(--accent);
+}
+.user-avatar-placeholder {
+  width: 32px; height: 32px; border-radius: 50%;
+  background: var(--accent); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 14px; font-weight: 700; flex-shrink: 0;
+}
+.user-profile-info { display: flex; flex-direction: column; min-width: 0; }
+.user-profile-name {
+  font-size: 13px; font-weight: 600; color: var(--text);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.user-signout-btn {
+  background: none; border: none; color: var(--text-muted);
+  font-size: 11px; cursor: pointer; padding: 0; text-align: left;
+}
+.user-signout-btn:hover { color: var(--accent); }
+
+.broker-hub { margin: 0 0 4px; }
+.broker-hub-header {
+  display: flex; align-items: center; justify-content: space-between;
+  font-size: 10px; font-weight: 700; color: var(--text-muted); text-transform: uppercase;
+  letter-spacing: .5px; padding: 6px 10px 4px;
+}
+.broker-row {
+  display: flex; align-items: center; gap: 6px;
+  padding: 5px 10px; font-size: 11px;
+  cursor: pointer; transition: background .15s; border-radius: 6px;
+}
+.broker-row:hover { background: rgba(99,102,241,.06); }
+.broker-icon {
+  width: 22px; height: 22px; border-radius: 5px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 8px; font-weight: 800; color: #fff;
+  background: linear-gradient(135deg,#22c55e,#16a34a);
+}
 .broker-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  flex-shrink: 0;
+  width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
 }
 .broker-dot.connected { background: #22c55e; box-shadow: 0 0 6px #22c55e88; animation: pulse-green 2s infinite; }
 @keyframes pulse-green { 0%, 100% { box-shadow: 0 0 6px #22c55e88; } 50% { box-shadow: 0 0 10px #22c55ecc; } }
 .broker-dot.disconnected { background: #6b7280; }
-.broker-label { flex: 1; font-weight: 500; }
-.broker-sub { font-size: 10px; color: var(--text-secondary); }
-.broker-status.compact { padding: 4px 8px; margin: 0 0 2px; }
-.broker-status.compact .broker-sub { display: none; }
+.broker-info { flex: 1; min-width: 0; }
+.broker-label { font-weight: 500; font-size: 11px; }
+.broker-sub { font-size: 9px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.broker-badge {
+  display: inline-block; padding: 1px 5px; border-radius: 3px; font-size: 8px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .3px;
+}
+.broker-badge.rh { background: rgba(0,200,5,.12); color: #00c805; }
+.broker-badge.cb { background: rgba(0,82,255,.12); color: #0052ff; }
+.broker-badge.mm { background: rgba(226,118,27,.12); color: #e2761b; }
+.broker-badge.manual { background: rgba(107,114,128,.12); color: #9ca3af; }
 .broker-sync-btn {
   background: none; border: 1px solid var(--border); border-radius: 4px;
   padding: 2px 6px; font-size: 10px; color: var(--text-secondary);
@@ -1685,6 +1737,20 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 .broker-sms-card .sms-icon {
   font-size: 40px; margin-bottom: 8px;
 }
+.setup-field { margin-bottom: 10px; text-align: left; }
+.setup-field label {
+  display: block; font-size: 11px; font-weight: 600;
+  color: var(--text-muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: .3px;
+}
+.setup-field input, .setup-field textarea {
+  width: 100%; padding: 9px 10px; font-size: 13px;
+  border: 1.5px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); outline: none;
+  transition: border-color .2s; box-sizing: border-box;
+}
+.setup-field input:focus, .setup-field textarea:focus { border-color: var(--accent); }
+.setup-field textarea { resize: vertical; min-height: 60px; font-family: monospace; font-size: 11px; }
+.setup-field .setup-hint { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
 /* Robinhood portfolio section in Portfolio tab */
 .rh-portfolio-section {
@@ -1793,14 +1859,45 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 <div class="t-body">
   <!-- Watchlist sidebar -->
   <div class="t-sidebar">
-    <!-- Robinhood connection status -->
-    <div class="broker-status" id="broker-status" onclick="connectBroker()" title="Click to connect/refresh Robinhood">
-      <span class="broker-dot disconnected" id="broker-dot"></span>
-      <div>
-        <div class="broker-label" id="broker-label">Robinhood</div>
-        <div class="broker-sub" id="broker-sub">Not configured</div>
+    <!-- User Account -->
+    <div class="sidebar-account" id="sidebar-account">
+      {% if is_guest and google_configured %}
+      <a href="/auth/google" class="google-signin-btn" title="Sign in with Google">
+        <svg viewBox="0 0 24 24" width="18" height="18" style="margin-right:8px;flex-shrink:0"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 0 1-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Sign in with Google
+      </a>
+      {% elif not is_guest %}
+      <div class="user-profile-row">
+        {% if avatar_url %}
+        <img src="{{ avatar_url }}" alt="" class="user-avatar" referrerpolicy="no-referrer" />
+        {% else %}
+        <div class="user-avatar-placeholder">{{ user_name[0]|upper }}</div>
+        {% endif %}
+        <div class="user-profile-info">
+          <div class="user-profile-name">{{ user_name }}</div>
+          <button class="user-signout-btn" onclick="signOut()">Sign out</button>
+        </div>
       </div>
-      <button class="broker-sync-btn" id="broker-sync-btn" onclick="event.stopPropagation();syncBroker()" style="display:none">Sync</button>
+      {% endif %}
+    </div>
+    <!-- Broker Hub -->
+    <div class="broker-hub" id="broker-hub">
+      <div class="broker-hub-header">Brokers & Wallets <button class="broker-sync-btn" id="broker-sync-all" onclick="event.stopPropagation();syncAllBrokers()" style="display:none">Sync All</button></div>
+      <div class="broker-row" id="broker-row-rh" onclick="connectBrokerByName('robinhood')" title="Click to connect Robinhood">
+        <span class="broker-icon">RH</span>
+        <span class="broker-dot disconnected" id="broker-dot-rh"></span>
+        <div class="broker-info"><div class="broker-label" id="broker-label-rh">Robinhood</div><div class="broker-sub" id="broker-sub-rh">Not configured</div></div>
+      </div>
+      <div class="broker-row" id="broker-row-cb" onclick="connectBrokerByName('coinbase')" title="Click to connect Coinbase Advanced">
+        <span class="broker-icon" style="background:linear-gradient(135deg,#0052ff,#0066ff)">CB</span>
+        <span class="broker-dot disconnected" id="broker-dot-cb"></span>
+        <div class="broker-info"><div class="broker-label" id="broker-label-cb">Coinbase</div><div class="broker-sub" id="broker-sub-cb">Not configured</div></div>
+      </div>
+      <div class="broker-row" id="broker-row-mm" onclick="_connectWallet()" title="Connect MetaMask wallet">
+        <span class="broker-icon" style="background:linear-gradient(135deg,#e2761b,#f6851b)">MM</span>
+        <span class="broker-dot disconnected" id="broker-dot-mm"></span>
+        <div class="broker-info"><div class="broker-label" id="broker-label-mm">MetaMask</div><div class="broker-sub" id="broker-sub-mm">Connect wallet</div></div>
+      </div>
     </div>
     <h3>Watchlist</h3>
     <div class="wl-search">
@@ -2024,10 +2121,10 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 
       <!-- Portfolio -->
       <div class="t-tab-content" id="tab-portfolio">
-        <div id="rh-portfolio-section" class="rh-portfolio-section" style="display:none">
-          <h4 class="portfolio-heading">&#x1F7E2; Robinhood Live Portfolio <button class="broker-sync-btn" onclick="syncBroker()">Sync Now</button></h4>
-          <div id="rh-portfolio-summary"></div>
-          <div id="rh-positions-list"></div>
+        <div id="broker-portfolio-section" class="rh-portfolio-section" style="display:none">
+          <h4 class="portfolio-heading">Live Portfolio <button class="broker-sync-btn" onclick="syncAllBrokers()">Sync All</button></h4>
+          <div id="broker-portfolio-summary"></div>
+          <div id="broker-positions-list"></div>
         </div>
         <!-- CHILI tracked portfolio -->
         <div class="portfolio-grid" id="portfolio-grid"></div>
@@ -2061,7 +2158,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
           <input id="tf-price" type="number" step="0.01" placeholder="Entry $" />
           <input id="tf-qty" type="number" step="0.01" value="1" placeholder="Qty" />
           <button onclick="createTrade()">Open Trade</button>
-          <button class="broker-sync-btn" id="trades-tab-sync-btn" onclick="syncBroker()" style="display:none">Sync with Robinhood</button>
+          <button class="broker-sync-btn" id="trades-tab-sync-btn" onclick="syncAllBrokers()" style="display:none">Sync Brokers</button>
         </div>
         <div class="trades-toolbar">
           <select id="trades-filter-status" onchange="applyTradesFilter()">
@@ -2254,6 +2351,39 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
     <div class="sms-actions">
       <button class="sms-btn-cancel" onclick="closeSmsDialog()">Cancel</button>
       <button class="sms-btn-verify" id="sms-verify-btn" onclick="verifySmsCode()">Verify</button>
+    </div>
+  </div>
+</div>
+
+<!-- Broker Setup Dialog -->
+<div class="broker-sms-dialog" id="broker-setup-dialog">
+  <div class="broker-sms-card" style="width:380px">
+    <div class="sms-icon" id="setup-icon">&#x1F511;</div>
+    <h3 id="setup-title">Broker Setup</h3>
+    <p id="setup-desc">Enter your credentials below.</p>
+    <div id="setup-fields"></div>
+    <div class="sms-error" id="setup-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeBrokerSetup()">Cancel</button>
+      <button class="sms-btn-verify" id="setup-save-btn" onclick="saveBrokerCredentials()">Save & Connect</button>
+    </div>
+  </div>
+</div>
+
+<div class="broker-sms-dialog" id="deposit-addr-dialog">
+  <div class="broker-sms-card" style="width:400px">
+    <div class="sms-icon">&#x1F4B0;</div>
+    <h3 id="deposit-dialog-title">Coinbase Deposit Address</h3>
+    <p style="font-size:.85rem;color:#aaa;margin-bottom:4px" id="deposit-dialog-desc">Open Coinbase, find the token, tap Receive, and copy the address.</p>
+    <p style="font-size:.85rem;color:#f44;margin-bottom:12px;font-weight:600" id="deposit-dialog-warning"></p>
+    <div class="setup-field">
+      <label id="deposit-dialog-label">Deposit Address</label>
+      <input type="text" id="deposit-addr-input" placeholder="0x..." style="font-family:monospace" />
+    </div>
+    <div class="sms-error" id="deposit-addr-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeDepositAddrDialog()">Cancel</button>
+      <button class="sms-btn-verify" id="deposit-addr-save-btn" onclick="saveDepositAddress()">Save & Continue</button>
     </div>
   </div>
 </div>
@@ -3400,7 +3530,7 @@ function confirmSell() {
       if (d.rh_state) msg += ' (RH: ' + d.rh_state + ')';
       if (d.remaining_qty > 0) msg += ', ' + d.remaining_qty + ' remaining';
       appendAiMsg('assistant', msg);
-      loadTrades(); loadStats(); loadRhPortfolio(); loadPortfolio();
+      loadTrades(); loadStats(); loadBrokerPortfolio(); loadPortfolio();
     } else {
       alert(d.error || 'Sell failed');
     }
@@ -4158,6 +4288,8 @@ function _streamAnalyze(msg, isSmartPick) {
     });
 }
 
+var LIQUIDATION_PATTERN = /sell.*?(all|everything|my).*?(coins?|tokens?|crypto).*?(transfer|send|move).*?coinbase|sell.*?metamask.*?(send|transfer|move|coinbase)|metamask.*?(sell|liquidat|send|move|transfer).*?coinbase|liquidat.*?metamask|move.*?metamask.*?coinbase|transfer.*?(everything|all).*?coinbase|swap.*?(all|everything).*?coinbase|send.*?(all|everything).*?coinbase/i;
+
 function sendAiChat() {
   var inp = document.getElementById('ai-input');
   var msg = inp.value.trim();
@@ -4165,6 +4297,17 @@ function sendAiChat() {
   inp.value = '';
   _hideAutocomplete();
   appendAiMsg('user', msg);
+
+  if (_liquidationActive && _w3._pendingLiquidation) {
+    if (/^confirm$/i.test(msg.trim())) { _confirmLiquidation(); return; }
+    if (/^cancel$/i.test(msg.trim())) { _cancelLiquidation(); return; }
+  }
+
+  if (LIQUIDATION_PATTERN.test(msg)) {
+    _handleLiquidationIntent();
+    return;
+  }
+
   var isSmartPick = SMART_PICK_PATTERNS.test(msg);
   _streamAnalyze(msg, isSmartPick);
 }
@@ -5212,6 +5355,9 @@ function _renderBestIdeaRow(item) {
   html += '<div class="bi-actions" onclick="event.stopPropagation()">';
   if (isProposal && p.status === 'pending') {
     html += '<button class="prop-btn-approve" onclick="approveProposal(' + p.id + ', this)">Approve & Execute</button>';
+    var _isCrypto = ticker.indexOf('-USD') !== -1;
+    if (_isCrypto) html += '<span class="broker-badge cb" title="Will execute via Coinbase or best available">CB</span>';
+    else html += '<span class="broker-badge rh" title="Will execute via Robinhood or best available">RH</span>';
     html += '<button class="prop-btn-reject" onclick="rejectProposal(' + p.id + ', this)">Reject</button>';
     html += '<button class="prop-btn-recheck" onclick="recheckProposal(' + p.id + ', this)" title="Revalidate with live price">&#x21BB; Recheck</button>';
   } else if (!isProposal) {
@@ -5526,10 +5672,11 @@ function runFullScan() {
 
 /* ── Strategy Proposals (actions) ─────────────────── */
 
-function approveProposal(id, btn) {
+function approveProposal(id, btn, broker) {
   btn.disabled = true;
   btn.textContent = 'Executing...';
-  fetch('/api/trading/proposals/' + id + '/approve', {method: 'POST'})
+  var opts = {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({broker: broker || null})};
+  fetch('/api/trading/proposals/' + id + '/approve', opts)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       if (d.ok) {
@@ -5986,67 +6133,182 @@ function renderTradeLog(trades) {
 /* ── Broker (Robinhood) ────────────────────────────── */
 var _brokerConnected = false;
 
+function signOut() {
+  fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' })
+    .then(function() { window.location.href = '/trading'; })
+    .catch(function() { window.location.href = '/trading'; });
+}
+
 function loadBrokerStatus() {
   fetch('/api/trading/broker/status').then(function(r){return r.json();}).then(function(d) {
-    var dot = document.getElementById('broker-dot');
-    var label = document.getElementById('broker-label');
-    var sub = document.getElementById('broker-sub');
-    var syncBtn = document.getElementById('broker-sync-btn');
+    if (!d.ok || !d.brokers) return;
+    var anyConnected = false;
 
-    var statusEl = document.getElementById('broker-status');
-    var tradesTabSyncBtn = document.getElementById('trades-tab-sync-btn');
-    if (d.connected) {
-      _brokerConnected = true;
-      dot.className = 'broker-dot connected';
-      label.textContent = 'Robinhood Connected';
-      sub.textContent = d.username || 'Linked account';
-      if (syncBtn) syncBtn.style.display = 'inline-block';
-      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'inline-block';
-      statusEl.classList.remove('compact');
-      loadRhPortfolio();
-    } else if (d.configured) {
-      dot.className = 'broker-dot disconnected';
-      label.textContent = 'Robinhood';
-      sub.textContent = 'Click to connect';
-      if (syncBtn) syncBtn.style.display = 'none';
-      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'none';
-      statusEl.classList.add('compact');
+    var rh = d.brokers.robinhood || {};
+    var dotRh = document.getElementById('broker-dot-rh');
+    var subRh = document.getElementById('broker-sub-rh');
+    if (rh.connected) {
+      anyConnected = true;
+      if (dotRh) dotRh.className = 'broker-dot connected';
+      if (subRh) subRh.textContent = rh.username || 'Connected';
+    } else if (rh.has_credentials || rh.configured) {
+      if (dotRh) dotRh.className = 'broker-dot disconnected';
+      if (subRh) subRh.textContent = 'Click to connect';
     } else {
-      dot.className = 'broker-dot disconnected';
-      label.textContent = 'Robinhood';
-      sub.textContent = 'Set credentials in .env';
-      if (syncBtn) syncBtn.style.display = 'none';
-      if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = 'none';
-      statusEl.classList.add('compact');
+      if (dotRh) dotRh.className = 'broker-dot disconnected';
+      if (subRh) subRh.textContent = 'Click to set up';
     }
+
+    var cb = d.brokers.coinbase || {};
+    var dotCb = document.getElementById('broker-dot-cb');
+    var subCb = document.getElementById('broker-sub-cb');
+    if (cb.connected) {
+      anyConnected = true;
+      if (dotCb) dotCb.className = 'broker-dot connected';
+      if (subCb) subCb.textContent = 'Connected';
+    } else if (cb.has_credentials || cb.configured) {
+      if (dotCb) dotCb.className = 'broker-dot disconnected';
+      if (subCb) subCb.textContent = 'Click to connect';
+    } else {
+      if (dotCb) dotCb.className = 'broker-dot disconnected';
+      if (subCb) subCb.textContent = 'Click to set up';
+    }
+
+    _brokerConnected = anyConnected;
+    var syncAll = document.getElementById('broker-sync-all');
+    var tradesTabSyncBtn = document.getElementById('trades-tab-sync-btn');
+    if (syncAll) syncAll.style.display = anyConnected ? 'inline-block' : 'none';
+    if (tradesTabSyncBtn) tradesTabSyncBtn.style.display = anyConnected ? 'inline-block' : 'none';
+    if (anyConnected) loadBrokerPortfolio();
   }).catch(function() {});
 }
 
 var _approvalPollTimer = null;
 
-function connectBroker() {
-  var sub = document.getElementById('broker-sub');
-  sub.textContent = 'Connecting...';
-  fetch('/api/trading/broker/connect', { method: 'POST' })
-    .then(function(r){return r.json();})
-    .then(function(d) {
+var _setupBroker = '';
+
+function connectBrokerByName(broker) {
+  var suffix = broker === 'robinhood' ? 'rh' : (broker === 'coinbase' ? 'cb' : 'mm');
+  var subEl = document.getElementById('broker-sub-' + suffix);
+  if (subEl) subEl.textContent = 'Connecting...';
+  fetch('/api/trading/broker/connect', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({ broker: broker })
+  }).then(function(r){return r.json();}).then(function(d) {
       if (d.ok) {
         loadBrokerStatus();
-        appendAiMsg('assistant', 'Robinhood connected successfully! I can now see your real portfolio and give you personalized advice based on your actual holdings.');
-      } else if (d.status === 'app_approval') {
-        sub.textContent = 'Check Robinhood app';
+        var label = broker === 'coinbase' ? 'Coinbase Advanced' : 'Robinhood';
+        appendAiMsg('assistant', label + ' connected successfully! I can now see your portfolio and execute trades through it.');
+      } else if (d.status === 'needs_credentials') {
+        if (subEl) subEl.textContent = 'Click to set up';
+        openBrokerSetup(broker);
+      } else if (broker === 'robinhood' && d.status === 'app_approval') {
+        if (subEl) subEl.textContent = 'Check Robinhood app';
         openApprovalDialog();
-      } else if (d.status === 'sms_sent') {
-        sub.textContent = 'Check your phone for SMS';
+      } else if (broker === 'robinhood' && d.status === 'sms_sent') {
+        if (subEl) subEl.textContent = 'Check your phone';
         openSmsDialog('sms');
       } else {
-        sub.textContent = d.configured ? 'Click to connect' : 'Set credentials in .env';
-        var msg = d.message || 'Could not connect to Robinhood.';
+        var shortMsg = d.status === 'error' ? 'Setup required' : 'Connection failed';
+        if (subEl) subEl.textContent = shortMsg;
+        var msg = d.message || 'Could not connect to ' + broker + '.';
         appendAiMsg('assistant', msg);
       }
     }).catch(function() {
-      document.getElementById('broker-sub').textContent = 'Connection failed';
+      if (subEl) subEl.textContent = 'Connection failed';
     });
+}
+
+function openBrokerSetup(broker) {
+  _setupBroker = broker;
+  var dialog = document.getElementById('broker-setup-dialog');
+  var fields = document.getElementById('setup-fields');
+  var title = document.getElementById('setup-title');
+  var desc = document.getElementById('setup-desc');
+  var icon = document.getElementById('setup-icon');
+  document.getElementById('setup-error').textContent = '';
+
+  if (broker === 'robinhood') {
+    icon.innerHTML = '&#x1F4B9;';
+    title.textContent = 'Connect Robinhood';
+    desc.textContent = 'Enter your Robinhood login credentials. These are encrypted and stored securely.';
+    fields.innerHTML =
+      '<div class="setup-field"><label>Email</label><input type="email" id="setup-rh-user" placeholder="your@email.com" autocomplete="username" /></div>' +
+      '<div class="setup-field"><label>Password</label><input type="password" id="setup-rh-pass" placeholder="Password" autocomplete="current-password" /></div>' +
+      '<div class="setup-field"><label>TOTP Secret <span style="font-weight:400;text-transform:none">(optional)</span></label><input type="text" id="setup-rh-totp" placeholder="Base32 secret for auto-login" /><div class="setup-hint">If set, Chili can auto-connect without SMS verification each time.</div></div>';
+  } else if (broker === 'coinbase') {
+    icon.innerHTML = '&#x1F4B0;';
+    title.textContent = 'Connect Coinbase Advanced';
+    desc.innerHTML = 'Enter your API credentials from <a href="https://www.coinbase.com/settings/api" target="_blank" style="color:var(--accent)">coinbase.com/settings/api</a>.';
+    fields.innerHTML =
+      '<div class="setup-field"><label>API Key</label><input type="text" id="setup-cb-key" placeholder="organizations/xxxx/apiKeys/yyyy" /></div>' +
+      '<div class="setup-field"><label>API Secret</label><textarea id="setup-cb-secret" placeholder="-----BEGIN EC PRIVATE KEY-----\n...\n-----END EC PRIVATE KEY-----"></textarea></div>';
+  }
+
+  dialog.classList.add('visible');
+  var firstInput = fields.querySelector('input,textarea');
+  if (firstInput) setTimeout(function() { firstInput.focus(); }, 100);
+}
+
+function closeBrokerSetup() {
+  document.getElementById('broker-setup-dialog').classList.remove('visible');
+  _setupBroker = '';
+  loadBrokerStatus();
+}
+
+function saveBrokerCredentials() {
+  var btn = document.getElementById('setup-save-btn');
+  var error = document.getElementById('setup-error');
+  error.textContent = '';
+  var body = { broker: _setupBroker };
+
+  if (_setupBroker === 'robinhood') {
+    body.username = (document.getElementById('setup-rh-user') || {}).value || '';
+    body.password = (document.getElementById('setup-rh-pass') || {}).value || '';
+    body.totp_secret = (document.getElementById('setup-rh-totp') || {}).value || '';
+    if (!body.username || !body.password) {
+      error.textContent = 'Email and password are required.';
+      return;
+    }
+  } else if (_setupBroker === 'coinbase') {
+    body.api_key = (document.getElementById('setup-cb-key') || {}).value || '';
+    body.api_secret = (document.getElementById('setup-cb-secret') || {}).value || '';
+    if (!body.api_key || !body.api_secret) {
+      error.textContent = 'API Key and Secret are required.';
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  btn.textContent = 'Connecting...';
+
+  fetch('/api/trading/broker/credentials', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    btn.disabled = false;
+    btn.textContent = 'Save & Connect';
+    if (d.ok) {
+      closeBrokerSetup();
+      loadBrokerStatus();
+      var label = _setupBroker === 'coinbase' ? 'Coinbase Advanced' : 'Robinhood';
+      appendAiMsg('assistant', label + ' connected successfully! Your credentials have been saved securely.');
+    } else if (_setupBroker === 'robinhood' && d.status === 'app_approval') {
+      closeBrokerSetup();
+      openApprovalDialog();
+    } else if (_setupBroker === 'robinhood' && d.status === 'sms_sent') {
+      closeBrokerSetup();
+      openSmsDialog('sms');
+    } else {
+      error.textContent = d.message || 'Connection failed. Check your credentials.';
+    }
+  }).catch(function() {
+    btn.disabled = false;
+    btn.textContent = 'Save & Connect';
+    error.textContent = 'Network error. Please try again.';
+  });
 }
 
 function openApprovalDialog() {
@@ -6156,13 +6418,12 @@ function verifySmsCode() {
   });
 }
 
-function syncBroker() {
-  var syncBtn = document.getElementById('broker-sync-btn');
+function syncAllBrokers() {
+  var syncBtn = document.getElementById('broker-sync-all');
   var tradesTabSyncBtn = document.getElementById('trades-tab-sync-btn');
   function setSyncing(v) {
-    var t = v ? 'Syncing...' : 'Sync';
-    if (syncBtn) { syncBtn.textContent = t; syncBtn.disabled = v; }
-    if (tradesTabSyncBtn) { tradesTabSyncBtn.textContent = v ? 'Syncing...' : 'Sync with Robinhood'; tradesTabSyncBtn.disabled = v; }
+    if (syncBtn) { syncBtn.textContent = v ? 'Syncing...' : 'Sync All'; syncBtn.disabled = v; }
+    if (tradesTabSyncBtn) { tradesTabSyncBtn.textContent = v ? 'Syncing...' : 'Sync Brokers'; tradesTabSyncBtn.disabled = v; }
   }
   setSyncing(true);
   fetch('/api/trading/broker/sync', { method: 'POST' })
@@ -6170,35 +6431,32 @@ function syncBroker() {
     .then(function(d) {
       setSyncing(false);
       if (d.ok) {
-        loadRhPortfolio();
+        loadBrokerPortfolio();
         loadPortfolio();
         loadTrades();
         var parts = [];
-        if (d.orders) {
-          var o = d.orders;
-          if (o.synced || o.filled || o.cancelled) parts.push('Orders: ' + (o.filled || 0) + ' filled, ' + (o.cancelled || 0) + ' cancelled');
-        }
-        if (d.positions) {
-          var p = d.positions;
-          if (p.created || p.updated || p.closed) parts.push('Positions: ' + (p.created || 0) + ' new, ' + (p.updated || 0) + ' updated, ' + (p.closed || 0) + ' closed');
-        }
-        if (d.manual && d.manual.closed_manual) {
-          parts.push('Cleaned up ' + d.manual.closed_manual + ' manual trade(s) with no RH position');
-        }
-        if (parts.length) appendAiMsg('assistant', 'Synced with Robinhood. ' + parts.join('; ') + '.');
-        else appendAiMsg('assistant', 'Trades tab synced with Robinhood. Everything is up to date.');
+        var rho = d.robinhood_orders;
+        if (rho && (rho.synced || rho.filled || rho.cancelled)) parts.push('RH Orders: ' + (rho.filled || 0) + ' filled, ' + (rho.cancelled || 0) + ' cancelled');
+        var rhp = d.robinhood_positions;
+        if (rhp && (rhp.created || rhp.updated || rhp.closed)) parts.push('RH Positions: ' + (rhp.created || 0) + ' new, ' + (rhp.updated || 0) + ' updated');
+        var cbo = d.coinbase_orders;
+        if (cbo && (cbo.synced || cbo.filled || cbo.cancelled)) parts.push('CB Orders: ' + (cbo.filled || 0) + ' filled, ' + (cbo.cancelled || 0) + ' cancelled');
+        var cbp = d.coinbase_positions;
+        if (cbp && (cbp.created || cbp.updated || cbp.closed)) parts.push('CB Positions: ' + (cbp.created || 0) + ' new, ' + (cbp.updated || 0) + ' updated');
+        if (parts.length) appendAiMsg('assistant', 'Synced all brokers. ' + parts.join('; ') + '.');
+        else appendAiMsg('assistant', 'All brokers synced. Everything is up to date.');
       }
     }).catch(function() {
       setSyncing(false);
     });
 }
 
-function loadRhPortfolio() {
+function loadBrokerPortfolio() {
   if (!_brokerConnected) return;
 
-  var section = document.getElementById('rh-portfolio-section');
-  var summaryEl = document.getElementById('rh-portfolio-summary');
-  var listEl = document.getElementById('rh-positions-list');
+  var section = document.getElementById('broker-portfolio-section');
+  var summaryEl = document.getElementById('broker-portfolio-summary');
+  var listEl = document.getElementById('broker-positions-list');
 
   Promise.all([
     fetch('/api/trading/broker/portfolio').then(function(r){return r.json();}),
@@ -6214,35 +6472,37 @@ function loadRhPortfolio() {
 
     section.style.display = 'block';
 
-    if (portData.ok && portData.portfolio && portData.portfolio.equity) {
+    if (portData.ok && portData.portfolio) {
       var p = portData.portfolio;
       summaryEl.innerHTML =
         '<div class="portfolio-grid" style="margin-bottom:8px">' +
-        '<div class="p-card"><div class="p-val">$' + (p.equity || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Equity</div></div>' +
-        '<div class="p-card"><div class="p-val">$' + (p.buying_power || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Buying Power</div></div>' +
-        '<div class="p-card"><div class="p-val">$' + (p.cash || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Cash</div></div>' +
-        '<div class="p-card"><div class="p-val">$' + (p.market_value || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Market Value</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.total_equity || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Total Equity</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.total_buying_power || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Buying Power</div></div>' +
+        '<div class="p-card"><div class="p-val">$' + (p.total_cash || 0).toLocaleString(undefined, {minimumFractionDigits:2}) + '</div><div class="p-lbl">Cash</div></div>' +
         '</div>';
     }
 
     if (posData.ok && posData.positions && posData.positions.length) {
-      var html = '<table class="rh-positions-table"><thead><tr><th>Ticker</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th>Equity</th><th>%</th></tr></thead><tbody>';
+      var html = '<table class="rh-positions-table"><thead><tr><th>Ticker</th><th>Broker</th><th>Qty</th><th>Avg Cost</th><th>Current</th><th>%</th></tr></thead><tbody>';
       posData.positions.forEach(function(p) {
         var pct = p.percent_change || 0;
         var cls = pct >= 0 ? 'rh-pnl-pos' : 'rh-pnl-neg';
         var pctStr = (pct >= 0 ? '+' : '') + parseFloat(pct).toFixed(2) + '%';
+        var src = p.broker_source || 'manual';
+        var badgeCls = src === 'robinhood' ? 'rh' : (src === 'coinbase' ? 'cb' : 'manual');
+        var badgeLbl = src === 'robinhood' ? 'RH' : (src === 'coinbase' ? 'CB' : 'MAN');
         html += '<tr onclick="selectTicker(\'' + p.ticker + '\')" style="cursor:pointer">' +
           '<td><strong>' + p.ticker + '</strong></td>' +
+          '<td><span class="broker-badge ' + badgeCls + '">' + badgeLbl + '</span></td>' +
           '<td>' + p.quantity + '</td>' +
           '<td>$' + smartPrice(p.average_buy_price || 0) + '</td>' +
           '<td>$' + smartPrice(p.current_price || 0) + '</td>' +
-          '<td>$' + smartPrice(p.equity || 0) + '</td>' +
           '<td class="' + cls + '">' + pctStr + '</td></tr>';
       });
       html += '</tbody></table>';
       listEl.innerHTML = html;
     } else {
-      listEl.innerHTML = '<div style="color:var(--text-muted);font-size:11px;margin-top:4px">No open positions on Robinhood</div>';
+      listEl.innerHTML = '<div style="color:var(--text-muted);font-size:11px;margin-top:4px">No open positions</div>';
     }
   }).catch(function() {
     section.style.display = 'none';
@@ -6287,6 +6547,10 @@ function renderTradeProposal(data) {
   html += '<div class="tp-actions">';
   html += '<button class="tp-btn-confirm" onclick="confirmProposal(\'' + proposalId + '\',\'' + ticker + '\',\'' + direction + '\',' + (data.entry_price||0) + ',' + (data.quantity||1) + ')">Confirm & Track</button>';
   html += '<button class="tp-btn-reject" onclick="dismissTradeProposal(this)">Dismiss</button>';
+  var _tpIsCrypto = ticker.indexOf('-USD') !== -1;
+  if (_tpIsCrypto) {
+    html += '<button class="tp-btn-rh" onclick="openInCoinbase(\'' + ticker + '\')" title="Open in Coinbase" style="background:#0052ff">CB</button>';
+  }
   html += '<button class="tp-btn-rh" onclick="openInRobinhood(\'' + ticker + '\')" title="Open in Robinhood">RH</button>';
   html += '</div>';
   html += '</div>';
@@ -6346,6 +6610,12 @@ function openInRobinhood(ticker) {
     url = 'https://robinhood.com/stocks/' + cleanTicker;
   }
   window.open(url, '_blank');
+}
+
+function openInCoinbase(ticker) {
+  var pair = ticker.toUpperCase();
+  if (!pair.includes('-')) pair = pair + '-USD';
+  window.open('https://www.coinbase.com/advanced-trade/' + pair, '_blank');
 }
 
 function _tryParseProposals(text) {
@@ -6452,10 +6722,19 @@ function _disconnectWallet() {
 async function _updateWalletUI() {
   var btn = document.getElementById('wallet-btn');
   var label = document.getElementById('wallet-label');
-  if (!_w3.connected) { btn.classList.remove('connected'); label.textContent = 'Connect Wallet'; return; }
+  var mmDot = document.getElementById('broker-dot-mm');
+  var mmSub = document.getElementById('broker-sub-mm');
+  if (!_w3.connected) {
+    btn.classList.remove('connected'); label.textContent = 'Connect Wallet';
+    if (mmDot) mmDot.className = 'broker-dot disconnected';
+    if (mmSub) mmSub.textContent = 'Connect wallet';
+    return;
+  }
   btn.classList.add('connected');
+  if (mmDot) mmDot.className = 'broker-dot connected';
   var chain = CHAINS[_w3.chainId];
   var addr = _w3.address.slice(0,6) + '...' + _w3.address.slice(-4);
+  if (mmSub) mmSub.textContent = addr;
   try {
     var bal = await _w3.provider.getBalance(_w3.address);
     _w3.balance = ethers.formatEther(bal);
@@ -6795,6 +7074,588 @@ function prefillSwap(symbol) {
   }
 }
 
+
+/* ── MetaMask Liquidation → Coinbase ──────────────── */
+
+var USDC_ADDRESSES = {
+  1:     '0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',
+  137:   '0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',
+  56:    '0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',
+  42161: '0xaf88d065e77c8cC2239327C5EDb3A432268e5831',
+  8453:  '0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913'
+};
+
+var COMMON_TOKENS = {
+  1: [
+    {symbol:'USDT',address:'0xdAC17F958D2ee523a2206206994597C13D831ec7',decimals:6},
+    {symbol:'USDC',address:'0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48',decimals:6},
+    {symbol:'DAI',address:'0x6B175474E89094C44Da98b954EedeAC495271d0F',decimals:18},
+    {symbol:'WETH',address:'0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2',decimals:18},
+    {symbol:'WBTC',address:'0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599',decimals:8},
+    {symbol:'LINK',address:'0x514910771AF9Ca656af840dff83E8264EcF986CA',decimals:18},
+    {symbol:'UNI',address:'0x1f9840a85d5aF5bf1D1762F925BDADdC4201F984',decimals:18},
+    {symbol:'PEPE',address:'0x6982508145454Ce325dDbE47a25d4ec3d2311933',decimals:18},
+    {symbol:'SHIB',address:'0x95aD61b0a150d79219dCF64E1E6Cc01f0B64C4cE',decimals:18},
+  ],
+  137: [
+    {symbol:'USDT',address:'0xc2132D05D31c914a87C6611C10748AEb04B58e8F',decimals:6},
+    {symbol:'USDC',address:'0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359',decimals:6},
+    {symbol:'WETH',address:'0x7ceB23fD6bC0adD59E62ac25578270cFf1b9f619',decimals:18},
+    {symbol:'WMATIC',address:'0x0d500B1d8E8eF31E21C99d1Db9A6444d3ADf1270',decimals:18},
+    {symbol:'DAI',address:'0x8f3Cf7ad23Cd3CaDbD9735AFf958023239c6A063',decimals:18},
+  ],
+  56: [
+    {symbol:'USDT',address:'0x55d398326f99059fF775485246999027B3197955',decimals:18},
+    {symbol:'USDC',address:'0x8AC76a51cc950d9822D68b83fE1Ad97B32Cd580d',decimals:18},
+    {symbol:'WBNB',address:'0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c',decimals:18},
+    {symbol:'DAI',address:'0x1AF3F329e8BE154074D8769D1FFa4eE058B1DBc3',decimals:18},
+  ],
+  42161: [
+    {symbol:'USDT',address:'0xFd086bC7CD5C481DCC9C85ebE478A1C0b69FCbb9',decimals:6},
+    {symbol:'USDC',address:'0xaf88d065e77c8cC2239327C5EDb3A432268e5831',decimals:6},
+    {symbol:'WETH',address:'0x82aF49447D8a07e3bd95BD0d56f35241523fBab1',decimals:18},
+    {symbol:'DAI',address:'0xDA10009cBd5D07dd0CeCc66161FC93D7c9000da1',decimals:18},
+  ],
+  8453: [
+    {symbol:'USDC',address:'0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913',decimals:6},
+    {symbol:'WETH',address:'0x4200000000000000000000000000000000000006',decimals:18},
+    {symbol:'DAI',address:'0x50c5725949A6F0c72E6C4a641F24049A917DB0Cb',decimals:18},
+  ]
+};
+
+var CHAIN_RPC = {
+  1:     'https://eth.llamarpc.com',
+  137:   'https://polygon-rpc.com',
+  56:    'https://bsc-dataseed1.binance.org',
+  42161: 'https://arb1.arbitrum.io/rpc',
+  8453:  'https://mainnet.base.org'
+};
+var CHAIN_NAMES = {1:'Ethereum',137:'Polygon',56:'BNB Chain',42161:'Arbitrum',8453:'Base'};
+var CHAIN_NATIVE = {1:{sym:'ETH',dec:18},137:{sym:'MATIC',dec:18},56:{sym:'BNB',dec:18},42161:{sym:'ETH',dec:18},8453:{sym:'ETH',dec:18}};
+
+async function _rpcBalanceOf(rpcUrl, tokenAddr, wallet, decimals) {
+  var calldata = '0x70a08231' + wallet.slice(2).toLowerCase().padStart(64, '0');
+  try {
+    var resp = await fetch(rpcUrl, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_call',params:[{to:tokenAddr,data:calldata},'latest']})
+    });
+    var json = await resp.json();
+    if (json.result && json.result !== '0x' && json.result !== '0x0' && json.result !== '0x0000000000000000000000000000000000000000000000000000000000000000') {
+      return parseFloat(ethers.formatUnits(BigInt(json.result), decimals));
+    }
+  } catch(e) { console.warn('[rpc] error:', e); }
+  return 0;
+}
+
+async function _rpcNativeBalance(rpcUrl, wallet) {
+  try {
+    var resp = await fetch(rpcUrl, {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({jsonrpc:'2.0',id:1,method:'eth_getBalance',params:[wallet,'latest']})
+    });
+    var json = await resp.json();
+    if (json.result) return parseFloat(ethers.formatUnits(BigInt(json.result), 18));
+  } catch(e) {}
+  return 0;
+}
+
+async function _scanChainViaRPC(chainId, wallet) {
+  var rpc = CHAIN_RPC[chainId];
+  if (!rpc) return [];
+  var found = [];
+  var native = CHAIN_NATIVE[chainId];
+  var nativeBal = await _rpcNativeBalance(rpc, wallet);
+  if (nativeBal > 0.000001) {
+    found.push({symbol: native.sym, address: NATIVE_ADDR, balance: nativeBal, decimals: native.dec, chainId: chainId});
+  }
+  var tokens = COMMON_TOKENS[chainId] || [];
+  var checks = tokens.map(function(tk) {
+    return _rpcBalanceOf(rpc, tk.address, wallet, tk.decimals).then(function(bal) {
+      if (bal > 0.000001) found.push({symbol: tk.symbol, address: tk.address, balance: bal, decimals: tk.decimals, chainId: chainId});
+    });
+  });
+  await Promise.all(checks);
+  return found;
+}
+
+async function _scanAllTokenBalances() {
+  if (!_w3.connected) return [];
+
+  if (!_w3.provider) {
+    try {
+      _w3.provider = new ethers.BrowserProvider(window.ethereum);
+      _w3.signer = await _w3.provider.getSigner();
+      var net = await _w3.provider.getNetwork();
+      _w3.chainId = Number(net.chainId);
+    } catch(e) { return []; }
+  }
+
+  var wallet = _w3.address;
+  var connectedChain = _w3.chainId;
+
+  appendAiMsg('assistant', 'Scanning all chains for wallet `' + wallet.slice(0,6) + '...' + wallet.slice(-4) + '`...');
+
+  var allChains = [1, 137, 56, 42161, 8453];
+  var allResults = [];
+  var chainPromises = allChains.map(function(cid) {
+    return _scanChainViaRPC(cid, wallet).then(function(found) {
+      found.forEach(function(f) { allResults.push(f); });
+    });
+  });
+  await Promise.all(chainPromises);
+
+  if (allResults.length === 0) return [];
+
+  var chainGroups = {};
+  allResults.forEach(function(r) {
+    if (!chainGroups[r.chainId]) chainGroups[r.chainId] = [];
+    chainGroups[r.chainId].push(r);
+  });
+
+  var bestChain = connectedChain;
+  var bestValue = 0;
+  Object.keys(chainGroups).forEach(function(cid) {
+    var total = 0;
+    chainGroups[cid].forEach(function(t) { total += t.balance; });
+    if (total > bestValue) { bestValue = total; bestChain = parseInt(cid); }
+  });
+
+  if (bestChain !== connectedChain) {
+    var chainName = CHAIN_NAMES[bestChain] || ('chain ' + bestChain);
+    appendAiMsg('assistant', 'Your tokens are on **' + chainName + '**. Switching MetaMask now...');
+    try {
+      var hexId = '0x' + bestChain.toString(16);
+      await window.ethereum.request({ method: 'wallet_switchEthereumChain', params: [{chainId: hexId}] });
+      _w3.provider = new ethers.BrowserProvider(window.ethereum);
+      _w3.signer = await _w3.provider.getSigner();
+      _w3.chainId = bestChain;
+      var sel = document.getElementById('chain-select');
+      if (sel) sel.value = bestChain;
+    } catch(e) {
+      appendAiMsg('assistant', 'Please switch MetaMask to **' + chainName + '** manually and try again.');
+      return [];
+    }
+  }
+
+  var results = [];
+  var group = chainGroups[bestChain] || [];
+  group.forEach(function(r) {
+    results.push({
+      symbol: r.symbol, address: r.address, balance: r.balance,
+      balanceRaw: ethers.parseUnits(r.balance.toFixed(r.decimals > 8 ? 8 : r.decimals), r.decimals).toString(),
+      decimals: r.decimals,
+      token: {symbol: r.symbol, address: r.address, decimals: String(r.decimals)}
+    });
+  });
+  return results;
+}
+
+var _liquidationActive = false;
+
+var STABLECOIN_SYMBOLS = ['USDT','USDC','DAI','BUSD','TUSD','FRAX'];
+
+function _isStablecoin(symbol) {
+  return STABLECOIN_SYMBOLS.indexOf(symbol.toUpperCase()) !== -1;
+}
+
+async function _executeLiquidationFlow(depositAddress, preScannedTokens) {
+  if (_liquidationActive) { appendAiMsg('assistant', 'A liquidation is already in progress.'); return; }
+  if (!_w3.connected) { appendAiMsg('assistant', 'Please connect MetaMask first.'); return; }
+  _liquidationActive = true;
+
+  var chainId = _w3.chainId;
+  var nativeInfo = CHAIN_NATIVE[chainId] || {sym:'ETH',dec:18};
+  var target = _pickTargetToken(preScannedTokens || [], chainId);
+  var usdcAddr = USDC_ADDRESSES[chainId];
+
+  var tokens = preScannedTokens;
+  if (!tokens || !tokens.length) {
+    appendAiMsg('assistant', 'Scanning your wallet for tokens...');
+    tokens = await _scanAllTokenBalances();
+  }
+  if (!tokens.length) {
+    appendAiMsg('assistant', 'No tokens with meaningful balances found in your wallet.');
+    _liquidationActive = false;
+    return;
+  }
+
+  var directTransfer = [];
+  var toSwap = [];
+  var nativeTk = null;
+
+  tokens.forEach(function(t) {
+    if (t.address === NATIVE_ADDR || t.address === '0x0000000000000000000000000000000000000000') {
+      nativeTk = t;
+    } else if (_isStablecoin(t.symbol)) {
+      directTransfer.push(t);
+    } else {
+      toSwap.push(t);
+    }
+  });
+
+  var sendNative = (target.type === 'native' && nativeTk && nativeTk.balance > 0);
+  var hasWork = directTransfer.length > 0 || toSwap.length > 0 || sendNative;
+  if (!hasWork) {
+    appendAiMsg('assistant', 'No transferable tokens found.');
+    _liquidationActive = false;
+    return;
+  }
+
+  var summary = '**Plan:**\n';
+  if (toSwap.length > 0) {
+    toSwap.forEach(function(t) {
+      summary += '- Swap **' + t.balance.toFixed(6) + ' ' + t.symbol + '** → ' + nativeInfo.sym + '\n';
+    });
+  }
+  if (directTransfer.length > 0) {
+    if (target.type === 'native') {
+      directTransfer.forEach(function(t) {
+        summary += '- Swap **' + t.balance.toFixed(2) + ' ' + t.symbol + '** → ' + nativeInfo.sym + '\n';
+      });
+    } else {
+      directTransfer.forEach(function(t) {
+        summary += '- Send **' + t.balance.toFixed(2) + ' ' + t.symbol + '** directly to Coinbase\n';
+      });
+    }
+  }
+  if (sendNative) {
+    summary += '- Send **' + nativeInfo.sym + '** (including swapped amounts) to Coinbase\n';
+  }
+  summary += '\nEach step requires MetaMask approval.\nType **confirm** to go or **cancel** to stop.';
+  appendAiMsg('assistant', summary);
+
+  _w3._pendingLiquidation = {
+    toSwap: toSwap, directTransfer: directTransfer,
+    usdcAddr: usdcAddr, depositAddress: depositAddress,
+    nativeTk: nativeTk, targetType: target.type, targetSymbol: target.symbol
+  };
+}
+
+async function _confirmLiquidation() {
+  var pending = _w3._pendingLiquidation;
+  if (!pending) { _liquidationActive = false; return; }
+  var toSwap = pending.toSwap || [];
+  var directTransfer = pending.directTransfer || [];
+  var depositAddr = pending.depositAddress;
+  var isNativeTarget = pending.targetType === 'native';
+  var nativeInfo = CHAIN_NATIVE[_w3.chainId] || {sym:'ETH',dec:18};
+
+  var permit2Addr = '0x000000000022D473030F116dDEE9F6B43aC78BA3';
+  var swapped = 0;
+  var failed = 0;
+  var transferred = 0;
+
+  var allToSwap = toSwap.slice();
+  if (isNativeTarget && directTransfer.length > 0) {
+    allToSwap = allToSwap.concat(directTransfer);
+  }
+
+  var nativeTarget = isNativeTarget
+    ? '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+    : (pending.usdcAddr || USDC_ADDRESSES[_w3.chainId]);
+
+  var nativeTargetLabel = isNativeTarget ? nativeInfo.sym : 'USDC';
+
+  if (allToSwap.length > 0) {
+    appendAiMsg('assistant', 'Starting swaps to **' + nativeTargetLabel + '**...');
+    for (var i = 0; i < allToSwap.length; i++) {
+      var tk = allToSwap[i];
+      appendAiMsg('assistant', '**[' + (i+1) + '/' + allToSwap.length + ']** Swapping ' + tk.balance.toFixed(6) + ' ' + tk.symbol + ' → ' + nativeTargetLabel + '...');
+      try {
+        var sellAmountWei = ethers.parseUnits(tk.balance.toString(), tk.decimals).toString();
+
+        var erc20 = new ethers.Contract(tk.address, [
+          'function allowance(address,address) view returns (uint256)',
+          'function approve(address,uint256) returns (bool)'
+        ], _w3.signer);
+        var allowance = await erc20.allowance(_w3.address, permit2Addr);
+        if (allowance < BigInt(sellAmountWei)) {
+          appendAiMsg('assistant', 'Approving ' + tk.symbol + ' for swap...');
+          var approveTx = await erc20.approve(permit2Addr, ethers.MaxUint256);
+          await approveTx.wait();
+        }
+
+        var buyToken = isNativeTarget
+          ? '0xEeeeeEeeeEeEeeEeEeEeeEEEeeeeEeeeeeeeEEeE'
+          : nativeTarget;
+
+        var quoteResp = await fetch('/api/trading/web3/quote', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            chain_id: _w3.chainId,
+            sell_token: tk.address,
+            buy_token: buyToken,
+            sell_amount: sellAmountWei,
+            taker_address: _w3.address,
+            slippage_bps: _w3.slippageBps || 100
+          })
+        });
+        var quote = await quoteResp.json();
+        if (!quote.ok) { appendAiMsg('assistant', 'Quote failed for ' + tk.symbol + ': ' + (quote.error || 'unknown')); failed++; continue; }
+
+        var txObj = quote.transaction || { to: quote.to, data: quote.data, value: quote.value };
+        if (!txObj.to) txObj = { to: quote.to, data: quote.data, value: quote.value };
+        if (txObj.value && typeof txObj.value === 'string' && !txObj.value.startsWith('0x')) {
+          txObj.value = '0x' + BigInt(txObj.value).toString(16);
+        }
+        if (txObj.gas) { txObj.gasLimit = txObj.gas; delete txObj.gas; }
+
+        var tx = await _w3.signer.sendTransaction(txObj);
+        _showTxToast('Swapping ' + tk.symbol + '...', tx.hash);
+        var receipt = await tx.wait();
+        if (receipt.status === 1) {
+          _updateTxToast(tx.hash, 'confirmed');
+          appendAiMsg('assistant', tk.symbol + ' swapped to ' + nativeTargetLabel + ' successfully.');
+          swapped++;
+        } else {
+          _updateTxToast(tx.hash, 'failed');
+          appendAiMsg('assistant', tk.symbol + ' swap failed on-chain.');
+          failed++;
+        }
+        await new Promise(function(r){ setTimeout(r, 1500); });
+      } catch(e) {
+        var reason = e.code === 'ACTION_REJECTED' ? 'Rejected by user' : (e.message || String(e));
+        appendAiMsg('assistant', 'Failed to swap ' + tk.symbol + ': ' + reason);
+        failed++;
+        if (e.code === 'ACTION_REJECTED') {
+          appendAiMsg('assistant', 'Liquidation aborted by user.');
+          _liquidationActive = false;
+          _w3._pendingLiquidation = null;
+          return;
+        }
+      }
+    }
+    if (allToSwap.length > 0) {
+      appendAiMsg('assistant', '**Swaps done.** ' + swapped + ' succeeded, ' + failed + ' failed.');
+    }
+  }
+
+  if (isNativeTarget) {
+    try {
+      var nativeBal = await _w3.provider.getBalance(_w3.address);
+      var gasReserve = ethers.parseUnits('0.002', 18);
+      var sendableNative = nativeBal - gasReserve;
+      if (sendableNative <= 0n) {
+        appendAiMsg('assistant', nativeInfo.sym + ' balance too low after reserving gas. Nothing to send.');
+      } else {
+        var sendAmt = parseFloat(ethers.formatUnits(sendableNative, 18));
+        appendAiMsg('assistant', 'Sending **' + sendAmt.toFixed(6) + ' ' + nativeInfo.sym + '** to Coinbase...\n`' + depositAddr + '`');
+        var nativeTx = await _w3.signer.sendTransaction({ to: depositAddr, value: sendableNative });
+        _showTxToast('Sending ' + nativeInfo.sym + ' to Coinbase...', nativeTx.hash);
+        var nativeReceipt = await nativeTx.wait();
+        if (nativeReceipt.status === 1) {
+          _updateTxToast(nativeTx.hash, 'confirmed');
+          appendAiMsg('assistant', '**' + sendAmt.toFixed(6) + ' ' + nativeInfo.sym + ' sent!** It should appear in Coinbase within a few minutes.');
+          transferred++;
+        } else {
+          _updateTxToast(nativeTx.hash, 'failed');
+          appendAiMsg('assistant', nativeInfo.sym + ' transfer failed on-chain.');
+        }
+      }
+    } catch(e) {
+      var reason = e.code === 'ACTION_REJECTED' ? 'Rejected by user' : (e.message || String(e));
+      appendAiMsg('assistant', nativeInfo.sym + ' transfer failed: ' + reason);
+    }
+  } else {
+    var tokensToSend = directTransfer.slice();
+    var usdcAddr = pending.usdcAddr;
+    if (usdcAddr) {
+      try {
+        var usdcContract = new ethers.Contract(usdcAddr, ['function balanceOf(address) view returns (uint256)'], _w3.provider);
+        var usdcBal = await usdcContract.balanceOf(_w3.address);
+        var usdcAmt = parseFloat(ethers.formatUnits(usdcBal, 6));
+        if (usdcAmt > 0.01) {
+          var alreadyHas = tokensToSend.find(function(t){ return t.address.toLowerCase() === usdcAddr.toLowerCase(); });
+          if (!alreadyHas) {
+            tokensToSend.push({ symbol: 'USDC', address: usdcAddr, balance: usdcAmt, balanceRaw: usdcBal.toString(), decimals: 6 });
+          }
+        }
+      } catch(e) {}
+    }
+
+    for (var j = 0; j < tokensToSend.length; j++) {
+      var stk = tokensToSend[j];
+      try {
+        var contract = new ethers.Contract(stk.address, [
+          'function balanceOf(address) view returns (uint256)',
+          'function transfer(address,uint256) returns (bool)'
+        ], _w3.signer);
+        var bal = await contract.balanceOf(_w3.address);
+        var balFmt = parseFloat(ethers.formatUnits(bal, stk.decimals));
+        if (balFmt < 0.01) {
+          appendAiMsg('assistant', stk.symbol + ' balance too low to transfer. Skipping.');
+          continue;
+        }
+        appendAiMsg('assistant', 'Sending **' + balFmt.toFixed(2) + ' ' + stk.symbol + '** to Coinbase...\n`' + depositAddr + '`');
+        var sendTx = await contract.transfer(depositAddr, bal);
+        _showTxToast('Sending ' + stk.symbol + ' to Coinbase...', sendTx.hash);
+        var sendReceipt = await sendTx.wait();
+        if (sendReceipt.status === 1) {
+          _updateTxToast(sendTx.hash, 'confirmed');
+          appendAiMsg('assistant', '**' + balFmt.toFixed(2) + ' ' + stk.symbol + ' sent!** It should appear in Coinbase within a few minutes.');
+          transferred++;
+        } else {
+          _updateTxToast(sendTx.hash, 'failed');
+          appendAiMsg('assistant', stk.symbol + ' transfer failed on-chain.');
+        }
+      } catch(e) {
+        var reason = e.code === 'ACTION_REJECTED' ? 'Rejected by user' : (e.message || String(e));
+        appendAiMsg('assistant', stk.symbol + ' transfer failed: ' + reason);
+        if (e.code === 'ACTION_REJECTED') {
+          appendAiMsg('assistant', 'Transfer aborted by user.');
+          _liquidationActive = false;
+          _w3._pendingLiquidation = null;
+          return;
+        }
+      }
+    }
+  }
+
+  if (transferred > 0) {
+    appendAiMsg('assistant', '**All done!** ' + transferred + ' transfer(s) sent to Coinbase successfully.');
+  } else if (swapped > 0 && transferred === 0) {
+    appendAiMsg('assistant', 'Swaps completed but transfer step had issues. Check your wallet.');
+  } else {
+    appendAiMsg('assistant', 'No transfers completed. Your tokens are still in your wallet.');
+  }
+
+  _liquidationActive = false;
+  _w3._pendingLiquidation = null;
+  _updateWalletUI();
+}
+
+function _cancelLiquidation() {
+  _liquidationActive = false;
+  _w3._pendingLiquidation = null;
+  appendAiMsg('assistant', 'Liquidation cancelled.');
+}
+
+var _pendingDepositNetwork = '';
+var _pendingDepositToken = '';
+var _scannedTokens = null;
+
+function _pickTargetToken(tokens, chainId) {
+  var nativeInfo = CHAIN_NATIVE[chainId] || {sym:'ETH',dec:18};
+  var nativeTk = tokens.find(function(t) {
+    return t.address === NATIVE_ADDR || t.address === '0x0000000000000000000000000000000000000000';
+  });
+  var stables = tokens.filter(function(t) { return _isStablecoin(t.symbol) && t.address !== NATIVE_ADDR; });
+  var erc20s = tokens.filter(function(t) {
+    return !_isStablecoin(t.symbol) && t.address !== NATIVE_ADDR && t.address !== '0x0000000000000000000000000000000000000000';
+  });
+
+  var bestStable = stables.length > 0 ? stables.reduce(function(a,b){ return (b.usdValue||0) > (a.usdValue||0) ? b : a; }) : null;
+  var nativeVal = nativeTk ? (nativeTk.usdValue || nativeTk.balance * 1) : 0;
+  var stableVal = bestStable ? (bestStable.usdValue || bestStable.balance * 1) : 0;
+
+  if (erc20s.length > 0 || (stables.length > 0 && nativeVal > stableVal)) {
+    return { symbol: nativeInfo.sym, type: 'native' };
+  }
+  if (bestStable && stableVal > 0) {
+    return { symbol: bestStable.symbol, type: 'stable' };
+  }
+  if (nativeTk && nativeVal > 0) {
+    return { symbol: nativeInfo.sym, type: 'native' };
+  }
+  return { symbol: nativeInfo.sym, type: 'native' };
+}
+
+async function _handleLiquidationIntent() {
+  if (!_w3.connected) {
+    appendAiMsg('assistant', 'Please connect MetaMask first, then try again.');
+    return;
+  }
+  appendAiMsg('assistant', 'Got it. Let me scan your wallet first to see what we\'re working with...');
+
+  var tokens = await _scanAllTokenBalances();
+  if (!tokens.length) {
+    appendAiMsg('assistant', 'No tokens with meaningful balances found in your wallet.');
+    return;
+  }
+
+  _scannedTokens = tokens;
+  var chainId = _w3.chainId;
+  var networkName = CHAIN_NAMES[chainId] || ('chain-' + chainId);
+  var networkKey = networkName.toLowerCase().replace(/\s+/g, '_');
+  var target = _pickTargetToken(tokens, chainId);
+
+  var summary = 'Found on **' + networkName + '**:\n';
+  tokens.forEach(function(t) { summary += '- **' + t.symbol + '**: ' + t.balance.toFixed(6) + '\n'; });
+  summary += '\nI\'ll send everything to your Coinbase as **' + target.symbol + '** on **' + networkName + '**.';
+  appendAiMsg('assistant', summary);
+
+  _pendingDepositNetwork = networkKey;
+  _pendingDepositToken = target.symbol;
+
+  try {
+    var addrKey = networkKey + '_' + target.symbol.toLowerCase();
+    var resp = await fetch('/api/trading/broker/deposit-address?broker=coinbase&network=' + encodeURIComponent(addrKey));
+    var data = await resp.json();
+    if (data.ok && data.address) {
+      _executeLiquidationFlow(data.address, _scannedTokens);
+    } else {
+      appendAiMsg('assistant', 'I need your Coinbase **' + target.symbol + '** deposit address on **' + networkName + '**. You only need to do this once per token/network.');
+      openDepositAddrDialog(networkName, target.symbol);
+    }
+  } catch(e) {
+    appendAiMsg('assistant', 'I need your Coinbase **' + target.symbol + '** deposit address on **' + networkName + '**.');
+    openDepositAddrDialog(networkName, target.symbol);
+  }
+}
+
+function openDepositAddrDialog(networkName, tokenSymbol) {
+  networkName = networkName || 'this network';
+  tokenSymbol = tokenSymbol || 'USDT';
+  document.getElementById('deposit-dialog-title').textContent = 'Coinbase ' + tokenSymbol + ' Deposit Address';
+  document.getElementById('deposit-dialog-desc').innerHTML = 'Open <b>Coinbase</b> &rarr; <b>' + tokenSymbol + '</b> &rarr; <b>Receive</b> &rarr; select <b>' + networkName + '</b> network &rarr; copy the address.';
+  document.getElementById('deposit-dialog-warning').textContent = 'Make sure you select "' + networkName + '" as the network in Coinbase! Using the wrong network will send funds to the wrong address.';
+  document.getElementById('deposit-dialog-label').textContent = tokenSymbol + ' Deposit Address (' + networkName + ')';
+  document.getElementById('deposit-addr-error').textContent = '';
+  document.getElementById('deposit-addr-input').value = '';
+  document.getElementById('deposit-addr-dialog').classList.add('visible');
+}
+
+function closeDepositAddrDialog() {
+  document.getElementById('deposit-addr-dialog').classList.remove('visible');
+  appendAiMsg('assistant', 'Transfer cancelled — no deposit address provided.');
+}
+
+async function saveDepositAddress() {
+  var addr = document.getElementById('deposit-addr-input').value.trim();
+  var errEl = document.getElementById('deposit-addr-error');
+  if (!addr || !/^0x[a-fA-F0-9]{40}$/.test(addr)) {
+    errEl.textContent = 'Please enter a valid address (0x..., 42 characters).';
+    return;
+  }
+  errEl.textContent = '';
+  var btn = document.getElementById('deposit-addr-save-btn');
+  btn.disabled = true;
+  btn.textContent = 'Saving...';
+  var networkKey = _pendingDepositNetwork || 'ethereum';
+  var tokenSym = (_pendingDepositToken || 'ETH').toLowerCase();
+  var addrKey = networkKey + '_' + tokenSym;
+  try {
+    var resp = await fetch('/api/trading/broker/deposit-address', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ broker: 'coinbase', network: addrKey, address: addr })
+    });
+    var data = await resp.json();
+    if (data.ok) {
+      document.getElementById('deposit-addr-dialog').classList.remove('visible');
+      appendAiMsg('assistant', 'Coinbase deposit address saved for **' + (CHAIN_NAMES[_w3.chainId] || networkKey) + '**. Starting liquidation...');
+      _executeLiquidationFlow(addr);
+    } else {
+      errEl.textContent = data.message || 'Failed to save address.';
+    }
+  } catch(e) {
+    errEl.textContent = 'Network error. Please try again.';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Save & Continue';
+}
 
 /* ── Chart Annotations ──────────────────────────── */
 function clearAnnotations(keepSpecs) {

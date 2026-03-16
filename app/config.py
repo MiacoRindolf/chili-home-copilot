@@ -67,10 +67,18 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
-    # Robinhood (portfolio sync + order execution)
+    # Google OAuth SSO (Sign in with Google)
+    google_client_id: str = ""
+    google_client_secret: str = ""
+    session_secret: str = "chili-session-change-me"  # sign session cookies
+
+    # Broker credentials — DEPRECATED: use the in-app setup dialogs instead.
+    # These .env values serve as a fallback when no per-user DB credentials exist.
     robinhood_username: str = ""
     robinhood_password: str = ""
-    robinhood_totp_secret: str = ""  # optional: base32 TOTP secret; if empty, SMS-based MFA is used
+    robinhood_totp_secret: str = ""
+    coinbase_api_key: str = ""
+    coinbase_api_secret: str = ""
 
     # Massive.com market data (primary — real-time quotes & aggregates)
     massive_api_key: str = ""

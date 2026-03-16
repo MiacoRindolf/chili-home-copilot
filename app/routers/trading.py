@@ -20,6 +20,7 @@ from ..services.trading.scanner import _validate_live_prices as _smart_pick_vali
 from ..services import trading_scheduler
 from ..services import ticker_universe
 from ..services import broker_service
+from ..services import broker_manager
 from .trading_sub import ai_router, broker_router, web3_router
 from ..schemas.trading import (
     AnalyzeRequest,
@@ -131,12 +132,25 @@ def trading_page(request: Request, background_tasks: BackgroundTasks, db: Sessio
 
         background_tasks.add_task(_bg_learn, ctx["user_id"])
 
+    identity = ctx["identity"]
+    avatar_url = ""
+    if not ctx["is_guest"] and ctx["user_id"]:
+        from ..models.core import User as _User
+        u = db.query(_User).filter(_User.id == ctx["user_id"]).first()
+        if u:
+            avatar_url = u.avatar_url or ""
+
+    from ..config import settings as _s
+    google_configured = bool(_s.google_client_id and _s.google_client_secret)
+
     return request.app.state.templates.TemplateResponse(
         request, "trading.html",
         {
             "title": "Trading",
             "is_guest": ctx["is_guest"],
             "user_name": ctx["user_name"],
+            "avatar_url": avatar_url,
+            "google_configured": google_configured,
         },
     )
 
@@ -374,50 +388,58 @@ def api_sell_trade(
 
     is_full_exit = abs(body.quantity - trade.quantity) < 0.0001
 
-    if trade.broker_source == "robinhood" and broker_service.is_connected():
-        order_type = "limit" if body.limit_price else "market"
-        result = broker_service.place_sell_order(
-            ticker=trade.ticker,
-            quantity=body.quantity,
-            order_type=order_type,
-            limit_price=body.limit_price,
+    if trade.broker_source in ("robinhood", "coinbase"):
+        broker_connected = (
+            (trade.broker_source == "robinhood" and broker_service.is_connected()) or
+            (trade.broker_source == "coinbase" and broker_manager.is_any_connected())
         )
-        if not result.get("ok"):
-            return JSONResponse({"ok": False, "error": result.get("error", "Sell failed")}, status_code=500)
-
-        rh_state = (result.get("state") or "queued").lower()
-        order_id = result.get("order_id", "")
-
-        if is_full_exit:
-            if rh_state == "filled":
-                trade.status = "closed"
-                trade.exit_price = body.limit_price or trade.entry_price
-                trade.exit_date = datetime.utcnow()
-                trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
-            else:
-                trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), RH order {order_id} ({rh_state})"
-        else:
-            remaining = round(trade.quantity - body.quantity, 6)
-            exit_price = body.limit_price or trade.entry_price
-            realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
-            trade.quantity = remaining
-            trade.notes = (
-                (trade.notes or "")
-                + f"\nPartial sell: {body.quantity} shares"
-                + (f" @ ${body.limit_price}" if body.limit_price else " (market)")
-                + f", RH order {order_id} ({rh_state}), realized ~${realized_pnl}"
+        if broker_connected:
+            order_type = "limit" if body.limit_price else "market"
+            result = broker_manager.place_sell_order(
+                ticker=trade.ticker,
+                quantity=body.quantity,
+                order_type=order_type,
+                limit_price=body.limit_price,
+                broker=trade.broker_source,
             )
+            if not result.get("ok"):
+                return JSONResponse({"ok": False, "error": result.get("error", "Sell failed")}, status_code=500)
 
-        db.commit()
-        return JSONResponse({
-            "ok": True,
-            "trade_id": trade.id,
-            "sold_qty": body.quantity,
-            "remaining_qty": round(trade.quantity, 6),
-            "rh_state": rh_state,
-            "order_id": order_id,
-            "status": trade.status,
-        })
+            broker_state = (result.get("state") or "queued").lower()
+            order_id = result.get("order_id", "")
+            src = result.get("broker", trade.broker_source)
+
+            if is_full_exit:
+                if broker_state == "filled":
+                    trade.status = "closed"
+                    trade.exit_price = body.limit_price or trade.entry_price
+                    trade.exit_date = datetime.utcnow()
+                    trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
+                else:
+                    trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), {src} order {order_id} ({broker_state})"
+            else:
+                remaining = round(trade.quantity - body.quantity, 6)
+                exit_price = body.limit_price or trade.entry_price
+                realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
+                trade.quantity = remaining
+                trade.notes = (
+                    (trade.notes or "")
+                    + f"\nPartial sell: {body.quantity} shares"
+                    + (f" @ ${body.limit_price}" if body.limit_price else " (market)")
+                    + f", {src} order {order_id} ({broker_state}), realized ~${realized_pnl}"
+                )
+
+            db.commit()
+            return JSONResponse({
+                "ok": True,
+                "trade_id": trade.id,
+                "sold_qty": body.quantity,
+                "remaining_qty": round(trade.quantity, 6),
+                "broker_state": broker_state,
+                "order_id": order_id,
+                "broker": src,
+                "status": trade.status,
+            })
 
     # Manual / paper trade — immediate simulated close
     exit_price = body.limit_price or trade.entry_price
@@ -1070,13 +1092,19 @@ def api_get_proposals(
 
 
 @router.post("/api/trading/proposals/{proposal_id}/approve")
-def api_approve_proposal(
+async def api_approve_proposal(
     proposal_id: int,
     request: Request,
     db: Session = Depends(get_db),
 ):
     ctx = get_identity_ctx(request, db)
-    result = ts.approve_proposal(db, proposal_id, ctx["user_id"])
+    broker = None
+    try:
+        body = await request.json()
+        broker = body.get("broker")
+    except Exception:
+        pass
+    result = ts.approve_proposal(db, proposal_id, ctx["user_id"], broker=broker)
     return JSONResponse(result)
 
 

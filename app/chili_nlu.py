@@ -113,6 +113,31 @@ def parse_message(text: str) -> Action:
     if m:
         return Action(type="add_plan_task", data={"title": m.group(1).strip(), "project_name": m.group(2).strip()})
 
+    # ── MetaMask / crypto transfer intents → redirect to trading page ──
+    if re.search(
+        r"(?i)("
+        r"sell.*?(all|everything|my).*?(coins?|tokens?|crypto).*?(transfer|send|move).*?coinbase"
+        r"|sell.*?metamask.*?(send|transfer|move|coinbase)"
+        r"|metamask.*?(sell|liquidat|send|move|transfer).*?coinbase"
+        r"|liquidat.*?metamask"
+        r"|move.*?metamask.*?coinbase"
+        r"|transfer.*?(everything|all).*?coinbase"
+        r"|swap.*?(all|everything).*?coinbase"
+        r"|send.*?(all|everything).*?coinbase"
+        r")",
+        t,
+    ):
+        return Action(
+            type="instant_reply",
+            data={
+                "text": (
+                    "To sell your MetaMask tokens and transfer to Coinbase, "
+                    "head to the **Trading page** and use the AI chat there. "
+                    "MetaMask operations require the trading interface for wallet signing."
+                )
+            },
+        )
+
     # ── Desktop companion actions ──
     # Normalize conversational phrasing so "can you open my notepad for me" -> "open notepad"
     t_desktop = _strip_desktop_filler(t)

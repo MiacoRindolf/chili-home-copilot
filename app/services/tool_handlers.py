@@ -70,6 +70,11 @@ def _handle_instant_how_are_you(db: Session, action_data: dict, llm_reply: str, 
     return "Doing great, thanks! How can I help you today?", True, "instant_how_are_you"
 
 
+@register("instant_reply")
+def _handle_instant_reply(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
+    return action_data.get("text", ""), True, "instant_reply"
+
+
 @register("instant_get_time")
 def _handle_instant_get_time(db: Session, action_data: dict, llm_reply: str, is_guest: bool, user_id: int | None) -> tuple[str, bool, str]:
     now = datetime.now()

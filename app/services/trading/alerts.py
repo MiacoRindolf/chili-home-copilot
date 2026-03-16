@@ -629,8 +629,9 @@ def approve_proposal(
     db: Session,
     proposal_id: int,
     user_id: int | None,
+    broker: str | None = None,
 ) -> dict[str, Any]:
-    """Approve a proposal and execute via Robinhood if connected."""
+    """Approve a proposal and execute via the best available broker."""
     from ...models.trading import StrategyProposal
     from sqlalchemy import or_
 
@@ -652,8 +653,7 @@ def approve_proposal(
     proposal.reviewed_at = datetime.utcnow()
     db.commit()
 
-    # Attempt order execution
-    execution = _execute_proposal(db, proposal, user_id)
+    execution = _execute_proposal(db, proposal, user_id, broker=broker)
 
     return {
         "ok": True,
@@ -930,27 +930,29 @@ def _execute_proposal(
     db: Session,
     proposal,
     user_id: int | None,
+    broker: str | None = None,
 ) -> dict[str, Any]:
-    """Place a Robinhood order for an approved proposal (or record locally).
+    """Place a broker order for an approved proposal (or record locally).
 
-    When Robinhood is connected the order is placed and both the proposal
+    Uses broker_manager to auto-select the best broker (Coinbase for crypto,
+    Robinhood for stocks) unless *broker* is explicitly provided.
+
+    When a broker is connected the order is placed and both the proposal
     and trade start in **working** status.  Only the periodic order-sync
-    job will flip them to *executed* / *open* once Robinhood confirms a
+    job will flip them to *executed* / *open* once the broker confirms a
     fill — this prevents marking trades as "executed" when the limit order
     is still sitting unfilled.
     """
-    from ..broker_service import is_connected, place_buy_order, map_rh_status
+    from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
     from ...models.trading import Trade
 
     ticker = proposal.ticker
     quantity = proposal.quantity
 
-    # Compute quantity using Chili's brain (regime, volatility, caps) when missing
     if not quantity or quantity <= 0:
         buying_power = _get_buying_power()
         stop = proposal.stop_loss or proposal.entry_price
         risk_per_share = abs(proposal.entry_price - stop) if stop else 0
-        # Build minimal pick from proposal for position-size overlays
         pick = {}
         if proposal.signals_json:
             try:
@@ -975,7 +977,9 @@ def _execute_proposal(
             quantity = 1
             proposal.quantity = 1
 
-    if not is_connected():
+    target_broker = broker or get_best_broker_for(ticker)
+
+    if not is_any_connected() or target_broker == "manual":
         trade = Trade(
             user_id=user_id,
             ticker=ticker,
@@ -1006,12 +1010,15 @@ def _execute_proposal(
             quantity=quantity,
             order_type="limit",
             limit_price=proposal.entry_price,
+            broker=target_broker,
         )
 
+        used_broker = result.get("broker", target_broker)
+
         if result.get("ok"):
-            rh_state = (result.get("raw") or {}).get("state", "queued")
-            chili_status = map_rh_status(rh_state)
-            is_already_filled = rh_state == "filled"
+            raw_state = (result.get("raw") or {}).get("state") or (result.get("raw") or {}).get("status") or "queued"
+            chili_status = map_status(used_broker, raw_state)
+            is_already_filled = raw_state.lower() == "filled"
 
             proposal.broker_order_id = result.get("order_id")
             if is_already_filled:
@@ -1029,7 +1036,10 @@ def _execute_proposal(
                 except Exception:
                     pass
 
-            avg_price = _safe_float((result.get("raw") or {}).get("average_price"))
+            avg_price = _safe_float(
+                (result.get("raw") or {}).get("average_price")
+                or (result.get("raw") or {}).get("average_filled_price")
+            )
 
             trade = Trade(
                 user_id=user_id,
@@ -1038,9 +1048,9 @@ def _execute_proposal(
                 entry_price=avg_price if is_already_filled and avg_price else proposal.entry_price,
                 quantity=quantity,
                 status="open" if is_already_filled else "working",
-                broker_source="robinhood",
+                broker_source=used_broker,
                 broker_order_id=result.get("order_id"),
-                broker_status=rh_state,
+                broker_status=raw_state,
                 last_broker_sync=datetime.utcnow(),
                 filled_at=datetime.utcnow() if is_already_filled else None,
                 avg_fill_price=avg_price if is_already_filled else None,
@@ -1051,27 +1061,28 @@ def _execute_proposal(
                 }),
                 tags="auto-trade,proposal",
                 pattern_tags=_ptags or None,
-                notes=f"Order placed from proposal #{proposal.id}: {proposal.thesis[:100]}",
+                notes=f"Order placed from proposal #{proposal.id} via {used_broker}: {proposal.thesis[:100]}",
             )
             db.add(trade)
             db.flush()
             proposal.trade_id = trade.id
             db.commit()
 
+            broker_label = used_broker.title()
             if is_already_filled:
                 msg = (
                     f"ORDER FILLED: BUY {quantity} {ticker} @ ${trade.entry_price:,.2f} "
-                    f"via Robinhood | Proposal #{proposal.id}"
+                    f"via {broker_label} | Proposal #{proposal.id}"
                 )
                 dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-                return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id}
+                return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
             else:
                 msg = (
                     f"ORDER PLACED: BUY {quantity} {ticker} @ ${proposal.entry_price:,.2f} "
-                    f"(limit, waiting for fill) via Robinhood | Proposal #{proposal.id}"
+                    f"(limit, waiting for fill) via {broker_label} | Proposal #{proposal.id}"
                 )
                 dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
-                return {"status": "working", "order_id": result.get("order_id"), "trade_id": trade.id}
+                return {"status": "working", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
         else:
             error = result.get("error", "Unknown error")
             msg = f"ORDER FAILED: {ticker} — {error}"

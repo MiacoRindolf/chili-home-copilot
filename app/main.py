@@ -6,13 +6,14 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.sessions import SessionMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, brain, chat, health_routes, pages, marketplace, mobile, trading
+from .routers import admin, auth, brain, chat, health_routes, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import MarketplaceModule
 from .services.trading_scheduler import start_scheduler, stop_scheduler
@@ -39,11 +40,21 @@ async def lifespan(app: FastAPI):
         load_model()
     except Exception:
         pass
+    _restore_broker_sessions()
     _start_massive_ws()
     _prewarm_market_context()
     yield
     _stop_massive_ws()
     stop_scheduler()
+
+
+def _restore_broker_sessions():
+    """Try to restore persisted Robinhood session on startup."""
+    try:
+        from .services import broker_service
+        broker_service.try_restore_session()
+    except Exception:
+        pass
 
 
 def _start_massive_ws():
@@ -85,6 +96,10 @@ def _prewarm_market_context():
 
 app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)
 
+# Session middleware (authlib OAuth stores nonce/state here)
+from .config import settings as _cfg
+app.add_middleware(SessionMiddleware, secret_key=_cfg.session_secret)
+
 # CORS for web and mobile clients (development-friendly defaults).
 app.add_middleware(
     CORSMiddleware,
@@ -122,6 +137,7 @@ app.state.templates.env.loader = ChoiceLoader(loader_list)
 # Navigation entries for optional modules (used by templates)
 app.state.nav_modules = get_nav_modules()
 
+app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(brain.router)

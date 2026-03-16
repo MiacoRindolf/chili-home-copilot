@@ -610,6 +610,40 @@ def _migration_019_project_brain_tables(conn) -> None:
     conn.commit()
 
 
+def _migration_020_user_google_oauth_cols(conn) -> None:
+    """Add google_id and avatar_url to users table for Google OAuth SSO."""
+    cols = _columns(conn, "users")
+    if "google_id" not in cols:
+        conn.execute(text("ALTER TABLE users ADD COLUMN google_id TEXT"))
+    if "avatar_url" not in cols:
+        conn.execute(text("ALTER TABLE users ADD COLUMN avatar_url TEXT"))
+    conn.commit()
+    try:
+        conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ix_users_google_id ON users(google_id)"))
+        conn.commit()
+    except Exception:
+        pass
+
+
+def _migration_021_broker_credentials_table(conn) -> None:
+    """Create broker_credentials table for per-user encrypted credential storage."""
+    tables = _tables(conn)
+    if "broker_credentials" not in tables:
+        conn.execute(text("""
+            CREATE TABLE broker_credentials (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL REFERENCES users(id),
+                broker TEXT NOT NULL,
+                encrypted_data TEXT NOT NULL,
+                created_at DATETIME DEFAULT (datetime('now')),
+                updated_at DATETIME DEFAULT (datetime('now')),
+                UNIQUE(user_id, broker)
+            )
+        """))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_broker_creds_user ON broker_credentials(user_id)"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -631,6 +665,8 @@ MIGRATIONS = [
     ("017_code_brain_innovation", _migration_017_code_brain_innovation),
     ("018_breakout_alert_outcome_cols", _migration_018_breakout_alert_outcome_cols),
     ("019_project_brain_tables", _migration_019_project_brain_tables),
+    ("020_user_google_oauth_cols", _migration_020_user_google_oauth_cols),
+    ("021_broker_credentials_table", _migration_021_broker_credentials_table),
 ]
 
 
