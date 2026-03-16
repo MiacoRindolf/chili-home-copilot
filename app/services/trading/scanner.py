@@ -14,15 +14,19 @@ from sqlalchemy.orm import Session
 
 from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
 from .market_data import (
-    fetch_quote, fetch_ohlcv_df, fetch_quotes_batch, smart_round,
-    DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS, ALL_SCAN_TICKERS,
-    get_market_regime, _use_massive, _use_polygon,
+    fetch_quote, fetch_ohlcv_df, fetch_ohlcv_batch, fetch_quotes_batch,
+    smart_round, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
+    ALL_SCAN_TICKERS, get_market_regime, _use_massive, _use_polygon,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights
 
 logger = logging.getLogger(__name__)
 
 import os as _os
+
+from ta.momentum import RSIIndicator, StochasticOscillator
+from ta.trend import MACD, EMAIndicator, ADXIndicator
+from ta.volatility import BollingerBands, AverageTrueRange
 
 _shutting_down = threading.Event()
 _CPU_COUNT = _os.cpu_count() or 4
@@ -581,9 +585,7 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
 def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
     """Actual scoring logic (no cache)."""
     try:
-        from ta.momentum import RSIIndicator, StochasticOscillator
-        from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
-        from ta.volatility import BollingerBands, AverageTrueRange
+        from ta.trend import SMAIndicator
 
         df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         if df.empty or len(df) < 30:
@@ -838,10 +840,6 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
     of 15m bars.
     """
     try:
-        from ta.momentum import RSIIndicator, StochasticOscillator
-        from ta.trend import MACD, EMAIndicator
-        from ta.volatility import AverageTrueRange
-
         df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
         if df.empty or len(df) < 40:
             return None
@@ -1100,6 +1098,108 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
 
 _crypto_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _CRYPTO_BREAKOUT_TTL = 900  # 15 minutes
+
+
+# ── Vectorised indicator computation ──────────────────────────────────
+
+def _compute_indicators(df: pd.DataFrame, *, crypto: bool = False) -> dict[str, Any] | None:
+    """Compute all indicators needed for breakout scoring in a single pass.
+
+    Returns a flat dict of scalar values or None if the DataFrame is too short.
+    """
+    if df.empty or len(df) < 60:
+        return None
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"]
+    price = float(close.iloc[-1])
+    if price <= 0:
+        return None
+
+    rsi = RSIIndicator(close=close, window=14).rsi()
+    macd_obj = MACD(close=close)
+    bb = BollingerBands(close=close, window=20, window_dev=2)
+    atr_series = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+    adx_series = ADXIndicator(high=high, low=low, close=close, window=14).adx()
+
+    result: dict[str, Any] = {
+        "df": df,
+        "close": close,
+        "high": high,
+        "low": low,
+        "volume": volume,
+        "price": price,
+        "rsi": float(rsi.iloc[-1]) if pd.notna(rsi.iloc[-1]) else None,
+        "macd_line": float(macd_obj.macd().iloc[-1]) if pd.notna(macd_obj.macd().iloc[-1]) else None,
+        "macd_signal": float(macd_obj.macd_signal().iloc[-1]) if pd.notna(macd_obj.macd_signal().iloc[-1]) else None,
+        "macd_hist": float(macd_obj.macd_diff().iloc[-1]) if pd.notna(macd_obj.macd_diff().iloc[-1]) else None,
+        "adx": float(adx_series.iloc[-1]) if pd.notna(adx_series.iloc[-1]) else None,
+        "atr": float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else price * 0.01,
+        "atr_series": atr_series,
+        "bb_upper_series": bb.bollinger_hband(),
+        "bb_lower_series": bb.bollinger_lband(),
+        "bb_width_series": bb.bollinger_wband(),
+        "bb_upper": float(bb.bollinger_hband().iloc[-1]) if pd.notna(bb.bollinger_hband().iloc[-1]) else None,
+        "bb_lower": float(bb.bollinger_lband().iloc[-1]) if pd.notna(bb.bollinger_lband().iloc[-1]) else None,
+        "bb_mid": float(bb.bollinger_mavg().iloc[-1]) if pd.notna(bb.bollinger_mavg().iloc[-1]) else None,
+    }
+
+    ema20 = EMAIndicator(close=close, window=20).ema_indicator()
+    ema50 = EMAIndicator(close=close, window=50).ema_indicator()
+    result["ema_20"] = float(ema20.iloc[-1]) if pd.notna(ema20.iloc[-1]) else None
+    result["ema_50"] = float(ema50.iloc[-1]) if pd.notna(ema50.iloc[-1]) else None
+
+    if crypto:
+        ema9 = EMAIndicator(close=close, window=9).ema_indicator()
+        ema21 = EMAIndicator(close=close, window=21).ema_indicator()
+        result["ema_9"] = float(ema9.iloc[-1]) if pd.notna(ema9.iloc[-1]) else None
+        result["ema_21"] = float(ema21.iloc[-1]) if pd.notna(ema21.iloc[-1]) else None
+        stoch = StochasticOscillator(high=high, low=low, close=close)
+        stoch_k = stoch.stoch()
+        stoch_d = stoch.stoch_signal()
+        result["stoch_k"] = float(stoch_k.iloc[-1]) if pd.notna(stoch_k.iloc[-1]) else None
+        result["stoch_d"] = float(stoch_d.iloc[-1]) if pd.notna(stoch_d.iloc[-1]) else None
+        result["stoch_k_prev"] = float(stoch_k.iloc[-2]) if len(stoch_k) >= 2 and pd.notna(stoch_k.iloc[-2]) else None
+        result["stoch_d_prev"] = float(stoch_d.iloc[-2]) if len(stoch_d) >= 2 and pd.notna(stoch_d.iloc[-2]) else None
+
+    bb_width_val = result["bb_width_series"].iloc[-1]
+    result["bb_width"] = float(bb_width_val) if pd.notna(bb_width_val) else 0
+
+    bb_width_clean = result["bb_width_series"].dropna()
+    result["bb_squeeze"] = False
+    result["bb_squeeze_firing"] = False
+    if len(bb_width_clean) >= 50:
+        bw50 = bb_width_clean.iloc[-50:]
+        pct_20 = float(bw50.quantile(0.20))
+        prev_w = float(bb_width_clean.iloc[-2]) if len(bb_width_clean) >= 2 else result["bb_width"]
+        if result["bb_width"] <= pct_20:
+            result["bb_squeeze"] = True
+        if prev_w <= pct_20 and result["bb_width"] > pct_20:
+            result["bb_squeeze_firing"] = True
+    elif len(bb_width_clean) >= 20:
+        pct_rank = float((bb_width_clean < result["bb_width"]).sum() / len(bb_width_clean) * 100)
+        result["bb_width_pct_rank"] = pct_rank
+        if pct_rank < 25:
+            result["bb_squeeze"] = True
+
+    vol_avg_20 = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+    vol_latest = float(volume.iloc[-1])
+    result["vol_avg_20"] = vol_avg_20
+    result["vol_latest"] = vol_latest
+    result["rel_vol"] = round(vol_latest / vol_avg_20, 2) if vol_avg_20 > 0 else 1.0
+
+    atr_clean = atr_series.dropna()
+    result["atr_state"] = "normal"
+    if len(atr_clean) >= 50:
+        atr50 = atr_clean.iloc[-50:]
+        if result["atr"] <= float(atr50.quantile(0.25)):
+            result["atr_state"] = "compressed"
+        elif result["atr"] >= float(atr50.quantile(0.75)):
+            result["atr_state"] = "expanding"
+
+    return result
 
 
 # ── Shared breakout pattern helpers ──────────────────────────────────
@@ -1374,106 +1474,68 @@ def _get_cached_news_sentiment(ticker: str) -> float | None:
         return None
 
 
+_cbo_score_cache: dict[str, tuple[float, dict | None]] = {}
+_cbo_score_lock = threading.Lock()
+_CBO_SCORE_TTL = 300  # 5 min for crypto (faster moving)
+
+
 def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
-    """Score a crypto pair for intraday breakout potential on 15m candles.
-
-    Detects: RVOL spikes, Bollinger squeeze/expansion, ATR compression,
-    EMA 9/21/50 stack alignment, and confirmed breakouts (close beyond BB
-    with volume).
-    """
+    """Score a crypto pair for intraday breakout potential on 15m candles."""
+    key = ticker.upper()
+    now = time.time()
+    with _cbo_score_lock:
+        entry = _cbo_score_cache.get(key)
+        if entry and now - entry[0] < _CBO_SCORE_TTL:
+            return entry[1]
     try:
-        from ta.momentum import RSIIndicator, StochasticOscillator
-        from ta.trend import MACD, EMAIndicator, ADXIndicator
-        from ta.volatility import BollingerBands, AverageTrueRange
-
         df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
-        if df.empty or len(df) < 60:
+        ind = _compute_indicators(df, crypto=True)
+        if ind is None:
             return None
 
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-        volume = df["Volume"]
-        price = float(close.iloc[-1])
-        if price <= 0:
-            return None
+        close = ind["close"]
+        high = ind["high"]
+        low = ind["low"]
+        volume = ind["volume"]
+        price = ind["price"]
+        rsi_val = ind["rsi"]
+        macd_line = ind["macd_line"]
+        macd_sig = ind["macd_signal"]
+        macd_hist = ind["macd_hist"]
+        ema_9 = ind["ema_9"]
+        ema_21 = ind["ema_21"]
+        ema_50 = ind["ema_50"]
+        bb_upper = ind["bb_upper"]
+        bb_lower = ind["bb_lower"]
+        bb_mid = ind["bb_mid"]
+        bb_width = ind["bb_width"]
+        atr_val = ind["atr"]
+        adx_val = ind["adx"]
+        stoch_k = ind["stoch_k"]
+        stoch_d = ind["stoch_d"]
+        stoch_k_prev = ind["stoch_k_prev"]
+        stoch_d_prev = ind["stoch_d_prev"]
+        rvol = ind["rel_vol"]
+        vol_avg_20 = ind["vol_avg_20"]
+        vol_latest = ind["vol_latest"]
+        bb_squeeze = ind["bb_squeeze"]
+        bb_squeeze_firing = ind["bb_squeeze_firing"]
+        atr_state = ind["atr_state"]
 
-        # ── Core indicators ──
-        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
-        macd_obj = MACD(close=close)
-        macd_line = macd_obj.macd().iloc[-1]
-        macd_sig = macd_obj.macd_signal().iloc[-1]
-        macd_hist = macd_obj.macd_diff().iloc[-1]
-        ema_9 = EMAIndicator(close=close, window=9).ema_indicator().iloc[-1]
-        ema_21 = EMAIndicator(close=close, window=21).ema_indicator().iloc[-1]
-        ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
-
-        bb = BollingerBands(close=close, window=20, window_dev=2)
-        bb_upper = bb.bollinger_hband().iloc[-1]
-        bb_lower = bb.bollinger_lband().iloc[-1]
-        bb_mid = bb.bollinger_mavg().iloc[-1]
-        bb_width_series = bb.bollinger_wband()
-        bb_width = float(bb_width_series.iloc[-1]) if pd.notna(bb_width_series.iloc[-1]) else 0
-
-        atr_series = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
-        atr_val = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else price * 0.01
-
-        adx_val = ADXIndicator(high=high, low=low, close=close, window=14).adx().iloc[-1]
-        stoch = StochasticOscillator(high=high, low=low, close=close)
-        stoch_k_series = stoch.stoch()
-        stoch_d_series = stoch.stoch_signal()
-        stoch_k = stoch_k_series.iloc[-1]
-        stoch_d = stoch_d_series.iloc[-1]
-        stoch_k_prev = stoch_k_series.iloc[-2] if len(stoch_k_series) >= 2 else None
-        stoch_d_prev = stoch_d_series.iloc[-2] if len(stoch_d_series) >= 2 else None
-
-        # ── RVOL (relative volume) ──
-        vol_avg_20 = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
-        vol_latest = float(volume.iloc[-1])
-        rvol = round(vol_latest / vol_avg_20, 2) if vol_avg_20 > 0 else 1.0
-
-        # ── Bollinger squeeze detection ──
-        bb_width_clean = bb_width_series.dropna()
-        bb_squeeze = False
-        bb_squeeze_firing = False
-        if len(bb_width_clean) >= 50:
-            bb_width_50 = bb_width_clean.iloc[-50:]
-            pct_20 = float(bb_width_50.quantile(0.20))
-            pct_80 = float(bb_width_50.quantile(0.80))
-            prev_width = float(bb_width_clean.iloc[-2]) if len(bb_width_clean) >= 2 else bb_width
-            if bb_width <= pct_20:
-                bb_squeeze = True
-            if prev_width <= pct_20 and bb_width > pct_20:
-                bb_squeeze_firing = True
-
-        # ── ATR compression / expansion ──
-        atr_state = "normal"
-        atr_clean = atr_series.dropna()
-        if len(atr_clean) >= 50:
-            atr_50 = atr_clean.iloc[-50:]
-            atr_pct_25 = float(atr_50.quantile(0.25))
-            atr_pct_75 = float(atr_50.quantile(0.75))
-            if atr_val <= atr_pct_25:
-                atr_state = "compressed"
-            elif atr_val >= atr_pct_75:
-                atr_state = "expanding"
-
-        # ── EMA stack alignment ──
         ema_alignment = "neutral"
-        if pd.notna(ema_9) and pd.notna(ema_21) and pd.notna(ema_50):
-            if price > float(ema_9) > float(ema_21) > float(ema_50):
+        if ema_9 is not None and ema_21 is not None and ema_50 is not None:
+            if price > ema_9 > ema_21 > ema_50:
                 ema_alignment = "bullish_stack"
-            elif price < float(ema_9) < float(ema_21) < float(ema_50):
+            elif price < ema_9 < ema_21 < ema_50:
                 ema_alignment = "bearish_stack"
-            elif float(ema_9) > float(ema_21):
+            elif ema_9 > ema_21:
                 ema_alignment = "bullish"
-            elif float(ema_9) < float(ema_21):
+            elif ema_9 < ema_21:
                 ema_alignment = "bearish"
 
-        # ── Breakout confirmation ──
         breakout_confirmed = False
         breakout_dir = None
-        if pd.notna(bb_upper) and pd.notna(bb_lower):
+        if bb_upper is not None and bb_lower is not None:
             if price > float(bb_upper) and rvol >= 1.5:
                 breakout_confirmed = True
                 breakout_dir = "long"
@@ -1770,7 +1832,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         target = smart_round(price + _c_tgt_m * atr_val, crypto=True)
         rr = round(_c_tgt_m / _c_stop_m, 2)
 
-        return {
+        result = {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": signal,
@@ -1811,6 +1873,9 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 float(adx_val) if pd.notna(adx_val) else None,
             ),
         }
+        with _cbo_score_lock:
+            _cbo_score_cache[key] = (time.time(), result)
+        return result
     except Exception as e:
         logger.debug(f"[crypto_breakout] {ticker} failed: {e}")
         return None
@@ -1851,13 +1916,12 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
     total = len(ticker_list)
     logger.info(f"[crypto_breakout] Scanning {total} crypto pairs...")
 
-    # Pre-warm the OHLCV cache with a single batch request to avoid
-    # hitting per-ticker rate limits during the scoring loop.
+    t_pw = time.time()
     try:
-        from ..yf_session import batch_download
-        batch_download(ticker_list, period="5d", interval="15m")
+        fetch_ohlcv_batch(ticker_list, interval="15m", period="5d")
     except Exception as e:
         logger.warning(f"[crypto_breakout] Batch pre-warm failed (will fetch individually): {e}")
+    logger.info(f"[crypto_breakout] Pre-warm {len(ticker_list)} tickers in {time.time()-t_pw:.1f}s")
 
     results = []
     errors = 0
@@ -1927,85 +1991,63 @@ def get_crypto_breakout_cache() -> dict[str, Any]:
 
 # ── Breakout Detection Scoring ────────────────────────────────────────
 
+_bo_score_cache: dict[str, tuple[float, dict | None]] = {}
+_bo_score_lock = threading.Lock()
+_BO_SCORE_TTL = 600  # 10 min — breakout setups don't change fast
+
+
 def _score_breakout(ticker: str) -> dict[str, Any] | None:
-    """Score a ticker for breakout readiness.
-
-    Detects consolidation via Bollinger Band squeeze, low ADX, declining
-    volume, and proximity to resistance.  Also evaluates momentum quality
-    via MACD gating, float size, relative volume surge, pullback quality,
-    and volume profile analysis.
-    """
+    """Score a ticker for breakout readiness."""
+    key = ticker.upper()
+    now = time.time()
+    with _bo_score_lock:
+        entry = _bo_score_cache.get(key)
+        if entry and now - entry[0] < _BO_SCORE_TTL:
+            return entry[1]
     try:
-        from ta.momentum import RSIIndicator
-        from ta.trend import MACD, EMAIndicator, ADXIndicator
-        from ta.volatility import BollingerBands, AverageTrueRange
-
         df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
-        if df.empty or len(df) < 60:
+        ind = _compute_indicators(df, crypto=False)
+        if ind is None:
             return None
 
-        close = df["Close"]
-        high = df["High"]
-        low = df["Low"]
-        volume = df["Volume"]
-        price = float(close.iloc[-1])
-        if price <= 0:
-            return None
+        close = ind["close"]
+        high = ind["high"]
+        low = ind["low"]
+        volume = ind["volume"]
+        price = ind["price"]
+        rsi_val = ind["rsi"]
+        macd_line = ind["macd_line"]
+        macd_sig = ind["macd_signal"]
+        macd_hist = ind["macd_hist"]
+        ema_20 = ind["ema_20"]
+        ema_50 = ind["ema_50"]
+        adx_val = ind["adx"]
+        atr_val = ind["atr"]
+        rel_vol = ind["rel_vol"]
+        vol_avg_20 = ind["vol_avg_20"]
+        vol_latest = ind["vol_latest"]
+        is_squeeze = ind["bb_squeeze"]
+        bb_width_pct_rank = ind.get("bb_width_pct_rank", 0.0 if is_squeeze else 50.0)
 
-        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
-        macd_obj = MACD(close=close)
-        macd_line = macd_obj.macd().iloc[-1]
-        macd_sig = macd_obj.macd_signal().iloc[-1]
-        macd_hist = macd_obj.macd_diff().iloc[-1]
-        ema_20 = EMAIndicator(close=close, window=20).ema_indicator().iloc[-1]
-        ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
-        adx_val = ADXIndicator(high=high, low=low, close=close).adx().iloc[-1]
-        atr_val = AverageTrueRange(high=high, low=low, close=close).average_true_range().iloc[-1]
-        bb = BollingerBands(close=close, window=20, window_dev=2)
-        bb_upper = bb.bollinger_hband()
-        bb_lower = bb.bollinger_lband()
-        bb_width = bb.bollinger_wband()
-
-        # Resistance: 20-day high
         resistance = float(high.rolling(20).max().iloc[-1])
         dist_to_breakout = round((resistance - price) / price * 100, 2)
 
-        # Bollinger Band width squeeze detection
-        bb_width_series = bb_width.dropna()
-        if len(bb_width_series) < 20:
-            return None
-        current_bb_width = float(bb_width_series.iloc[-1])
-        bb_width_pct_rank = float(
-            (bb_width_series < current_bb_width).sum() / len(bb_width_series) * 100
-        )
-        is_squeeze = bb_width_pct_rank < 25
-
-        # Volume trend (declining = compression before expansion)
         vol_recent = float(volume.iloc[-5:].mean())
         vol_prior = float(volume.iloc[-20:-5].mean()) if len(volume) >= 20 else vol_recent
         vol_declining = vol_recent < vol_prior * 0.8
         vol_trend_pct = round((vol_recent - vol_prior) / vol_prior * 100, 1) if vol_prior > 0 else 0
 
-        # Relative volume (latest bar vs 20-day average)
-        vol_avg_20 = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
-        vol_latest = float(volume.iloc[-1])
-        rel_vol = round(vol_latest / vol_avg_20, 2) if vol_avg_20 > 0 else 1.0
-
-        # Consolidation days: how many recent bars stayed within a tight range
         recent_range = high.iloc[-20:].max() - low.iloc[-20:].min()
         daily_ranges = high.iloc[-20:] - low.iloc[-20:]
         tight_days = int((daily_ranges < recent_range * 0.3).sum())
 
-        # Scoring
         score = 5.0
         signals: list[str] = []
 
-        # BB squeeze = consolidation
         if is_squeeze:
             score += get_adaptive_weight("bo_squeeze")
             signals.append(f"Bollinger squeeze (width percentile: {bb_width_pct_rank:.0f}%)")
 
-        # Near resistance
         if 0 <= dist_to_breakout <= 2.0:
             score += get_adaptive_weight("bo_near_resistance_close")
             signals.append(f"Near resistance — {dist_to_breakout:.1f}% to breakout")
@@ -2153,7 +2195,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
 
         # ── Momentum Divergence Filter ──
         rsi_series = RSIIndicator(close=close, window=14).rsi()
-        macd_hist_series = macd_obj.macd_diff()
+        macd_hist_series = MACD(close=close).macd_diff()
         rsi_div = _detect_divergence(close, rsi_series)
         if rsi_div == "bearish":
             score += get_adaptive_weight("bo_rsi_divergence_penalty")
@@ -2165,7 +2207,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
 
         # ── Candlestick Patterns at Key Levels ──
         candle = _detect_candle_pattern(df["Open"], high, low, close)
-        bb_upper_last = float(bb_upper.iloc[-1]) if pd.notna(bb_upper.iloc[-1]) else None
+        bb_upper_last = ind["bb_upper"]
         if candle == "engulfing" and bb_upper_last and abs(price - bb_upper_last) / price < 0.02:
             score += get_adaptive_weight("bo_candle_engulfing")
             signals.append("Bullish engulfing candle near resistance")
@@ -2285,7 +2327,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         _bo_stop_m = get_adaptive_weight("bo_stop_atr_mult")
         _bo_tgt_m = get_adaptive_weight("bo_target_atr_mult")
 
-        return {
+        result = {
             "ticker": ticker.upper(),
             "score": round(score, 1),
             "signal": status,
@@ -2320,6 +2362,9 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 float(adx_val) if pd.notna(adx_val) else None,
             ),
         }
+        with _bo_score_lock:
+            _bo_score_cache[key] = (time.time(), result)
+        return result
     except Exception:
         return None
 
@@ -2466,8 +2511,53 @@ def _quick_filter_candidates(
 
 # ── Batch runners for day-trade / breakout scans ──────────────────────
 
+_daytrade_cache: dict[str, Any] = {"results": [], "ts": 0.0}
+_DAYTRADE_CACHE_TTL = 600  # 10 min
+_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
+_BREAKOUT_CACHE_TTL = 600  # 10 min
+
+
+def get_daytrade_cache() -> dict[str, Any]:
+    """Return cached daytrade scan results (for API layer)."""
+    now = time.time()
+    age = int(now - _daytrade_cache["ts"]) if _daytrade_cache["ts"] > 0 else None
+    return {
+        "results": _daytrade_cache.get("results", []),
+        "scan_time": _daytrade_cache.get("scan_time"),
+        "age_seconds": age,
+        "total_scanned": _daytrade_cache.get("candidates_scanned", 0),
+    }
+
+
+def get_breakout_cache() -> dict[str, Any]:
+    """Return cached breakout scan results (for API layer)."""
+    now = time.time()
+    age = int(now - _breakout_cache["ts"]) if _breakout_cache["ts"] > 0 else None
+    return {
+        "results": _breakout_cache.get("results", []),
+        "scan_time": _breakout_cache.get("scan_time"),
+        "age_seconds": age,
+        "total_scanned": _breakout_cache.get("candidates_scanned", 0),
+    }
+
+
 def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     """Full-universe day-trade scan: prescreen -> batch-quote filter -> intraday scoring."""
+    global _daytrade_cache
+
+    now = time.time()
+    if _daytrade_cache["results"] and (now - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
+        return {
+            "ok": True,
+            "scan_type": "day_trade",
+            "cached": True,
+            "candidates_scanned": _daytrade_cache.get("candidates_scanned", 0),
+            "total_sourced": _daytrade_cache.get("total_sourced", 0),
+            "matches": len(_daytrade_cache["results"]),
+            "results": _daytrade_cache["results"][:max_results],
+            "brain": _brain_meta(),
+        }
+
     from .prescreener import get_daytrade_candidates
 
     start = time.time()
@@ -2507,8 +2597,15 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
                 pass
 
     results.sort(key=lambda r: r["score"], reverse=True)
-    results = results[:max_results]
     elapsed = round(time.time() - start, 1)
+
+    _daytrade_cache.update(
+        results=results, ts=time.time(),
+        candidates_scanned=len(candidates),
+        total_sourced=total_sourced,
+        scan_time=elapsed,
+    )
+    logger.info(f"[trading] Day-trade cache filled: {len(results)} results in {elapsed}s")
 
     with _intraday_progress_lock:
         _intraday_scan_progress.update(running=False, scan_type="")
@@ -2518,15 +2615,30 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
         "scan_type": "day_trade",
         "candidates_scanned": len(candidates),
         "total_sourced": total_sourced,
-        "matches": len(results),
+        "matches": len(results[:max_results]),
         "elapsed_s": elapsed,
-        "results": results,
+        "results": results[:max_results],
         "brain": _brain_meta(),
     }
 
 
 def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
     """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
+    global _breakout_cache
+
+    now = time.time()
+    if _breakout_cache["results"] and (now - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
+        return {
+            "ok": True,
+            "scan_type": "breakout",
+            "cached": True,
+            "candidates_scanned": _breakout_cache.get("candidates_scanned", 0),
+            "total_sourced": _breakout_cache.get("total_sourced", 0),
+            "matches": len(_breakout_cache["results"][:max_results]),
+            "results": _breakout_cache["results"][:max_results],
+            "brain": _brain_meta(),
+        }
+
     from .prescreener import get_breakout_candidates
 
     start = time.time()
@@ -2569,8 +2681,15 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
                 pass
 
     results.sort(key=lambda r: r["score"], reverse=True)
-    results = results[:max_results]
     elapsed = round(time.time() - start, 1)
+
+    _breakout_cache.update(
+        results=results, ts=time.time(),
+        candidates_scanned=len(candidates),
+        total_sourced=total_sourced,
+        scan_time=elapsed,
+    )
+    logger.info(f"[trading] Breakout cache filled: {len(results)} results in {elapsed}s")
 
     with _intraday_progress_lock:
         _intraday_scan_progress.update(running=False, scan_type="")
@@ -2580,9 +2699,9 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
         "scan_type": "breakout",
         "candidates_scanned": len(candidates),
         "total_sourced": total_sourced,
-        "matches": len(results),
+        "matches": len(results[:max_results]),
         "elapsed_s": elapsed,
-        "results": results,
+        "results": results[:max_results],
         "brain": _brain_meta(),
     }
 
@@ -2734,12 +2853,60 @@ def _eval_condition(cond: dict, scored: dict) -> bool:
     return False
 
 
+def _try_load_cached_scores(db: "Session | None") -> list[dict[str, Any]]:
+    """Attempt to load recent scored results from the DB or in-memory caches.
+
+    Returns a list of scored dicts if fresh data is available, else empty list.
+    """
+    results: list[dict[str, Any]] = []
+
+    if _breakout_cache["results"] and (time.time() - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
+        results.extend(_breakout_cache["results"])
+    if _daytrade_cache["results"] and (time.time() - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
+        results.extend(_daytrade_cache["results"])
+
+    if db is not None:
+        try:
+            from ...models.trading import ScanResult
+            cutoff = datetime.utcnow() - timedelta(hours=2)
+            rows = db.query(ScanResult).filter(
+                ScanResult.scanned_at >= cutoff,
+            ).order_by(ScanResult.score.desc()).limit(500).all()
+            seen = {r.get("ticker") for r in results}
+            for r in rows:
+                if r.ticker in seen:
+                    continue
+                seen.add(r.ticker)
+                results.append({
+                    "ticker": r.ticker,
+                    "score": r.score,
+                    "signal": r.signal,
+                    "price": r.entry_price,
+                    "entry_price": r.entry_price,
+                    "stop_loss": r.stop_loss,
+                    "take_profit": r.take_profit,
+                    "risk_level": r.risk_level,
+                    "signals": r.rationale.split("; ") if r.rationale else [],
+                    "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+                })
+        except Exception as e:
+            logger.debug(f"[trading] Could not load cached scores from DB: {e}")
+
+    return results
+
+
 def run_custom_screen(
     screen_id: str | None = None,
     conditions: list[dict] | None = None,
     tickers: list[str] | None = None,
+    db: "Session | None" = None,
 ) -> dict[str, Any]:
-    """Run a preset or custom screen against the pre-filtered candidate pool."""
+    """Run a preset or custom screen against the pre-filtered candidate pool.
+
+    When recent ScanResult rows exist in the DB (from the learning cycle),
+    we evaluate conditions against those cached scores instead of re-scoring
+    the entire universe from scratch.
+    """
     from .prescreener import get_prescreened_candidates
 
     if screen_id and screen_id in PRESET_SCREENS:
@@ -2754,11 +2921,13 @@ def run_custom_screen(
     else:
         return {"ok": False, "error": "No screen_id or conditions provided"}
 
-    scan_list = tickers or get_prescreened_candidates()
-    _prewarm_cache(scan_list)
-    scored_all = batch_score_tickers(
-        scan_list, max_workers=_MAX_SCAN_WORKERS, skip_fundamentals=True,
-    )
+    scored_all = _try_load_cached_scores(db)
+    if not scored_all:
+        scan_list = tickers or get_prescreened_candidates()
+        _prewarm_cache(scan_list)
+        scored_all = batch_score_tickers(
+            scan_list, max_workers=_MAX_SCAN_WORKERS, skip_fundamentals=True,
+        )
 
     matches = []
     for scored in scored_all:
@@ -2865,38 +3034,33 @@ def run_scan(
 
 
 def _prewarm_cache(tickers: list[str]) -> None:
-    """Pre-warm OHLCV cache with parallel chunk downloads.
+    """Pre-warm OHLCV cache for all providers.
 
-    When Massive or Polygon is enabled the per-ticker cache inside the
-    respective client handles this automatically, so we skip the yfinance
-    batch_download.  Otherwise we fall back to the original yfinance bulk download.
+    Uses ``fetch_ohlcv_batch`` which dispatches through Massive's concurrent
+    pool (saturating rate limit), Polygon, or yfinance batch_download.
     """
-    if _use_massive() or _use_polygon():
+    if not tickers:
         return
-    BATCH_SIZE = 50
-    chunks = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
-    def _dl(chunk: list[str]) -> None:
-        try:
-            batch_download(chunk, period="6mo", interval="1d")
-        except Exception:
-            pass
-    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as pool:
-        list(pool.map(_dl, chunks))
+    t0 = time.time()
+    try:
+        fetch_ohlcv_batch(tickers, interval="1d", period="6mo")
+    except Exception as e:
+        logger.warning(f"[scanner] prewarm_cache failed: {e}")
+    elapsed = time.time() - t0
+    logger.info(f"[scanner] Pre-warmed {len(tickers)} tickers in {elapsed:.1f}s")
 
 
 def _prewarm_cache_intraday(tickers: list[str]) -> None:
-    """Pre-warm 5d/15m intraday cache with parallel chunk downloads."""
-    if _use_massive() or _use_polygon():
+    """Pre-warm 5d/15m intraday cache for all providers."""
+    if not tickers:
         return
-    BATCH_SIZE = 50
-    chunks = [tickers[i:i + BATCH_SIZE] for i in range(0, len(tickers), BATCH_SIZE)]
-    def _dl(chunk: list[str]) -> None:
-        try:
-            batch_download(chunk, period="5d", interval="15m")
-        except Exception:
-            pass
-    with ThreadPoolExecutor(max_workers=min(6, len(chunks))) as pool:
-        list(pool.map(_dl, chunks))
+    t0 = time.time()
+    try:
+        fetch_ohlcv_batch(tickers, interval="15m", period="5d")
+    except Exception as e:
+        logger.warning(f"[scanner] prewarm_cache_intraday failed: {e}")
+    elapsed = time.time() - t0
+    logger.info(f"[scanner] Pre-warmed intraday {len(tickers)} tickers in {elapsed:.1f}s")
 
 
 def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[dict]:

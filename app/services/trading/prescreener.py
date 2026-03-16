@@ -21,7 +21,7 @@ logger = logging.getLogger(__name__)
 _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
 _CACHE_TTL = 1800  # 30 minutes
-_finviz_lock = threading.Lock()  # serialize FinViz requests to avoid 429
+_finviz_sem = threading.Semaphore(2)  # allow 2 concurrent FinViz requests
 
 _prescreen_status: dict[str, Any] = {
     "running": False,
@@ -62,15 +62,15 @@ def _finviz_screen(filters_dict: dict | None = None,
 
     Each individual screen result is cached for 60 minutes so that
     repeated calls (e.g. from different scan types) don't hit FinViz again.
-    Uses a module-level lock so only one FinViz request runs at a time,
-    preventing HTTP 429 rate-limit errors.
+    A semaphore limits concurrency to 2 simultaneous FinViz requests
+    to avoid HTTP 429 rate-limit errors while still allowing parallelism.
     """
     cache_key = f"finviz_{signal or ''}_{'_'.join(sorted((filters_dict or {}).keys()))}"
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    with _finviz_lock:
+    with _finviz_sem:
         rechecked = _cache_get(cache_key)
         if rechecked is not None:
             return rechecked
@@ -79,7 +79,7 @@ def _finviz_screen(filters_dict: dict | None = None,
 
             screener = Overview()
             screener.set_filter(signal=signal, filters_dict=filters_dict or {})
-            df = screener.screener_view(limit=limit, verbose=0, sleep_sec=1)
+            df = screener.screener_view(limit=limit, verbose=0, sleep_sec=0)
             if df is not None and not df.empty:
                 col = "Ticker" if "Ticker" in df.columns else df.columns[0]
                 result = df[col].tolist()
@@ -199,16 +199,8 @@ def _finviz_small_cap_momentum() -> list[str]:
 
 
 def _finviz_momentum_gappers() -> list[str]:
-    """Low-float momentum gappers: price $2-$20, up > 5%, high relative vol.
-
-    These are the bread-and-butter candidates for momentum day trading —
-    small/micro floats gapping up on volume with potential for 20-100%
-    intraday moves.
-    """
-    # FinViz does not support "$2 to $20" directly, so we request the
-    # slightly wider "$1 to $20" band and clamp to 2–20 using our own
-    # price data afterwards.
-    from .market_data import fetch_quote
+    """Low-float momentum gappers: price $2-$20, up > 5%, high relative vol."""
+    from .market_data import fetch_quotes_batch
 
     tickers = _finviz_screen(
         filters_dict={
@@ -220,19 +212,18 @@ def _finviz_momentum_gappers() -> list[str]:
         },
         limit=100,
     )
+    if not tickers:
+        return []
 
+    quotes = fetch_quotes_batch(tickers)
     filtered: list[str] = []
     for t in tickers:
-        try:
-            q = fetch_quote(t)
-            price = q.get("price") if q else None
-            if price is None:
-                continue
-            if 2.0 <= float(price) <= 20.0:
-                filtered.append(t)
-        except Exception:
+        q = quotes.get(t) or quotes.get(t.upper())
+        if not q:
             continue
-
+        price = q.get("price") or q.get("last_price")
+        if price is not None and 2.0 <= float(price) <= 20.0:
+            filtered.append(t)
     return filtered
 
 

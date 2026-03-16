@@ -405,6 +405,89 @@ def _get_crypto_quote_from_aggs(ticker: str) -> dict[str, Any] | None:
 # Batch helpers
 # ---------------------------------------------------------------------------
 
+def get_aggregates_batch(
+    tickers: list[str],
+    interval: str = "1d",
+    period: str = "6mo",
+    *,
+    max_workers: int = 0,
+) -> dict[str, list[dict[str, Any]]]:
+    """Fetch OHLCV bars for many tickers concurrently.
+
+    Saturates the rate limiter (up to ``massive_max_rps``) by dispatching
+    requests through a thread pool.  Results are stored in the module-level
+    cache so subsequent :func:`get_aggregates` calls are instant cache hits.
+    """
+    if not _api_key():
+        return {}
+    if max_workers <= 0:
+        max_workers = min(60, max(20, settings.massive_max_rps))
+
+    uncached: list[str] = []
+    results: dict[str, list[dict[str, Any]]] = {}
+    for t in tickers:
+        m_ticker = to_massive_ticker(t)
+        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            results[t] = cached
+        else:
+            uncached.append(t)
+
+    if not uncached:
+        return results
+
+    def _fetch_one(ticker: str) -> tuple[str, list[dict[str, Any]]]:
+        bars = get_aggregates(ticker, interval=interval, period=period)
+        return ticker, bars
+
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch_one, t): t for t in uncached}
+        for fut in as_completed(futures):
+            try:
+                sym, bars = fut.result(timeout=30)
+                if bars:
+                    results[sym] = bars
+            except Exception:
+                pass
+
+    return results
+
+
+def get_aggregates_df_batch(
+    tickers: list[str],
+    interval: str = "1d",
+    period: str = "6mo",
+    *,
+    max_workers: int = 0,
+):
+    """Fetch OHLCV DataFrames for many tickers concurrently.
+
+    Returns ``{ticker: DataFrame}`` and populates the aggregates cache.
+    """
+    import pandas as pd
+
+    raw = get_aggregates_batch(
+        tickers, interval=interval, period=period, max_workers=max_workers,
+    )
+    dfs: dict[str, pd.DataFrame] = {}
+    for sym, bars in raw.items():
+        if not bars:
+            continue
+        df = pd.DataFrame(bars)
+        df["Date"] = pd.to_datetime(df["time"], unit="s", utc=True)
+        df.set_index("Date", inplace=True)
+        df.rename(columns={
+            "open": "Open", "high": "High", "low": "Low",
+            "close": "Close", "volume": "Volume",
+        }, inplace=True)
+        df.drop(columns=["time"], inplace=True, errors="ignore")
+        dfs[sym] = df
+    return dfs
+
+
 def get_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
     """Fetch live quotes for many tickers via snapshots."""
     stocks = [t for t in tickers if not is_crypto(t)]
@@ -414,11 +497,33 @@ def get_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
     if stocks:
         results.update(_get_stock_snapshots_bulk(stocks))
 
-    for c in cryptos:
-        q = get_last_quote(c)
-        if q and q.get("last_price"):
-            results[c] = q
+    if cryptos:
+        results.update(_get_crypto_snapshots_batch(cryptos))
 
+    return results
+
+
+def _get_crypto_snapshots_batch(
+    tickers: list[str], max_workers: int = 30,
+) -> dict[str, dict[str, Any]]:
+    """Fetch crypto quotes concurrently instead of one-by-one."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    results: dict[str, dict[str, Any]] = {}
+
+    def _fetch(t: str):
+        q = get_last_quote(t)
+        return t, q
+
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_fetch, c): c for c in tickers}
+        for fut in as_completed(futures):
+            try:
+                sym, q = fut.result(timeout=15)
+                if q and q.get("last_price"):
+                    results[sym] = q
+            except Exception:
+                pass
     return results
 
 

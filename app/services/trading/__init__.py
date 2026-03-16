@@ -75,6 +75,8 @@ from .scanner import (
     run_daytrade_scan,
     run_breakout_scan,
     run_momentum_scanner,
+    get_daytrade_cache,
+    get_breakout_cache,
     evolve_strategy_weights,
     get_all_weights,
     get_latest_scan,

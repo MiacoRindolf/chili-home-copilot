@@ -1007,11 +1007,12 @@ class ScreenRequest(_BaseModel):
 
 
 @router.post("/api/trading/screener/run")
-def api_run_screener(body: ScreenRequest):
+def api_run_screener(body: ScreenRequest, db: Session = Depends(get_db)):
     """Run a preset or custom screen across the full ticker universe."""
     result = ts.run_custom_screen(
         screen_id=body.screen_id,
         conditions=body.conditions,
+        db=db,
     )
     return JSONResponse(result)
 
@@ -1025,16 +1026,50 @@ def api_scan_progress():
 
 
 @router.post("/api/trading/scan/daytrade")
-def api_run_daytrade_scan():
-    """Scan for day-trade opportunities using intraday data."""
-    result = ts.run_daytrade_scan()
+def api_run_daytrade_scan(background_tasks: BackgroundTasks):
+    """Return cached day-trade results if fresh, else serve stale + refresh in BG."""
+    from ..services.trading.scanner import (
+        get_daytrade_cache, run_daytrade_scan, _brain_meta,
+    )
+    cache = get_daytrade_cache()
+    if cache["results"] and cache["age_seconds"] is not None and cache["age_seconds"] < 600:
+        return JSONResponse({
+            "ok": True, "scan_type": "day_trade", "cached": True,
+            "matches": len(cache["results"]), "results": cache["results"][:30],
+            "brain": _brain_meta(),
+        })
+    if cache["results"]:
+        background_tasks.add_task(run_daytrade_scan, 30)
+        return JSONResponse({
+            "ok": True, "scan_type": "day_trade", "cached": True, "refreshing": True,
+            "matches": len(cache["results"]), "results": cache["results"][:30],
+            "brain": _brain_meta(),
+        })
+    result = run_daytrade_scan()
     return JSONResponse(result)
 
 
 @router.post("/api/trading/scan/breakouts")
-def api_run_breakout_scan():
-    """Scan for stocks consolidating near resistance — breakout watchlist."""
-    result = ts.run_breakout_scan()
+def api_run_breakout_scan(background_tasks: BackgroundTasks):
+    """Return cached breakout results if fresh, else serve stale + refresh in BG."""
+    from ..services.trading.scanner import (
+        get_breakout_cache, run_breakout_scan, _brain_meta,
+    )
+    cache = get_breakout_cache()
+    if cache["results"] and cache["age_seconds"] is not None and cache["age_seconds"] < 600:
+        return JSONResponse({
+            "ok": True, "scan_type": "breakout", "cached": True,
+            "matches": len(cache["results"]), "results": cache["results"][:30],
+            "brain": _brain_meta(),
+        })
+    if cache["results"]:
+        background_tasks.add_task(run_breakout_scan, 30)
+        return JSONResponse({
+            "ok": True, "scan_type": "breakout", "cached": True, "refreshing": True,
+            "matches": len(cache["results"]), "results": cache["results"][:30],
+            "brain": _brain_meta(),
+        })
+    result = run_breakout_scan()
     return JSONResponse(result)
 
 
@@ -1042,7 +1077,8 @@ def api_run_breakout_scan():
 @router.post("/api/trading/scan/momentum")
 def api_run_momentum_scan():
     """Active momentum scanner — finds top intraday setups with strict filters."""
-    result = ts.run_momentum_scanner()
+    from ..services.trading.scanner import run_momentum_scanner
+    result = run_momentum_scanner()
     return JSONResponse(result)
 
 

@@ -265,6 +265,62 @@ def fetch_ohlcv_df(
     return df if df is not None else pd.DataFrame()
 
 
+def fetch_ohlcv_batch(
+    tickers: list[str],
+    interval: str = "1d",
+    period: str = "6mo",
+) -> dict[str, pd.DataFrame]:
+    """Fetch OHLCV DataFrames for many tickers in parallel.
+
+    Uses Massive batch (concurrent thread pool) when available, otherwise
+    falls back to yfinance ``batch_download`` + per-ticker history.
+    """
+    results: dict[str, pd.DataFrame] = {}
+
+    if _use_massive():
+        try:
+            dfs = _massive.get_aggregates_df_batch(
+                tickers, interval=interval, period=period,
+            )
+            results.update(dfs)
+        except Exception as e:
+            logger.warning(f"[market_data] Massive batch OHLCV failed: {e}")
+
+        missing = [t for t in tickers if t not in results]
+        if not missing:
+            return results
+        tickers = missing
+
+    if _use_polygon():
+        from concurrent.futures import ThreadPoolExecutor
+        def _poly_one(t):
+            try:
+                df = _poly.get_aggregates_df(t, interval=interval, period=period)
+                return t, df
+            except Exception:
+                return t, pd.DataFrame()
+        with ThreadPoolExecutor(max_workers=30) as pool:
+            for t, df in pool.map(_poly_one, tickers):
+                if not df.empty:
+                    results[t] = df
+        missing = [t for t in tickers if t not in results]
+        if not missing:
+            return results
+        tickers = missing
+
+    from ..yf_session import batch_download
+    batch_download(tickers, period=period, interval=interval)
+    for t in tickers:
+        if t in results:
+            continue
+        p = _clamp_period(interval, period)
+        df = _yf_history(t, period=p, interval=interval)
+        if df is not None and not df.empty:
+            results[t] = df
+
+    return results
+
+
 # ── Quote ──────────────────────────────────────────────────────────────
 
 def fetch_quote(ticker: str) -> dict[str, Any] | None:
