@@ -361,6 +361,118 @@ def _migration_016_reasoning_learning_structures(conn) -> None:
     conn.commit()
 
 
+def _migration_017_code_brain_innovation(conn) -> None:
+    """Create tables for Code Brain innovation: graph, trends, reviews, dep alerts, search index."""
+    tables = _tables(conn)
+    if "code_dependencies" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_dependencies (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                source_file VARCHAR(500) NOT NULL,
+                target_file VARCHAR(500) NOT NULL,
+                import_name VARCHAR(300),
+                is_circular BOOLEAN NOT NULL DEFAULT 0,
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_code_dep_repo ON code_dependencies(repo_id)"))
+    if "code_quality_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_quality_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                total_files INTEGER DEFAULT 0,
+                total_lines INTEGER DEFAULT 0,
+                avg_complexity REAL DEFAULT 0.0,
+                max_complexity REAL DEFAULT 0.0,
+                test_file_count INTEGER DEFAULT 0,
+                test_ratio REAL DEFAULT 0.0,
+                hotspot_count INTEGER DEFAULT 0,
+                insight_count INTEGER DEFAULT 0,
+                recorded_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_code_qs_repo ON code_quality_snapshots(repo_id)"))
+    if "code_reviews" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_reviews (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                user_id INTEGER,
+                commit_hash VARCHAR(50) NOT NULL,
+                author VARCHAR(200),
+                summary TEXT,
+                findings_json TEXT,
+                overall_score REAL DEFAULT 5.0,
+                reviewed_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_code_rev_repo ON code_reviews(repo_id)"))
+        conn.execute(text("CREATE INDEX ix_code_rev_hash ON code_reviews(commit_hash)"))
+    if "code_dep_alerts" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_dep_alerts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                package_name VARCHAR(200) NOT NULL,
+                current_version VARCHAR(50),
+                latest_version VARCHAR(50),
+                severity VARCHAR(20) NOT NULL DEFAULT 'info',
+                alert_type VARCHAR(30) NOT NULL DEFAULT 'outdated',
+                ecosystem VARCHAR(10) NOT NULL DEFAULT 'pip',
+                resolved BOOLEAN NOT NULL DEFAULT 0,
+                detected_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_code_depalert_repo ON code_dep_alerts(repo_id)"))
+    if "code_search_index" not in tables:
+        conn.execute(text("""
+            CREATE TABLE code_search_index (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                repo_id INTEGER NOT NULL,
+                file_path VARCHAR(500) NOT NULL,
+                symbol_name VARCHAR(300) NOT NULL,
+                symbol_type VARCHAR(20) NOT NULL,
+                signature TEXT,
+                docstring TEXT,
+                line_number INTEGER DEFAULT 0,
+                indexed_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_code_search_repo ON code_search_index(repo_id)"))
+        conn.execute(text("CREATE INDEX ix_code_search_sym ON code_search_index(symbol_name)"))
+    conn.commit()
+
+
+def _migration_018_breakout_alert_outcome_cols(conn) -> None:
+    """Add exit-optimization and context columns to trading_breakout_alerts."""
+    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    if "trading_breakout_alerts" not in tables:
+        return
+    existing = {r[1] for r in conn.execute(text("PRAGMA table_info(trading_breakout_alerts)")).fetchall()}
+    new_cols = [
+        ("time_to_peak_hours", "REAL"),
+        ("time_to_stop_hours", "REAL"),
+        ("price_at_peak", "REAL"),
+        ("optimal_exit_pct", "REAL"),
+        ("regime_at_alert", "VARCHAR(20)"),
+        ("scan_cycle_id", "VARCHAR(40)"),
+        ("timeframe", "VARCHAR(10)"),
+        ("sector", "VARCHAR(60)"),
+        ("news_sentiment_at_alert", "REAL"),
+    ]
+    for col_name, col_type in new_cols:
+        if col_name not in existing:
+            conn.execute(text(f"ALTER TABLE trading_breakout_alerts ADD COLUMN {col_name} {col_type}"))
+    if "scan_cycle_id" not in existing:
+        try:
+            conn.execute(text("CREATE INDEX ix_breakout_scan_cycle ON trading_breakout_alerts(scan_cycle_id)"))
+        except Exception:
+            pass
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -379,6 +491,8 @@ MIGRATIONS = [
     ("014_code_brain_tables", _migration_014_code_brain_tables),
     ("015_reasoning_brain_tables", _migration_015_reasoning_brain_tables),
     ("016_reasoning_learning_structures", _migration_016_reasoning_learning_structures),
+    ("017_code_brain_innovation", _migration_017_code_brain_innovation),
+    ("018_breakout_alert_outcome_cols", _migration_018_breakout_alert_outcome_cols),
 ]
 
 

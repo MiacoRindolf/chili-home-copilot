@@ -42,7 +42,7 @@ def get_journal(db: Session, user_id: int | None, limit: int = 50) -> list[Journ
 
 def auto_journal_trade_open(db: Session, trade: Trade) -> None:
     """AI auto-journals why a trade was opened."""
-    from .learning import log_learning_event
+    from .learning_events import log_learning_event
     try:
         snap = get_indicator_snapshot(trade.ticker)
         snap_text = json.dumps(snap, indent=2) if snap else "N/A"
@@ -59,7 +59,7 @@ def auto_journal_trade_open(db: Session, trade: Trade) -> None:
 
 def daily_market_journal(db: Session, user_id: int | None) -> str | None:
     """Generate a daily market observation journal entry."""
-    from .learning import log_learning_event
+    from .learning_events import log_learning_event
     from .scanner import _score_ticker
 
     movers: list[dict] = []
@@ -98,7 +98,7 @@ def daily_market_journal(db: Session, user_id: int | None) -> str | None:
 
 def check_signal_events(db: Session, user_id: int | None) -> list[str]:
     """Scan watchlist for significant indicator events and auto-journal them."""
-    from .learning import log_learning_event
+    from .learning_events import log_learning_event
     from .scanner import _score_ticker
     from .portfolio import get_watchlist
 
@@ -140,7 +140,7 @@ def check_signal_events(db: Session, user_id: int | None) -> list[str]:
 
 def weekly_performance_review(db: Session, user_id: int | None) -> str | None:
     """AI writes a weekly performance summary."""
-    from .learning import log_learning_event
+    from .learning_events import log_learning_event
     from .portfolio import get_trade_stats, get_insights
 
     stats = get_trade_stats(db, user_id)

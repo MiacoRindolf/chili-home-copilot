@@ -18,6 +18,7 @@ from .planner import (
 from .marketplace import MarketplaceModule
 from .trading import (
     BacktestResult,
+    BreakoutAlert,
     JournalEntry,
     LearningEvent,
     MarketSnapshot,
@@ -26,7 +27,18 @@ from .trading import (
     TradingInsight,
     WatchlistItem,
 )
-from .code_brain import CodeHotspot, CodeInsight, CodeLearningEvent, CodeRepo, CodeSnapshot
+from .code_brain import (
+    CodeDepAlert,
+    CodeDependency,
+    CodeHotspot,
+    CodeInsight,
+    CodeLearningEvent,
+    CodeQualitySnapshot,
+    CodeRepo,
+    CodeReview,
+    CodeSearchEntry,
+    CodeSnapshot,
+)
 from .reasoning_brain import (
     ReasoningAnticipation,
     ReasoningConfidenceSnapshot,
@@ -77,6 +89,11 @@ __all__ = [
     "CodeSnapshot",
     "CodeHotspot",
     "CodeLearningEvent",
+    "CodeDependency",
+    "CodeQualitySnapshot",
+    "CodeReview",
+    "CodeDepAlert",
+    "CodeSearchEntry",
     "ReasoningUserModel",
     "ReasoningInterest",
     "ReasoningResearch",

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -17,6 +17,12 @@ from ..services import trading_service as ts
 from ..services.code_brain import learning as cb_learning
 from ..services.code_brain import indexer as cb_indexer
 from ..services.code_brain import insights as cb_insights
+from ..services.code_brain import graph as cb_graph
+from ..services.code_brain import trends as cb_trends
+from ..services.code_brain import reviewer as cb_reviewer
+from ..services.code_brain import deps_scanner as cb_deps
+from ..services.code_brain import search as cb_search
+from ..services.code_brain import lenses as cb_lenses
 from ..services.reasoning_brain import learning as rb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
 from ..models import (
@@ -69,11 +75,12 @@ def api_brain_domains():
                 "phase": trading_st.get("phase", "idle"),
             },
             {
-                "id": "code",
-                "label": "Code",
+                "id": "project",
+                "label": "Project",
                 "status": "learning" if code_st.get("running") else "idle",
                 "last_run": code_st.get("last_run"),
                 "phase": code_st.get("phase", "idle"),
+                "lenses": [l["name"] for l in cb_lenses.list_lenses()],
             },
             {
                 "id": "reasoning",
@@ -565,6 +572,65 @@ def api_brain_code_remove_repo(repo_id: int, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True})
 
 
+# ── Code Brain: Graph, Trends, Reviews, Deps, Search ──────────────────
+
+@router.get("/api/brain/code/graph")
+def api_brain_code_graph(repo_id: int = Query(...), db: Session = Depends(get_db)):
+    """Return the architecture dependency graph for a repo."""
+    data = cb_graph.get_graph_data(db, repo_id)
+    return JSONResponse({"ok": True, **data})
+
+
+@router.get("/api/brain/code/trends")
+def api_brain_code_trends(repo_id: int = Query(...), db: Session = Depends(get_db)):
+    """Quality trend time series and deltas."""
+    series = cb_trends.get_quality_trends(db, repo_id, limit=30)
+    deltas = cb_trends.compute_trend_deltas(db, repo_id)
+    return JSONResponse({"ok": True, "series": series, "deltas": deltas})
+
+
+@router.get("/api/brain/code/reviews")
+def api_brain_code_reviews(
+    repo_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Recent LLM code reviews."""
+    reviews = cb_reviewer.get_recent_reviews(db, repo_id=repo_id, limit=20)
+    return JSONResponse({"ok": True, "reviews": reviews})
+
+
+@router.get("/api/brain/code/deps")
+def api_brain_code_deps(
+    repo_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Dependency health alerts."""
+    health = cb_deps.get_dep_health(db, repo_id=repo_id)
+    return JSONResponse({"ok": True, **health})
+
+
+class _CodeSearchBody(BaseModel):
+    query: str
+    repo_id: int | None = None
+    use_llm: bool = False
+
+
+@router.post("/api/brain/code/search")
+def api_brain_code_search(
+    body: _CodeSearchBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Search code symbols and optionally ask the LLM."""
+    if body.use_llm:
+        ctx = get_identity_ctx(request, db)
+        result = cb_search.search_with_llm(db, body.query, repo_id=body.repo_id, user_id=ctx["user_id"])
+    else:
+        results = cb_search.search_code(db, body.query, repo_id=body.repo_id)
+        result = {"query": body.query, "results": results}
+    return JSONResponse({"ok": True, **result})
+
+
 # ── Code Agent ─────────────────────────────────────────────────────────
 
 class _AgentRequest(BaseModel):
@@ -586,3 +652,64 @@ async def api_brain_code_agent(
     if "error" in result:
         return JSONResponse({"ok": False, "message": result["error"]}, status_code=400)
     return JSONResponse({"ok": True, **result})
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# Project domain — role-based lenses over the shared Code Brain engine
+# ══════════════════════════════════════════════════════════════════════════
+
+@router.get("/api/brain/project/lenses")
+def api_brain_project_lenses():
+    """List all available project lenses."""
+    return JSONResponse({"ok": True, "lenses": cb_lenses.list_lenses()})
+
+
+@router.get("/api/brain/project/lens/{lens_name}/metrics")
+def api_brain_project_lens_metrics(
+    lens_name: str,
+    repo_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Metrics filtered through a specific role lens."""
+    if not cb_lenses.get_lens(lens_name):
+        return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
+    if repo_id is None:
+        from ..models.code_brain import CodeRepo
+        first = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).first()
+        repo_id = first.id if first else None
+    metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=repo_id)
+    planner_data = None
+    lens_obj = cb_lenses.get_lens(lens_name)
+    if lens_obj and lens_obj.planner_integration:
+        try:
+            from ..services import planner_service
+            planner_data = planner_service.get_all_users_task_summary(db)
+        except Exception:
+            planner_data = None
+    return JSONResponse({"ok": True, **metrics, "planner": planner_data})
+
+
+@router.get("/api/brain/project/lens/{lens_name}/hotspots")
+def api_brain_project_lens_hotspots(
+    lens_name: str,
+    repo_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Hotspots filtered by lens file patterns."""
+    if not cb_lenses.get_lens(lens_name):
+        return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
+    data = cb_lenses.get_lens_hotspots(db, lens_name, repo_id=repo_id)
+    return JSONResponse({"ok": True, "hotspots": data})
+
+
+@router.get("/api/brain/project/lens/{lens_name}/insights")
+def api_brain_project_lens_insights(
+    lens_name: str,
+    repo_id: int | None = Query(None),
+    db: Session = Depends(get_db),
+):
+    """Insights filtered by lens categories."""
+    if not cb_lenses.get_lens(lens_name):
+        return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
+    data = cb_lenses.get_lens_insights(db, lens_name, repo_id=repo_id)
+    return JSONResponse({"ok": True, "insights": data})

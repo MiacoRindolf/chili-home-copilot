@@ -635,6 +635,18 @@ def _build_market_context_fresh(db: Session, user_id: int | None) -> str:
             f"S&P 500 (SPY): ${spy_quote.get('price')} ({spy_dir} {spy_quote.get('change_pct')}% today)"
         )
 
+    try:
+        from .market_data import get_market_regime
+        regime = get_market_regime()
+        if regime:
+            parts.append(
+                f"VIX: {regime.get('vix', 'N/A')} ({regime.get('vix_regime', 'N/A')}) | "
+                f"Regime: {regime.get('regime', 'N/A').upper()} | "
+                f"SPY 5d momentum: {regime.get('spy_momentum_5d', 0):+.1f}%"
+            )
+    except Exception:
+        pass
+
     total = bullish + bearish + neutral
     if total:
         avg_rsi = sum(rsi_vals) / len(rsi_vals) if rsi_vals else 50

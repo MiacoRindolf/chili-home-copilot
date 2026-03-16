@@ -39,33 +39,8 @@ def signal_shutdown():
     _shutting_down.set()
 
 
-# ── Learning Event Logger ─────────────────────────────────────────────
-
-def log_learning_event(
-    db: Session, user_id: int | None,
-    event_type: str, description: str,
-    confidence_before: float | None = None,
-    confidence_after: float | None = None,
-    related_insight_id: int | None = None,
-) -> LearningEvent:
-    ev = LearningEvent(
-        user_id=user_id,
-        event_type=event_type,
-        description=description,
-        confidence_before=confidence_before,
-        confidence_after=confidence_after,
-        related_insight_id=related_insight_id,
-    )
-    db.add(ev)
-    db.commit()
-    db.refresh(ev)
-    return ev
-
-
-def get_learning_events(db: Session, user_id: int | None, limit: int = 50) -> list[LearningEvent]:
-    return db.query(LearningEvent).filter(
-        LearningEvent.user_id == user_id,
-    ).order_by(LearningEvent.created_at.desc()).limit(limit).all()
+# ── Learning Event Logger (extracted to learning_events.py) ───────────
+from .learning_events import log_learning_event, get_learning_events  # noqa: F401 — re-export for backward compat
 
 
 # ── AI Self-Learning ──────────────────────────────────────────────────
@@ -451,6 +426,53 @@ def backfill_future_returns(db: Session) -> int:
 
 # ── Pattern Mining ────────────────────────────────────────────────────
 
+_spy_regime_cache: dict[str, Any] = {"data": {}, "ts": 0.0}
+_SPY_REGIME_CACHE_TTL = 600
+
+
+def _get_historical_regime_map() -> dict[str, dict]:
+    """Build a date->regime map from SPY daily data (cached).
+
+    Returns {date_str: {"spy_chg": ..., "spy_mom_5d": ..., "regime": ...}}
+    """
+    import time as _t
+
+    now = _t.time()
+    if _spy_regime_cache["data"] and now - _spy_regime_cache["ts"] < _SPY_REGIME_CACHE_TTL:
+        return _spy_regime_cache["data"]
+
+    try:
+        spy_df = fetch_ohlcv_df("SPY", period="6mo", interval="1d")
+        if spy_df.empty or len(spy_df) < 10:
+            return {}
+    except Exception:
+        return {}
+
+    spy_close = spy_df["Close"]
+    regime_map: dict[str, dict] = {}
+    for i in range(5, len(spy_df)):
+        dt_str = str(spy_df.index[i].date()) if hasattr(spy_df.index[i], "date") else str(spy_df.index[i])[:10]
+        chg = (float(spy_close.iloc[i]) - float(spy_close.iloc[i - 1])) / float(spy_close.iloc[i - 1]) * 100
+        mom_5d = (float(spy_close.iloc[i]) - float(spy_close.iloc[i - 5])) / float(spy_close.iloc[i - 5]) * 100
+
+        if chg > 0.3 and mom_5d > 0:
+            regime = "risk_on"
+        elif chg < -0.3 or mom_5d < -2:
+            regime = "risk_off"
+        else:
+            regime = "cautious"
+
+        regime_map[dt_str] = {
+            "spy_chg": round(chg, 2),
+            "spy_mom_5d": round(mom_5d, 2),
+            "regime": regime,
+        }
+
+    _spy_regime_cache["data"] = regime_map
+    _spy_regime_cache["ts"] = now
+    return regime_map
+
+
 def _mine_from_history(ticker: str) -> list[dict]:
     from ta.momentum import RSIIndicator, StochasticOscillator
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
@@ -486,6 +508,8 @@ def _mine_from_history(ticker: str) -> list[dict]:
     stoch_k = stoch.stoch()
     vol_sma = volume.rolling(20).mean()
 
+    regime_map = _get_historical_regime_map()
+
     rows = []
     for i in range(50, len(df) - 10):
         price = float(close.iloc[i])
@@ -518,6 +542,9 @@ def _mine_from_history(ticker: str) -> list[dict]:
             if prices_5[-1] > max(prices_5[:-1]) and stochs_5[-1] < max(stochs_5[:-1]):
                 stoch_bear_div = True
 
+        dt_str = str(df.index[i].date()) if hasattr(df.index[i], "date") else str(df.index[i])[:10]
+        regime_info = regime_map.get(dt_str, {})
+
         rows.append({
             "ticker": ticker,
             "price": price,
@@ -539,6 +566,8 @@ def _mine_from_history(ticker: str) -> list[dict]:
             "is_crypto": ticker.endswith("-USD"),
             "vol_ratio": round(vol_ratio, 2),
             "gap_pct": round(gap_pct, 2),
+            "regime": regime_info.get("regime", "unknown"),
+            "spy_mom_5d": regime_info.get("spy_mom_5d", 0),
         })
     return rows
 
@@ -1341,6 +1370,60 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"[learning] Per-pattern trade feedback failed: {e}")
 
+    # ── Breakout-specific hypotheses ──
+    # BB squeeze + vol declining vs BB squeeze + vol rising
+    sq_vol_down = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("vol_ratio", 1) < 0.8]
+    sq_vol_up = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("vol_ratio", 1) > 1.5]
+    _test_hypothesis(
+        "BB squeeze + declining volume outperforms BB squeeze + rising volume",
+        sq_vol_down, sq_vol_up, "a_better",
+    )
+
+    # ADX < 20 with BB squeeze vs ADX > 25 with BB squeeze
+    sq_adx_low = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r["adx"] < 20]
+    sq_adx_high = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r["adx"] > 25]
+    _test_hypothesis(
+        "Consolidating (ADX<20) squeeze outperforms trending (ADX>25) squeeze",
+        sq_adx_low, sq_adx_high, "a_better",
+    )
+
+    # EMA aligned + squeeze vs misaligned + squeeze
+    sq_ema_aligned = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("ema_stack")]
+    sq_ema_broken = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and not r.get("ema_stack")]
+    _test_hypothesis(
+        "BB squeeze + bullish EMA stack outperforms squeeze + broken EMAs",
+        sq_ema_aligned, sq_ema_broken, "a_better",
+    )
+
+    # ── Regime-conditional hypotheses ──
+    macd_pos_risk_on = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0 and r.get("regime") == "risk_on"]
+    macd_pos_risk_off = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0 and r.get("regime") == "risk_off"]
+    _test_hypothesis(
+        "MACD positive in risk_on outperforms MACD positive in risk_off",
+        macd_pos_risk_on, macd_pos_risk_off, "a_better",
+    )
+
+    sq_low_spy_mom = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("spy_mom_5d", 0) < -1]
+    sq_high_spy_mom = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("spy_mom_5d", 0) > 1]
+    _test_hypothesis(
+        "BB squeeze in bullish SPY momentum outperforms squeeze in bearish SPY momentum",
+        sq_high_spy_mom, sq_low_spy_mom, "a_better",
+    )
+
+    ema_risk_on = [r for r in rows if r.get("ema_stack") and r.get("regime") == "risk_on"]
+    ema_risk_off = [r for r in rows if r.get("ema_stack") and r.get("regime") == "risk_off"]
+    _test_hypothesis(
+        "EMA stack in risk_on outperforms EMA stack in risk_off",
+        ema_risk_on, ema_risk_off, "a_better",
+    )
+
+    vol_hi_risk_off = [r for r in rows if r.get("vol_ratio", 1) > 2.0 and r.get("regime") == "risk_off"]
+    vol_lo_risk_off = [r for r in rows if r.get("vol_ratio", 1) < 1.0 and r.get("regime") == "risk_off"]
+    _test_hypothesis(
+        "High volume entries in risk_off outperform low volume in risk_off (flight-to-quality)",
+        vol_hi_risk_off, vol_lo_risk_off, "a_better",
+    )
+
     # ── Now evolve the scoring weights based on what we learned ──
     from .scanner import evolve_strategy_weights
     weight_result = evolve_strategy_weights(db)
@@ -1371,6 +1454,800 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         "weights_evolved": weight_result.get("adjusted", 0),
         "details": results,
     }
+
+
+# ── Intraday Breakout Pattern Mining (15m data) ──────────────────────
+
+def _mine_intraday_breakout_patterns(ticker: str) -> list[dict]:
+    """Mine 15m OHLCV for short-term breakout patterns (minutes to hours).
+
+    Returns rows of indicator + pattern states with 4h and 8h forward returns.
+    """
+    from ta.momentum import RSIIndicator, StochasticOscillator
+    from ta.trend import MACD, EMAIndicator, ADXIndicator
+    from ta.volatility import BollingerBands, AverageTrueRange
+
+    try:
+        df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
+        if df.empty or len(df) < 80:
+            return []
+    except Exception:
+        return []
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"]
+
+    rsi = RSIIndicator(close=close, window=14).rsi()
+    macd_obj = MACD(close=close)
+    macd_hist = macd_obj.macd_diff()
+    ema9 = EMAIndicator(close=close, window=9).ema_indicator()
+    ema21 = EMAIndicator(close=close, window=21).ema_indicator()
+    bb = BollingerBands(close=close, window=20, window_dev=2)
+    bb_width = bb.bollinger_wband()
+    adx = ADXIndicator(high=high, low=low, close=close).adx()
+    atr = AverageTrueRange(high=high, low=low, close=close).average_true_range()
+    stoch = StochasticOscillator(high=high, low=low, close=close)
+    stoch_k = stoch.stoch()
+    vol_sma = volume.rolling(20).mean()
+
+    rows = []
+    bars_4h = 16   # 4h / 15m = 16 bars
+    bars_8h = 32
+
+    for i in range(50, len(df) - bars_8h):
+        price = float(close.iloc[i])
+        if price <= 0:
+            continue
+
+        ret_4h = (float(close.iloc[i + bars_4h]) - price) / price * 100
+        ret_8h = (float(close.iloc[i + bars_8h]) - price) / price * 100
+
+        bw = float(bb_width.iloc[i]) if pd.notna(bb_width.iloc[i]) else 0
+        bw_pct = 0.5
+        if i >= 50:
+            bw_window = bb_width.iloc[i - 49:i + 1].dropna()
+            if len(bw_window) > 10 and bw > 0:
+                bw_pct = float((bw_window < bw).sum() / len(bw_window))
+
+        bb_squeeze = bw_pct < 0.20
+
+        vol_ratio = 1.0
+        if pd.notna(vol_sma.iloc[i]) and float(vol_sma.iloc[i]) > 0:
+            vol_ratio = float(volume.iloc[i]) / float(vol_sma.iloc[i])
+
+        e9 = float(ema9.iloc[i]) if pd.notna(ema9.iloc[i]) else None
+        e21 = float(ema21.iloc[i]) if pd.notna(ema21.iloc[i]) else None
+        ema_bullish = e9 is not None and e21 is not None and price > e9 > e21
+
+        current_range = float(high.iloc[i]) - float(low.iloc[i])
+        nr7 = False
+        if i >= 7 and current_range > 0:
+            prev_ranges = [float(high.iloc[i - j]) - float(low.iloc[i - j]) for j in range(1, 7)]
+            nr7 = current_range <= min(prev_ranges) if prev_ranges else False
+
+        atr_val = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0
+        atr_compressed = False
+        if i >= 50 and atr_val > 0:
+            atr_window = atr.iloc[i - 49:i + 1].dropna()
+            if len(atr_window) > 10:
+                atr_compressed = atr_val <= float(atr_window.quantile(0.25))
+
+        rows.append({
+            "ticker": ticker,
+            "price": price,
+            "ret_4h": round(ret_4h, 3),
+            "ret_8h": round(ret_8h, 3),
+            "rsi": float(rsi.iloc[i]) if pd.notna(rsi.iloc[i]) else 50,
+            "macd_hist": float(macd_hist.iloc[i]) if pd.notna(macd_hist.iloc[i]) else 0,
+            "adx": float(adx.iloc[i]) if pd.notna(adx.iloc[i]) else 0,
+            "stoch_k": float(stoch_k.iloc[i]) if pd.notna(stoch_k.iloc[i]) else 50,
+            "bb_squeeze": bb_squeeze,
+            "vol_ratio": round(vol_ratio, 2),
+            "ema_bullish": ema_bullish,
+            "nr7": nr7,
+            "atr_compressed": atr_compressed,
+            "is_crypto": ticker.endswith("-USD"),
+        })
+    return rows
+
+
+def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Run intraday pattern mining on 15m data for breakout-specific learning."""
+    from .market_data import DEFAULT_CRYPTO_TICKERS, DEFAULT_SCAN_TICKERS
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    tickers = list(DEFAULT_CRYPTO_TICKERS)[:30] + list(DEFAULT_SCAN_TICKERS)[:30]
+
+    rows: list[dict] = []
+    _workers = 10
+    with ThreadPoolExecutor(max_workers=_workers) as pool:
+        futs = {pool.submit(_mine_intraday_breakout_patterns, t): t for t in tickers}
+        for f in as_completed(futs):
+            try:
+                rows.extend(f.result())
+            except Exception:
+                pass
+
+    if len(rows) < 30:
+        return {"tested": 0, "note": "insufficient intraday data"}
+
+    discoveries = 0
+
+    # Hypothesis: BB squeeze -> 4h positive returns
+    sq = [r for r in rows if r["bb_squeeze"]]
+    no_sq = [r for r in rows if not r["bb_squeeze"]]
+    if len(sq) >= 10 and len(no_sq) >= 10:
+        avg_sq = sum(r["ret_4h"] for r in sq) / len(sq)
+        avg_no = sum(r["ret_4h"] for r in no_sq) / len(no_sq)
+        wr_sq = sum(1 for r in sq if r["ret_4h"] > 0) / len(sq) * 100
+        if avg_sq > avg_no and avg_sq > 0.1:
+            save_insight(
+                db, user_id,
+                f"Intraday: BB squeeze -> {avg_sq:+.2f}% avg 4h return, "
+                f"{wr_sq:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
+                confidence=min(0.80, wr_sq / 100),
+            )
+            discoveries += 1
+
+    # Hypothesis: BB squeeze + volume declining -> better breakouts
+    sq_vol_low = [r for r in rows if r["bb_squeeze"] and r["vol_ratio"] < 0.8]
+    sq_vol_high = [r for r in rows if r["bb_squeeze"] and r["vol_ratio"] > 1.5]
+    if len(sq_vol_low) >= 5 and len(sq_vol_high) >= 5:
+        avg_low = sum(r["ret_4h"] for r in sq_vol_low) / len(sq_vol_low)
+        avg_high = sum(r["ret_4h"] for r in sq_vol_high) / len(sq_vol_high)
+        save_insight(
+            db, user_id,
+            f"Intraday: squeeze + low vol {avg_low:+.2f}%/4h "
+            f"vs squeeze + high vol {avg_high:+.2f}%/4h "
+            f"(n={len(sq_vol_low)}+{len(sq_vol_high)})",
+            confidence=0.5,
+        )
+        discoveries += 1
+
+    # Hypothesis: NR7 -> expansion profitable within 8h
+    nr7s = [r for r in rows if r["nr7"]]
+    if len(nr7s) >= 10:
+        avg_nr7 = sum(r["ret_8h"] for r in nr7s) / len(nr7s)
+        wr_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0) / len(nr7s) * 100
+        save_insight(
+            db, user_id,
+            f"Intraday: NR7 (narrow range 7) -> {avg_nr7:+.2f}% avg 8h return, "
+            f"{wr_nr7:.0f}%wr (n={len(nr7s)})",
+            confidence=min(0.75, wr_nr7 / 100),
+        )
+        discoveries += 1
+
+    # Hypothesis: ATR compressed + EMA bullish -> breakout outperforms
+    coiled = [r for r in rows if r["atr_compressed"] and r["ema_bullish"]]
+    if len(coiled) >= 5:
+        avg_coil = sum(r["ret_4h"] for r in coiled) / len(coiled)
+        wr_coil = sum(1 for r in coiled if r["ret_4h"] > 0) / len(coiled) * 100
+        save_insight(
+            db, user_id,
+            f"Intraday: ATR compressed + EMA bullish = coiled spring, "
+            f"{avg_coil:+.2f}%/4h, {wr_coil:.0f}%wr (n={len(coiled)})",
+            confidence=min(0.80, wr_coil / 100),
+        )
+        discoveries += 1
+
+    # Hypothesis: RSI 40-65 zone outperforms extremes in squeeze context
+    sq_rsi_mid = [r for r in rows if r["bb_squeeze"] and 40 <= r["rsi"] <= 65]
+    sq_rsi_ext = [r for r in rows if r["bb_squeeze"] and (r["rsi"] < 30 or r["rsi"] > 70)]
+    if len(sq_rsi_mid) >= 5 and len(sq_rsi_ext) >= 5:
+        avg_mid = sum(r["ret_4h"] for r in sq_rsi_mid) / len(sq_rsi_mid)
+        avg_ext = sum(r["ret_4h"] for r in sq_rsi_ext) / len(sq_rsi_ext)
+        save_insight(
+            db, user_id,
+            f"Intraday: squeeze + RSI 40-65 {avg_mid:+.2f}%/4h vs "
+            f"squeeze + extreme RSI {avg_ext:+.2f}%/4h",
+            confidence=0.55,
+        )
+        discoveries += 1
+
+    # Crypto vs Stock breakout comparison
+    crypto_rows = [r for r in rows if r["is_crypto"] and r["bb_squeeze"]]
+    stock_rows = [r for r in rows if not r["is_crypto"] and r["bb_squeeze"]]
+    if len(crypto_rows) >= 10 and len(stock_rows) >= 10:
+        avg_crypto = sum(r["ret_4h"] for r in crypto_rows) / len(crypto_rows)
+        avg_stock = sum(r["ret_4h"] for r in stock_rows) / len(stock_rows)
+        save_insight(
+            db, user_id,
+            f"Intraday squeeze: crypto {avg_crypto:+.2f}%/4h vs "
+            f"stocks {avg_stock:+.2f}%/4h (n={len(crypto_rows)}+{len(stock_rows)})",
+            confidence=0.5,
+        )
+        discoveries += 1
+
+    log_learning_event(
+        db, user_id, "intraday_pattern_mining",
+        f"Mined {len(rows)} intraday bars from {len(tickers)} tickers, "
+        f"{discoveries} breakout pattern discoveries",
+    )
+
+    return {
+        "rows_mined": len(rows),
+        "tickers": len(tickers),
+        "discoveries": discoveries,
+    }
+
+
+# ── Breakout Outcome Learning ──────────────────────────────────────────
+
+def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Compute per-pattern win rates from resolved BreakoutAlert outcomes
+    and feed them back into TradingInsight records for weight evolution.
+    """
+    from ...models.trading import BreakoutAlert
+
+    try:
+        cutoff = datetime.utcnow() - timedelta(days=180)
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+            BreakoutAlert.resolved_at >= cutoff,
+        ).order_by(BreakoutAlert.resolved_at.desc()).limit(500).all()
+    except Exception:
+        return {"patterns_learned": 0}
+
+    if len(resolved) < 3:
+        return {"patterns_learned": 0, "note": "insufficient resolved alerts"}
+
+    from collections import defaultdict
+    groups: dict[str, list] = defaultdict(list)
+    for alert in resolved:
+        key = f"{alert.asset_type}|{alert.alert_tier}"
+        groups[key].append(alert)
+
+    patterns_created = 0
+    for key, alerts in groups.items():
+        if len(alerts) < 3:
+            continue
+        asset_type, tier = key.split("|", 1)
+        winners = sum(1 for a in alerts if a.outcome == "winner")
+        fakeouts = sum(1 for a in alerts if a.outcome == "fakeout")
+        total = len(alerts)
+        win_rate = winners / total * 100
+        avg_gain = sum(
+            (a.max_gain_pct or 0) for a in alerts
+        ) / total
+        avg_dd = sum(
+            (a.max_drawdown_pct or 0) for a in alerts
+        ) / total
+
+        desc = (
+            f"Breakout outcome: {asset_type} {tier} — "
+            f"{win_rate:.0f}% win rate ({winners}/{total}), "
+            f"avg peak gain {avg_gain:+.1f}%, avg max DD {avg_dd:+.1f}%, "
+            f"fakeout rate {fakeouts/total*100:.0f}%"
+        )
+        confidence = min(0.90, win_rate / 100)
+
+        existing = db.query(TradingInsight).filter(
+            TradingInsight.user_id == user_id,
+            TradingInsight.pattern_description.like(f"%{asset_type} {tier}%"),
+            TradingInsight.pattern_description.like("Breakout outcome:%"),
+            TradingInsight.active.is_(True),
+        ).first()
+
+        if existing:
+            existing.confidence = round(
+                existing.confidence * 0.4 + confidence * 0.6, 3
+            )
+            existing.evidence_count = total
+            existing.pattern_description = desc
+            existing.last_seen = datetime.utcnow()
+        else:
+            save_insight(db, user_id, desc, confidence=confidence)
+
+        patterns_created += 1
+
+        log_learning_event(
+            db, user_id, "breakout_outcome_learning",
+            f"{asset_type} {tier}: {win_rate:.0f}%wr ({total} alerts), "
+            f"avg gain {avg_gain:+.1f}%, fakeout {fakeouts/total*100:.0f}%",
+        )
+
+    return {
+        "patterns_learned": patterns_created,
+        "total_resolved": len(resolved),
+    }
+
+
+# ── Exit Optimization Learning ────────────────────────────────────────
+
+def learn_exit_optimization(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Analyze time-to-peak, time-to-stop, and trailing stop data to
+    recommend ATR multiplier adjustments for stops and targets."""
+    from ...models.trading import BreakoutAlert
+
+    try:
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+            BreakoutAlert.time_to_peak_hours.isnot(None),
+        ).all()
+    except Exception:
+        return {"adjustments": 0}
+
+    if len(resolved) < 5:
+        return {"adjustments": 0, "note": "insufficient data"}
+
+    from collections import defaultdict
+    groups: dict[str, list] = defaultdict(list)
+    for a in resolved:
+        groups[f"{a.asset_type}|{a.alert_tier}"].append(a)
+
+    adjustments = 0
+    for key, alerts in groups.items():
+        if len(alerts) < 5:
+            continue
+        asset_type, tier = key.split("|", 1)
+
+        peaks = [a.time_to_peak_hours for a in alerts if a.time_to_peak_hours is not None]
+        stops = [a.time_to_stop_hours for a in alerts if a.time_to_stop_hours is not None]
+        winners = [a for a in alerts if a.outcome == "winner"]
+        losers = [a for a in alerts if a.outcome == "loser"]
+
+        if peaks:
+            median_peak = sorted(peaks)[len(peaks) // 2]
+
+            if median_peak < 2 and asset_type == "crypto":
+                desc = (
+                    f"Exit optimization: {asset_type} {tier} — median time-to-peak "
+                    f"is {median_peak:.1f}h. Consider tighter crypto_bo_target_atr_mult "
+                    f"targets for faster profit-taking."
+                )
+                save_insight(db, user_id, desc, confidence=0.6)
+                adjustments += 1
+
+        if stops and losers:
+            fast_stops = sum(1 for s in stops if s < 1)
+            if fast_stops / len(stops) > 0.5:
+                prefix = "crypto_bo" if asset_type == "crypto" else "bo"
+                desc = (
+                    f"Exit optimization: {asset_type} {tier} — {fast_stops}/{len(stops)} "
+                    f"alerts hit stop within 1h. Consider widening {prefix}_stop_atr_mult."
+                )
+                save_insight(db, user_id, desc, confidence=0.55)
+                adjustments += 1
+
+        # Optimal exit vs actual outcome
+        opt_exits = [a.optimal_exit_pct for a in alerts if a.optimal_exit_pct is not None]
+        actual_gains = [a.max_gain_pct for a in winners if a.max_gain_pct is not None]
+        if opt_exits and actual_gains:
+            avg_opt = sum(opt_exits) / len(opt_exits)
+            avg_actual = sum(actual_gains) / len(actual_gains)
+            if avg_opt > avg_actual * 0.8 and avg_opt > 1.0:
+                desc = (
+                    f"Exit optimization: {asset_type} {tier} — trailing stop would "
+                    f"capture avg {avg_opt:.1f}% vs actual avg peak {avg_actual:.1f}%. "
+                    f"Trailing stop strategy is recommended."
+                )
+                save_insight(db, user_id, desc, confidence=0.65)
+                adjustments += 1
+
+    if adjustments:
+        log_learning_event(
+            db, user_id, "exit_optimization",
+            f"Generated {adjustments} exit optimization insights from {len(resolved)} alerts",
+        )
+
+    return {"adjustments": adjustments, "alerts_analyzed": len(resolved)}
+
+
+# ── Fakeout Pattern Mining ────────────────────────────────────────────
+
+def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Mine indicator states that commonly precede fakeout outcomes and
+    create insights so the brain learns to penalize them."""
+    import json as _json
+    from ...models.trading import BreakoutAlert
+
+    try:
+        fakeouts = db.query(BreakoutAlert).filter(BreakoutAlert.outcome == "fakeout").all()
+        winners = db.query(BreakoutAlert).filter(BreakoutAlert.outcome == "winner").all()
+    except Exception:
+        return {"patterns_found": 0}
+
+    if len(fakeouts) < 3 or len(winners) < 3:
+        return {"patterns_found": 0, "note": "insufficient fakeout/winner data"}
+
+    def _parse_indicators(alerts):
+        parsed = []
+        for a in alerts:
+            try:
+                ind = _json.loads(a.indicator_snapshot) if a.indicator_snapshot else {}
+                parsed.append(ind)
+            except Exception:
+                pass
+        return parsed
+
+    fakeout_inds = _parse_indicators(fakeouts)
+    winner_inds = _parse_indicators(winners)
+
+    patterns_found = 0
+
+    def _check_condition(inds, condition_fn):
+        return sum(1 for i in inds if condition_fn(i)) / max(len(inds), 1) * 100
+
+    conditions = [
+        ("RSI > 65 at alert", lambda i: (i.get("rsi") or 50) > 65, "overbought squeeze fakeout"),
+        ("RVOL < 1.0", lambda i: (i.get("rvol") or 1.0) < 1.0, "low volume fakeout"),
+        ("ADX > 30", lambda i: (i.get("adx") or 0) > 30, "trending squeeze fakeout"),
+        ("BB width narrow (<0.02)", lambda i: (i.get("bb_width") or 1.0) < 0.02, "extremely narrow range fakeout"),
+    ]
+
+    for label, cond, keyword in conditions:
+        fakeout_pct = _check_condition(fakeout_inds, cond)
+        winner_pct = _check_condition(winner_inds, cond)
+
+        if fakeout_pct > winner_pct + 15 and fakeout_pct > 30:
+            desc = (
+                f"Fakeout pattern: {label} occurs in {fakeout_pct:.0f}% of fakeouts "
+                f"vs {winner_pct:.0f}% of winners — {keyword}"
+            )
+            save_insight(db, user_id, desc, confidence=0.55)
+            patterns_found += 1
+
+    # Signal combination analysis
+    from collections import Counter
+    fakeout_sig_combos: Counter = Counter()
+    winner_sig_combos: Counter = Counter()
+
+    for a in fakeouts:
+        try:
+            sigs = _json.loads(a.signals_snapshot) if a.signals_snapshot else []
+            for i in range(len(sigs)):
+                for j in range(i + 1, min(i + 3, len(sigs))):
+                    combo = tuple(sorted([sigs[i][:30], sigs[j][:30]]))
+                    fakeout_sig_combos[combo] += 1
+        except Exception:
+            pass
+
+    for a in winners:
+        try:
+            sigs = _json.loads(a.signals_snapshot) if a.signals_snapshot else []
+            for i in range(len(sigs)):
+                for j in range(i + 1, min(i + 3, len(sigs))):
+                    combo = tuple(sorted([sigs[i][:30], sigs[j][:30]]))
+                    winner_sig_combos[combo] += 1
+        except Exception:
+            pass
+
+    for combo, count in fakeout_sig_combos.most_common(5):
+        if count < 3:
+            continue
+        fakeout_rate = count / max(len(fakeouts), 1) * 100
+        winner_rate = winner_sig_combos.get(combo, 0) / max(len(winners), 1) * 100
+        if fakeout_rate > winner_rate * 1.5 and fakeout_rate > 20:
+            desc = (
+                f"Fakeout combo: '{combo[0]}' + '{combo[1]}' — "
+                f"{fakeout_rate:.0f}% fakeout rate vs {winner_rate:.0f}% winner rate"
+            )
+            save_insight(db, user_id, desc, confidence=0.5)
+            patterns_found += 1
+
+    if patterns_found:
+        log_learning_event(
+            db, user_id, "fakeout_mining",
+            f"Discovered {patterns_found} fakeout patterns from {len(fakeouts)} fakeouts",
+        )
+
+    return {"patterns_found": patterns_found, "fakeouts_analyzed": len(fakeouts)}
+
+
+# ── Position Sizing Feedback Loop ─────────────────────────────────────
+
+def tune_position_sizing(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Link breakout outcome stats to position sizing adaptive weights."""
+    from ...models.trading import BreakoutAlert
+    from collections import defaultdict
+
+    try:
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+        ).all()
+    except Exception:
+        return {"adjustments": 0}
+
+    if len(resolved) < 10:
+        return {"adjustments": 0, "note": "insufficient data"}
+
+    groups: dict[str, list] = defaultdict(list)
+    for a in resolved:
+        regime = a.regime_at_alert or "unknown"
+        groups[f"{a.asset_type}|{regime}"].append(a)
+
+    adjustments = 0
+    for key, alerts in groups.items():
+        if len(alerts) < 5:
+            continue
+        asset_type, regime = key.split("|", 1)
+        winners = [a for a in alerts if a.outcome == "winner"]
+        fakeouts = [a for a in alerts if a.outcome == "fakeout"]
+        losers = [a for a in alerts if a.outcome == "loser"]
+        win_rate = len(winners) / len(alerts) * 100
+        fakeout_rate = len(fakeouts) / len(alerts) * 100
+
+        if asset_type == "crypto" and regime == "risk_off" and fakeout_rate > 60:
+            desc = (
+                f"Position sizing: crypto in risk_off has {fakeout_rate:.0f}% fakeout rate "
+                f"({len(alerts)} alerts) — reduce pos_speculative_mult"
+            )
+            save_insight(db, user_id, desc, confidence=0.6)
+            adjustments += 1
+
+        if regime == "risk_on" and win_rate > 70:
+            desc = (
+                f"Position sizing: {asset_type} in risk_on has {win_rate:.0f}% win rate "
+                f"({len(alerts)} alerts) — can increase pos_regime_risk_off_mult towards 1.0"
+            )
+            save_insight(db, user_id, desc, confidence=0.6)
+            adjustments += 1
+
+        # Profit factor per tier
+        avg_winner_gain = sum(a.max_gain_pct or 0 for a in winners) / max(len(winners), 1)
+        avg_loser_loss = abs(sum(a.max_drawdown_pct or 0 for a in losers) / max(len(losers), 1))
+        if avg_loser_loss > 0:
+            profit_factor = avg_winner_gain / avg_loser_loss
+            if profit_factor > 2.0 and len(alerts) >= 10:
+                desc = (
+                    f"Position sizing: {asset_type} {regime} has profit factor "
+                    f"{profit_factor:.1f}x — consider larger pos_pct_hard_cap for this regime"
+                )
+                save_insight(db, user_id, desc, confidence=0.65)
+                adjustments += 1
+
+    if adjustments:
+        log_learning_event(
+            db, user_id, "position_sizing_feedback",
+            f"Generated {adjustments} sizing adjustments from {len(resolved)} alerts",
+        )
+
+    return {"adjustments": adjustments}
+
+
+# ── Inter-Alert Learning ──────────────────────────────────────────────
+
+def learn_inter_alert_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Correlate co-fired alerts (same scan_cycle_id) to learn about
+    alert volume and sector concentration effects."""
+    from ...models.trading import BreakoutAlert
+    from collections import defaultdict
+
+    try:
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+            BreakoutAlert.scan_cycle_id.isnot(None),
+        ).all()
+    except Exception:
+        return {"insights": 0}
+
+    if len(resolved) < 10:
+        return {"insights": 0, "note": "insufficient data"}
+
+    cycles: dict[str, list] = defaultdict(list)
+    for a in resolved:
+        cycles[a.scan_cycle_id].append(a)
+
+    insights_created = 0
+    multi_alert_cycles = {k: v for k, v in cycles.items() if len(v) >= 3}
+
+    if len(multi_alert_cycles) >= 3:
+        high_vol_wins = []
+        low_vol_wins = []
+        for cid, alerts in cycles.items():
+            winners = sum(1 for a in alerts if a.outcome == "winner")
+            wr = winners / len(alerts) * 100 if alerts else 0
+            if len(alerts) >= 4:
+                high_vol_wins.append(wr)
+            elif len(alerts) <= 2:
+                low_vol_wins.append(wr)
+
+        if high_vol_wins and low_vol_wins:
+            avg_high = sum(high_vol_wins) / len(high_vol_wins)
+            avg_low = sum(low_vol_wins) / len(low_vol_wins)
+            if avg_high < avg_low - 10:
+                desc = (
+                    f"Inter-alert: high-volume cycles (4+ alerts) have {avg_high:.0f}% win rate "
+                    f"vs low-volume (1-2) at {avg_low:.0f}% — reduce crypto_alert_max_per_cycle"
+                )
+                save_insight(db, user_id, desc, confidence=0.55)
+                insights_created += 1
+
+    # Sector concentration analysis
+    for cid, alerts in multi_alert_cycles.items():
+        sectors = set(a.sector or "unknown" for a in alerts)
+        winners = sum(1 for a in alerts if a.outcome == "winner")
+        wr = winners / len(alerts) * 100
+
+        if len(sectors) == 1 and wr > 60 and len(alerts) >= 3:
+            desc = (
+                f"Inter-alert: single-sector cycle ({list(sectors)[0]}, {len(alerts)} alerts) "
+                f"achieved {wr:.0f}% win rate — sector momentum confirmed"
+            )
+            save_insight(db, user_id, desc, confidence=0.55)
+            insights_created += 1
+            break  # one insight per cycle is enough
+
+    if insights_created:
+        log_learning_event(
+            db, user_id, "inter_alert_learning",
+            f"Generated {insights_created} inter-alert insights from {len(cycles)} cycles",
+        )
+
+    return {"insights": insights_created, "cycles_analyzed": len(cycles)}
+
+
+# ── Adaptive Timeframe Learning ───────────────────────────────────────
+
+def learn_timeframe_performance(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Learn which scanner timeframes produce the best outcomes."""
+    from ...models.trading import BreakoutAlert
+    from collections import defaultdict
+
+    try:
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+            BreakoutAlert.timeframe.isnot(None),
+        ).all()
+    except Exception:
+        return {"insights": 0}
+
+    if len(resolved) < 10:
+        return {"insights": 0, "note": "insufficient data"}
+
+    groups: dict[str, list] = defaultdict(list)
+    for a in resolved:
+        groups[f"{a.asset_type}|{a.timeframe}"].append(a)
+
+    insights_created = 0
+    tf_stats: list[tuple[str, float, int]] = []
+
+    for key, alerts in groups.items():
+        if len(alerts) < 5:
+            continue
+        asset_type, tf = key.split("|", 1)
+        winners = sum(1 for a in alerts if a.outcome == "winner")
+        wr = winners / len(alerts) * 100
+        avg_gain = sum(a.max_gain_pct or 0 for a in alerts) / len(alerts)
+        tf_stats.append((key, wr, len(alerts)))
+
+        if wr > 65 and len(alerts) >= 8:
+            desc = (
+                f"Timeframe performance: {asset_type} {tf} achieves {wr:.0f}% win rate "
+                f"(avg gain {avg_gain:+.1f}%, n={len(alerts)}) — boost {tf} pattern weights"
+            )
+            save_insight(db, user_id, desc, confidence=min(0.8, wr / 100))
+            insights_created += 1
+
+    if tf_stats and len(tf_stats) >= 2:
+        best = max(tf_stats, key=lambda x: x[1])
+        worst = min(tf_stats, key=lambda x: x[1])
+        if best[1] - worst[1] > 20:
+            desc = (
+                f"Timeframe comparison: best {best[0]} at {best[1]:.0f}%wr (n={best[2]}) "
+                f"vs worst {worst[0]} at {worst[1]:.0f}%wr (n={worst[2]})"
+            )
+            save_insight(db, user_id, desc, confidence=0.55)
+            insights_created += 1
+
+    if insights_created:
+        log_learning_event(
+            db, user_id, "timeframe_learning",
+            f"Generated {insights_created} timeframe insights from {len(resolved)} alerts",
+        )
+
+    return {"insights": insights_created}
+
+
+# ── Confidence Decay ──────────────────────────────────────────────────
+
+def decay_stale_insights(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Decay confidence of insights not refreshed recently. Prune dead ones."""
+    now = datetime.utcnow()
+    q = db.query(TradingInsight).filter(TradingInsight.active.is_(True))
+    if user_id is not None:
+        q = q.filter(TradingInsight.user_id == user_id)
+    insights = q.all()
+
+    decayed = 0
+    pruned = 0
+    for ins in insights:
+        if ins.last_seen is None:
+            continue
+        age_days = (now - ins.last_seen).days
+
+        if age_days > 90 and ins.confidence < 0.3:
+            ins.active = False
+            pruned += 1
+            log_learning_event(
+                db, user_id, "insight_pruned",
+                f"Pruned stale insight (>{age_days}d, conf {ins.confidence:.0%}): "
+                f"{ins.pattern_description[:60]}",
+                confidence_before=ins.confidence,
+                confidence_after=0,
+                related_insight_id=ins.id,
+            )
+        elif age_days > 60:
+            old_conf = ins.confidence
+            ins.confidence = round(ins.confidence * 0.8, 3)
+            decayed += 1
+        elif age_days > 30:
+            old_conf = ins.confidence
+            ins.confidence = round(ins.confidence * 0.9, 3)
+            decayed += 1
+
+    if decayed or pruned:
+        db.commit()
+        log_learning_event(
+            db, user_id, "confidence_decay",
+            f"Decayed {decayed} stale insights, pruned {pruned} dead insights",
+        )
+
+    return {"decayed": decayed, "pruned": pruned}
+
+
+# ── Signal Synergy Mining ─────────────────────────────────────────────
+
+def mine_signal_synergies(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Find which signal combinations are most powerful (win more than
+    individual signals predict) and create synergy insights."""
+    import json as _json
+    from ...models.trading import BreakoutAlert
+    from collections import Counter, defaultdict
+
+    try:
+        resolved = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome != "pending",
+            BreakoutAlert.signals_snapshot.isnot(None),
+        ).all()
+    except Exception:
+        return {"synergies_found": 0}
+
+    if len(resolved) < 10:
+        return {"synergies_found": 0, "note": "insufficient data"}
+
+    combo_outcomes: dict[tuple, list[str]] = defaultdict(list)
+
+    for a in resolved:
+        try:
+            sigs = _json.loads(a.signals_snapshot) if a.signals_snapshot else []
+            short_sigs = [s[:35] for s in sigs[:8]]
+            for i in range(len(short_sigs)):
+                for j in range(i + 1, len(short_sigs)):
+                    combo = tuple(sorted([short_sigs[i], short_sigs[j]]))
+                    combo_outcomes[combo].append(a.outcome)
+        except Exception:
+            pass
+
+    synergies_found = 0
+    overall_wr = sum(1 for a in resolved if a.outcome == "winner") / len(resolved) * 100
+
+    for combo, outcomes in combo_outcomes.items():
+        if len(outcomes) < 5:
+            continue
+        wr = sum(1 for o in outcomes if o == "winner") / len(outcomes) * 100
+
+        if wr > overall_wr + 15 and wr > 65:
+            desc = (
+                f"Signal synergy: '{combo[0]}' + '{combo[1]}' — "
+                f"{wr:.0f}% win rate (n={len(outcomes)}) vs baseline {overall_wr:.0f}% "
+                f"— pattern combo synergy bonus"
+            )
+            save_insight(db, user_id, desc, confidence=min(0.85, wr / 100))
+            synergies_found += 1
+
+        if synergies_found >= 5:
+            break
+
+    if synergies_found:
+        log_learning_event(
+            db, user_id, "synergy_mining",
+            f"Discovered {synergies_found} signal synergies from {len(resolved)} alerts",
+        )
+
+    return {"synergies_found": synergies_found}
 
 
 # ── Pattern Refinement Engine ──────────────────────────────────────────
@@ -2564,7 +3441,7 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 14
+    _learning_status["total_steps"] = 23
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -2644,14 +3521,27 @@ def run_learning_cycle(
         _step_time("backfill", step_start,
                     f"{filled} returns + {scores_filled} scores via {_provider}")
 
-        # Step 5: Mine patterns
+        # Step 4b: Confidence decay (prune stale insights early)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Decaying stale insights"
+        _learning_status["phase"] = "confidence_decay"
+        decay_result = decay_stale_insights(db, user_id)
+        report["insights_decayed"] = decay_result.get("decayed", 0)
+        report["insights_pruned"] = decay_result.get("pruned", 0)
+        _learning_status["steps_completed"] = 5
+        _step_time("confidence_decay", step_start,
+                    f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned")
+
+        # Step 6: Mine patterns
         _learning_status["current_step"] = "Mining patterns"
         _learning_status["phase"] = "mining"
         step_start = time.time()
         discoveries = mine_patterns(db, user_id)
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
-        _learning_status["steps_completed"] = 5
+        _learning_status["steps_completed"] = 6
         _step_time("mine", step_start,
                     f"{len(discoveries)} patterns from OHLCV via {_provider}")
 
@@ -2663,7 +3553,7 @@ def run_learning_cycle(
         _learning_status["phase"] = "active_seeking"
         seek_result = seek_pattern_data(db, user_id)
         report["patterns_boosted"] = seek_result.get("sought", 0)
-        _learning_status["steps_completed"] = 6
+        _learning_status["steps_completed"] = 7
         _step_time("active_seek", step_start,
                     f"{seek_result.get('sought', 0)} boosted")
 
@@ -2675,7 +3565,7 @@ def run_learning_cycle(
         _learning_status["phase"] = "backtesting"
         bt_count = _auto_backtest_patterns(db, user_id)
         report["backtests_run"] = bt_count
-        _learning_status["steps_completed"] = 7
+        _learning_status["steps_completed"] = 8
         _step_time("backtest", step_start, f"{bt_count} backtests via {_provider}")
 
         # Step 8: Self-validation & weight evolution (with dynamic hypotheses)
@@ -2689,12 +3579,38 @@ def run_learning_cycle(
         report["hypotheses_challenged"] = evolve_result.get("challenged", 0)
         report["real_trade_adjustments"] = evolve_result.get("real_trade_adjustments", 0)
         report["weights_evolved"] = evolve_result.get("weights_evolved", 0)
-        _learning_status["steps_completed"] = 8
+        _learning_status["steps_completed"] = 9
         _step_time("evolve", step_start,
                     f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
                     f"{evolve_result.get('weights_evolved', 0)} weights evolved")
 
-        # Step 8b: Refine patterns (parameter sweeping)
+        # Step 8b: Breakout outcome learning
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start_bo = time.time()
+        _learning_status["current_step"] = "Learning from breakout outcomes"
+        _learning_status["phase"] = "breakout_learning"
+        bo_result = learn_from_breakout_outcomes(db, user_id)
+        report["breakout_patterns_learned"] = bo_result.get("patterns_learned", 0)
+        _learning_status["steps_completed"] = 10
+        _step_time("breakout_outcomes", step_start_bo,
+                    f"{bo_result.get('patterns_learned', 0)} patterns from "
+                    f"{bo_result.get('total_resolved', 0)} resolved alerts")
+
+        # Step 8c: Intraday breakout pattern mining (15m data)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start_id = time.time()
+        _learning_status["current_step"] = "Mining intraday breakout patterns"
+        _learning_status["phase"] = "intraday_mining"
+        intra_result = mine_intraday_patterns(db, user_id)
+        report["intraday_discoveries"] = intra_result.get("discoveries", 0)
+        _learning_status["steps_completed"] = 11
+        _step_time("intraday_mining", step_start_id,
+                    f"{intra_result.get('discoveries', 0)} discoveries from "
+                    f"{intra_result.get('rows_mined', 0)} bars")
+
+        # Step 8d: Refine patterns (parameter sweeping)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -2702,11 +3618,83 @@ def run_learning_cycle(
         _learning_status["phase"] = "refining"
         refine_result = refine_patterns(db, user_id)
         report["patterns_refined"] = refine_result.get("refined", 0)
-        _learning_status["steps_completed"] = 9
+        _learning_status["steps_completed"] = 12
         _step_time("refine", step_start,
                     f"{refine_result.get('refined', 0)} patterns refined")
 
-        # Step 9: Market journal
+        # Step 8e: Exit optimization learning
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Learning exit optimization"
+        _learning_status["phase"] = "exit_optimization"
+        exit_result = learn_exit_optimization(db, user_id)
+        report["exit_adjustments"] = exit_result.get("adjustments", 0)
+        _learning_status["steps_completed"] = 13
+        _step_time("exit_optimization", step_start,
+                    f"{exit_result.get('adjustments', 0)} adjustments")
+
+        # Step 8f: Fakeout pattern mining
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Mining fakeout patterns"
+        _learning_status["phase"] = "fakeout_mining"
+        fakeout_result = mine_fakeout_patterns(db, user_id)
+        report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
+        _learning_status["steps_completed"] = 14
+        _step_time("fakeout_mining", step_start,
+                    f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
+
+        # Step 8g: Position sizing feedback
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Tuning position sizing"
+        _learning_status["phase"] = "position_sizing"
+        sizing_result = tune_position_sizing(db, user_id)
+        report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
+        _learning_status["steps_completed"] = 15
+        _step_time("position_sizing", step_start,
+                    f"{sizing_result.get('adjustments', 0)} sizing adjustments")
+
+        # Step 8h: Inter-alert learning
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Learning inter-alert patterns"
+        _learning_status["phase"] = "inter_alert"
+        inter_result = learn_inter_alert_patterns(db, user_id)
+        report["inter_alert_insights"] = inter_result.get("insights", 0)
+        _learning_status["steps_completed"] = 16
+        _step_time("inter_alert", step_start,
+                    f"{inter_result.get('insights', 0)} inter-alert insights")
+
+        # Step 8i: Timeframe performance learning
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Learning timeframe performance"
+        _learning_status["phase"] = "timeframe_learning"
+        tf_result = learn_timeframe_performance(db, user_id)
+        report["timeframe_insights"] = tf_result.get("insights", 0)
+        _learning_status["steps_completed"] = 17
+        _step_time("timeframe_learning", step_start,
+                    f"{tf_result.get('insights', 0)} timeframe insights")
+
+        # Step 8j: Signal synergy mining
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Mining signal synergies"
+        _learning_status["phase"] = "synergy_mining"
+        synergy_result = mine_signal_synergies(db, user_id)
+        report["synergies_found"] = synergy_result.get("synergies_found", 0)
+        _learning_status["steps_completed"] = 18
+        _step_time("synergy_mining", step_start,
+                    f"{synergy_result.get('synergies_found', 0)} synergies found")
+
+        # Step 19: Market journal
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -2714,7 +3702,7 @@ def run_learning_cycle(
         _learning_status["phase"] = "journaling"
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
-        _learning_status["steps_completed"] = 10
+        _learning_status["steps_completed"] = 19
         _step_time("journal", step_start)
 
         # Step 10: Signal events
@@ -2725,7 +3713,7 @@ def run_learning_cycle(
         _learning_status["phase"] = "signals"
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
-        _learning_status["steps_completed"] = 11
+        _learning_status["steps_completed"] = 20
         _step_time("signals", step_start, f"{len(events)} events")
 
         # Step 11: Train ML model (with regime features)
@@ -2738,7 +3726,7 @@ def run_learning_cycle(
         ml_result = _train_ml(db)
         report["ml_trained"] = ml_result.get("ok", False)
         report["ml_accuracy"] = ml_result.get("cv_accuracy", 0)
-        _learning_status["steps_completed"] = 12
+        _learning_status["steps_completed"] = 21
         _step_time("ml_train", step_start,
                     f"acc={ml_result.get('cv_accuracy', 0):.3f}"
                     if ml_result.get("ok") else "skipped")
@@ -2756,7 +3744,7 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning(f"[trading] Strategy proposal generation failed: {e}")
             report["proposals_generated"] = 0
-        _learning_status["steps_completed"] = 13
+        _learning_status["steps_completed"] = 22
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
 
@@ -2782,7 +3770,7 @@ def run_learning_cycle(
             f"ML={'trained' if report.get('ml_trained') else 'skipped'}, "
             f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = 14
+        _learning_status["steps_completed"] = 23
 
     except InterruptedError:
         logger.info("[trading] Learning cycle interrupted by shutdown")

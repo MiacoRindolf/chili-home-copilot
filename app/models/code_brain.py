@@ -85,3 +85,79 @@ class CodeLearningEvent(Base):
     event_type: str = Column(String(30), nullable=False)  # "index", "insight", "hotspot", "error"
     description: str = Column(Text, nullable=False)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CodeDependency(Base):
+    """Directed edge in the architecture import graph."""
+    __tablename__ = "code_dependencies"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    repo_id: int = Column(Integer, nullable=False, index=True)
+    source_file: str = Column(String(500), nullable=False)
+    target_file: str = Column(String(500), nullable=False)
+    import_name: Optional[str] = Column(String(300), nullable=True)
+    is_circular: bool = Column(Boolean, default=False, nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CodeQualitySnapshot(Base):
+    """Point-in-time aggregate quality metrics for trend tracking."""
+    __tablename__ = "code_quality_snapshots"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    repo_id: int = Column(Integer, nullable=False, index=True)
+    total_files: int = Column(Integer, default=0)
+    total_lines: int = Column(Integer, default=0)
+    avg_complexity: float = Column(Float, default=0.0)
+    max_complexity: float = Column(Float, default=0.0)
+    test_file_count: int = Column(Integer, default=0)
+    test_ratio: float = Column(Float, default=0.0)
+    hotspot_count: int = Column(Integer, default=0)
+    insight_count: int = Column(Integer, default=0)
+    recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CodeReview(Base):
+    """LLM-generated code review for a git commit."""
+    __tablename__ = "code_reviews"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    repo_id: int = Column(Integer, nullable=False, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    commit_hash: str = Column(String(50), nullable=False, index=True)
+    author: Optional[str] = Column(String(200), nullable=True)
+    summary: Optional[str] = Column(Text, nullable=True)
+    findings_json: Optional[str] = Column(Text, nullable=True)
+    overall_score: float = Column(Float, default=5.0)
+    reviewed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CodeDepAlert(Base):
+    """Dependency health alert (outdated, vulnerable, etc.)."""
+    __tablename__ = "code_dep_alerts"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    repo_id: int = Column(Integer, nullable=False, index=True)
+    package_name: str = Column(String(200), nullable=False)
+    current_version: Optional[str] = Column(String(50), nullable=True)
+    latest_version: Optional[str] = Column(String(50), nullable=True)
+    severity: str = Column(String(20), nullable=False, default="info")
+    alert_type: str = Column(String(30), nullable=False, default="outdated")
+    ecosystem: str = Column(String(10), nullable=False, default="pip")
+    resolved: bool = Column(Boolean, default=False, nullable=False)
+    detected_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CodeSearchEntry(Base):
+    """Indexed function/class symbol for code search."""
+    __tablename__ = "code_search_index"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    repo_id: int = Column(Integer, nullable=False, index=True)
+    file_path: str = Column(String(500), nullable=False)
+    symbol_name: str = Column(String(300), nullable=False, index=True)
+    symbol_type: str = Column(String(20), nullable=False)
+    signature: Optional[str] = Column(Text, nullable=True)
+    docstring: Optional[str] = Column(Text, nullable=True)
+    line_number: int = Column(Integer, default=0)
+    indexed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -849,3 +849,63 @@ def get_market_regime() -> dict[str, Any]:
     _market_regime_cache["data"] = result
     _market_regime_cache["ts"] = now
     return result
+
+
+# ── BTC Leading Indicator ──────────────────────────────────────────────
+
+_btc_state_cache: dict[str, Any] = {"data": None, "ts": 0.0}
+_BTC_STATE_TTL = 300  # 5 minutes
+
+
+def get_btc_state() -> dict[str, Any]:
+    """Return BTC trend/momentum state for use as a crypto leading indicator.
+
+    Returns dict with: btc_price, btc_change_pct, btc_1h_momentum,
+    btc_4h_momentum, btc_trend ("up"/"down"/"flat").
+    """
+    import time as _t
+
+    now = _t.time()
+    if _btc_state_cache["data"] is not None and now - _btc_state_cache["ts"] < _BTC_STATE_TTL:
+        return _btc_state_cache["data"]
+
+    result: dict[str, Any] = {
+        "btc_price": None, "btc_change_pct": 0.0,
+        "btc_1h_momentum": 0.0, "btc_4h_momentum": 0.0, "btc_trend": "flat",
+    }
+
+    try:
+        q = fetch_quote("BTC-USD")
+        if q:
+            result["btc_price"] = q.get("price")
+            result["btc_change_pct"] = q.get("change_pct", 0.0) or 0.0
+    except Exception:
+        pass
+
+    try:
+        df = fetch_ohlcv_df("BTC-USD", period="5d", interval="1h")
+        if df is not None and len(df) >= 4:
+            c = df["Close"].dropna()
+            if len(c) >= 4 and float(c.iloc[-2]) != 0:
+                result["btc_1h_momentum"] = round(
+                    (float(c.iloc[-1]) - float(c.iloc[-2])) / float(c.iloc[-2]) * 100, 2
+                )
+            if len(c) >= 5 and float(c.iloc[-4]) != 0:
+                result["btc_4h_momentum"] = round(
+                    (float(c.iloc[-1]) - float(c.iloc[-4])) / float(c.iloc[-4]) * 100, 2
+                )
+    except Exception:
+        pass
+
+    chg = result["btc_change_pct"] or 0.0
+    mom4 = result["btc_4h_momentum"] or 0.0
+    if chg > 1 and mom4 > 0.5:
+        result["btc_trend"] = "up"
+    elif chg < -1 and mom4 < -0.5:
+        result["btc_trend"] = "down"
+    else:
+        result["btc_trend"] = "flat"
+
+    _btc_state_cache["data"] = result
+    _btc_state_cache["ts"] = now
+    return result

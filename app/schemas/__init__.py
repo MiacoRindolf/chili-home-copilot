@@ -1,5 +1,5 @@
 """Pydantic schemas for API and planner. Re-export for backward compatibility."""
-from ..modules import is_module_enabled
+from ..modules import get_enabled_module_names
 
 from .trading import (
     WatchlistAdd,
@@ -61,7 +61,7 @@ from .planner import (  # type: ignore[assignment]
     TaskSpec,
 )
 
-if is_module_enabled("planner"):
+if "planner" in get_enabled_module_names():
     __all__ += [
         "validate_plan",
         "ProjectBody",

@@ -371,7 +371,7 @@ def generate_strategy_proposals(
         if quantity is None:
             quantity = 1
         if position_size_pct is None:
-            position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(buying_power, 10000.0) * 100), 2)
+            position_size_pct = round(min(_get_brain_weight("pos_pct_hard_cap"), (quantity * price) / max(buying_power, 10000.0) * 100), 2)
 
         confidence = pick.get("brain_confidence") or (combined * 10)
 

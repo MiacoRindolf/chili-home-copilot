@@ -153,6 +153,45 @@ class AlertHistory(Base):
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BreakoutAlert(Base):
+    """Tracks each breakout alert with outcome data for the learning feedback loop."""
+    __tablename__ = "trading_breakout_alerts"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    ticker: str = Column(String(20), nullable=False, index=True)
+    asset_type: str = Column(String(10), nullable=False, default="crypto")
+    alert_tier: str = Column(String(50), nullable=False)
+    score_at_alert: float = Column(Float, nullable=False)
+    indicator_snapshot: Optional[str] = Column(Text, nullable=True)
+    price_at_alert: float = Column(Float, nullable=False)
+    entry_price: Optional[float] = Column(Float, nullable=True)
+    stop_loss: Optional[float] = Column(Float, nullable=True)
+    target_price: Optional[float] = Column(Float, nullable=True)
+    signals_snapshot: Optional[str] = Column(Text, nullable=True)
+    alerted_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    price_1h: Optional[float] = Column(Float, nullable=True)
+    price_4h: Optional[float] = Column(Float, nullable=True)
+    price_24h: Optional[float] = Column(Float, nullable=True)
+    breakout_occurred: Optional[bool] = Column(Boolean, nullable=True)
+    max_gain_pct: Optional[float] = Column(Float, nullable=True)
+    max_drawdown_pct: Optional[float] = Column(Float, nullable=True)
+    outcome: str = Column(String(20), nullable=False, default="pending")
+    outcome_checked_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+    # Exit optimization fields
+    time_to_peak_hours: Optional[float] = Column(Float, nullable=True)
+    time_to_stop_hours: Optional[float] = Column(Float, nullable=True)
+    price_at_peak: Optional[float] = Column(Float, nullable=True)
+    optimal_exit_pct: Optional[float] = Column(Float, nullable=True)
+
+    # Context at alert time
+    regime_at_alert: Optional[str] = Column(String(20), nullable=True)
+    scan_cycle_id: Optional[str] = Column(String(40), nullable=True, index=True)
+    timeframe: Optional[str] = Column(String(10), nullable=True)
+    sector: Optional[str] = Column(String(60), nullable=True)
+    news_sentiment_at_alert: Optional[float] = Column(Float, nullable=True)
+
+
 class StrategyProposal(Base):
     """AI-generated trade proposal for user review and optional auto-execution."""
     __tablename__ = "trading_proposals"

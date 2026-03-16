@@ -88,6 +88,56 @@ def _run_price_monitor_job():
 
 
 _crypto_alert_cooldown: dict[str, float] = {}
+_stock_alert_cooldown: dict[str, float] = {}
+
+
+def _record_breakout_alert(
+    setup: dict, alert_tier: str, asset_type: str,
+    scan_cycle_id: str | None = None,
+    timeframe: str | None = None,
+) -> None:
+    """Write a BreakoutAlert row for outcome tracking."""
+    import json as _json
+    try:
+        from ..db import SessionLocal
+        from ..models.trading import BreakoutAlert
+        from .trading.market_data import get_market_regime
+
+        _regime = "unknown"
+        try:
+            _regime = get_market_regime().get("regime", "unknown")
+        except Exception:
+            pass
+
+        _sector = setup.get("sector") or ("crypto" if asset_type == "crypto" else None)
+        _news_sent = setup.get("news_sentiment")
+
+        db = SessionLocal()
+        try:
+            row = BreakoutAlert(
+                ticker=setup.get("ticker", ""),
+                asset_type=asset_type,
+                alert_tier=alert_tier,
+                score_at_alert=setup.get("score", 0),
+                indicator_snapshot=_json.dumps(setup.get("indicators", {})),
+                price_at_alert=setup.get("price", 0),
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                target_price=setup.get("take_profit"),
+                signals_snapshot=_json.dumps(setup.get("signals", [])[:10]),
+                outcome="pending",
+                regime_at_alert=_regime,
+                scan_cycle_id=scan_cycle_id,
+                timeframe=timeframe,
+                sector=_sector,
+                news_sentiment_at_alert=_news_sent,
+            )
+            db.add(row)
+            db.commit()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"[scheduler] Failed to record breakout alert: {e}", exc_info=True)
 
 
 def _run_crypto_breakout_job():
@@ -104,6 +154,7 @@ def _run_crypto_breakout_job():
     All thresholds are brain-adaptive and evolve via the learning cycle.
     """
     import time as _t
+    import uuid as _uuid
     from .trading.scanner import run_crypto_breakout_scan, get_adaptive_weight
     from .trading.alerts import dispatch_alert
 
@@ -111,6 +162,18 @@ def _run_crypto_breakout_job():
     try:
         result = run_crypto_breakout_scan(max_results=20)
         now = _t.time()
+        _cycle_id = str(_uuid.uuid4())[:12]
+
+        # BTC dump filter — reduce alert volume when BTC is crashing
+        _btc_dump_halve = False
+        try:
+            from .trading.market_data import get_btc_state
+            _btc = get_btc_state()
+            if (_btc.get("btc_change_pct") or 0) < -5:
+                _btc_dump_halve = True
+                logger.info("[scheduler] BTC dumping >5% — halving crypto alert cap")
+        except Exception:
+            pass
 
         stale = [k for k, v in _crypto_alert_cooldown.items() if now - v > 7200]
         for k in stale:
@@ -193,13 +256,26 @@ def _run_crypto_breakout_job():
         sent = 0
         cooldown_skipped = 0
         _max_alerts = int(get_adaptive_weight("crypto_alert_max_per_cycle"))
-        for setup, prefix, alert_type in alertable[:_max_alerts]:
+        if _btc_dump_halve:
+            _max_alerts = max(1, _max_alerts // 2)
+
+        _sector_counts: dict[str, int] = {}
+        _sector_cap = int(get_adaptive_weight("alert_max_per_sector"))
+
+        for setup, prefix, alert_type in alertable[:_max_alerts * 2]:
+            if sent >= _max_alerts:
+                break
             ticker = setup["ticker"]
             last_sent = _crypto_alert_cooldown.get(ticker, 0)
             if now - last_sent < get_adaptive_weight("crypto_alert_cooldown_s"):
                 cooldown_skipped += 1
                 logger.debug(f"[scheduler] {ticker} skipped (cooldown)")
                 continue
+
+            _sect = setup.get("sector") or "crypto_other"
+            if _sector_counts.get(_sect, 0) >= _sector_cap:
+                continue
+            _sector_counts[_sect] = _sector_counts.get(_sect, 0) + 1
 
             flags = []
             if setup.get("bb_squeeze"):
@@ -234,6 +310,8 @@ def _run_crypto_breakout_job():
                 price=setup["price"],
             )
             _crypto_alert_cooldown[ticker] = now
+            _record_breakout_alert(setup, prefix, "crypto",
+                                   scan_cycle_id=_cycle_id, timeframe="15m")
             sent += 1
 
         logger.info(
@@ -241,10 +319,117 @@ def _run_crypto_breakout_job():
             f"{result.get('total_scanned', 0)} scanned, "
             f"{len(all_results)} scored, "
             f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
-            f"{sent} SMS sent"
+            f"{sent} alerts sent"
         )
     except Exception as e:
         logger.error(f"[scheduler] Crypto breakout scan failed: {e}")
+
+
+def _run_stock_breakout_job():
+    """Stock breakout scanner: detect consolidation-to-breakout setups during market hours.
+
+    Uses the same tier logic as crypto but with stock-specific thresholds.
+    All thresholds are brain-adaptive.
+    """
+    import time as _t
+    import uuid as _uuid
+    from .trading.scanner import run_breakout_scan, get_adaptive_weight
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running stock breakout scanner")
+    try:
+        result = run_breakout_scan(max_results=20)
+        now = _t.time()
+        _cycle_id = str(_uuid.uuid4())[:12]
+
+        stale = [k for k, v in _stock_alert_cooldown.items() if now - v > 7200]
+        for k in stale:
+            del _stock_alert_cooldown[k]
+
+        t_coiled = get_adaptive_weight("stock_alert_coiled_spring_min")
+        t_squeeze = get_adaptive_weight("stock_alert_squeeze_firing_min")
+        t_high = get_adaptive_weight("stock_alert_high_score_min")
+
+        all_results = result.get("results", [])
+        logger.info(
+            f"[scheduler] Stock breakout scan: {result.get('candidates_scanned', 0)} scanned, "
+            f"{len(all_results)} scored"
+        )
+
+        alertable: list[tuple[dict, str, str]] = []
+        for r in all_results:
+            score = r.get("score", 0)
+            squeeze = r.get("bb_squeeze", False)
+            status = r.get("status", "wait")
+            adx = r.get("adx")
+            adx_low = adx is not None and adx < 20
+
+            if squeeze and adx_low and score >= t_coiled:
+                alertable.append((r, "STOCK COILED SPRING", "stock_breakout"))
+            elif status == "breaking_out" and score >= t_squeeze:
+                alertable.append((r, "STOCK BREAKOUT", "stock_breakout"))
+            elif squeeze and score >= t_squeeze:
+                alertable.append((r, "STOCK SQUEEZE SETUP", "stock_breakout"))
+            elif score >= t_high:
+                alertable.append((r, "STOCK HIGH-SCORE SETUP", "stock_breakout"))
+
+        sent = 0
+        cooldown_skipped = 0
+        _max_alerts = int(get_adaptive_weight("stock_alert_max_per_cycle"))
+        _sector_counts: dict[str, int] = {}
+        _sector_cap = int(get_adaptive_weight("alert_max_per_sector"))
+
+        for setup, prefix, alert_type in alertable[:_max_alerts * 2]:
+            if sent >= _max_alerts:
+                break
+            ticker = setup["ticker"]
+            last_sent = _stock_alert_cooldown.get(ticker, 0)
+            if now - last_sent < get_adaptive_weight("stock_alert_cooldown_s"):
+                cooldown_skipped += 1
+                continue
+
+            _sect = setup.get("sector") or "unknown"
+            if _sector_counts.get(_sect, 0) >= _sector_cap:
+                continue
+            _sector_counts[_sect] = _sector_counts.get(_sect, 0) + 1
+
+            flags = []
+            if setup.get("bb_squeeze"):
+                flags.append("BB squeeze")
+            if setup.get("adx") and setup["adx"] < 20:
+                flags.append(f"ADX {setup['adx']:.0f}")
+            flag_line = " + ".join(flags) if flags else ""
+            sig_text = "; ".join(setup.get("signals", [])[:3])
+
+            msg = (
+                f"{prefix}: {ticker}\n"
+                f"Score {setup['score']}/10 | ${setup['price']}\n"
+                f"Dist to breakout: {setup.get('dist_to_breakout', 0):.1f}%\n"
+                + (f"{flag_line}\n" if flag_line else "")
+                + f"Entry ${setup.get('entry_price')} | "
+                f"Stop ${setup.get('stop_loss')} | "
+                f"Target ${setup.get('take_profit')}\n"
+                f"{sig_text}"
+            )
+
+            dispatch_alert(
+                ticker=ticker,
+                alert_type=alert_type,
+                message=msg,
+                price=setup["price"],
+            )
+            _stock_alert_cooldown[ticker] = now
+            _record_breakout_alert(setup, prefix, "stock",
+                                   scan_cycle_id=_cycle_id, timeframe="1d")
+            sent += 1
+
+        logger.info(
+            f"[scheduler] Stock breakout scan done: "
+            f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
+            f"{sent} alerts sent"
+        )
+    except Exception as e:
+        logger.error(f"[scheduler] Stock breakout scan failed: {e}")
 
 
 def _run_momentum_scanner_job():
@@ -281,6 +466,135 @@ def _run_momentum_scanner_job():
             )
     except Exception as e:
         logger.error(f"[scheduler] Momentum scanner failed: {e}")
+
+
+def _check_breakout_outcomes():
+    """Hourly job: check price outcomes for pending breakout alerts.
+
+    For each pending BreakoutAlert:
+      - If >=1h old: fill price_1h, compute gain
+      - If >=4h old: fill price_4h
+      - If >=24h old: fill price_24h, classify outcome, close the record
+    """
+    from datetime import timedelta
+    import time as _t
+    from ..db import SessionLocal
+    from ..models.trading import BreakoutAlert
+    from .trading.market_data import fetch_quote
+
+    logger.info("[scheduler] Checking breakout alert outcomes")
+    db = SessionLocal()
+    try:
+        now = datetime.utcnow()
+        pending = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome == "pending",
+        ).all()
+
+        if not pending:
+            logger.info("[scheduler] No pending breakout alerts to check")
+            return
+
+        updated = 0
+        closed = 0
+        for alert in pending:
+            age = now - alert.alerted_at
+            age_hours = age.total_seconds() / 3600
+
+            try:
+                q = fetch_quote(alert.ticker)
+                current_price = q.get("price") if q else None
+            except Exception:
+                current_price = None
+
+            if current_price is None:
+                continue
+
+            if alert.price_at_alert <= 0:
+                continue
+
+            gain_pct = (current_price - alert.price_at_alert) / alert.price_at_alert * 100
+
+            prev_max_gain = alert.max_gain_pct
+            if alert.max_gain_pct is None:
+                alert.max_gain_pct = max(0, gain_pct)
+            else:
+                alert.max_gain_pct = max(alert.max_gain_pct, gain_pct)
+
+            if alert.max_drawdown_pct is None:
+                alert.max_drawdown_pct = min(0, gain_pct)
+            else:
+                alert.max_drawdown_pct = min(alert.max_drawdown_pct, gain_pct)
+
+            # Track time-to-peak: update when new high is set
+            if alert.max_gain_pct > (prev_max_gain or 0):
+                alert.time_to_peak_hours = round(age_hours, 2)
+                alert.price_at_peak = current_price
+
+            # Track time-to-stop: when drawdown first crosses stop distance
+            if alert.time_to_stop_hours is None and alert.stop_loss is not None:
+                stop_dist_pct = (alert.price_at_alert - alert.stop_loss) / alert.price_at_alert * 100
+                if alert.max_drawdown_pct <= -stop_dist_pct:
+                    alert.time_to_stop_hours = round(age_hours, 2)
+
+            # Trailing stop simulation: 50% of gain as trailing stop
+            if alert.max_gain_pct and alert.max_gain_pct > 0.5:
+                trailing_exit = alert.max_gain_pct * 0.5
+                if gain_pct <= trailing_exit and (alert.optimal_exit_pct is None or alert.max_gain_pct > alert.optimal_exit_pct):
+                    alert.optimal_exit_pct = round(alert.max_gain_pct * 0.75, 2)
+
+            if age_hours >= 1 and alert.price_1h is None:
+                alert.price_1h = current_price
+                updated += 1
+
+            if age_hours >= 4 and alert.price_4h is None:
+                alert.price_4h = current_price
+                updated += 1
+
+            if age_hours >= 24:
+                alert.price_24h = current_price
+                alert.outcome_checked_at = now
+
+                hit_target = (
+                    alert.target_price is not None
+                    and alert.max_gain_pct >= (
+                        (alert.target_price - alert.price_at_alert) / alert.price_at_alert * 100
+                    ) * 0.5
+                )
+                hit_stop = (
+                    alert.stop_loss is not None
+                    and alert.max_drawdown_pct <= -(
+                        (alert.price_at_alert - alert.stop_loss) / alert.price_at_alert * 100
+                    )
+                )
+
+                if hit_target or alert.max_gain_pct >= 2.0:
+                    alert.outcome = "winner"
+                    alert.breakout_occurred = True
+                elif hit_stop:
+                    alert.outcome = "loser"
+                    alert.breakout_occurred = False
+                elif alert.max_gain_pct >= 1.0 and gain_pct < 0:
+                    alert.outcome = "fakeout"
+                    alert.breakout_occurred = False
+                elif gain_pct > 0:
+                    alert.outcome = "winner"
+                    alert.breakout_occurred = True
+                else:
+                    alert.outcome = "loser"
+                    alert.breakout_occurred = False
+
+                closed += 1
+                updated += 1
+
+        db.commit()
+        logger.info(
+            f"[scheduler] Breakout outcome check: {len(pending)} pending, "
+            f"{updated} updated, {closed} closed"
+        )
+    except Exception as e:
+        logger.error(f"[scheduler] Breakout outcome check failed: {e}")
+    finally:
+        db.close()
 
 
 def _run_code_learning_job():
@@ -404,6 +718,29 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_stock_breakout_job,
+            trigger=CronTrigger(
+                day_of_week="mon-fri",
+                hour="9-15",
+                minute="*/15",
+                timezone="US/Eastern",
+            ),
+            id="stock_breakout_scanner",
+            name="Stock breakout scanner (market hours every 15min)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
+        _scheduler.add_job(
+            _check_breakout_outcomes,
+            trigger=IntervalTrigger(hours=1),
+            id="breakout_outcome_checker",
+            name="Breakout outcome checker (hourly)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _code_hours = max(1, settings.code_brain_interval_hours)
         _scheduler.add_job(
             _run_code_learning_job,
@@ -430,7 +767,8 @@ def start_scheduler():
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
-            "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7)"
+            "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
+            "stock breakout scanner market hours every 15min)"
         )
 
 

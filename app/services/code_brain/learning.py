@@ -12,9 +12,12 @@ from sqlalchemy import func
 
 from ...config import settings
 from ...models.code_brain import (
-    CodeHotspot, CodeInsight, CodeLearningEvent, CodeRepo, CodeSnapshot,
+    CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
+    CodeLearningEvent, CodeRepo, CodeReview, CodeSnapshot,
 )
 from . import indexer, analyzer, git_miner, insights as insights_mod
+from . import graph as graph_mod, trends as trends_mod, reviewer as reviewer_mod
+from . import deps_scanner as deps_mod, search as search_mod
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +69,7 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 4
+    _learning_status["total_steps"] = 8
     _learning_status["repos_processed"] = 0
     _learning_status["insights_found"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -123,7 +126,54 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             _learning_status["step_timings"][f"git_{repo.name}"] = round(time.time() - t0, 1)
             logger.info("[code-brain] Git mined %s: %s", repo.name, git_result)
 
-            # Step 4: Discover insights
+            # Step 4: Build dependency graph
+            _learning_status["phase"] = "graphing"
+            _learning_status["current_step"] = f"Building dependency graph for {repo.name}"
+            t0 = time.time()
+            try:
+                graph_result = graph_mod.build_dependency_graph(db, repo.id)
+                logger.info("[code-brain] Graph for %s: %s", repo.name, graph_result)
+            except Exception as ge:
+                logger.warning("[code-brain] Graph failed for %s: %s", repo.name, ge)
+                graph_result = {}
+            _learning_status["step_timings"][f"graph_{repo.name}"] = round(time.time() - t0, 1)
+
+            # Step 5: Review recent diffs
+            _learning_status["phase"] = "reviewing"
+            _learning_status["current_step"] = f"Reviewing recent commits for {repo.name}"
+            t0 = time.time()
+            try:
+                review_result = reviewer_mod.review_recent_commits(db, repo.id, user_id=user_id)
+                logger.info("[code-brain] Reviews for %s: %s", repo.name, review_result)
+            except Exception as re_:
+                logger.warning("[code-brain] Review failed for %s: %s", repo.name, re_)
+                review_result = {}
+            _learning_status["step_timings"][f"review_{repo.name}"] = round(time.time() - t0, 1)
+
+            # Step 6: Scan dependencies
+            _learning_status["phase"] = "scanning_deps"
+            _learning_status["current_step"] = f"Scanning dependencies for {repo.name}"
+            t0 = time.time()
+            try:
+                deps_result = deps_mod.scan_dependencies(db, repo.id)
+                logger.info("[code-brain] Deps for %s: %s", repo.name, deps_result)
+            except Exception as de:
+                logger.warning("[code-brain] Deps scan failed for %s: %s", repo.name, de)
+                deps_result = {}
+            _learning_status["step_timings"][f"deps_{repo.name}"] = round(time.time() - t0, 1)
+
+            # Step 7: Record quality snapshot
+            _learning_status["phase"] = "trends"
+            _learning_status["current_step"] = f"Recording quality trends for {repo.name}"
+            t0 = time.time()
+            try:
+                trends_result = trends_mod.record_quality_snapshot(db, repo.id)
+                logger.info("[code-brain] Trends for %s: %s", repo.name, trends_result)
+            except Exception as te:
+                logger.warning("[code-brain] Trends failed for %s: %s", repo.name, te)
+            _learning_status["step_timings"][f"trends_{repo.name}"] = round(time.time() - t0, 1)
+
+            # Step 8: Discover insights
             _learning_status["phase"] = "discovering"
             _learning_status["current_step"] = f"Discovering patterns in {repo.name}"
             t0 = time.time()
@@ -132,11 +182,17 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             _learning_status["step_timings"][f"insights_{repo.name}"] = round(time.time() - t0, 1)
             logger.info("[code-brain] Insights for %s: %s", repo.name, insight_result)
 
+            # Index symbols for search (piggyback on the cycle)
+            try:
+                search_mod.index_symbols(db, repo.id)
+            except Exception as se:
+                logger.warning("[code-brain] Symbol indexing failed for %s: %s", repo.name, se)
+
             _learning_status["repos_processed"] = i + 1
             _log_event(db, repo.id, "index", f"Completed learning cycle for {repo.name}: {idx_result.get('file_count', 0)} files, {insight_result.get('discovered', 0)} insights", user_id)
 
         _learning_status["insights_found"] = total_insights
-        _learning_status["steps_completed"] = 4
+        _learning_status["steps_completed"] = 8
 
         elapsed = round(time.time() - start, 1)
         report["elapsed_seconds"] = elapsed
@@ -199,6 +255,17 @@ def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[s
         .all()
     )
 
+    circular_count = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True)).scalar() or 0
+    dep_alert_count = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False)).scalar() or 0
+    review_count = db.query(func.count(CodeReview.id)).scalar() or 0
+
+    trend_deltas = {}
+    if repos:
+        try:
+            trend_deltas = trends_mod.compute_trend_deltas(db, repos[0].id)
+        except Exception:
+            pass
+
     return {
         "repos": len(repos),
         "total_files": total_files,
@@ -206,7 +273,11 @@ def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[s
         "insight_count": insight_count,
         "hotspot_count": hotspot_count,
         "avg_complexity": round(avg_complexity, 2),
+        "circular_dep_count": circular_count,
+        "dep_alert_count": dep_alert_count,
+        "review_count": review_count,
         "languages": lang_totals,
+        "trend_deltas": trend_deltas,
         "top_hotspots": [
             {
                 "file": h.file_path,
@@ -295,4 +366,66 @@ def get_code_chat_context(db: Session, user_id: Optional[int] = None) -> str:
             + ". Prefer small, well-tested changes when working here."
         )
 
+    # Circular dependency warnings
+    circ = metrics.get("circular_dep_count") or 0
+    if circ:
+        parts.append(
+            f"Warning: {circ} circular import edges detected. "
+            "Consider breaking these cycles to improve maintainability."
+        )
+
+    # Dependency health alerts
+    dep_alerts = metrics.get("dep_alert_count") or 0
+    if dep_alerts:
+        parts.append(
+            f"Dependency health: {dep_alerts} package(s) are outdated. "
+            "Check the Brain dashboard for details."
+        )
+
+    # Quality trends
+    td = metrics.get("trend_deltas") or {}
+    if td.get("available"):
+        deltas = td.get("deltas") or {}
+        alerts = td.get("alerts") or []
+        if alerts:
+            alert_msgs = [f"{a['metric']} changed {a['change']:+.1f}%" for a in alerts]
+            parts.append("Quality trend alerts: " + "; ".join(alert_msgs) + ".")
+
+    # Recent review findings
+    try:
+        reviews = reviewer_mod.get_recent_reviews(db, limit=3)
+        critical_findings = []
+        for rev in reviews:
+            for f in (rev.get("findings") or []):
+                if f.get("severity") in ("critical", "warn"):
+                    critical_findings.append(f"{f.get('category', 'issue')}: {f.get('message', '')}")
+        if critical_findings:
+            parts.append(
+                "Recent code review findings: "
+                + "; ".join(critical_findings[:3])
+                + "."
+            )
+    except Exception:
+        pass
+
     return "\n".join(parts)
+
+
+# ── Project-level wrappers (lens-aware) ──────────────────────────────
+
+def get_project_metrics(db: Session, user_id: Optional[int] = None, lens: Optional[str] = None) -> Dict[str, Any]:
+    """Return metrics, optionally filtered through a role lens."""
+    if lens:
+        from .lenses import get_lens_metrics
+        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+        repo_id = repos[0].id if repos else None
+        return get_lens_metrics(db, lens, repo_id=repo_id)
+    return get_code_brain_metrics(db, user_id=user_id)
+
+
+def get_project_chat_context(db: Session, user_id: Optional[int] = None, lens: Optional[str] = None) -> str:
+    """Return chat context, optionally filtered through a role lens."""
+    if lens:
+        from .lenses import get_lens_chat_context
+        return get_lens_chat_context(db, lens, user_id=user_id)
+    return get_code_chat_context(db, user_id=user_id)

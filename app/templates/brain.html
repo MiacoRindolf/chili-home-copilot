@@ -293,10 +293,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       Trading
       <span class="b-domain-dot idle" id="trading-status-dot"></span>
     </div>
-    <div class="b-domain" data-domain="code" onclick="switchDomain('code')">
-      <span class="b-domain-icon">&#x1F4BB;</span>
-      Code
-      <span class="b-domain-dot idle" id="code-status-dot"></span>
+    <div class="b-domain" data-domain="project" onclick="switchDomain('project')">
+      <span class="b-domain-icon">&#x1F3D7;</span>
+      Project
+      <span class="b-domain-dot idle" id="project-status-dot"></span>
     </div>
     <div class="b-domain" data-domain="reasoning" onclick="switchDomain('reasoning')">
       <span class="b-domain-icon">&#x1F9E0;</span>
@@ -395,12 +395,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
     </div>
 
-    <!-- ═══ Code Domain ═══ -->
-    <div id="domain-code" style="display:none">
+    <!-- ═══ Project Domain ═══ -->
+    <div id="domain-project" style="display:none">
       <div class="b-main-header">
-        <h2>Code Brain</h2>
+        <h2>Project Brain</h2>
         <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
       </div>
+
+      <!-- Subdomain lens tabs -->
+      <div class="proj-lens-bar" id="proj-lens-bar"></div>
 
       <!-- Code learning pipeline -->
       <div class="brain-section" id="code-pipeline-section" style="display:none">
@@ -453,6 +456,51 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Discovered Conventions &amp; Patterns</div>
         <div id="code-insights" style="max-height:400px;overflow-y:auto">
           <div style="font-size:11px;color:var(--text-muted)">Loading insights...</div>
+        </div>
+      </div>
+
+      <!-- Architecture Graph -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Graph</div>
+        <div id="code-graph" style="max-height:400px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Run a learning cycle to build the dependency graph.</div>
+        </div>
+      </div>
+
+      <!-- Quality Trends -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Quality Trends</div>
+        <div id="code-trends">
+          <div style="font-size:11px;color:var(--text-muted)">Trends will appear after multiple learning cycles.</div>
+        </div>
+      </div>
+
+      <!-- Code Reviews -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Code Reviews</div>
+        <div id="code-reviews" style="max-height:400px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Reviews of recent commits will appear after learning.</div>
+        </div>
+      </div>
+
+      <!-- Dependency Health -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4E6;</span> Dependency Health</div>
+        <div id="code-deps" style="max-height:350px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Dependency alerts will appear after learning.</div>
+        </div>
+      </div>
+
+      <!-- Code Search -->
+      <div class="brain-section">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F50E;</span> Code Search</div>
+        <div style="display:flex;gap:6px;margin-bottom:8px">
+          <input type="text" id="code-search-input" placeholder="Search functions, classes, files..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px">
+          <button onclick="runCodeSearch()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2);padding:6px 14px;font-size:11px">Search</button>
+          <button onclick="runCodeSearch(true)" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:6px 14px;font-size:11px" title="Ask LLM">AI Search</button>
+        </div>
+        <div id="code-search-results" style="max-height:300px;overflow-y:auto">
+          <div style="font-size:11px;color:var(--text-muted)">Type a query to search indexed code.</div>
         </div>
       </div>
 
@@ -626,14 +674,14 @@ function updateSidebarStatus() {
       banner.textContent = 'Trading: ' + lastRun;
     }
     var c = d.code || {};
-    var codeDot = document.getElementById('code-status-dot');
-    if (codeDot) {
-      codeDot.className = c.running ? 'b-domain-dot learning' : 'b-domain-dot idle';
+    var projDot = document.getElementById('project-status-dot');
+    if (projDot) {
+      projDot.className = c.running ? 'b-domain-dot learning' : 'b-domain-dot idle';
     }
     if (c.running) {
-      banner.textContent += ' | Code: ' + (c.phase || 'learning') + '...';
+      banner.textContent += ' | Project: ' + (c.phase || 'learning') + '...';
     } else if (c.last_run) {
-      banner.textContent += ' | Code: ' + timeSince(new Date(c.last_run)) + ' ago';
+      banner.textContent += ' | Project: ' + timeSince(new Date(c.last_run)) + ' ago';
     }
     var r = d.reasoning || {};
     var rDot = document.getElementById('reasoning-status-dot');
@@ -1127,21 +1175,24 @@ function triggerRetrainML() {
    Code Brain JavaScript
    ══════════════════════════════════════════════════ */
 var _activeDomain = 'trading';
-var _codeDashboardLoaded = false;
+var _projectDashboardLoaded = false;
 var _reasoningDashboardLoaded = false;
+var _activeProjectLens = 'architect';
 
 function switchDomain(domain) {
+  if (domain === 'code') domain = 'project';
   _activeDomain = domain;
   document.querySelectorAll('.b-domain').forEach(function(el) {
     el.classList.toggle('active', el.dataset.domain === domain);
   });
   document.getElementById('domain-trading').style.display = domain === 'trading' ? '' : 'none';
-  document.getElementById('domain-code').style.display = domain === 'code' ? '' : 'none';
+  document.getElementById('domain-project').style.display = domain === 'project' ? '' : 'none';
   var rd = document.getElementById('domain-reasoning');
   if (rd) rd.style.display = domain === 'reasoning' ? '' : 'none';
 
-  if (domain === 'code' && !_codeDashboardLoaded) {
-    _codeDashboardLoaded = true;
+  if (domain === 'project' && !_projectDashboardLoaded) {
+    _projectDashboardLoaded = true;
+    initProjectLensBar();
     loadCodeDashboard();
   }
   if (domain === 'reasoning' && !_reasoningDashboardLoaded) {
@@ -1155,6 +1206,10 @@ function loadCodeDashboard() {
   loadCodeMetrics();
   loadCodeHotspots();
   loadCodeInsights();
+  loadCodeGraph();
+  loadCodeTrends();
+  loadCodeReviews();
+  loadCodeDeps();
   pollCodeLearningStatus();
 }
 
@@ -1602,6 +1657,232 @@ function loadCodeInsights() {
   }).catch(function(){});
 }
 
+/* ── Architecture Graph ────────────────────────── */
+function loadCodeGraph() {
+  var repoSel = document.querySelector('#code-repos .code-repo-card.active');
+  var repoId = repoSel ? repoSel.dataset.repoId : '';
+  if (!repoId) {
+    fetch('/api/brain/code/repos').then(function(r){return r.json();}).then(function(d) {
+      if (d.ok && d.repos && d.repos.length) _fetchGraph(d.repos[0].id);
+    }).catch(function(){});
+    return;
+  }
+  _fetchGraph(repoId);
+}
+function _fetchGraph(repoId) {
+  fetch('/api/brain/code/graph?repo_id=' + repoId).then(function(r){return r.json();}).then(function(d) {
+    var c = document.getElementById('code-graph');
+    if (!d.ok || !d.stats) { c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No graph data yet.</div>'; return; }
+    var s = d.stats;
+    var html = '<div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:10px">';
+    html += '<div class="brain-kpi"><div class="bk-val">' + (s.total_nodes||0) + '</div><div class="bk-label">Files</div></div>';
+    html += '<div class="brain-kpi"><div class="bk-val">' + (s.total_edges||0) + '</div><div class="bk-label">Edges</div></div>';
+    html += '<div class="brain-kpi"><div class="bk-val" style="color:' + (s.circular_edges ? '#ef4444' : '#22c55e') + '">' + (s.circular_edges||0) + '</div><div class="bk-label">Circular</div></div>';
+    html += '</div>';
+    if (s.circular_edges > 0) {
+      html += '<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-radius:8px;padding:8px 12px;font-size:11px;color:#ef4444;margin-bottom:8px">';
+      html += '&#x26A0; ' + s.circular_edges + ' circular dependency edge(s) detected. Consider breaking these cycles.</div>';
+    }
+    if (s.most_depended_on && s.most_depended_on.length) {
+      html += '<div style="font-size:11px;font-weight:600;margin:8px 0 4px">Most Depended-On Files</div>';
+      html += '<div style="display:flex;flex-direction:column;gap:3px">';
+      s.most_depended_on.forEach(function(f) {
+        html += '<div style="display:flex;justify-content:space-between;font-size:11px;padding:3px 8px;background:var(--card);border-radius:4px">';
+        html += '<span style="color:var(--text);word-break:break-all">' + escHtml(f.file) + '</span>';
+        html += '<span style="color:var(--accent);font-weight:600;white-space:nowrap;margin-left:8px">' + f.count + ' imports</span></div>';
+      });
+      html += '</div>';
+    }
+    if (s.coupling && s.coupling.length) {
+      html += '<div style="font-size:11px;font-weight:600;margin:10px 0 4px">Top Module Coupling</div>';
+      html += '<div style="display:flex;flex-direction:column;gap:3px">';
+      s.coupling.slice(0,8).forEach(function(cp) {
+        html += '<div style="display:flex;justify-content:space-between;font-size:10px;padding:3px 8px;background:var(--card);border-radius:4px">';
+        html += '<span>' + escHtml(cp.source_dir) + ' → ' + escHtml(cp.target_dir) + '</span>';
+        html += '<span style="font-weight:600">' + cp.edge_count + '</span></div>';
+      });
+      html += '</div>';
+    }
+    c.innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ── Quality Trends ───────────────────────────── */
+function loadCodeTrends() {
+  var repoSel = document.querySelector('#code-repos .code-repo-card.active');
+  var repoId = repoSel ? repoSel.dataset.repoId : '';
+  if (!repoId) {
+    fetch('/api/brain/code/repos').then(function(r){return r.json();}).then(function(d) {
+      if (d.ok && d.repos && d.repos.length) _fetchTrends(d.repos[0].id);
+    }).catch(function(){});
+    return;
+  }
+  _fetchTrends(repoId);
+}
+function _fetchTrends(repoId) {
+  fetch('/api/brain/code/trends?repo_id=' + repoId).then(function(r){return r.json();}).then(function(d) {
+    var c = document.getElementById('code-trends');
+    if (!d.ok || !d.series || !d.series.length) {
+      c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No trend data yet. Requires multiple learning cycles.</div>';
+      return;
+    }
+    var html = '';
+    var del = (d.deltas && d.deltas.available) ? d.deltas : null;
+    if (del && del.alerts && del.alerts.length) {
+      html += '<div style="background:rgba(234,179,8,0.08);border:1px solid rgba(234,179,8,0.2);border-radius:8px;padding:8px 12px;font-size:11px;color:#eab308;margin-bottom:8px">';
+      del.alerts.forEach(function(a) {
+        html += '&#x26A0; <b>' + escHtml(a.metric) + '</b> changed ' + (a.change > 0 ? '+' : '') + a.change + '%<br>';
+      });
+      html += '</div>';
+    }
+    html += '<div style="display:flex;gap:16px;flex-wrap:wrap;margin-bottom:8px">';
+    html += '<canvas id="trend-cx-canvas" width="260" height="80" style="background:var(--card);border-radius:8px;padding:4px"></canvas>';
+    html += '<canvas id="trend-files-canvas" width="260" height="80" style="background:var(--card);border-radius:8px;padding:4px"></canvas>';
+    html += '</div>';
+    if (del && del.deltas) {
+      html += '<div style="display:flex;gap:12px;flex-wrap:wrap">';
+      var dd = del.deltas;
+      if (dd.complexity_delta_pct !== null) html += _trendBadge('Complexity', dd.complexity_delta_pct, true);
+      if (dd.files_delta_pct !== null) html += _trendBadge('Files', dd.files_delta_pct, false);
+      if (dd.test_ratio_delta_pct !== null) html += _trendBadge('Test Ratio', dd.test_ratio_delta_pct, false);
+      if (dd.hotspot_delta_pct !== null) html += _trendBadge('Hotspots', dd.hotspot_delta_pct, true);
+      html += '</div>';
+    }
+    c.innerHTML = html;
+    _drawTrendSparkline('trend-cx-canvas', d.series.map(function(s){return s.avg_complexity;}), 'Avg Complexity', '#06b6d4');
+    _drawTrendSparkline('trend-files-canvas', d.series.map(function(s){return s.total_files;}), 'Total Files', '#8b5cf6');
+  }).catch(function(){});
+}
+function _trendBadge(label, pct, invertColor) {
+  var isUp = pct > 0;
+  var color = invertColor ? (isUp ? '#ef4444' : '#22c55e') : (isUp ? '#22c55e' : '#ef4444');
+  return '<div style="font-size:10px;padding:3px 10px;border-radius:12px;background:' + color + '15;color:' + color + '">' +
+    label + ' <b>' + (isUp ? '+' : '') + pct + '%</b></div>';
+}
+function _drawTrendSparkline(canvasId, values, label, color) {
+  var cv = document.getElementById(canvasId);
+  if (!cv || !values.length) return;
+  var ctx = cv.getContext('2d');
+  var w = cv.width, h = cv.height;
+  ctx.clearRect(0, 0, w, h);
+  var mn = Math.min.apply(null, values), mx = Math.max.apply(null, values);
+  var range = mx - mn || 1;
+  ctx.strokeStyle = color; ctx.lineWidth = 1.5; ctx.beginPath();
+  values.forEach(function(v, i) {
+    var x = (i / (values.length - 1)) * (w - 20) + 10;
+    var y = h - 16 - ((v - mn) / range) * (h - 24);
+    if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+  ctx.font = '9px system-ui'; ctx.fillStyle = 'var(--text-muted,#888)';
+  ctx.fillText(label, 4, 10);
+}
+
+/* ── Code Reviews ─────────────────────────────── */
+function loadCodeReviews() {
+  fetch('/api/brain/code/reviews').then(function(r){return r.json();}).then(function(d) {
+    var c = document.getElementById('code-reviews');
+    if (!d.ok || !d.reviews || !d.reviews.length) {
+      c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No reviews yet.</div>';
+      return;
+    }
+    var html = '';
+    d.reviews.forEach(function(rev) {
+      var scoreColor = rev.overall_score >= 7 ? '#22c55e' : rev.overall_score >= 4 ? '#eab308' : '#ef4444';
+      html += '<div style="background:var(--card);border-radius:8px;padding:10px 12px;margin-bottom:6px">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">';
+      html += '<span style="font-size:11px;font-weight:600;font-family:monospace">' + escHtml(rev.commit_hash.slice(0,8)) + '</span>';
+      html += '<span style="font-size:10px;color:var(--text-muted)">' + escHtml(rev.author||'') + '</span>';
+      html += '<span style="font-size:11px;font-weight:700;color:' + scoreColor + '">' + rev.overall_score + '/10</span>';
+      html += '</div>';
+      if (rev.summary) html += '<div style="font-size:11px;color:var(--text);margin-bottom:4px">' + escHtml(rev.summary) + '</div>';
+      if (rev.findings && rev.findings.length) {
+        rev.findings.slice(0,5).forEach(function(f) {
+          var fc = f.severity === 'critical' ? '#ef4444' : f.severity === 'warn' ? '#eab308' : '#06b6d4';
+          html += '<div style="font-size:10px;padding:2px 8px;border-left:2px solid ' + fc + ';margin:2px 0;color:var(--text)">';
+          html += '<span style="color:' + fc + ';font-weight:600;text-transform:uppercase">' + escHtml(f.severity||'info') + '</span> ';
+          html += escHtml(f.message||'') + '</div>';
+        });
+      }
+      html += '<div style="font-size:9px;color:var(--text-muted);margin-top:4px">' + (rev.reviewed_at ? timeSince(new Date(rev.reviewed_at)) + ' ago' : '') + '</div>';
+      html += '</div>';
+    });
+    c.innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ── Dependency Health ────────────────────────── */
+function loadCodeDeps() {
+  fetch('/api/brain/code/deps').then(function(r){return r.json();}).then(function(d) {
+    var c = document.getElementById('code-deps');
+    if (!d.ok || d.total === 0) {
+      c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No dependency alerts.</div>';
+      return;
+    }
+    var html = '<div style="display:flex;gap:12px;margin-bottom:10px">';
+    html += '<div class="brain-kpi"><div class="bk-val" style="color:#ef4444">' + (d.critical||0) + '</div><div class="bk-label">Critical</div></div>';
+    html += '<div class="brain-kpi"><div class="bk-val" style="color:#eab308">' + (d.warn||0) + '</div><div class="bk-label">Warning</div></div>';
+    html += '<div class="brain-kpi"><div class="bk-val" style="color:#06b6d4">' + (d.info||0) + '</div><div class="bk-label">Info</div></div>';
+    html += '</div>';
+    html += '<table style="width:100%;font-size:11px;border-collapse:collapse">';
+    html += '<tr style="text-align:left;border-bottom:1px solid var(--border)">';
+    html += '<th style="padding:4px 8px">Package</th><th style="padding:4px 8px">Current</th><th style="padding:4px 8px">Latest</th><th style="padding:4px 8px">Severity</th><th style="padding:4px 8px">Eco</th></tr>';
+    var allAlerts = [].concat(d.alerts.critical||[], d.alerts.warn||[], d.alerts.info||[]);
+    allAlerts.slice(0, 30).forEach(function(a) {
+      var sc = a.severity === 'critical' ? '#ef4444' : a.severity === 'warn' ? '#eab308' : '#06b6d4';
+      html += '<tr style="border-bottom:1px solid var(--border)">';
+      html += '<td style="padding:4px 8px;font-weight:600">' + escHtml(a.package) + '</td>';
+      html += '<td style="padding:4px 8px;font-family:monospace">' + escHtml(a.current||'?') + '</td>';
+      html += '<td style="padding:4px 8px;font-family:monospace;color:#22c55e">' + escHtml(a.latest||'?') + '</td>';
+      html += '<td style="padding:4px 8px"><span style="color:' + sc + ';font-weight:600;text-transform:uppercase">' + escHtml(a.severity||'') + '</span></td>';
+      html += '<td style="padding:4px 8px">' + escHtml(a.ecosystem||'') + '</td>';
+      html += '</tr>';
+    });
+    html += '</table>';
+    c.innerHTML = html;
+  }).catch(function(){});
+}
+
+/* ── Code Search ──────────────────────────────── */
+function runCodeSearch(useLlm) {
+  var input = document.getElementById('code-search-input');
+  var query = (input ? input.value : '').trim();
+  if (!query) return;
+  var c = document.getElementById('code-search-results');
+  c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">Searching...</div>';
+  fetch('/api/brain/code/search', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({query: query, use_llm: !!useLlm})
+  }).then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) { c.innerHTML = '<div style="font-size:11px;color:#ef4444">Search failed.</div>'; return; }
+    var html = '';
+    if (d.answer) {
+      html += '<div style="background:rgba(139,92,246,0.06);border:1px solid rgba(139,92,246,0.15);border-radius:8px;padding:10px 12px;font-size:11px;color:var(--text);margin-bottom:8px;white-space:pre-wrap">' + escHtml(d.answer) + '</div>';
+    }
+    if (d.results && d.results.length) {
+      d.results.forEach(function(r) {
+        html += '<div style="background:var(--card);border-radius:6px;padding:6px 10px;margin-bottom:4px;font-size:11px">';
+        html += '<div style="display:flex;justify-content:space-between;align-items:center">';
+        html += '<span style="font-weight:600;color:var(--accent)">' + escHtml(r.symbol) + '</span>';
+        html += '<span style="font-size:9px;padding:1px 6px;background:var(--border);border-radius:4px">' + escHtml(r.type) + '</span>';
+        html += '</div>';
+        html += '<div style="font-size:10px;color:var(--text-muted);font-family:monospace">' + escHtml(r.file) + ':' + r.line + '</div>';
+        if (r.signature) html += '<div style="font-size:10px;color:var(--text);font-family:monospace;margin-top:2px">' + escHtml(r.signature) + '</div>';
+        if (r.docstring) html += '<div style="font-size:10px;color:var(--text-muted);font-style:italic;margin-top:2px">' + escHtml(r.docstring) + '</div>';
+        html += '</div>';
+      });
+    } else if (!d.answer) {
+      html += '<div style="font-size:11px;color:var(--text-muted)">No results found.</div>';
+    }
+    c.innerHTML = html;
+  }).catch(function(){ c.innerHTML = '<div style="font-size:11px;color:#ef4444">Search error.</div>'; });
+}
+document.addEventListener('DOMContentLoaded', function() {
+  var si = document.getElementById('code-search-input');
+  if (si) si.addEventListener('keydown', function(e) { if (e.key === 'Enter') runCodeSearch(); });
+});
+
 /* ── Code Learning ──────────────────────────────── */
 function triggerCodeLearn() {
   var btn = document.getElementById('btn-code-learn');
@@ -1623,12 +1904,12 @@ function pollCodeLearningStatus() {
     if (!d.ok) return;
     var code = d.code || {};
     var section = document.getElementById('code-pipeline-section');
-    var dot = document.getElementById('code-status-dot');
+    var dot = document.getElementById('project-status-dot');
     var btn = document.getElementById('btn-code-learn');
 
     if (code.running) {
       section.style.display = '';
-      dot.className = 'b-domain-dot learning';
+      if (dot) dot.className = 'b-domain-dot learning';
       document.getElementById('code-learning-step').textContent = code.current_step || '';
       document.getElementById('code-learning-phase').textContent = code.phase || '';
       var pct = code.repos_processed && code.total_steps ? Math.round((code.repos_processed / code.total_steps) * 100) : 0;
@@ -1637,7 +1918,7 @@ function pollCodeLearningStatus() {
       if (!_codePollTimer) _codePollTimer = setInterval(pollCodeLearningStatus, 3000);
     } else {
       section.style.display = 'none';
-      dot.className = 'b-domain-dot idle';
+      if (dot) dot.className = 'b-domain-dot idle';
       btn.disabled = false; btn.innerHTML = '&#x1F4BB; Reindex All';
       if (_codePollTimer) { clearInterval(_codePollTimer); _codePollTimer = null; }
       if (section._wasRunning) loadCodeDashboard();

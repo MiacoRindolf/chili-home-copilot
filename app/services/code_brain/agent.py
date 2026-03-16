@@ -1,13 +1,13 @@
-"""Code Agent: analyze request -> gather context -> propose changes -> generate diffs.
+"""Code Agent: analyze request -> gather context -> plan -> edit -> validate.
 
-Uses the Code Brain's knowledge (project structure, conventions, hotspots, insights)
-combined with the configured LLM to act as an intelligent coding assistant that
-deeply understands the user's codebase.
+Uses a two-step LLM flow (plan-then-edit) so every diff is generated with
+the real file contents in context, eliminating placeholder/hallucinated code.
 """
 from __future__ import annotations
 
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -16,8 +16,12 @@ from sqlalchemy.orm import Session
 from ...models.code_brain import CodeHotspot, CodeInsight, CodeRepo, CodeSnapshot
 from . import insights as insights_mod
 from .indexer import get_registered_repos
+from .search import search_code
 
 logger = logging.getLogger(__name__)
+
+_MAX_FILE_LINES = 600
+_MAX_FILES_PER_EDIT = 8
 
 
 def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[str, Any]:
@@ -38,6 +42,7 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
     for repo in repos:
         lang_stats = json.loads(repo.language_stats) if repo.language_stats else {}
         context["repos"].append({
+            "id": repo.id,
             "name": repo.name,
             "path": repo.path,
             "file_count": repo.file_count,
@@ -65,41 +70,58 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
                 "complexity": round(h.complexity_score, 3),
             })
 
-    prompt_lower = prompt.lower()
+    # Use semantic search for relevance instead of naive path-word matching
     for repo in repos:
-        snaps = (
-            db.query(CodeSnapshot)
-            .filter(CodeSnapshot.repo_id == repo.id)
-            .all()
-        )
-        for snap in snaps:
-            file_lower = snap.file_path.lower()
-            relevance = 0
-            for word in prompt_lower.split():
-                if len(word) > 2 and word in file_lower:
-                    relevance += 1
-            if relevance > 0:
+        try:
+            results = search_code(db, prompt, repo_id=repo.id, limit=20)
+            seen: set[str] = set()
+            for r in results:
+                fp = r["file"]
+                if fp in seen:
+                    continue
+                seen.add(fp)
                 context["relevant_files"].append({
-                    "file": snap.file_path,
+                    "file": fp,
                     "repo": repo.name,
                     "repo_path": repo.path,
-                    "language": snap.language,
-                    "lines": snap.line_count,
-                    "complexity": snap.complexity_score,
-                    "relevance": relevance,
+                    "language": None,
+                    "lines": 0,
+                    "complexity": 0,
+                    "relevance": r.get("score", 0.5),
+                    "symbol": r.get("symbol", ""),
                 })
+        except Exception:
+            pass
 
-    context["relevant_files"].sort(key=lambda x: -x["relevance"])
-    context["relevant_files"] = context["relevant_files"][:20]
+    # Fallback: if search returned nothing, use path-word matching
+    if not context["relevant_files"]:
+        prompt_lower = prompt.lower()
+        for repo in repos:
+            snaps = db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo.id).all()
+            for snap in snaps:
+                file_lower = snap.file_path.lower()
+                relevance = sum(1 for word in prompt_lower.split() if len(word) > 2 and word in file_lower)
+                if relevance > 0:
+                    context["relevant_files"].append({
+                        "file": snap.file_path,
+                        "repo": repo.name,
+                        "repo_path": repo.path,
+                        "language": snap.language,
+                        "lines": snap.line_count,
+                        "complexity": snap.complexity_score,
+                        "relevance": relevance,
+                    })
+        context["relevant_files"].sort(key=lambda x: -x["relevance"])
+        context["relevant_files"] = context["relevant_files"][:20]
 
     return context
 
 
-def _build_system_prompt(context: Dict[str, Any]) -> str:
-    """Build the system prompt with Code Brain context."""
+def _build_plan_prompt(context: Dict[str, Any]) -> str:
+    """System prompt for Step 1: produce a structured plan only, no diffs."""
     parts = [
         "You are Chili Code Agent, an expert software engineer with deep knowledge of the user's codebases.",
-        "You have been continuously learning the user's projects and have the following understanding:",
+        "You have been continuously learning the user's projects.",
         "",
     ]
 
@@ -125,32 +147,75 @@ def _build_system_prompt(context: Dict[str, Any]) -> str:
 
     if context["relevant_files"]:
         parts.append("## Potentially Relevant Files")
-        for f in context["relevant_files"][:10]:
-            parts.append(f"- {f['file']} ({f['language']}, {f['lines']} lines, complexity: {f['complexity']:.1f})")
+        for f in context["relevant_files"][:15]:
+            sym = f" (contains: {f['symbol']})" if f.get("symbol") else ""
+            parts.append(f"- {f['file']}{sym}")
         parts.append("")
 
     parts.extend([
-        "## Your Capabilities",
-        "1. **Analyze**: Understand the user's request in context of their codebase",
-        "2. **Reason**: Identify which files need changes and why, using your knowledge of the project's patterns",
-        "3. **Propose**: Generate specific, well-structured code changes as unified diffs",
-        "4. **Explain**: Describe your reasoning and any trade-offs",
+        "## Your Task",
+        "Analyze the user's request and produce ONLY a structured plan.",
+        "Do NOT generate any code or diffs yet.",
         "",
-        "## Response Format",
-        "Always structure your response as:",
-        "1. **Analysis**: Brief understanding of the request",
-        "2. **Plan**: Which files to modify/create and why",
-        "3. **Changes**: Specific code changes in unified diff format (```diff blocks)",
-        "4. **Notes**: Any caveats, follow-up suggestions, or alternative approaches",
+        "## Required Output Format",
+        "Return a JSON object with this exact structure:",
+        "```json",
+        '{',
+        '  "analysis": "one paragraph understanding of the request",',
+        '  "files": [',
+        '    {"path": "relative/file/path.py", "action": "modify|create", "description": "what to change and why"}',
+        '  ],',
+        '  "notes": "any caveats or alternative approaches"',
+        '}',
+        "```",
         "",
-        "When proposing code, follow the project's conventions (naming, imports, patterns) that you've learned.",
-        "Be precise and actionable. Don't explain obvious things.",
+        "RULES:",
+        "- Only include files that actually exist in the repository (listed above) or new files to create.",
+        "- Be specific about what needs to change in each file.",
+        "- Limit to the most important files (max 8).",
     ])
 
     return "\n".join(parts)
 
 
-def _read_file_content(repo_path: str, file_path: str, max_lines: int = 500) -> Optional[str]:
+def _build_edit_prompt(file_path: str, file_content: str, change_description: str, conventions: List[str]) -> str:
+    """System prompt for Step 2: generate a diff for one specific file."""
+    parts = [
+        "You are Chili Code Agent. You are editing a specific file.",
+        "",
+        "STRICT RULES:",
+        "- Your diff MUST be based ONLY on the file content provided below.",
+        "- Every line you mark with '-' (removal) MUST exist verbatim in the current file.",
+        "- Do NOT invent or guess code that is not in the provided file.",
+        "- Do NOT use placeholder code like '# Implementation here' or 'pass' for real logic.",
+        "- If you cannot accomplish the change with the provided content, explain why instead of guessing.",
+        "- Use proper unified diff format with --- a/ and +++ b/ headers.",
+        "",
+    ]
+
+    if conventions:
+        parts.append("## Project Conventions to Follow")
+        for c in conventions[:5]:
+            parts.append(f"- {c}")
+        parts.append("")
+
+    parts.extend([
+        f"## File: {file_path}",
+        "```",
+        file_content,
+        "```",
+        "",
+        "## Required Change",
+        change_description,
+        "",
+        "## Output",
+        "Return ONLY a unified diff block wrapped in ```diff ... ```. No other text.",
+    ])
+
+    return "\n".join(parts)
+
+
+def _read_file_content(repo_path: str, file_path: str, max_lines: int = _MAX_FILE_LINES) -> Optional[str]:
     """Read file content for LLM context. Returns None if unreadable."""
     try:
         full = Path(repo_path) / file_path
@@ -158,10 +223,65 @@ def _read_file_content(repo_path: str, file_path: str, max_lines: int = 500) -> 
             return None
         lines = full.read_text(encoding="utf-8", errors="replace").splitlines()
         if len(lines) > max_lines:
-            return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines)"
+            return "\n".join(lines[:max_lines]) + f"\n... ({len(lines) - max_lines} more lines truncated)"
         return "\n".join(lines)
     except Exception:
         return None
+
+
+def _parse_plan_json(reply: str) -> Optional[Dict[str, Any]]:
+    """Extract the JSON plan from the LLM's Step 1 response."""
+    # Try to find JSON block
+    m = re.search(r"```(?:json)?\s*\n(\{.*?\})\s*\n```", reply, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(1))
+        except json.JSONDecodeError:
+            pass
+    # Try raw JSON
+    m = re.search(r"\{[^{}]*\"files\"[^{}]*\[.*?\].*?\}", reply, re.DOTALL)
+    if m:
+        try:
+            return json.loads(m.group(0))
+        except json.JSONDecodeError:
+            pass
+    return None
+
+
+def _validate_diff(diff_text: str, file_path: str, file_content: Optional[str]) -> Dict[str, Any]:
+    """Validate a generated diff against the real file content."""
+    result = {"valid": True, "warnings": []}
+
+    if not file_content:
+        result["warnings"].append(f"Cannot validate: file '{file_path}' not readable")
+        return result
+
+    real_lines = set(file_content.splitlines())
+    removed_lines = []
+    for line in diff_text.splitlines():
+        if line.startswith("-") and not line.startswith("---"):
+            removed_lines.append(line[1:])
+
+    bad_count = 0
+    for rl in removed_lines:
+        stripped = rl.strip()
+        if stripped and stripped not in {l.strip() for l in real_lines}:
+            bad_count += 1
+
+    if bad_count > 0 and removed_lines:
+        pct = bad_count / len(removed_lines) * 100
+        if pct > 50:
+            result["valid"] = False
+            result["warnings"].append(
+                f"{bad_count}/{len(removed_lines)} removed lines do not match the actual file. "
+                "This diff may contain hallucinated code."
+            )
+        elif pct > 20:
+            result["warnings"].append(
+                f"{bad_count}/{len(removed_lines)} removed lines could not be verified."
+            )
+
+    return result
 
 
 async def run_code_agent(
@@ -170,7 +290,7 @@ async def run_code_agent(
     repo_id: Optional[int] = None,
     user_id: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Execute the Code Agent flow."""
+    """Execute the two-step Code Agent flow: Plan -> Edit."""
     from ...openai_client import chat as llm_chat, is_configured
 
     if not is_configured():
@@ -181,51 +301,161 @@ async def run_code_agent(
     if not context["repos"]:
         return {"error": "No repos registered. Add a repo first via the Brain UI."}
 
-    system_prompt = _build_system_prompt(context)
-
-    file_contents = []
-    for f in context["relevant_files"][:5]:
-        content = _read_file_content(f["repo_path"], f["file"])
-        if content:
-            file_contents.append(f"### {f['file']}\n```{f['language'] or 'text'}\n{content}\n```")
-
-    user_content = prompt
-    if file_contents:
-        user_content += "\n\n## Relevant File Contents (from Code Brain index)\n\n" + "\n\n".join(file_contents)
-
-    messages = [{"role": "user", "content": user_content}]
-
-    result = llm_chat(
-        messages=messages,
-        system_prompt=system_prompt,
-        trace_id="code-agent",
+    # ── Step 1: Plan ─────────────────────────────────────────────
+    plan_system = _build_plan_prompt(context)
+    plan_result = llm_chat(
+        messages=[{"role": "user", "content": prompt}],
+        system_prompt=plan_system,
+        trace_id="code-agent-plan",
         user_message=prompt,
-        max_tokens=4096,
+        max_tokens=1500,
     )
+    plan_reply = plan_result.get("reply", "")
+    plan_json = _parse_plan_json(plan_reply)
 
-    reply = result.get("reply", "")
-    model = result.get("model", "unknown")
+    if not plan_json or not plan_json.get("files"):
+        return {
+            "response": plan_reply,
+            "model": plan_result.get("model", "unknown"),
+            "diffs": [],
+            "files_changed": [],
+            "validation": [],
+            "context_used": _context_summary(context, 0),
+        }
 
-    import re
-    diffs = re.findall(r"```diff\n(.*?)```", reply, re.DOTALL)
-    files_changed = []
-    for diff in diffs:
-        for line in diff.splitlines():
-            if line.startswith("---") or line.startswith("+++"):
-                fname = line.split("\t")[0].replace("--- a/", "").replace("+++ b/", "").strip()
-                if fname and fname != "/dev/null" and fname not in files_changed:
-                    files_changed.append(fname)
+    analysis = plan_json.get("analysis", "")
+    plan_files = plan_json.get("files", [])[:_MAX_FILES_PER_EDIT]
+    notes = plan_json.get("notes", "")
+
+    # Collect conventions for the edit prompts
+    conventions = [
+        ins["description"] for ins in context["insights"]
+        if ins.get("category") in ("convention", "pattern")
+    ][:5]
+
+    # Resolve repo paths
+    repo_path_map: Dict[str, str] = {}
+    for r in context["repos"]:
+        repo_path_map[r["name"]] = r["path"]
+    default_repo_path = context["repos"][0]["path"] if context["repos"] else ""
+
+    # ── Step 2: Edit each file ───────────────────────────────────
+    all_diffs: List[str] = []
+    files_changed: List[str] = []
+    validations: List[Dict[str, Any]] = []
+    edit_sections: List[str] = []
+
+    for pf in plan_files:
+        fpath = pf.get("path", "")
+        action = pf.get("action", "modify")
+        description = pf.get("description", "")
+
+        if action == "create":
+            edit_sections.append(f"### New file: {fpath}\n{description}")
+            # For new files, ask LLM to generate the full file content
+            create_prompt = (
+                f"You are creating a new file: {fpath}\n\n"
+                f"Requirements: {description}\n\n"
+                "Follow the project conventions:\n" +
+                "\n".join(f"- {c}" for c in conventions[:3]) +
+                "\n\nReturn ONLY the file content wrapped in a code block."
+            )
+            create_result = llm_chat(
+                messages=[{"role": "user", "content": create_prompt}],
+                system_prompt="You are Chili Code Agent. Generate clean, production-quality code.",
+                trace_id=f"code-agent-create-{fpath}",
+                user_message=description,
+                max_tokens=3000,
+            )
+            create_reply = create_result.get("reply", "")
+            m = re.search(r"```\w*\n(.*?)```", create_reply, re.DOTALL)
+            if m:
+                new_content = m.group(1).strip()
+                diff = f"--- /dev/null\n+++ b/{fpath}\n@@ -0,0 +1,{len(new_content.splitlines())} @@\n"
+                diff += "\n".join("+" + l for l in new_content.splitlines())
+                all_diffs.append(diff)
+                files_changed.append(fpath)
+                validations.append({"file": fpath, "valid": True, "warnings": ["New file"]})
+            else:
+                edit_sections.append(f"Could not generate content for {fpath}")
+            continue
+
+        file_content = _read_file_content(default_repo_path, fpath)
+        if file_content is None:
+            # Try other repos
+            for rp in repo_path_map.values():
+                file_content = _read_file_content(rp, fpath)
+                if file_content is not None:
+                    break
+
+        if file_content is None:
+            validations.append({
+                "file": fpath,
+                "valid": False,
+                "warnings": [f"File not found in any registered repo: {fpath}"],
+            })
+            edit_sections.append(f"### {fpath}\nFile not found -- skipped.")
+            continue
+
+        edit_system = _build_edit_prompt(fpath, file_content, description, conventions)
+        edit_result = llm_chat(
+            messages=[{"role": "user", "content": f"Apply the change to {fpath} as described."}],
+            system_prompt=edit_system,
+            trace_id=f"code-agent-edit-{fpath}",
+            user_message=description,
+            max_tokens=3000,
+        )
+        edit_reply = edit_result.get("reply", "")
+
+        diffs_in_reply = re.findall(r"```diff\n(.*?)```", edit_reply, re.DOTALL)
+        if diffs_in_reply:
+            for d in diffs_in_reply:
+                validation = _validate_diff(d, fpath, file_content)
+                validations.append({"file": fpath, **validation})
+                if validation["valid"]:
+                    all_diffs.append(d)
+                    if fpath not in files_changed:
+                        files_changed.append(fpath)
+                    edit_sections.append(f"### {fpath}\n```diff\n{d}\n```")
+                else:
+                    edit_sections.append(
+                        f"### {fpath}\n**Diff rejected** -- {'; '.join(validation['warnings'])}"
+                    )
+        else:
+            edit_sections.append(f"### {fpath}\n{edit_reply}")
+
+    # ── Assemble final response ──────────────────────────────────
+    response_parts = [f"## Analysis\n{analysis}"]
+    response_parts.append(
+        "## Plan\n" +
+        "\n".join(f"- **{pf['path']}** ({pf.get('action','modify')}): {pf.get('description','')}" for pf in plan_files)
+    )
+    if edit_sections:
+        response_parts.append("## Changes\n" + "\n\n".join(edit_sections))
+    if notes:
+        response_parts.append(f"## Notes\n{notes}")
+
+    # Add validation summary
+    invalid = [v for v in validations if not v.get("valid")]
+    if invalid:
+        warn_lines = [f"- **{v['file']}**: {'; '.join(v.get('warnings', []))}" for v in invalid]
+        response_parts.append("## Validation Warnings\n" + "\n".join(warn_lines))
 
     return {
-        "response": reply,
-        "model": model,
-        "diffs": diffs,
+        "response": "\n\n".join(response_parts),
+        "model": plan_result.get("model", "unknown"),
+        "diffs": all_diffs,
         "files_changed": files_changed,
-        "context_used": {
-            "repos": len(context["repos"]),
-            "insights": len(context["insights"]),
-            "hotspots": len(context["hotspots"]),
-            "relevant_files": len(context["relevant_files"]),
-            "file_contents_included": len(file_contents),
-        },
+        "validation": validations,
+        "context_used": _context_summary(context, len(plan_files)),
+    }
+
+
+def _context_summary(context: Dict[str, Any], files_edited: int) -> Dict[str, Any]:
+    return {
+        "repos": len(context["repos"]),
+        "insights": len(context["insights"]),
+        "hotspots": len(context["hotspots"]),
+        "relevant_files": len(context["relevant_files"]),
+        "files_in_plan": files_edited,
     }
