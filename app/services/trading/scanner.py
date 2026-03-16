@@ -48,6 +48,7 @@ def signal_shutdown():
 # on what the data actually shows — no assumption is sacred.
 
 _DEFAULT_WEIGHTS: dict[str, float] = {
+    # ── Shared / cross-scorer weights ──────────────────────────────────
     "macd_positive_bonus": 1.5,
     "macd_negative_penalty": -2.0,
     "float_micro_bonus": 2.0,
@@ -75,6 +76,139 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "stoch_oversold_macd_bonus": 0.8,
     "stoch_overbought_macd_penalty": -0.8,
     "stoch_crossover_bonus": 0.5,
+
+    # ── _score_ticker (swing) ──────────────────────────────────────────
+    "swing_ema_stack_full_bull": 1.5,
+    "swing_ema_stack_partial_bull": 0.8,
+    "swing_ema_stack_full_bear": -1.5,
+    "swing_ema_stack_partial_bear": -0.8,
+    "swing_rsi_oversold": 1.5,
+    "swing_rsi_near_oversold": 0.5,
+    "swing_rsi_overbought": -1.5,
+    "swing_macd_bull": 1.0,
+    "swing_macd_bear": -0.5,
+    "swing_sma_uptrend": 0.5,
+    "swing_sma_downtrend": -0.5,
+    "swing_bb_near_lower": 1.0,
+    "swing_bb_near_upper": -0.5,
+    "swing_adx_strong": 0.5,
+    "swing_vol_surge_accum": 0.5,
+    "swing_vol_surge_distrib": -0.5,
+    "swing_decline_sharp": -2.0,
+    "swing_decline_moderate": -1.0,
+    "swing_fund_margins_debt": 0.5,
+    "swing_fund_revenue_growth": 0.5,
+    "swing_fund_pe_reasonable": 0.5,
+    "swing_fund_pe_expensive": -0.5,
+    "swing_regime_oversold_contra": 0.3,
+    "swing_below_major_mas": -1.0,
+    "swing_signal_buy": 7.0,
+    "swing_signal_sell": 3.5,
+    "swing_stop_atr_mult_vol": 2.5,
+    "swing_stop_atr_mult_normal": 2.0,
+    "swing_target_atr_mult": 3.0,
+
+    # ── _score_ticker_intraday ─────────────────────────────────────────
+    "intra_rsi_momentum_zone": 1.0,
+    "intra_rsi_oversold": 0.5,
+    "intra_rsi_overextended": -0.5,
+    "intra_ema_bull": 1.0,
+    "intra_ema_bear": -0.5,
+    "intra_vwap_above": 0.8,
+    "intra_vwap_below": -0.3,
+    "intra_vol_above_avg": 0.5,
+    "intra_gap_play": 0.5,
+    "intra_signal_long": 7.0,
+    "intra_signal_short": 3.5,
+    "intra_stop_atr_mult": 1.5,
+    "intra_target_atr_mult": 2.5,
+
+    # ── _score_crypto_breakout ─────────────────────────────────────────
+    "crypto_bo_rvol_5x": 2.0,
+    "crypto_bo_rvol_3x": 1.5,
+    "crypto_bo_rvol_2x": 1.0,
+    "crypto_bo_rvol_1_5x": 0.5,
+    "crypto_bo_rvol_low": 0.0,
+    "crypto_bo_squeeze_firing": 2.5,
+    "crypto_bo_squeeze": 1.5,
+    "crypto_bo_breakout_confirmed": 2.0,
+    "crypto_bo_atr_expanding": 0.5,
+    "crypto_bo_atr_compressed_squeeze": 1.0,
+    "crypto_bo_ema_bull_stack": 2.0,
+    "crypto_bo_ema_bull": 0.5,
+    "crypto_bo_ema_bear_stack": -0.5,
+    "crypto_bo_rsi_momentum": 0.5,
+    "crypto_bo_rsi_oversold": 0.3,
+    "crypto_bo_rsi_overextended": -0.5,
+    "crypto_bo_macd_bull": 1.0,
+    "crypto_bo_macd_bear": -0.3,
+    "crypto_bo_vwap_above": 0.5,
+    "crypto_bo_vwap_below": -0.3,
+    "crypto_bo_adx_strong": 0.5,
+    "crypto_bo_hot_mover": 0.5,
+    "crypto_bo_gaining": 0.3,
+    "crypto_bo_vol_awakening": 0.5,
+    "crypto_bo_stoch_curl_squeeze": 0.5,
+    "crypto_bo_higher_lows": 1.0,
+    "crypto_bo_macd_neg_cap": 8.0,
+    "crypto_bo_signal_long": 7.0,
+    "crypto_bo_signal_short": 3.5,
+    "crypto_bo_stop_atr_mult": 1.5,
+    "crypto_bo_target_atr_mult": 2.5,
+
+    # ── _score_breakout (stocks) ───────────────────────────────────────
+    "bo_squeeze": 2.0,
+    "bo_near_resistance_close": 1.5,
+    "bo_near_resistance_mid": 0.5,
+    "bo_breaking_out": 2.0,
+    "bo_adx_consolidating": 1.0,
+    "bo_adx_trending": -0.5,
+    "bo_vol_declining": 0.8,
+    "bo_ema_support": 0.5,
+    "bo_rsi_neutral": 0.5,
+    "bo_rsi_overbought": -1.0,
+    "bo_macd_building": 0.5,
+    "bo_signal_ready": 7.0,
+    "bo_signal_watch": 5.0,
+    "bo_stop_atr_mult": 2.0,
+    "bo_target_atr_mult": 3.0,
+
+    # ── Alert / proposal thresholds ────────────────────────────────────
+    "alert_min_score_proposal": 7.5,
+    "alert_min_rr_proposal": 1.5,
+    "alert_min_rr_from_pick": 0.8,
+    "alert_min_price": 1.0,
+    "alert_breakout_min_score": 7.0,
+    "alert_auto_proposal_min_score": 8.0,
+
+    # ── Position sizing ────────────────────────────────────────────────
+    "pos_max_risk_pct": 2.0,
+    "pos_pct_hard_cap": 10.0,
+    "pos_pct_risk_off_cap": 7.0,
+    "pos_pct_speculative_cap": 5.0,
+    "pos_regime_risk_off_mult": 0.50,
+    "pos_regime_cautious_mult": 0.75,
+    "pos_vix_elevated_mult": 0.85,
+    "pos_vix_extreme_mult": 0.70,
+    "pos_vol_stop_10_mult": 0.70,
+    "pos_vol_stop_8_mult": 0.80,
+    "pos_vol_stop_5_mult": 0.90,
+    "pos_speculative_mult": 0.60,
+    "pos_scanner_cap_mult": 1.25,
+
+    # ── Crypto breakout alert thresholds ───────────────────────────────
+    "crypto_alert_coiled_spring_min": 6.0,
+    "crypto_alert_squeeze_firing_min": 5.5,
+    "crypto_alert_building_min": 6.5,
+    "crypto_alert_range_tight_min": 6.5,
+    "crypto_alert_high_score_min": 7.5,
+    "crypto_alert_rvol_building_min": 1.0,
+    "crypto_alert_rvol_high_score_min": 1.5,
+    "crypto_alert_cooldown_s": 3600.0,
+    "crypto_alert_max_per_cycle": 5.0,
+
+    # ── Scheduler / scanner limits ─────────────────────────────────────
+    "momentum_max_results": 3.0,
 }
 
 _adaptive_weights: dict[str, float] = dict(_DEFAULT_WEIGHTS)
@@ -156,6 +290,93 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
         "stoch_oversold_macd_bonus": ["stoch oversold", "stochastic oversold", "double bottom"],
         "stoch_overbought_macd_penalty": ["stoch overbought", "stochastic overbought"],
         "stoch_crossover_bonus": ["stoch crossover", "stochastic crossover", "bullish crossover from oversold"],
+        # ── Swing scorer ──
+        "swing_ema_stack_full_bull": ["ema stacking bullish", "full ema stack", "ema stack bullish"],
+        "swing_ema_stack_partial_bull": ["partial ema alignment", "ema20>ema50"],
+        "swing_ema_stack_full_bear": ["ema stacking bearish", "full bearish stack"],
+        "swing_ema_stack_partial_bear": ["bearish ema alignment", "bearish ema"],
+        "swing_rsi_oversold": ["rsi oversold", "rsi < 30", "deeply oversold"],
+        "swing_rsi_near_oversold": ["rsi near oversold", "rsi approaching oversold"],
+        "swing_rsi_overbought": ["rsi overbought", "rsi > 70", "overextended rsi"],
+        "swing_macd_bull": ["macd bullish crossover", "macd bullish"],
+        "swing_macd_bear": ["macd bearish", "macd negative"],
+        "swing_sma_uptrend": ["uptrend", "sma20 > sma50", "price above sma"],
+        "swing_sma_downtrend": ["downtrend", "sma decline", "below sma"],
+        "swing_bb_near_lower": ["near lower bollinger", "bollinger low", "bb low"],
+        "swing_bb_near_upper": ["near upper bollinger", "bb high"],
+        "swing_adx_strong": ["strong trend", "adx strong", "adx > 25"],
+        "swing_vol_surge_accum": ["volume surge accumulation", "accumulation volume"],
+        "swing_vol_surge_distrib": ["volume surge distribution", "distribution volume"],
+        "swing_decline_sharp": ["sharp decline", "falling knife", "crash"],
+        "swing_decline_moderate": ["falling", "moderate decline", "5-day decline"],
+        "swing_fund_margins_debt": ["strong margins", "low debt", "fundamentals strong"],
+        "swing_fund_revenue_growth": ["revenue growth", "growing revenue"],
+        "swing_fund_pe_reasonable": ["reasonable p/e", "fair valuation"],
+        "swing_fund_pe_expensive": ["expensive p/e", "overvalued", "high pe"],
+        "swing_below_major_mas": ["below sma50", "below ema50", "falling-knife"],
+        # ── Intraday scorer ──
+        "intra_rsi_momentum_zone": ["rsi momentum zone", "rsi 40-65"],
+        "intra_rsi_oversold": ["rsi deeply oversold", "intraday oversold"],
+        "intra_rsi_overextended": ["rsi overextended", "intraday overbought"],
+        "intra_ema_bull": ["ema9 > ema21", "bullish intraday ema"],
+        "intra_ema_bear": ["bearish ema alignment", "intraday bearish ema"],
+        "intra_vwap_above": ["above vwap", "vwap support"],
+        "intra_vwap_below": ["below vwap", "vwap resistance"],
+        "intra_vol_above_avg": ["above-average volume", "volume 1.5x"],
+        "intra_gap_play": ["gap up", "gap down", "gap play"],
+        # ── Crypto breakout scorer ──
+        "crypto_bo_rvol_5x": ["volume explosion", "5x volume", "rvol 5x"],
+        "crypto_bo_rvol_3x": ["massive volume surge", "3x volume", "rvol 3x"],
+        "crypto_bo_rvol_2x": ["strong volume", "2x volume", "rvol 2x"],
+        "crypto_bo_rvol_1_5x": ["above-avg volume crypto", "1.5x volume"],
+        "crypto_bo_rvol_low": ["low volume fakeout", "thin volume"],
+        "crypto_bo_squeeze_firing": ["squeeze firing", "bollinger squeeze firing"],
+        "crypto_bo_squeeze": ["bollinger squeeze", "bb squeeze consolidation"],
+        "crypto_bo_breakout_confirmed": ["confirmed breakout", "breakout on volume"],
+        "crypto_bo_atr_expanding": ["atr expanding", "volatility increasing"],
+        "crypto_bo_atr_compressed_squeeze": ["coiled spring", "atr compressed + squeeze"],
+        "crypto_bo_ema_bull_stack": ["full bullish ema stack crypto", "crypto ema bullish"],
+        "crypto_bo_ema_bull": ["ema 9 > ema 21 crypto", "short-term bullish crypto"],
+        "crypto_bo_ema_bear_stack": ["bearish ema stack crypto"],
+        "crypto_bo_rsi_momentum": ["rsi momentum zone crypto"],
+        "crypto_bo_rsi_oversold": ["rsi deeply oversold crypto", "bounce candidate"],
+        "crypto_bo_rsi_overextended": ["rsi overextended crypto", "crypto overbought"],
+        "crypto_bo_macd_bull": ["macd bullish crossover crypto"],
+        "crypto_bo_macd_bear": ["macd bearish crypto", "crypto momentum lost"],
+        "crypto_bo_vwap_above": ["above vwap crypto"],
+        "crypto_bo_vwap_below": ["below vwap crypto"],
+        "crypto_bo_adx_strong": ["strong trend crypto", "crypto adx strong"],
+        "crypto_bo_hot_mover": ["hot mover", "top crypto gainer"],
+        "crypto_bo_gaining": ["gaining crypto", "crypto up 5%"],
+        "crypto_bo_vol_awakening": ["volume awakening", "volume waking up in squeeze", "rvol picking up"],
+        "crypto_bo_stoch_curl_squeeze": ["stochastic curl", "stoch crossover in squeeze", "momentum building in squeeze"],
+        "crypto_bo_higher_lows": ["higher lows", "ascending triangle", "pressure building", "ascending lows into resistance"],
+        # ── Stock breakout scorer ──
+        "bo_squeeze": ["bollinger squeeze breakout", "bb squeeze stocks"],
+        "bo_near_resistance_close": ["near resistance", "close to breakout"],
+        "bo_near_resistance_mid": ["below resistance", "approaching resistance"],
+        "bo_breaking_out": ["breaking out", "new high", "20-day high"],
+        "bo_adx_consolidating": ["low adx", "adx consolidating", "adx < 20"],
+        "bo_adx_trending": ["adx trending", "adx > 30", "already trending"],
+        "bo_vol_declining": ["volume declining", "volume coiling"],
+        "bo_ema_support": ["above rising emas", "ema support", "bullish base"],
+        "bo_rsi_neutral": ["rsi neutral", "rsi room to run"],
+        "bo_rsi_overbought": ["rsi overbought breakout", "rsi may fade"],
+        "bo_macd_building": ["macd building", "histogram positive building"],
+        # ── Alert thresholds ──
+        "alert_min_score_proposal": ["proposal score", "proposal threshold"],
+        "alert_auto_proposal_min_score": ["auto proposal", "high-confidence pick"],
+        "alert_breakout_min_score": ["breakout alert score", "breakout threshold"],
+        # ── Position sizing ──
+        "pos_pct_hard_cap": ["position cap", "hard cap"],
+        "pos_regime_risk_off_mult": ["risk-off position", "risk off sizing"],
+        "pos_speculative_mult": ["speculative sizing", "speculative position"],
+        # ── Crypto alert thresholds ──
+        "crypto_alert_coiled_spring_min": ["coiled spring", "squeeze + atr compressed", "double compression"],
+        "crypto_alert_squeeze_firing_min": ["squeeze firing", "squeeze releasing", "bb squeeze fire"],
+        "crypto_alert_building_min": ["breakout building", "squeeze + ema bullish", "volume picking up"],
+        "crypto_alert_range_tight_min": ["range tightening", "atr compressed", "atr compression"],
+        "crypto_alert_high_score_min": ["high score setup", "crypto high score", "strong crypto"],
     }
 
     adjustments: dict[str, float] = {}
@@ -294,43 +515,43 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
 
             if e100 is not None and price > e20 > e50 > e100:
                 ema_stack_bullish = True
-                score += 1.5
+                score += get_adaptive_weight("swing_ema_stack_full_bull")
                 signals.append(f"EMA stacking bullish (P>{e20:.0f}>{e50:.0f}>{e100:.0f})")
             elif price > e20 > e50:
-                score += 0.8
+                score += get_adaptive_weight("swing_ema_stack_partial_bull")
                 signals.append("Partial EMA alignment (P>EMA20>EMA50)")
             elif e100 is not None and price < e20 < e50 < e100:
                 ema_stack_bearish = True
-                score -= 1.5
+                score += get_adaptive_weight("swing_ema_stack_full_bear")
                 signals.append("EMA stacking bearish")
             elif price < e20 < e50:
-                score -= 0.8
+                score += get_adaptive_weight("swing_ema_stack_partial_bear")
                 signals.append("Bearish EMA alignment")
 
         if pd.notna(rsi_val):
             if rsi_val < 30:
-                score += 1.5
+                score += get_adaptive_weight("swing_rsi_oversold")
                 signals.append(f"RSI oversold ({rsi_val:.0f})")
             elif rsi_val < 40:
-                score += 0.5
+                score += get_adaptive_weight("swing_rsi_near_oversold")
                 signals.append(f"RSI near oversold ({rsi_val:.0f})")
             elif rsi_val > 70:
-                score -= 1.5
+                score += get_adaptive_weight("swing_rsi_overbought")
                 signals.append(f"RSI overbought ({rsi_val:.0f})")
 
         if pd.notna(macd_val) and pd.notna(macd_sig):
             if macd_val > macd_sig:
-                score += 1.0
+                score += get_adaptive_weight("swing_macd_bull")
                 signals.append("MACD bullish crossover")
             else:
-                score -= 0.5
+                score += get_adaptive_weight("swing_macd_bear")
 
         if pd.notna(sma_20) and pd.notna(sma_50):
             if price > sma_20 > sma_50:
-                score += 0.5
+                score += get_adaptive_weight("swing_sma_uptrend")
                 signals.append("Uptrend (price > SMA20 > SMA50)")
             elif price < sma_20 < sma_50:
-                score -= 0.5
+                score += get_adaptive_weight("swing_sma_downtrend")
                 signals.append("Downtrend")
 
         if pd.notna(bb_lower) and pd.notna(bb_upper):
@@ -338,33 +559,33 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             if bb_range > 0:
                 bb_pct = (price - bb_lower) / bb_range
                 if bb_pct < 0.15:
-                    score += 1.0
+                    score += get_adaptive_weight("swing_bb_near_lower")
                     signals.append("Near lower Bollinger Band")
                 elif bb_pct > 0.85:
-                    score -= 0.5
+                    score += get_adaptive_weight("swing_bb_near_upper")
 
         if pd.notna(adx_val) and adx_val > 25:
-            score += 0.5
+            score += get_adaptive_weight("swing_adx_strong")
             signals.append(f"Strong trend (ADX {adx_val:.0f})")
 
         if vol_avg > 0 and vol_latest > vol_avg * 1.5:
             latest_close = float(df["Close"].iloc[-1])
             latest_open = float(df["Open"].iloc[-1])
             if latest_close >= latest_open:
-                score += 0.5
+                score += get_adaptive_weight("swing_vol_surge_accum")
                 signals.append("Volume surge (accumulation)")
             else:
-                score -= 0.5
+                score += get_adaptive_weight("swing_vol_surge_distrib")
                 signals.append("Volume surge (distribution)")
 
         # ── Recent price trend — penalise falling knives ──
         if len(df) >= 6:
             _ret_5d = (float(df["Close"].iloc[-1]) / float(df["Close"].iloc[-6]) - 1) * 100
             if _ret_5d < -15:
-                score -= 2.0
+                score += get_adaptive_weight("swing_decline_sharp")
                 signals.append(f"Sharp decline ({_ret_5d:.1f}% in 5 days)")
             elif _ret_5d < -8:
-                score -= 1.0
+                score += get_adaptive_weight("swing_decline_moderate")
                 signals.append(f"Falling ({_ret_5d:.1f}% in 5 days)")
 
         # ── Stochastic scoring (brain-adaptive) ──
@@ -393,18 +614,18 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                     fund_bonus = 0.0
                     if fund.get("profit_margins") is not None and fund["profit_margins"] > 0.10:
                         if fund.get("debt_to_equity") is not None and fund["debt_to_equity"] < 100:
-                            fund_bonus += 0.5
+                            fund_bonus += get_adaptive_weight("swing_fund_margins_debt")
                             signals.append("Strong margins + low debt")
                     if fund.get("revenue_growth") is not None and fund["revenue_growth"] > 0:
-                        fund_bonus += 0.5
+                        fund_bonus += get_adaptive_weight("swing_fund_revenue_growth")
                         signals.append(f"Revenue growth +{fund['revenue_growth']:.0%}")
                     if fund.get("pe_trailing") is not None:
                         pe = fund["pe_trailing"]
                         if 5 < pe < 25:
-                            fund_bonus += 0.5
+                            fund_bonus += get_adaptive_weight("swing_fund_pe_reasonable")
                             signals.append(f"Reasonable P/E ({pe:.1f})")
                         elif pe > 60:
-                            fund_bonus -= 0.5
+                            fund_bonus += get_adaptive_weight("swing_fund_pe_expensive")
                             signals.append(f"Expensive P/E ({pe:.1f})")
                     score += fund_bonus
             except Exception:
@@ -417,7 +638,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             if _regime_label == "risk_off":
                 score += get_adaptive_weight("regime_risk_off_penalty")
                 if pd.notna(rsi_val) and rsi_val < 35:
-                    score += 0.3
+                    score += get_adaptive_weight("swing_regime_oversold_contra")
                     signals.append("Risk-off regime but oversold — contra play")
                 else:
                     signals.append("Risk-off regime — penalised")
@@ -432,14 +653,16 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
         _below_sma50 = pd.notna(sma_50) and price < float(sma_50)
         _below_ema50 = pd.notna(ema_50) and price < float(ema_50)
         if _below_sma50 and _below_ema50:
-            score -= 1.0
+            score += get_adaptive_weight("swing_below_major_mas")
             signals.append("Below SMA50 & EMA50 — falling-knife risk")
 
         score = max(1.0, min(10.0, score))
 
-        if score >= 7:
+        _buy_thresh = get_adaptive_weight("swing_signal_buy")
+        _sell_thresh = get_adaptive_weight("swing_signal_sell")
+        if score >= _buy_thresh:
             signal = "buy"
-        elif score <= 3.5:
+        elif score <= _sell_thresh:
             signal = "sell"
         else:
             signal = "hold"
@@ -448,9 +671,9 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
         _cr = is_crypto_ticker
 
         volatility_pct = (atr_f / price * 100) if price > 0 else 5
-        _stop_mult = 2.5 if volatility_pct > 3 else 2.0
+        _stop_mult = get_adaptive_weight("swing_stop_atr_mult_vol") if volatility_pct > 3 else get_adaptive_weight("swing_stop_atr_mult_normal")
         stop_loss = smart_round(price - _stop_mult * atr_f, crypto=_cr)
-        take_profit = smart_round(price + 3 * atr_f, crypto=_cr)
+        take_profit = smart_round(price + get_adaptive_weight("swing_target_atr_mult") * atr_f, crypto=_cr)
         if volatility_pct > 3:
             risk = "high"
         elif volatility_pct > 1.5:
@@ -573,13 +796,13 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         # Momentum: RSI sweet spot for day trades
         if pd.notna(rsi_val):
             if 40 <= rsi_val <= 65:
-                score += 1.0
+                score += get_adaptive_weight("intra_rsi_momentum_zone")
                 signals.append(f"RSI in momentum zone ({rsi_val:.0f})")
             elif rsi_val < 25:
-                score += 0.5
+                score += get_adaptive_weight("intra_rsi_oversold")
                 signals.append(f"RSI deeply oversold ({rsi_val:.0f}) — potential bounce")
             elif rsi_val > 75:
-                score -= 0.5
+                score += get_adaptive_weight("intra_rsi_overextended")
                 signals.append(f"RSI overextended ({rsi_val:.0f})")
 
         # MACD momentum (brain-adaptive gating)
@@ -594,19 +817,19 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         # EMA trend alignment
         if pd.notna(ema_9) and pd.notna(ema_21):
             if price > float(ema_9) > float(ema_21):
-                score += 1.0
+                score += get_adaptive_weight("intra_ema_bull")
                 signals.append("Price > EMA9 > EMA21 (bullish intraday)")
             elif price < float(ema_9) < float(ema_21):
-                score -= 0.5
+                score += get_adaptive_weight("intra_ema_bear")
                 signals.append("Bearish EMA alignment")
 
         # VWAP positioning
         if vwap is not None:
             if price > vwap:
-                score += 0.8
+                score += get_adaptive_weight("intra_vwap_above")
                 signals.append(f"Above VWAP ({vwap_pct:+.1f}%)")
             else:
-                score -= 0.3
+                score += get_adaptive_weight("intra_vwap_below")
                 signals.append(f"Below VWAP ({vwap_pct:+.1f}%)")
 
         # Volume surge (brain-adaptive tiers)
@@ -620,12 +843,12 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             score += get_adaptive_weight("vol_surge_3x")
             signals.append(f"Strong volume surge ({vol_ratio:.1f}x avg)")
         elif vol_ratio >= 1.5:
-            score += 0.5
+            score += get_adaptive_weight("intra_vol_above_avg")
             signals.append(f"Above-average volume ({vol_ratio:.1f}x)")
 
         # Gap play
         if abs(gap_pct) > 2:
-            score += 0.5
+            score += get_adaptive_weight("intra_gap_play")
             signals.append(f"Gap {'up' if gap_pct > 0 else 'down'} {gap_pct:+.1f}%")
 
         # ── Daily gainer check (brain-adaptive) ──
@@ -711,17 +934,21 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
 
         score = max(1.0, min(10.0, score))
 
-        if score >= 7:
+        _long_thresh = get_adaptive_weight("intra_signal_long")
+        _short_thresh = get_adaptive_weight("intra_signal_short")
+        if score >= _long_thresh:
             signal = "long"
-        elif score <= 3.5:
+        elif score <= _short_thresh:
             signal = "short"
         else:
             signal = "wait"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.01
-        scalp_stop = smart_round(price - 1.5 * atr_f, crypto=_cr)
-        scalp_target = smart_round(price + 2.5 * atr_f, crypto=_cr)
-        risk_reward = round(2.5 * atr_f / (1.5 * atr_f), 2) if atr_f > 0 else 1.67
+        _i_stop_m = get_adaptive_weight("intra_stop_atr_mult")
+        _i_tgt_m = get_adaptive_weight("intra_target_atr_mult")
+        scalp_stop = smart_round(price - _i_stop_m * atr_f, crypto=_cr)
+        scalp_target = smart_round(price + _i_tgt_m * atr_f, crypto=_cr)
+        risk_reward = round(_i_tgt_m * atr_f / (_i_stop_m * atr_f), 2) if atr_f > 0 else 1.67
 
         return {
             "ticker": ticker.upper(),
@@ -752,6 +979,457 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
         }
     except Exception:
         return None
+
+
+# ── Crypto Intraday Breakout Scoring ──────────────────────────────────
+
+_crypto_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
+_CRYPTO_BREAKOUT_TTL = 900  # 15 minutes
+
+
+def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
+    """Score a crypto pair for intraday breakout potential on 15m candles.
+
+    Detects: RVOL spikes, Bollinger squeeze/expansion, ATR compression,
+    EMA 9/21/50 stack alignment, and confirmed breakouts (close beyond BB
+    with volume).
+    """
+    try:
+        from ta.momentum import RSIIndicator, StochasticOscillator
+        from ta.trend import MACD, EMAIndicator, ADXIndicator
+        from ta.volatility import BollingerBands, AverageTrueRange
+
+        df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
+        if df.empty or len(df) < 60:
+            return None
+
+        close = df["Close"]
+        high = df["High"]
+        low = df["Low"]
+        volume = df["Volume"]
+        price = float(close.iloc[-1])
+        if price <= 0:
+            return None
+
+        # ── Core indicators ──
+        rsi_val = RSIIndicator(close=close, window=14).rsi().iloc[-1]
+        macd_obj = MACD(close=close)
+        macd_line = macd_obj.macd().iloc[-1]
+        macd_sig = macd_obj.macd_signal().iloc[-1]
+        macd_hist = macd_obj.macd_diff().iloc[-1]
+        ema_9 = EMAIndicator(close=close, window=9).ema_indicator().iloc[-1]
+        ema_21 = EMAIndicator(close=close, window=21).ema_indicator().iloc[-1]
+        ema_50 = EMAIndicator(close=close, window=50).ema_indicator().iloc[-1]
+
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        bb_upper = bb.bollinger_hband().iloc[-1]
+        bb_lower = bb.bollinger_lband().iloc[-1]
+        bb_mid = bb.bollinger_mavg().iloc[-1]
+        bb_width_series = bb.bollinger_wband()
+        bb_width = float(bb_width_series.iloc[-1]) if pd.notna(bb_width_series.iloc[-1]) else 0
+
+        atr_series = AverageTrueRange(high=high, low=low, close=close, window=14).average_true_range()
+        atr_val = float(atr_series.iloc[-1]) if pd.notna(atr_series.iloc[-1]) else price * 0.01
+
+        adx_val = ADXIndicator(high=high, low=low, close=close, window=14).adx().iloc[-1]
+        stoch = StochasticOscillator(high=high, low=low, close=close)
+        stoch_k_series = stoch.stoch()
+        stoch_d_series = stoch.stoch_signal()
+        stoch_k = stoch_k_series.iloc[-1]
+        stoch_d = stoch_d_series.iloc[-1]
+        stoch_k_prev = stoch_k_series.iloc[-2] if len(stoch_k_series) >= 2 else None
+        stoch_d_prev = stoch_d_series.iloc[-2] if len(stoch_d_series) >= 2 else None
+
+        # ── RVOL (relative volume) ──
+        vol_avg_20 = float(volume.rolling(20).mean().iloc[-1]) if len(volume) >= 20 else float(volume.mean())
+        vol_latest = float(volume.iloc[-1])
+        rvol = round(vol_latest / vol_avg_20, 2) if vol_avg_20 > 0 else 1.0
+
+        # ── Bollinger squeeze detection ──
+        bb_width_clean = bb_width_series.dropna()
+        bb_squeeze = False
+        bb_squeeze_firing = False
+        if len(bb_width_clean) >= 50:
+            bb_width_50 = bb_width_clean.iloc[-50:]
+            pct_20 = float(bb_width_50.quantile(0.20))
+            pct_80 = float(bb_width_50.quantile(0.80))
+            prev_width = float(bb_width_clean.iloc[-2]) if len(bb_width_clean) >= 2 else bb_width
+            if bb_width <= pct_20:
+                bb_squeeze = True
+            if prev_width <= pct_20 and bb_width > pct_20:
+                bb_squeeze_firing = True
+
+        # ── ATR compression / expansion ──
+        atr_state = "normal"
+        atr_clean = atr_series.dropna()
+        if len(atr_clean) >= 50:
+            atr_50 = atr_clean.iloc[-50:]
+            atr_pct_25 = float(atr_50.quantile(0.25))
+            atr_pct_75 = float(atr_50.quantile(0.75))
+            if atr_val <= atr_pct_25:
+                atr_state = "compressed"
+            elif atr_val >= atr_pct_75:
+                atr_state = "expanding"
+
+        # ── EMA stack alignment ──
+        ema_alignment = "neutral"
+        if pd.notna(ema_9) and pd.notna(ema_21) and pd.notna(ema_50):
+            if price > float(ema_9) > float(ema_21) > float(ema_50):
+                ema_alignment = "bullish_stack"
+            elif price < float(ema_9) < float(ema_21) < float(ema_50):
+                ema_alignment = "bearish_stack"
+            elif float(ema_9) > float(ema_21):
+                ema_alignment = "bullish"
+            elif float(ema_9) < float(ema_21):
+                ema_alignment = "bearish"
+
+        # ── Breakout confirmation ──
+        breakout_confirmed = False
+        breakout_dir = None
+        if pd.notna(bb_upper) and pd.notna(bb_lower):
+            if price > float(bb_upper) and rvol >= 1.5:
+                breakout_confirmed = True
+                breakout_dir = "long"
+            elif price < float(bb_lower) and rvol >= 1.5:
+                breakout_confirmed = True
+                breakout_dir = "short"
+
+        # ── VWAP ──
+        today_mask = df.index.date == df.index.date[-1]
+        today_df = df[today_mask]
+        vwap = None
+        vwap_pct = 0.0
+        if len(today_df) > 1:
+            typical = (today_df["High"] + today_df["Low"] + today_df["Close"]) / 3
+            cum_vol = today_df["Volume"].cumsum()
+            cum_tp_vol = (typical * today_df["Volume"]).cumsum()
+            if float(cum_vol.iloc[-1]) > 0:
+                vwap = float(cum_tp_vol.iloc[-1] / cum_vol.iloc[-1])
+                vwap_pct = round((price - vwap) / vwap * 100, 2)
+
+        # ── 24h change ──
+        change_24h = 0.0
+        if len(df) >= 96:
+            prev_price = float(close.iloc[-96])
+            if prev_price > 0:
+                change_24h = round((price - prev_price) / prev_price * 100, 2)
+        elif len(df) > 1:
+            prev_price = float(close.iloc[0])
+            if prev_price > 0:
+                change_24h = round((price - prev_price) / prev_price * 100, 2)
+
+        # ── MACD gating ──
+        macd_negative = (
+            pd.notna(macd_line) and pd.notna(macd_sig) and pd.notna(macd_hist)
+            and float(macd_line) < float(macd_sig) and float(macd_hist) < 0
+        )
+        macd_bullish = (
+            pd.notna(macd_line) and pd.notna(macd_sig) and pd.notna(macd_hist)
+            and float(macd_line) > float(macd_sig) and float(macd_hist) > 0
+        )
+
+        # ── Scoring ──
+        score = 5.0
+        signals: list[str] = []
+
+        # RVOL
+        if rvol >= 5.0:
+            score += get_adaptive_weight("crypto_bo_rvol_5x")
+            signals.append(f"Volume explosion ({rvol:.1f}x avg)")
+        elif rvol >= 3.0:
+            score += get_adaptive_weight("crypto_bo_rvol_3x")
+            signals.append(f"Massive volume surge ({rvol:.1f}x avg)")
+        elif rvol >= 2.0:
+            score += get_adaptive_weight("crypto_bo_rvol_2x")
+            signals.append(f"Strong volume ({rvol:.1f}x avg)")
+        elif rvol >= 1.5:
+            score += get_adaptive_weight("crypto_bo_rvol_1_5x")
+            signals.append(f"Above-avg volume ({rvol:.1f}x)")
+        elif rvol < 0.5:
+            score += get_adaptive_weight("crypto_bo_rvol_low")
+            signals.append(f"Low volume ({rvol:.1f}x) — fakeout risk")
+
+        # Bollinger squeeze
+        if bb_squeeze_firing:
+            score += get_adaptive_weight("crypto_bo_squeeze_firing")
+            signals.append("Bollinger squeeze FIRING — breakout imminent")
+        elif bb_squeeze:
+            score += get_adaptive_weight("crypto_bo_squeeze")
+            signals.append("Bollinger squeeze — consolidation, big move coming")
+
+        # Breakout confirmation
+        if breakout_confirmed:
+            score += get_adaptive_weight("crypto_bo_breakout_confirmed")
+            dir_label = "above upper BB" if breakout_dir == "long" else "below lower BB"
+            signals.append(f"CONFIRMED breakout {dir_label} on volume")
+
+        # ATR state
+        if atr_state == "expanding":
+            score += get_adaptive_weight("crypto_bo_atr_expanding")
+            signals.append("ATR expanding — volatility increasing")
+        elif atr_state == "compressed":
+            if bb_squeeze:
+                score += get_adaptive_weight("crypto_bo_atr_compressed_squeeze")
+                signals.append("ATR compressed + BB squeeze — coiled spring")
+            else:
+                signals.append("ATR compressed — range tightening")
+
+        # EMA stack
+        if ema_alignment == "bullish_stack":
+            score += get_adaptive_weight("crypto_bo_ema_bull_stack")
+            signals.append("Full bullish EMA stack (P > 9 > 21 > 50)")
+        elif ema_alignment == "bullish":
+            score += get_adaptive_weight("crypto_bo_ema_bull")
+            signals.append("EMA 9 > EMA 21 — short-term bullish")
+        elif ema_alignment == "bearish_stack":
+            score += get_adaptive_weight("crypto_bo_ema_bear_stack")
+            signals.append("Bearish EMA stack")
+
+        # RSI
+        if pd.notna(rsi_val):
+            if 40 <= rsi_val <= 65:
+                score += get_adaptive_weight("crypto_bo_rsi_momentum")
+                signals.append(f"RSI in momentum zone ({rsi_val:.0f})")
+            elif rsi_val < 25:
+                score += get_adaptive_weight("crypto_bo_rsi_oversold")
+                signals.append(f"RSI deeply oversold ({rsi_val:.0f}) — bounce candidate")
+            elif rsi_val > 80:
+                score += get_adaptive_weight("crypto_bo_rsi_overextended")
+                signals.append(f"RSI overextended ({rsi_val:.0f}) — caution")
+
+        # MACD
+        if macd_bullish:
+            score += get_adaptive_weight("crypto_bo_macd_bull")
+            signals.append("MACD bullish crossover confirmed")
+        elif macd_negative:
+            score += get_adaptive_weight("crypto_bo_macd_bear")
+            signals.append("MACD bearish — momentum lost")
+
+        # VWAP
+        if vwap is not None:
+            if price > vwap:
+                score += get_adaptive_weight("crypto_bo_vwap_above")
+                signals.append(f"Above VWAP ({vwap_pct:+.1f}%)")
+            else:
+                score += get_adaptive_weight("crypto_bo_vwap_below")
+                signals.append(f"Below VWAP ({vwap_pct:+.1f}%)")
+
+        # ADX trend strength
+        if pd.notna(adx_val):
+            if adx_val > 25:
+                score += get_adaptive_weight("crypto_bo_adx_strong")
+                signals.append(f"Strong trend (ADX {adx_val:.0f})")
+            elif adx_val < 15:
+                signals.append(f"Weak trend (ADX {adx_val:.0f}) — range-bound")
+
+        # 24h momentum
+        if change_24h >= 10:
+            score += get_adaptive_weight("crypto_bo_hot_mover")
+            signals.append(f"Hot mover +{change_24h:.1f}% (24h)")
+        elif change_24h >= 5:
+            score += get_adaptive_weight("crypto_bo_gaining")
+            signals.append(f"Gaining +{change_24h:.1f}% (24h)")
+
+        # Volume awakening: RVOL picking up during a squeeze (early breakout sign)
+        if bb_squeeze and 0.8 <= rvol <= 1.5:
+            score += get_adaptive_weight("crypto_bo_vol_awakening")
+            signals.append(f"Volume awakening in squeeze ({rvol:.1f}x)")
+
+        # Stochastic curl in squeeze: %K crossing above %D inside a BB squeeze
+        if bb_squeeze and pd.notna(stoch_k) and pd.notna(stoch_d):
+            if pd.notna(stoch_k_prev) and pd.notna(stoch_d_prev):
+                if stoch_k_prev <= stoch_d_prev and stoch_k > stoch_d and stoch_k < 80:
+                    score += get_adaptive_weight("crypto_bo_stoch_curl_squeeze")
+                    signals.append(f"Stochastic curl in squeeze (%K {stoch_k:.0f} > %D {stoch_d:.0f})")
+
+        # Higher lows into flat resistance (ascending triangle / pressure building)
+        if len(low) >= 12 and pd.notna(bb_upper):
+            recent_lows = low.iloc[-12:]
+            swing_lows = []
+            for i in range(1, len(recent_lows) - 1):
+                if recent_lows.iloc[i] <= recent_lows.iloc[i - 1] and recent_lows.iloc[i] <= recent_lows.iloc[i + 1]:
+                    swing_lows.append(float(recent_lows.iloc[i]))
+            if len(swing_lows) >= 3:
+                ascending = all(swing_lows[j] < swing_lows[j + 1] for j in range(len(swing_lows) - 1))
+                near_resistance = abs(price - float(bb_upper)) / price < 0.015
+                if ascending and near_resistance:
+                    score += get_adaptive_weight("crypto_bo_higher_lows")
+                    signals.append("Higher lows into resistance — pressure building")
+
+        # Cap + signal
+        if macd_negative and not breakout_confirmed:
+            score = min(score, get_adaptive_weight("crypto_bo_macd_neg_cap"))
+
+        score = max(1.0, min(10.0, score))
+
+        _c_long = get_adaptive_weight("crypto_bo_signal_long")
+        _c_short = get_adaptive_weight("crypto_bo_signal_short")
+        if breakout_confirmed and breakout_dir == "long":
+            signal = "long"
+        elif breakout_confirmed and breakout_dir == "short":
+            signal = "short"
+        elif score >= _c_long:
+            signal = "long"
+        elif score <= _c_short:
+            signal = "short"
+        else:
+            signal = "watch"
+
+        # Entry / stop / target
+        _c_stop_m = get_adaptive_weight("crypto_bo_stop_atr_mult")
+        _c_tgt_m = get_adaptive_weight("crypto_bo_target_atr_mult")
+        entry = smart_round(price, crypto=True)
+        stop = smart_round(price - _c_stop_m * atr_val, crypto=True)
+        target = smart_round(price + _c_tgt_m * atr_val, crypto=True)
+        rr = round(_c_tgt_m / _c_stop_m, 2)
+
+        return {
+            "ticker": ticker.upper(),
+            "score": round(score, 1),
+            "signal": signal,
+            "price": entry,
+            "entry_price": entry,
+            "stop_loss": stop,
+            "take_profit": target,
+            "risk_reward": rr,
+            "risk_level": "high" if atr_val / price > 0.02 else "medium",
+            "signals": signals,
+            "rvol": rvol,
+            "bb_squeeze": bb_squeeze,
+            "bb_squeeze_firing": bb_squeeze_firing,
+            "breakout_confirmed": breakout_confirmed,
+            "breakout_dir": breakout_dir,
+            "atr_state": atr_state,
+            "ema_alignment": ema_alignment,
+            "change_24h": change_24h,
+            "vwap": smart_round(vwap, crypto=True) if vwap else None,
+            "vwap_pct": vwap_pct,
+            "indicators": {
+                "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
+                "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
+                "adx": round(float(adx_val), 1) if pd.notna(adx_val) else None,
+                "atr": round(atr_val, 6),
+                "bb_width": round(bb_width, 4),
+                "ema_9": smart_round(float(ema_9), crypto=True) if pd.notna(ema_9) else None,
+                "ema_21": smart_round(float(ema_21), crypto=True) if pd.notna(ema_21) else None,
+                "ema_50": smart_round(float(ema_50), crypto=True) if pd.notna(ema_50) else None,
+                "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
+                "stoch_d": round(float(stoch_d), 1) if pd.notna(stoch_d) else None,
+                "rvol": rvol,
+            },
+        }
+    except Exception as e:
+        logger.debug(f"[crypto_breakout] {ticker} failed: {e}")
+        return None
+
+
+def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
+    """Scan 70+ crypto pairs for intraday breakout setups on 15m candles.
+
+    Results are cached for 15 minutes. Runs all crypto candidates through
+    _score_crypto_breakout() and returns the top setups sorted by score.
+    """
+    global _crypto_breakout_cache
+
+    now = time.time()
+    if (now - _crypto_breakout_cache["ts"]) < _CRYPTO_BREAKOUT_TTL and _crypto_breakout_cache["results"]:
+        return {
+            "ok": True,
+            "cached": True,
+            "results": _crypto_breakout_cache["results"][:max_results],
+            "total_scanned": _crypto_breakout_cache.get("total_scanned", 0),
+            "scan_time": _crypto_breakout_cache.get("scan_time"),
+            "age_seconds": int(now - _crypto_breakout_cache["ts"]),
+        }
+
+    from .prescreener import get_trending_crypto, _crypto_top_movers
+
+    tickers = set(DEFAULT_CRYPTO_TICKERS)
+    try:
+        tickers.update(get_trending_crypto())
+    except Exception:
+        pass
+    try:
+        tickers.update(_crypto_top_movers())
+    except Exception:
+        pass
+
+    ticker_list = sorted(tickers)
+    total = len(ticker_list)
+    logger.info(f"[crypto_breakout] Scanning {total} crypto pairs...")
+
+    # Pre-warm the OHLCV cache with a single batch request to avoid
+    # hitting per-ticker rate limits during the scoring loop.
+    try:
+        from ..yf_session import batch_download
+        batch_download(ticker_list, period="5d", interval="15m")
+    except Exception as e:
+        logger.warning(f"[crypto_breakout] Batch pre-warm failed (will fetch individually): {e}")
+
+    results = []
+    errors = 0
+    t0 = time.time()
+
+    with ThreadPoolExecutor(max_workers=min(10, _MAX_SCAN_WORKERS)) as pool:
+        future_map = {
+            pool.submit(_score_crypto_breakout, t): t
+            for t in ticker_list
+            if not _shutting_down.is_set()
+        }
+        for future in as_completed(future_map):
+            if _shutting_down.is_set():
+                break
+            try:
+                r = future.result(timeout=30)
+                if r is not None:
+                    results.append(r)
+            except Exception:
+                errors += 1
+
+    results.sort(key=lambda x: x["score"], reverse=True)
+    elapsed = round(time.time() - t0, 1)
+
+    _crypto_breakout_cache = {
+        "results": results,
+        "ts": time.time(),
+        "total_scanned": total,
+        "scan_time": datetime.utcnow().isoformat(),
+        "elapsed_s": elapsed,
+        "errors": errors,
+    }
+
+    above_6 = sum(1 for r in results if r["score"] >= 6)
+    above_7 = sum(1 for r in results if r["score"] >= 7)
+    squeezes = sum(1 for r in results if r.get("bb_squeeze"))
+    logger.info(
+        f"[crypto_breakout] Done: {len(results)}/{total} scored, "
+        f"{errors} errors, {elapsed}s, "
+        f"score>=6: {above_6}, score>=7: {above_7}, squeezes: {squeezes}, "
+        f"top: "
+        + (results[0]["ticker"] + f" ({results[0]['score']})" if results else "none")
+    )
+
+    return {
+        "ok": True,
+        "cached": False,
+        "results": results[:max_results],
+        "total_scanned": total,
+        "scan_time": _crypto_breakout_cache["scan_time"],
+        "elapsed_s": elapsed,
+        "age_seconds": 0,
+    }
+
+
+def get_crypto_breakout_cache() -> dict[str, Any]:
+    """Return the current cached crypto breakout results (for brain context)."""
+    now = time.time()
+    age = int(now - _crypto_breakout_cache["ts"]) if _crypto_breakout_cache["ts"] > 0 else None
+    return {
+        "results": _crypto_breakout_cache.get("results", []),
+        "scan_time": _crypto_breakout_cache.get("scan_time"),
+        "age_seconds": age,
+        "total_scanned": _crypto_breakout_cache.get("total_scanned", 0),
+    }
 
 
 # ── Breakout Detection Scoring ────────────────────────────────────────
@@ -831,48 +1509,48 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
 
         # BB squeeze = consolidation
         if is_squeeze:
-            score += 2.0
+            score += get_adaptive_weight("bo_squeeze")
             signals.append(f"Bollinger squeeze (width percentile: {bb_width_pct_rank:.0f}%)")
 
         # Near resistance
         if 0 <= dist_to_breakout <= 2.0:
-            score += 1.5
+            score += get_adaptive_weight("bo_near_resistance_close")
             signals.append(f"Near resistance — {dist_to_breakout:.1f}% to breakout")
         elif 2.0 < dist_to_breakout <= 5.0:
-            score += 0.5
+            score += get_adaptive_weight("bo_near_resistance_mid")
             signals.append(f"{dist_to_breakout:.1f}% below resistance")
 
         # Already breaking out
         if dist_to_breakout <= 0:
-            score += 2.0
+            score += get_adaptive_weight("bo_breaking_out")
             signals.append("BREAKING OUT — new 20-day high!")
 
         # Low ADX = consolidation, not trending
         if pd.notna(adx_val):
             if adx_val < 20:
-                score += 1.0
+                score += get_adaptive_weight("bo_adx_consolidating")
                 signals.append(f"Low ADX ({adx_val:.0f}) — consolidating")
             elif adx_val > 30:
-                score -= 0.5
+                score += get_adaptive_weight("bo_adx_trending")
 
         # Declining volume = coiling
         if vol_declining:
-            score += 0.8
+            score += get_adaptive_weight("bo_vol_declining")
             signals.append(f"Volume declining ({vol_trend_pct:+.0f}%) — coiling")
 
         # EMA support
         if pd.notna(ema_20) and pd.notna(ema_50):
             if price > float(ema_20) > float(ema_50):
-                score += 0.5
+                score += get_adaptive_weight("bo_ema_support")
                 signals.append("Above rising EMAs — bullish base")
 
         # RSI neutral zone (not overbought for a pre-breakout)
         if pd.notna(rsi_val):
             if 45 <= rsi_val <= 65:
-                score += 0.5
+                score += get_adaptive_weight("bo_rsi_neutral")
                 signals.append(f"RSI neutral ({rsi_val:.0f}) — room to run")
             elif rsi_val > 70:
-                score -= 1.0
+                score += get_adaptive_weight("bo_rsi_overbought")
                 signals.append(f"RSI overbought ({rsi_val:.0f}) — may fade")
 
         # ── MACD gate (primary momentum filter — weight is brain-adaptive) ──
@@ -881,7 +1559,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("macd_positive_bonus")
                 signals.append("MACD positive + histogram rising — strong momentum")
             elif float(macd_hist) > 0:
-                score += 0.5
+                score += get_adaptive_weight("bo_macd_building")
                 signals.append("MACD histogram positive — momentum building")
             elif float(macd_line) < float(macd_sig) and float(macd_hist) < 0:
                 score += get_adaptive_weight("macd_negative_penalty")
@@ -964,17 +1642,21 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
 
         score = max(1.0, min(10.0, score))
 
+        _bo_ready = get_adaptive_weight("bo_signal_ready")
+        _bo_watch = get_adaptive_weight("bo_signal_watch")
         if dist_to_breakout <= 0:
             status = "breaking_out"
-        elif score >= 7:
+        elif score >= _bo_ready:
             status = "ready"
-        elif score >= 5:
+        elif score >= _bo_watch:
             status = "watch"
         else:
             status = "wait"
 
         atr_f = float(atr_val) if pd.notna(atr_val) else price * 0.02
         _cr = ticker.upper().endswith("-USD")
+        _bo_stop_m = get_adaptive_weight("bo_stop_atr_mult")
+        _bo_tgt_m = get_adaptive_weight("bo_target_atr_mult")
 
         return {
             "ticker": ticker.upper(),
@@ -992,8 +1674,8 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             "risk_level": "medium" if status == "watch" else "high",
             "signals": signals,
             "entry_price": smart_round(resistance, crypto=_cr),
-            "stop_loss": smart_round(resistance - 2 * atr_f, crypto=_cr),
-            "take_profit": smart_round(resistance + 3 * atr_f, crypto=_cr),
+            "stop_loss": smart_round(resistance - _bo_stop_m * atr_f, crypto=_cr),
+            "take_profit": smart_round(resistance + _bo_tgt_m * atr_f, crypto=_cr),
             "indicators": {
                 "rsi": round(float(rsi_val), 1) if pd.notna(rsi_val) else None,
                 "macd_hist": round(float(macd_hist), 4) if pd.notna(macd_hist) else None,
@@ -1998,35 +2680,72 @@ def _make_plain_english(scored: dict, insights: str) -> str:
     """Convert technical signals into beginner-friendly language."""
     parts = []
     signal = scored["signal"]
+    is_crypto = scored.get("ticker", "").endswith("-USD") or scored.get("is_crypto")
+    asset = "coin" if is_crypto else "stock"
 
-    if signal == "buy":
-        parts.append("This stock looks like a good buying opportunity right now.")
-    elif signal == "sell":
-        parts.append("This stock might be overpriced. Consider taking profits.")
+    if signal in ("buy", "long"):
+        parts.append(f"This {asset} looks like a good buying opportunity right now.")
+    elif signal in ("sell", "short"):
+        parts.append(f"This {asset} might be overpriced. Consider taking profits.")
+    elif signal == "watch":
+        parts.append(f"This {asset} is worth watching closely -- a big move may be building.")
     else:
-        parts.append("No strong signal either way. Best to wait for a clearer setup.")
+        parts.append(f"No strong signal either way. Best to wait for a clearer setup.")
 
-    for s in scored.get("signals", [])[:3]:
-        if "oversold" in s.lower():
+    for s in scored.get("signals", [])[:5]:
+        sl = s.lower()
+        if "oversold" in sl:
             parts.append("The price has dropped a lot and may be due for a bounce.")
-        elif "overbought" in s.lower():
+        elif "overbought" in sl or "overextended" in sl:
             parts.append("The price has risen sharply and may pull back soon.")
-        elif "uptrend" in s.lower():
+        elif "uptrend" in sl:
             parts.append("The overall direction has been up, which is a good sign.")
-        elif "downtrend" in s.lower():
+        elif "downtrend" in sl:
             parts.append("The overall direction has been down, so be cautious.")
-        elif "volume surge" in s.lower():
+        elif "volume explosion" in sl or "massive volume" in sl:
+            parts.append("Trading volume just exploded -- a sign that something major is happening.")
+        elif "volume surge" in sl or "strong volume" in sl:
             parts.append("Trading activity just spiked, which often signals a big move.")
-        elif "macd" in s.lower():
+        elif "low volume" in sl:
+            parts.append("Volume is low, so any price move could be a fakeout -- wait for confirmation.")
+        elif "squeeze firing" in sl:
+            parts.append("The price has been coiling in a tight range and is now breaking out -- this is a high-probability setup.")
+        elif "squeeze" in sl and "bollinger" in sl:
+            parts.append("The price has been trading in a very tight range (consolidation). This often leads to a big move soon.")
+        elif "confirmed breakout" in sl:
+            parts.append("The price just broke out of its normal range on strong volume -- this is a confirmed breakout.")
+        elif "atr expanding" in sl:
+            parts.append("Price swings are getting larger, which usually means a breakout is in progress.")
+        elif "atr compressed" in sl or "coiled spring" in sl:
+            parts.append("Price movement has gotten very quiet -- like a coiled spring, it often explodes after this.")
+        elif "bullish ema stack" in sl or "ema stack" in sl:
+            parts.append("Short, medium, and long-term trends are all aligned upward -- strong bullish momentum.")
+        elif "bearish ema" in sl:
+            parts.append("The trend is pointing down across multiple timeframes.")
+        elif "macd bullish" in sl:
             parts.append("Momentum indicators suggest buyers are stepping in.")
-        elif "bollinger" in s.lower():
-            parts.append("The price is near a statistical low point and often bounces from here.")
+        elif "macd" in sl and ("negative" in sl or "bearish" in sl):
+            parts.append("Momentum has turned negative -- sellers are in control.")
+        elif "above vwap" in sl:
+            parts.append("The price is above the average trading price today -- institutions are buying.")
+        elif "below vwap" in sl:
+            parts.append("The price is below the average trading price today -- watch for support.")
+        elif "bollinger" in sl:
+            parts.append("The price is near a statistical extreme and often bounces from here.")
+        elif "hot mover" in sl or "top gainer" in sl or "strong gainer" in sl:
+            parts.append(f"This {asset} is one of the biggest movers right now -- high activity.")
+        elif "volume awakening" in sl:
+            parts.append("Volume is picking up inside the squeeze -- like a car revving before the light turns green.")
+        elif "stochastic curl" in sl:
+            parts.append("Momentum is starting to build inside the tight range -- early buyers are stepping in.")
+        elif "higher lows" in sl and "resistance" in sl:
+            parts.append("Buyers are pushing the floor higher while hitting the same ceiling -- pressure is building for a breakout.")
 
     risk = scored.get("risk_level", "medium")
     if risk == "high":
         parts.append("Risk is HIGH -- only use money you're comfortable losing.")
     elif risk == "low":
-        parts.append("This is a relatively stable stock with lower risk.")
+        parts.append(f"This is a relatively stable {asset} with lower risk.")
 
     return " ".join(parts)
 

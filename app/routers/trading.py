@@ -41,12 +41,21 @@ router.include_router(broker_router)
 router.include_router(web3_router)
 
 _TRADING_PROMPT: str | None = None
+_TRADING_PROMPT_MTIME: float = 0.0
 
 
 def _get_trading_prompt() -> str:
-    global _TRADING_PROMPT
-    if _TRADING_PROMPT is None:
+    """Load trading analyst prompt, auto-reloading when the file changes."""
+    global _TRADING_PROMPT, _TRADING_PROMPT_MTIME
+    from pathlib import Path
+    prompt_path = Path(__file__).resolve().parent.parent / "prompts" / "trading_analyst.txt"
+    try:
+        current_mtime = prompt_path.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+    if _TRADING_PROMPT is None or current_mtime != _TRADING_PROMPT_MTIME:
         _TRADING_PROMPT = load_prompt("trading_analyst")
+        _TRADING_PROMPT_MTIME = current_mtime
     return _TRADING_PROMPT
 
 
@@ -792,6 +801,31 @@ def api_run_backtest(
     return JSONResponse(result)
 
 
+@router.get("/api/trading/backtest/all")
+def api_backtest_all_strategies(
+    ticker: str = Query(...),
+):
+    """Run all strategies on a ticker and return summary results."""
+    results = []
+    for sid, info in bt_svc.STRATEGIES.items():
+        try:
+            r = bt_svc.run_backtest(ticker=ticker, strategy_id=sid, period="1y")
+            if r.get("ok"):
+                results.append({
+                    "strategy_id": sid,
+                    "strategy": r["strategy"],
+                    "return_pct": r["return_pct"],
+                    "win_rate": r["win_rate"],
+                    "sharpe": r.get("sharpe"),
+                    "max_drawdown": r["max_drawdown"],
+                    "trade_count": r["trade_count"],
+                })
+        except Exception:
+            continue
+    results.sort(key=lambda x: x["return_pct"], reverse=True)
+    return JSONResponse({"ok": True, "results": results})
+
+
 @router.get("/api/trading/backtest/quick")
 def api_quick_backtest(
     ticker: str = Query(...),
@@ -858,6 +892,47 @@ def api_quick_backtest(
         "equity_curve": best_result.get("equity_curve", []),
         "trades": best_result.get("trades", []),
     })
+
+
+# ── Crypto Breakout Scanner ────────────────────────────────────────────
+
+@router.get("/api/trading/crypto-breakouts")
+def api_crypto_breakouts(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    refresh: bool = Query(False),
+):
+    """Return cached crypto breakout scan or trigger a fresh scan."""
+    from ..services.trading.scanner import run_crypto_breakout_scan, get_crypto_breakout_cache
+
+    if refresh:
+        background_tasks.add_task(run_crypto_breakout_scan, 20)
+        cache = get_crypto_breakout_cache()
+        if cache["results"]:
+            return JSONResponse({
+                "ok": True,
+                "refreshing": True,
+                **cache,
+            })
+        return JSONResponse({"ok": True, "refreshing": True, "results": [], "message": "Scan started"})
+
+    cache = get_crypto_breakout_cache()
+    if cache["results"]:
+        return JSONResponse({"ok": True, **cache})
+
+    result = run_crypto_breakout_scan(max_results=20)
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/crypto-breakouts/scan")
+def api_trigger_crypto_scan(
+    background_tasks: BackgroundTasks,
+):
+    """Manually trigger a crypto breakout scan."""
+    from ..services.trading.scanner import run_crypto_breakout_scan
+    background_tasks.add_task(run_crypto_breakout_scan, 20)
+    return JSONResponse({"ok": True, "message": "Crypto breakout scan started"})
 
 
 # ── Scanner ────────────────────────────────────────────────────────────

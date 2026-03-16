@@ -16,6 +16,8 @@ logger = logging.getLogger(__name__)
 
 # Alert type constants
 BREAKOUT_TRIGGERED = "breakout_triggered"
+CRYPTO_BREAKOUT = "crypto_breakout"
+CRYPTO_SQUEEZE_FIRING = "crypto_squeeze_firing"
 TARGET_HIT = "target_hit"
 STOP_HIT = "stop_hit"
 NEW_TOP_PICK = "new_top_pick"
@@ -25,7 +27,8 @@ STRATEGY_PROPOSED = "strategy_proposed"
 WEEKLY_REVIEW = "weekly_review"
 
 ALL_ALERT_TYPES = [
-    BREAKOUT_TRIGGERED, TARGET_HIT, STOP_HIT, NEW_TOP_PICK,
+    BREAKOUT_TRIGGERED, CRYPTO_BREAKOUT, CRYPTO_SQUEEZE_FIRING,
+    TARGET_HIT, STOP_HIT, NEW_TOP_PICK,
     POSITION_OPENED, POSITION_CLOSED, STRATEGY_PROPOSED, WEEKLY_REVIEW,
 ]
 
@@ -51,17 +54,13 @@ def _extract_pattern_keywords(signals: list[str]) -> list[str]:
         found.append("unclassified")
     return found[:10]
 
-_PROPOSAL_EXPIRE_HOURS = 24
-_MIN_SCORE_FOR_PROPOSAL = 7.5
-_MAX_RISK_PCT = 2.0  # max 2% of portfolio per trade
-_MIN_RR_FOR_PROPOSAL = 1.5  # minimum risk:reward ratio
-_MIN_RR_FOR_FROM_PICK = 0.8  # lower threshold when user explicitly creates from pick (price may have drifted)
-_MIN_PRICE_FOR_PROPOSAL = 1.0  # skip sub-$1 penny stocks
+_PROPOSAL_EXPIRE_HOURS = 24  # operational, not scoring
 
-# ── Position sizing caps ───────────────────────────────────────────────
-_POS_PCT_HARD_CAP = 10.0
-_POS_PCT_RISK_OFF_CAP = 7.0
-_POS_PCT_SPECULATIVE_CAP = 5.0
+
+def _get_brain_weight(key: str) -> float:
+    """Read a scoring weight from the brain's adaptive weight system."""
+    from .scanner import get_adaptive_weight
+    return get_adaptive_weight(key)
 
 _SPECULATIVE_KEYWORDS = [
     "float_micro", "float_low", "micro", "microcap", "penny",
@@ -84,7 +83,7 @@ def _compute_position_size(
     if buying_power <= 0 or risk_per_share <= 0 or price <= 0:
         return None, None
 
-    risk_dollars = buying_power * (_MAX_RISK_PCT / 100)
+    risk_dollars = buying_power * (_get_brain_weight("pos_max_risk_pct") / 100)
     raw_shares = risk_dollars / risk_per_share
     raw_pct = (raw_shares * price) / buying_power * 100
 
@@ -101,24 +100,24 @@ def _compute_position_size(
 
     regime_mult = 1.0
     if regime_label == "risk_off":
-        regime_mult = 0.50
+        regime_mult = _get_brain_weight("pos_regime_risk_off_mult")
     elif regime_label == "cautious":
-        regime_mult = 0.75
+        regime_mult = _get_brain_weight("pos_regime_cautious_mult")
 
     if vix_regime == "elevated":
-        regime_mult *= 0.85
+        regime_mult *= _get_brain_weight("pos_vix_elevated_mult")
     elif vix_regime == "extreme":
-        regime_mult *= 0.70
+        regime_mult *= _get_brain_weight("pos_vix_extreme_mult")
 
-    # ── 2. Volatility overlay (wide stop → more volatile) ─────────────
+    # ── 2. Volatility overlay (wide stop -> more volatile) ────────────
     stop_dist_pct = risk_per_share / price * 100
     vol_mult = 1.0
     if stop_dist_pct > 10:
-        vol_mult = 0.70
+        vol_mult = _get_brain_weight("pos_vol_stop_10_mult")
     elif stop_dist_pct > 8:
-        vol_mult = 0.80
+        vol_mult = _get_brain_weight("pos_vol_stop_8_mult")
     elif stop_dist_pct > 5:
-        vol_mult = 0.90
+        vol_mult = _get_brain_weight("pos_vol_stop_5_mult")
 
     # ── 3. Instrument-quality / speculative overlay ───────────────────
     signals_text = " ".join(s.lower() for s in pick.get("signals", []))
@@ -131,22 +130,22 @@ def _compute_position_size(
                 is_speculative = True
                 break
 
-    spec_mult = 0.60 if is_speculative else 1.0
+    spec_mult = _get_brain_weight("pos_speculative_mult") if is_speculative else 1.0
 
     # ── 4. Apply multiplicative overlays ──────────────────────────────
     adjusted_pct = raw_pct * regime_mult * vol_mult * spec_mult
 
-    # ── 5. Scanner/brain soft cap — stay near their suggestion ────────
+    # ── 5. Scanner/brain soft cap -- stay near their suggestion ───────
     pick_pct = pick.get("position_size_pct")
     if pick_pct and pick_pct > 0:
-        adjusted_pct = min(adjusted_pct, pick_pct * 1.25)
+        adjusted_pct = min(adjusted_pct, pick_pct * _get_brain_weight("pos_scanner_cap_mult"))
 
     # ── 6. Hard caps (regime-aware) ───────────────────────────────────
-    cap = _POS_PCT_HARD_CAP
+    cap = _get_brain_weight("pos_pct_hard_cap")
     if regime_label == "risk_off" or vix_regime in ("elevated", "extreme"):
-        cap = min(cap, _POS_PCT_RISK_OFF_CAP)
+        cap = min(cap, _get_brain_weight("pos_pct_risk_off_cap"))
     if is_speculative:
-        cap = min(cap, _POS_PCT_SPECULATIVE_CAP)
+        cap = min(cap, _get_brain_weight("pos_pct_speculative_cap"))
 
     final_pct = round(min(adjusted_pct, cap), 2)
 
@@ -326,7 +325,7 @@ def generate_strategy_proposals(
 
     for pick in picks:
         combined = pick.get("combined_score", 0)
-        if combined < _MIN_SCORE_FOR_PROPOSAL:
+        if combined < _get_brain_weight("alert_min_score_proposal"):
             continue
         if pick.get("signal") != "buy":
             continue
@@ -353,9 +352,9 @@ def generate_strategy_proposals(
 
         rr_ratio = round(reward_per_share / risk_per_share, 2)
 
-        if rr_ratio < _MIN_RR_FOR_PROPOSAL:
+        if rr_ratio < _get_brain_weight("alert_min_rr_proposal"):
             continue
-        if price < _MIN_PRICE_FOR_PROPOSAL:
+        if price < _get_brain_weight("alert_min_price"):
             continue
 
         projected_profit_pct = round((target - price) / price * 100, 2)
@@ -511,11 +510,12 @@ def create_proposal_from_pick(
         return None, "Stop loss must be different from entry."
 
     rr_ratio = round(reward_per_share / risk_per_share, 2)
-    min_rr = _MIN_RR_FOR_FROM_PICK  # use lower threshold for explicit "create from pick"
+    min_rr = _get_brain_weight("alert_min_rr_from_pick")
     if rr_ratio < min_rr:
         return None, f"Risk:reward ratio {rr_ratio}:1 is below minimum {min_rr}:1."
-    if price < _MIN_PRICE_FOR_PROPOSAL:
-        return None, f"Price ${price} is below minimum ${_MIN_PRICE_FOR_PROPOSAL}."
+    _min_price = _get_brain_weight("alert_min_price")
+    if price < _min_price:
+        return None, f"Price ${price} is below minimum ${_min_price}."
 
     _supersede_proposals(db, user_id, ticker)
 
@@ -823,7 +823,7 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
         db.query(ScanResult)
         .filter(
             ScanResult.scanned_at >= cutoff,
-            ScanResult.score >= 7.0,
+            ScanResult.score >= _get_brain_weight("alert_breakout_min_score"),
         )
         .all()
     )
@@ -878,7 +878,7 @@ def _check_top_picks_for_proposals(
     new_proposals = []
 
     for pick in picks:
-        if (pick.get("combined_score", 0) < 8.0 or
+        if (pick.get("combined_score", 0) < _get_brain_weight("alert_auto_proposal_min_score") or
                 pick.get("signal") != "buy"):
             continue
 

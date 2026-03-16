@@ -827,16 +827,34 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   background: var(--bg-header); border-left: 3px solid var(--accent, #8b5cf6);
   border-radius: 6px; padding: 8px 12px; font-size: 11.5px; line-height: 1.55;
   color: var(--text); font-style: italic; cursor: pointer;
+  min-width: 0;
 }
-.bi-take.collapsed { max-height: 42px; overflow: hidden; text-overflow: ellipsis;
+.bi-take.collapsed { max-height: 52px; overflow: hidden; text-overflow: ellipsis;
   -webkit-mask-image: linear-gradient(180deg, #000 60%, transparent);
   mask-image: linear-gradient(180deg, #000 60%, transparent);
 }
+.bi-take-label { font-weight: 700; font-style: normal; font-size: 9px; text-transform: uppercase; color: var(--text-muted); letter-spacing: .5px; }
+.bi-explain { font-style: normal; font-size: 10px; color: var(--text-secondary); line-height: 1.5; margin-top: 4px; padding-top: 4px; border-top: 1px solid var(--border); }
 
 .bi-data-grid {
   display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;
 }
 @media (max-width: 640px) { .bi-data-grid { grid-template-columns: 1fr; } }
+
+.bi-backtest-row {
+  display: flex; gap: 8px; overflow-x: auto; padding: 2px 0;
+}
+.bi-bt-card {
+  flex: 0 0 auto; min-width: 140px; max-width: 200px;
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 10px; font-size: 10px; display: flex; flex-direction: column; gap: 3px;
+  transition: border-color .15s;
+}
+.bi-bt-card:hover { border-color: var(--accent); }
+.bi-bt-card-name { font-weight: 700; font-size: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bi-bt-card-val { font-weight: 700; font-size: 13px; }
+.bi-bt-card-row { display: flex; justify-content: space-between; align-items: center; }
+.bi-bt-card-lbl { color: var(--text-muted); font-size: 8px; text-transform: uppercase; }
 
 .bi-levels {
   display: flex; flex-direction: column; gap: 5px;
@@ -5116,24 +5134,38 @@ function _renderBestIdeaRow(item) {
   html += '<span style="font-size:11px;font-weight:700;color:' + confColor + '">' + Math.round(conf) + '%</span></div>';
   html += '</div>';
 
-  /* ── Chili's Take ── */
+  /* ── Row 1: Chili's Take + Levels + Metrics (3-column) ── */
   var thesis = isProposal ? p.thesis : pk.thesis;
-  if (thesis) {
-    html += '<div class="bi-take collapsed" onclick="event.stopPropagation();this.classList.toggle(\'collapsed\')">';
-    html += '<span style="font-weight:700;font-style:normal;font-size:9px;text-transform:uppercase;color:var(--text-muted);letter-spacing:.5px">Chili\'s Take</span><br>';
-    html += escHtml(thesis);
-    html += '</div>';
-  }
+  var explanation = pk.explanation || null;
 
-  /* ── 3-column data grid ── */
   html += '<div class="bi-data-grid">';
 
+  // Column 1: Chili's Take + plain-English explanation
+  html += '<div class="bi-take collapsed" onclick="event.stopPropagation();this.classList.toggle(\'collapsed\')">';
+  if (thesis) {
+    html += '<span class="bi-take-label">Chili\'s Take</span><br>';
+    html += escHtml(thesis);
+  }
+  if (explanation) {
+    html += '<div class="bi-explain">';
+    html += '<span class="bi-take-label">In Plain English</span><br>';
+    html += escHtml(explanation);
+    html += '</div>';
+  }
+  if (!thesis && !explanation) {
+    html += '<span class="bi-take-label">Analysis</span><br>';
+    html += '<span style="color:var(--text-muted);font-size:10px">Run a scan to generate insight</span>';
+  }
+  html += '</div>';
+
+  // Column 2: Entry / Stop / Target levels
   html += '<div class="bi-levels">';
   html += '<div class="bi-lv"><span class="bi-lbl">Entry</span><span class="bi-val entry">$' + smartPrice(price, isCr) + '</span></div>';
   html += '<div class="bi-lv"><span class="bi-lbl">Stop Loss</span><span class="bi-val stop">$' + smartPrice(stop, isCr) + '</span></div>';
   html += '<div class="bi-lv"><span class="bi-lbl">Target</span><span class="bi-val target">$' + smartPrice(target, isCr) + '</span></div>';
   html += '</div>';
 
+  // Column 3: Metrics
   html += '<div class="bi-metrics-col">';
   html += '<div class="bi-metric-row"><span class="bi-metric-lbl">Profit</span><span class="bi-metric-val profit">' + profText + '</span></div>';
   if (isProposal) html += '<div class="bi-metric-row"><span class="bi-metric-lbl">Max Loss</span><span class="bi-metric-val loss">' + lossText + '</span></div>';
@@ -5143,18 +5175,22 @@ function _renderBestIdeaRow(item) {
   if (!isProposal && pk.combined_score) html += '<div class="bi-metric-row"><span class="bi-metric-lbl">Score</span><span class="bi-metric-val">' + (pk.combined_score || pk.score) + '/10</span></div>';
   html += '</div>';
 
-  html += '<div class="bi-backtest">';
-  if (btStrategy) {
-    html += '<div class="bi-bt-row"><span class="bi-bt-lbl">Strategy</span><span class="bi-bt-val">' + escHtml(btStrategy) + '</span></div>';
-    if (btReturn != null) html += '<div class="bi-bt-row"><span class="bi-bt-lbl">Return</span><span class="bi-bt-val ' + (btReturn >= 0 ? 'pos' : 'neg') + '">' + (btReturn >= 0 ? '+' : '') + btReturn.toFixed(1) + '%</span></div>';
-    if (btWinRate != null) html += '<div class="bi-bt-row"><span class="bi-bt-lbl">Win Rate</span><span class="bi-bt-val">' + btWinRate.toFixed(0) + '%</span></div>';
-  } else {
-    html += '<div style="font-size:10px;color:var(--text-muted);text-align:center;padding:4px 0">No backtest yet</div>';
-  }
-  html += '<button class="bi-run-bt-btn" onclick="event.stopPropagation();runQuickBacktest(\'' + escAttr(ticker) + '\',this)" title="Run backtest for ' + ticker + '">&#x25B6; Run Backtest</button>';
-  html += '<div class="bi-bt-expanded" id="bt-expand-' + ticker + '" style="display:none"></div>';
   html += '</div>';
 
+  /* ── Row 2: Backtest strategy cards ── */
+  html += '<div class="bi-backtest-row" id="bt-cards-' + ticker + '">';
+  if (btStrategy) {
+    var retCls = (btReturn != null && btReturn >= 0) ? 'pos' : 'neg';
+    html += '<div class="bi-bt-card">';
+    html += '<div class="bi-bt-card-name">' + escHtml(btStrategy) + '</div>';
+    if (btReturn != null) html += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Return</span><span class="bi-bt-card-val bi-bt-val ' + retCls + '">' + (btReturn >= 0 ? '+' : '') + btReturn.toFixed(1) + '%</span></div>';
+    if (btWinRate != null) html += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + btWinRate.toFixed(0) + '%</span></div>';
+    html += '</div>';
+  }
+  html += '<div class="bi-bt-card" style="display:flex;align-items:center;justify-content:center;cursor:pointer;border-style:dashed" onclick="event.stopPropagation();runAllBacktests(\'' + escAttr(ticker) + '\',this)">';
+  html += '<span style="font-size:11px;color:var(--text-muted)">&#x25B6; Test All Strategies</span>';
+  html += '</div>';
+  html += '<div class="bi-bt-expanded" id="bt-expand-' + ticker + '" style="display:none"></div>';
   html += '</div>';
 
   /* ── Evidence pills ── */
@@ -5215,6 +5251,41 @@ function _renderBestIdeaRow(item) {
 
   html += '</div>';
   return html;
+}
+
+function runAllBacktests(ticker, btnEl) {
+  if (!ticker) return;
+  var container = document.getElementById('bt-cards-' + ticker);
+  if (!container) return;
+  if (btnEl) { btnEl.innerHTML = '<span style="font-size:11px;color:var(--text-muted)">Running\u2026</span>'; btnEl.style.pointerEvents = 'none'; }
+
+  fetch('/api/trading/backtest/all?ticker=' + encodeURIComponent(ticker))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.results) {
+        if (btnEl) { btnEl.innerHTML = '<span style="font-size:11px;color:#ef4444">Failed</span>'; }
+        return;
+      }
+      container.innerHTML = '';
+      d.results.forEach(function(r) {
+        var retCls = r.return_pct >= 0 ? 'pos' : 'neg';
+        var card = '<div class="bi-bt-card">';
+        card += '<div class="bi-bt-card-name">' + escHtml(r.strategy) + '</div>';
+        card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Return</span><span class="bi-bt-card-val bi-bt-val ' + retCls + '">' + (r.return_pct >= 0 ? '+' : '') + r.return_pct.toFixed(1) + '%</span></div>';
+        card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + r.win_rate.toFixed(0) + '%</span></div>';
+        card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Trades</span><span class="bi-bt-card-val">' + r.trade_count + '</span></div>';
+        if (r.sharpe != null) card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Sharpe</span><span class="bi-bt-card-val">' + r.sharpe.toFixed(2) + '</span></div>';
+        card += '</div>';
+        container.innerHTML += card;
+      });
+      var linkCard = '<div class="bi-bt-card" style="display:flex;align-items:center;justify-content:center;cursor:pointer" onclick="event.stopPropagation();_openFullBacktest(\'' + escAttr(ticker) + '\')">';
+      linkCard += '<span style="font-size:10px;color:var(--accent);font-weight:600">Full Chart &#x2192;</span>';
+      linkCard += '</div>';
+      container.innerHTML += linkCard;
+    })
+    .catch(function() {
+      if (btnEl) { btnEl.innerHTML = '<span style="font-size:11px;color:#ef4444">Error</span>'; }
+    });
 }
 
 function createProposalFromPick(ticker, btn, entryPrice, stopLoss, takeProfit) {

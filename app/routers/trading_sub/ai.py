@@ -18,12 +18,21 @@ from ...services import ticker_universe
 router = APIRouter(tags=["trading-ai"])
 
 _TRADING_PROMPT: str | None = None
+_TRADING_PROMPT_MTIME: float = 0.0
 
 
 def _get_trading_prompt() -> str:
-    global _TRADING_PROMPT
-    if _TRADING_PROMPT is None:
+    """Load trading analyst prompt, auto-reloading when the file changes."""
+    global _TRADING_PROMPT, _TRADING_PROMPT_MTIME
+    from pathlib import Path
+    prompt_path = Path(__file__).resolve().parent.parent.parent / "prompts" / "trading_analyst.txt"
+    try:
+        current_mtime = prompt_path.stat().st_mtime
+    except OSError:
+        current_mtime = 0.0
+    if _TRADING_PROMPT is None or current_mtime != _TRADING_PROMPT_MTIME:
         _TRADING_PROMPT = load_prompt("trading_analyst")
+        _TRADING_PROMPT_MTIME = current_mtime
     return _TRADING_PROMPT
 
 

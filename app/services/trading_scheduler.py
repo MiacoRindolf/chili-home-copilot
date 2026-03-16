@@ -87,14 +87,174 @@ def _run_price_monitor_job():
         db.close()
 
 
+_crypto_alert_cooldown: dict[str, float] = {}
+
+
+def _run_crypto_breakout_job():
+    """24/7 crypto breakout scanner: detect intraday setups on 15m candles.
+
+    Alerts BEFORE breakouts happen -- prioritises pre-breakout precursors:
+      1. BB squeeze + ATR compressed (coiled spring)
+      2. BB squeeze firing (squeeze just releasing)
+      3. BB squeeze + bullish EMA stack + rising volume
+      4. ATR compressed with strong momentum setup
+      5. High-score pre-breakout with volume
+      6. Freshly confirmed breakout (still actionable with tighter stop)
+
+    All thresholds are brain-adaptive and evolve via the learning cycle.
+    """
+    import time as _t
+    from .trading.scanner import run_crypto_breakout_scan, get_adaptive_weight
+    from .trading.alerts import dispatch_alert
+
+    logger.info("[scheduler] Running crypto breakout scanner")
+    try:
+        result = run_crypto_breakout_scan(max_results=20)
+        now = _t.time()
+
+        stale = [k for k, v in _crypto_alert_cooldown.items() if now - v > 7200]
+        for k in stale:
+            del _crypto_alert_cooldown[k]
+
+        t_coiled = get_adaptive_weight("crypto_alert_coiled_spring_min")
+        t_squeeze = get_adaptive_weight("crypto_alert_squeeze_firing_min")
+        t_building = get_adaptive_weight("crypto_alert_building_min")
+        t_range = get_adaptive_weight("crypto_alert_range_tight_min")
+        t_high = get_adaptive_weight("crypto_alert_high_score_min")
+        rvol_building = get_adaptive_weight("crypto_alert_rvol_building_min")
+        rvol_high = get_adaptive_weight("crypto_alert_rvol_high_score_min")
+
+        all_results = result.get("results", [])
+
+        # Diagnostic: score distribution
+        score_buckets = {"8+": 0, "7-8": 0, "6-7": 0, "5-6": 0, "<5": 0}
+        for r in all_results:
+            s = r.get("score", 0)
+            if s >= 8:
+                score_buckets["8+"] += 1
+            elif s >= 7:
+                score_buckets["7-8"] += 1
+            elif s >= 6:
+                score_buckets["6-7"] += 1
+            elif s >= 5:
+                score_buckets["5-6"] += 1
+            else:
+                score_buckets["<5"] += 1
+
+        logger.info(
+            f"[scheduler] Crypto score distribution: "
+            + ", ".join(f"{k}={v}" for k, v in score_buckets.items())
+        )
+
+        # Diagnostic: log top 3 setups regardless of alert qualification
+        for i, r in enumerate(all_results[:3]):
+            logger.info(
+                f"[scheduler] Top-{i+1}: {r['ticker']} score={r['score']} "
+                f"squeeze={r.get('bb_squeeze')} firing={r.get('bb_squeeze_firing')} "
+                f"atr={r.get('atr_state')} ema={r.get('ema_alignment')} "
+                f"rvol={r.get('rvol')} confirmed={r.get('breakout_confirmed')} "
+                f"sigs={r.get('signals', [])[:3]}"
+            )
+
+        alertable: list[tuple[dict, str, str]] = []
+        for r in all_results:
+            score = r.get("score", 0)
+            squeeze = r.get("bb_squeeze", False)
+            squeeze_firing = r.get("bb_squeeze_firing", False)
+            atr = r.get("atr_state", "normal")
+            ema = r.get("ema_alignment", "neutral")
+            rvol = r.get("rvol", 1.0)
+            confirmed = r.get("breakout_confirmed", False)
+
+            # Tier 1: Coiled spring -- squeeze + ATR compressed (highest edge)
+            if not confirmed and squeeze and atr == "compressed" and score >= t_coiled:
+                alertable.append((r, "COILED SPRING", "crypto_squeeze_firing"))
+
+            # Tier 2: Squeeze just releasing -- imminent move
+            elif not confirmed and squeeze_firing and score >= t_squeeze:
+                alertable.append((r, "SQUEEZE FIRING", "crypto_squeeze_firing"))
+
+            # Tier 3: Squeeze + bullish alignment + volume picking up
+            elif not confirmed and squeeze and ema in ("bullish_stack", "bullish") and rvol >= rvol_building and score >= t_building:
+                alertable.append((r, "BREAKOUT BUILDING", "crypto_breakout"))
+
+            # Tier 4: ATR compressed with strong momentum setup
+            elif not confirmed and atr == "compressed" and score >= t_range:
+                alertable.append((r, "RANGE TIGHTENING", "crypto_breakout"))
+
+            # Tier 5: High-score pre-breakout with volume
+            elif not confirmed and score >= t_high and rvol >= rvol_high:
+                alertable.append((r, "HIGH-SCORE SETUP", "crypto_breakout"))
+
+            # Tier 6: Freshly confirmed breakout (still actionable)
+            elif confirmed and score >= t_high and rvol >= rvol_high:
+                alertable.append((r, "BREAKOUT CONFIRMED", "crypto_breakout"))
+
+        sent = 0
+        cooldown_skipped = 0
+        _max_alerts = int(get_adaptive_weight("crypto_alert_max_per_cycle"))
+        for setup, prefix, alert_type in alertable[:_max_alerts]:
+            ticker = setup["ticker"]
+            last_sent = _crypto_alert_cooldown.get(ticker, 0)
+            if now - last_sent < get_adaptive_weight("crypto_alert_cooldown_s"):
+                cooldown_skipped += 1
+                logger.debug(f"[scheduler] {ticker} skipped (cooldown)")
+                continue
+
+            flags = []
+            if setup.get("bb_squeeze"):
+                flags.append("BB squeeze")
+            if setup.get("bb_squeeze_firing"):
+                flags.append("squeeze releasing")
+            if setup.get("atr_state") == "compressed":
+                flags.append("ATR compressed")
+            if setup.get("ema_alignment") in ("bullish_stack",):
+                flags.append("full EMA stack")
+
+            flag_line = " + ".join(flags) if flags else ""
+            sig_text = "; ".join(setup.get("signals", [])[:3])
+
+            msg = (
+                f"{prefix}: {ticker}\n"
+                f"Score {setup['score']}/10 | ${setup['price']} "
+                f"({setup.get('change_24h', 0):+.1f}% 24h)\n"
+                f"RVOL {setup.get('rvol', 0):.1f}x | "
+                f"EMA: {setup.get('ema_alignment', 'n/a').replace('_', ' ')}\n"
+                + (f"{flag_line}\n" if flag_line else "")
+                + f"Entry ${setup.get('entry_price')} | "
+                f"Stop ${setup.get('stop_loss')} | "
+                f"Target ${setup.get('take_profit')}\n"
+                f"{sig_text}"
+            )
+
+            dispatch_alert(
+                ticker=ticker,
+                alert_type=alert_type,
+                message=msg,
+                price=setup["price"],
+            )
+            _crypto_alert_cooldown[ticker] = now
+            sent += 1
+
+        logger.info(
+            f"[scheduler] Crypto breakout scan done: "
+            f"{result.get('total_scanned', 0)} scanned, "
+            f"{len(all_results)} scored, "
+            f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
+            f"{sent} SMS sent"
+        )
+    except Exception as e:
+        logger.error(f"[scheduler] Crypto breakout scan failed: {e}")
+
+
 def _run_momentum_scanner_job():
     """Active momentum scanner: find immaculate day-trade setups and alert."""
-    from .trading.scanner import run_momentum_scanner
+    from .trading.scanner import run_momentum_scanner, get_adaptive_weight
     from .trading.alerts import dispatch_alert
 
     logger.info("[scheduler] Running momentum scanner")
     try:
-        result = run_momentum_scanner(max_results=3)
+        result = run_momentum_scanner(max_results=int(get_adaptive_weight("momentum_max_results")))
         immaculate = [r for r in result.get("results", []) if r.get("immaculate")]
         if immaculate:
             for setup in immaculate:
@@ -235,6 +395,15 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_crypto_breakout_job,
+            trigger=IntervalTrigger(minutes=15),
+            id="crypto_breakout_scanner",
+            name="Crypto breakout scanner (every 15min, 24/7)",
+            replace_existing=True,
+            max_instances=1,
+        )
+
         _code_hours = max(1, settings.code_brain_interval_hours)
         _scheduler.add_job(
             _run_code_learning_job,
@@ -261,7 +430,7 @@ def start_scheduler():
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
-            "momentum scanner 9:30-11AM ET market hours)"
+            "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7)"
         )
 
 

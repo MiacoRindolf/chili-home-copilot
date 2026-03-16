@@ -63,6 +63,10 @@ class Settings(BaseSettings):
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""    # Twilio phone number with country code, e.g. "+18001234567"
 
+    # Telegram Bot (free, no quota — preferred for trading alerts)
+    telegram_bot_token: str = ""
+    telegram_chat_id: str = ""
+
     # Robinhood (portfolio sync + order execution)
     robinhood_username: str = ""
     robinhood_password: str = ""

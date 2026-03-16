@@ -87,6 +87,46 @@ def _format_fundamentals(ticker_up: str, fund: dict) -> str | None:
     return "\n".join(lines)
 
 
+def _build_candle_snapshots(tickers: list[str]) -> list[str]:
+    """Fetch 15m and 5m candle snapshots for the given tickers.
+
+    Returns formatted lines ready to append to the AI context.
+    Data is already cached from the scanner run so this is fast.
+    """
+    from .market_data import fetch_ohlcv_df
+
+    lines: list[str] = []
+    for ticker in tickers:
+        for interval, period, n_bars, label in [
+            ("15m", "5d", 8, "15m"),
+            ("5m", "1d", 10, "5m"),
+        ]:
+            try:
+                df = fetch_ohlcv_df(ticker, period=period, interval=interval)
+                if df.empty or len(df) < 2:
+                    continue
+                tail = df.tail(n_bars)
+                lines.append(f"\n{ticker} — last {len(tail)} candles ({label}):")
+                lines.append("  Time            | Open      | High      | Low       | Close     | Volume")
+                for ts, row in tail.iterrows():
+                    t_str = ts.strftime("%m-%d %H:%M") if hasattr(ts, "strftime") else str(ts)[-11:]
+                    o = f"${row['Open']:.4f}" if row["Open"] < 1 else f"${row['Open']:,.2f}"
+                    h = f"${row['High']:.4f}" if row["High"] < 1 else f"${row['High']:,.2f}"
+                    lo = f"${row['Low']:.4f}" if row["Low"] < 1 else f"${row['Low']:,.2f}"
+                    c = f"${row['Close']:.4f}" if row["Close"] < 1 else f"${row['Close']:,.2f}"
+                    v = row.get("Volume", 0)
+                    if v >= 1_000_000:
+                        v_s = f"{v / 1_000_000:.1f}M"
+                    elif v >= 1_000:
+                        v_s = f"{v / 1_000:.1f}K"
+                    else:
+                        v_s = str(int(v))
+                    lines.append(f"  {t_str:17}| {o:>9} | {h:>9} | {lo:>9} | {c:>9} | {v_s}")
+            except Exception:
+                continue
+    return lines
+
+
 def build_ai_context(
     db: Session, user_id: int | None, ticker: str, interval: str = "1d",
 ) -> str:
@@ -188,6 +228,81 @@ def build_ai_context(
             f"Risk: {scored['risk_level'].upper()}\n"
             f"Signals: {', '.join(scored['signals']) if scored['signals'] else 'None strong'}"
         )
+
+    # Per-ticker crypto intraday context: if the ticker being analyzed is in
+    # the breakout cache, surface its full 15m indicator data + candle snapshot
+    if _is_crypto:
+        try:
+            from .scanner import get_crypto_breakout_cache
+            _bo_cache = get_crypto_breakout_cache()
+            _bo_match = None
+            for _r in _bo_cache.get("results", []):
+                if _r["ticker"].upper() == ticker_up:
+                    _bo_match = _r
+                    break
+            if _bo_match:
+                ind = _bo_match.get("indicators", {})
+                _cr_lines = [f"## INTRADAY BREAKOUT ANALYSIS — {ticker_up} (15m candles)"]
+                _cr_lines.append(
+                    f"Breakout Score: {_bo_match['score']}/10 | Signal: {_bo_match['signal'].upper()} | "
+                    f"RVOL: {_bo_match.get('rvol', 0):.1f}x"
+                )
+                _flags = []
+                if _bo_match.get("breakout_confirmed"):
+                    _flags.append(f"BREAKOUT CONFIRMED ({_bo_match.get('breakout_dir', '').upper()})")
+                if _bo_match.get("bb_squeeze_firing"):
+                    _flags.append("BB SQUEEZE FIRING")
+                elif _bo_match.get("bb_squeeze"):
+                    _flags.append("BB squeeze active")
+                if _bo_match.get("atr_state") != "normal":
+                    _flags.append(f"ATR {_bo_match['atr_state']}")
+                _flags.append(f"EMA: {_bo_match.get('ema_alignment', 'neutral').replace('_', ' ')}")
+                _cr_lines.append("  " + " | ".join(_flags))
+
+                ind_parts = []
+                if ind.get("rsi") is not None:
+                    ind_parts.append(f"RSI {ind['rsi']}")
+                if ind.get("macd_hist") is not None:
+                    ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
+                if ind.get("adx") is not None:
+                    ind_parts.append(f"ADX {ind['adx']:.0f}")
+                if ind.get("atr") is not None:
+                    ind_parts.append(f"ATR ${ind['atr']:.4f}")
+                if ind.get("bb_width") is not None:
+                    ind_parts.append(f"BB width {ind['bb_width']:.4f}")
+                if ind_parts:
+                    _cr_lines.append("  " + " | ".join(ind_parts))
+
+                ema_vals = []
+                for _ek in ("ema_9", "ema_21", "ema_50"):
+                    if ind.get(_ek) is not None:
+                        ema_vals.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
+                if ema_vals:
+                    _cr_lines.append("  " + " > ".join(ema_vals))
+
+                stoch_parts = []
+                if ind.get("stoch_k") is not None:
+                    stoch_parts.append(f"Stoch %K {ind['stoch_k']:.0f}")
+                if ind.get("stoch_d") is not None:
+                    stoch_parts.append(f"%D {ind['stoch_d']:.0f}")
+                if _bo_match.get("vwap") is not None:
+                    stoch_parts.append(f"VWAP ${_bo_match['vwap']} ({_bo_match.get('vwap_pct', 0):+.1f}%)")
+                if stoch_parts:
+                    _cr_lines.append("  " + " | ".join(stoch_parts))
+
+                _cr_lines.append(
+                    f"  Entry ${_bo_match.get('entry_price')} | Stop ${_bo_match.get('stop_loss')} | "
+                    f"Target ${_bo_match.get('take_profit')} | R:R {_bo_match.get('risk_reward', 'n/a')}"
+                )
+                sigs = ", ".join(_bo_match.get("signals", [])[:5])
+                _cr_lines.append(f"  Signals: {sigs}")
+
+                # Candle snapshots for this specific ticker
+                _cr_lines.append("")
+                _cr_lines.extend(_build_candle_snapshots([ticker_up]))
+                parts.append("\n".join(_cr_lines))
+        except Exception:
+            pass
 
     # Active / pending strategy proposals — prevent contradictions
     from datetime import datetime, timedelta
@@ -347,6 +462,93 @@ def build_ai_context(
         for j in journal:
             lines.append(f"- {j.created_at.strftime('%Y-%m-%d')}: {j.content[:300]}")
         parts.append("\n".join(lines))
+
+    # Crypto breakout scan context (from cached 15m scan)
+    try:
+        from .scanner import get_crypto_breakout_cache
+        crypto_bo = get_crypto_breakout_cache()
+        bo_results = crypto_bo.get("results", [])
+        bo_age = crypto_bo.get("age_seconds")
+        if bo_results and bo_age is not None:
+            age_str = f"{bo_age // 60}m ago" if bo_age < 3600 else f"{bo_age // 3600}h ago"
+            lines = [
+                f"## CRYPTO BREAKOUT SCAN (15m candles, updated {age_str}, "
+                f"{crypto_bo.get('total_scanned', 0)} pairs scanned)\n"
+                "You have LIVE 15m OHLCV + indicators for all pairs below. "
+                "Use this data to make precise entry/stop/target calls."
+            ]
+            for r in bo_results[:10]:
+                ind = r.get("indicators", {})
+                flags = []
+                if r.get("breakout_confirmed"):
+                    flags.append(f"BREAKOUT {r.get('breakout_dir', '').upper()}")
+                if r.get("bb_squeeze_firing"):
+                    flags.append("BB SQUEEZE FIRING")
+                elif r.get("bb_squeeze"):
+                    flags.append("BB squeeze")
+                if r.get("atr_state") == "expanding":
+                    flags.append("ATR expanding")
+                elif r.get("atr_state") == "compressed":
+                    flags.append("ATR compressed")
+                if r.get("ema_alignment") in ("bullish_stack", "bearish_stack"):
+                    flags.append(f"EMA {r['ema_alignment'].replace('_', ' ')}")
+                flag_str = " | ".join(flags) if flags else "—"
+
+                rsi_s = f"RSI {ind['rsi']}" if ind.get("rsi") is not None else "RSI n/a"
+                macd_s = f"MACD {ind['macd_hist']:+.4f}" if ind.get("macd_hist") is not None else "MACD n/a"
+                adx_s = f"ADX {ind['adx']:.0f}" if ind.get("adx") is not None else "ADX n/a"
+                atr_s = f"ATR ${ind['atr']:.4f}" if ind.get("atr") is not None else "ATR n/a"
+                bb_s = f"BB {ind['bb_width']:.4f}" if ind.get("bb_width") is not None else "BB n/a"
+                stoch_s = ""
+                if ind.get("stoch_k") is not None:
+                    stoch_s = f"Stoch %K {ind['stoch_k']:.0f}"
+                    if ind.get("stoch_d") is not None:
+                        stoch_s += f" / %D {ind['stoch_d']:.0f}"
+
+                ema_parts = []
+                for ema_key in ("ema_9", "ema_21", "ema_50"):
+                    if ind.get(ema_key) is not None:
+                        ema_parts.append(f"{ema_key.upper().replace('_','')} ${ind[ema_key]}")
+                ema_s = " > ".join(ema_parts) if ema_parts else ""
+                ema_label = f"({r.get('ema_alignment', 'neutral').replace('_', ' ')})"
+
+                vwap_s = ""
+                if r.get("vwap") is not None:
+                    vwap_s = f"VWAP ${r['vwap']} ({r.get('vwap_pct', 0):+.1f}%)"
+
+                sigs = ", ".join(r.get("signals", [])[:5])
+
+                lines.append(
+                    f"\n### {r['ticker']} | Score {r['score']}/10 | ${r['price']} ({r.get('change_24h', 0):+.1f}% 24h) | RVOL {r.get('rvol', 0):.1f}x | {r['signal'].upper()}"
+                )
+                lines.append(f"  {flag_str}")
+                lines.append(f"  {rsi_s} | {macd_s} | {adx_s} | {atr_s} | {bb_s}")
+                if ema_s:
+                    lines.append(f"  {ema_s} {ema_label}")
+                if stoch_s:
+                    line_extra = f"  {stoch_s}"
+                    if vwap_s:
+                        line_extra += f" | {vwap_s}"
+                    lines.append(line_extra)
+                elif vwap_s:
+                    lines.append(f"  {vwap_s}")
+                lines.append(
+                    f"  Entry ${r.get('entry_price')} | Stop ${r.get('stop_loss')} | "
+                    f"Target ${r.get('take_profit')} | R:R {r.get('risk_reward', 'n/a')}"
+                )
+                lines.append(f"  Signals: {sigs}")
+
+            # Candle snapshots for top 3 setups (15m + 5m)
+            _top_tickers_for_candles = [r["ticker"] for r in bo_results[:3]]
+            if _top_tickers_for_candles:
+                lines.append("\n## CANDLE SNAPSHOTS (top breakout candidates)")
+                lines.extend(
+                    _build_candle_snapshots(_top_tickers_for_candles)
+                )
+
+            parts.append("\n".join(lines))
+    except Exception as exc:
+        logger.debug(f"Crypto breakout context failed: {exc}")
 
     try:
         market_ctx = futures["market_ctx"].result(timeout=20)
