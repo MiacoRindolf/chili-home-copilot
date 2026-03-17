@@ -316,7 +316,7 @@ def fetch_ohlcv_batch(
                 return t, df
             except Exception:
                 return t, pd.DataFrame()
-        with ThreadPoolExecutor(max_workers=30) as pool:
+        with ThreadPoolExecutor(max_workers=48) as pool:
             for t, df in pool.map(_poly_one, tickers):
                 if not df.empty:
                     results[t] = df
@@ -505,8 +505,8 @@ def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
 
 _ind_cache: dict[tuple, tuple[float, dict]] = {}
 _ind_cache_lock = threading.Lock()
-_IND_CACHE_TTL = 900   # 15 min — learning cycles may take 10+ min; reuse within a session
-_IND_CACHE_MAX = 1200  # support 500+ ticker learning runs without thrashing
+_IND_CACHE_TTL = 1800  # 30 min — learning cycles reuse; 64 GB RAM keeps longer
+_IND_CACHE_MAX = 5000  # 64 GB RAM — cache indicators for full universe without thrashing
 
 
 def compute_indicators(

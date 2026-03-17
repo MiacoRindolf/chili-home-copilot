@@ -27,9 +27,9 @@ from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insigh
 logger = logging.getLogger(__name__)
 
 _CPU_COUNT = os.cpu_count() or 4
-_IO_WORKERS_HIGH = min(48, max(24, _CPU_COUNT * 2))  # IO-heavy data fetching
-_IO_WORKERS_MED = min(32, max(16, _CPU_COUNT))       # mixed IO/CPU work
-_IO_WORKERS_LOW = min(20, max(10, _CPU_COUNT))       # lighter parallel tasks
+_IO_WORKERS_HIGH = min(80, max(24, _CPU_COUNT * 3))  # IO-heavy data fetching (64 GB / 32 cores)
+_IO_WORKERS_MED = min(48, max(16, _CPU_COUNT * 2))   # mixed IO/CPU work
+_IO_WORKERS_LOW = min(32, max(10, _CPU_COUNT))        # lighter parallel tasks
 
 _shutting_down = threading.Event()
 
@@ -277,7 +277,7 @@ def take_snapshots_parallel(
     # respective client handles this automatically.
     if not (_use_massive() or _use_polygon()):
         from ..yf_session import batch_download
-        BATCH = 50
+        BATCH = 100
         for i in range(0, len(tickers), BATCH):
             try:
                 batch_download(tickers[i:i + BATCH], period="3mo", interval="1d")
@@ -364,7 +364,7 @@ def backfill_future_returns(db: Session) -> int:
     tickers = list({s.ticker for s in unfilled})
     if not (_use_massive() or _use_polygon()):
         from ..yf_session import batch_download as _bd
-        BATCH = 50
+        BATCH = 100
         for i in range(0, len(tickers), BATCH):
             try:
                 _bd(tickers[i:i + BATCH], period="1mo", interval="1d")

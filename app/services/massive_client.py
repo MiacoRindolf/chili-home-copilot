@@ -31,10 +31,10 @@ logger = logging.getLogger(__name__)
 _cache: dict[str, tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
 
-_TTL_BARS = 1800       # 30 min for OHLCV bars
+_TTL_BARS = 3600       # 1 hour for OHLCV bars (64 GB RAM — keep longer)
 _TTL_QUOTE = 30        # 30 sec for live quotes
 _TTL_SNAPSHOT = 60     # 1 min for snapshots
-_MAX_CACHE = 8000      # support heavy learning runs (500+ tickers × multiple endpoints)
+_MAX_CACHE = 30_000    # 64 GB RAM — keep ~1000 tickers × many intervals in memory
 
 _dead_tickers: dict[str, float] = {}
 _dead_lock = threading.Lock()
@@ -141,8 +141,8 @@ def _cache_set(key: str, val: Any) -> None:
 _session = requests.Session()
 _session.headers.update({"Accept": "application/json"})
 from requests.adapters import HTTPAdapter
-_session.mount("https://", HTTPAdapter(pool_connections=40, pool_maxsize=40))
-_session.mount("http://", HTTPAdapter(pool_connections=40, pool_maxsize=40))
+_session.mount("https://", HTTPAdapter(pool_connections=80, pool_maxsize=80))
+_session.mount("http://", HTTPAdapter(pool_connections=80, pool_maxsize=80))
 
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 1.0
@@ -473,7 +473,7 @@ def get_aggregates_batch(
     if not _api_key():
         return {}
     if max_workers <= 0:
-        max_workers = min(60, max(20, settings.massive_max_rps))
+        max_workers = min(80, max(30, settings.massive_max_rps))
 
     uncached: list[str] = []
     results: dict[str, list[dict[str, Any]]] = {}
@@ -558,7 +558,7 @@ def get_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
 
 
 def _get_crypto_snapshots_batch(
-    tickers: list[str], max_workers: int = 30,
+    tickers: list[str], max_workers: int = 50,
 ) -> dict[str, dict[str, Any]]:
     """Fetch crypto quotes concurrently instead of one-by-one."""
     from concurrent.futures import ThreadPoolExecutor, as_completed

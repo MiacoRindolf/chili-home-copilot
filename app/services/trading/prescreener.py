@@ -38,8 +38,8 @@ _CRYPTO_EXCLUDE: set[str] = {
 
 _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
-_CACHE_TTL = 1800  # 30 minutes
-_finviz_sem = threading.Semaphore(2)  # allow 2 concurrent FinViz requests
+_CACHE_TTL = 3600  # 1 hour — keep prescreener results longer (64 GB RAM)
+_finviz_sem = threading.Semaphore(3)  # allow 3 concurrent FinViz requests
 
 _prescreen_status: dict[str, Any] = {
     "running": False,
@@ -424,7 +424,7 @@ def get_prescreened_candidates(
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         future_map = {
             executor.submit(fn): name for name, fn in sources.items()
         }
@@ -598,7 +598,7 @@ def get_daytrade_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
@@ -691,7 +691,7 @@ def get_breakout_candidates() -> tuple[list[str], int]:
             seen.add(t)
             combined.append(t)
 
-    with ThreadPoolExecutor(max_workers=10) as executor:
+    with ThreadPoolExecutor(max_workers=20) as executor:
         future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]

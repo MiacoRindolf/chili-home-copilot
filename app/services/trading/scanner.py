@@ -30,7 +30,7 @@ from ta.volatility import BollingerBands, AverageTrueRange
 
 _shutting_down = threading.Event()
 _CPU_COUNT = _os.cpu_count() or 4
-_MAX_SCAN_WORKERS = min(40, max(16, _CPU_COUNT * 2))
+_MAX_SCAN_WORKERS = min(64, max(16, _CPU_COUNT * 2))
 
 _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
 _TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster
@@ -550,8 +550,8 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
 
 _score_cache: dict[tuple, tuple[float, dict | None]] = {}
 _score_cache_lock = threading.Lock()
-_SCORE_CACHE_TTL = 180  # 3 min
-_SCORE_CACHE_MAX = 300
+_SCORE_CACHE_TTL = 300  # 5 min (64 GB RAM)
+_SCORE_CACHE_MAX = 1000
 
 
 def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
@@ -1207,7 +1207,7 @@ def _compute_indicators(df: pd.DataFrame, *, crypto: bool = False) -> dict[str, 
 # ── Shared breakout pattern helpers ──────────────────────────────────
 
 _sector_cache: dict[str, tuple[str, float]] = {}
-_SECTOR_CACHE_TTL = 3600
+_SECTOR_CACHE_TTL = 7200  # 2 hours — sectors rarely change
 
 
 _CRYPTO_CATEGORIES: dict[str, str] = {
@@ -1508,7 +1508,7 @@ def _detect_vwap_reclaim(close: pd.Series, vwap_val: float | None,
 
 
 _news_sentiment_cache: dict[str, tuple[float, float]] = {}
-_NEWS_SENTIMENT_TTL = 900  # 15 minutes
+_NEWS_SENTIMENT_TTL = 1800  # 30 min — keep sentiment cached longer
 
 
 def _get_cached_news_sentiment(ticker: str) -> float | None:
@@ -1547,7 +1547,7 @@ def _get_cached_news_sentiment(ticker: str) -> float | None:
 
 _cbo_score_cache: dict[str, tuple[float, dict | None]] = {}
 _cbo_score_lock = threading.Lock()
-_CBO_SCORE_TTL = 300  # 5 min for crypto (faster moving)
+_CBO_SCORE_TTL = 600  # 10 min for crypto (64 GB RAM — keep scores longer)
 
 
 def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
@@ -2103,7 +2103,7 @@ def get_crypto_breakout_cache() -> dict[str, Any]:
 
 _bo_score_cache: dict[str, tuple[float, dict | None]] = {}
 _bo_score_lock = threading.Lock()
-_BO_SCORE_TTL = 600  # 10 min — breakout setups don't change fast
+_BO_SCORE_TTL = 900  # 15 min — breakout setups don't change fast (64 GB RAM)
 
 
 def _score_breakout(ticker: str) -> dict[str, Any] | None:
@@ -2564,7 +2564,7 @@ _intraday_scan_progress: dict[str, Any] = {
 }
 _intraday_progress_lock = threading.Lock()
 
-_MAX_HEAVY_CANDIDATES = 200
+_MAX_HEAVY_CANDIDATES = 400
 
 
 def get_intraday_scan_progress() -> dict[str, Any]:

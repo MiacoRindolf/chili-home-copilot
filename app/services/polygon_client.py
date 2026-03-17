@@ -29,10 +29,10 @@ logger = logging.getLogger(__name__)
 _cache: dict[str, tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
 
-_TTL_BARS = 1800       # 30 min for OHLCV bars
+_TTL_BARS = 3600       # 1 hour for OHLCV bars (64 GB RAM — keep longer)
 _TTL_QUOTE = 30        # 30 sec for live quotes
 _TTL_SNAPSHOT = 60     # 1 min for snapshots
-_MAX_CACHE = 4000
+_MAX_CACHE = 15_000    # 64 GB RAM — generous cache
 
 # Metrics counters for diagnostics
 _metrics_lock = threading.Lock()

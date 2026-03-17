@@ -58,14 +58,14 @@ def acquire() -> None:
 _cache: dict[str, tuple[float, Any]] = {}
 _cache_lock = threading.Lock()
 
-_TTL_HISTORY = 1800    # 30 minutes for OHLCV / indicator data
+_TTL_HISTORY = 3600    # 1 hour for OHLCV / indicator data (64 GB RAM)
 _TTL_QUOTE = 30        # 30 seconds for live price
 _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
 _TTL_NEWS = 600        # 10 minutes for ticker news
 _TTL_DEAD = 14400      # 4 hours for known-bad tickers
-_MAX_CACHE_SIZE = 2000
+_MAX_CACHE_SIZE = 10_000   # 64 GB RAM — keep much more in memory
 
 _dead_tickers: dict[str, float] = {}
 _dead_lock = threading.Lock()
