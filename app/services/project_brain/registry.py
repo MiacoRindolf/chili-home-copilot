@@ -68,9 +68,24 @@ def _register_all_agents() -> None:
     from .agents.product_owner import ProductOwnerAgent
     from .agents.project_manager import ProjectManagerAgent
     from .agents.architect import ArchitectAgent
+    from .agents.backend_engineer import BackendEngineerAgent
+    from .agents.frontend_engineer import FrontendEngineerAgent
+    from .agents.ux_designer import UXDesignerAgent
+    from .agents.qa_engineer import QAEngineerAgent
+    from .agents.devops_engineer import DevOpsEngineerAgent
+    from .agents.security_engineer import SecurityEngineerAgent
+    from .agents.ai_engineer import AIEngineerAgent
+
     register_agent(ProductOwnerAgent())
     register_agent(ProjectManagerAgent())
     register_agent(ArchitectAgent())
+    register_agent(BackendEngineerAgent())
+    register_agent(FrontendEngineerAgent())
+    register_agent(UXDesignerAgent())
+    register_agent(QAEngineerAgent())
+    register_agent(DevOpsEngineerAgent())
+    register_agent(SecurityEngineerAgent())
+    register_agent(AIEngineerAgent())
 
 
 _register_all_agents()

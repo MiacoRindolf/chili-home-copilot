@@ -67,30 +67,42 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-act-study { background: linear-gradient(135deg,#f59e0b,#d97706); }
 .brain-act-ml { background: linear-gradient(135deg,#06b6d4,#0891b2); }
 
-/* Project lens tab bar */
-.proj-lens-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 14px; padding: 4px 0; border-bottom: 1px solid var(--border); }
-.proj-lens-tab { display: inline-flex; align-items: center; gap: 4px; padding: 5px 12px; border-radius: 6px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .15s; white-space: nowrap; }
+/* Code Brain collapsible wrapper */
+.code-brain-header {
+  display: flex; align-items: center; gap: 8px; cursor: pointer;
+  margin-top: 20px; margin-bottom: 0; padding: 12px 14px;
+  border: 1px solid var(--border); border-radius: 10px;
+  background: var(--bg-header); transition: all .15s;
+}
+.code-brain-header:hover { background: rgba(6,182,212,.06); }
+.code-brain-header .cb-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); }
+.code-brain-header .cb-chevron { margin-left: auto; font-size: 10px; color: var(--text-muted); transition: transform .2s; }
+.code-brain-header.open .cb-chevron { transform: rotate(180deg); }
+.code-brain-body { display: none; padding-top: 12px; }
+.code-brain-body.open { display: block; }
+
+/* Project lens tab bar (compact pills — visually distinct from agent tabs) */
+.proj-lens-bar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 12px; padding: 2px 0; }
+.proj-lens-tab { display: inline-flex; align-items: center; gap: 3px; padding: 3px 9px; border-radius: 12px; font-size: 9px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: rgba(255,255,255,.04); border: 1px solid var(--border); transition: all .15s; white-space: nowrap; letter-spacing: .2px; }
 
 /* Project Agent tab bar */
 .proj-agent-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 16px; padding: 6px 0; border-bottom: 1px solid var(--border); }
-.proj-agent-tab { display: inline-flex; align-items: center; gap: 5px; padding: 6px 14px; border-radius: 8px; font-size: 11px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .2s; white-space: nowrap; }
+.proj-agent-tab { display: inline-flex; align-items: center; gap: 5px; padding: 5px 12px; border-radius: 8px; font-size: 10px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: transparent; border: 1px solid transparent; transition: all .2s; white-space: nowrap; }
 .proj-agent-tab:hover { background: rgba(139,92,246,.08); color: var(--text); }
-.proj-agent-tab.active { background: rgba(139,92,246,.12); color: #a78bfa; border-color: rgba(139,92,246,.25); }
-.proj-agent-tab.inactive { opacity: .4; cursor: default; }
-.proj-agent-tab .agt-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--text-muted); flex-shrink: 0; }
+.proj-agent-tab.active { background: rgba(139,92,246,.14); color: #a78bfa; border-color: rgba(139,92,246,.3); box-shadow: 0 0 0 1px rgba(139,92,246,.1); }
+.proj-agent-tab .agt-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--border); flex-shrink: 0; }
 .proj-agent-tab.active .agt-dot { background: #22c55e; }
-.proj-agent-tab.inactive .agt-dot { background: transparent; }
 
 .proj-agent-panel { display: none; }
 .proj-agent-panel.active { display: block; }
 
-/* PO Status card */
-.po-status-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 16px; }
-.po-stat { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
-.po-stat-val { font-size: 18px; font-weight: 700; color: #a78bfa; }
-.po-stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
+/* Agent Status card (shared across all agent panels) */
+.agent-status-card { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 8px; margin-bottom: 16px; }
+.agent-stat { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px; text-align: center; }
+.agent-stat-val { font-size: 18px; font-weight: 700; color: #a78bfa; }
+.agent-stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
-/* PO Questions */
+/* PO Questions (specific to Product Owner) */
 .po-q-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
 .po-q-text { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
 .po-q-ctx { font-size: 10px; color: var(--text-muted); margin-bottom: 8px; }
@@ -104,7 +116,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .po-q-btn.submit { background: linear-gradient(135deg,#8b5cf6,#6d28d9); }
 .po-q-btn.skip { background: var(--border); color: var(--text-muted); }
 
-/* PO Requirements */
+/* PO Requirements (specific to Product Owner) */
 .po-req-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; }
 .po-req-row:last-child { border-bottom: none; }
 .po-req-pri { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
@@ -116,6 +128,33 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .po-req-status { font-size: 9px; color: var(--text-muted); }
 .po-req-push { padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(139,92,246,.3); background: transparent; color: #a78bfa; font-size: 9px; font-weight: 600; cursor: pointer; }
 .po-req-push:hover { background: rgba(139,92,246,.12); }
+
+/* Inter-agent message feed */
+.msg-feed { max-height: 350px; overflow-y: auto; }
+.msg-feed-row { display: flex; align-items: flex-start; gap: 8px; padding: 6px 8px; border-bottom: 1px solid var(--border); font-size: 10px; }
+.msg-feed-row:last-child { border-bottom: none; }
+.msg-feed-agents { font-weight: 600; min-width: 140px; white-space: nowrap; }
+.msg-feed-type { font-size: 9px; padding: 1px 6px; border-radius: 6px; font-weight: 600; text-transform: uppercase; background: rgba(139,92,246,.1); color: #a78bfa; margin-right: 6px; }
+.msg-feed-time { font-size: 9px; color: var(--text-muted); white-space: nowrap; margin-left: auto; }
+
+/* QA-specific styles */
+.qa-bug-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-bottom: 8px; }
+.qa-bug-title { font-size: 11px; font-weight: 600; margin-bottom: 4px; }
+.qa-bug-sev { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 700; text-transform: uppercase; }
+.qa-bug-sev.critical { background: rgba(239,68,68,.15); color: #ef4444; }
+.qa-bug-sev.warn { background: rgba(245,158,11,.15); color: #f59e0b; }
+.qa-bug-sev.info { background: rgba(6,182,212,.12); color: #06b6d4; }
+.qa-test-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
+.qa-test-row:last-child { border-bottom: none; }
+.qa-test-status { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.qa-test-status.pass { background: #22c55e; }
+.qa-test-status.fail { background: #ef4444; }
+
+/* Security risk badge */
+.sec-risk-badge { display: inline-block; padding: 4px 12px; border-radius: 12px; font-size: 12px; font-weight: 700; }
+.sec-risk-badge.low { background: rgba(34,197,94,.15); color: #22c55e; }
+.sec-risk-badge.medium { background: rgba(245,158,11,.15); color: #f59e0b; }
+.sec-risk-badge.high { background: rgba(239,68,68,.15); color: #ef4444; }
 
 /* Agent findings */
 .agt-finding-row { display: flex; align-items: flex-start; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
@@ -139,9 +178,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .agt-evo-dim { font-weight: 600; min-width: 80px; }
 .agt-evo-conf { display: flex; align-items: center; gap: 4px; font-size: 10px; }
 .agt-evo-arrow { color: #22c55e; font-weight: 700; }
-.proj-lens-tab:hover { background: var(--bg-header); color: var(--text); }
-.proj-lens-tab.active { background: var(--accent); color: #fff; border-color: var(--accent); }
-.proj-lens-tab .plt-icon { font-size: 13px; }
+.proj-lens-tab:hover { background: rgba(6,182,212,.1); color: var(--text); border-color: rgba(6,182,212,.3); }
+.proj-lens-tab.active { background: rgba(6,182,212,.18); color: #06b6d4; border-color: rgba(6,182,212,.4); }
+.proj-lens-tab .plt-icon { font-size: 10px; }
 .proj-lens-panel { display: none; }
 .proj-lens-panel.active { display: block; }
 .proj-lens-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 14px; }
@@ -494,6 +533,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
       </div>
 
+      <!-- Project Brain action row -->
+      <div class="brain-action-row">
+        <button onclick="triggerAllAgentsCycle()" id="btn-all-agents" class="brain-act-btn brain-act-primary">&#x1F504; Run All Agents</button>
+        <button onclick="loadProjectBrainStatus()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4CA; Status</button>
+        <span id="project-brain-status-text" style="font-size:10px;color:var(--text-muted);margin-left:8px"></span>
+      </div>
+
       <!-- Agent tabs -->
       <div class="proj-agent-bar" id="proj-agent-bar"></div>
 
@@ -501,7 +547,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div id="proj-agent-panels">
         <!-- PO Agent Panel -->
         <div class="proj-agent-panel" id="agent-panel-product_owner" data-agent="product_owner">
-          <div class="po-status-card" id="po-status-card"></div>
+          <div class="agent-status-card" id="po-status-card"></div>
 
           <div class="brain-section">
             <div class="brain-section-title"><span class="bs-icon">&#x2753;</span> Questions for You</div>
@@ -548,7 +594,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
         <!-- PM Agent Panel -->
         <div class="proj-agent-panel" id="agent-panel-project_manager" data-agent="project_manager">
-          <div class="po-status-card" id="pm-status-card"></div>
+          <div class="agent-status-card" id="pm-status-card"></div>
 
           <div class="brain-section">
             <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Velocity &amp; Health</div>
@@ -593,7 +639,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
         <!-- Architect Agent Panel -->
         <div class="proj-agent-panel" id="agent-panel-architect" data-agent="architect">
-          <div class="po-status-card" id="arch-status-card"></div>
+          <div class="agent-status-card" id="arch-status-card"></div>
 
           <div class="brain-section">
             <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Health</div>
@@ -645,6 +691,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
         </div>
       </div>
+
+      <!-- Inter-agent Message Feed -->
+      <div class="brain-section" id="agent-msg-feed-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+          <span class="bs-icon">&#x1F4AC;</span> Agent Collaboration Feed
+          <button onclick="loadAgentMessageFeed()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div class="msg-feed" id="agent-msg-feed">
+          <div style="font-size:11px;color:var(--text-muted)">Switch to the Project domain to see agent messages...</div>
+        </div>
+      </div>
+
+      <!-- ═══ Code Brain Sub-Section (collapsible) ═══ -->
+      <div id="code-brain-wrapper">
+      <div class="code-brain-header" id="code-brain-toggle" onclick="toggleCodeBrain()">
+        <span style="font-size:15px">&#x1F4BB;</span>
+        <span class="cb-title">Code Brain</span>
+        <span id="code-brain-summary" style="font-size:10px;color:var(--text-muted)"></span>
+        <span class="cb-chevron">&#x25BC;</span>
+      </div>
+      <div class="code-brain-body" id="code-brain-body">
 
       <!-- Subdomain lens tabs (Code Brain data views) -->
       <div class="proj-lens-bar" id="proj-lens-bar"></div>
@@ -767,6 +834,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <div id="code-agent-result" style="display:none;margin-top:12px"></div>
         </div>
       </div>
+      </div><!-- /code-brain-body -->
+      </div><!-- /code-brain-wrapper -->
     </div>
 
     <!-- ═══ Reasoning Domain ═══ -->
@@ -1439,6 +1508,8 @@ function switchDomain(domain) {
     initProjectAgentBar();
     initProjectLensBar();
     loadCodeDashboard();
+    loadAgentMessageFeed();
+    loadProjectBrainStatus();
   }
   if (domain === 'reasoning' && !_reasoningDashboardLoaded) {
     _reasoningDashboardLoaded = true;
@@ -1456,6 +1527,15 @@ function loadCodeDashboard() {
   loadCodeReviews();
   loadCodeDeps();
   pollCodeLearningStatus();
+}
+
+function toggleCodeBrain() {
+  var header = document.getElementById('code-brain-toggle');
+  var body = document.getElementById('code-brain-body');
+  if (!header || !body) return;
+  var isOpen = body.classList.contains('open');
+  body.classList.toggle('open');
+  header.classList.toggle('open');
 }
 
 /* ══════════════════════════════════════════════════
@@ -1491,15 +1571,11 @@ function initProjectAgentBar() {
 
     allAgentDefs.forEach(function(def) {
       var tab = document.createElement('div');
-      var isActive = !!activeNames[def.name];
-      tab.className = 'proj-agent-tab' + (def.name === _activeAgent ? ' active' : '') + (!isActive ? ' inactive' : '');
+      var isRegistered = !!activeNames[def.name];
+      tab.className = 'proj-agent-tab' + (def.name === _activeAgent ? ' active' : '');
       tab.dataset.agent = def.name;
       tab.innerHTML = '<span class="agt-dot"></span> ' + def.icon + ' ' + def.label;
-      if (isActive) {
-        tab.onclick = function() { switchProjectAgent(def.name); };
-      } else {
-        tab.title = 'Coming soon';
-      }
+      tab.onclick = function() { switchProjectAgent(def.name); };
       bar.appendChild(tab);
     });
 
@@ -1517,6 +1593,12 @@ function switchProjectAgent(agentName) {
   document.querySelectorAll('.proj-agent-panel').forEach(function(el) {
     el.classList.toggle('active', el.dataset.agent === agentName);
   });
+
+  var specialAgents = ['product_owner', 'project_manager', 'architect'];
+  if (specialAgents.indexOf(agentName) === -1 && !_agentPanelLoaded[agentName]) {
+    _ensureGenericPanel(agentName);
+  }
+
   if (agentName === 'product_owner' && !_agentPanelLoaded['product_owner']) {
     _agentPanelLoaded['product_owner'] = true;
     loadPODashboard();
@@ -1529,6 +1611,289 @@ function switchProjectAgent(agentName) {
     _agentPanelLoaded['architect'] = true;
     loadArchDashboard();
   }
+}
+
+/* ── Generic Agent Panel (dynamic, shared template) ─── */
+function _ensureGenericPanel(agentName) {
+  var containerId = 'agent-panel-' + agentName;
+  if (document.getElementById(containerId)) {
+    _agentPanelLoaded[agentName] = true;
+    _loadGenericDashboard(agentName);
+    return;
+  }
+  var container = document.getElementById('proj-agent-panels');
+  if (!container) return;
+  var panel = document.createElement('div');
+  panel.className = 'proj-agent-panel active';
+  panel.id = containerId;
+  panel.dataset.agent = agentName;
+  panel.innerHTML =
+    '<div class="agent-status-card" id="' + agentName + '-status-card"></div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Findings & Recommendations</div>' +
+      '<div id="' + agentName + '-findings" style="max-height:350px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Run a cycle to generate findings...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Research</div>' +
+      '<div id="' + agentName + '-research" style="max-height:350px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Research results will appear after a cycle...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Goals</div>' +
+      '<div id="' + agentName + '-goals" style="max-height:250px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Goals will appear...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Evolution Timeline</div>' +
+      '<div id="' + agentName + '-evolution" style="max-height:300px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Evolution events will appear as the agent learns...</div></div>' +
+    '</div>' +
+    _getAgentSpecificSections(agentName) +
+    '<button onclick="triggerAgentCycle(\'' + agentName + '\')" class="brain-act-btn" style="margin-top:10px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F504; Run ' + agentName.replace('_', ' ') + ' Cycle</button>';
+  container.appendChild(panel);
+  _agentPanelLoaded[agentName] = true;
+  _loadGenericDashboard(agentName);
+}
+
+function _getAgentSpecificSections(agentName) {
+  if (agentName === 'qa') {
+    return '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F9EA;</span> Test Cases</div>' +
+      '<div id="qa-test-cases" style="max-height:300px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Test cases will appear after QA cycle...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F41E;</span> Bug Reports</div>' +
+      '<div id="qa-bug-reports" style="max-height:300px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Bug reports will appear after QA cycle...</div></div>' +
+    '</div>';
+  }
+  if (agentName === 'security') {
+    return '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x26A0;</span> Risk Score</div>' +
+      '<div id="security-risk" style="font-size:11px;color:var(--text-muted)">Security risk score will appear after a cycle...</div>' +
+    '</div>';
+  }
+  return '';
+}
+
+function _loadGenericDashboard(agentName) {
+  _loadGenericMetrics(agentName);
+  _loadGenericFindings(agentName);
+  _loadGenericResearch(agentName);
+  _loadGenericGoals(agentName);
+  _loadGenericEvolution(agentName);
+  if (agentName === 'qa') { _loadQATestCases(); _loadQABugReports(); }
+  if (agentName === 'security') { _loadSecurityRisk(agentName); }
+}
+
+function _loadGenericMetrics(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById(agentName + '-status-card');
+    if (!el) return;
+    var kpis = [
+      {val: ((d.confidence || 0) * 100).toFixed(0) + '%', lbl: 'Confidence'},
+      {val: d.finding_count || 0, lbl: 'Findings'},
+      {val: d.research_count || 0, lbl: 'Research'},
+      {val: d.active_goals || 0, lbl: 'Goals'},
+      {val: d.evolution_count || 0, lbl: 'Evolutions'},
+      {val: d.unread_messages || 0, lbl: 'Inbox'},
+    ];
+    if (d.total_test_cases !== undefined) kpis.push({val: d.total_test_cases, lbl: 'Test Cases'});
+    if (d.open_bugs !== undefined) kpis.push({val: d.open_bugs, lbl: 'Open Bugs'});
+    el.innerHTML = kpis.map(function(k) {
+      return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
+    }).join('');
+  });
+}
+
+function _loadGenericFindings(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/findings').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById(agentName + '-findings');
+    if (!el) return;
+    var items = d.findings || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No findings yet.</div>'; return; }
+    el.innerHTML = items.map(function(f) {
+      return '<div class="agt-finding-row">' +
+        '<span class="agt-finding-sev ' + f.severity + '">' + f.severity + '</span>' +
+        '<div style="flex:1"><strong>' + f.title + '</strong><div style="color:var(--text-muted);margin-top:2px">' + f.description + '</div></div>' +
+        '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadGenericResearch(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/research').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById(agentName + '-research');
+    if (!el) return;
+    var items = d.research || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No research yet.</div>'; return; }
+    el.innerHTML = items.map(function(r) {
+      var sources = '';
+      try {
+        var s = JSON.parse(r.sources_json || '[]');
+        if (s.length) {
+          sources = '<div class="agt-research-sources">' + s.map(function(src) {
+            return '<a href="' + (src.url || '#') + '" target="_blank">' + (src.title || src.url || 'source') + '</a>';
+          }).join(' &middot; ') + '</div>';
+        }
+      } catch(e) {}
+      return '<div class="agt-research-card">' +
+        '<div class="agt-research-topic">' + r.topic + '</div>' +
+        '<div class="agt-research-summary">' + r.summary + '</div>' +
+        sources +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadGenericGoals(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/goals').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById(agentName + '-goals');
+    if (!el) return;
+    var items = d.goals || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No goals yet.</div>'; return; }
+    el.innerHTML = items.map(function(g) {
+      var statusColor = g.status === 'active' ? '#22c55e' : g.status === 'completed' ? '#a78bfa' : 'var(--text-muted)';
+      var pct = Math.round(g.progress * 100);
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid var(--border);font-size:11px">' +
+        '<span style="color:' + statusColor + ';font-weight:600;text-transform:uppercase;font-size:9px;min-width:55px">' + g.status + '</span>' +
+        '<span style="flex:1">' + g.description + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + pct + '%</span>' +
+        '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#a78bfa;border-radius:2px"></div></div>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadGenericEvolution(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/evolution').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById(agentName + '-evolution');
+    if (!el) return;
+    var items = d.evolution || [];
+    if (!items.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No evolution events yet.</div>'; return; }
+    el.innerHTML = items.map(function(e) {
+      var before = (e.confidence_before * 100).toFixed(0);
+      var after = (e.confidence_after * 100).toFixed(0);
+      var delta = after - before;
+      var arrow = delta >= 0 ? '\u2191' : '\u2193';
+      var color = delta >= 0 ? '#22c55e' : '#ef4444';
+      return '<div class="agt-evo-row">' +
+        '<span class="agt-evo-dim">' + e.dimension + '</span>' +
+        '<div class="agt-evo-conf">' + before + '%<span style="color:' + color + ';font-weight:700">' + arrow + '</span>' + after + '%</div>' +
+        '<span style="flex:1;color:var(--text-muted)">' + e.description.substring(0, 100) + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadQATestCases() {
+  fetch('/api/brain/project/agent/qa/test-cases').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('qa-test-cases');
+    if (!el) return;
+    var cases = d.test_cases || [];
+    if (!cases.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No test cases yet. Run a QA cycle.</div>'; return; }
+    el.innerHTML = cases.map(function(c) {
+      return '<div class="qa-test-row">' +
+        '<span class="qa-test-status ' + (c.status === 'active' ? 'pass' : 'fail') + '"></span>' +
+        '<span style="flex:1;font-weight:600">' + c.name + '</span>' +
+        '<span style="font-size:9px;color:var(--text-muted)">' + c.priority + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadQABugReports() {
+  fetch('/api/brain/project/agent/qa/bug-reports').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('qa-bug-reports');
+    if (!el) return;
+    var bugs = d.bug_reports || [];
+    if (!bugs.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No bugs detected yet.</div>'; return; }
+    el.innerHTML = bugs.map(function(b) {
+      return '<div class="qa-bug-card">' +
+        '<div style="display:flex;align-items:center;gap:6px;margin-bottom:4px">' +
+          '<span class="qa-bug-sev ' + b.severity + '">' + b.severity + '</span>' +
+          '<span class="qa-bug-title">' + b.title + '</span>' +
+          '<span style="margin-left:auto;font-size:9px;padding:2px 6px;border-radius:6px;background:rgba(139,92,246,.1);color:#a78bfa">' + b.status + '</span>' +
+        '</div>' +
+        (b.description ? '<div style="font-size:10px;color:var(--text-muted)">' + b.description.substring(0, 150) + '</div>' : '') +
+      '</div>';
+    }).join('');
+  });
+}
+
+function _loadSecurityRisk(agentName) {
+  fetch('/api/brain/project/agent/' + agentName + '/metrics').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('security-risk');
+    if (!el) return;
+    var state = {};
+    try { state = JSON.parse(d.state_json || '{}'); } catch(e) {}
+    var risk = state.risk_score || 0;
+    var level = risk < 3 ? 'low' : risk < 6 ? 'medium' : 'high';
+    el.innerHTML = '<div style="display:flex;align-items:center;gap:12px">' +
+      '<span class="sec-risk-badge ' + level + '">' + risk.toFixed(1) + ' / 10</span>' +
+      '<span style="font-size:11px;color:var(--text-muted)">Overall Security Risk Score</span>' +
+    '</div>';
+  });
+}
+
+/* ── Agent message feed ───────────────────────── */
+function loadAgentMessageFeed() {
+  fetch('/api/brain/project/messages').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('agent-msg-feed');
+    if (!el) return;
+    var msgs = d.messages || [];
+    if (!msgs.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No inter-agent messages yet. Run an agent cycle.</div>'; return; }
+    el.innerHTML = msgs.slice(0, 30).map(function(m) {
+      var ts = m.created_at ? timeSince(new Date(m.created_at)) + ' ago' : '';
+      var ack = m.acknowledged ? '' : ' style="background:rgba(139,92,246,.04)"';
+      return '<div class="msg-feed-row"' + ack + '>' +
+        '<span class="msg-feed-agents">' + m.from + ' &#x2192; ' + m.to + '</span>' +
+        '<span class="msg-feed-type">' + m.type + '</span>' +
+        '<span class="msg-feed-time">' + ts + '</span>' +
+      '</div>';
+    }).join('');
+  });
+}
+
+/* ── Global Project Brain actions ─────────────── */
+function triggerAllAgentsCycle() {
+  fetch('/api/brain/project/cycle', {method: 'POST'})
+  .then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('project-brain-status-text');
+    if (d.ok) {
+      if (el) el.textContent = 'All-agent cycle started...';
+      setTimeout(function() { loadProjectBrainStatus(); }, 3000);
+      setTimeout(function() {
+        _agentPanelLoaded = {};
+        switchProjectAgent(_activeAgent);
+        loadAgentMessageFeed();
+      }, 15000);
+    } else {
+      if (el) el.textContent = d.error || 'Failed';
+    }
+  });
+}
+
+function loadProjectBrainStatus() {
+  fetch('/api/brain/project/status').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var el = document.getElementById('project-brain-status-text');
+    if (!el) return;
+    if (d.running) {
+      var pct = Math.round((d.progress || 0) * 100);
+      el.textContent = (d.step || 'running') + ' (' + pct + '%)';
+      setTimeout(loadProjectBrainStatus, 3000);
+    } else {
+      el.textContent = d.last_run ? 'Last run: ' + timeSince(new Date(d.last_run)) + ' ago' : 'Idle';
+    }
+  });
 }
 
 /* ── Product Owner Panel ─────────────────────── */
@@ -1558,7 +1923,7 @@ function loadPOMetrics() {
       {val: d.evolution_count || 0, lbl: 'Evolutions'},
     ];
     el.innerHTML = kpis.map(function(k) {
-      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+      return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
   });
 }
@@ -1759,7 +2124,7 @@ function loadPMMetrics() {
       {val: d.finding_count || 0, lbl: 'Findings'},
     ];
     el.innerHTML = kpis.map(function(k) {
-      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+      return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
   });
 }
@@ -1786,10 +2151,10 @@ function loadPMVelocity() {
         '</div>' +
       '</div>' +
       '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:6px">' +
-        '<div class="po-stat"><div class="po-stat-val" style="color:#22c55e">' + (d.done || 0) + '</div><div class="po-stat-lbl">Done</div></div>' +
-        '<div class="po-stat"><div class="po-stat-val" style="color:#06b6d4">' + (d.in_progress || 0) + '</div><div class="po-stat-lbl">In Progress</div></div>' +
-        '<div class="po-stat"><div class="po-stat-val" style="color:#f59e0b">' + (d.blocked || 0) + '</div><div class="po-stat-lbl">Blocked</div></div>' +
-        '<div class="po-stat"><div class="po-stat-val" style="color:#ef4444">' + (d.overdue || 0) + '</div><div class="po-stat-lbl">Overdue</div></div>' +
+        '<div class="agent-stat"><div class="agent-stat-val" style="color:#22c55e">' + (d.done || 0) + '</div><div class="agent-stat-lbl">Done</div></div>' +
+        '<div class="agent-stat"><div class="agent-stat-val" style="color:#06b6d4">' + (d.in_progress || 0) + '</div><div class="agent-stat-lbl">In Progress</div></div>' +
+        '<div class="agent-stat"><div class="agent-stat-val" style="color:#f59e0b">' + (d.blocked || 0) + '</div><div class="agent-stat-lbl">Blocked</div></div>' +
+        '<div class="agent-stat"><div class="agent-stat-val" style="color:#ef4444">' + (d.overdue || 0) + '</div><div class="agent-stat-lbl">Overdue</div></div>' +
       '</div>';
   });
 }
@@ -1959,7 +2324,7 @@ function loadArchMetrics() {
       {val: d.research_count || 0, lbl: 'Research'},
     ];
     el.innerHTML = kpis.map(function(k) {
-      return '<div class="po-stat"><div class="po-stat-val">' + k.val + '</div><div class="po-stat-lbl">' + k.lbl + '</div></div>';
+      return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
   });
 }
@@ -1976,9 +2341,9 @@ function loadArchHealth() {
     if (healthEl) {
       healthEl.innerHTML =
         '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:8px">' +
-          '<div class="po-stat"><div class="po-stat-val">' + (snap.repo_count || 0) + '</div><div class="po-stat-lbl">Repos</div></div>' +
-          '<div class="po-stat"><div class="po-stat-val">' + (snap.total_deps || 0) + '</div><div class="po-stat-lbl">Dependencies</div></div>' +
-          '<div class="po-stat"><div class="po-stat-val">' + (snap.total_hotspots || 0) + '</div><div class="po-stat-lbl">Hotspots</div></div>' +
+          '<div class="agent-stat"><div class="agent-stat-val">' + (snap.repo_count || 0) + '</div><div class="agent-stat-lbl">Repos</div></div>' +
+          '<div class="agent-stat"><div class="agent-stat-val">' + (snap.total_deps || 0) + '</div><div class="agent-stat-lbl">Dependencies</div></div>' +
+          '<div class="agent-stat"><div class="agent-stat-val">' + (snap.total_hotspots || 0) + '</div><div class="agent-stat-lbl">Hotspots</div></div>' +
         '</div>' +
         '<button onclick="triggerAgentCycle(\'architect\')" class="brain-act-btn" style="margin-top:10px;background:linear-gradient(135deg,#f59e0b,#d97706)">\uD83C\uDFD7 Run Architect Cycle</button>';
     }
@@ -2107,11 +2472,14 @@ function triggerAgentCycle(agentName) {
   fetch('/api/brain/project/agent/' + agentName + '/cycle', {method: 'POST'})
   .then(function(r){return r.json();}).then(function(d) {
     if (d.ok) {
-      alert(d.message || 'Cycle started');
+      var el = document.getElementById('project-brain-status-text');
+      if (el) el.textContent = agentName + ' cycle started...';
       setTimeout(function() {
         if (agentName === 'product_owner') loadPODashboard();
-        if (agentName === 'project_manager') loadPMDashboard();
-        if (agentName === 'architect') loadArchDashboard();
+        else if (agentName === 'project_manager') loadPMDashboard();
+        else if (agentName === 'architect') loadArchDashboard();
+        else _loadGenericDashboard(agentName);
+        loadAgentMessageFeed();
       }, 5000);
     } else {
       alert(d.message || 'Could not start cycle');

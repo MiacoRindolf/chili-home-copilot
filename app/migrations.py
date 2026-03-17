@@ -654,6 +654,61 @@ def _migration_022_alert_trade_type_cols(conn) -> None:
     conn.commit()
 
 
+def _migration_023_qa_engineer_tables(conn) -> None:
+    """Create tables for the QA Engineer agent: test cases, test runs, bug reports."""
+    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+
+    if "qa_test_cases" not in tables:
+        conn.execute(text("""
+            CREATE TABLE qa_test_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                name VARCHAR(300) NOT NULL,
+                steps_json TEXT,
+                expected_json TEXT,
+                priority VARCHAR(20) NOT NULL DEFAULT 'medium',
+                status VARCHAR(20) NOT NULL DEFAULT 'active',
+                last_run_at DATETIME,
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_qa_tc_user ON qa_test_cases(user_id)"))
+
+    if "qa_test_runs" not in tables:
+        conn.execute(text("""
+            CREATE TABLE qa_test_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                test_name VARCHAR(300) NOT NULL,
+                passed BOOLEAN NOT NULL DEFAULT 0,
+                errors_json TEXT,
+                duration_ms INTEGER DEFAULT 0,
+                screenshot_path VARCHAR(500),
+                created_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_qa_tr_user ON qa_test_runs(user_id)"))
+
+    if "qa_bug_reports" not in tables:
+        conn.execute(text("""
+            CREATE TABLE qa_bug_reports (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                title VARCHAR(300) NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                severity VARCHAR(20) NOT NULL DEFAULT 'warn',
+                screenshot_path VARCHAR(500),
+                reproduction_steps TEXT,
+                status VARCHAR(20) NOT NULL DEFAULT 'open',
+                created_at DATETIME DEFAULT (datetime('now')),
+                updated_at DATETIME DEFAULT (datetime('now'))
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_qa_br_user ON qa_bug_reports(user_id)"))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -678,6 +733,7 @@ MIGRATIONS = [
     ("020_user_google_oauth_cols", _migration_020_user_google_oauth_cols),
     ("021_broker_credentials_table", _migration_021_broker_credentials_table),
     ("022_alert_trade_type_cols", _migration_022_alert_trade_type_cols),
+    ("023_qa_engineer_tables", _migration_023_qa_engineer_tables),
 ]
 
 

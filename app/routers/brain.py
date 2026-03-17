@@ -945,13 +945,14 @@ def api_brain_po_req_to_task(
     requirement_id: int,
     request: Request,
     db: Session = Depends(get_db),
+    project_id: int | None = None,
 ):
     """Push a PO requirement to the Planner as a task."""
     ctx = get_identity_ctx(request, db)
     po = pb_registry.get_agent("product_owner")
     if not po:
         return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
-    result = po.push_requirement_to_planner(db, ctx["user_id"], requirement_id)
+    result = po.push_requirement_to_planner(db, ctx["user_id"], requirement_id, project_id=project_id)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(result, status_code=status_code)
 
@@ -1000,3 +1001,82 @@ def api_brain_arch_health(request: Request, db: Session = Depends(get_db)):
     if not arch:
         return JSONResponse({"ok": False, "message": "Architect agent not found"}, status_code=404)
     return JSONResponse({"ok": True, **arch.get_architecture_health(db, ctx["user_id"])})
+
+
+# ── Global Project Brain endpoints ────────────────────────────────────
+
+@router.post("/api/brain/project/cycle")
+def api_brain_project_cycle_all(request: Request, db: Session = Depends(get_db), background_tasks: BackgroundTasks = None):
+    """Trigger a learning cycle for ALL active agents."""
+    from ..services.project_brain.learning import run_project_brain_cycle_background
+    from ..db import SessionLocal
+    ctx = get_identity_ctx(request, db)
+    run_project_brain_cycle_background(SessionLocal, ctx["user_id"])
+    return JSONResponse({"ok": True, "message": "All-agent cycle started in background"})
+
+
+@router.get("/api/brain/project/status")
+def api_brain_project_status():
+    """Global Project Brain status (running, progress, last run)."""
+    from ..services.project_brain.learning import get_project_brain_status
+    return JSONResponse({"ok": True, **get_project_brain_status()})
+
+
+@router.get("/api/brain/project/metrics")
+def api_brain_project_metrics(request: Request, db: Session = Depends(get_db)):
+    """Aggregate metrics across all Project Brain agents."""
+    from ..services.project_brain.learning import get_project_brain_metrics
+    ctx = get_identity_ctx(request, db)
+    return JSONResponse({"ok": True, **get_project_brain_metrics(db, ctx["user_id"])})
+
+
+# ── QA Engineer specific endpoints ───────────────────────────────────
+
+@router.get("/api/brain/project/agent/qa/test-cases")
+def api_brain_qa_test_cases(request: Request, db: Session = Depends(get_db)):
+    """List QA test cases."""
+    ctx = get_identity_ctx(request, db)
+    qa = pb_registry.get_agent("qa")
+    if not qa:
+        return JSONResponse({"ok": False, "message": "QA agent not found"}, status_code=404)
+    cases = qa.get_test_cases(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "test_cases": [
+        {"id": c.id, "name": c.name, "priority": c.priority, "status": c.status,
+         "steps": c.steps_json, "expected": c.expected_json,
+         "last_run_at": c.last_run_at.isoformat() if c.last_run_at else None,
+         "created_at": c.created_at.isoformat() if c.created_at else None}
+        for c in cases
+    ]})
+
+
+@router.get("/api/brain/project/agent/qa/test-runs")
+def api_brain_qa_test_runs(request: Request, db: Session = Depends(get_db)):
+    """List QA test execution history."""
+    ctx = get_identity_ctx(request, db)
+    qa = pb_registry.get_agent("qa")
+    if not qa:
+        return JSONResponse({"ok": False, "message": "QA agent not found"}, status_code=404)
+    runs = qa.get_test_runs(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "test_runs": [
+        {"id": r.id, "test_name": r.test_name, "passed": r.passed,
+         "duration_ms": r.duration_ms, "errors": r.errors_json,
+         "created_at": r.created_at.isoformat() if r.created_at else None}
+        for r in runs
+    ]})
+
+
+@router.get("/api/brain/project/agent/qa/bug-reports")
+def api_brain_qa_bug_reports(request: Request, db: Session = Depends(get_db)):
+    """List QA bug reports."""
+    ctx = get_identity_ctx(request, db)
+    qa = pb_registry.get_agent("qa")
+    if not qa:
+        return JSONResponse({"ok": False, "message": "QA agent not found"}, status_code=404)
+    bugs = qa.get_bug_reports(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "bug_reports": [
+        {"id": b.id, "title": b.title, "description": b.description,
+         "severity": b.severity, "status": b.status,
+         "reproduction_steps": b.reproduction_steps,
+         "created_at": b.created_at.isoformat() if b.created_at else None}
+        for b in bugs
+    ]})

@@ -1,16 +1,17 @@
 """Learning cycle orchestrator for Project Brain agents.
 
-Runs each active agent's learning cycle in sequence, tracks status
-and progress similar to the existing Reasoning Brain pattern.
+Runs each active agent's learning cycle with priority-driven scheduling,
+tracks status and progress, and supports the agent collaboration pipeline.
 """
 from __future__ import annotations
 
 import logging
 import threading
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from ...config import settings
 
@@ -24,7 +25,21 @@ _status: Dict[str, Any] = {
     "step": None,
     "progress": 0.0,
     "error": None,
+    "agents_completed": [],
 }
+
+_PIPELINE_ORDER = [
+    "product_owner",
+    "project_manager",
+    "architect",
+    "backend",
+    "frontend",
+    "ux",
+    "qa",
+    "security",
+    "devops",
+    "ai_eng",
+]
 
 
 def get_project_brain_status() -> Dict[str, Any]:
@@ -43,10 +58,33 @@ def get_project_brain_metrics(db: Session, user_id: int) -> Dict[str, Any]:
     }
 
 
+def _prioritize_agents(agents_to_run: List[Tuple[str, Any]], db: Session, user_id: int) -> List[Tuple[str, Any]]:
+    """Sort agents by priority: those with pending messages first, then by pipeline order."""
+    from ...models.project_brain import AgentMessage
+
+    message_counts: Dict[str, int] = {}
+    for name, _ in agents_to_run:
+        count = (
+            db.query(func.count(AgentMessage.id))
+            .filter(AgentMessage.to_agent == name, AgentMessage.user_id == user_id, AgentMessage.acknowledged.is_(False))
+            .scalar() or 0
+        )
+        message_counts[name] = count
+
+    def _sort_key(item):
+        name = item[0]
+        has_msgs = 1 if message_counts.get(name, 0) > 0 else 0
+        pipeline_idx = _PIPELINE_ORDER.index(name) if name in _PIPELINE_ORDER else 99
+        return (-has_msgs, pipeline_idx)
+
+    return sorted(agents_to_run, key=_sort_key)
+
+
 def run_project_brain_cycle(db: Session, user_id: int, agent_name: Optional[str] = None) -> Dict[str, Any]:
     """Run the learning cycle for one or all active agents.
 
-    If agent_name is given, run only that agent. Otherwise run all active agents.
+    If agent_name is given, run only that agent. Otherwise run all active agents
+    in priority order (agents with pending messages first, then pipeline order).
     """
     from .registry import AGENT_REGISTRY
 
@@ -54,7 +92,7 @@ def run_project_brain_cycle(db: Session, user_id: int, agent_name: Optional[str]
         return {"ok": False, "error": "Cycle already running"}
 
     try:
-        _status.update(running=True, error=None, progress=0.0, step="starting")
+        _status.update(running=True, error=None, progress=0.0, step="starting", agents_completed=[])
 
         agents_to_run = []
         if agent_name:
@@ -64,6 +102,7 @@ def run_project_brain_cycle(db: Session, user_id: int, agent_name: Optional[str]
             agents_to_run = [(agent_name, agent)]
         else:
             agents_to_run = [(n, a) for n, a in AGENT_REGISTRY.items() if a.active]
+            agents_to_run = _prioritize_agents(agents_to_run, db, user_id)
 
         if not agents_to_run:
             _status.update(running=False, step="idle", progress=1.0)
@@ -71,6 +110,7 @@ def run_project_brain_cycle(db: Session, user_id: int, agent_name: Optional[str]
 
         results = {}
         total = len(agents_to_run)
+        completed = []
         for i, (name, agent) in enumerate(agents_to_run):
             _status.update(
                 last_agent=name,
@@ -80,6 +120,8 @@ def run_project_brain_cycle(db: Session, user_id: int, agent_name: Optional[str]
             try:
                 result = agent.run_cycle(db, user_id)
                 results[name] = result
+                completed.append(name)
+                _status["agents_completed"] = list(completed)
                 logger.info("[project_brain] %s cycle completed: %s", name, result)
             except Exception as e:
                 logger.exception("[project_brain] %s cycle failed", name)

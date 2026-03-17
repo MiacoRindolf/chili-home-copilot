@@ -45,6 +45,10 @@ class ArchitectAgent(AgentBase):
         steps_done = 0
         report: Dict[str, Any] = {}
 
+        # 0. Process incoming messages from PO and PM
+        msgs_processed = self._process_incoming_messages(db, user_id)
+        report["messages_processed"] = msgs_processed
+
         # 1. Gather architecture snapshot
         snapshot = self._gather_snapshot(db)
         report["repos"] = snapshot.get("repo_count", 0)
@@ -91,9 +95,29 @@ class ArchitectAgent(AgentBase):
                         f"Cycle: {circular.get('total', 0)} circular deps, {hotspots.get('critical_count', 0)} critical hotspots",
                         old_conf, new_conf, trigger="learning_cycle")
 
+        # 9. Notify other agents
+        summary = {
+            "type": "cycle_complete",
+            "circular_deps": circular.get("total", 0),
+            "critical_hotspots": hotspots.get("critical_count", 0),
+            "trend": trends.get("direction", "stable"),
+            "confidence": new_conf,
+        }
+        for target in ["product_owner", "project_manager"]:
+            self.send_message(db, user_id, target, "cycle_summary", summary)
+
         return {"steps": steps_done, **report}
 
     # ── Step implementations ──────────────────────────────────────────
+
+    def _process_incoming_messages(self, db: Session, user_id: int) -> int:
+        """Step 0: Read and acknowledge inter-agent messages (findings, cycle summaries)."""
+        messages = self.get_messages(db, user_id)
+        count = 0
+        for msg in messages:
+            self.acknowledge_message(db, msg)
+            count += 1
+        return count
 
     def _gather_snapshot(self, db: Session) -> Dict[str, Any]:
         """Step 1: Collect current architecture state from Code Brain data."""
@@ -347,6 +371,32 @@ class ArchitectAgent(AgentBase):
             "hotspots": hotspots,
             "trends": trends,
         }
+
+    def get_chat_context(self, db: Session, user_id: int) -> str:
+        """Richer Architect context: health score, hotspots, circular deps, trends."""
+        parts = [f"[Project Brain — {self.label}]", self.role_prompt]
+        state = self.get_state(db, user_id)
+        if state and state.state_json:
+            try:
+                s = json.loads(state.state_json)
+                parts.append(
+                    f"Architecture health: {s.get('health_score', 0):.0%} — "
+                    f"{s.get('circular_deps', 0)} circular deps, "
+                    f"{s.get('critical_hotspots', 0)} critical hotspots, "
+                    f"trend: {s.get('trend_direction', 'unknown')}"
+                )
+                parts.append(f"Repos: {s.get('repos', 0)}, total deps: {s.get('total_deps', 0)}")
+            except Exception:
+                pass
+            parts.append(f"Architect confidence: {state.confidence:.0%}")
+
+        findings = self.get_findings(db, user_id, limit=3)
+        if findings:
+            parts.append("Recent architectural findings:")
+            for f in findings:
+                parts.append(f"  [{f.severity}] {f.title}: {f.description[:100]}")
+
+        return "\n".join(parts)
 
     def get_metrics(self, db: Session, user_id: int) -> Dict[str, Any]:
         base = super().get_metrics(db, user_id)

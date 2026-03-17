@@ -31,7 +31,7 @@ _PO_ROLE_PROMPT = (
 
 _QUESTION_CATEGORIES = [
     "vision", "features", "priorities", "tech_stack",
-    "users", "success_criteria", "constraints", "domain",
+    "users", "success_criteria", "constraints", "domain", "general",
 ]
 
 
@@ -488,27 +488,73 @@ class ProductOwnerAgent(AgentBase):
             .all()
         )
 
-    def push_requirement_to_planner(self, db: Session, user_id: int, requirement_id: int) -> dict:
+    def push_requirement_to_planner(self, db: Session, user_id: int, requirement_id: int, project_id: int | None = None) -> dict:
         """Create a planner task from a PO requirement."""
         req = db.query(PORequirement).get(requirement_id)
         if not req:
             return {"ok": False, "error": "Requirement not found"}
 
         try:
-            from ...services import planner_service
-            task = planner_service.create_task(
+            from ...planner_service import create_task, list_projects
+
+            if not project_id:
+                projects = list_projects(db, user_id)
+                if projects:
+                    project_id = projects[0]["id"]
+                else:
+                    return {"ok": False, "error": "No planner project found — create one first"}
+
+            task = create_task(
                 db,
+                project_id=project_id,
                 user_id=user_id,
                 title=req.title,
                 description=f"{req.description}\n\nAcceptance Criteria:\n{req.acceptance_criteria or 'TBD'}",
                 priority=req.priority,
             )
+            if not task:
+                return {"ok": False, "error": "Task creation failed (permission denied or invalid project)"}
             req.status = "in_planner"
             db.commit()
-            return {"ok": True, "task_id": task.id if task else None}
+            return {"ok": True, "task_id": task.get("id")}
         except Exception as e:
             logger.warning("[po] push_to_planner failed: %s", e)
             return {"ok": False, "error": str(e)}
+
+    def get_chat_context(self, db: Session, user_id: int) -> str:
+        """Richer PO context for the LLM: pending questions, top requirements, gaps."""
+        parts = [f"[Project Brain — {self.label}]", self.role_prompt]
+        state = self.get_state(db, user_id)
+        if state and state.state_json:
+            try:
+                s = json.loads(state.state_json)
+                conf = state.confidence
+                parts.append(f"Project understanding confidence: {conf:.0%}")
+                cats = s.get("categories_covered", [])
+                if cats:
+                    parts.append(f"Categories explored: {', '.join(cats)}")
+            except Exception:
+                pass
+
+        pending_qs = self.get_questions(db, user_id, status="pending", limit=3)
+        if pending_qs:
+            parts.append("Pending questions for the user:")
+            for q in pending_qs:
+                parts.append(f"  - [{q.category}] {q.question}")
+
+        reqs = self.get_requirements(db, user_id, limit=5)
+        if reqs:
+            parts.append("Top requirements:")
+            for r in reqs:
+                parts.append(f"  - [{r.priority}] {r.title} ({r.status})")
+
+        findings = self.get_findings(db, user_id, limit=3)
+        if findings:
+            parts.append("Recent findings:")
+            for f in findings:
+                parts.append(f"  [{f.severity}] {f.title}: {f.description[:100]}")
+
+        return "\n".join(parts)
 
     def get_metrics(self, db: Session, user_id: int) -> Dict[str, Any]:
         base = super().get_metrics(db, user_id)

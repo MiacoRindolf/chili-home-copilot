@@ -33,6 +33,7 @@ itsdangerous>=2.1.0
 twilio>=9.0.0  # optional: SMS alerts via Twilio (free tier uses email-to-SMS gateway instead)
 vaderSentiment>=3.3.2
 
-# dev / test
+# dev / test / QA automation
 pytest==9.0.2
 httpx==0.28.1
+playwright>=1.49.0

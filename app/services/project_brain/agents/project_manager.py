@@ -91,15 +91,33 @@ class ProjectManagerAgent(AgentBase):
                         f"Cycle completed: {tasks_created} tasks created, velocity={velocity}",
                         old_conf, new_conf, trigger="learning_cycle")
 
+        summary = {
+            "type": "cycle_complete",
+            "tasks_created": tasks_created,
+            "health": velocity.get("health", "unknown"),
+            "completion_pct": velocity.get("completion_pct", 0),
+            "confidence": new_conf,
+        }
+        for target in ["product_owner", "architect"]:
+            self.send_message(db, user_id, target, "cycle_summary", summary)
+
         return {"steps": steps_done, **report}
 
     # ── Step implementations ──────────────────────────────────────────
 
     def _process_incoming_messages(self, db: Session, user_id: int) -> int:
-        """Step 1: Read and acknowledge messages from other agents."""
+        """Step 1: Read and acknowledge messages from other agents.
+
+        Tracks new requirements signaled by PO cycle summaries so the
+        breakdown step can pick them up.
+        """
         messages = self.get_messages(db, user_id)
         count = 0
         for msg in messages:
+            if msg.message_type == "finding" and msg.from_agent == "product_owner":
+                logger.info("[pm] Received PO finding: %s", msg.content_json[:200] if msg.content_json else "")
+            elif msg.message_type == "cycle_summary" and msg.from_agent == "product_owner":
+                logger.info("[pm] PO cycle complete — new_reqs=%s", msg.content_json[:200] if msg.content_json else "")
             self.acknowledge_message(db, msg)
             count += 1
         return count
@@ -442,6 +460,32 @@ class ProjectManagerAgent(AgentBase):
                 "by_priority": by_priority,
             })
         return {"projects": breakdown}
+
+    def get_chat_context(self, db: Session, user_id: int) -> str:
+        """Richer PM context: velocity, health, blockers, overdue tasks."""
+        parts = [f"[Project Brain — {self.label}]", self.role_prompt]
+        try:
+            velocity = self.get_velocity(db, user_id)
+            parts.append(
+                f"Project health: {velocity.get('health', 'unknown')} — "
+                f"{velocity.get('completion_pct', 0)}% complete, "
+                f"{velocity.get('done', 0)} done, {velocity.get('in_progress', 0)} in progress, "
+                f"{velocity.get('blocked', 0)} blocked, {velocity.get('overdue', 0)} overdue"
+            )
+        except Exception:
+            pass
+
+        state = self.get_state(db, user_id)
+        if state:
+            parts.append(f"PM confidence: {state.confidence:.0%}")
+
+        findings = self.get_findings(db, user_id, limit=3)
+        if findings:
+            parts.append("Recent PM findings:")
+            for f in findings:
+                parts.append(f"  [{f.severity}] {f.title}: {f.description[:100]}")
+
+        return "\n".join(parts)
 
     def get_metrics(self, db: Session, user_id: int) -> Dict[str, Any]:
         base = super().get_metrics(db, user_id)

@@ -670,6 +670,31 @@ def _run_reasoning_learning_job():
         db.close()
 
 
+def _run_project_brain_job():
+    """Run all active Project Brain agent cycles."""
+    from ..db import SessionLocal
+    from ..models import User
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "project_brain_enabled", True):
+        return
+
+    logger.info("[scheduler] Starting Project Brain cycle")
+    db = SessionLocal()
+    try:
+        user = db.query(User).order_by(User.id.asc()).first()
+        if not user:
+            logger.info("[scheduler] No users found; skipping Project Brain cycle")
+            return
+        from .project_brain.learning import run_project_brain_cycle
+        result = run_project_brain_cycle(db, user.id)
+        logger.info("[scheduler] Project Brain result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Project Brain failed: %s", e)
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -795,11 +820,23 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
+        if getattr(settings, "project_brain_enabled", True):
+            _scheduler.add_job(
+                _run_project_brain_job,
+                trigger=IntervalTrigger(minutes=_pb_minutes),
+                id="project_brain_cycle",
+                name=f"Project Brain cycle (every {_pb_minutes}min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
         _scheduler.start()
         logger.info(
             f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
+            f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
             "stock breakout scanner market hours every 15min)"
