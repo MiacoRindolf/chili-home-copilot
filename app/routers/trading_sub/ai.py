@@ -185,7 +185,13 @@ def api_deep_study(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/api/trading/learn/retrain-ml")
 def api_retrain_ml(request: Request, db: Session = Depends(get_db)):
-    result = ts.train_ml_model(db)
+    from app.services.trading.pattern_ml import get_meta_learner, apply_ml_feedback
+    meta = get_meta_learner()
+    result = meta.train(db)
+    if result.get("ok"):
+        imps = meta.get_pattern_importances()
+        fb = apply_ml_feedback(db, imps)
+        result["feedback"] = fb
     return JSONResponse({"ok": True, **result})
 
 
@@ -725,17 +731,16 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
         root = parent
 
     all_patterns = [root]
-    queue = [root]
-    while queue:
-        node = queue.pop(0)
+    current_ids = [root.id]
+    while current_ids:
         children = (
             db.query(ScanPattern)
-            .filter(ScanPattern.parent_id == node.id)
+            .filter(ScanPattern.parent_id.in_(current_ids))
             .order_by(ScanPattern.generation, ScanPattern.id)
             .all()
         )
         all_patterns.extend(children)
-        queue.extend(children)
+        current_ids = [c.id for c in children]
 
     all_sp_ids = [p.id for p in all_patterns]
     bt_stats = compute_pattern_bt_stats(db, all_sp_ids, ctx["user_id"])

@@ -185,6 +185,7 @@ def evaluate_patterns(
                 "score_boost": pattern.score_boost,
                 "min_base_score": pattern.min_base_score,
                 "confidence": pattern.confidence,
+                "win_rate": pattern.win_rate,
             })
 
     return matches
@@ -233,6 +234,137 @@ def _eval_condition(cond: dict, indicators: dict[str, Any]) -> bool:
         return False
 
     return False
+
+
+def _condition_has_data(cond: dict, indicators: dict[str, Any]) -> bool:
+    """Check whether the indicator data required for a condition is available."""
+    ind_key = cond.get("indicator", "")
+    if indicators.get(ind_key) is None:
+        return False
+    ref = cond.get("ref")
+    if ref and indicators.get(ref) is None:
+        return False
+    return True
+
+
+def evaluate_patterns_soft(
+    indicators: dict[str, Any],
+    patterns: list[ScanPattern],
+    min_eval_ratio: float = 0.5,
+) -> list[dict[str, Any]]:
+    """Partial-match pattern evaluation for prediction context.
+
+    Unlike ``evaluate_patterns`` which requires ALL conditions to pass,
+    this function skips conditions whose indicator data is unavailable
+    (e.g. resistance_retests in a prediction snapshot). A pattern matches
+    when at least *min_eval_ratio* of conditions are evaluable AND all
+    evaluable conditions pass. Returns a ``match_quality`` (0-1) equal
+    to the fraction of total conditions that were evaluated and passed.
+    """
+    matches: list[dict[str, Any]] = []
+
+    for pattern in patterns:
+        try:
+            rules = json.loads(pattern.rules_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        conditions = rules.get("conditions", [])
+        if not conditions:
+            continue
+
+        evaluable = []
+        for cond in conditions:
+            if _condition_has_data(cond, indicators):
+                evaluable.append(cond)
+
+        total = len(conditions)
+        n_eval = len(evaluable)
+        if n_eval < max(1, total * min_eval_ratio):
+            continue
+
+        all_pass = True
+        for cond in evaluable:
+            if not _eval_condition(cond, indicators):
+                all_pass = False
+                break
+
+        if all_pass:
+            match_quality = n_eval / total
+            matches.append({
+                "pattern_id": pattern.id,
+                "name": pattern.name,
+                "score_boost": pattern.score_boost,
+                "min_base_score": pattern.min_base_score,
+                "confidence": pattern.confidence,
+                "win_rate": pattern.win_rate,
+                "match_quality": round(match_quality, 2),
+                "conditions_met": n_eval,
+                "conditions_total": total,
+            })
+
+    return matches
+
+
+def evaluate_patterns_with_strength(
+    indicators: dict[str, Any],
+    patterns: list[ScanPattern],
+    min_eval_ratio: float = 0.5,
+) -> list[dict[str, Any]]:
+    """Partial-match evaluation with continuous condition strengths.
+
+    Like ``evaluate_patterns_soft`` but also computes per-condition strength
+    (0-1) via ``pattern_ml.compute_condition_strength``, returning
+    ``avg_strength`` and a ``strengths`` list alongside the match result.
+    """
+    from .pattern_ml import compute_condition_strength
+
+    matches: list[dict[str, Any]] = []
+
+    for pattern in patterns:
+        try:
+            rules = json.loads(pattern.rules_json)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        conditions = rules.get("conditions", [])
+        if not conditions:
+            continue
+
+        evaluable = [c for c in conditions if _condition_has_data(c, indicators)]
+        total = len(conditions)
+        n_eval = len(evaluable)
+        if n_eval < max(1, total * min_eval_ratio):
+            continue
+
+        all_pass = True
+        for cond in evaluable:
+            if not _eval_condition(cond, indicators):
+                all_pass = False
+                break
+
+        if all_pass:
+            strengths = [
+                round(compute_condition_strength(c, indicators), 3)
+                for c in evaluable
+            ]
+            avg_strength = sum(strengths) / len(strengths) if strengths else 0.0
+            match_quality = n_eval / total
+            matches.append({
+                "pattern_id": pattern.id,
+                "name": pattern.name,
+                "score_boost": pattern.score_boost,
+                "min_base_score": pattern.min_base_score,
+                "confidence": pattern.confidence,
+                "win_rate": pattern.win_rate,
+                "match_quality": round(match_quality, 2),
+                "conditions_met": n_eval,
+                "conditions_total": total,
+                "avg_strength": round(avg_strength, 3),
+                "strengths": strengths,
+            })
+
+    return matches
 
 
 def build_indicator_snapshot(

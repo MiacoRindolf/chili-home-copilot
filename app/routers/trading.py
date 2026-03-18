@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any
 
@@ -113,6 +114,19 @@ def _get_proposal_reminder(db: Session, ticker: str, user_id: int | None) -> str
         if p.thesis:
             lines.append(f"    Thesis: {p.thesis[:200]}")
     return "\n".join(lines)
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively replace non-finite floats so JSONResponse never crashes."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {k: _json_safe(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_json_safe(v) for v in value)
+    return value
 
 
 # ── Page ────────────────────────────────────────────────────────────────
@@ -819,10 +833,10 @@ def api_run_backtest(
         cash=body.cash, commission=body.commission,
     )
     if not result.get("ok"):
-        return JSONResponse(result, status_code=400)
+        return JSONResponse(_json_safe(result), status_code=400)
 
     bt_svc.save_backtest(db, ctx["user_id"], result)
-    return JSONResponse(result)
+    return JSONResponse(_json_safe(result))
 
 
 @router.get("/api/trading/backtest/all")
@@ -1581,14 +1595,20 @@ def api_backtest_pattern(
     period: str = Query("1y"),
     db: Session = Depends(get_db),
 ):
-    from ..models.trading import ScanPattern
+    from ..models.trading import ScanPattern, TradingInsight
     from ..services.backtest_service import backtest_pattern
+    # Accept either ScanPattern.id or TradingInsight.id (UI evidence modal uses insight ids).
     p = db.query(ScanPattern).get(pattern_id)
+    if not p:
+        insight = db.query(TradingInsight).get(pattern_id)
+        sp_id = getattr(insight, "scan_pattern_id", None) if insight else None
+        if sp_id:
+            p = db.query(ScanPattern).get(sp_id)
     if not p:
         return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
     result = backtest_pattern(ticker=ticker, pattern_name=p.name, rules_json=p.rules_json,
                               interval=interval, period=period)
-    return JSONResponse(result)
+    return JSONResponse(_json_safe(result))
 
 
 @router.post("/api/trading/patterns/research")

@@ -347,8 +347,9 @@ def build_ai_context(
 
     # Brain prediction for this ticker
     try:
-        from .learning import compute_prediction
-        from .ml_engine import predict_ml, extract_features, is_model_ready
+        from .pattern_ml import get_meta_learner, extract_pattern_features
+        from .pattern_engine import get_active_patterns, evaluate_patterns_with_strength
+        from .learning import _indicator_data_to_flat_snapshot
         full_indicators_for_pred = futures["indicators"].result(timeout=1) if "indicators" in futures else {}
         ind_flat = {}
         for ind_name, records in full_indicators_for_pred.items():
@@ -358,18 +359,39 @@ def build_ai_context(
                     if k != "time":
                         ind_flat[f"{ind_name}_{k}" if k != "value" else ind_name] = v
         if ind_flat:
-            rule_score = compute_prediction(full_indicators_for_pred)
-            ml_prob = None
-            if is_model_ready():
-                feats = extract_features(ind_flat)
-                if feats:
-                    ml_prob = predict_ml(feats)
+            flat_snap = _indicator_data_to_flat_snapshot(full_indicators_for_pred, None)
+            meta = get_meta_learner()
             brain_lines = [f"## CHILI BRAIN PREDICTION — {ticker_up}"]
-            direction = "BULLISH" if rule_score > 1 else "BEARISH" if rule_score < -1 else "NEUTRAL"
-            brain_lines.append(f"Rule-based score: {rule_score:+.1f}/10 ({direction})")
-            if ml_prob is not None:
-                ml_dir = "bullish" if ml_prob > 0.55 else "bearish" if ml_prob < 0.45 else "neutral"
-                brain_lines.append(f"ML probability (5-day up): {ml_prob:.1%} ({ml_dir})")
+            meta_prob = None
+            try:
+                from ...db import SessionLocal as _SL
+                _ctx_db = _SL()
+                try:
+                    _pats = get_active_patterns(_ctx_db)
+                finally:
+                    _ctx_db.close()
+            except Exception:
+                _pats = []
+            if _pats and meta.is_ready():
+                pat_feats = extract_pattern_features(_pats, flat_snap)
+                meta_prob = meta.predict(pat_feats)
+            matches = evaluate_patterns_with_strength(flat_snap, _pats) if _pats else []
+            if meta_prob is not None:
+                score = round((meta_prob - 0.5) * 20, 2)
+            elif matches:
+                score = sum(m.get("score_boost", 1.0) * max(0.5, m.get("win_rate") or 0.5) * m.get("match_quality", 1.0) for m in matches)
+                score = max(-10.0, min(10.0, score))
+            else:
+                score = 0.0
+            direction = "BULLISH" if score > 1 else "BEARISH" if score < -1 else "NEUTRAL"
+            brain_lines.append(f"Pattern ML score: {score:+.1f}/10 ({direction})")
+            if meta_prob is not None:
+                brain_lines.append(f"Meta-learner probability (5-day up): {meta_prob:.1%}")
+            if matches:
+                for m in matches[:5]:
+                    wr = m.get("win_rate")
+                    wr_s = f" ({round(wr*100)}% WR)" if wr else ""
+                    brain_lines.append(f"  Matched: {m['name']}{wr_s}")
 
             # Reconciliation: compare brain vs scanner
             if scored:

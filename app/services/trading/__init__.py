@@ -124,7 +124,7 @@ from .learning import (
 )
 
 
-# ML engine
+# ML engine (deprecated stubs — real logic lives in pattern_ml)
 from .ml_engine import (
     train_model as train_ml_model,
     predict_ml,
@@ -132,6 +132,13 @@ from .ml_engine import (
     get_model_stats as get_ml_model_stats,
     load_model as load_ml_model,
     is_model_ready as is_ml_model_ready,
+)
+
+# Pattern-driven ML
+from .pattern_ml import (
+    get_meta_learner,
+    load_meta_learner,
+    apply_ml_feedback,
 )
 
 # Pre-screener (fast server-side filtering)

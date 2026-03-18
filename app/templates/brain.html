@@ -459,6 +459,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .ev-pnl-pos { color: #22c55e; font-weight: 600; }
 .ev-pnl-neg { color: #ef4444; font-weight: 600; }
 .ev-status-badge { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 9px; font-weight: 600; }
+.ev-table tr.bt-clickable { cursor: pointer; }
+.ev-table tr.bt-clickable:hover td { background: rgba(139,92,246,.06); }
+.bt-chart-row td { padding: 0 !important; border-bottom: 1px solid var(--border); }
+.bt-chart-wrap { padding: 10px; background: var(--bg); border-radius: 8px; margin: 4px 6px 8px; }
+.bt-chart-container { width: 100%; height: 280px; border-radius: 6px; overflow: hidden; border: 1px solid var(--border); }
+.bt-chart-toolbar { display: flex; align-items: center; justify-content: space-between; margin-top: 6px; font-size: 10px; }
+.bt-chart-stats { display: flex; gap: 12px; color: var(--text-muted); }
+.bt-chart-stats span b { color: var(--text); }
+.bt-chart-link { color: #818cf8; text-decoration: none; font-weight: 600; font-size: 10px; }
+.bt-chart-link:hover { text-decoration: underline; }
 .ev-status-badge.win, .ev-status-badge.closed { background: rgba(34,197,94,.12); color: #22c55e; }
 .ev-status-badge.loss { background: rgba(239,68,68,.12); color: #ef4444; }
 .ev-status-badge.open { background: rgba(59,130,246,.12); color: #3b82f6; }
@@ -600,7 +610,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div class="brain-action-row">
         <button onclick="triggerFullScan()" id="btn-full-scan" class="brain-act-btn brain-act-primary">&#x1F310; Scan Market</button>
         <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
-        <button onclick="triggerRetrainML()" id="btn-retrain-ml" class="brain-act-btn brain-act-ml">&#x1F9E0; Retrain ML</button>
+        <button onclick="triggerRetrainML()" id="btn-retrain-ml" class="brain-act-btn brain-act-ml">&#x1F9E0; Train Pattern ML</button>
       </div>
 
       <div class="brain-reflection-box" id="brain-reflection">
@@ -1239,8 +1249,8 @@ function loadBrainDashboard() {
         '<div class="bk-lbl">Crypto Accuracy</div>' + _accSub(d.crypto_predictions||0) + '</div>' +
       '<div class="brain-kpi clickable" onclick="showMLDetail()">' +
         (d.ml_ready
-          ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div class="bk-lbl">ML Accuracy (CV)</div><div class="bk-trend flat">' + (d.ml_samples||0) + ' samples</div>'
-          : '<div class="bk-val" style="color:var(--text-muted)">--</div><div class="bk-lbl">ML Model</div><div class="bk-trend flat">Not trained yet</div>') + '</div>' +
+          ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div class="bk-lbl">Pattern ML (CV)</div><div class="bk-trend flat">' + (d.ml_samples||0) + ' samples · ' + (d.ml_active_patterns||0) + ' patterns</div>'
+          : '<div class="bk-val" style="color:var(--text-muted)">--</div><div class="bk-lbl">Pattern ML</div><div class="bk-trend flat">Not trained yet</div>') + '</div>' +
       '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')">' +
         '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
         '<div class="bk-lbl">Snapshots</div>' +
@@ -1299,21 +1309,23 @@ function showAccuracyDetail(type) {
 
 function showMLDetail() {
   var d = window._brainStats || {};
-  if (!d.ml_ready) { openBrainModal('ML Model', '<div style="text-align:center;padding:20px;color:var(--text-muted)">ML model not trained yet. Click <strong>Retrain ML</strong> when you have enough data.</div>'); return; }
-  var html = '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:12px">' +
+  if (!d.ml_ready) { openBrainModal('Pattern ML', '<div style="text-align:center;padding:20px;color:var(--text-muted)">Pattern meta-learner not trained yet. Click <strong>Retrain ML</strong> when you have enough snapshot data and active patterns.</div>'); return; }
+  var html = '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">' +
     '<div style="padding:8px;background:rgba(6,182,212,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div style="font-size:10px;color:var(--text-muted)">CV Accuracy</div></div>' +
-    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#8b5cf6">' + (d.ml_samples||0) + '</div><div style="font-size:10px;color:var(--text-muted)">Training Samples</div></div></div>';
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#8b5cf6">' + (d.ml_samples||0) + '</div><div style="font-size:10px;color:var(--text-muted)">Training Samples</div></div>' +
+    '<div style="padding:8px;background:rgba(34,197,94,.06);border-radius:8px;text-align:center"><div style="font-size:18px;font-weight:800;color:#22c55e">' + (d.ml_active_patterns||0) + '</div><div style="font-size:10px;color:var(--text-muted)">Active Patterns</div></div></div>';
   var imps = d.ml_feature_importances || {};
-  var entries = Object.entries(imps).sort(function(a,b){return b[1]-a[1];});
+  var entries = Object.entries(imps).sort(function(a,b){return b[1]-a[1];}).slice(0, 20);
   if (entries.length) {
-    html += '<h4>Feature Importances</h4>';
+    html += '<h4 style="margin-bottom:6px">Top Pattern Feature Importances</h4>';
     var maxVal = entries[0][1] || 1;
     entries.forEach(function(e) {
       var pct = Math.round(e[1] / maxVal * 100);
-      html += '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="width:100px;font-size:10px;font-weight:600;text-align:right">' + e[0] + '</span><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#06b6d4,#8b5cf6);border-radius:3px"></div></div><span style="font-size:10px;color:var(--text-muted);width:40px">' + (e[1]*100).toFixed(1) + '%</span></div>';
+      var label = e[0].replace(/^pat_\d+_/, function(m) { return 'P' + m.split('_')[1] + ' '; });
+      html += '<div style="display:flex;align-items:center;gap:6px;margin:3px 0"><span style="width:120px;font-size:10px;font-weight:600;text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="' + e[0] + '">' + label + '</span><div style="flex:1;height:6px;background:var(--border);border-radius:3px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:linear-gradient(90deg,#06b6d4,#8b5cf6);border-radius:3px"></div></div><span style="font-size:10px;color:var(--text-muted);width:40px">' + (e[1]*100).toFixed(1) + '%</span></div>';
     });
   }
-  openBrainModal('ML Model Details', html);
+  openBrainModal('Pattern ML Details', html);
 }
 
 function showKpiInfo(type) {
@@ -1397,11 +1409,25 @@ function _renderPredCards(container, preds) {
     if (p.suggested_stop != null && p.suggested_target != null) {
       riskLine = '<div style="display:flex;gap:8px;font-size:9px;margin-top:3px;color:var(--text-muted)"><span style="color:#ef4444">SL $' + (p.suggested_stop||0).toFixed(2) + '</span><span style="color:#22c55e">TP $' + (p.suggested_target||0).toFixed(2) + '</span></div>';
     }
+    var patChips = '';
+    if (p.matched_patterns && p.matched_patterns.length) {
+      patChips = '<div style="display:flex;flex-wrap:wrap;gap:3px;margin-top:3px">';
+      p.matched_patterns.forEach(function(mp) {
+        var info = '';
+        if (mp.win_rate != null) info += mp.win_rate + '%';
+        if (mp.avg_strength != null) info += (info ? ' ' : '') + Math.round(mp.avg_strength * 100) + '% str';
+        if (mp.conditions_met != null && mp.conditions_total != null && mp.conditions_met < mp.conditions_total) info += (info ? ' ' : '') + mp.conditions_met + '/' + mp.conditions_total;
+        if (info) info = ' ' + info;
+        patChips += '<span style="display:inline-flex;align-items:center;gap:2px;padding:1px 6px;border-radius:8px;font-size:8px;font-weight:600;background:rgba(139,92,246,.12);color:#a78bfa;white-space:nowrap">&#x1F9EC; ' + escHtml(mp.name).substring(0,30) + info + '</span>';
+      });
+      patChips += '</div>';
+    }
     html += '<div class="pred-card" onclick="showPredDetail(' + i + ')">' +
       '<div class="pred-top"><span class="pred-ticker">' + p.ticker.replace('-USD','') + '</span><span class="pred-dir ' + p.direction + '">' + dirLabel + '</span></div>' +
       '<div style="display:flex;align-items:center;gap:6px"><span class="pred-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
         '<div class="pred-score-bar" style="flex:1"><div class="pred-score-mid"></div><div class="pred-score-fill" style="width:' + Math.max(2,scoreNorm) + '%;background:' + fillColor + '"></div></div>' +
         '<span style="font-size:10px;font-weight:700;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</span></div>' +
+      patChips +
       '<div class="pred-signals">' + p.signals.join(' &middot; ') + '</div>' + riskLine + '</div>';
   }
   html += '</div>';
@@ -1416,7 +1442,21 @@ function showPredDetail(idx) {
   html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px">' +
     '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800;color:' + fillColor + '">' + (p.score > 0 ? '+' : '') + p.score.toFixed(1) + '</div><div style="font-size:9px;color:var(--text-muted)">Score</div></div>' +
     '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div>' +
-    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800;color:#06b6d4">' + (p.ml_probability != null ? Math.round(p.ml_probability*100) + '%' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)">ML Prob</div></div></div>';
+    '<div style="padding:8px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:16px;font-weight:800;color:#06b6d4">' + (p.meta_ml_probability != null ? Math.round(p.meta_ml_probability*100) + '%' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)">Pattern ML</div></div></div>';
+  if (p.matched_patterns && p.matched_patterns.length) {
+    html += '<h4 style="margin-bottom:6px">Matched Patterns</h4><div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">';
+    p.matched_patterns.forEach(function(mp) {
+      var parts = [];
+      if (mp.win_rate != null) parts.push(mp.win_rate + '% WR');
+      if (mp.conditions_met != null && mp.conditions_total != null && mp.conditions_met < mp.conditions_total) parts.push(mp.conditions_met + '/' + mp.conditions_total + ' conds');
+      if (mp.avg_strength != null) parts.push(Math.round(mp.avg_strength * 100) + '% str');
+      var sub = parts.length ? '<span style="margin-left:6px;color:var(--text-muted);font-size:10px">' + parts.join(' · ') + '</span>' : '';
+      html += '<div style="padding:5px 10px;border-radius:8px;background:rgba(139,92,246,.1);border:1px solid rgba(139,92,246,.2);font-size:11px">' +
+        '<span style="font-weight:700;color:#a78bfa">&#x1F9EC; ' + escHtml(mp.name) + '</span>' + sub +
+      '</div>';
+    });
+    html += '</div>';
+  }
   html += '<h4>Signals</h4><ul style="margin:4px 0;padding-left:18px">';
   (p.signals||[]).forEach(function(s) { html += '<li>' + s + '</li>'; });
   html += '</ul>';
@@ -1715,10 +1755,12 @@ function showPatternDetail(patternId) {
   html += '<div class="ev-pane" id="ev-pane-hypotheses"></div>';
   html += '<div class="ev-pane" id="ev-pane-trades"></div>';
   html += '<div class="ev-pane" id="ev-pane-backtests"></div>';
-  html += '<div class="ev-pane" id="ev-pane-evolution"><div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evolution tree...</div></div>';
+  html += '<div class="ev-pane" id="ev-pane-evolution"><div class="ev-empty" style="padding:16px">Click to load evolution tree.</div></div>';
 
   var footer = p.active ? '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>' : '';
   openBrainModal('Pattern Evidence', html, footer);
+  window._currentEvidencePatternId = p.id;
+  window._evoTabLoaded = false;
 
   fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) { document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Could not load evidence.</div>'; return; }
@@ -1742,32 +1784,36 @@ function showPatternDetail(patternId) {
     b('backtests', (d.backtests||[]).length);
     if (d.computed_stats) _renderComputedStats(d.computed_stats);
   }).catch(function(){ document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Network error loading evidence.</div>'; });
-
-  fetch('/api/trading/learn/patterns/' + p.id + '/evolution').then(function(r){return r.json();}).then(function(d) {
-    if (d.ok) {
-      _renderEvEvolution(d.root, d.current_scan_pattern_id);
-      var badge = document.getElementById('ev-badge-evolution');
-      if (badge) {
-        if (d.root && d.root.children && d.root.children.length > 0) {
-          var countNodes = function(n) { var c = 1; (n.children||[]).forEach(function(ch){ c += countNodes(ch); }); return c; };
-          badge.textContent = countNodes(d.root);
-        } else {
-          badge.textContent = '0';
-        }
-      }
-    } else {
-      _renderEvEvolution(null, null);
-      var badge = document.getElementById('ev-badge-evolution');
-      if (badge) badge.textContent = '0';
-    }
-  }).catch(function(){
-    _renderEvEvolution(null, null);
-  });
 }
 
 function _switchEvTab(tab) {
   document.querySelectorAll('.ev-tab').forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-evtab')===tab); });
   document.querySelectorAll('.ev-pane').forEach(function(p){ p.classList.toggle('active', p.id==='ev-pane-'+tab); });
+  if (tab === 'evolution' && !window._evoTabLoaded && window._currentEvidencePatternId) {
+    window._evoTabLoaded = true;
+    var evoPane = document.getElementById('ev-pane-evolution');
+    if (evoPane) evoPane.innerHTML = '<div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evolution tree...</div>';
+    fetch('/api/trading/learn/patterns/' + window._currentEvidencePatternId + '/evolution').then(function(r){return r.json();}).then(function(d) {
+      if (d.ok) {
+        _renderEvEvolution(d.root, d.current_scan_pattern_id);
+        var badge = document.getElementById('ev-badge-evolution');
+        if (badge) {
+          if (d.root && d.root.children && d.root.children.length > 0) {
+            var countNodes = function(n) { var c = 1; (n.children||[]).forEach(function(ch){ c += countNodes(ch); }); return c; };
+            badge.textContent = countNodes(d.root);
+          } else {
+            badge.textContent = '0';
+          }
+        }
+      } else {
+        _renderEvEvolution(null, null);
+        var badge = document.getElementById('ev-badge-evolution');
+        if (badge) badge.textContent = '0';
+      }
+    }).catch(function(){
+      _renderEvEvolution(null, null);
+    });
+  }
 }
 
 function _renderComputedStats(cs) {
@@ -1907,19 +1953,22 @@ function _renderEvBacktests(bts) {
   var el = document.getElementById('ev-pane-backtests');
   if (!bts.length) { el.innerHTML = '<div class="ev-empty">No backtest results found for this pattern.</div>'; return; }
   var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Strategy</th><th>Return</th><th>Win Rate</th><th>Sharpe</th><th>Max DD</th><th>Trades</th><th>Period</th><th>Ran</th></tr></thead><tbody>';
-  bts.forEach(function(b) {
+  bts.forEach(function(b, idx) {
     var retClass = b.return_pct > 0 ? 'ev-pnl-pos' : (b.return_pct < 0 ? 'ev-pnl-neg' : '');
     var noTrades = (b.trade_count || 0) === 0;
     var rowStyle = noTrades ? ' style="opacity:.5"' : '';
     var dateStr = b.ran_at ? new Date(b.ran_at).toLocaleDateString() : '--';
     var periodStr = '--';
+    var strategyId = '';
     try {
       if (b.params) {
         var p = typeof b.params === 'string' ? JSON.parse(b.params) : b.params;
         if (p && p.period) periodStr = p.period;
+        if (p && p.strategy_id) strategyId = p.strategy_id;
       }
     } catch(e) {}
-    html += '<tr' + rowStyle + '>' +
+    var clickAttr = noTrades ? rowStyle : ' class="bt-clickable" onclick="toggleBtChart(this,' + idx + ',\'' + escHtml(b.ticker) + '\',\'' + escHtml(strategyId || b.strategy_name || '') + '\',\'' + escHtml(periodStr) + '\')" title="Click to view chart"';
+    html += '<tr' + (noTrades ? rowStyle : '') + (noTrades ? '' : clickAttr) + '>' +
       '<td><b>' + escHtml(b.ticker) + '</b></td>' +
       '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
       '<td class="' + retClass + '">' + (noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (b.return_pct != null ? b.return_pct.toFixed(1) + '%' : '--')) + '</td>' +
@@ -1929,10 +1978,113 @@ function _renderEvBacktests(bts) {
       '<td>' + (b.trade_count||0) + '</td>' +
       '<td>' + periodStr + '</td>' +
       '<td>' + dateStr + '</td>' +
-    '</tr>';
+    '</tr>' +
+    '<tr class="bt-chart-row" id="bt-chart-row-' + idx + '" style="display:none"><td colspan="9"></td></tr>';
   });
   html += '</tbody></table>';
   el.innerHTML = html;
+}
+
+var _btChartInstances = {};
+function toggleBtChart(row, idx, ticker, strategy, period) {
+  var chartRow = document.getElementById('bt-chart-row-' + idx);
+  if (!chartRow) return;
+  var isOpen = chartRow.style.display !== 'none';
+  if (isOpen) { chartRow.style.display = 'none'; return; }
+  chartRow.style.display = '';
+  var cell = chartRow.querySelector('td');
+  if (cell.querySelector('.bt-chart-wrap')) return;
+
+  var deepLink = (strategy === 'dynamic_pattern' && window._currentEvidencePatternId)
+    ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentEvidencePatternId + '&period=' + encodeURIComponent(period)
+    : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(period);
+  cell.innerHTML = '<div class="bt-chart-wrap">' +
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">Running backtest for ' + escHtml(ticker) + '...</span></div>' +
+    '<div class="bt-chart-container" id="bt-chart-' + idx + '"></div>' +
+    '<div class="bt-chart-toolbar">' +
+      '<div class="bt-chart-stats" id="bt-chart-stats-' + idx + '"></div>' +
+      '<a class="bt-chart-link" href="' + deepLink + '" target="_blank">Open Full Chart &#x2197;</a>' +
+    '</div></div>';
+
+  var fetchPromise;
+  if (strategy === 'dynamic_pattern' && window._currentEvidencePatternId) {
+    fetchPromise = fetch('/api/trading/patterns/' + window._currentEvidencePatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
+  } else {
+    fetchPromise = fetch('/api/trading/backtest', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
+    });
+  }
+  fetchPromise.then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) { cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Backtest failed: ' + escHtml(d.error||'unknown') + '</div>'; return; }
+    _drawBtMiniChart(idx, d);
+  }).catch(function(e) {
+    cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Error: ' + escHtml(e.message) + '</div>';
+  });
+}
+
+function _drawBtMiniChart(idx, data) {
+  var el = document.getElementById('bt-chart-' + idx);
+  if (!el) return;
+  el.innerHTML = '';
+
+  var isDark = document.documentElement.getAttribute('data-theme') === 'dark' || window.matchMedia('(prefers-color-scheme: dark)').matches;
+  var bgColor = isDark ? '#1a1a2e' : '#ffffff';
+  var textColor = isDark ? '#a0a0b0' : '#666';
+  var gridColor = isDark ? 'rgba(255,255,255,.05)' : 'rgba(0,0,0,.05)';
+
+  var chart = LightweightCharts.createChart(el, {
+    width: el.clientWidth,
+    height: 280,
+    layout: { background: { type: 'solid', color: bgColor }, textColor: textColor, fontSize: 10 },
+    grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
+    rightPriceScale: { borderColor: gridColor },
+    timeScale: { borderColor: gridColor, timeVisible: false },
+  });
+
+  if (data.ohlc && data.ohlc.length) {
+    var candleSeries = chart.addCandlestickSeries({
+      upColor: '#22c55e', downColor: '#ef4444',
+      borderUpColor: '#22c55e', borderDownColor: '#ef4444',
+      wickUpColor: '#22c55e88', wickDownColor: '#ef444488',
+    });
+    candleSeries.setData(data.ohlc);
+
+    if (data.trades && data.trades.length) {
+      var markers = [];
+      data.trades.forEach(function(t) {
+        if (t.entry_time) markers.push({ time: t.entry_time, position: 'belowBar', color: '#22c55e', shape: 'arrowUp', text: 'BUY' });
+        if (t.exit_time) markers.push({ time: t.exit_time, position: 'aboveBar', color: t.pnl >= 0 ? '#22c55e' : '#ef4444', shape: 'arrowDown', text: (t.return_pct != null ? (t.return_pct > 0 ? '+' : '') + t.return_pct.toFixed(1) + '%' : 'SELL') });
+      });
+      markers.sort(function(a,b){ return a.time - b.time; });
+      candleSeries.setMarkers(markers);
+    }
+  } else if (data.equity_curve && data.equity_curve.length) {
+    var areaSeries = chart.addAreaSeries({
+      lineColor: '#818cf8', topColor: 'rgba(129,140,248,.3)', bottomColor: 'rgba(129,140,248,.02)', lineWidth: 2,
+    });
+    areaSeries.setData(data.equity_curve);
+  }
+
+  chart.timeScale().fitContent();
+  _btChartInstances[idx] = chart;
+
+  var statsEl = document.getElementById('bt-chart-stats-' + idx);
+  if (statsEl) {
+    var retColor = (data.return_pct||0) > 0 ? '#22c55e' : (data.return_pct||0) < 0 ? '#ef4444' : 'var(--text-muted)';
+    statsEl.innerHTML =
+      '<span>Return: <b style="color:' + retColor + '">' + (data.return_pct != null ? (data.return_pct > 0 ? '+' : '') + data.return_pct.toFixed(1) + '%' : '--') + '</b></span>' +
+      '<span>Trades: <b>' + (data.trade_count||0) + '</b></span>' +
+      '<span>Win Rate: <b>' + (data.win_rate != null ? data.win_rate.toFixed(0) + '%' : '--') + '</b></span>' +
+      '<span>Sharpe: <b>' + (data.sharpe != null ? data.sharpe.toFixed(2) : '--') + '</b></span>';
+  }
+
+  var wrap = el.closest('.bt-chart-wrap');
+  if (wrap) { var loader = wrap.querySelector('.brain-pulse'); if (loader) loader.parentElement.style.display = 'none'; }
+
+  new ResizeObserver(function() { chart.applyOptions({ width: el.clientWidth }); }).observe(el);
 }
 
 function _renderEvEvolution(root, currentSpId) {
@@ -2187,16 +2339,18 @@ function triggerDeepStudy() {
 function triggerRetrainML() {
   var btn = document.getElementById('btn-retrain-ml'); btn.disabled = true; btn.textContent = '&#x1F9E0; Training...';
   fetch('/api/trading/learn/retrain-ml', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
-    btn.disabled = false; btn.textContent = '&#x1F9E0; Retrain ML';
+    btn.disabled = false; btn.textContent = '&#x1F9E0; Train Pattern ML';
     var panel = document.getElementById('brain-reflection'); var content = document.getElementById('brain-reflection-content');
     panel.style.display = 'block';
     if (d.ok && d.cv_accuracy) {
-      content.innerHTML = '<h3 style="color:#22c55e">&#x2705; ML Model Trained</h3><p><strong>Samples:</strong> ' + (d.samples||0) + ' | <strong>CV:</strong> ' + (d.cv_accuracy||0) + '%</p>';
+      var fb = d.feedback || {};
+      content.innerHTML = '<h3 style="color:#22c55e">&#x2705; Pattern ML Trained</h3><p><strong>Samples:</strong> ' + (d.samples||0) + ' | <strong>CV:</strong> ' + (d.cv_accuracy||0) + '% | <strong>Patterns:</strong> ' + (d.active_patterns||0) + '</p>' +
+        (fb.boosted || fb.penalised ? '<p style="font-size:11px;color:var(--text-muted)">Feedback: ' + (fb.boosted||0) + ' patterns boosted, ' + (fb.penalised||0) + ' penalised</p>' : '');
       loadBrainDashboard();
     } else {
-      content.innerHTML = '<h3 style="color:#f59e0b">&#x26A0; Not Enough Data</h3><p>' + (d.reason||'Need more labeled snapshots') + '</p>';
+      content.innerHTML = '<h3 style="color:#f59e0b">&#x26A0; Not Enough Data</h3><p>' + (d.reason||'Need more labeled snapshots or active patterns') + '</p>';
     }
-  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F9E0; Retrain ML';});
+  }).catch(function(){btn.disabled=false;btn.textContent='&#x1F9E0; Train Pattern ML';});
 }
 
 /* ══════════════════════════════════════════════════

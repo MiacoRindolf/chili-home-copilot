@@ -3092,43 +3092,132 @@ def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[s
     return result
 
 
+def _indicator_data_to_flat_snapshot(
+    ind_data: dict[str, Any], price: float | None,
+) -> dict[str, Any]:
+    """Convert nested ``get_indicator_snapshot()`` output to flat dict for ``evaluate_patterns()``."""
+    snap: dict[str, Any] = {}
+    if price is not None:
+        snap["price"] = price
+
+    rsi_val = (ind_data.get("rsi") or {}).get("value")
+    if rsi_val is not None:
+        snap["rsi_14"] = rsi_val
+
+    for ema_key in ("ema_20", "ema_50", "ema_100"):
+        v = (ind_data.get(ema_key) or {}).get("value")
+        if v is not None:
+            snap[ema_key] = v
+
+    sma20 = (ind_data.get("sma_20") or {}).get("value")
+    if sma20 is not None:
+        snap["sma_20"] = sma20
+
+    macd_hist = (ind_data.get("macd") or {}).get("histogram")
+    if macd_hist is not None:
+        snap["macd_hist"] = macd_hist
+
+    adx_val = (ind_data.get("adx") or {}).get("adx")
+    if adx_val is not None:
+        snap["adx"] = adx_val
+
+    atr_val = (ind_data.get("atr") or {}).get("value")
+    if atr_val is not None:
+        snap["atr"] = atr_val
+
+    bb = ind_data.get("bbands") or {}
+    bb_upper = bb.get("upper")
+    bb_lower = bb.get("lower")
+    if bb_upper and bb_lower and bb_upper > bb_lower:
+        bandwidth = (bb_upper - bb_lower) / ((bb_upper + bb_lower) / 2)
+        snap["bb_squeeze"] = bandwidth < 0.04
+
+    obv = (ind_data.get("obv") or {}).get("value")
+    if obv is not None:
+        snap["obv"] = obv
+
+    stoch_k = (ind_data.get("stoch") or {}).get("k")
+    if stoch_k is not None:
+        snap["stoch_k"] = stoch_k
+
+    return snap
+
+
 def _predict_single_ticker(
     ticker: str,
     quotes_map: dict[str, dict],
     vix: float | None,
     vol_regime: dict,
-    ml_available: bool,
-    predict_ml_fn,
-    extract_features_fn,
-    market_regime: dict | None = None,
+    meta_learner_ready: bool,
+    meta_predict_fn,
+    active_patterns: list | None = None,
 ) -> dict | None:
-    """Predict a single ticker. Thread-safe; returns None on failure."""
+    """Predict a single ticker using the pattern-driven ML brain.
+
+    Scoring tiers (graceful degradation):
+      1. Meta-learner trained  -> probability from pattern feature model
+      2. Patterns exist, no ML -> weighted soft-match fallback
+      3. No patterns            -> neutral (score=0)
+    """
+    from .pattern_engine import evaluate_patterns_with_strength
+    from .pattern_ml import extract_pattern_features
+
     try:
         snapshot = get_indicator_snapshot(ticker)
         if not snapshot or len(snapshot) < 3:
             return None
         ind_data = {k: v for k, v in snapshot.items() if k not in ("ticker", "interval")}
-        rule_score = compute_prediction(ind_data)
 
         quote = quotes_map.get(ticker)
         if not quote:
             quote = fetch_quote(ticker)
         price = quote["price"] if quote else None
 
-        ml_prob = None
-        blended_score = rule_score
-        if ml_available and price:
-            ind_data_with_ticker = dict(ind_data)
-            ind_data_with_ticker["ticker"] = ticker
-            features = extract_features_fn(
-                ind_data_with_ticker, close_price=price, vix=vix,
-                regime=market_regime,
-            )
-            ml_prob = predict_ml_fn(features)
-            if ml_prob is not None:
-                rule_norm = (rule_score + 10) / 20
-                blended = 0.4 * rule_norm + 0.6 * ml_prob
-                blended_score = round((blended * 20) - 10, 2)
+        if not active_patterns:
+            return None
+
+        flat_snap = _indicator_data_to_flat_snapshot(ind_data, price) if price else {}
+        if not flat_snap:
+            return None
+
+        # Evaluate patterns with strength for explainability
+        matches = evaluate_patterns_with_strength(flat_snap, active_patterns)
+        matched_patterns: list[dict] = []
+        for m in matches:
+            raw_wr = m.get("win_rate")
+            wr_pct = round(raw_wr) if raw_wr is not None and raw_wr > 1 else (round(raw_wr * 100) if raw_wr else None)
+            matched_patterns.append({
+                "name": m["name"],
+                "win_rate": wr_pct,
+                "pattern_id": m.get("pattern_id"),
+                "match_quality": m.get("match_quality"),
+                "conditions_met": m.get("conditions_met"),
+                "conditions_total": m.get("conditions_total"),
+                "avg_strength": m.get("avg_strength"),
+            })
+
+        # --- Tier 1: meta-learner ---
+        meta_prob = None
+        if meta_learner_ready:
+            pat_features = extract_pattern_features(active_patterns, flat_snap)
+            meta_prob = meta_predict_fn(pat_features)
+
+        if meta_prob is not None:
+            blended_score = round((meta_prob - 0.5) * 20, 2)
+        elif matched_patterns:
+            # --- Tier 2: soft-match fallback ---
+            pattern_score = 0.0
+            for m in matches:
+                raw_wr = m.get("win_rate") or 0.5
+                wr = raw_wr / 100.0 if raw_wr > 1 else raw_wr
+                quality = m.get("match_quality", 1.0)
+                strength = m.get("avg_strength", 0.5)
+                contrib = m.get("score_boost", 1.0) * max(0.5, wr) * quality * max(0.3, strength)
+                pattern_score += contrib
+            blended_score = max(-10.0, min(10.0, round(pattern_score, 2)))
+        else:
+            # --- Tier 3: neutral ---
+            blended_score = 0.0
 
         regime = vol_regime.get("regime", "normal")
         if regime == "extreme":
@@ -3164,11 +3253,11 @@ def _predict_single_ticker(
             "ticker": ticker,
             "price": price,
             "score": blended_score,
-            "rule_score": rule_score,
-            "ml_probability": round(ml_prob, 4) if ml_prob is not None else None,
+            "meta_ml_probability": round(meta_prob, 4) if meta_prob is not None else None,
             "direction": direction,
             "confidence": confidence,
-            "signals": _explain_prediction(ind_data, blended_score),
+            "signals": _explain_prediction(matched_patterns, blended_score),
+            "matched_patterns": matched_patterns or [],
             "vix_regime": regime,
             "suggested_stop": stop,
             "suggested_target": target,
@@ -3230,21 +3319,26 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
 
 
 def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> list[dict]:
-    """Core prediction logic (no cache)."""
-    from .ml_engine import predict_ml, extract_features, is_model_ready
+    """Core prediction logic (no cache).  Pattern-driven ML pipeline."""
+    from .pattern_engine import get_active_patterns
+    from .pattern_ml import get_meta_learner
 
     tickers = _build_prediction_tickers(db, tickers)
     ticker_batch = tickers[:150]
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
-    ml_available = is_model_ready()
+
+    meta = get_meta_learner()
+    meta_ready = meta.is_ready()
 
     try:
-        from .market_data import get_market_regime
-        _mkt_regime = get_market_regime()
+        _active_patterns = get_active_patterns(db)
     except Exception:
-        _mkt_regime = None
+        _active_patterns = []
+
+    if not _active_patterns:
+        return []
 
     quotes_map = fetch_quotes_batch(ticker_batch)
 
@@ -3254,9 +3348,9 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
         futures = {
             pool.submit(
                 _predict_single_ticker,
-                t, quotes_map, vix, vol_regime, ml_available,
-                predict_ml, extract_features,
-                _mkt_regime,
+                t, quotes_map, vix, vol_regime,
+                meta_ready, meta.predict,
+                _active_patterns,
             ): t
             for t in ticker_batch
         }
@@ -3269,53 +3363,36 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
     return results
 
 
-def _explain_prediction(ind_data: dict, score: float) -> list[str]:
-    """Generate human-readable explanations for a prediction."""
-    reasons = []
-    rsi = (ind_data.get("rsi") or {}).get("value")
-    macd_data = ind_data.get("macd") or {}
-    stoch = (ind_data.get("stoch") or {}).get("k")
-    e20 = (ind_data.get("ema_20") or {}).get("value")
-    e50 = (ind_data.get("ema_50") or {}).get("value")
-    e100 = (ind_data.get("ema_100") or {}).get("value")
-    adx = (ind_data.get("adx") or {}).get("adx")
+def _explain_prediction(
+    matched_patterns: list[dict] | None,
+    score: float,
+) -> list[str]:
+    """Generate human-readable explanations from matched patterns."""
+    reasons: list[str] = []
 
-    if rsi is not None:
-        if rsi < 30:
-            reasons.append(f"RSI oversold at {rsi:.0f}")
-        elif rsi < 40:
-            reasons.append(f"RSI near oversold ({rsi:.0f})")
-        elif rsi > 70:
-            reasons.append(f"RSI overbought at {rsi:.0f}")
-        elif rsi > 60:
-            reasons.append(f"RSI elevated ({rsi:.0f})")
-
-    hist = macd_data.get("histogram")
-    macd_l = macd_data.get("macd")
-    macd_s = macd_data.get("signal")
-    if macd_l is not None and macd_s is not None:
-        if macd_l > macd_s and hist and hist > 0:
-            reasons.append("MACD bullish crossover")
-        elif macd_l < macd_s and hist and hist < 0:
-            reasons.append("MACD bearish crossover")
-
-    if e20 is not None and e50 is not None and e100 is not None:
-        if e20 > e50 > e100:
-            reasons.append("EMA stacking bullish")
-        elif e20 < e50 < e100:
-            reasons.append("EMA stacking bearish")
-
-    if stoch is not None:
-        if stoch < 20:
-            reasons.append(f"Stochastic oversold ({stoch:.0f})")
-        elif stoch > 80:
-            reasons.append(f"Stochastic overbought ({stoch:.0f})")
-
-    if adx is not None and adx > 25:
-        reasons.append(f"Strong trend (ADX {adx:.0f})")
+    if matched_patterns:
+        for mp in matched_patterns:
+            wr = mp.get("win_rate")
+            met = mp.get("conditions_met")
+            total = mp.get("conditions_total")
+            strength = mp.get("avg_strength")
+            label = mp["name"]
+            parts: list[str] = []
+            if wr is not None:
+                parts.append(f"{wr}% WR")
+            if met is not None and total is not None and met < total:
+                parts.append(f"{met}/{total} conditions")
+            if strength is not None and strength < 1.0:
+                parts.append(f"{round(strength * 100)}% strength")
+            if parts:
+                label += f" ({', '.join(parts)})"
+            reasons.append(f"Pattern: {label}")
 
     if not reasons:
-        reasons.append("Mixed signals, no strong conviction")
+        if abs(score) < 0.5:
+            reasons.append("No active patterns matched — neutral")
+        else:
+            reasons.append("Weak pattern signals")
 
     return reasons
 
@@ -3517,8 +3594,9 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     learning_st = get_learning_status()
     vol_regime = get_volatility_regime()
 
-    from .ml_engine import get_model_stats, is_model_ready
-    ml_stats = get_model_stats()
+    from .pattern_ml import get_meta_learner
+    _meta = get_meta_learner()
+    ml_stats = _meta.get_stats()
 
     return {
         "total_patterns": total_patterns,
@@ -3552,11 +3630,12 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         "vix": vol_regime.get("vix"),
         "vix_regime": vol_regime.get("regime"),
         "vix_label": vol_regime.get("label"),
-        "ml_ready": is_model_ready(),
+        "ml_ready": _meta.is_ready(),
         "ml_accuracy": ml_stats.get("cv_accuracy", 0),
         "ml_samples": ml_stats.get("samples", 0),
         "ml_trained_at": ml_stats.get("trained_at"),
         "ml_feature_importances": ml_stats.get("feature_importances"),
+        "ml_active_patterns": ml_stats.get("active_patterns", 0),
     }
 
 
@@ -5188,16 +5267,27 @@ def run_learning_cycle(
         _learning_status["steps_completed"] = 20
         _step_time("signals", step_start, f"{len(events)} events")
 
-        # Step 11: Train ML model (with regime features)
+        # Step 11: Train pattern meta-learner
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        _learning_status["current_step"] = "Training ML model"
+        _learning_status["current_step"] = "Training pattern meta-learner"
         _learning_status["phase"] = "ml_training"
-        from .ml_engine import train_model as _train_ml
-        ml_result = _train_ml(db)
+        from .pattern_ml import get_meta_learner, apply_ml_feedback
+        _meta = get_meta_learner()
+        ml_result = _meta.train(db)
         report["ml_trained"] = ml_result.get("ok", False)
         report["ml_accuracy"] = ml_result.get("cv_accuracy", 0)
+        if ml_result.get("ok"):
+            _fb = apply_ml_feedback(db, _meta.get_pattern_importances())
+            report["ml_feedback_boosted"] = _fb.get("boosted", 0)
+            report["ml_feedback_penalised"] = _fb.get("penalised", 0)
+            log_learning_event(
+                db, user_id, "ml_feedback",
+                f"Pattern meta-learner trained: CV acc={ml_result.get('cv_accuracy',0)}%, "
+                f"{ml_result.get('active_patterns',0)} patterns, "
+                f"{_fb.get('boosted',0)} boosted, {_fb.get('penalised',0)} penalised",
+            )
         _learning_status["steps_completed"] = 21
         _step_time("ml_train", step_start,
                     f"acc={ml_result.get('cv_accuracy', 0):.3f}"

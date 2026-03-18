@@ -2994,6 +2994,29 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Load brain tickers -> populate Quick Add Crypto + resolve default ticker
   _initFromBrain();
+
+  // Deep-link: auto-open backtest tab from brain page links
+  var _urlParams = new URLSearchParams(window.location.search);
+  if (_urlParams.get('tab') === 'backtest') {
+    var _dlTicker = _urlParams.get('ticker');
+    var _dlStrategy = _urlParams.get('strategy');
+    var _dlPeriod = _urlParams.get('period');
+    setTimeout(function() {
+      if (_dlTicker) selectTicker(_dlTicker);
+      switchTabByName('backtest');
+      setTimeout(function() {
+        if (_dlStrategy) {
+          var sel = document.getElementById('bt-strategy');
+          if (sel) { for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === _dlStrategy) { sel.value = _dlStrategy; break; } } }
+        }
+        if (_dlPeriod) {
+          var per = document.getElementById('bt-period');
+          if (per) { for (var i = 0; i < per.options.length; i++) { if (per.options[i].value === _dlPeriod) { per.value = _dlPeriod; break; } } }
+        }
+        runBacktest();
+      }, 600);
+    }, 500);
+  }
 });
 
 function _initFromBrain() {

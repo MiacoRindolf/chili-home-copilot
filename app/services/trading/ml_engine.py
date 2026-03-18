@@ -1,7 +1,8 @@
-"""Machine learning prediction engine for the AI Brain.
+"""DEPRECATED — Legacy ML engine.
 
-Uses GradientBoostingClassifier trained on historical snapshot outcomes
-to predict whether a ticker will go up in the next 5 days.
+Replaced by ``pattern_ml.PatternMetaLearner`` which trains on pattern
+features rather than raw indicators.  Functions here are kept as stubs
+so existing imports don't break.
 """
 from __future__ import annotations
 
@@ -143,188 +144,30 @@ def _features_to_array(features: dict[str, float]) -> np.ndarray:
 
 
 def train_model(db) -> dict[str, Any]:
-    """Train a GradientBoostingClassifier on labeled snapshots."""
-    from sklearn.ensemble import GradientBoostingClassifier
-    from sklearn.model_selection import cross_val_score
-    from sklearn.metrics import accuracy_score, precision_score, recall_score
-
-    from ...models.trading import MarketSnapshot
-
-    global _model, _model_stats
-
-    snaps = db.query(MarketSnapshot).filter(
-        MarketSnapshot.future_return_5d.isnot(None),
-        MarketSnapshot.indicator_data.isnot(None),
-    ).order_by(MarketSnapshot.snapshot_date.desc()).limit(5000).all()
-
-    if len(snaps) < _MIN_SAMPLES:
-        logger.info(f"[ml_engine] Not enough labeled snapshots ({len(snaps)}/{_MIN_SAMPLES})")
-        return {
-            "ok": False,
-            "reason": "Not enough training data yet",
-            "labeled_snapshots": len(snaps),
-            "needed": _MIN_SAMPLES,
-            "tip": "Run a full market scan, then wait 1-2 days for outcomes to be verified. "
-                   "Snapshots need at least 5 trading days before their predictions can be checked.",
-        }
-
-    def _extract_one(snap_data: dict) -> tuple[list[float], int] | None:
-        try:
-            ind_data = json.loads(snap_data["indicator_data"]) if snap_data["indicator_data"] else {}
-            if not ind_data:
-                return None
-            ind_data["ticker"] = snap_data["ticker"]
-            for k in ("news_sentiment", "news_count", "pe_ratio", "market_cap_b"):
-                if snap_data.get(k) is not None:
-                    ind_data[k] = snap_data[k]
-            features = extract_features(
-                ind_data,
-                close_price=snap_data["close_price"],
-                vix=snap_data.get("vix_at_snapshot"),
-                regime=None,
-            )
-            x = [features.get(f, 0.0) for f in FEATURE_NAMES]
-            y = 1 if (snap_data.get("future_return_5d") or 0) > 0 else 0
-            return (x, y)
-        except Exception:
-            return None
-
-    snap_dicts = [
-        {
-            "indicator_data": s.indicator_data,
-            "ticker": s.ticker,
-            "close_price": s.close_price,
-            "future_return_5d": s.future_return_5d,
-            "news_sentiment": getattr(s, "news_sentiment", None),
-            "news_count": getattr(s, "news_count", None),
-            "pe_ratio": getattr(s, "pe_ratio", None),
-            "market_cap_b": getattr(s, "market_cap_b", None),
-            "vix_at_snapshot": getattr(s, "vix_at_snapshot", None),
-        }
-        for s in snaps
-    ]
-
-    from concurrent.futures import ThreadPoolExecutor
-    X_rows = []
-    y_rows = []
-    _n_workers = min(max(4, (os.cpu_count() or 4)), len(snap_dicts) // 50 + 1)
-    with ThreadPoolExecutor(max_workers=_n_workers) as pool:
-        for result in pool.map(_extract_one, snap_dicts):
-            if result is not None:
-                X_rows.append(result[0])
-                y_rows.append(result[1])
-
-    if len(X_rows) < _MIN_SAMPLES:
-        return {
-            "ok": False,
-            "reason": "Not enough usable samples after filtering",
-            "labeled_snapshots": len(snaps),
-            "usable_samples": len(X_rows),
-            "needed": _MIN_SAMPLES,
-            "tip": "Some snapshots had missing indicator data. Run more scans to collect better data.",
-        }
-
-    X = np.array(X_rows)
-    y = np.array(y_rows)
-
-    clf = GradientBoostingClassifier(
-        n_estimators=100,
-        max_depth=4,
-        learning_rate=0.1,
-        subsample=0.8,
-        min_samples_leaf=5,
-        random_state=42,
-    )
-
-    cv_scores = cross_val_score(clf, X, y, cv=min(5, max(2, len(X) // 20)), scoring="accuracy", n_jobs=-1)
-
-    clf.fit(X, y)
-
-    y_pred = clf.predict(X)
-    train_acc = round(accuracy_score(y, y_pred) * 100, 1)
-    cv_acc = round(cv_scores.mean() * 100, 1)
-    precision = round(precision_score(y, y_pred, zero_division=0) * 100, 1)
-    recall = round(recall_score(y, y_pred, zero_division=0) * 100, 1)
-
-    importances = {
-        FEATURE_NAMES[i]: round(float(clf.feature_importances_[i]), 4)
-        for i in range(len(FEATURE_NAMES))
-    }
-    importances = dict(sorted(importances.items(), key=lambda x: x[1], reverse=True))
-
-    with _model_lock:
-        _model = clf
-        _model_stats = {
-            "trained_at": datetime.utcnow().isoformat(),
-            "samples": len(X),
-            "positive_rate": round(y.mean() * 100, 1),
-            "train_accuracy": train_acc,
-            "cv_accuracy": cv_acc,
-            "precision": precision,
-            "recall": recall,
-            "feature_importances": importances,
-        }
-
-    try:
-        _DATA_DIR.mkdir(parents=True, exist_ok=True)
-        with open(_MODEL_PATH, "wb") as f:
-            pickle.dump({"model": clf, "stats": _model_stats, "features": FEATURE_NAMES}, f)
-        logger.info(f"[ml_engine] Model saved to {_MODEL_PATH}")
-    except Exception as e:
-        logger.warning(f"[ml_engine] Could not save model: {e}")
-
-    logger.info(
-        f"[ml_engine] Trained on {len(X)} samples: "
-        f"CV accuracy={cv_acc}%, precision={precision}%, recall={recall}%"
-    )
-
-    return {"ok": True, **_model_stats}
+    """DEPRECATED — delegates to PatternMetaLearner."""
+    logger.warning("[ml_engine] train_model is deprecated; use PatternMetaLearner.train()")
+    from .pattern_ml import get_meta_learner
+    return get_meta_learner().train(db)
 
 
 def load_model() -> bool:
-    """Load persisted model from disk."""
-    global _model, _model_stats
-    if not _MODEL_PATH.exists():
-        return False
-    try:
-        with open(_MODEL_PATH, "rb") as f:
-            data = pickle.load(f)
-        with _model_lock:
-            _model = data["model"]
-            _model_stats = data.get("stats", {})
-        logger.info(f"[ml_engine] Model loaded ({_model_stats.get('samples', '?')} samples)")
-        return True
-    except Exception as e:
-        logger.warning(f"[ml_engine] Could not load model: {e}")
-        return False
+    """DEPRECATED — loads PatternMetaLearner instead."""
+    from .pattern_ml import load_meta_learner
+    return load_meta_learner()
 
 
 def predict_ml(features: dict[str, float]) -> float | None:
-    """Return probability (0-1) that the ticker goes up in 5 days.
-
-    Returns None if no model is available.
-    """
-    with _model_lock:
-        model = _model
-    if model is None:
-        return None
-    try:
-        X = _features_to_array(features)
-        prob = float(model.predict_proba(X)[0][1])
-        return round(prob, 4)
-    except Exception:
-        return None
+    """DEPRECATED — returns None. Use PatternMetaLearner.predict()."""
+    return None
 
 
 def get_model_stats() -> dict[str, Any]:
-    """Return current model stats for the dashboard."""
-    return dict(_model_stats) if _model_stats else {
-        "trained_at": None,
-        "samples": 0,
-        "cv_accuracy": 0,
-    }
+    """DEPRECATED — returns PatternMetaLearner stats."""
+    from .pattern_ml import get_meta_learner
+    return get_meta_learner().get_stats()
 
 
 def is_model_ready() -> bool:
-    with _model_lock:
-        return _model is not None
+    """DEPRECATED — checks PatternMetaLearner readiness."""
+    from .pattern_ml import get_meta_learner
+    return get_meta_learner().is_ready()

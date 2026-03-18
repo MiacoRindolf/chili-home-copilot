@@ -3684,7 +3684,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                 candidates[t]["brain_score"] = p["score"]
                 candidates[t]["brain_confidence"] = p["confidence"]
                 candidates[t]["brain_direction"] = p["direction"]
-                candidates[t]["ml_probability"] = p.get("ml_probability")
+                candidates[t]["ml_probability"] = p.get("meta_ml_probability")
                 if p.get("suggested_stop"):
                     candidates[t]["brain_stop"] = p["suggested_stop"]
                 if p.get("suggested_target"):
@@ -3710,7 +3710,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                     "brain_score": p["score"],
                     "brain_confidence": p["confidence"],
                     "brain_direction": p["direction"],
-                    "ml_probability": p.get("ml_probability"),
+                    "ml_probability": p.get("meta_ml_probability"),
                     "risk_reward": p.get("risk_reward"),
                 }
     except Exception:
