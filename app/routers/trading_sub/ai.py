@@ -460,6 +460,8 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "best_exit": best_exit,
             "scan_pattern_id": linked_sp.id if linked_sp else None,
             "parent_scan_pattern_id": linked_sp.parent_id if linked_sp else None,
+            "ticker_scope": getattr(linked_sp, "ticker_scope", "universal") if linked_sp else "universal",
+            "scope_tickers": getattr(linked_sp, "scope_tickers", None) if linked_sp else None,
         }
         if ins.active:
             active.append(entry)

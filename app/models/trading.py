@@ -260,6 +260,8 @@ class ScanPattern(Base):
     exit_config: Optional[str] = Column(Text, nullable=True)
     variant_label: Optional[str] = Column(String(40), nullable=True)
     generation: int = Column(Integer, nullable=False, default=0)
+    ticker_scope: str = Column(String(20), nullable=False, default="universal")
+    scope_tickers: Optional[str] = Column(Text, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

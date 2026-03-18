@@ -176,24 +176,22 @@ def _repair_wrongly_deactivated():
 
 
 def _reinfer_pattern_timeframes():
-    """One-time migration: re-infer timeframe for existing patterns that are
-    stuck on the default '1d' when the inference logic would assign something
-    more appropriate (e.g. crypto patterns -> 4h, intraday -> 15m)."""
+    """One-time migration: re-infer timeframe for ALL existing patterns using
+    the latest dynamic inference logic.  Only updates rows whose inferred
+    timeframe differs from the current value."""
     _log = logging.getLogger("chili.reinfer_tf")
     try:
         from .db import SessionLocal as _SL
         from .models.trading import ScanPattern
         from .services.backtest_service import infer_pattern_timeframe
         import json as _json
+        from collections import Counter
 
         db = _SL()
         try:
-            patterns = (
-                db.query(ScanPattern)
-                .filter(ScanPattern.timeframe == "1d")
-                .all()
-            )
+            patterns = db.query(ScanPattern).all()
             updated = 0
+            changes: Counter = Counter()
             for p in patterns:
                 conditions: list[dict] = []
                 try:
@@ -207,19 +205,76 @@ def _reinfer_pattern_timeframes():
                     asset_class=p.asset_class or "all",
                     description=p.description or "",
                 )
-                if new_tf != "1d":
+                old_tf = p.timeframe or "1d"
+                if new_tf != old_tf:
+                    changes[f"{old_tf}->{new_tf}"] += 1
                     p.timeframe = new_tf
                     updated += 1
             if updated:
                 db.commit()
-                _log.info("[reinfer_tf] Updated timeframe for %d patterns (of %d with '1d')",
-                          updated, len(patterns))
+                summary = ", ".join(f"{k}: {v}" for k, v in changes.most_common())
+                _log.info("[reinfer_tf] Updated %d of %d patterns: %s",
+                          updated, len(patterns), summary)
             else:
-                _log.info("[reinfer_tf] All %d patterns already have correct timeframes", len(patterns))
+                _log.info("[reinfer_tf] All %d patterns already have correct timeframes",
+                          len(patterns))
         finally:
             db.close()
     except Exception:
         _log.exception("[reinfer_tf] Failed to re-infer pattern timeframes")
+
+
+def _ensure_ticker_scope_columns():
+    """Add ticker_scope and scope_tickers columns if they don't exist yet."""
+    _log = logging.getLogger("chili.migrate")
+    try:
+        from .db import engine as _engine
+        from sqlalchemy import text, inspect as sa_inspect
+        insp = sa_inspect(_engine)
+        existing = {c["name"] for c in insp.get_columns("scan_patterns")}
+        with _engine.begin() as conn:
+            if "ticker_scope" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE scan_patterns ADD COLUMN ticker_scope VARCHAR(20) NOT NULL DEFAULT 'universal'"
+                ))
+                _log.info("[migrate] Added ticker_scope column to scan_patterns")
+            if "scope_tickers" not in existing:
+                conn.execute(text(
+                    "ALTER TABLE scan_patterns ADD COLUMN scope_tickers TEXT"
+                ))
+                _log.info("[migrate] Added scope_tickers column to scan_patterns")
+    except Exception:
+        _log.exception("[migrate] Failed to add ticker_scope columns")
+
+
+def _recompute_all_ticker_scopes():
+    """One-time: classify ticker_scope for all patterns with enough backtest data."""
+    _log = logging.getLogger("chili.scope_recompute")
+    try:
+        from .db import SessionLocal as _SL
+        from .models.trading import ScanPattern
+
+        db = _SL()
+        try:
+            from .services.trading.learning import recompute_ticker_scope
+            patterns = db.query(ScanPattern).filter(ScanPattern.active.is_(True)).all()
+            updated = 0
+            for p in patterns:
+                old_scope = p.ticker_scope or "universal"
+                new_scope = recompute_ticker_scope(db, p.id)
+                if new_scope and new_scope != old_scope:
+                    updated += 1
+            if updated:
+                db.commit()
+                _log.info("[scope_recompute] Updated ticker_scope for %d of %d active patterns",
+                          updated, len(patterns))
+            else:
+                _log.info("[scope_recompute] All %d active patterns already have correct scopes",
+                          len(patterns))
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("[scope_recompute] Failed to recompute ticker scopes")
 
 
 def _backfill_backtests():
@@ -398,7 +453,9 @@ async def lifespan(app: FastAPI):
     _prewarm_market_context()
     _dedup_backtests()
     _repair_wrongly_deactivated()
+    _ensure_ticker_scope_columns()
     _reinfer_pattern_timeframes()
+    _recompute_all_ticker_scopes()
     threading.Thread(target=_backfill_backtests, daemon=True).start()
     yield
     _stop_massive_ws()

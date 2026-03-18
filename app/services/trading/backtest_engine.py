@@ -87,6 +87,11 @@ for _sect, _tlist in SECTOR_TICKERS.items():
     if _sect != "crypto":
         _ALL_STOCK_TICKERS.update(_tlist)
 
+TICKER_TO_SECTOR: dict[str, str] = {}
+for _sect, _tlist in SECTOR_TICKERS.items():
+    for _t in _tlist:
+        TICKER_TO_SECTOR[_t] = _sect
+
 _CRYPTO_HINTS = {
     "btc", "eth", "sol", "bnb", "xrp", "crypto", "-usd", "coin",
     "defi", "token", "blockchain", "doge", "altcoin",
@@ -344,15 +349,14 @@ def _select_tickers(
     db: Session | None = None,
     insight_id: int | None = None,
     target_count: int = 40,
+    ticker_scope: str = "universal",
+    scope_tickers: list[str] | None = None,
 ) -> list[str]:
-    """Build a **broad, balanced** ticker pool across all sectors + crypto.
+    """Build a ticker pool for backtesting, respecting the pattern's scope.
 
-    Every pattern is tested against both stocks and crypto so the brain can
-    *learn* which asset classes work best from actual results instead of
-    guessing up front.  The allocation is fixed at ~30 % crypto / ~70 %
-    stocks (distributed evenly across all stock sectors).
-
-    Mentioned tickers and previous winners are still prioritised.
+    * ``ticker_specific`` -- 60 % from scope tickers, 40 % exploration
+    * ``sector`` -- 60 % from scope sectors, 40 % exploration
+    * ``universal`` -- broad diversification across all sectors + crypto
     """
     pool: list[str] = []
     pool_set: set[str] = set()
@@ -365,11 +369,30 @@ def _select_tickers(
     for t in ctx["mentioned_tickers"]:
         _add(t)
 
+    if ticker_scope == "ticker_specific" and scope_tickers:
+        for t in scope_tickers:
+            _add(t)
+        bias_count = max(1, int(target_count * 0.6)) - len(pool)
+        if bias_count > 0 and scope_tickers:
+            extras = scope_tickers * ((bias_count // len(scope_tickers)) + 1)
+            random.shuffle(extras)
+            for t in extras[:bias_count]:
+                _add(t)
+    elif ticker_scope == "sector" and scope_tickers:
+        bias_count = max(1, int(target_count * 0.6)) - len(pool)
+        for sector_name in scope_tickers:
+            sector_list = SECTOR_TICKERS.get(sector_name, [])
+            avail = [t for t in sector_list if t not in pool_set]
+            per = max(1, bias_count // max(1, len(scope_tickers)))
+            for t in random.sample(avail, min(per, len(avail))):
+                _add(t)
+
     crypto_list = SECTOR_TICKERS.get("crypto", [])
     stock_sectors = [k for k in SECTOR_TICKERS if k != "crypto"]
 
-    n_crypto = int(target_count * _DEFAULT_CRYPTO_RATIO)
-    n_stocks = target_count - n_crypto
+    remaining = target_count - len(pool)
+    n_crypto = int(remaining * _DEFAULT_CRYPTO_RATIO)
+    n_stocks = remaining - n_crypto
 
     already_crypto = sum(1 for t in pool if t.endswith("-USD"))
     already_stocks = len(pool) - already_crypto
@@ -574,13 +597,12 @@ def smart_backtest_insight(
     shutdown = _get_shutdown_event()
     desc = insight.pattern_description or ""
     ctx = _extract_context(desc, db=db, insight_id=insight.id)
-    tickers = _select_tickers(
-        ctx, db=db, insight_id=insight.id, target_count=target_tickers,
-    )
 
     linked = _find_linked_pattern(db, insight)
     exit_config: dict[str, Any] | None = None
     timeframe = "1d"
+    _scope = "universal"
+    _scope_tickers: list[str] | None = None
 
     if linked:
         conditions, pattern_name, exit_config = linked
@@ -588,15 +610,19 @@ def smart_backtest_insight(
         if sp_id:
             try:
                 from ...models.trading import ScanPattern
+                import json as _json
                 sp = db.query(ScanPattern).get(sp_id)
                 if sp:
                     timeframe = getattr(sp, "timeframe", "1d") or "1d"
+                    _scope = getattr(sp, "ticker_scope", "universal") or "universal"
+                    _raw_st = getattr(sp, "scope_tickers", None)
+                    if _raw_st:
+                        try:
+                            _scope_tickers = _json.loads(_raw_st)
+                        except Exception:
+                            pass
             except Exception:
                 pass
-        logger.info(
-            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s, tf=%s)",
-            pattern_name, len(tickers), "custom" if exit_config else "auto", timeframe,
-        )
     else:
         conditions = _parse_conditions_from_description(desc)
         pattern_name = None
@@ -607,6 +633,18 @@ def smart_backtest_insight(
             )
             return {"wins": 0, "losses": 0, "total": 0, "backtests_run": 0}
         timeframe = infer_pattern_timeframe(conditions, name=desc[:60])
+
+    tickers = _select_tickers(
+        ctx, db=db, insight_id=insight.id, target_count=target_tickers,
+        ticker_scope=_scope, scope_tickers=_scope_tickers,
+    )
+
+    if linked:
+        logger.info(
+            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s, tf=%s, scope=%s)",
+            pattern_name, len(tickers), "custom" if exit_config else "auto", timeframe, _scope,
+        )
+    else:
         logger.info(
             "[backtest_engine] Parsed %d conditions from description for insight %d — %d tickers (tf=%s)",
             len(conditions), insight.id, len(tickers), timeframe,

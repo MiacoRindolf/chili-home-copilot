@@ -1041,7 +1041,7 @@ _EXPLICIT_TF_HINTS: dict[str, list[str]] = {
     "15m": ["15m", "15-min", "15min", "quarter hour"],
     "1h":  ["1h ", "1-hour", "1hour", "hourly", "60m", "60min"],
     "4h":  ["4h", "4-hour", "4 hour", "4hour", "intraswing"],
-    "1d":  ["daily", "1d ", "eod", "end of day", "weekly", "position"],
+    "1d":  ["daily", "1d ", "eod", "end of day"],
 }
 
 _SCALP_HINTS = {
@@ -1061,16 +1061,13 @@ _MID_HINTS = {
     "4h", "4-hour", "4 hour", "intraswing",
 }
 _SLOW_SWING_HINTS = {
-    "vcp", "volume contraction", "tight range",
+    "vcp", "volume contraction",
     "swing", "multi-day", "weekly", "position",
-    "52 week", "52-week", "relative volume contraction",
-    "cup and handle", "flat top", "ema stack",
+    "52 week", "52-week",
 }
 
 _SWING_INDICATORS = {
-    "resistance_retests", "vcp_count", "narrow_range",
-    "dist_to_resistance_pct", "retest_range_tightening",
-    "ema_stack", "sma_cross",
+    "vcp_count", "narrow_range",
 }
 
 _TIMEFRAME_PARAMS: dict[str, dict[str, Any]] = {

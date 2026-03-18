@@ -922,7 +922,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
-    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant", "tf_variant"}
+    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant"}
     for ins in existing:
         sp = None
         if getattr(ins, "scan_pattern_id", None):
@@ -3176,12 +3176,41 @@ def _predict_single_ticker(
         if not active_patterns:
             return None
 
+        from .backtest_engine import TICKER_TO_SECTOR as _T2S
+        _ticker_sector = _T2S.get(ticker)
+        applicable_patterns = []
+        for _pat in active_patterns:
+            _scope = getattr(_pat, "ticker_scope", "universal") or "universal"
+            if _scope == "universal":
+                applicable_patterns.append(_pat)
+            elif _scope == "ticker_specific":
+                try:
+                    _st = json.loads(getattr(_pat, "scope_tickers", None) or "[]")
+                except (json.JSONDecodeError, TypeError):
+                    _st = []
+                if ticker in _st:
+                    applicable_patterns.append(_pat)
+            elif _scope == "sector":
+                if _ticker_sector:
+                    try:
+                        _ss = json.loads(getattr(_pat, "scope_tickers", None) or "[]")
+                    except (json.JSONDecodeError, TypeError):
+                        _ss = []
+                    if _ticker_sector in _ss:
+                        applicable_patterns.append(_pat)
+                else:
+                    applicable_patterns.append(_pat)
+            else:
+                applicable_patterns.append(_pat)
+
+        if not applicable_patterns:
+            return None
+
         flat_snap = _indicator_data_to_flat_snapshot(ind_data, price) if price else {}
         if not flat_snap:
             return None
 
-        # Evaluate patterns with strength for explainability
-        matches = evaluate_patterns_with_strength(flat_snap, active_patterns)
+        matches = evaluate_patterns_with_strength(flat_snap, applicable_patterns)
         matched_patterns: list[dict] = []
         for m in matches:
             raw_wr = m.get("win_rate")
@@ -4072,7 +4101,7 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
 
     _PROTECTED_ORIGINS = {
         "builtin", "user_seeded", "seed", "user",
-        "exit_variant", "entry_variant", "combo_variant", "tf_variant",
+        "exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant",
     }
 
     patterns = db.query(ScanPattern).filter_by(active=True).all()
@@ -4105,6 +4134,79 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
     if modified:
         db.commit()
     return modified
+
+
+# ── Ticker-scope classification ────────────────────────────────────
+
+def recompute_ticker_scope(db: Session, pattern_id: int) -> str | None:
+    """Classify a pattern as universal / sector / ticker_specific from its
+    backtest results and persist the outcome.
+
+    Returns the new scope string, or None when there isn't enough data.
+    """
+    from ...models.trading import ScanPattern, TradingInsight, BacktestResult
+    from .backtest_engine import TICKER_TO_SECTOR
+
+    pat = db.query(ScanPattern).get(pattern_id)
+    if not pat:
+        return None
+
+    insight_ids = [
+        r[0] for r in db.query(TradingInsight.id)
+        .filter(TradingInsight.scan_pattern_id == pattern_id)
+        .all()
+    ]
+    if not insight_ids:
+        return None
+
+    bts = (
+        db.query(BacktestResult)
+        .filter(
+            BacktestResult.related_insight_id.in_(insight_ids),
+            BacktestResult.trade_count > 0,
+        )
+        .all()
+    )
+    if len(bts) < 5:
+        return pat.ticker_scope
+
+    winners = [b for b in bts if (b.return_pct or 0) > 0]
+    if not winners:
+        return pat.ticker_scope
+
+    sector_wins: dict[str, int] = {}
+    ticker_wins: dict[str, int] = {}
+    for w in winners:
+        t = w.ticker or ""
+        ticker_wins[t] = ticker_wins.get(t, 0) + 1
+        sector = TICKER_TO_SECTOR.get(t, "unknown")
+        sector_wins[sector] = sector_wins.get(sector, 0) + 1
+
+    total_wins = len(winners)
+
+    top_tickers = sorted(ticker_wins.items(), key=lambda x: -x[1])
+    top3_ticker_wins = sum(c for _, c in top_tickers[:3])
+    if total_wins >= 3 and top3_ticker_wins / total_wins >= 0.70 and len(top_tickers) <= 5:
+        new_scope = "ticker_specific"
+        scope_list = [t for t, _ in top_tickers[:5]]
+        pat.ticker_scope = new_scope
+        pat.scope_tickers = json.dumps(scope_list)
+        return new_scope
+
+    top_sectors = sorted(sector_wins.items(), key=lambda x: -x[1])
+    top2_sector_wins = sum(c for _, c in top_sectors[:2])
+    unique_sectors = {s for s in sector_wins if s != "unknown"}
+    if total_wins >= 3 and top2_sector_wins / total_wins >= 0.60 and len(unique_sectors) <= 3:
+        new_scope = "sector"
+        scope_list = [s for s, _ in top_sectors[:2] if s != "unknown"]
+        if scope_list:
+            pat.ticker_scope = new_scope
+            pat.scope_tickers = json.dumps(scope_list)
+            return new_scope
+
+    pat.ticker_scope = "universal"
+    pat.scope_tickers = None
+    return "universal"
 
 
 # ── Entry condition mutation operators ─────────────────────────────
@@ -4394,6 +4496,8 @@ def _create_variant_child(
     rules_json: str | None = None,
     exit_config_json: str | None = None,
     timeframe: str | None = None,
+    ticker_scope: str | None = None,
+    scope_tickers_json: str | None = None,
 ) -> "ScanPattern":
     """Low-level helper: create a child ScanPattern + linked TradingInsight."""
     from ...models.trading import ScanPattern, TradingInsight
@@ -4416,6 +4520,8 @@ def _create_variant_child(
         exit_config=exit_config_json or parent.exit_config,
         variant_label=variant_label,
         generation=(parent.generation or 0) + 1,
+        ticker_scope=ticker_scope or getattr(parent, "ticker_scope", "universal") or "universal",
+        scope_tickers=scope_tickers_json if scope_tickers_json is not None else getattr(parent, "scope_tickers", None),
     )
     db.add(child)
     db.flush()
@@ -4687,20 +4793,145 @@ def fork_timeframe_variants(
     return created_ids
 
 
+def fork_scope_variants(
+    db: Session,
+    pattern_id: int,
+    max_variants: int = 2,
+) -> list[int]:
+    """Create children that test the same pattern with narrower or broader
+    ticker scope.
+
+    From a universal parent:  create sector + ticker_specific children
+    based on the best-performing sectors/tickers from backtests.
+    From a ticker_specific parent:  create a universal child to test if
+    the pattern generalises.
+    """
+    from ...models.trading import ScanPattern, TradingInsight, BacktestResult
+    from .backtest_engine import TICKER_TO_SECTOR
+    import random
+
+    parent = db.query(ScanPattern).get(pattern_id)
+    if not parent or not parent.active:
+        return []
+
+    existing_children = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
+        .count()
+    )
+    if existing_children >= _MAX_ACTIVE_VARIANTS:
+        return []
+
+    existing_labels = set(
+        r[0] for r in db.query(ScanPattern.variant_label)
+        .filter(ScanPattern.parent_id == pattern_id)
+        .all() if r[0]
+    )
+
+    insight_ids = [
+        r[0] for r in db.query(TradingInsight.id)
+        .filter(TradingInsight.scan_pattern_id == pattern_id)
+        .all()
+    ]
+    winners: list[str] = []
+    if insight_ids:
+        winners = [
+            r[0] for r in db.query(BacktestResult.ticker)
+            .filter(
+                BacktestResult.related_insight_id.in_(insight_ids),
+                BacktestResult.trade_count > 0,
+                BacktestResult.return_pct > 0,
+            )
+            .all()
+            if r[0]
+        ]
+
+    parent_scope = getattr(parent, "ticker_scope", "universal") or "universal"
+    slots = min(max_variants, _MAX_ACTIVE_VARIANTS - existing_children)
+    created_ids: list[int] = []
+
+    if parent_scope == "universal" and winners:
+        sector_counts: dict[str, int] = {}
+        ticker_counts: dict[str, int] = {}
+        for t in winners:
+            ticker_counts[t] = ticker_counts.get(t, 0) + 1
+            s = TICKER_TO_SECTOR.get(t, "unknown")
+            if s != "unknown":
+                sector_counts[s] = sector_counts.get(s, 0) + 1
+
+        if sector_counts and len(created_ids) < slots:
+            top_sector = max(sector_counts, key=sector_counts.get)
+            label = f"scope-sector-{top_sector}"[:40]
+            if label not in existing_labels:
+                child = _create_variant_child(
+                    db, parent,
+                    origin="scope_variant",
+                    variant_label=label,
+                    ticker_scope="sector",
+                    scope_tickers_json=json.dumps([top_sector]),
+                )
+                existing_labels.add(label)
+                created_ids.append(child.id)
+                logger.info(
+                    "[learning] Forked scope variant: %s (universal->sector:%s, parent=%d)",
+                    child.name, top_sector, parent.id,
+                )
+
+        if ticker_counts and len(created_ids) < slots:
+            top_tickers = sorted(ticker_counts, key=ticker_counts.get, reverse=True)[:5]
+            label = f"scope-tickers-{','.join(top_tickers[:3])}"[:40]
+            if label not in existing_labels:
+                child = _create_variant_child(
+                    db, parent,
+                    origin="scope_variant",
+                    variant_label=label,
+                    ticker_scope="ticker_specific",
+                    scope_tickers_json=json.dumps(top_tickers),
+                )
+                existing_labels.add(label)
+                created_ids.append(child.id)
+                logger.info(
+                    "[learning] Forked scope variant: %s (universal->tickers:%s, parent=%d)",
+                    child.name, top_tickers, parent.id,
+                )
+
+    elif parent_scope in ("ticker_specific", "sector") and len(created_ids) < slots:
+        label = "scope-universal"
+        if label not in existing_labels:
+            child = _create_variant_child(
+                db, parent,
+                origin="scope_variant",
+                variant_label=label,
+                ticker_scope="universal",
+                scope_tickers_json=None,
+            )
+            existing_labels.add(label)
+            created_ids.append(child.id)
+            logger.info(
+                "[learning] Forked scope variant: %s (%s->universal, parent=%d)",
+                child.name, parent_scope, parent.id,
+            )
+
+    if created_ids:
+        db.commit()
+    return created_ids
+
+
 def fork_pattern_variants(
     db: Session,
     pattern_id: int,
     loss_report: dict[str, Any] | None = None,
 ) -> list[int]:
-    """Fork entry, exit, combo, AND timeframe variants for a pattern.
+    """Fork entry, exit, combo, timeframe, AND scope variants for a pattern.
 
-    Orchestrates all four axes of evolution.
+    Orchestrates all five axes of evolution.
     """
     created: list[int] = []
     created.extend(fork_exit_variants(db, pattern_id))
     created.extend(fork_entry_variants(db, pattern_id, loss_report=loss_report))
     created.extend(fork_combo_variants(db, pattern_id))
     created.extend(fork_timeframe_variants(db, pattern_id))
+    created.extend(fork_scope_variants(db, pattern_id))
     return created
 
 
@@ -4850,7 +5081,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         .filter(
             ScanPattern.active.is_(True),
             ScanPattern.parent_id.is_(None),
-            ScanPattern.origin.notin_(["exit_variant", "entry_variant", "combo_variant", "tf_variant"]),
+            ScanPattern.origin.notin_(["exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant"]),
         )
         .all()
     )
@@ -4870,6 +5101,8 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             stats["forked_combo"] += len(combo_ids)
             tf_ids = fork_timeframe_variants(db, rp.id, max_variants=2)
             stats["forked_tf"] = stats.get("forked_tf", 0) + len(tf_ids)
+            scope_ids = fork_scope_variants(db, rp.id, max_variants=2)
+            stats["forked_scope"] = stats.get("forked_scope", 0) + len(scope_ids)
 
     # ── 2. Compare phase ─────────────────────────────────────────────
     parents_with_children = (
@@ -4949,6 +5182,11 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             parent.timeframe = winner.timeframe
             parent.updated_at = datetime.utcnow()
             stats["promoted"] += 1
+        elif winner.origin == "scope_variant":
+            parent.ticker_scope = getattr(winner, "ticker_scope", "universal") or "universal"
+            parent.scope_tickers = getattr(winner, "scope_tickers", None)
+            parent.updated_at = datetime.utcnow()
+            stats["promoted"] += 1
         elif winner.origin in ("entry_variant", "combo_variant") and winner.rules_json:
             parent.rules_json = winner.rules_json
             parent.updated_at = datetime.utcnow()
@@ -4993,7 +5231,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                 description=(
                     f"Evolution for '{parent.name}': winner={winner.variant_label} "
                     f"({winner.origin}, sharpe={winner_sharpe:.2f}, wr={winner_wr:.0%}). "
-                    f"Compared {len(variant_scores)} variants across exit/entry/combo/timeframe axes."
+                    f"Compared {len(variant_scores)} variants across exit/entry/combo/timeframe/scope axes."
                     + (f" Loss report: avg_losing_return={loss_report['avg_losing_return']}%, "
                        f"sectors={loss_report.get('sector_losses', {})}"
                        if loss_report else "")
