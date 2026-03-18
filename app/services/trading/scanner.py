@@ -281,6 +281,16 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
 
     # ── Scheduler / scanner limits ─────────────────────────────────────
     "momentum_max_results": 3.0,
+
+    # ── Momentum breakout / resistance-retest weights ─────────────────
+    "bo_rsi_momentum_strong": 1.0,
+    "bo_retest_pressure": 2.0,
+    "bo_retest_consolidation": 1.5,
+    "bo_mtf_retest_confirm": 1.0,
+    "crypto_bo_rsi_momentum_strong": 1.0,
+    "crypto_bo_retest_pressure": 2.0,
+    "crypto_bo_retest_consolidation": 1.5,
+    "crypto_bo_mtf_retest_confirm": 1.0,
 }
 
 _adaptive_weights: dict[str, float] = dict(_DEFAULT_WEIGHTS)
@@ -1150,8 +1160,10 @@ def _compute_indicators(df: pd.DataFrame, *, crypto: bool = False) -> dict[str, 
 
     ema20 = EMAIndicator(close=close, window=20).ema_indicator()
     ema50 = EMAIndicator(close=close, window=50).ema_indicator()
+    ema100 = EMAIndicator(close=close, window=100).ema_indicator()
     result["ema_20"] = float(ema20.iloc[-1]) if pd.notna(ema20.iloc[-1]) else None
     result["ema_50"] = float(ema50.iloc[-1]) if pd.notna(ema50.iloc[-1]) else None
+    result["ema_100"] = float(ema100.iloc[-1]) if pd.notna(ema100.iloc[-1]) else None
 
     if crypto:
         ema9 = EMAIndicator(close=close, window=9).ema_indicator()
@@ -1507,6 +1519,64 @@ def _detect_vwap_reclaim(close: pd.Series, vwap_val: float | None,
     return prev_close < vwap_val and curr_close > vwap_val and rvol >= 1.2
 
 
+def _detect_resistance_retests(
+    high: pd.Series,
+    close: pd.Series,
+    resistance: float,
+    tolerance_pct: float = 1.5,
+    lookback: int = 20,
+) -> dict[str, Any]:
+    """Count how many bars touched/came within tolerance of resistance.
+
+    Returns dict with ``retest_count``, ``bars_since_last_retest``,
+    ``range_tightening`` (bool — True when recent range is contracting
+    towards resistance), and ``avg_wick_ratio`` (how far wicks reached
+    into the resistance zone).
+    """
+    result: dict[str, Any] = {
+        "retest_count": 0,
+        "bars_since_last_retest": lookback,
+        "range_tightening": False,
+        "avg_wick_ratio": 0.0,
+    }
+    if len(high) < lookback or resistance <= 0:
+        return result
+
+    h = high.iloc[-lookback:]
+    c = close.iloc[-lookback:]
+    threshold = resistance * (tolerance_pct / 100.0)
+    lower_band = resistance - threshold
+
+    touches = 0
+    last_touch_idx = -1
+    wick_ratios: list[float] = []
+
+    for i in range(len(h)):
+        bar_high = float(h.iloc[i])
+        if pd.isna(bar_high):
+            continue
+        if bar_high >= lower_band:
+            touches += 1
+            last_touch_idx = i
+            penetration = min(bar_high, resistance) - lower_band
+            wick_ratios.append(penetration / threshold if threshold > 0 else 0)
+
+    result["retest_count"] = touches
+    if last_touch_idx >= 0:
+        result["bars_since_last_retest"] = len(h) - 1 - last_touch_idx
+
+    if wick_ratios:
+        result["avg_wick_ratio"] = sum(wick_ratios) / len(wick_ratios)
+
+    if len(h) >= 10:
+        first_half_range = float(h.iloc[:len(h)//2].max() - h.iloc[:len(h)//2].min())
+        second_half_range = float(h.iloc[len(h)//2:].max() - h.iloc[len(h)//2:].min())
+        if first_half_range > 0 and second_half_range < first_half_range * 0.75:
+            result["range_tightening"] = True
+
+    return result
+
+
 _news_sentiment_cache: dict[str, tuple[float, float]] = {}
 _NEWS_SENTIMENT_TTL = 1800  # 30 min — keep sentiment cached longer
 
@@ -1578,6 +1648,8 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         ema_9 = ind["ema_9"]
         ema_21 = ind["ema_21"]
         ema_50 = ind["ema_50"]
+        ema_20 = ind["ema_20"]
+        ema_100 = ind["ema_100"]
         bb_upper = ind["bb_upper"]
         bb_lower = ind["bb_lower"]
         bb_mid = ind["bb_mid"]
@@ -1708,6 +1780,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
             signals.append("Bearish EMA stack")
 
         # RSI
+        crypto_ema_stack = ema_alignment == "bullish_stack"
         if pd.notna(rsi_val):
             if 40 <= rsi_val <= 65:
                 score += get_adaptive_weight("crypto_bo_rsi_momentum")
@@ -1716,8 +1789,42 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("crypto_bo_rsi_oversold")
                 signals.append(f"RSI deeply oversold ({rsi_val:.0f}) — bounce candidate")
             elif rsi_val > 80:
-                score += get_adaptive_weight("crypto_bo_rsi_overextended")
-                signals.append(f"RSI overextended ({rsi_val:.0f}) — caution")
+                if crypto_ema_stack:
+                    score += get_adaptive_weight("crypto_bo_rsi_momentum_strong")
+                    signals.append(f"RSI momentum ({rsi_val:.0f}) + EMA stack — strong continuation")
+                else:
+                    score += get_adaptive_weight("crypto_bo_rsi_overextended")
+                    signals.append(f"RSI overextended ({rsi_val:.0f}) — caution")
+            elif 65 < rsi_val <= 80 and crypto_ema_stack:
+                score += get_adaptive_weight("crypto_bo_rsi_momentum_strong")
+                signals.append(f"RSI momentum ({rsi_val:.0f}) + EMA stack — breakout continuation")
+
+        # ── Resistance retest pressure (momentum breakout path) ──
+        retest_info = _detect_resistance_retests(high, close, resistance, tolerance_pct=2.0, lookback=20)
+        if retest_info["retest_count"] >= 3:
+            score += get_adaptive_weight("crypto_bo_retest_pressure")
+            signals.append(f"Resistance retested {retest_info['retest_count']}x — pressure building")
+            if retest_info["range_tightening"]:
+                nr = _detect_narrow_range(high, low)
+                vcp_count = _detect_vcp(high, low, volume, lookback=20)
+                if nr or vcp_count >= 2:
+                    score += get_adaptive_weight("crypto_bo_retest_consolidation")
+                    tag = nr or f"VCP({vcp_count})"
+                    signals.append(f"Post-retest consolidation ({tag}) — coiled for breakout")
+
+        # ── Multi-timeframe retest confirmation (1h) ──
+        try:
+            df_1h = fetch_ohlcv_df(ticker, interval="1h", period="5d")
+            if not df_1h.empty and len(df_1h) >= 20:
+                h_1h = df_1h["High"]
+                c_1h = df_1h["Close"]
+                res_1h = float(h_1h.rolling(20).max().iloc[-1])
+                mtf_retest = _detect_resistance_retests(h_1h, c_1h, res_1h, tolerance_pct=1.0, lookback=30)
+                if mtf_retest["retest_count"] >= 3:
+                    score += get_adaptive_weight("crypto_bo_mtf_retest_confirm")
+                    signals.append(f"1h: {mtf_retest['retest_count']}x retest — multi-TF pressure confirmed")
+        except Exception:
+            pass
 
         # MACD
         if macd_bullish:
@@ -1883,6 +1990,41 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         if macd_negative and not breakout_confirmed:
             score = min(score, get_adaptive_weight("crypto_bo_macd_neg_cap"))
 
+        # ── Composable Pattern Engine evaluation ──
+        try:
+            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+            from ...db import SessionLocal as _SL
+            _pe_db = _SL()
+            try:
+                _pe_patterns = get_active_patterns(_pe_db, asset_class="crypto")
+                if _pe_patterns:
+                    _pe_snap = build_indicator_snapshot(
+                        price=price,
+                        indicators={
+                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                            "ema_100": float(ema_100) if pd.notna(ema_100) else None,
+                            "bb_squeeze": bb_squeeze,
+                            "adx": float(adx_val) if pd.notna(adx_val) else None,
+                            "rel_vol": rvol,
+                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                            "narrow_range": _detect_narrow_range(high, low),
+                            "vcp_count": _detect_vcp(high, low, volume, lookback=20),
+                        },
+                        resistance=resistance,
+                        retest_info=retest_info,
+                    )
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    for m in _pe_matches:
+                        if score >= m.get("min_base_score", 0):
+                            score += m["score_boost"]
+                            signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
+            finally:
+                _pe_db.close()
+        except Exception:
+            pass
+
         score = max(1.0, min(10.0, score))
 
         _c_long = get_adaptive_weight("crypto_bo_signal_long")
@@ -1953,8 +2095,10 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 "atr": round(atr_val, 6),
                 "bb_width": round(bb_width, 4),
                 "ema_9": smart_round(float(ema_9), crypto=True) if pd.notna(ema_9) else None,
+                "ema_20": smart_round(float(ema_20), crypto=True) if pd.notna(ema_20) else None,
                 "ema_21": smart_round(float(ema_21), crypto=True) if pd.notna(ema_21) else None,
                 "ema_50": smart_round(float(ema_50), crypto=True) if pd.notna(ema_50) else None,
+                "ema_100": smart_round(float(ema_100), crypto=True) if pd.notna(ema_100) else None,
                 "stoch_k": round(float(stoch_k), 1) if pd.notna(stoch_k) else None,
                 "stoch_d": round(float(stoch_d), 1) if pd.notna(stoch_d) else None,
                 "rvol": rvol,
@@ -2000,10 +2144,32 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
     _crypto_scan_running = True
 
     from .prescreener import get_trending_crypto, _crypto_top_movers
-    from ..massive_client import get_dead_tickers as _get_massive_dead
 
     try:
         tickers = set(DEFAULT_CRYPTO_TICKERS)
+
+        # Pull the full crypto universe the brain knows about
+        try:
+            from ..ticker_universe import get_all_crypto_tickers
+            tickers.update(get_all_crypto_tickers(n=200))
+        except Exception:
+            pass
+
+        # Pull crypto tickers the brain has already scored (DB knowledge)
+        try:
+            from ...db import SessionLocal
+            from ...models.trading import MarketSnapshot
+            _db = SessionLocal()
+            try:
+                known = _db.query(MarketSnapshot.ticker).filter(
+                    MarketSnapshot.ticker.like("%-USD")
+                ).distinct().all()
+                tickers.update(t[0] for t in known)
+            finally:
+                _db.close()
+        except Exception:
+            pass
+
         try:
             tickers.update(get_trending_crypto())
         except Exception:
@@ -2013,11 +2179,9 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
         except Exception:
             pass
 
-        dead = _get_massive_dead()
-        before = len(tickers)
-        tickers = {t for t in tickers if f"X:{t.upper()}" not in dead}
-        if before != len(tickers):
-            logger.info(f"[crypto_breakout] Pruned {before - len(tickers)} dead tickers (Massive 404 cache)")
+        # NOTE: We intentionally skip the Massive dead-ticker filter here.
+        # Many crypto tickers 404 on Massive but resolve fine via yfinance.
+        # The hard RSI/EMA filters will drop genuinely bad tickers anyway.
 
         ticker_list = sorted(tickers)
         total = len(ticker_list)
@@ -2133,6 +2297,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         macd_hist = ind["macd_hist"]
         ema_20 = ind["ema_20"]
         ema_50 = ind["ema_50"]
+        ema_100 = ind["ema_100"]
         adx_val = ind["adx"]
         atr_val = ind["atr"]
         rel_vol = ind["rel_vol"]
@@ -2189,16 +2354,55 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         if pd.notna(ema_20) and pd.notna(ema_50):
             if price > float(ema_20) > float(ema_50):
                 score += get_adaptive_weight("bo_ema_support")
-                signals.append("Above rising EMAs — bullish base")
+                if pd.notna(ema_100) and float(ema_20) > float(ema_50) > float(ema_100):
+                    signals.append("Above rising EMAs (20/50/100) — strong bullish base")
+                else:
+                    signals.append("Above rising EMAs — bullish base")
 
         # RSI neutral zone (not overbought for a pre-breakout)
+        ema_stack_bullish = (pd.notna(ema_20) and pd.notna(ema_50) and pd.notna(ema_100)
+                            and price > float(ema_20) > float(ema_50) > float(ema_100))
         if pd.notna(rsi_val):
             if 45 <= rsi_val <= 65:
                 score += get_adaptive_weight("bo_rsi_neutral")
                 signals.append(f"RSI neutral ({rsi_val:.0f}) — room to run")
             elif rsi_val > 70:
-                score += get_adaptive_weight("bo_rsi_overbought")
-                signals.append(f"RSI overbought ({rsi_val:.0f}) — may fade")
+                if ema_stack_bullish:
+                    score += get_adaptive_weight("bo_rsi_momentum_strong")
+                    signals.append(f"RSI momentum ({rsi_val:.0f}) + EMA stack — strong continuation")
+                else:
+                    score += get_adaptive_weight("bo_rsi_overbought")
+                    signals.append(f"RSI overbought ({rsi_val:.0f}) — may fade")
+            elif 65 < rsi_val <= 80 and ema_stack_bullish:
+                score += get_adaptive_weight("bo_rsi_momentum_strong")
+                signals.append(f"RSI momentum ({rsi_val:.0f}) + EMA stack — breakout continuation setup")
+
+        # ── Resistance retest pressure (momentum breakout path) ──
+        retest_info = _detect_resistance_retests(high, close, resistance, tolerance_pct=1.5, lookback=20)
+        if retest_info["retest_count"] >= 3:
+            score += get_adaptive_weight("bo_retest_pressure")
+            signals.append(f"Resistance retested {retest_info['retest_count']}x — pressure building")
+            if retest_info["range_tightening"]:
+                nr = _detect_narrow_range(high, low)
+                vcp_count = _detect_vcp(high, low, volume, lookback=20)
+                if nr or vcp_count >= 2:
+                    score += get_adaptive_weight("bo_retest_consolidation")
+                    tag = nr or f"VCP({vcp_count})"
+                    signals.append(f"Post-retest consolidation ({tag}) — coiled for breakout")
+
+        # ── Multi-timeframe retest confirmation (15m) ──
+        try:
+            df_15m = fetch_ohlcv_df(ticker, interval="15m", period="5d")
+            if not df_15m.empty and len(df_15m) >= 20:
+                h_15m = df_15m["High"]
+                c_15m = df_15m["Close"]
+                res_15m = float(h_15m.rolling(20).max().iloc[-1])
+                mtf_retest = _detect_resistance_retests(h_15m, c_15m, res_15m, tolerance_pct=1.0, lookback=40)
+                if mtf_retest["retest_count"] >= 3:
+                    score += get_adaptive_weight("bo_mtf_retest_confirm")
+                    signals.append(f"15m: {mtf_retest['retest_count']}x retest of ${smart_round(res_15m)} — intraday pressure confirmed")
+        except Exception:
+            pass
 
         # ── MACD gate (primary momentum filter — weight is brain-adaptive) ──
         if pd.notna(macd_hist) and pd.notna(macd_line) and pd.notna(macd_sig):
@@ -2422,9 +2626,43 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("bo_news_bearish_penalty")
                 signals.append("Recent news sentiment is bearish — breakout may face headwinds")
 
-        score = max(1.0, min(10.0, score))
+        # ── Composable Pattern Engine evaluation ──
+        try:
+            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+            from ...models.trading import ScanPattern as _SP
+            from ...db import SessionLocal as _SL
+            _pe_db = _SL()
+            try:
+                _pe_patterns = get_active_patterns(_pe_db, asset_class="stocks")
+                if _pe_patterns:
+                    _pe_snap = build_indicator_snapshot(
+                        price=price,
+                        indicators={
+                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                            "ema_100": float(ema_100) if pd.notna(ema_100) else None,
+                            "bb_squeeze": is_squeeze,
+                            "adx": float(adx_val) if pd.notna(adx_val) else None,
+                            "rel_vol": rel_vol,
+                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                            "narrow_range": _detect_narrow_range(high, low),
+                            "vcp_count": _detect_vcp(high, low, volume, lookback=20),
+                        },
+                        resistance=resistance,
+                        retest_info=retest_info,
+                    )
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    for m in _pe_matches:
+                        if score >= m.get("min_base_score", 0):
+                            score += m["score_boost"]
+                            signals.append(f"Pattern match: {m['name']} (+{m['score_boost']:.1f})")
+            finally:
+                _pe_db.close()
+        except Exception:
+            pass
 
-        _bo_ready = get_adaptive_weight("bo_signal_ready")
+        score = max(1.0, min(10.0, score))
         _bo_watch = get_adaptive_weight("bo_signal_watch")
         if dist_to_breakout <= 0:
             status = "breaking_out"
@@ -2465,6 +2703,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 "atr": round(atr_f, 6 if _cr else 4),
                 "ema_20": smart_round(float(ema_20), crypto=_cr) if pd.notna(ema_20) else None,
                 "ema_50": smart_round(float(ema_50), crypto=_cr) if pd.notna(ema_50) else None,
+                "ema_100": smart_round(float(ema_100), crypto=_cr) if pd.notna(ema_100) else None,
                 "bb_width_pctile": round(bb_width_pct_rank, 0),
             },
             "news_sentiment": _news_score,

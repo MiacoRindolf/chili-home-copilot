@@ -157,6 +157,12 @@ def list_projects(db: Session, user_id: int) -> list[dict]:
     return [_project_dict(p) for p in projects]
 
 
+def list_all_projects(db: Session) -> list[dict]:
+    """Return every project in the household (home app — no multi-tenant isolation)."""
+    projects = db.query(PlanProject).order_by(PlanProject.updated_at.desc()).all()
+    return [_project_dict(p) for p in projects]
+
+
 def get_project(db: Session, project_id: int, user_id: int) -> dict | None:
     if not _user_can_access(db, project_id, user_id):
         return None

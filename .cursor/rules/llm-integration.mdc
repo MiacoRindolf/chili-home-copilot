@@ -1,0 +1,75 @@
+---
+description: LLM, RAG, and AI integration patterns for CHILI
+globs: "app/openai_client.py,app/services/llm_caller.py,app/rag.py,app/vision.py,app/wellness.py,app/prompts/**"
+alwaysApply: false
+---
+
+# LLM & AI Integration
+
+## Tiered LLM Architecture (openai_client.py)
+
+Two cloud providers with auto-escalation:
+
+| Tier | Provider | Default Model | Env Vars |
+|------|----------|---------------|----------|
+| Primary (free) | Groq | llama-3.3-70b-versatile | `LLM_API_KEY`, `LLM_MODEL`, `LLM_BASE_URL` |
+| Fallback (free) | Gemini | gemini-2.0-flash | `PREMIUM_API_KEY`, `PREMIUM_MODEL`, `PREMIUM_BASE_URL` |
+
+**Auto-escalation**: primary → check quality (`_is_weak_response`) → fallback if weak.
+
+Both `chat()` and `chat_stream()` use the OpenAI-compatible API pattern:
+
+```python
+client = OpenAI(api_key=api_key, base_url=base_url)
+response = client.chat.completions.create(model=model, messages=messages)
+```
+
+## LLM Caller (services/llm_caller.py)
+
+Thin wrapper for services that need LLM calls without importing `chat_service` (avoids circular deps):
+
+```python
+from ..llm_caller import call_llm
+reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=800)
+```
+
+## Prompt Templates (app/prompts/)
+
+LLM prompts are stored as `.txt` files under `app/prompts/`:
+- `system_base.txt` — core CHILI personality
+- `trading_analyst.txt` — trade analysis prompts
+- `planner_system.txt`, `planner_actions.txt`, `planner_page_context.txt`
+- `vision_system.txt`
+
+Loaded via helper function, not hardcoded in Python.
+
+## Ollama Integration
+
+- Planner (`llm_planner.py`): local tool-calling via `requests.post(f"{OLLAMA_URL}/api/generate")`
+- Vision (`vision.py`): llama3.2-vision → cloud fallback
+- Embeddings: `OllamaEmbeddingFunction` for ChromaDB
+- Health check: `requests.get(f"{OLLAMA_URL}/api/tags")`
+
+## RAG (rag.py)
+
+- ChromaDB `PersistentClient` at `data/chroma/`
+- Global collection + per-project collections (`project_{id}`)
+- Distance threshold: `< 1.5` to inject context
+- Embedding model: `nomic-embed-text` via Ollama
+
+## Fallback Chain
+
+Every LLM-dependent path must have fallbacks:
+
+```
+Ollama planner (local) → NLU parser (no LLM) → Groq/Gemini cloud → offline message
+```
+
+## Market Data Providers (Trading)
+
+| Provider | Priority | Use |
+|----------|----------|-----|
+| Massive.com | Primary | Real-time quotes, aggregates, WebSocket |
+| Polygon.io | Secondary | Crypto tickers (`X:BTCUSD` format), fallback |
+| yfinance | Tertiary | Last-resort OHLCV fallback |
+| CoinGecko | Crypto | Crypto metadata, top coins list |

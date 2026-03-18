@@ -1,0 +1,80 @@
+---
+description: Service layer patterns for CHILI business logic
+globs: "app/services/**/*.py"
+alwaysApply: false
+---
+
+# Services Layer
+
+Services in `app/services/` contain business logic. Routers call services; services call models and external APIs.
+
+## Domain Structure
+
+| Domain | Path | Purpose |
+|--------|------|---------|
+| Core | `app/services/*.py` | Chat, brokers, marketplace, voice, LLM caller |
+| Trading | `app/services/trading/` | Scanner, learning, pattern engine, portfolio, alerts, ML |
+| Code Brain | `app/services/code_brain/` | Code indexer, analyzer, reviewer, git miner, trends |
+| Reasoning Brain | `app/services/reasoning_brain/` | User model, interest graph, anticipator, web researcher |
+| Project Brain | `app/services/project_brain/` | Autonomous agents (PO, PM, Architect, devs, QA, DevOps, etc.) |
+
+## Key Service Patterns
+
+### LLM Calls in Services
+
+Use `llm_caller.py` to avoid circular imports (not `chat_service` or `openai_client` directly):
+
+```python
+from ..llm_caller import call_llm
+reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=800)
+```
+
+### Scheduler Integration
+
+Background jobs are registered in `trading_scheduler.py` via APScheduler:
+
+```python
+scheduler.add_job(func, "interval", hours=2, id="job_name", name="Human-readable name")
+```
+
+### Adaptive Weights (Trading)
+
+The trading scanner uses `_DEFAULT_WEIGHTS` dict + `get_adaptive_weight()` to dynamically adjust scoring based on learning outcomes. New weights follow the pattern: `{domain}_{metric}` (e.g., `bo_rsi_momentum_strong`).
+
+### Pattern: Fresh Sessions for Background Tasks
+
+Background jobs and generators that outlive the request must create a fresh session:
+
+```python
+db = SessionLocal()
+try:
+    # ... work ...
+    db.commit()
+finally:
+    db.close()
+```
+
+### Pattern: Fallback Chains
+
+Always implement graceful degradation:
+
+```
+Ollama planner → NLU fallback parser → Groq/Gemini general chat → offline message
+```
+
+Never let a single service failure crash the request.
+
+## Project Brain Agents
+
+Agents inherit from `AgentBase` in `app/services/project_brain/base.py`. Each agent has:
+- `think()` method for autonomous reasoning
+- `process_message()` for user interactions  
+- Self-evolving via web research (`web_research.py`)
+- Priority-driven scheduling (agents with unread messages go first)
+
+## Adding New Services
+
+1. Create module in the appropriate domain directory
+2. Accept `db: Session` as first param, `user_id: int | None` as second
+3. Wrap external calls in try/except with logging
+4. Wire into the scheduler if it needs periodic execution

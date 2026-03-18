@@ -709,6 +709,26 @@ def _migration_023_qa_engineer_tables(conn) -> None:
     conn.commit()
 
 
+def _migration_024_po_question_options(conn) -> None:
+    """Add options column to po_questions for multiple-choice interview flow."""
+    cols = {r[1] for r in conn.execute(text("PRAGMA table_info('po_questions')")).fetchall()}
+    if "options" not in cols:
+        conn.execute(text("ALTER TABLE po_questions ADD COLUMN options TEXT"))
+    conn.commit()
+
+
+def _migration_025_insight_win_loss_counts(conn) -> None:
+    """Add win_count and loss_count columns to trading_insights."""
+    if "trading_insights" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_insights")
+    if "win_count" not in cols:
+        conn.execute(text("ALTER TABLE trading_insights ADD COLUMN win_count INTEGER NOT NULL DEFAULT 0"))
+    if "loss_count" not in cols:
+        conn.execute(text("ALTER TABLE trading_insights ADD COLUMN loss_count INTEGER NOT NULL DEFAULT 0"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -734,6 +754,8 @@ MIGRATIONS = [
     ("021_broker_credentials_table", _migration_021_broker_credentials_table),
     ("022_alert_trade_type_cols", _migration_022_alert_trade_type_cols),
     ("023_qa_engineer_tables", _migration_023_qa_engineer_tables),
+    ("024_po_question_options", _migration_024_po_question_options),
+    ("025_insight_win_loss_counts", _migration_025_insight_win_loss_counts),
 ]
 
 

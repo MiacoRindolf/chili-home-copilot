@@ -670,6 +670,17 @@ def _run_reasoning_learning_job():
         db.close()
 
 
+def _run_web_pattern_research_job():
+    """Executed by APScheduler: search the web for new trading patterns."""
+    logger.info("[scheduler] Starting web pattern research")
+    try:
+        from .trading.web_pattern_researcher import run_web_pattern_research
+        report = run_web_pattern_research()
+        logger.info("[scheduler] Web pattern research result: %s", report)
+    except Exception as e:
+        logger.error("[scheduler] Web pattern research failed: %s", e)
+
+
 def _run_project_brain_job():
     """Run all active Project Brain agent cycles."""
     from ..db import SessionLocal
@@ -831,6 +842,16 @@ def start_scheduler():
                 max_instances=1,
             )
 
+        _scheduler.add_job(
+            _run_web_pattern_research_job,
+            trigger=IntervalTrigger(hours=12),
+            id="web_pattern_research",
+            name="Web pattern research (every 12h)",
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=datetime.now() + timedelta(minutes=30),
+        )
+
         _scheduler.start()
         logger.info(
             f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
@@ -839,7 +860,7 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
-            "stock breakout scanner market hours every 15min)"
+            "stock breakout scanner market hours every 15min, web pattern research every 12h)"
         )
 
 

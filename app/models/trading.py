@@ -63,6 +63,8 @@ class TradingInsight(Base):
     pattern_description: str = Column(Text, nullable=False)
     confidence: float = Column(Float, nullable=False, default=0.5)
     evidence_count: int = Column(Integer, nullable=False, default=1)
+    win_count: int = Column(Integer, nullable=False, default=0)
+    loss_count: int = Column(Integer, nullable=False, default=0)
     last_seen: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     active: bool = Column(Boolean, default=True, nullable=False)
@@ -231,3 +233,51 @@ class StrategyProposal(Base):
 
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
     trade_id: Optional[int] = Column(Integer, nullable=True)
+
+
+class ScanPattern(Base):
+    """Composable breakout/screener pattern — builtin, user-submitted, or brain-discovered."""
+    __tablename__ = "scan_patterns"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    name: str = Column(String(120), nullable=False)
+    description: Optional[str] = Column(Text, nullable=True)
+    rules_json: str = Column(Text, nullable=False, default="{}")
+    origin: str = Column(String(30), nullable=False, default="user")
+    asset_class: str = Column(String(20), nullable=False, default="all")
+    confidence: float = Column(Float, nullable=False, default=0.0)
+    evidence_count: int = Column(Integer, nullable=False, default=0)
+    win_rate: Optional[float] = Column(Float, nullable=True)
+    avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    backtest_count: int = Column(Integer, nullable=False, default=0)
+    score_boost: float = Column(Float, nullable=False, default=0.0)
+    min_base_score: float = Column(Float, nullable=False, default=0.0)
+    active: bool = Column(Boolean, nullable=False, default=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class TradingHypothesis(Base):
+    """Dynamic A/B hypothesis for the brain's self-validation loop.
+
+    Each row represents a testable claim like 'RSI > 65 + EMA stack + retests >= 3
+    outperforms RSI > 65 + EMA stack alone'.  The learning cycle evaluates these
+    against mined historical data each run and tracks confirmation rate over time.
+    """
+    __tablename__ = "trading_hypotheses"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    description: str = Column(Text, nullable=False)
+    condition_a: str = Column(Text, nullable=False)
+    condition_b: str = Column(Text, nullable=False)
+    expected_winner: str = Column(String(5), nullable=False, default="a")
+    origin: str = Column(String(30), nullable=False, default="llm_generated")
+    status: str = Column(String(20), nullable=False, default="pending")
+    times_tested: int = Column(Integer, nullable=False, default=0)
+    times_confirmed: int = Column(Integer, nullable=False, default=0)
+    times_rejected: int = Column(Integer, nullable=False, default=0)
+    last_result_json: Optional[str] = Column(Text, nullable=True)
+    related_weight: Optional[str] = Column(String(80), nullable=True)
+    related_pattern_id: Optional[int] = Column(Integer, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_tested_at: Optional[datetime] = Column(DateTime, nullable=True)

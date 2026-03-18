@@ -114,6 +114,7 @@ class POQuestion(Base):
     category: str = Column(String(50), nullable=False, default="general")  # vision, features, priorities, tech_stack, users, success_criteria
     priority: int = Column(Integer, default=5)
     status: str = Column(String(20), nullable=False, default="pending")  # pending, answered, skipped
+    options: Optional[str] = Column(Text, nullable=True)
     answer: Optional[str] = Column(Text, nullable=True)
     asked_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     answered_at: Optional[datetime] = Column(DateTime, nullable=True)

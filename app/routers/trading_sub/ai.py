@@ -255,6 +255,10 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
         }][:3]
 
+        wc = ins.win_count or 0
+        lc = ins.loss_count or 0
+        real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
+
         entry = {
             "id": ins.id,
             "pattern": desc,
@@ -262,7 +266,9 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "evidence_count": ins.evidence_count,
             "active": ins.active,
             "signal_type": signal_type,
-            "win_rate": float(win_match.group(1)) if win_match else None,
+            "win_rate": real_wr,
+            "win_count": wc,
+            "loss_count": lc,
             "avg_return": float(ret_match.group(1)) if ret_match else None,
             "example_tickers": tickers_found,
             "created_at": ins.created_at.isoformat(),
@@ -280,3 +286,230 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         "total_active": len(active),
         "total_demoted": len(demoted),
     })
+
+
+@router.get("/api/trading/learn/patterns/{pattern_id}/evidence")
+def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depends(get_db)):
+    """Assemble comprehensive evidence for a pattern from all available data sources."""
+    ctx = get_identity_ctx(request, db)
+    from ...models.trading import (
+        TradingInsight, LearningEvent, TradingHypothesis,
+        Trade, BacktestResult,
+    )
+
+    insight = db.query(TradingInsight).filter(
+        TradingInsight.id == pattern_id,
+        TradingInsight.user_id == ctx["user_id"],
+    ).first()
+    if not insight:
+        return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
+
+    desc = insight.pattern_description or ""
+
+    # 1. Learning events linked to this insight
+    events = (
+        db.query(LearningEvent)
+        .filter(LearningEvent.related_insight_id == pattern_id)
+        .order_by(LearningEvent.created_at.desc())
+        .limit(30)
+        .all()
+    )
+    timeline = [
+        {
+            "id": e.id,
+            "event_type": e.event_type,
+            "description": e.description,
+            "confidence_before": e.confidence_before,
+            "confidence_after": e.confidence_after,
+            "created_at": e.created_at.isoformat(),
+        }
+        for e in events
+    ]
+
+    # 2. Related hypotheses — match by keyword overlap or pattern_id link
+    keywords = _extract_keywords_for_matching(desc)
+    all_hyps = db.query(TradingHypothesis).limit(100).all()
+    hypotheses = []
+    for h in all_hyps:
+        h_desc = (h.description or "").lower()
+        if any(kw in h_desc for kw in keywords):
+            confirm_rate = (
+                (h.times_confirmed or 0) / max(1, h.times_tested or 1)
+            )
+            last_result = None
+            if h.last_result_json:
+                try:
+                    last_result = json.loads(h.last_result_json)
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            hypotheses.append({
+                "id": h.id,
+                "description": h.description,
+                "status": h.status,
+                "origin": h.origin,
+                "times_tested": h.times_tested or 0,
+                "times_confirmed": h.times_confirmed or 0,
+                "times_rejected": h.times_rejected or 0,
+                "confirm_rate": round(confirm_rate * 100, 1),
+                "expected_winner": h.expected_winner,
+                "condition_a": h.condition_a,
+                "condition_b": h.condition_b,
+                "last_result": last_result,
+                "last_tested_at": h.last_tested_at.isoformat() if h.last_tested_at else None,
+            })
+
+    # 3. Matching trades by pattern_tags
+    trades_out = []
+    try:
+        trade_keywords = _extract_keywords_for_matching(desc, min_len=3)
+        all_trades = (
+            db.query(Trade)
+            .filter(Trade.user_id == ctx["user_id"], Trade.pattern_tags.isnot(None))
+            .order_by(Trade.entry_date.desc())
+            .limit(200)
+            .all()
+        )
+        for t in all_trades:
+            tags_lower = (t.pattern_tags or "").lower()
+            if any(kw in tags_lower for kw in trade_keywords):
+                trades_out.append({
+                    "id": t.id,
+                    "ticker": t.ticker,
+                    "direction": t.direction,
+                    "entry_price": t.entry_price,
+                    "exit_price": t.exit_price,
+                    "pnl": t.pnl,
+                    "status": t.status,
+                    "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+                    "exit_date": t.exit_date.isoformat() if t.exit_date else None,
+                    "pattern_tags": t.pattern_tags,
+                })
+                if len(trades_out) >= 20:
+                    break
+    except Exception:
+        pass
+
+    # 4. Backtest results matching this pattern (require 2+ keyword hits for relevance)
+    backtests_out = []
+    try:
+        bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
+        all_bts = (
+            db.query(BacktestResult)
+            .order_by(BacktestResult.ran_at.desc())
+            .limit(200)
+            .all()
+        )
+        for bt in all_bts:
+            strat_lower = (bt.strategy_name or "").lower()
+            params_lower = (bt.params or "").lower()
+            combined = strat_lower + " " + params_lower
+            hits = sum(1 for kw in bt_keywords if kw in combined)
+            if hits >= 2:
+                backtests_out.append({
+                    "id": bt.id,
+                    "ticker": bt.ticker,
+                    "strategy_name": bt.strategy_name,
+                    "return_pct": bt.return_pct,
+                    "win_rate": bt.win_rate,
+                    "sharpe": bt.sharpe,
+                    "max_drawdown": bt.max_drawdown,
+                    "trade_count": bt.trade_count,
+                    "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
+                    "relevance": hits,
+                })
+                if len(backtests_out) >= 15:
+                    break
+        backtests_out.sort(key=lambda x: -x.get("relevance", 0))
+    except Exception:
+        pass
+
+    # 5. Compute live aggregate stats from actual evidence
+    computed_stats = _compute_evidence_stats(timeline, hypotheses, trades_out, backtests_out)
+
+    return JSONResponse({
+        "ok": True,
+        "insight": {
+            "id": insight.id,
+            "pattern": desc,
+            "confidence": round(insight.confidence * 100, 1),
+            "evidence_count": insight.evidence_count,
+            "win_count": insight.win_count or 0,
+            "loss_count": insight.loss_count or 0,
+            "win_rate": round((insight.win_count or 0) / max(1, (insight.win_count or 0) + (insight.loss_count or 0)) * 100, 1) if ((insight.win_count or 0) + (insight.loss_count or 0)) > 0 else None,
+            "active": insight.active,
+            "created_at": insight.created_at.isoformat(),
+            "last_seen": insight.last_seen.isoformat() if insight.last_seen else None,
+        },
+        "computed_stats": computed_stats,
+        "timeline": timeline,
+        "hypotheses": hypotheses,
+        "trades": trades_out,
+        "backtests": backtests_out,
+    })
+
+
+def _compute_evidence_stats(
+    timeline: list, hypotheses: list, trades: list, backtests: list,
+) -> dict:
+    """Compute live aggregate stats from the actual evidence data."""
+    stats: dict = {}
+
+    # From hypotheses: average confirmation rate
+    if hypotheses:
+        tested = [h for h in hypotheses if h.get("times_tested", 0) > 0]
+        if tested:
+            avg_confirm = sum(h["confirm_rate"] for h in tested) / len(tested)
+            stats["hypothesis_confirm_rate"] = round(avg_confirm, 1)
+            stats["hypotheses_tested"] = len(tested)
+
+    # From trades: real trade win rate and P&L
+    if trades:
+        closed = [t for t in trades if t.get("pnl") is not None]
+        if closed:
+            wins = sum(1 for t in closed if t["pnl"] > 0)
+            stats["trade_win_rate"] = round(wins / len(closed) * 100, 1)
+            stats["trade_count"] = len(closed)
+            stats["total_pnl"] = round(sum(t["pnl"] for t in closed), 2)
+
+    # From backtests: average return and win rate
+    if backtests:
+        stats["backtest_avg_return"] = round(
+            sum(b["return_pct"] for b in backtests) / len(backtests), 1
+        )
+        stats["backtest_avg_win_rate"] = round(
+            sum(b["win_rate"] for b in backtests) / len(backtests), 1
+        )
+        stats["backtest_count"] = len(backtests)
+
+    # From timeline: count of confirmations vs challenges
+    if timeline:
+        stats["confirmations"] = sum(
+            1 for e in timeline if e.get("event_type") in ("discovery", "real_trade_validation")
+        )
+        stats["challenges"] = sum(
+            1 for e in timeline if e.get("event_type") == "hypothesis_challenged"
+        )
+
+    return stats
+
+
+def _extract_keywords_for_matching(text: str, min_len: int = 4) -> list[str]:
+    """Extract meaningful lowercase keywords from a pattern description for fuzzy matching."""
+    stop_words = {
+        "chili", "validated", "challenge", "discovery", "data", "says", "otherwise",
+        "confirmed", "actually", "outperform", "outperforms", "samples", "better",
+        "with", "than", "from", "that", "this", "entries", "positive", "negative",
+        "above", "below", "signal", "pattern", "average", "return", "based",
+        "when", "have", "been", "more", "less", "into", "over", "under",
+        "trend", "following", "bullish", "bearish", "rate", "combo", "bonus",
+        "synergy", "baseline", "versus", "compared", "strong", "weak",
+        "high", "very", "just", "only", "also", "some", "each", "every",
+    }
+    words = re.findall(r'[a-z_]+', text.lower())
+    keywords = []
+    seen = set()
+    for w in words:
+        if len(w) >= min_len and w not in stop_words and w not in seen:
+            seen.add(w)
+            keywords.append(w)
+    return keywords[:15]

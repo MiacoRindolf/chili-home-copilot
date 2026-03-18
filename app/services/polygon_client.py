@@ -6,7 +6,7 @@ the ``market_data`` abstraction layer.
 
 Symbol conventions:
   - US stocks:  plain ticker like ``AAPL``, ``NVDA``, ``SPY``
-  - Crypto:     ``X:BTC-USD``, ``X:ETH-USD`` (Polygon crypto prefix)
+  - Crypto:     ``X:BTCUSD``, ``X:ETHUSD`` (Polygon crypto prefix, no hyphen)
 """
 from __future__ import annotations
 
@@ -194,10 +194,14 @@ def is_crypto(ticker: str) -> bool:
 
 
 def to_polygon_ticker(ticker: str) -> str:
-    """Convert app-internal ticker to Polygon symbol format."""
+    """Convert app-internal ticker to Polygon symbol format.
+
+    Polygon crypto format uses ``X:BTCUSD`` (no hyphen), while the app uses
+    ``BTC-USD`` (yfinance style).
+    """
     t = ticker.upper()
     if is_crypto(t):
-        return f"X:{t}"
+        return f"X:{t.replace('-', '')}"
     return t
 
 

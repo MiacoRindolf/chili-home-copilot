@@ -6,7 +6,7 @@ client for real-time NBBO quote streaming.
 
 Symbol conventions:
   - US stocks:  plain ticker like ``AAPL``, ``NVDA``, ``SPY``
-  - Crypto:     ``X:BTC-USD``, ``X:ETH-USD`` (Polygon-compatible crypto prefix)
+  - Crypto:     ``X:BTCUSD``, ``X:ETHUSD`` (Polygon-compatible crypto prefix, no hyphen)
 """
 from __future__ import annotations
 
@@ -209,10 +209,27 @@ def is_crypto(ticker: str) -> bool:
 
 
 def to_massive_ticker(ticker: str) -> str:
-    """Convert app-internal ticker to Massive/Polygon-compatible symbol format."""
+    """Convert app-internal ticker to Massive/Polygon-compatible symbol format.
+
+    Polygon crypto format uses ``X:BTCUSD`` (no hyphen), while the app uses
+    ``BTC-USD`` (yfinance style).  Stocks pass through unchanged.
+    """
     t = ticker.upper()
     if is_crypto(t):
-        return f"X:{t}"
+        return f"X:{t.replace('-', '')}"
+    if t.startswith("X:") and "-" in t:
+        return t.replace("-", "")
+    return t
+
+
+def from_massive_ticker(m_ticker: str) -> str:
+    """Convert Polygon-format ``X:BTCUSD`` back to app-internal ``BTC-USD``."""
+    t = m_ticker.upper()
+    if t.startswith("X:"):
+        sym = t[2:]
+        if sym.endswith("USD") and len(sym) > 3:
+            return f"{sym[:-3]}-USD"
+        return sym
     return t
 
 

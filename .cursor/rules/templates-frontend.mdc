@@ -1,0 +1,72 @@
+---
+description: Jinja2 template and frontend conventions for CHILI
+globs: "app/templates/*.html"
+alwaysApply: false
+---
+
+# Templates & Frontend
+
+## Template Inheritance
+
+All pages extend `base.html`:
+
+```html
+{% extends "base.html" %}
+{% block title %}Page Title{% endblock %}
+{% block head_extra %}<!-- page CSS -->{% endblock %}
+{% block content %}<!-- page body -->{% endblock %}
+```
+
+## Styling
+
+- **No CSS framework** — custom CSS with CSS variables for theming
+- Theme toggle: `localStorage['chili-theme']`, `data-theme` attribute on `<html>`
+- Colors via CSS variables: `--bg`, `--fg`, `--accent`, `--border`, `--card-bg`
+- Dark mode: `[data-theme="dark"]` selector overrides
+- Layout: flexbox and CSS grid, `max-width` containers
+
+## JavaScript
+
+- **Vanilla JS only** — no React, Vue, or build tools
+- `fetch()` for API calls with `credentials: 'same-origin'`
+- CDN libraries: `marked.js` (markdown), `highlight.js` (code), `DOMPurify` (sanitization)
+- All JS is inline in template `<script>` blocks
+- LightweightCharts v4 for trading charts with indicator sub-panes
+- HTML5 Drag and Drop for reorderable UI elements (chart panels, etc.)
+
+### API Call Pattern
+
+```javascript
+fetch('/api/endpoint', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(data) })
+  .then(r => r.json())
+  .then(d => { if (!d.ok) { alert(d.error); return; } /* handle d */ })
+  .catch(() => alert('Network error'));
+```
+
+### State Management
+
+Frontend state uses module-level variables with `_` prefix:
+
+```javascript
+var _activeTab = 'overview';
+var _paneSlots = ['rsi', 'main', 'macd'];
+var _screenerLoaded = { breakout: false, patterns: false };
+```
+
+Persist user preferences via `localStorage` (e.g., chart pane order, theme).
+
+## Major Template Pages
+
+| Template | Purpose |
+|----------|---------|
+| `chat.html` | Main chat interface with SSE streaming |
+| `trading.html` | Trading dashboard: charts, screener, patterns, portfolio |
+| `brain.html` | AI Brain dashboard: learning reports, patterns, evidence modals |
+| `planner.html` | Project planner with tasks, labels, members |
+| `home.html` | Home dashboard with household features |
+
+## PWA
+
+- `manifest.json` in `app/static/`
+- Service worker `sw.js`: cache-first for CDN assets, network-first for API calls
+- Icons: `icon-192.png`, `icon-512.png`

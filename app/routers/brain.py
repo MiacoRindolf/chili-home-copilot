@@ -861,9 +861,16 @@ def api_brain_po_next_question(request: Request, db: Session = Depends(get_db)):
     q = po.get_next_question(db, ctx["user_id"])
     if not q:
         return JSONResponse({"ok": True, "question": None})
+    import json as _json
+    opts = []
+    if q.options:
+        try:
+            opts = _json.loads(q.options)
+        except Exception:
+            pass
     return JSONResponse({"ok": True, "question": {
         "id": q.id, "question": q.question, "context": q.context,
-        "category": q.category, "priority": q.priority,
+        "category": q.category, "priority": q.priority, "options": opts,
     }})
 
 
@@ -878,12 +885,23 @@ def api_brain_po_questions(
     po = pb_registry.get_agent("product_owner")
     if not po:
         return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    import json as _json
     questions = po.get_questions(db, ctx["user_id"], status=status)
+
+    def _parse_opts(raw):
+        if not raw:
+            return []
+        try:
+            return _json.loads(raw)
+        except Exception:
+            return []
+
     return JSONResponse({"ok": True, "questions": [
         {
             "id": q.id, "question": q.question, "context": q.context,
             "category": q.category, "priority": q.priority,
             "status": q.status, "answer": q.answer,
+            "options": _parse_opts(q.options),
             "asked_at": q.asked_at.isoformat() if q.asked_at else None,
             "answered_at": q.answered_at.isoformat() if q.answered_at else None,
         }
@@ -921,6 +939,18 @@ def api_brain_po_skip(question_id: int, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True})
 
 
+@router.post("/api/brain/project/agent/product_owner/refresh-options")
+def api_brain_po_refresh_options(request: Request, db: Session = Depends(get_db)):
+    """Generate options for any pending questions that lack them."""
+    ctx = get_identity_ctx(request, db)
+    po = pb_registry.get_agent("product_owner")
+    if not po:
+        return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
+    context = po._review_context(db, ctx["user_id"])
+    upgraded = po._upgrade_optionless_questions(db, ctx["user_id"], context)
+    return JSONResponse({"ok": True, "upgraded": upgraded})
+
+
 @router.get("/api/brain/project/agent/product_owner/requirements")
 def api_brain_po_requirements(request: Request, db: Session = Depends(get_db)):
     """List PO-gathered requirements."""
@@ -940,21 +970,34 @@ def api_brain_po_requirements(request: Request, db: Session = Depends(get_db)):
     ]})
 
 
+class _ReqToTaskBody(BaseModel):
+    project_id: int | None = None
+
+
 @router.post("/api/brain/project/agent/product_owner/requirement/{requirement_id}/to-task")
 def api_brain_po_req_to_task(
     requirement_id: int,
     request: Request,
+    body: _ReqToTaskBody | None = None,
     db: Session = Depends(get_db),
-    project_id: int | None = None,
 ):
     """Push a PO requirement to the Planner as a task."""
     ctx = get_identity_ctx(request, db)
     po = pb_registry.get_agent("product_owner")
     if not po:
         return JSONResponse({"ok": False, "message": "PO agent not found"}, status_code=404)
-    result = po.push_requirement_to_planner(db, ctx["user_id"], requirement_id, project_id=project_id)
+    pid = body.project_id if body else None
+    result = po.push_requirement_to_planner(db, ctx["user_id"], requirement_id, project_id=pid)
     status_code = 200 if result.get("ok") else 400
     return JSONResponse(result, status_code=status_code)
+
+
+@router.get("/api/brain/project/planner-projects")
+def api_brain_planner_projects(db: Session = Depends(get_db)):
+    """List all planner projects in the household for the project picker."""
+    from ..services import planner_service
+    projects = planner_service.list_all_projects(db)
+    return JSONResponse({"ok": True, "projects": projects})
 
 
 # ── Project Manager specific endpoints ────────────────────────────────

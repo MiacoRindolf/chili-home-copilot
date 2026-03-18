@@ -38,6 +38,48 @@ if sys.platform == "win32":
 Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
+try:
+    from .services.trading.pattern_engine import seed_builtin_patterns as _seed_patterns
+    _seed_db = SessionLocal()
+    _seed_patterns(_seed_db)
+    _seed_db.close()
+except Exception:
+    pass
+
+# Backfill win_count/loss_count for existing insights that have evidence but no win/loss data
+try:
+    _bf_db = SessionLocal()
+    from .models.trading import TradingInsight as _TI
+    import re as _re
+    _stale = _bf_db.query(_TI).filter(
+        _TI.evidence_count > 0,
+        (_TI.win_count == None) | (_TI.win_count == 0),  # noqa: E711
+        (_TI.loss_count == None) | (_TI.loss_count == 0),  # noqa: E711
+    ).all()
+    _backfilled = 0
+    for _ins in _stale:
+        _m = _re.search(r"(\d+(?:\.\d+)?)%\s*win", _ins.pattern_description or "")
+        if _m:
+            _parsed_wr = float(_m.group(1))
+            _n_match = _re.search(r"\bn[=:]?\s*(\d+)", _ins.pattern_description or "")
+            _samples_match = _re.search(r"(\d+)\s*samples", _ins.pattern_description or "")
+            if _n_match:
+                _n = int(_n_match.group(1))
+            elif _samples_match:
+                _n = int(_samples_match.group(1))
+            else:
+                _n = min(_ins.evidence_count or 1, 20)
+            _n = max(_n, 1)
+            _ins.win_count = round(_parsed_wr / 100 * _n)
+            _ins.loss_count = _n - _ins.win_count
+            _backfilled += 1
+    if _backfilled:
+        _bf_db.commit()
+        logging.getLogger("chili").info(f"Backfilled win/loss counts for {_backfilled} insights")
+    _bf_db.close()
+except Exception:
+    pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

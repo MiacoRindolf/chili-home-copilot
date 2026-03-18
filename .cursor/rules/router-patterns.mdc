@@ -1,0 +1,80 @@
+---
+description: FastAPI router patterns and endpoint conventions for CHILI
+globs: "app/routers/**/*.py"
+alwaysApply: false
+---
+
+# Router Patterns
+
+## Router Setup
+
+Every router module follows this pattern:
+
+```python
+"""Module docstring describing the routes."""
+from fastapi import APIRouter, Depends, Request
+from fastapi.responses import HTMLResponse, JSONResponse
+from sqlalchemy.orm import Session
+from ..deps import get_db, get_identity_ctx, require_paired
+
+router = APIRouter()
+```
+
+Templates are accessed via `request.app.state.templates` (set in `main.py`), not module-level globals.
+
+## Endpoint Conventions
+
+### Page routes (HTML)
+```python
+@router.get("/path", response_class=HTMLResponse)
+def page_name(request: Request, ctx=Depends(require_paired)):
+    if not ctx:
+        return RedirectResponse("/chat", status_code=303)
+    return request.app.state.templates.TemplateResponse(request, "template.html", {context_dict})
+```
+
+### API routes (JSON)
+```python
+@router.get("/api/resource")
+def list_resource(request: Request, db: Session = Depends(get_db)):
+    ctx = get_identity_ctx(request, db)
+    # ... business logic ...
+    return JSONResponse({"ok": True, "data": result})
+```
+
+### Streaming routes (SSE)
+```python
+@router.post("/api/chat/stream")
+async def stream_endpoint(...):
+    def gen():
+        yield sse_event({"token": text, "done": False})
+        yield sse_event({"token": "", "done": True})
+    return StreamingResponse(gen(), media_type="text/event-stream")
+```
+
+## Identity Resolution
+
+Always resolve identity server-side, never trust client-provided user IDs:
+
+```python
+ctx = get_identity_ctx(request, db)
+user_id = ctx["user_id"]
+user_name = ctx["user_name"]
+is_guest = ctx["is_guest"]
+```
+
+## Sub-Routers
+
+Large domains use sub-router directories (e.g., `routers/trading_sub/`). The parent router includes them:
+```python
+from .trading_sub import ai as ai_sub, broker as broker_sub
+router.include_router(ai_sub.router)
+```
+
+## Error Responses
+
+```python
+return JSONResponse({"ok": False, "error": "Human-readable message"}, status_code=4xx)
+```
+
+Use `{"ok": True, ...}` for success, `{"ok": False, "error": "..."}` for errors.

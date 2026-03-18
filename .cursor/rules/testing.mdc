@@ -1,0 +1,65 @@
+---
+description: Testing patterns and pytest conventions for CHILI
+globs: "tests/**/*.py"
+alwaysApply: false
+---
+
+# Testing Patterns
+
+## Framework
+
+pytest with `httpx` (`TestClient`). In-memory SQLite for isolation.
+
+## Fixtures (conftest.py)
+
+```python
+@pytest.fixture()
+def db():
+    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
+    Base.metadata.create_all(bind=engine)
+    session = sessionmaker(bind=engine)()
+    yield session
+    session.close()
+
+@pytest.fixture()
+def client(db):
+    app.dependency_overrides[get_db] = lambda: (yield db)
+    with TestClient(app) as c:
+        yield c
+    app.dependency_overrides.clear()
+
+@pytest.fixture()
+def paired_client(db, client):
+    user = User(name="TestUser")
+    db.add(user); db.commit(); db.refresh(user)
+    db.add(Device(token="test-token", user_id=user.id, label="Test", client_ip_last="127.0.0.1"))
+    db.commit()
+    client.cookies.set(DEVICE_COOKIE_NAME, "test-token")
+    return client, user
+```
+
+## Test Conventions
+
+- `client` for guest tests, `paired_client` for authenticated tests
+- Mock external services with `@patch`
+- Assert on `resp.json()` shape, DB state, and status codes
+- Test both guest and paired user paths
+- Test files named `test_*.py` matching the module they test
+
+## Test Coverage Areas
+
+| Area | Test Files |
+|------|-----------|
+| Core API | `test_api.py`, `test_conversations.py` |
+| Trading | `test_trading.py`, `test_scanner_scoring.py`, `test_position_sizing.py`, `test_market_data.py` |
+| Brokers | `test_broker_service.py`, `test_broker_sync.py`, `test_trades_sync.py` |
+| AI/LLM | `test_openai_routing.py`, `test_provider_selection.py`, `test_fallback_parser.py` |
+| Brain | `test_code_agent.py`, `test_memory.py`, `test_personality.py` |
+| Features | `test_planner_schema.py`, `test_projects.py`, `test_intercom.py`, `test_voice.py` |
+
+## Running Tests
+
+```bash
+pytest tests/ -v
+pytest tests/test_scanner_scoring.py -v -k "test_specific"
+```

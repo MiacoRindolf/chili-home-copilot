@@ -1,0 +1,64 @@
+---
+description: Pydantic schema and validation patterns for CHILI
+globs: "app/schemas/**/*.py,app/planner_schema.py"
+alwaysApply: false
+---
+
+# Pydantic Schema Patterns
+
+## Version
+
+Pydantic v2 with `pydantic-settings`. Use `model_config = ConfigDict(...)`, not `class Config`.
+
+## Schema Organization
+
+Schemas are split by domain under `app/schemas/`:
+
+| File | Purpose |
+|------|---------|
+| `chat.py` | Chat message schemas |
+| `household.py` | Chore, birthday schemas |
+| `planner.py` | Planner discriminated union (LLM tool-calling) |
+| `trading.py` | Trading API request/response schemas |
+
+## Planner Schema (Discriminated Union)
+
+The LLM planner returns JSON validated against a discriminated union by `type` field:
+
+```python
+class BasePlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    reply: str = Field(min_length=1, max_length=200)
+
+class AddChorePlan(BasePlan):
+    type: Literal["add_chore"]
+    data: AddChoreData
+```
+
+## Inline Pydantic Models in Routers
+
+For simple request bodies in trading/brain routes, define models inline with `_` prefix:
+
+```python
+from pydantic import BaseModel as _BaseModel
+
+class _CreatePatternBody(_BaseModel):
+    name: str
+    rules_json: str
+```
+
+## Strict Validation Rules
+
+- **Always** use `ConfigDict(extra="forbid")` on planner schemas to reject LLM hallucinated fields
+- **Always** use `Field(min_length=1)` on required string fields
+- **Always** use `Field(ge=1)` on ID fields
+- Dates are `date` type, serialized to ISO string
+
+## Configuration (app/config.py)
+
+Uses `pydantic_settings.BaseSettings` with `SettingsConfigDict(env_file=".env")`. Loaded once as singleton:
+
+```python
+from .config import settings
+api_key = settings.massive_api_key
+```

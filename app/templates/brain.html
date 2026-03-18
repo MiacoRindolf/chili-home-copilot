@@ -67,23 +67,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-act-study { background: linear-gradient(135deg,#f59e0b,#d97706); }
 .brain-act-ml { background: linear-gradient(135deg,#06b6d4,#0891b2); }
 
-/* Code Brain collapsible wrapper */
-.code-brain-header {
-  display: flex; align-items: center; gap: 8px; cursor: pointer;
-  margin-top: 20px; margin-bottom: 0; padding: 12px 14px;
-  border: 1px solid var(--border); border-radius: 10px;
-  background: var(--bg-header); transition: all .15s;
-}
-.code-brain-header:hover { background: rgba(6,182,212,.06); }
-.code-brain-header .cb-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); }
-.code-brain-header .cb-chevron { margin-left: auto; font-size: 10px; color: var(--text-muted); transition: transform .2s; }
-.code-brain-header.open .cb-chevron { transform: rotate(180deg); }
-.code-brain-body { display: none; padding-top: 12px; }
-.code-brain-body.open { display: block; }
-
-/* Project lens tab bar (compact pills — visually distinct from agent tabs) */
-.proj-lens-bar { display: flex; flex-wrap: wrap; gap: 3px; margin-bottom: 12px; padding: 2px 0; }
-.proj-lens-tab { display: inline-flex; align-items: center; gap: 3px; padding: 3px 9px; border-radius: 12px; font-size: 9px; font-weight: 600; cursor: pointer; color: var(--text-muted); background: rgba(255,255,255,.04); border: 1px solid var(--border); transition: all .15s; white-space: nowrap; letter-spacing: .2px; }
+/* (Code Brain section and lens tabs removed — merged into agent panels) */
 
 /* Project Agent tab bar */
 .proj-agent-bar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 16px; padding: 6px 0; border-bottom: 1px solid var(--border); }
@@ -102,19 +86,40 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .agent-stat-val { font-size: 18px; font-weight: 700; color: #a78bfa; }
 .agent-stat-lbl { font-size: 10px; color: var(--text-muted); margin-top: 2px; }
 
-/* PO Questions (specific to Product Owner) */
-.po-q-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px; margin-bottom: 10px; }
-.po-q-text { font-size: 12px; font-weight: 600; margin-bottom: 4px; }
-.po-q-ctx { font-size: 10px; color: var(--text-muted); margin-bottom: 8px; }
-.po-q-badge { font-size: 9px; padding: 2px 8px; border-radius: 10px; font-weight: 600; display: inline-block; margin-right: 4px; }
-.po-q-badge.pending { background: rgba(245,158,11,.15); color: #f59e0b; }
-.po-q-badge.answered { background: rgba(34,197,94,.15); color: #22c55e; }
-.po-q-badge.skipped { background: rgba(148,163,184,.15); color: #94a3b8; }
-.po-q-input-row { display: flex; gap: 6px; margin-top: 8px; }
-.po-q-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 7px 10px; font-size: 11px; font-family: inherit; }
-.po-q-btn { padding: 6px 14px; border-radius: 8px; border: none; cursor: pointer; font-size: 10px; font-weight: 600; color: #fff; }
+/* PO Smart Interview */
+.po-q-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 12px; padding: 20px; margin-bottom: 16px; transition: border-color .15s; }
+.po-q-card:hover { border-color: rgba(139,92,246,.2); }
+.po-q-header { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.po-q-badge { font-size: 8px; padding: 2px 7px; border-radius: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.po-q-badge.pending { background: rgba(139,92,246,.12); color: #a78bfa; }
+.po-q-badge.answered { background: rgba(34,197,94,.12); color: #22c55e; }
+.po-q-badge.skipped { background: rgba(148,163,184,.1); color: #64748b; }
+.po-q-text { font-size: 14px; font-weight: 600; line-height: 1.5; color: var(--text); margin-bottom: 4px; }
+.po-q-ctx { font-size: 11px; color: var(--text-muted); margin-bottom: 14px; line-height: 1.4; }
+.po-option-grid { display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px; }
+.po-option-card { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-radius: 10px; border: 1.5px solid var(--border); background: var(--bg); cursor: pointer; transition: all .15s ease; font-size: 12px; line-height: 1.5; color: var(--text); user-select: none; }
+.po-option-card:hover { border-color: rgba(139,92,246,.45); background: rgba(139,92,246,.04); transform: translateX(2px); }
+.po-option-card.selected { border-color: #8b5cf6; background: rgba(139,92,246,.1); box-shadow: 0 0 0 1px rgba(139,92,246,.2); }
+.po-option-radio { width: 18px; height: 18px; border-radius: 50%; border: 2px solid var(--border); flex-shrink: 0; display: flex; align-items: center; justify-content: center; transition: all .15s; }
+.po-option-card:hover .po-option-radio { border-color: rgba(139,92,246,.4); }
+.po-option-card.selected .po-option-radio { border-color: #8b5cf6; background: rgba(139,92,246,.1); }
+.po-option-card.selected .po-option-radio::after { content: ''; width: 8px; height: 8px; border-radius: 50%; background: #8b5cf6; }
+.po-option-label { flex: 1; }
+.po-q-custom-toggle { font-size: 10px; color: var(--text-muted); cursor: pointer; display: inline-flex; align-items: center; gap: 4px; padding: 4px 0; transition: color .15s; }
+.po-q-custom-toggle:hover { color: #a78bfa; }
+.po-q-custom-row { display: flex; gap: 6px; margin-top: 8px; }
+.po-q-input { flex: 1; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 9px 12px; font-size: 12px; font-family: inherit; transition: border-color .15s; }
+.po-q-input:focus { border-color: #8b5cf6; outline: none; }
+.po-q-action-row { display: flex; gap: 8px; margin-top: 12px; align-items: center; }
+.po-q-btn { padding: 8px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 11px; font-weight: 600; color: #fff; transition: all .15s; }
 .po-q-btn.submit { background: linear-gradient(135deg,#8b5cf6,#6d28d9); }
-.po-q-btn.skip { background: var(--border); color: var(--text-muted); }
+.po-q-btn.submit:hover { box-shadow: 0 2px 12px rgba(139,92,246,.3); }
+.po-q-btn.skip { background: transparent; border: 1px solid var(--border); color: var(--text-muted); }
+.po-q-btn.skip:hover { border-color: rgba(139,92,246,.3); color: var(--text); }
+.po-q-answered { font-size: 12px; margin-top: 10px; padding: 10px 14px; background: rgba(34,197,94,.05); border-radius: 8px; border: 1px solid rgba(34,197,94,.12); line-height: 1.5; }
+.po-q-answered strong { color: #22c55e; font-size: 10px; text-transform: uppercase; letter-spacing: .3px; }
+.po-q-refresh-banner { text-align: center; padding: 14px; background: rgba(139,92,246,.05); border: 1px dashed rgba(139,92,246,.25); border-radius: 10px; margin-bottom: 14px; }
+.po-q-refresh-banner .po-q-btn { margin-top: 8px; }
 
 /* PO Requirements (specific to Product Owner) */
 .po-req-row { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; }
@@ -128,6 +133,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .po-req-status { font-size: 9px; color: var(--text-muted); }
 .po-req-push { padding: 4px 10px; border-radius: 6px; border: 1px solid rgba(139,92,246,.3); background: transparent; color: #a78bfa; font-size: 9px; font-weight: 600; cursor: pointer; }
 .po-req-push:hover { background: rgba(139,92,246,.12); }
+
+/* Project picker dropdown */
+.po-req-row { position: relative; }
+.po-project-picker { position: absolute; right: 0; top: 100%; z-index: 50; background: var(--bg-secondary, #1e1e2e); border: 1px solid var(--border); border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35); padding: 6px; min-width: 200px; margin-top: 4px; }
+.po-picker-title { font-size: 10px; color: var(--text-muted); padding: 4px 8px 6px; font-weight: 600; }
+.po-picker-opt { display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: none; background: transparent; color: var(--text); font-size: 11px; cursor: pointer; border-radius: 5px; text-align: left; }
+.po-picker-opt:hover { background: rgba(139,92,246,.12); }
+.po-picker-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
 
 /* Inter-agent message feed */
 .msg-feed { max-height: 350px; overflow-y: auto; }
@@ -178,25 +191,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .agt-evo-dim { font-weight: 600; min-width: 80px; }
 .agt-evo-conf { display: flex; align-items: center; gap: 4px; font-size: 10px; }
 .agt-evo-arrow { color: #22c55e; font-weight: 700; }
-.proj-lens-tab:hover { background: rgba(6,182,212,.1); color: var(--text); border-color: rgba(6,182,212,.3); }
-.proj-lens-tab.active { background: rgba(6,182,212,.18); color: #06b6d4; border-color: rgba(6,182,212,.4); }
-.proj-lens-tab .plt-icon { font-size: 10px; }
-.proj-lens-panel { display: none; }
-.proj-lens-panel.active { display: block; }
-.proj-lens-kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 8px; margin-bottom: 14px; }
-.proj-lens-kpi { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; text-align: center; }
-.proj-lens-kpi .plk-val { font-size: 20px; font-weight: 800; }
-.proj-lens-kpi .plk-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-muted); margin-top: 2px; }
-.proj-hotspot-row { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid var(--border); font-size: 11px; }
-.proj-hotspot-row:last-child { border-bottom: none; }
-.proj-hotspot-file { flex: 1; font-family: var(--font-mono, monospace); color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.proj-hotspot-score { font-weight: 700; min-width: 50px; text-align: right; }
-.proj-insight-row { padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 11px; line-height: 1.5; }
-.proj-insight-row:last-child { border-bottom: none; }
-.proj-insight-cat { display: inline-block; padding: 1px 6px; border-radius: 4px; font-size: 9px; font-weight: 700; text-transform: uppercase; background: rgba(6,182,212,.12); color: #06b6d4; margin-right: 6px; }
-.proj-event-row { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 10px; color: var(--text-muted); }
+/* (lens panel CSS removed) */
+/* (proj-hotspot-row, proj-insight-row, proj-event-row, proj-planner-summary removed — lens panels gone) */
 .proj-event-type { font-weight: 700; color: var(--text); text-transform: uppercase; min-width: 60px; }
-.proj-planner-summary { background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 14px; }
 
 /* Brain sections */
 .brain-section { margin-bottom: 16px; }
@@ -310,8 +307,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Brain modal */
 .brain-modal-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,.45); z-index: 9999; align-items: center; justify-content: center; backdrop-filter: blur(2px); }
 .brain-modal-overlay.active { display: flex; }
-.brain-modal-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 14px; width: 92vw; max-width: 640px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); animation: brainModalIn .2s ease; }
+.brain-modal-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 14px; width: 92vw; max-width: 720px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); animation: brainModalIn .2s ease; }
 @keyframes brainModalIn { from { opacity:0; transform: translateY(20px) scale(.97); } to { opacity:1; transform: none; } }
+@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .brain-modal-header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; }
 .brain-modal-header .bm-close { margin-left: auto; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 20px; line-height: 1; padding: 0 4px; }
 .brain-modal-header .bm-close:hover { color: var(--text); }
@@ -326,6 +324,68 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-modal-footer { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; gap: 8px; justify-content: flex-end; }
 .brain-modal-footer button { padding: 6px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; transition: opacity .15s; }
 .brain-modal-footer button:hover { opacity: .85; }
+
+/* Evidence detail tabs & content */
+.ev-tabs { display: flex; gap: 0; border-bottom: 1px solid var(--border); margin: 10px 0 0; }
+.ev-tab { padding: 7px 14px; font-size: 11px; font-weight: 600; color: var(--text-muted); cursor: pointer; border-bottom: 2px solid transparent; transition: color .15s, border-color .15s; background: none; border-top: none; border-left: none; border-right: none; }
+.ev-tab:hover { color: var(--text); }
+.ev-tab.active { color: #8b5cf6; border-bottom-color: #8b5cf6; }
+.ev-tab-badge { display: inline-block; min-width: 16px; padding: 0 5px; margin-left: 4px; border-radius: 8px; background: rgba(139,92,246,.15); color: #8b5cf6; font-size: 9px; font-weight: 700; text-align: center; line-height: 16px; }
+.ev-pane { display: none; padding: 10px 0 0; }
+.ev-pane.active { display: block; }
+.ev-empty { text-align: center; padding: 20px 10px; color: var(--text-muted); font-size: 11px; }
+
+/* Timeline items */
+.ev-tl-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.08); }
+.ev-tl-item:last-child { border-bottom: none; }
+.ev-tl-dot { width: 8px; height: 8px; border-radius: 50%; margin-top: 4px; flex-shrink: 0; }
+.ev-tl-dot.discovery { background: #8b5cf6; }
+.ev-tl-dot.update { background: #06b6d4; }
+.ev-tl-dot.hypothesis_challenged { background: #ef4444; }
+.ev-tl-dot.real_trade_validation { background: #22c55e; }
+.ev-tl-dot.demotion { background: #f59e0b; }
+.ev-tl-dot.self_validation { background: #3b82f6; }
+.ev-tl-body { flex: 1; min-width: 0; }
+.ev-tl-desc { font-size: 11px; line-height: 1.45; color: var(--text); word-break: break-word; }
+.ev-tl-meta { font-size: 9px; color: var(--text-muted); margin-top: 2px; display: flex; gap: 8px; align-items: center; }
+.ev-tl-conf { display: inline-flex; align-items: center; gap: 3px; }
+.ev-tl-conf .before { color: #ef4444; }
+.ev-tl-conf .after { color: #22c55e; }
+
+/* Hypothesis cards */
+.ev-hyp-card { padding: 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; }
+.ev-hyp-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.ev-hyp-status { display: inline-block; padding: 2px 8px; border-radius: 6px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
+.ev-hyp-status.confirmed { background: rgba(34,197,94,.12); color: #22c55e; }
+.ev-hyp-status.rejected { background: rgba(239,68,68,.12); color: #ef4444; }
+.ev-hyp-status.testing { background: rgba(245,158,11,.12); color: #f59e0b; }
+.ev-hyp-status.pending { background: rgba(107,114,128,.12); color: #9ca3af; }
+.ev-hyp-status.retired { background: rgba(107,114,128,.08); color: #6b7280; }
+.ev-hyp-desc { font-size: 11px; line-height: 1.4; margin-bottom: 6px; }
+.ev-hyp-stats { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 6px; font-size: 10px; }
+.ev-hyp-stat { padding: 4px 6px; background: rgba(139,92,246,.04); border-radius: 4px; text-align: center; }
+.ev-hyp-stat b { display: block; font-size: 12px; }
+.ev-hyp-conds { margin-top: 6px; font-size: 10px; color: var(--text-muted); }
+.ev-hyp-conds code { font-size: 9px; background: rgba(139,92,246,.06); padding: 1px 4px; border-radius: 3px; }
+.ev-hyp-ab { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 6px; }
+.ev-hyp-ab-col { padding: 5px 7px; border-radius: 6px; font-size: 10px; }
+.ev-hyp-ab-col.col-a { background: rgba(34,197,94,.06); border: 1px solid rgba(34,197,94,.15); }
+.ev-hyp-ab-col.col-b { background: rgba(239,68,68,.06); border: 1px solid rgba(239,68,68,.15); }
+.ev-hyp-ab-col .ab-label { font-weight: 700; font-size: 9px; text-transform: uppercase; letter-spacing: .3px; margin-bottom: 3px; }
+
+/* Evidence tables (trades, backtests) */
+.ev-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.ev-table th { text-align: left; font-weight: 600; padding: 5px 6px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .3px; }
+.ev-table td { padding: 5px 6px; border-bottom: 1px solid rgba(128,128,128,.08); }
+.ev-table tr:hover td { background: rgba(139,92,246,.03); }
+.ev-pnl-pos { color: #22c55e; font-weight: 600; }
+.ev-pnl-neg { color: #ef4444; font-weight: 600; }
+.ev-status-badge { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 9px; font-weight: 600; }
+.ev-status-badge.win, .ev-status-badge.closed { background: rgba(34,197,94,.12); color: #22c55e; }
+.ev-status-badge.loss { background: rgba(239,68,68,.12); color: #ef4444; }
+.ev-status-badge.open { background: rgba(59,130,246,.12); color: #3b82f6; }
+.ev-confirm-bar { height: 4px; border-radius: 2px; background: rgba(128,128,128,.15); overflow: hidden; margin-top: 3px; }
+.ev-confirm-fill { height: 100%; border-radius: 2px; transition: width .3s; }
 
 /* Reflection box */
 .brain-reflection-box { display: none; padding: 10px 14px; background: var(--bg-header); border: 1px solid rgba(139,92,246,.3); border-radius: 8px; font-size: 11px; line-height: 1.5; margin-bottom: 12px; }
@@ -536,8 +596,34 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <!-- Project Brain action row -->
       <div class="brain-action-row">
         <button onclick="triggerAllAgentsCycle()" id="btn-all-agents" class="brain-act-btn brain-act-primary">&#x1F504; Run All Agents</button>
-        <button onclick="loadProjectBrainStatus()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4CA; Status</button>
+        <button onclick="triggerCodeLearn()" id="btn-code-learn" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4BB; Reindex Code</button>
+        <button onclick="showAddRepoModal()" class="brain-act-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x2795; Add Repo</button>
+        <button onclick="codeAgentOpen()" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F916; Dev Assistant</button>
         <span id="project-brain-status-text" style="font-size:10px;color:var(--text-muted);margin-left:8px"></span>
+      </div>
+
+      <!-- Code learning pipeline (shows during reindex) -->
+      <div class="brain-section" id="code-pipeline-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Code Learning In Progress</div>
+        <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
+          <div id="code-progress-bar" style="height:100%;background:linear-gradient(90deg,#06b6d4,#0891b2);border-radius:2px;transition:width .3s;width:0%"></div>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
+          <span id="code-learning-step"></span>
+          <span id="code-learning-phase"></span>
+        </div>
+      </div>
+
+      <!-- Dev Assistant Panel (hidden until opened) -->
+      <div class="brain-section" id="code-agent-section" style="display:none">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F916;</span> Dev Assistant</div>
+        <div class="code-agent-panel">
+          <div class="code-agent-input-row">
+            <textarea id="code-agent-prompt" placeholder="Ask Chili to analyze, refactor, or implement something..." rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:12px;resize:vertical;font-family:inherit"></textarea>
+            <button onclick="runCodeAgent()" id="btn-code-agent" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);margin-top:6px">&#x1F680; Run Agent</button>
+          </div>
+          <div id="code-agent-result" style="display:none;margin-top:12px"></div>
+        </div>
       </div>
 
       <!-- Agent tabs -->
@@ -550,9 +636,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <div class="agent-status-card" id="po-status-card"></div>
 
           <div class="brain-section">
-            <div class="brain-section-title"><span class="bs-icon">&#x2753;</span> Questions for You</div>
-            <div id="po-questions" style="max-height:400px;overflow-y:auto">
-              <div style="font-size:11px;color:var(--text-muted)">Run a PO learning cycle to generate questions...</div>
+            <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Product Decisions</div>
+            <div id="po-questions" style="max-height:600px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Run a PO learning cycle to generate smart decisions...</div>
             </div>
           </div>
 
@@ -689,6 +775,56 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <div style="font-size:11px;color:var(--text-muted)">Evolution events will appear...</div>
             </div>
           </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4C1;</span> Repositories</div>
+            <div id="code-repos" class="code-repos-grid">
+              <div style="font-size:11px;color:var(--text-muted)">Loading repos...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Quality Metrics</div>
+            <div class="brain-kpis" id="code-kpis">
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Graph</div>
+            <div id="code-graph" style="max-height:400px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Run a learning cycle to build the dependency graph.</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Discovered Conventions &amp; Patterns</div>
+            <div id="code-insights" style="max-height:400px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Loading insights...</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Quality Trends</div>
+            <div id="code-trends">
+              <div style="font-size:11px;color:var(--text-muted)">Trends will appear after multiple learning cycles.</div>
+            </div>
+          </div>
+
+          <div class="brain-section">
+            <div class="brain-section-title"><span class="bs-icon">&#x1F50E;</span> Code Search</div>
+            <div style="display:flex;gap:6px;margin-bottom:8px">
+              <input type="text" id="code-search-input" placeholder="Search functions, classes, files..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px">
+              <button onclick="runCodeSearch()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2);padding:6px 14px;font-size:11px">Search</button>
+              <button onclick="runCodeSearch(true)" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:6px 14px;font-size:11px" title="Ask LLM">AI Search</button>
+            </div>
+            <div id="code-search-results" style="max-height:300px;overflow-y:auto">
+              <div style="font-size:11px;color:var(--text-muted)">Type a query to search indexed code.</div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -703,139 +839,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </div>
       </div>
 
-      <!-- ═══ Code Brain Sub-Section (collapsible) ═══ -->
-      <div id="code-brain-wrapper">
-      <div class="code-brain-header" id="code-brain-toggle" onclick="toggleCodeBrain()">
-        <span style="font-size:15px">&#x1F4BB;</span>
-        <span class="cb-title">Code Brain</span>
-        <span id="code-brain-summary" style="font-size:10px;color:var(--text-muted)"></span>
-        <span class="cb-chevron">&#x25BC;</span>
-      </div>
-      <div class="code-brain-body" id="code-brain-body">
-
-      <!-- Subdomain lens tabs (Code Brain data views) -->
-      <div class="proj-lens-bar" id="proj-lens-bar"></div>
-
-      <!-- Code learning pipeline -->
-      <div class="brain-section" id="code-pipeline-section" style="display:none">
-        <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Code Learning In Progress</div>
-        <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
-          <div id="code-progress-bar" style="height:100%;background:linear-gradient(90deg,#06b6d4,#0891b2);border-radius:2px;transition:width .3s;width:0%"></div>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
-          <span id="code-learning-step"></span>
-          <span id="code-learning-phase"></span>
-        </div>
-      </div>
-
-      <!-- Code action row -->
-      <div class="brain-action-row">
-        <button onclick="triggerCodeLearn()" id="btn-code-learn" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4BB; Reindex All</button>
-        <button onclick="showAddRepoModal()" class="brain-act-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x2795; Add Repo</button>
-        <button onclick="codeAgentOpen()" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F916; Dev Assistant</button>
-      </div>
-
-      <!-- Repos -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4C1;</span> Repositories</div>
-        <div id="code-repos" class="code-repos-grid">
-          <div style="font-size:11px;color:var(--text-muted)">Loading repos...</div>
-        </div>
-      </div>
-
-      <!-- Code KPIs -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Quality Metrics</div>
-        <div class="brain-kpis" id="code-kpis">
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
-        </div>
-      </div>
-
-      <!-- Hotspots -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Hotspots (High Churn + Complexity)</div>
-        <div id="code-hotspots" style="max-height:350px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Loading hotspots...</div>
-        </div>
-      </div>
-
-      <!-- Insights / Conventions -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Discovered Conventions &amp; Patterns</div>
-        <div id="code-insights" style="max-height:400px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Loading insights...</div>
-        </div>
-      </div>
-
-      <!-- Architecture Graph -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Graph</div>
-        <div id="code-graph" style="max-height:400px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Run a learning cycle to build the dependency graph.</div>
-        </div>
-      </div>
-
-      <!-- Quality Trends -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Quality Trends</div>
-        <div id="code-trends">
-          <div style="font-size:11px;color:var(--text-muted)">Trends will appear after multiple learning cycles.</div>
-        </div>
-      </div>
-
-      <!-- Code Reviews -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Code Reviews</div>
-        <div id="code-reviews" style="max-height:400px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Reviews of recent commits will appear after learning.</div>
-        </div>
-      </div>
-
-      <!-- Dependency Health -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4E6;</span> Dependency Health</div>
-        <div id="code-deps" style="max-height:350px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Dependency alerts will appear after learning.</div>
-        </div>
-      </div>
-
-      <!-- Code Search -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F50E;</span> Code Search</div>
-        <div style="display:flex;gap:6px;margin-bottom:8px">
-          <input type="text" id="code-search-input" placeholder="Search functions, classes, files..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:7px 12px;font-size:12px">
-          <button onclick="runCodeSearch()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2);padding:6px 14px;font-size:11px">Search</button>
-          <button onclick="runCodeSearch(true)" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:6px 14px;font-size:11px" title="Ask LLM">AI Search</button>
-        </div>
-        <div id="code-search-results" style="max-height:300px;overflow-y:auto">
-          <div style="font-size:11px;color:var(--text-muted)">Type a query to search indexed code.</div>
-        </div>
-      </div>
-
-      <!-- Code Activity Timeline -->
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
-        <div class="brain-timeline" id="code-activity">
-          <div style="font-size:11px;color:var(--text-muted)">No activity yet. Add a repo and run indexing.</div>
-        </div>
-      </div>
-
-      <!-- Dev Assistant Panel -->
-      <div class="brain-section" id="code-agent-section" style="display:none">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F916;</span> Dev Assistant</div>
-        <div class="code-agent-panel">
-          <div class="code-agent-input-row">
-            <textarea id="code-agent-prompt" placeholder="Ask Chili to analyze, refactor, or implement something... e.g. 'Add input validation to the user registration endpoint'" rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:12px;resize:vertical;font-family:inherit"></textarea>
-            <button onclick="runCodeAgent()" id="btn-code-agent" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);margin-top:6px">&#x1F680; Run Agent</button>
-          </div>
-          <div id="code-agent-result" style="display:none;margin-top:12px"></div>
-        </div>
-      </div>
-      </div><!-- /code-brain-body -->
-      </div><!-- /code-brain-wrapper -->
+      <!-- (Code Brain sections merged into agent panels above) -->
     </div>
 
     <!-- ═══ Reasoning Domain ═══ -->
@@ -1362,7 +1366,7 @@ function loadLearnedPatterns() {
       var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
       html += '<div class="pattern-card" style="cursor:pointer" onclick="showPatternDetail(' + idx + ',true)"><div class="pc-header"><span class="pc-signal ' + (p.signal_type||'neutral') + '">' + (p.signal_type||'neutral') + '</span><span style="font-weight:700;color:' + barColor + '">' + p.confidence + '%</span></div>' +
         '<div class="pc-desc">' + escHtml(p.pattern) + '</div>' +
-        '<div class="pc-stats"><span>&#x1F4CA; ' + p.evidence_count + ' evidence</span>' + (p.win_rate != null ? '<span>&#x1F3AF; ' + p.win_rate + '% win</span>' : '') + '</div>' +
+        '<div class="pc-stats"><span>&#x1F4CA; ' + p.evidence_count + ' evidence</span>' + (p.win_rate != null ? '<span>&#x1F3AF; ' + p.win_rate + '% win (' + (p.win_count||0) + 'W/' + (p.loss_count||0) + 'L)</span>' : '') + '</div>' +
         '<div style="display:flex;align-items:center;gap:6px;margin-top:4px"><div class="pattern-bar-bg" style="flex:1"><div class="pattern-bar" style="width:' + p.confidence + '%;background:' + barColor + '"></div></div></div></div>';
     });
     el.innerHTML = html;
@@ -1373,18 +1377,215 @@ function showPatternDetail(idx, isActive) {
   var list = (window._brainPatterns || {})[isActive ? 'active' : 'demoted'] || [];
   var p = list[idx]; if (!p) return;
   var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+
   var html = '<div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(p.pattern) + '</div>';
-  html += '<div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
+  html += '<div id="ev-stat-cards" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence</div></div>' +
-    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + (p.win_rate != null ? p.win_rate + '%' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)">Win Rate</div></div>' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_count != null && (p.win_count + (p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : '') + '</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700;color:' + barColor + '">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div></div>';
+  html += '<div id="ev-computed-row" style="display:none;margin-top:8px"></div>';
   if (p.example_tickers && p.example_tickers.length) {
     html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
     p.example_tickers.forEach(function(t) { html += '<span class="pc-ticker" onclick="goToTicker(\'' + t + '\');closeBrainModal()" style="cursor:pointer">' + t + '</span>'; });
     html += '</div>';
   }
-  var footer = p.active ? '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">&#x1F4C9; Demote</button>' : '';
-  openBrainModal('Pattern Detail', html, footer);
+
+  html += '<div class="ev-tabs" id="ev-tabs">' +
+    '<button class="ev-tab active" data-evtab="timeline" onclick="_switchEvTab(\'timeline\')">Timeline <span class="ev-tab-badge" id="ev-badge-timeline">-</span></button>' +
+    '<button class="ev-tab" data-evtab="hypotheses" onclick="_switchEvTab(\'hypotheses\')">Hypotheses <span class="ev-tab-badge" id="ev-badge-hypotheses">-</span></button>' +
+    '<button class="ev-tab" data-evtab="trades" onclick="_switchEvTab(\'trades\')">Trades <span class="ev-tab-badge" id="ev-badge-trades">-</span></button>' +
+    '<button class="ev-tab" data-evtab="backtests" onclick="_switchEvTab(\'backtests\')">Backtests <span class="ev-tab-badge" id="ev-badge-backtests">-</span></button>' +
+  '</div>';
+  html += '<div class="ev-pane active" id="ev-pane-timeline"><div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evidence...</div></div>';
+  html += '<div class="ev-pane" id="ev-pane-hypotheses"></div>';
+  html += '<div class="ev-pane" id="ev-pane-trades"></div>';
+  html += '<div class="ev-pane" id="ev-pane-backtests"></div>';
+
+  var footer = p.active ? '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>' : '';
+  openBrainModal('Pattern Evidence', html, footer);
+
+  fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) { document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Could not load evidence.</div>'; return; }
+    _renderEvTimeline(d.timeline || []);
+    _renderEvHypotheses(d.hypotheses || []);
+    _renderEvTrades(d.trades || []);
+    _renderEvBacktests(d.backtests || []);
+    if (d.insight && d.insight.win_rate != null) {
+      var wrEl = document.getElementById('ev-wr-val');
+      var wrLbl = document.getElementById('ev-wr-label');
+      if (wrEl) {
+        var wrColor = d.insight.win_rate >= 50 ? '#22c55e' : '#ef4444';
+        wrEl.innerHTML = '<span style="color:' + wrColor + '">' + d.insight.win_rate + '%</span>';
+      }
+      if (wrLbl) wrLbl.innerHTML = 'Win Rate (' + (d.insight.win_count||0) + 'W/' + (d.insight.loss_count||0) + 'L)';
+    }
+    var b = function(id,n){ var el=document.getElementById('ev-badge-'+id); if(el) el.textContent=n; };
+    b('timeline', (d.timeline||[]).length);
+    b('hypotheses', (d.hypotheses||[]).length);
+    b('trades', (d.trades||[]).length);
+    b('backtests', (d.backtests||[]).length);
+    if (d.computed_stats) _renderComputedStats(d.computed_stats);
+  }).catch(function(){ document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Network error loading evidence.</div>'; });
+}
+
+function _switchEvTab(tab) {
+  document.querySelectorAll('.ev-tab').forEach(function(t){ t.classList.toggle('active', t.getAttribute('data-evtab')===tab); });
+  document.querySelectorAll('.ev-pane').forEach(function(p){ p.classList.toggle('active', p.id==='ev-pane-'+tab); });
+}
+
+function _renderComputedStats(cs) {
+  var row = document.getElementById('ev-computed-row');
+  if (!row) return;
+  var cards = [];
+
+  if (cs.backtest_avg_win_rate != null) {
+    var bwrColor = cs.backtest_avg_win_rate >= 50 ? '#22c55e' : '#ef4444';
+    cards.push('<div style="padding:5px 8px;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.12);border-radius:6px;text-align:center;flex:1">' +
+      '<div style="font-size:13px;font-weight:700;color:' + bwrColor + '">' + cs.backtest_avg_win_rate + '%</div>' +
+      '<div style="font-size:8px;color:var(--text-muted)">Backtest WR (' + (cs.backtest_count||0) + ' runs)</div></div>');
+  }
+  if (cs.backtest_avg_return != null) {
+    var brColor = cs.backtest_avg_return >= 0 ? '#22c55e' : '#ef4444';
+    cards.push('<div style="padding:5px 8px;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.12);border-radius:6px;text-align:center;flex:1">' +
+      '<div style="font-size:13px;font-weight:700;color:' + brColor + '">' + cs.backtest_avg_return + '%</div>' +
+      '<div style="font-size:8px;color:var(--text-muted)">Avg Backtest Return</div></div>');
+  }
+  if (cs.trade_win_rate != null) {
+    var twrColor = cs.trade_win_rate >= 50 ? '#22c55e' : '#ef4444';
+    cards.push('<div style="padding:5px 8px;background:rgba(34,197,94,.06);border:1px solid rgba(34,197,94,.12);border-radius:6px;text-align:center;flex:1">' +
+      '<div style="font-size:13px;font-weight:700;color:' + twrColor + '">' + cs.trade_win_rate + '%</div>' +
+      '<div style="font-size:8px;color:var(--text-muted)">Real Trade WR (' + (cs.trade_count||0) + ' trades)</div></div>');
+  }
+  if (cs.hypothesis_confirm_rate != null) {
+    var hcColor = cs.hypothesis_confirm_rate >= 60 ? '#22c55e' : cs.hypothesis_confirm_rate >= 40 ? '#f59e0b' : '#ef4444';
+    cards.push('<div style="padding:5px 8px;background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.12);border-radius:6px;text-align:center;flex:1">' +
+      '<div style="font-size:13px;font-weight:700;color:' + hcColor + '">' + cs.hypothesis_confirm_rate + '%</div>' +
+      '<div style="font-size:8px;color:var(--text-muted)">Hypothesis Confirm (' + (cs.hypotheses_tested||0) + ')</div></div>');
+  }
+  if (cs.confirmations != null || cs.challenges != null) {
+    cards.push('<div style="padding:5px 8px;background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.12);border-radius:6px;text-align:center;flex:1">' +
+      '<div style="font-size:13px;font-weight:700"><span style="color:#22c55e">' + (cs.confirmations||0) + '</span> / <span style="color:#ef4444">' + (cs.challenges||0) + '</span></div>' +
+      '<div style="font-size:8px;color:var(--text-muted)">Validated / Challenged</div></div>');
+  }
+
+  if (cards.length) {
+    row.innerHTML = '<div style="font-size:9px;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px">Live Evidence Stats</div>' +
+      '<div style="display:flex;gap:6px;flex-wrap:wrap">' + cards.join('') + '</div>';
+    row.style.display = 'block';
+  }
+}
+
+function _renderEvTimeline(events) {
+  var el = document.getElementById('ev-pane-timeline');
+  if (!events.length) { el.innerHTML = '<div class="ev-empty">No learning events recorded yet for this pattern.</div>'; return; }
+  var html = '';
+  events.forEach(function(e) {
+    var dotClass = e.event_type || 'update';
+    var confHtml = '';
+    if (e.confidence_before != null && e.confidence_after != null) {
+      confHtml = '<span class="ev-tl-conf"><span class="before">' + (e.confidence_before*100).toFixed(0) + '%</span> &rarr; <span class="after">' + (e.confidence_after*100).toFixed(0) + '%</span></span>';
+    }
+    var dateStr = e.created_at ? new Date(e.created_at).toLocaleString() : '';
+    html += '<div class="ev-tl-item">' +
+      '<div class="ev-tl-dot ' + dotClass + '"></div>' +
+      '<div class="ev-tl-body">' +
+        '<div class="ev-tl-desc">' + escHtml(e.description) + '</div>' +
+        '<div class="ev-tl-meta"><span>' + dateStr + '</span>' + confHtml +
+          '<span style="color:var(--text-muted);font-style:italic">' + escHtml(e.event_type||'') + '</span>' +
+        '</div>' +
+      '</div></div>';
+  });
+  el.innerHTML = html;
+}
+
+function _renderEvHypotheses(hyps) {
+  var el = document.getElementById('ev-pane-hypotheses');
+  if (!hyps.length) { el.innerHTML = '<div class="ev-empty">No related hypotheses found.</div>'; return; }
+  var html = '';
+  hyps.forEach(function(h) {
+    var statusClass = h.status || 'pending';
+    var confirmColor = h.confirm_rate >= 70 ? '#22c55e' : h.confirm_rate >= 40 ? '#f59e0b' : '#ef4444';
+    html += '<div class="ev-hyp-card">' +
+      '<div class="ev-hyp-header">' +
+        '<span class="ev-hyp-status ' + statusClass + '">' + statusClass + '</span>' +
+        (h.origin ? '<span style="font-size:9px;color:var(--text-muted)">' + h.origin + '</span>' : '') +
+        (h.last_tested_at ? '<span style="font-size:9px;color:var(--text-muted);margin-left:auto">' + new Date(h.last_tested_at).toLocaleDateString() + '</span>' : '') +
+      '</div>' +
+      '<div class="ev-hyp-desc">' + escHtml(h.description) + '</div>' +
+      '<div class="ev-hyp-stats">' +
+        '<div class="ev-hyp-stat"><b>' + h.times_tested + '</b>Tested</div>' +
+        '<div class="ev-hyp-stat"><b style="color:#22c55e">' + h.times_confirmed + '</b>Confirmed</div>' +
+        '<div class="ev-hyp-stat"><b style="color:#ef4444">' + h.times_rejected + '</b>Rejected</div>' +
+      '</div>' +
+      '<div class="ev-confirm-bar"><div class="ev-confirm-fill" style="width:' + h.confirm_rate + '%;background:' + confirmColor + '"></div></div>' +
+      '<div style="text-align:center;font-size:9px;color:var(--text-muted);margin-top:2px">' + h.confirm_rate + '% confirmation rate</div>';
+
+    if (h.last_result) {
+      var lr = h.last_result;
+      html += '<div class="ev-hyp-ab">' +
+        '<div class="ev-hyp-ab-col col-a"><div class="ab-label">Group A</div>' +
+          '<div>Avg: <b>' + (lr.group_a_avg != null ? lr.group_a_avg.toFixed(2) + '%' : '--') + '</b></div>' +
+          '<div>WR: <b>' + (lr.group_a_wr != null ? lr.group_a_wr.toFixed(0) + '%' : '--') + '</b></div>' +
+          '<div>N: ' + (lr.group_a_n || 0) + '</div>' +
+        '</div>' +
+        '<div class="ev-hyp-ab-col col-b"><div class="ab-label">Group B</div>' +
+          '<div>Avg: <b>' + (lr.group_b_avg != null ? lr.group_b_avg.toFixed(2) + '%' : '--') + '</b></div>' +
+          '<div>WR: <b>' + (lr.group_b_wr != null ? lr.group_b_wr.toFixed(0) + '%' : '--') + '</b></div>' +
+          '<div>N: ' + (lr.group_b_n || 0) + '</div>' +
+        '</div></div>';
+    }
+
+    if (h.condition_a || h.condition_b) {
+      html += '<div class="ev-hyp-conds">A: <code>' + escHtml(h.condition_a||'') + '</code> &nbsp; B: <code>' + escHtml(h.condition_b||'') + '</code></div>';
+    }
+    html += '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function _renderEvTrades(trades) {
+  var el = document.getElementById('ev-pane-trades');
+  if (!trades.length) { el.innerHTML = '<div class="ev-empty">No matching trades found for this pattern.</div>'; return; }
+  var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Status</th><th>Date</th></tr></thead><tbody>';
+  trades.forEach(function(t) {
+    var pnlClass = t.pnl > 0 ? 'ev-pnl-pos' : (t.pnl < 0 ? 'ev-pnl-neg' : '');
+    var pnlStr = t.pnl != null ? '$' + t.pnl.toFixed(2) : '--';
+    var statusClass = t.pnl > 0 ? 'win' : (t.pnl < 0 ? 'loss' : 'open');
+    var dateStr = t.entry_date ? new Date(t.entry_date).toLocaleDateString() : '--';
+    html += '<tr>' +
+      '<td><b>' + escHtml(t.ticker) + '</b></td>' +
+      '<td>' + (t.direction||'--') + '</td>' +
+      '<td>' + (t.entry_price != null ? '$' + t.entry_price.toFixed(2) : '--') + '</td>' +
+      '<td>' + (t.exit_price != null ? '$' + t.exit_price.toFixed(2) : '--') + '</td>' +
+      '<td class="' + pnlClass + '">' + pnlStr + '</td>' +
+      '<td><span class="ev-status-badge ' + statusClass + '">' + (t.status||'--') + '</span></td>' +
+      '<td>' + dateStr + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _renderEvBacktests(bts) {
+  var el = document.getElementById('ev-pane-backtests');
+  if (!bts.length) { el.innerHTML = '<div class="ev-empty">No backtest results found for this pattern.</div>'; return; }
+  var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Strategy</th><th>Return</th><th>Win Rate</th><th>Sharpe</th><th>Max DD</th><th>Trades</th><th>Date</th></tr></thead><tbody>';
+  bts.forEach(function(b) {
+    var retClass = b.return_pct > 0 ? 'ev-pnl-pos' : (b.return_pct < 0 ? 'ev-pnl-neg' : '');
+    var dateStr = b.ran_at ? new Date(b.ran_at).toLocaleDateString() : '--';
+    html += '<tr>' +
+      '<td><b>' + escHtml(b.ticker) + '</b></td>' +
+      '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
+      '<td class="' + retClass + '">' + (b.return_pct != null ? b.return_pct.toFixed(1) + '%' : '--') + '</td>' +
+      '<td>' + (b.win_rate != null ? b.win_rate.toFixed(0) + '%' : '--') + '</td>' +
+      '<td>' + (b.sharpe != null ? b.sharpe.toFixed(2) : '--') + '</td>' +
+      '<td>' + (b.max_drawdown != null ? b.max_drawdown.toFixed(1) + '%' : '--') + '</td>' +
+      '<td>' + (b.trade_count||0) + '</td>' +
+      '<td>' + dateStr + '</td>' +
+    '</tr>';
+  });
+  html += '</tbody></table>';
+  el.innerHTML = html;
 }
 
 function demotePattern(patternId) {
@@ -1490,7 +1691,7 @@ function triggerRetrainML() {
 var _activeDomain = 'trading';
 var _projectDashboardLoaded = false;
 var _reasoningDashboardLoaded = false;
-var _activeProjectLens = 'architect';
+var _activeProjectLens = 'architect'; /* kept for compat */
 
 function switchDomain(domain) {
   if (domain === 'code') domain = 'project';
@@ -1506,7 +1707,6 @@ function switchDomain(domain) {
   if (domain === 'project' && !_projectDashboardLoaded) {
     _projectDashboardLoaded = true;
     initProjectAgentBar();
-    initProjectLensBar();
     loadCodeDashboard();
     loadAgentMessageFeed();
     loadProjectBrainStatus();
@@ -1518,31 +1718,17 @@ function switchDomain(domain) {
 }
 
 function loadCodeDashboard() {
-  loadCodeRepos();
-  loadCodeMetrics();
-  loadCodeHotspots();
-  loadCodeInsights();
-  loadCodeGraph();
-  loadCodeTrends();
-  loadCodeReviews();
-  loadCodeDeps();
   pollCodeLearningStatus();
 }
 
-function toggleCodeBrain() {
-  var header = document.getElementById('code-brain-toggle');
-  var body = document.getElementById('code-brain-body');
-  if (!header || !body) return;
-  var isOpen = body.classList.contains('open');
-  body.classList.toggle('open');
-  header.classList.toggle('open');
-}
+/* toggleCodeBrain removed — Code Brain merged into agent panels */
 
 /* ══════════════════════════════════════════════════
    Project Brain — Autonomous Agents
    ══════════════════════════════════════════════════ */
 var _agentList = [];
 var _activeAgent = 'product_owner';
+var _activeProjectAgent = 'product_owner';
 var _agentPanelLoaded = {};
 
 function initProjectAgentBar() {
@@ -1587,6 +1773,7 @@ function initProjectAgentBar() {
 
 function switchProjectAgent(agentName) {
   _activeAgent = agentName;
+  _activeProjectAgent = agentName;
   document.querySelectorAll('.proj-agent-tab').forEach(function(el) {
     el.classList.toggle('active', el.dataset.agent === agentName);
   });
@@ -1661,12 +1848,34 @@ function _getAgentSpecificSections(agentName) {
     '<div class="brain-section">' +
       '<div class="brain-section-title"><span class="bs-icon">&#x1F41E;</span> Bug Reports</div>' +
       '<div id="qa-bug-reports" style="max-height:300px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Bug reports will appear after QA cycle...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Code Reviews</div>' +
+      '<div id="code-reviews" style="max-height:400px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Reviews of recent commits will appear after learning.</div></div>' +
     '</div>';
   }
   if (agentName === 'security') {
     return '<div class="brain-section">' +
       '<div class="brain-section-title"><span class="bs-icon">&#x26A0;</span> Risk Score</div>' +
       '<div id="security-risk" style="font-size:11px;color:var(--text-muted)">Security risk score will appear after a cycle...</div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4E6;</span> Dependency Health</div>' +
+      '<div id="sec-code-deps" style="max-height:350px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Dependency alerts will appear after learning.</div></div>' +
+    '</div>';
+  }
+  if (agentName === 'devops') {
+    return '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4E6;</span> Dependency Health</div>' +
+      '<div id="code-deps" style="max-height:350px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Dependency alerts will appear after learning.</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Hotspots</div>' +
+      '<div id="code-hotspots" style="max-height:350px;overflow-y:auto"><div style="font-size:11px;color:var(--text-muted)">Loading hotspots...</div></div>' +
+    '</div>' +
+    '<div class="brain-section">' +
+      '<div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>' +
+      '<div class="brain-timeline" id="code-activity"><div style="font-size:11px;color:var(--text-muted)">No activity yet. Add a repo and run indexing.</div></div>' +
     '</div>';
   }
   return '';
@@ -1678,8 +1887,9 @@ function _loadGenericDashboard(agentName) {
   _loadGenericResearch(agentName);
   _loadGenericGoals(agentName);
   _loadGenericEvolution(agentName);
-  if (agentName === 'qa') { _loadQATestCases(); _loadQABugReports(); }
-  if (agentName === 'security') { _loadSecurityRisk(agentName); }
+  if (agentName === 'qa') { _loadQATestCases(); _loadQABugReports(); loadCodeReviews(); }
+  if (agentName === 'security') { _loadSecurityRisk(agentName); loadCodeDeps('sec-code-deps'); }
+  if (agentName === 'devops') { loadCodeDeps(); loadCodeHotspots(); }
 }
 
 function _loadGenericMetrics(agentName) {
@@ -1928,58 +2138,168 @@ function loadPOMetrics() {
   });
 }
 
+var _poSelectedOptions = {};
+
 function loadPOQuestions() {
-  fetch('/api/brain/project/agent/product_owner/questions').then(function(r){return r.json();}).then(function(d) {
+  fetch('/api/brain/project/agent/product_owner/questions?status=pending').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var el = document.getElementById('po-questions');
     if (!el) return;
     var qs = d.questions || [];
     if (!qs.length) {
-      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No questions yet. Click the button below to run a PO learning cycle.</div>' +
-        '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
+      el.innerHTML = '<div style="font-size:12px;color:var(--text-muted);padding:8px 0">No pending decisions. Run a PO cycle to generate new ones.</div>' +
+        '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:6px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
       return;
     }
-    el.innerHTML = qs.map(function(q) {
-      var badge = '<span class="po-q-badge ' + q.status + '">' + q.status + '</span>';
-      var catBadge = '<span class="po-q-badge" style="background:rgba(139,92,246,.1);color:#a78bfa">' + q.category + '</span>';
-      var html = '<div class="po-q-card">';
-      html += '<div class="po-q-text">' + badge + catBadge + ' ' + q.question + '</div>';
-      if (q.context) html += '<div class="po-q-ctx">' + q.context + '</div>';
-      if (q.status === 'pending') {
-        html += '<div class="po-q-input-row">' +
-          '<input type="text" class="po-q-input" id="po-answer-' + q.id + '" placeholder="Type your answer...">' +
-          '<button class="po-q-btn submit" onclick="submitPOAnswer(' + q.id + ')">Submit</button>' +
-          '<button class="po-q-btn skip" onclick="skipPOQuestion(' + q.id + ')">Skip</button>' +
+
+    var hasOptionless = qs.some(function(q) { return !q.options || !q.options.length; });
+    _poSelectedOptions = {};
+    var html = '';
+
+    if (hasOptionless) {
+      html += '<div class="po-q-refresh-banner">' +
+        '<div style="font-size:12px;color:var(--text-muted)">Some questions need smart options generated from your repo.</div>' +
+        '<button class="po-q-btn submit" onclick="refreshPOOptions()" id="btn-po-refresh">Generate Smart Options</button>' +
+      '</div>';
+    }
+
+    html += qs.map(function(q) {
+      var opts = q.options || [];
+      var card = '<div class="po-q-card" id="po-card-' + q.id + '">';
+      card += '<div class="po-q-header"><span class="po-q-badge pending">' + q.category + '</span></div>';
+      card += '<div class="po-q-text">' + escHtml(q.question) + '</div>';
+      if (q.context) card += '<div class="po-q-ctx">' + escHtml(q.context) + '</div>';
+
+      if (opts.length) {
+        card += '<div class="po-option-grid" id="po-opts-' + q.id + '">';
+        opts.forEach(function(opt, idx) {
+          card += '<div class="po-option-card" data-qid="' + q.id + '" data-idx="' + idx + '" onclick="selectPOOption(' + q.id + ',' + idx + ')">' +
+            '<div class="po-option-radio"></div>' +
+            '<div class="po-option-label">' + escHtml(opt) + '</div>' +
+          '</div>';
+        });
+        card += '</div>';
+        card += '<div class="po-q-custom-toggle" onclick="togglePOCustom(' + q.id + ')">&#x270F; Write a different answer</div>';
+        card += '<div class="po-q-custom-row" id="po-custom-row-' + q.id + '" style="display:none">' +
+          '<input type="text" class="po-q-input" id="po-custom-' + q.id + '" placeholder="Your own answer...">' +
         '</div>';
-      } else if (q.status === 'answered' && q.answer) {
-        html += '<div style="font-size:11px;margin-top:6px;padding:6px 8px;background:rgba(34,197,94,.05);border-radius:6px;border:1px solid rgba(34,197,94,.15)"><strong>Answer:</strong> ' + q.answer + '</div>';
+      } else {
+        card += '<div class="po-q-custom-row" style="margin-top:8px">' +
+          '<input type="text" class="po-q-input" id="po-custom-' + q.id + '" placeholder="Type your answer...">' +
+        '</div>';
       }
-      html += '</div>';
-      return html;
+
+      card += '<div class="po-q-action-row">' +
+        '<button class="po-q-btn submit" onclick="submitPOAnswer(' + q.id + ')">Confirm</button>' +
+        '<button class="po-q-btn skip" onclick="skipPOQuestion(' + q.id + ')">Skip</button>' +
+      '</div>';
+      card += '</div>';
+      return card;
     }).join('');
-    el.innerHTML += '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
+
+    html += '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:10px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
+    el.innerHTML = html;
+  });
+
+  _loadPOAnswered();
+}
+
+function _loadPOAnswered() {
+  fetch('/api/brain/project/agent/product_owner/questions?status=answered').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var qs = d.questions || [];
+    if (!qs.length) return;
+    var el = document.getElementById('po-questions');
+    if (!el) return;
+    var html = '<div style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">' +
+      '<div style="font-size:10px;font-weight:700;text-transform:uppercase;color:var(--text-muted);letter-spacing:.5px;margin-bottom:8px">Previous Decisions (' + qs.length + ')</div>';
+    qs.slice(0, 5).forEach(function(q) {
+      html += '<div class="po-q-card" style="padding:12px 16px;margin-bottom:8px;opacity:.7">' +
+        '<div class="po-q-header"><span class="po-q-badge answered">answered</span><span class="po-q-badge" style="background:rgba(139,92,246,.08);color:#a78bfa">' + q.category + '</span></div>' +
+        '<div style="font-size:12px;font-weight:600;margin-bottom:4px">' + escHtml(q.question) + '</div>' +
+        '<div class="po-q-answered"><strong>Decision: </strong>' + escHtml(q.answer) + '</div>' +
+      '</div>';
+    });
+    html += '</div>';
+    el.innerHTML += html;
   });
 }
 
+function refreshPOOptions() {
+  var btn = document.getElementById('btn-po-refresh');
+  if (btn) { btn.disabled = true; btn.textContent = 'Generating...'; }
+  fetch('/api/brain/project/agent/product_owner/refresh-options', {method:'POST'})
+  .then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) loadPOQuestions();
+    else if (btn) { btn.disabled = false; btn.textContent = 'Generate Smart Options'; }
+  }).catch(function() {
+    if (btn) { btn.disabled = false; btn.textContent = 'Generate Smart Options'; }
+  });
+}
+
+function selectPOOption(qid, idx) {
+  var grid = document.getElementById('po-opts-' + qid);
+  if (!grid) return;
+  grid.querySelectorAll('.po-option-card').forEach(function(c) {
+    c.classList.toggle('selected', parseInt(c.dataset.idx) === idx);
+  });
+  _poSelectedOptions[qid] = idx;
+  var customRow = document.getElementById('po-custom-row-' + qid);
+  if (customRow) customRow.style.display = 'none';
+}
+
+function togglePOCustom(qid) {
+  var customRow = document.getElementById('po-custom-row-' + qid);
+  if (!customRow) return;
+  var isVisible = customRow.style.display !== 'none';
+  customRow.style.display = isVisible ? 'none' : 'flex';
+  if (!isVisible) {
+    delete _poSelectedOptions[qid];
+    var grid = document.getElementById('po-opts-' + qid);
+    if (grid) grid.querySelectorAll('.po-option-card').forEach(function(c) { c.classList.remove('selected'); });
+    var input = document.getElementById('po-custom-' + qid);
+    if (input) input.focus();
+  }
+}
+
 function submitPOAnswer(questionId) {
-  var input = document.getElementById('po-answer-' + questionId);
-  if (!input || !input.value.trim()) return;
+  var answer = '';
+  if (typeof _poSelectedOptions[questionId] !== 'undefined') {
+    var grid = document.getElementById('po-opts-' + questionId);
+    if (grid) {
+      var sel = grid.querySelector('.po-option-card.selected .po-option-label');
+      if (sel) answer = sel.textContent.trim();
+    }
+  }
+  if (!answer) {
+    var input = document.getElementById('po-custom-' + questionId);
+    if (input) answer = input.value.trim();
+  }
+  if (!answer) return;
+
+  var card = document.getElementById('po-card-' + questionId);
+  if (card) card.style.opacity = '0.5';
+
   fetch('/api/brain/project/agent/product_owner/question/' + questionId + '/answer', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({answer: input.value.trim()})
+    body: JSON.stringify({answer: answer})
   }).then(function(r){return r.json();}).then(function(d) {
     if (d.ok) {
+      delete _poSelectedOptions[questionId];
       loadPOQuestions();
       loadPOMetrics();
-    }
+    } else if (card) { card.style.opacity = '1'; }
   });
 }
 
 function skipPOQuestion(questionId) {
+  var card = document.getElementById('po-card-' + questionId);
+  if (card) card.style.opacity = '0.5';
   fetch('/api/brain/project/agent/product_owner/question/' + questionId + '/skip', {method: 'POST'})
   .then(function(r){return r.json();}).then(function(d) {
     if (d.ok) loadPOQuestions();
+    else if (card) card.style.opacity = '1';
   });
 }
 
@@ -1996,16 +2316,55 @@ function loadPORequirements() {
         '<span class="po-req-title">' + r.title + '</span>' +
         '<span class="po-req-status">' + r.status + '</span>' +
         (r.status !== 'in_planner' && r.status !== 'done' ?
-          '<button class="po-req-push" onclick="pushReqToPlanner(' + r.id + ')">&#x1F4CB; To Planner</button>' : '') +
+          '<button class="po-req-push" data-push-req="' + r.id + '" onclick="pushReqToPlanner(' + r.id + ')">&#x1F4CB; To Planner</button>' : '') +
       '</div>';
     }).join('');
   });
 }
 
 function pushReqToPlanner(reqId) {
-  fetch('/api/brain/project/agent/product_owner/requirement/' + reqId + '/to-task', {method: 'POST'})
+  fetch('/api/brain/project/planner-projects')
   .then(function(r){return r.json();}).then(function(d) {
-    if (d.ok) loadPORequirements();
+    var projects = (d.projects || []).filter(function(p){ return p.status !== 'archived'; });
+    if (!projects.length) {
+      alert('No planner projects found. Create one on the Planner page first.');
+      return;
+    }
+    if (projects.length === 1) {
+      _doPushReq(reqId, projects[0].id);
+      return;
+    }
+    var existing = document.getElementById('po-project-picker-' + reqId);
+    if (existing) { existing.remove(); return; }
+    var btn = document.querySelector('[data-push-req="' + reqId + '"]');
+    if (!btn) { _doPushReq(reqId, projects[0].id); return; }
+    var picker = document.createElement('div');
+    picker.id = 'po-project-picker-' + reqId;
+    picker.className = 'po-project-picker';
+    picker.innerHTML = '<div class="po-picker-title">Select project:</div>' +
+      projects.map(function(p) {
+        return '<button class="po-picker-opt" onclick="event.stopPropagation();_doPushReq(' + reqId + ',' + p.id + ')">' +
+          '<span class="po-picker-dot" style="background:' + (p.color || '#6366f1') + '"></span>' +
+          p.name + '</button>';
+      }).join('');
+    btn.parentElement.appendChild(picker);
+    setTimeout(function(){ document.addEventListener('click', function _close(e) {
+      if (!picker.contains(e.target)) { picker.remove(); document.removeEventListener('click', _close); }
+    }); }, 0);
+  });
+}
+
+function _doPushReq(reqId, projectId) {
+  var picker = document.getElementById('po-project-picker-' + reqId);
+  if (picker) picker.remove();
+  fetch('/api/brain/project/agent/product_owner/requirement/' + reqId + '/to-task', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({project_id: projectId})
+  })
+  .then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) { loadPORequirements(); }
+    else { alert(d.error || d.message || 'Could not push to planner.'); }
   });
 }
 
@@ -2304,6 +2663,11 @@ function loadArchDashboard() {
   loadArchFindings();
   loadArchResearch();
   loadArchEvolution();
+  loadCodeRepos();
+  loadCodeMetrics();
+  loadCodeGraph();
+  loadCodeInsights();
+  loadCodeTrends();
 }
 
 function loadArchMetrics() {
@@ -2487,210 +2851,7 @@ function triggerAgentCycle(agentName) {
   });
 }
 
-/* ── Project Lens Functions ─────────────────────── */
-var _lensCache = {};
-var _lensListLoaded = false;
-var _lensList = [];
-
-function initProjectLensBar() {
-  fetch('/api/brain/project/lenses').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    _lensList = d.lenses || [];
-    _lensListLoaded = true;
-    var bar = document.getElementById('proj-lens-bar');
-    if (!bar) return;
-    bar.innerHTML = '';
-    _lensList.forEach(function(l) {
-      var tab = document.createElement('div');
-      tab.className = 'proj-lens-tab' + (l.name === _activeProjectLens ? ' active' : '');
-      tab.dataset.lens = l.name;
-      tab.innerHTML = '<span class="plt-icon">' + l.icon + '</span> ' + l.label;
-      tab.onclick = function() { switchProjectLens(l.name); };
-      bar.appendChild(tab);
-    });
-    _ensureLensPanelContainer();
-    switchProjectLens(_activeProjectLens);
-  });
-}
-
-function _ensureLensPanelContainer() {
-  if (document.getElementById('proj-lens-panels')) return;
-  var dp = document.getElementById('domain-project');
-  if (!dp) return;
-  var codeContent = dp.querySelector('#code-pipeline-section');
-  var container = document.createElement('div');
-  container.id = 'proj-lens-panels';
-  if (codeContent) {
-    dp.insertBefore(container, codeContent);
-  } else {
-    dp.appendChild(container);
-  }
-}
-
-function switchProjectLens(lensName) {
-  _activeProjectLens = lensName;
-  document.querySelectorAll('.proj-lens-tab').forEach(function(el) {
-    el.classList.toggle('active', el.dataset.lens === lensName);
-  });
-  document.querySelectorAll('.proj-lens-panel').forEach(function(el) {
-    el.classList.toggle('active', el.dataset.lens === lensName);
-  });
-  var existing = document.querySelector('.proj-lens-panel[data-lens="' + lensName + '"]');
-  if (!existing) {
-    _createLensPanel(lensName);
-  }
-  loadLensMetrics(lensName);
-}
-
-function _createLensPanel(lensName) {
-  var container = document.getElementById('proj-lens-panels');
-  if (!container) return;
-  var panel = document.createElement('div');
-  panel.className = 'proj-lens-panel active';
-  panel.dataset.lens = lensName;
-  panel.id = 'lens-panel-' + lensName;
-  panel.innerHTML =
-    '<div class="proj-lens-kpis" id="lens-kpis-' + lensName + '"></div>' +
-    '<div id="lens-extra-' + lensName + '"></div>' +
-    '<div class="brain-section" id="lens-hotspots-' + lensName + '">' +
-      '<div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Hotspots</div>' +
-      '<div id="lens-hotspots-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
-    '</div>' +
-    '<div class="brain-section" id="lens-insights-' + lensName + '">' +
-      '<div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Insights</div>' +
-      '<div id="lens-insights-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
-    '</div>' +
-    '<div class="brain-section" id="lens-activity-' + lensName + '">' +
-      '<div class="brain-section-title"><span class="bs-icon">&#x23F1;</span> Recent Activity</div>' +
-      '<div id="lens-activity-list-' + lensName + '" style="font-size:11px;color:var(--text-muted)">Loading...</div>' +
-    '</div>';
-  container.appendChild(panel);
-}
-
-function loadLensMetrics(lensName) {
-  fetch('/api/brain/project/lens/' + lensName + '/metrics').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    _lensCache[lensName] = d;
-    _renderLensKpis(lensName, d);
-    _renderLensHotspots(lensName, d.top_hotspots || []);
-    _renderLensInsights(lensName, d.top_insights || []);
-    _renderLensActivity(lensName, d.recent_events || []);
-    _renderLensExtras(lensName, d);
-  });
-}
-
-function _renderLensKpis(lensName, d) {
-  var el = document.getElementById('lens-kpis-' + lensName);
-  if (!el) return;
-  var kpis = [
-    {val: (d.total_files || 0).toLocaleString(), lbl: 'Files'},
-    {val: (d.total_lines || 0).toLocaleString(), lbl: 'Lines'},
-    {val: d.avg_complexity || '0', lbl: 'Avg Complexity'},
-    {val: d.hotspot_count || 0, lbl: 'Hotspots'},
-    {val: d.insight_count || 0, lbl: 'Insights'},
-  ];
-  if (lensName === 'qa') {
-    kpis.push({val: d.test_file_count || 0, lbl: 'Test Files'});
-    var ratio = d.total_files ? ((d.test_file_count || 0) / d.total_files * 100).toFixed(1) + '%' : '0%';
-    kpis.push({val: ratio, lbl: 'Test Ratio'});
-  }
-  if (d.circular_dep_count) {
-    kpis.push({val: d.circular_dep_count, lbl: 'Circular Deps'});
-  }
-  if (d.dep_alert_count) {
-    kpis.push({val: d.dep_alert_count, lbl: 'Dep Alerts'});
-  }
-  kpis.push({val: d.review_count || 0, lbl: 'Reviews'});
-  el.innerHTML = kpis.map(function(k) {
-    return '<div class="proj-lens-kpi"><div class="plk-val">' + k.val + '</div><div class="plk-lbl">' + k.lbl + '</div></div>';
-  }).join('');
-}
-
-function _renderLensHotspots(lensName, hotspots) {
-  var el = document.getElementById('lens-hotspots-list-' + lensName);
-  if (!el) return;
-  if (!hotspots.length) { el.textContent = 'No hotspots in this scope.'; return; }
-  el.innerHTML = hotspots.slice(0, 10).map(function(h) {
-    var scoreClass = h.combined > 0.7 ? 'danger' : h.combined > 0.4 ? 'warn' : 'good';
-    return '<div class="proj-hotspot-row">' +
-      '<span class="proj-hotspot-file">' + h.file + '</span>' +
-      '<span class="proj-hotspot-score" style="color:var(--' + scoreClass + ',inherit)">' + h.combined.toFixed(3) + '</span>' +
-      '<span style="color:var(--text-muted)">' + h.commits + ' commits</span>' +
-    '</div>';
-  }).join('');
-}
-
-function _renderLensInsights(lensName, insights) {
-  var el = document.getElementById('lens-insights-list-' + lensName);
-  if (!el) return;
-  if (!insights.length) { el.textContent = 'No insights yet. Run a learning cycle.'; return; }
-  el.innerHTML = insights.slice(0, 10).map(function(i) {
-    return '<div class="proj-insight-row">' +
-      '<span class="proj-insight-cat">' + i.category + '</span>' +
-      i.description +
-      '<span style="margin-left:6px;font-size:9px;color:var(--text-muted)">' + (i.confidence * 100).toFixed(0) + '% conf</span>' +
-    '</div>';
-  }).join('');
-}
-
-function _renderLensActivity(lensName, events) {
-  var el = document.getElementById('lens-activity-list-' + lensName);
-  if (!el) return;
-  if (!events.length) { el.textContent = 'No recent activity.'; return; }
-  el.innerHTML = events.slice(0, 8).map(function(e) {
-    var ago = e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '';
-    return '<div class="proj-event-row">' +
-      '<span class="proj-event-type">' + e.type + '</span>' +
-      '<span style="flex:1">' + e.description + '</span>' +
-      '<span>' + ago + '</span>' +
-    '</div>';
-  }).join('');
-}
-
-function _renderLensExtras(lensName, d) {
-  var el = document.getElementById('lens-extra-' + lensName);
-  if (!el) return;
-  el.innerHTML = '';
-  if ((lensName === 'pm' || lensName === 'po') && d.planner) {
-    var summaries = d.planner || [];
-    if (summaries.length) {
-      var html = '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Planner Summary</div>';
-      html += '<div class="proj-planner-summary">';
-      summaries.forEach(function(s) {
-        html += '<div style="margin-bottom:8px">';
-        html += '<strong>' + (s.user_name || 'User') + '</strong>';
-        html += '<div style="font-size:11px;color:var(--text-muted);margin-top:2px">' + (s.summary || 'No tasks') + '</div>';
-        html += '</div>';
-      });
-      html += '</div></div>';
-      el.innerHTML = html;
-    }
-  }
-  if (lensName === 'architect' && d.circular_dep_count) {
-    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x26A0;</span> Architecture Warnings</div>' +
-      '<div style="font-size:11px;padding:8px;background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.2);border-radius:6px">' +
-      d.circular_dep_count + ' circular dependency edge(s) detected. Check the Architecture Graph below for details.' +
-      '</div></div>';
-  }
-  if ((lensName === 'devops' || lensName === 'security') && d.dep_alert_count) {
-    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F6A8;</span> Dependency Health</div>' +
-      '<div style="font-size:11px;padding:8px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.2);border-radius:6px">' +
-      d.dep_alert_count + ' package alert(s) require attention.' +
-      '</div></div>';
-  }
-  if (lensName === 'qa') {
-    var total = d.total_files || 0;
-    var tests = d.test_file_count || 0;
-    var ratio = total ? (tests / total * 100).toFixed(1) : '0.0';
-    var barColor = parseFloat(ratio) > 20 ? '#22c55e' : parseFloat(ratio) > 10 ? '#f59e0b' : '#ef4444';
-    el.innerHTML += '<div class="brain-section"><div class="brain-section-title"><span class="bs-icon">&#x1F9EA;</span> Test Coverage</div>' +
-      '<div style="background:var(--bg-header);border:1px solid var(--border);border-radius:8px;padding:10px">' +
-      '<div style="font-size:12px;margin-bottom:6px">' + tests + ' test files out of ' + total + ' total (' + ratio + '%)</div>' +
-      '<div style="height:8px;background:var(--border);border-radius:4px;overflow:hidden">' +
-      '<div style="height:100%;width:' + Math.min(parseFloat(ratio), 100) + '%;background:' + barColor + ';border-radius:4px;transition:width .5s"></div>' +
-      '</div></div></div>';
-  }
-}
+/* Lens functions removed — Code Brain merged into agent panels */
 
 /* ══════════════════════════════════════════════════
    Reasoning Brain JavaScript
@@ -3080,7 +3241,8 @@ function loadCodeMetrics() {
             '<div class="be-time">' + (ev.created_at ? timeSince(new Date(ev.created_at)) + ' ago' : '') + '</div>' +
           '</div></div>';
       });
-      document.getElementById('code-activity').innerHTML = timelineHtml;
+      var actEl = document.getElementById('code-activity');
+      if (actEl) actEl.innerHTML = timelineHtml;
     }
   }).catch(function(){});
 }
@@ -3291,9 +3453,9 @@ function loadCodeReviews() {
 }
 
 /* ── Dependency Health ────────────────────────── */
-function loadCodeDeps() {
+function loadCodeDeps(targetId) {
   fetch('/api/brain/code/deps').then(function(r){return r.json();}).then(function(d) {
-    var c = document.getElementById('code-deps');
+    var c = document.getElementById(targetId || 'code-deps');
     if (!d.ok || d.total === 0) {
       c.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No dependency alerts.</div>';
       return;
@@ -3400,7 +3562,12 @@ function pollCodeLearningStatus() {
       if (dot) dot.className = 'b-domain-dot idle';
       btn.disabled = false; btn.innerHTML = '&#x1F4BB; Reindex All';
       if (_codePollTimer) { clearInterval(_codePollTimer); _codePollTimer = null; }
-      if (section._wasRunning) loadCodeDashboard();
+      if (section._wasRunning) {
+        if (_activeProjectAgent === 'architect') loadArchDashboard();
+        else if (_activeProjectAgent === 'devops') _loadGenericDashboard('devops');
+        else if (_activeProjectAgent === 'qa') _loadGenericDashboard('qa');
+        else if (_activeProjectAgent === 'security') _loadGenericDashboard('security');
+      }
       section._wasRunning = code.running;
     }
     section._wasRunning = code.running;

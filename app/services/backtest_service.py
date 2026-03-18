@@ -155,6 +155,35 @@ class TrendFollowing(Strategy):
             self.position.close()
 
 
+class MomentumBreakout(Strategy):
+    """Momentum breakout: RSI > threshold, price above EMA stack, volume surge.
+
+    Models the pattern: strong RSI + full EMA alignment + volume confirmation.
+    """
+    rsi_threshold = 65
+    ema_fast = 20
+    ema_mid = 50
+    ema_slow = 100
+    atr_mult = 2.0
+
+    def init(self):
+        self.rsi = self.I(_rsi, self.data.Close, 14)
+        self.ef = self.I(_ema, self.data.Close, self.ema_fast)
+        self.em = self.I(_ema, self.data.Close, self.ema_mid)
+        self.es = self.I(_ema, self.data.Close, self.ema_slow)
+
+    def next(self):
+        price = self.data.Close[-1]
+        rsi_ok = self.rsi[-1] > self.rsi_threshold
+        ema_stack = price > self.ef[-1] > self.em[-1] > self.es[-1]
+
+        if rsi_ok and ema_stack and not self.position:
+            self.buy()
+        elif self.position:
+            if self.rsi[-1] < 40 or price < self.em[-1]:
+                self.position.close()
+
+
 # ── Strategy registry ───────────────────────────────────────────────────
 
 STRATEGIES: dict[str, dict[str, Any]] = {
@@ -193,6 +222,12 @@ STRATEGIES: dict[str, dict[str, Any]] = {
         "name": "Trend Following",
         "description": "Multi-indicator trend: SMA + EMA + RSI confluence for high-confidence entries.",
         "params": {"sma_len": (30, 80, 10)},
+    },
+    "momentum_breakout": {
+        "cls": MomentumBreakout,
+        "name": "Momentum Breakout",
+        "description": "RSI momentum + full EMA stack alignment. Captures strong continuation breakouts.",
+        "params": {"rsi_threshold": (55, 75, 5), "ema_fast": (10, 30, 5)},
     },
 }
 
@@ -256,12 +291,13 @@ def run_backtest(
     cash: float = 10000,
     commission: float = 0.001,
     optimize: bool = False,
+    interval: str = "1d",
 ) -> dict[str, Any]:
     """Run a backtest and return results dict."""
     if strategy_id not in STRATEGIES:
         return {"ok": False, "error": f"Unknown strategy: {strategy_id}"}
 
-    df = _fetch_ohlcv_df(ticker, period=period, interval="1d")
+    df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 
@@ -377,3 +413,64 @@ def save_backtest(db: Session, user_id: int | None, result: dict[str, Any]) -> B
     db.commit()
     db.refresh(record)
     return record
+
+
+_PATTERN_STRATEGY_MAP = {
+    "rsi": "momentum_breakout",
+    "ema": "momentum_breakout",
+    "momentum": "momentum_breakout",
+    "breakout": "momentum_breakout",
+    "bollinger": "bb_bounce",
+    "squeeze": "bb_bounce",
+    "macd": "macd",
+    "trend": "trend_follow",
+    "sma": "sma_cross",
+    "vwap": "trend_follow",
+}
+
+
+def backtest_pattern(
+    ticker: str,
+    pattern_name: str,
+    rules_json: str,
+    interval: str = "1d",
+    period: str = "1y",
+) -> dict[str, Any]:
+    """Run the most appropriate backtest strategy for a ScanPattern.
+
+    Maps pattern name/rules to the closest pre-built strategy and runs
+    the backtest on the requested interval.
+    """
+    strategy_id = "momentum_breakout"
+    name_lower = pattern_name.lower()
+    for keyword, sid in _PATTERN_STRATEGY_MAP.items():
+        if keyword in name_lower:
+            strategy_id = sid
+            break
+
+    try:
+        rules = json.loads(rules_json) if rules_json else {}
+        conditions = rules.get("conditions", [])
+        for cond in conditions:
+            ind = cond.get("indicator", "").lower()
+            if "rsi" in ind:
+                strategy_id = "momentum_breakout"
+                break
+            elif "bb" in ind or "squeeze" in ind:
+                strategy_id = "bb_bounce"
+                break
+            elif "macd" in ind:
+                strategy_id = "macd"
+                break
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    result = run_backtest(
+        ticker=ticker,
+        strategy_id=strategy_id,
+        period=period,
+        interval=interval,
+    )
+    result["pattern_name"] = pattern_name
+    result["mapped_strategy"] = strategy_id
+    return result

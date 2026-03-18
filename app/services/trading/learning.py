@@ -111,7 +111,8 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
         log_info(trace_id, f"[trading] post-trade analysis error: {e}")
         return None
 
-    _extract_and_store_patterns(db, trade.user_id, reply, existing_insights)
+    _extract_and_store_patterns(db, trade.user_id, reply, existing_insights,
+                                trade_won=trade.pnl is not None and trade.pnl > 0)
 
     add_journal_entry(
         db, trade.user_id,
@@ -125,6 +126,7 @@ def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
 def _extract_and_store_patterns(
     db: Session, user_id: int | None,
     ai_reply: str, existing_insights: list[TradingInsight],
+    trade_won: bool = False,
 ) -> None:
     """Parse PATTERNS: JSON from the AI reply and upsert insights."""
     import re
@@ -164,6 +166,8 @@ def _extract_and_store_patterns(
         if matched_existing:
             old_conf = matched_existing.confidence
             matched_existing.evidence_count += 1
+            matched_existing.win_count = (matched_existing.win_count or 0) + (1 if trade_won else 0)
+            matched_existing.loss_count = (matched_existing.loss_count or 0) + (0 if trade_won else 1)
             matched_existing.confidence = min(0.95, old_conf + 0.05)
             matched_existing.last_seen = datetime.utcnow()
             db.commit()
@@ -176,7 +180,8 @@ def _extract_and_store_patterns(
                 related_insight_id=matched_existing.id,
             )
         else:
-            save_insight(db, user_id, desc, confidence=max(0.1, min(0.9, conf)))
+            save_insight(db, user_id, desc, confidence=max(0.1, min(0.9, conf)),
+                         wins=1 if trade_won else 0, losses=0 if trade_won else 1)
 
 
 # ── Market Snapshots ──────────────────────────────────────────────────
@@ -483,6 +488,7 @@ def _mine_from_history(ticker: str) -> list[dict]:
     from ta.momentum import RSIIndicator, StochasticOscillator
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
+    from .scanner import _detect_resistance_retests, _detect_narrow_range, _detect_vcp
 
     try:
         df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
@@ -508,6 +514,7 @@ def _mine_from_history(ticker: str) -> list[dict]:
     bb = BollingerBands(close=close, window=20, window_dev=2)
     bb_upper = bb.bollinger_hband()
     bb_lower = bb.bollinger_lband()
+    bb_width = bb.bollinger_wband()
     adx = ADXIndicator(high=high, low=low, close=close).adx()
     atr = AverageTrueRange(high=high, low=low, close=close).average_true_range()
     stoch = StochasticOscillator(high=high, low=low, close=close)
@@ -548,6 +555,33 @@ def _mine_from_history(ticker: str) -> list[dict]:
             if prices_5[-1] > max(prices_5[:-1]) and stochs_5[-1] < max(stochs_5[:-1]):
                 stoch_bear_div = True
 
+        # Breakout-specific enrichment
+        lookback = min(20, i)
+        h_slice = high.iloc[i - lookback:i + 1]
+        c_slice = close.iloc[i - lookback:i + 1]
+        l_slice = low.iloc[i - lookback:i + 1]
+        v_slice = volume.iloc[i - lookback:i + 1]
+        resistance = float(h_slice.max()) if len(h_slice) > 0 else price
+
+        try:
+            retest_info = _detect_resistance_retests(h_slice, c_slice, resistance, tolerance_pct=1.5, lookback=lookback)
+            retest_count = retest_info.get("retest_count", 0)
+        except Exception:
+            retest_count = 0
+
+        try:
+            nr = _detect_narrow_range(h_slice, l_slice)
+        except Exception:
+            nr = None
+
+        try:
+            vcp = _detect_vcp(h_slice, l_slice, v_slice, lookback=lookback)
+        except Exception:
+            vcp = 0
+
+        bw = float(bb_width.iloc[i]) if pd.notna(bb_width.iloc[i]) else 0.1
+        bb_squeeze = bw < 0.04
+
         dt_str = str(df.index[i].date()) if hasattr(df.index[i], "date") else str(df.index[i])[:10]
         regime_info = regime_map.get(dt_str, {})
 
@@ -562,13 +596,21 @@ def _mine_from_history(ticker: str) -> list[dict]:
             "macd_hist": float(macd_hist.iloc[i]) if pd.notna(macd_hist.iloc[i]) else 0,
             "adx": float(adx.iloc[i]) if pd.notna(adx.iloc[i]) else 0,
             "bb_pct": bb_pct,
+            "bb_squeeze": bb_squeeze,
             "atr": float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0,
             "stoch_k": float(stoch_k.iloc[i]) if pd.notna(stoch_k.iloc[i]) else 50,
             "stoch_bull_div": stoch_bull_div,
             "stoch_bear_div": stoch_bear_div,
             "above_sma20": price > float(sma20.iloc[i]) if pd.notna(sma20.iloc[i]) else False,
+            "ema_20": e20,
+            "ema_50": e50,
+            "ema_100": e100,
             "ema_stack": (e20 is not None and e50 is not None and e100 is not None
                           and price > e20 > e50 > e100),
+            "resistance": round(resistance, 4),
+            "resistance_retests": retest_count,
+            "narrow_range": nr or "",
+            "vcp_count": vcp,
             "is_crypto": ticker.endswith("-USD"),
             "vol_ratio": round(vol_ratio, 2),
             "gap_pct": round(gap_pct, 2),
@@ -700,7 +742,8 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                 ret_str += f", {avg_10d:+.1f}%/10d"
             pattern = f"{label} -> avg {ret_str} ({wr:.0f}% win, {len(filtered)} samples){regime_tag}"
             discoveries.append(pattern)
-            save_insight(db, user_id, pattern, confidence=min(0.9, wr / 100))
+            save_insight(db, user_id, pattern, confidence=min(0.9, wr / 100),
+                         wins=wins, losses=len(filtered) - wins)
 
     logger.info(f"[mine_patterns] Mining from {len(all_rows)} historical data points")
 
@@ -952,26 +995,94 @@ def _row_matches_condition(row: dict, cond: dict) -> bool:
 
 
 def _filter_rows_by_condition(rows: list[dict], condition_str: str) -> list[dict]:
-    """Parse a simple condition string like 'rsi < 30' and filter rows."""
+    """Parse condition expressions and filter rows.
+
+    Supports:
+      - Numeric comparisons: ``rsi > 65``, ``adx <= 20``, ``vol_ratio >= 3``
+      - Boolean fields: ``ema_stack == true``, ``bb_squeeze == 1``, ``bb_squeeze == false``
+      - String equality: ``narrow_range == NR7``, ``regime == risk_on``
+      - Compound AND: ``rsi > 65 and ema_stack == true and resistance_retests >= 3``
+      - Field-vs-field: ``macd > macd_sig``
+    """
     import re
-    parts = re.split(r'\s+and\s+', condition_str.lower().strip())
+    parts = re.split(r'\s+and\s+', condition_str.strip())
     filtered = list(rows)
+
     for part in parts:
-        m = re.match(r'(\w+)\s*([<>=!]+)\s*([\d.]+)', part.strip())
+        part = part.strip()
+        if not part:
+            continue
+
+        m = re.match(r'(\w+)\s*([<>=!]+)\s*(.+)', part)
         if not m:
             continue
-        field, op_str, val_str = m.group(1), m.group(2), m.group(3)
-        try:
-            threshold = float(val_str)
-        except ValueError:
+        field = m.group(1)
+        op_str = m.group(2)
+        raw_val = m.group(3).strip()
+
+        bool_map = {"true": True, "false": False, "1": True, "0": False}
+        if raw_val.lower() in bool_map:
+            target_val = bool_map[raw_val.lower()]
+            if op_str == "==" or op_str == "=":
+                filtered = [r for r in filtered if r.get(field) == target_val]
+            elif op_str == "!=" or op_str == "<>":
+                filtered = [r for r in filtered if r.get(field) != target_val]
             continue
-        if op_str in ("<", "<="):
-            filtered = [r for r in filtered if (r.get(field) or 999) < threshold + (0.001 if "<=" in op_str else 0)]
-        elif op_str in (">", ">="):
-            filtered = [r for r in filtered if (r.get(field) or -999) > threshold - (0.001 if ">=" in op_str else 0)]
-        elif op_str == "==":
-            filtered = [r for r in filtered if r.get(field) == threshold]
+
+        try:
+            threshold = float(raw_val)
+            is_numeric = True
+        except ValueError:
+            is_numeric = False
+
+        if is_numeric:
+            if op_str == "<":
+                filtered = [r for r in filtered if _num(r, field) < threshold]
+            elif op_str == "<=":
+                filtered = [r for r in filtered if _num(r, field) <= threshold]
+            elif op_str == ">":
+                filtered = [r for r in filtered if _num(r, field) > threshold]
+            elif op_str == ">=":
+                filtered = [r for r in filtered if _num(r, field) >= threshold]
+            elif op_str == "==" or op_str == "=":
+                filtered = [r for r in filtered if _num(r, field) == threshold]
+            elif op_str == "!=" or op_str == "<>":
+                filtered = [r for r in filtered if _num(r, field) != threshold]
+        else:
+            other_field = raw_val
+            if any(r.get(other_field) is not None for r in filtered[:20]):
+                if op_str == ">":
+                    filtered = [r for r in filtered
+                                if _num(r, field) > _num(r, other_field)]
+                elif op_str == ">=":
+                    filtered = [r for r in filtered
+                                if _num(r, field) >= _num(r, other_field)]
+                elif op_str == "<":
+                    filtered = [r for r in filtered
+                                if _num(r, field) < _num(r, other_field)]
+                elif op_str == "<=":
+                    filtered = [r for r in filtered
+                                if _num(r, field) <= _num(r, other_field)]
+            else:
+                if op_str == "==" or op_str == "=":
+                    filtered = [r for r in filtered if str(r.get(field, "")).lower() == raw_val.lower()]
+                elif op_str == "!=" or op_str == "<>":
+                    filtered = [r for r in filtered if str(r.get(field, "")).lower() != raw_val.lower()]
+
     return filtered
+
+
+def _num(row: dict, field: str, default: float = 0.0) -> float:
+    """Extract a numeric value from a row, coercing booleans and Nones."""
+    v = row.get(field)
+    if v is None:
+        return default
+    if isinstance(v, bool):
+        return 1.0 if v else 0.0
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
@@ -1038,6 +1149,8 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         old_evidence = ins.evidence_count
         old_conf = ins.confidence
         ins.evidence_count = min(old_evidence + len(matching), 200)
+        ins.win_count = (ins.win_count or 0) + wins
+        ins.loss_count = (ins.loss_count or 0) + (len(matching) - wins)
 
         if avg_5d > 0 and wr > 50:
             ins.confidence = round(min(0.95, old_conf * 0.7 + (wr / 100) * 0.3), 3)
@@ -1139,6 +1252,8 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
             new_conf = old_conf * 0.7 + bt_win_rate * 0.3
             ins.confidence = round(min(0.95, max(0.1, new_conf)), 3)
             ins.evidence_count += total
+            ins.win_count = (ins.win_count or 0) + wins
+            ins.loss_count = (ins.loss_count or 0) + (total - wins)
             db.commit()
             if abs(new_conf - old_conf) > 0.01:
                 log_learning_event(
@@ -1155,17 +1270,15 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
 
 
 def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Test every scoring assumption against real data and evolve.
+    """Dynamically test hypotheses from the TradingHypothesis table against real data.
 
-    This is where CHILI grows beyond any single strategy.  For each key
-    hypothesis (e.g. "MACD negative = always bad"), we check the actual
-    historical data.  If the data contradicts an assumption, CHILI weakens
-    it.  If CHILI discovers something new that no strategy taught it, it
-    creates a novel insight.
-
-    Called as part of the learning cycle.
+    On first run, seeds the table with the original hardcoded hypotheses.
+    Every subsequent run loads all pending/testing hypotheses, evaluates them
+    against mined historical rows, and updates their lifecycle state.
+    The brain's perspective grows as the data grows — no hardcoded ceiling.
     """
     from .market_data import ALL_SCAN_TICKERS
+    from ...models.trading import TradingHypothesis
 
     mine_tickers = list(ALL_SCAN_TICKERS)[:200]
 
@@ -1183,24 +1296,54 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     if len(rows) < 30:
         return {"tested": 0, "note": "insufficient data for self-validation"}
 
+    # ── Seed built-in hypotheses on first run ──
+    existing_count = db.query(TradingHypothesis).count()
+    if existing_count == 0:
+        _seed_builtin_hypotheses(db)
+
+    # ── Auto-derive hypotheses from active ScanPatterns ──
+    try:
+        _derive_hypotheses_from_patterns(db)
+    except Exception as e:
+        logger.warning(f"[learning] Pattern-derived hypothesis generation failed: {e}")
+
+    # ── Migrate any old-format TradingInsight hypotheses ──
+    try:
+        _migrate_legacy_hypotheses(db, user_id)
+    except Exception:
+        pass
+
+    # ── Load all testable hypotheses ──
+    hypotheses = (
+        db.query(TradingHypothesis)
+        .filter(TradingHypothesis.status.in_(["pending", "testing", "confirmed", "rejected"]))
+        .order_by(TradingHypothesis.times_tested.asc())
+        .limit(50)
+        .all()
+    )
+
     results: list[dict[str, Any]] = []
 
-    def _test_hypothesis(label: str, group_a: list, group_b: list, expected: str):
-        """Compare two groups (e.g. MACD+ vs MACD-) and report which actually performs better."""
+    for hyp in hypotheses:
+        group_a = _filter_rows_by_condition(rows, hyp.condition_a)
+        group_b = _filter_rows_by_condition(rows, hyp.condition_b)
+
         if len(group_a) < 5 or len(group_b) < 5:
-            return
+            continue
+
         avg_a = sum(r["ret_5d"] for r in group_a) / len(group_a)
         avg_b = sum(r["ret_5d"] for r in group_b) / len(group_b)
         wr_a = sum(1 for r in group_a if r["ret_5d"] > 0) / len(group_a) * 100
         wr_b = sum(1 for r in group_b if r["ret_5d"] > 0) / len(group_b) * 100
 
-        if expected == "a_better":
+        if hyp.expected_winner == "a":
             confirmed = avg_a > avg_b
         else:
             confirmed = avg_b > avg_a
 
         finding = {
-            "hypothesis": label,
+            "hypothesis": hyp.description,
+            "hypothesis_id": hyp.id,
             "confirmed": confirmed,
             "group_a_avg": round(avg_a, 3),
             "group_b_avg": round(avg_b, 3),
@@ -1211,151 +1354,54 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         }
         results.append(finding)
 
+        hyp.times_tested = (hyp.times_tested or 0) + 1
+        if confirmed:
+            hyp.times_confirmed = (hyp.times_confirmed or 0) + 1
+        else:
+            hyp.times_rejected = (hyp.times_rejected or 0) + 1
+        hyp.status = "testing"
+        hyp.last_tested_at = datetime.utcnow()
+        hyp.last_result_json = json.dumps(finding)
+
+        confirm_rate = (hyp.times_confirmed or 0) / max(1, hyp.times_tested)
+        if hyp.times_tested >= 5:
+            if confirm_rate >= 0.7:
+                hyp.status = "confirmed"
+            elif confirm_rate < 0.3:
+                hyp.status = "rejected"
+        if hyp.times_tested >= 10 and confirm_rate < 0.4:
+            hyp.status = "retired"
+
         if not confirmed:
+            wins_a = sum(1 for r in group_a if r["ret_5d"] > 0)
             save_insight(
                 db, user_id,
-                f"CHILI challenge: {label} — data says otherwise "
+                f"CHILI challenge: {hyp.description} — data says otherwise "
                 f"(A: {avg_a:+.2f}%/5d {wr_a:.0f}%wr vs B: {avg_b:+.2f}%/5d {wr_b:.0f}%wr, "
                 f"n={len(group_a)}+{len(group_b)})",
                 confidence=0.45,
+                wins=wins_a, losses=len(group_a) - wins_a,
             )
             log_learning_event(
                 db, user_id, "hypothesis_challenged",
-                f"Data challenges: {label} | "
-                f"Expected {'A' if expected == 'a_better' else 'B'} wins, "
-                f"but {'B' if expected == 'a_better' else 'A'} actually performed better",
+                f"Data challenges: {hyp.description} | "
+                f"Expected {'A' if hyp.expected_winner == 'a' else 'B'} wins, "
+                f"but {'B' if hyp.expected_winner == 'a' else 'A'} actually performed better "
+                f"(tested {hyp.times_tested}x, confirm rate {confirm_rate:.0%})",
             )
         else:
             if avg_a > 0 and wr_a > 55:
+                wins_a = sum(1 for r in group_a if r["ret_5d"] > 0)
                 save_insight(
                     db, user_id,
-                    f"CHILI validated: {label} — confirmed by data "
-                    f"({avg_a:+.2f}%/5d, {wr_a:.0f}%wr, {len(group_a)} samples)",
+                    f"CHILI validated: {hyp.description} — confirmed by data "
+                    f"({avg_a:+.2f}%/5d, {wr_a:.0f}%wr, {len(group_a)} samples, "
+                    f"tested {hyp.times_tested}x, {confirm_rate:.0%} confirm rate)",
                     confidence=min(0.85, wr_a / 100),
+                    wins=wins_a, losses=len(group_a) - wins_a,
                 )
 
-    # ── Test: Does MACD positive actually outperform MACD negative? ──
-    macd_pos = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0]
-    macd_neg = [r for r in rows if r["macd"] < r["macd_sig"] and r["macd_hist"] < 0]
-    _test_hypothesis(
-        "MACD positive entries outperform MACD negative entries",
-        macd_pos, macd_neg, "a_better",
-    )
-
-    # ── Test: Do high-volume (>3x) entries outperform low-volume? ──
-    vol_hi = [r for r in rows if r.get("vol_ratio") and r["vol_ratio"] > 3.0]
-    vol_lo = [r for r in rows if r.get("vol_ratio") and r["vol_ratio"] < 1.5]
-    _test_hypothesis(
-        "High relative volume (>3x) entries outperform low volume (<1.5x)",
-        vol_hi, vol_lo, "a_better",
-    )
-
-    # ── Test: Do strong ADX trends (>25) produce better returns? ──
-    adx_hi = [r for r in rows if r["adx"] > 25]
-    adx_lo = [r for r in rows if r["adx"] < 15]
-    _test_hypothesis(
-        "Strong trends (ADX>25) outperform range-bound (ADX<15)",
-        adx_hi, adx_lo, "a_better",
-    )
-
-    # ── Test: Does EMA stack (bullish alignment) outperform broken EMAs? ──
-    ema_stack = [r for r in rows if r.get("ema_stack")]
-    ema_broken = [r for r in rows if not r.get("ema_stack")]
-    _test_hypothesis(
-        "Bullish EMA stack outperforms broken EMA alignment",
-        ema_stack, ema_broken, "a_better",
-    )
-
-    # ── Test: Do oversold RSI entries (RSI<30) outperform neutral RSI? ──
-    rsi_os = [r for r in rows if r["rsi"] < 30]
-    rsi_mid = [r for r in rows if 40 <= r["rsi"] <= 60]
-    _test_hypothesis(
-        "Oversold RSI (<30) mean-reversion outperforms neutral RSI entries",
-        rsi_os, rsi_mid, "a_better",
-    )
-
-    # ── Test: MACD histogram momentum (positive hist) vs negative hist ──
-    hist_pos = [r for r in rows if r["macd_hist"] > 0 and r["rsi"] > 40 and r["rsi"] < 65]
-    hist_neg = [r for r in rows if r["macd_hist"] < 0 and r["rsi"] > 40 and r["rsi"] < 65]
-    _test_hypothesis(
-        "MACD histogram positive (momentum) outperforms histogram negative in neutral RSI zone",
-        hist_pos, hist_neg, "a_better",
-    )
-
-    # ── Exploratory: Find novel patterns CHILI discovers on its own ──
-    # Check conditions that no human taught — let the data reveal surprises
-    bb_low_macd_neg = [r for r in rows if r["bb_pct"] < 0.15 and r["macd_hist"] < 0]
-    bb_low_macd_pos = [r for r in rows if r["bb_pct"] < 0.15 and r["macd_hist"] > 0]
-    if len(bb_low_macd_neg) >= 5 and len(bb_low_macd_pos) >= 5:
-        avg_neg = sum(r["ret_5d"] for r in bb_low_macd_neg) / len(bb_low_macd_neg)
-        avg_pos = sum(r["ret_5d"] for r in bb_low_macd_pos) / len(bb_low_macd_pos)
-        if avg_neg > avg_pos and avg_neg > 0.5:
-            save_insight(
-                db, user_id,
-                f"CHILI discovery: BB low + MACD negative STILL profitable "
-                f"({avg_neg:+.2f}%/5d vs {avg_pos:+.2f}%/5d) — "
-                f"contrarian bounce pattern (n={len(bb_low_macd_neg)})",
-                confidence=0.5,
-            )
-            results.append({
-                "hypothesis": "CHILI novel: BB oversold + MACD neg = contrarian opportunity",
-                "confirmed": True,
-                "avg_return": round(avg_neg, 3),
-            })
-
-    stoch_ext_adx = [r for r in rows if r["stoch_k"] < 20 and r["adx"] > 30]
-    if len(stoch_ext_adx) >= 5:
-        avg_ret = sum(r["ret_5d"] for r in stoch_ext_adx) / len(stoch_ext_adx)
-        wr = sum(1 for r in stoch_ext_adx if r["ret_5d"] > 0) / len(stoch_ext_adx) * 100
-        if avg_ret > 0.3 and wr > 50:
-            save_insight(
-                db, user_id,
-                f"CHILI discovery: Stochastic extreme (<20) + strong trend (ADX>30) "
-                f"= high-probability snap-back ({avg_ret:+.2f}%/5d, {wr:.0f}%wr, "
-                f"n={len(stoch_ext_adx)})",
-                confidence=min(0.8, wr / 100),
-            )
-
-    # ── Dynamic hypothesis testing (from LLM-generated hypotheses) ──
-    dynamic_tested = 0
-    try:
-        hyp_insights = db.query(TradingInsight).filter(
-            TradingInsight.user_id == user_id,
-            TradingInsight.active.is_(True),
-            TradingInsight.pattern_description.like("hypothesis:%"),
-        ).limit(10).all()
-
-        for hyp_ins in hyp_insights:
-            desc = hyp_ins.pattern_description
-            parts = desc.split("|")
-            if len(parts) < 3:
-                continue
-            cond_a_str = parts[1].strip().replace("A:", "").strip()
-            cond_b_str = parts[2].strip().replace("B:", "").strip()
-            expected = "a"
-            if len(parts) >= 4:
-                exp_part = parts[3].strip().lower()
-                if "b" in exp_part:
-                    expected = "b"
-
-            group_a = _filter_rows_by_condition(rows, cond_a_str)
-            group_b = _filter_rows_by_condition(rows, cond_b_str)
-
-            if len(group_a) >= 5 and len(group_b) >= 5:
-                label = desc.split("|")[0].replace("hypothesis:", "").strip()
-                _test_hypothesis(label, group_a, group_b, f"{expected}_better")
-                dynamic_tested += 1
-
-                hyp_ins.active = False
-                db.commit()
-
-        if dynamic_tested > 0:
-            log_learning_event(
-                db, user_id, "dynamic_hypothesis_testing",
-                f"Tested {dynamic_tested} LLM-generated hypotheses",
-            )
-    except Exception as e:
-        logger.warning(f"[learning] Dynamic hypothesis testing failed: {e}")
+    db.commit()
 
     # ── Feed real-trade per-pattern win rates back into insight confidence ──
     real_trade_adjustments = 0
@@ -1372,6 +1418,8 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
                         ins.confidence = round(
                             min(0.95, old_conf * 0.5 + (real_wr / 100) * 0.5), 3
                         )
+                        ins.win_count = ps.get("wins", 0) or 0
+                        ins.loss_count = (ps.get("trades", 0) or 0) - (ps.get("wins", 0) or 0)
                         db.commit()
                         real_trade_adjustments += 1
                         log_learning_event(
@@ -1387,77 +1435,29 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"[learning] Per-pattern trade feedback failed: {e}")
 
-    # ── Breakout-specific hypotheses ──
-    # BB squeeze + vol declining vs BB squeeze + vol rising
-    sq_vol_down = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("vol_ratio", 1) < 0.8]
-    sq_vol_up = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("vol_ratio", 1) > 1.5]
-    _test_hypothesis(
-        "BB squeeze + declining volume outperforms BB squeeze + rising volume",
-        sq_vol_down, sq_vol_up, "a_better",
-    )
-
-    # ADX < 20 with BB squeeze vs ADX > 25 with BB squeeze
-    sq_adx_low = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r["adx"] < 20]
-    sq_adx_high = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r["adx"] > 25]
-    _test_hypothesis(
-        "Consolidating (ADX<20) squeeze outperforms trending (ADX>25) squeeze",
-        sq_adx_low, sq_adx_high, "a_better",
-    )
-
-    # EMA aligned + squeeze vs misaligned + squeeze
-    sq_ema_aligned = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("ema_stack")]
-    sq_ema_broken = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and not r.get("ema_stack")]
-    _test_hypothesis(
-        "BB squeeze + bullish EMA stack outperforms squeeze + broken EMAs",
-        sq_ema_aligned, sq_ema_broken, "a_better",
-    )
-
-    # ── Regime-conditional hypotheses ──
-    macd_pos_risk_on = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0 and r.get("regime") == "risk_on"]
-    macd_pos_risk_off = [r for r in rows if r["macd"] > r["macd_sig"] and r["macd_hist"] > 0 and r.get("regime") == "risk_off"]
-    _test_hypothesis(
-        "MACD positive in risk_on outperforms MACD positive in risk_off",
-        macd_pos_risk_on, macd_pos_risk_off, "a_better",
-    )
-
-    sq_low_spy_mom = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("spy_mom_5d", 0) < -1]
-    sq_high_spy_mom = [r for r in rows if r.get("bb_pct", 0.5) < 0.20 and r.get("spy_mom_5d", 0) > 1]
-    _test_hypothesis(
-        "BB squeeze in bullish SPY momentum outperforms squeeze in bearish SPY momentum",
-        sq_high_spy_mom, sq_low_spy_mom, "a_better",
-    )
-
-    ema_risk_on = [r for r in rows if r.get("ema_stack") and r.get("regime") == "risk_on"]
-    ema_risk_off = [r for r in rows if r.get("ema_stack") and r.get("regime") == "risk_off"]
-    _test_hypothesis(
-        "EMA stack in risk_on outperforms EMA stack in risk_off",
-        ema_risk_on, ema_risk_off, "a_better",
-    )
-
-    vol_hi_risk_off = [r for r in rows if r.get("vol_ratio", 1) > 2.0 and r.get("regime") == "risk_off"]
-    vol_lo_risk_off = [r for r in rows if r.get("vol_ratio", 1) < 1.0 and r.get("regime") == "risk_off"]
-    _test_hypothesis(
-        "High volume entries in risk_off outperform low volume in risk_off (flight-to-quality)",
-        vol_hi_risk_off, vol_lo_risk_off, "a_better",
-    )
-
-    # ── Now evolve the scoring weights based on what we learned ──
+    # ── Evolve scoring weights ──
     from .scanner import evolve_strategy_weights
     weight_result = evolve_strategy_weights(db)
 
     confirmed_count = sum(1 for r in results if r.get("confirmed"))
     challenged_count = sum(1 for r in results if not r.get("confirmed", True))
 
+    total_hyp = db.query(TradingHypothesis).count()
+    active_hyp = db.query(TradingHypothesis).filter(
+        TradingHypothesis.status.in_(["pending", "testing", "confirmed"])
+    ).count()
+
     log_learning_event(
         db, user_id, "self_validation",
-        f"Tested {len(results)} hypotheses: {confirmed_count} confirmed, "
-        f"{challenged_count} challenged by data. "
+        f"Tested {len(results)} hypotheses (of {total_hyp} total, {active_hyp} active): "
+        f"{confirmed_count} confirmed, {challenged_count} challenged by data. "
         f"Real-trade adjustments: {real_trade_adjustments}. "
         f"Evolved {weight_result.get('adjusted', 0)} scoring weights.",
     )
 
     logger.info(
-        f"[learning] Self-validation: {len(results)} hypotheses tested, "
+        f"[learning] Dynamic self-validation: {len(results)} hypotheses tested "
+        f"({total_hyp} total in pool, {active_hyp} active), "
         f"{confirmed_count} confirmed, {challenged_count} challenged, "
         f"{real_trade_adjustments} real-trade adjustments, "
         f"{weight_result.get('adjusted', 0)} weights evolved"
@@ -1465,12 +1465,247 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
 
     return {
         "hypotheses_tested": len(results),
+        "hypotheses_in_pool": total_hyp,
+        "hypotheses_active": active_hyp,
         "confirmed": confirmed_count,
         "challenged": challenged_count,
         "real_trade_adjustments": real_trade_adjustments,
         "weights_evolved": weight_result.get("adjusted", 0),
         "details": results,
     }
+
+
+_BUILTIN_SEED_HYPOTHESES: list[dict[str, str]] = [
+    {"description": "MACD positive entries outperform MACD negative entries",
+     "condition_a": "macd > macd_sig and macd_hist > 0",
+     "condition_b": "macd < macd_sig and macd_hist < 0",
+     "expected_winner": "a", "related_weight": "macd_positive_bonus"},
+    {"description": "High relative volume (>3x) entries outperform low volume (<1.5x)",
+     "condition_a": "vol_ratio > 3.0",
+     "condition_b": "vol_ratio < 1.5",
+     "expected_winner": "a", "related_weight": "vol_surge_3x"},
+    {"description": "Strong trends (ADX>25) outperform range-bound (ADX<15)",
+     "condition_a": "adx > 25",
+     "condition_b": "adx < 15",
+     "expected_winner": "a", "related_weight": "bo_adx_trending"},
+    {"description": "Bullish EMA stack outperforms broken EMA alignment",
+     "condition_a": "ema_stack == true",
+     "condition_b": "ema_stack == false",
+     "expected_winner": "a", "related_weight": "bo_ema_support"},
+    {"description": "Oversold RSI (<30) mean-reversion outperforms neutral RSI entries",
+     "condition_a": "rsi < 30",
+     "condition_b": "rsi >= 40 and rsi <= 60",
+     "expected_winner": "a"},
+    {"description": "MACD histogram positive outperforms negative in neutral RSI zone",
+     "condition_a": "macd_hist > 0 and rsi > 40 and rsi < 65",
+     "condition_b": "macd_hist < 0 and rsi > 40 and rsi < 65",
+     "expected_winner": "a"},
+    {"description": "BB squeeze + declining volume outperforms BB squeeze + rising volume",
+     "condition_a": "bb_pct < 0.20 and vol_ratio < 0.8",
+     "condition_b": "bb_pct < 0.20 and vol_ratio > 1.5",
+     "expected_winner": "a"},
+    {"description": "Consolidating (ADX<20) squeeze outperforms trending (ADX>25) squeeze",
+     "condition_a": "bb_pct < 0.20 and adx < 20",
+     "condition_b": "bb_pct < 0.20 and adx > 25",
+     "expected_winner": "a", "related_weight": "bo_adx_consolidating"},
+    {"description": "BB squeeze + bullish EMA stack outperforms squeeze + broken EMAs",
+     "condition_a": "bb_pct < 0.20 and ema_stack == true",
+     "condition_b": "bb_pct < 0.20 and ema_stack == false",
+     "expected_winner": "a"},
+    {"description": "MACD positive in risk_on outperforms MACD positive in risk_off",
+     "condition_a": "macd > macd_sig and macd_hist > 0 and regime == risk_on",
+     "condition_b": "macd > macd_sig and macd_hist > 0 and regime == risk_off",
+     "expected_winner": "a"},
+    {"description": "EMA stack in risk_on outperforms EMA stack in risk_off",
+     "condition_a": "ema_stack == true and regime == risk_on",
+     "condition_b": "ema_stack == true and regime == risk_off",
+     "expected_winner": "a"},
+    {"description": "BB squeeze in bullish SPY momentum outperforms squeeze in bearish SPY momentum",
+     "condition_a": "bb_pct < 0.20 and spy_mom_5d > 1",
+     "condition_b": "bb_pct < 0.20 and spy_mom_5d < -1",
+     "expected_winner": "a"},
+    {"description": "High volume in risk_off outperforms low volume in risk_off (flight-to-quality)",
+     "condition_a": "vol_ratio > 2.0 and regime == risk_off",
+     "condition_b": "vol_ratio < 1.0 and regime == risk_off",
+     "expected_winner": "a"},
+    {"description": "RSI momentum + EMA stack + resistance retests outperforms RSI momentum + EMA stack alone",
+     "condition_a": "rsi > 65 and ema_stack == true and resistance_retests >= 3",
+     "condition_b": "rsi > 65 and ema_stack == true and resistance_retests < 3",
+     "expected_winner": "a", "related_weight": "bo_retest_pressure"},
+    {"description": "VCP (2+ contractions) near resistance outperforms no VCP near resistance",
+     "condition_a": "vcp_count >= 2 and bb_pct < 0.30",
+     "condition_b": "vcp_count < 1 and bb_pct < 0.30",
+     "expected_winner": "a"},
+]
+
+
+def _seed_builtin_hypotheses(db: Session) -> int:
+    """Seed the TradingHypothesis table with initial hypotheses on first run."""
+    from ...models.trading import TradingHypothesis
+    added = 0
+    for h in _BUILTIN_SEED_HYPOTHESES:
+        hyp = TradingHypothesis(
+            description=h["description"],
+            condition_a=h["condition_a"],
+            condition_b=h["condition_b"],
+            expected_winner=h.get("expected_winner", "a"),
+            origin="builtin_seed",
+            status="pending",
+            related_weight=h.get("related_weight"),
+        )
+        db.add(hyp)
+        added += 1
+    db.commit()
+    logger.info(f"[learning] Seeded {added} builtin hypotheses")
+    return added
+
+
+def _migrate_legacy_hypotheses(db: Session, user_id: int | None) -> int:
+    """Migrate old TradingInsight hypothesis:... entries into TradingHypothesis."""
+    from ...models.trading import TradingHypothesis
+
+    legacy = db.query(TradingInsight).filter(
+        TradingInsight.active.is_(True),
+        TradingInsight.pattern_description.like("hypothesis:%"),
+    ).limit(20).all()
+
+    migrated = 0
+    for ins in legacy:
+        desc = ins.pattern_description
+        parts = desc.split("|")
+        if len(parts) < 3:
+            ins.active = False
+            continue
+
+        label = parts[0].replace("hypothesis:", "").strip()
+        cond_a = parts[1].strip().replace("A:", "").strip()
+        cond_b = parts[2].strip().replace("B:", "").strip()
+        expected = "a"
+        if len(parts) >= 4 and "b" in parts[3].strip().lower():
+            expected = "b"
+
+        existing = db.query(TradingHypothesis).filter_by(description=label).first()
+        if not existing:
+            hyp = TradingHypothesis(
+                description=label,
+                condition_a=cond_a,
+                condition_b=cond_b,
+                expected_winner=expected,
+                origin="llm_generated",
+                status="pending",
+            )
+            db.add(hyp)
+            migrated += 1
+
+        ins.active = False
+
+    if migrated:
+        db.commit()
+        logger.info(f"[learning] Migrated {migrated} legacy hypothesis insights")
+    return migrated
+
+
+def _derive_hypotheses_from_patterns(db: Session) -> int:
+    """Auto-generate A/B hypotheses from active ScanPatterns.
+
+    For each ScanPattern with conditions, we create a hypothesis that tests
+    whether the FULL pattern outperforms a version with one key condition removed.
+    This makes every user/brain/web-discovered pattern automatically testable.
+    """
+    from ...models.trading import ScanPattern, TradingHypothesis
+
+    patterns = db.query(ScanPattern).filter_by(active=True).all()
+    existing_pattern_ids = {
+        h.related_pattern_id
+        for h in db.query(TradingHypothesis).filter(
+            TradingHypothesis.related_pattern_id.isnot(None)
+        ).all()
+    }
+
+    _OP_MAP = {">": ">", ">=": ">=", "<": "<", "<=": "<=", "==": "==", "!=": "!="}
+    _OP_NEGATE = {">": "<=", ">=": "<", "<": ">=", "<=": ">", "==": "!="}
+
+    added = 0
+    for p in patterns:
+        if p.id in existing_pattern_ids:
+            continue
+
+        try:
+            rules = json.loads(p.rules_json or "{}")
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        conditions = rules.get("conditions", [])
+        if len(conditions) < 2:
+            continue
+
+        parts_a: list[str] = []
+        for cond in conditions:
+            ind = cond.get("indicator", "")
+            op = _OP_MAP.get(cond.get("op", ""), "==")
+            ref = cond.get("ref")
+            val = cond.get("value")
+
+            if ind == "price" and ref:
+                parts_a.append(f"ema_stack == true")
+                continue
+            if isinstance(val, bool):
+                parts_a.append(f"{ind} == {'true' if val else 'false'}")
+            elif isinstance(val, list) and len(val) == 2:
+                parts_a.append(f"{ind} >= {val[0]} and {ind} <= {val[1]}")
+            elif isinstance(val, list):
+                parts_a.append(f"{ind} == {val[0]}")
+            else:
+                parts_a.append(f"{ind} {op} {val}")
+
+        if not parts_a:
+            continue
+
+        condition_a = " and ".join(parts_a)
+
+        drop_idx = len(conditions) - 1
+        last_cond = conditions[drop_idx]
+        last_ind = last_cond.get("indicator", "")
+        last_op = last_cond.get("op", ">")
+        last_val = last_cond.get("value")
+        last_ref = last_cond.get("ref")
+
+        parts_b = list(parts_a[:-1])
+        if last_ind == "price" and last_ref:
+            parts_b.append("ema_stack == false")
+        elif last_op in _OP_NEGATE:
+            neg_op = _OP_NEGATE[last_op]
+            if isinstance(last_val, bool):
+                parts_b.append(f"{last_ind} == {'false' if last_val else 'true'}")
+            elif isinstance(last_val, list):
+                pass
+            else:
+                parts_b.append(f"{last_ind} {neg_op} {last_val}")
+        else:
+            parts_b.append(f"{last_ind} == 0")
+
+        if not parts_b:
+            continue
+
+        condition_b = " and ".join(parts_b)
+        description = f"{p.name}: full pattern outperforms partial (without {last_ind} condition)"
+
+        hyp = TradingHypothesis(
+            description=description,
+            condition_a=condition_a,
+            condition_b=condition_b,
+            expected_winner="a",
+            origin="pattern_derived",
+            status="pending",
+            related_pattern_id=p.id,
+        )
+        db.add(hyp)
+        added += 1
+
+    if added:
+        db.commit()
+        logger.info(f"[learning] Derived {added} hypotheses from ScanPatterns")
+    return added
 
 
 # ── Intraday Breakout Pattern Mining (15m data) ──────────────────────
@@ -1600,11 +1835,13 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
         avg_no = sum(r["ret_4h"] for r in no_sq) / len(no_sq)
         wr_sq = sum(1 for r in sq if r["ret_4h"] > 0) / len(sq) * 100
         if avg_sq > avg_no and avg_sq > 0.1:
+            w = sum(1 for r in sq if r["ret_4h"] > 0)
             save_insight(
                 db, user_id,
                 f"Intraday: BB squeeze -> {avg_sq:+.2f}% avg 4h return, "
                 f"{wr_sq:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
                 confidence=min(0.80, wr_sq / 100),
+                wins=w, losses=len(sq) - w,
             )
             discoveries += 1
 
@@ -1614,12 +1851,14 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if len(sq_vol_low) >= 5 and len(sq_vol_high) >= 5:
         avg_low = sum(r["ret_4h"] for r in sq_vol_low) / len(sq_vol_low)
         avg_high = sum(r["ret_4h"] for r in sq_vol_high) / len(sq_vol_high)
+        w_low = sum(1 for r in sq_vol_low if r["ret_4h"] > 0)
         save_insight(
             db, user_id,
             f"Intraday: squeeze + low vol {avg_low:+.2f}%/4h "
             f"vs squeeze + high vol {avg_high:+.2f}%/4h "
             f"(n={len(sq_vol_low)}+{len(sq_vol_high)})",
             confidence=0.5,
+            wins=w_low, losses=len(sq_vol_low) - w_low,
         )
         discoveries += 1
 
@@ -1628,11 +1867,13 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if len(nr7s) >= 10:
         avg_nr7 = sum(r["ret_8h"] for r in nr7s) / len(nr7s)
         wr_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0) / len(nr7s) * 100
+        w_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0)
         save_insight(
             db, user_id,
             f"Intraday: NR7 (narrow range 7) -> {avg_nr7:+.2f}% avg 8h return, "
             f"{wr_nr7:.0f}%wr (n={len(nr7s)})",
             confidence=min(0.75, wr_nr7 / 100),
+            wins=w_nr7, losses=len(nr7s) - w_nr7,
         )
         discoveries += 1
 
@@ -1641,11 +1882,13 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if len(coiled) >= 5:
         avg_coil = sum(r["ret_4h"] for r in coiled) / len(coiled)
         wr_coil = sum(1 for r in coiled if r["ret_4h"] > 0) / len(coiled) * 100
+        w_coil = sum(1 for r in coiled if r["ret_4h"] > 0)
         save_insight(
             db, user_id,
             f"Intraday: ATR compressed + EMA bullish = coiled spring, "
             f"{avg_coil:+.2f}%/4h, {wr_coil:.0f}%wr (n={len(coiled)})",
             confidence=min(0.80, wr_coil / 100),
+            wins=w_coil, losses=len(coiled) - w_coil,
         )
         discoveries += 1
 
@@ -1655,11 +1898,13 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if len(sq_rsi_mid) >= 5 and len(sq_rsi_ext) >= 5:
         avg_mid = sum(r["ret_4h"] for r in sq_rsi_mid) / len(sq_rsi_mid)
         avg_ext = sum(r["ret_4h"] for r in sq_rsi_ext) / len(sq_rsi_ext)
+        w_mid = sum(1 for r in sq_rsi_mid if r["ret_4h"] > 0)
         save_insight(
             db, user_id,
             f"Intraday: squeeze + RSI 40-65 {avg_mid:+.2f}%/4h vs "
             f"squeeze + extreme RSI {avg_ext:+.2f}%/4h",
             confidence=0.55,
+            wins=w_mid, losses=len(sq_rsi_mid) - w_mid,
         )
         discoveries += 1
 
@@ -1752,10 +1997,13 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
                 existing.confidence * 0.4 + confidence * 0.6, 3
             )
             existing.evidence_count = total
+            existing.win_count = winners
+            existing.loss_count = total - winners
             existing.pattern_description = desc
             existing.last_seen = datetime.utcnow()
         else:
-            save_insight(db, user_id, desc, confidence=confidence)
+            save_insight(db, user_id, desc, confidence=confidence,
+                         wins=winners, losses=total - winners)
 
         patterns_created += 1
 
@@ -1814,7 +2062,8 @@ def learn_exit_optimization(db: Session, user_id: int | None) -> dict[str, Any]:
                     f"is {median_peak:.1f}h. Consider tighter crypto_bo_target_atr_mult "
                     f"targets for faster profit-taking."
                 )
-                save_insight(db, user_id, desc, confidence=0.6)
+                save_insight(db, user_id, desc, confidence=0.6,
+                             wins=len(winners), losses=len(losers))
                 adjustments += 1
 
         if stops and losers:
@@ -1825,7 +2074,8 @@ def learn_exit_optimization(db: Session, user_id: int | None) -> dict[str, Any]:
                     f"Exit optimization: {asset_type} {tier} — {fast_stops}/{len(stops)} "
                     f"alerts hit stop within 1h. Consider widening {prefix}_stop_atr_mult."
                 )
-                save_insight(db, user_id, desc, confidence=0.55)
+                save_insight(db, user_id, desc, confidence=0.55,
+                             wins=len(winners), losses=len(losers))
                 adjustments += 1
 
         # Optimal exit vs actual outcome
@@ -1840,7 +2090,8 @@ def learn_exit_optimization(db: Session, user_id: int | None) -> dict[str, Any]:
                     f"capture avg {avg_opt:.1f}% vs actual avg peak {avg_actual:.1f}%. "
                     f"Trailing stop strategy is recommended."
                 )
-                save_insight(db, user_id, desc, confidence=0.65)
+                save_insight(db, user_id, desc, confidence=0.65,
+                             wins=len(winners), losses=len(alerts) - len(winners))
                 adjustments += 1
 
     if adjustments:
@@ -1903,7 +2154,8 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"Fakeout pattern: {label} occurs in {fakeout_pct:.0f}% of fakeouts "
                 f"vs {winner_pct:.0f}% of winners — {keyword}"
             )
-            save_insight(db, user_id, desc, confidence=0.55)
+            save_insight(db, user_id, desc, confidence=0.55,
+                         wins=len(winner_inds), losses=len(fakeout_inds))
             patterns_found += 1
 
     # Signal combination analysis
@@ -1941,7 +2193,8 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"Fakeout combo: '{combo[0]}' + '{combo[1]}' — "
                 f"{fakeout_rate:.0f}% fakeout rate vs {winner_rate:.0f}% winner rate"
             )
-            save_insight(db, user_id, desc, confidence=0.5)
+            save_insight(db, user_id, desc, confidence=0.5,
+                         losses=count)
             patterns_found += 1
 
     if patterns_found:
@@ -1991,7 +2244,8 @@ def tune_position_sizing(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"Position sizing: crypto in risk_off has {fakeout_rate:.0f}% fakeout rate "
                 f"({len(alerts)} alerts) — reduce pos_speculative_mult"
             )
-            save_insight(db, user_id, desc, confidence=0.6)
+            save_insight(db, user_id, desc, confidence=0.6,
+                         wins=len(winners), losses=len(losers) + len(fakeouts))
             adjustments += 1
 
         if regime == "risk_on" and win_rate > 70:
@@ -1999,7 +2253,8 @@ def tune_position_sizing(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"Position sizing: {asset_type} in risk_on has {win_rate:.0f}% win rate "
                 f"({len(alerts)} alerts) — can increase pos_regime_risk_off_mult towards 1.0"
             )
-            save_insight(db, user_id, desc, confidence=0.6)
+            save_insight(db, user_id, desc, confidence=0.6,
+                         wins=len(winners), losses=len(losers) + len(fakeouts))
             adjustments += 1
 
         # Profit factor per tier
@@ -2012,7 +2267,8 @@ def tune_position_sizing(db: Session, user_id: int | None) -> dict[str, Any]:
                     f"Position sizing: {asset_type} {regime} has profit factor "
                     f"{profit_factor:.1f}x — consider larger pos_pct_hard_cap for this regime"
                 )
-                save_insight(db, user_id, desc, confidence=0.65)
+                save_insight(db, user_id, desc, confidence=0.65,
+                             wins=len(winners), losses=len(losers))
                 adjustments += 1
 
     if adjustments:
@@ -2135,7 +2391,8 @@ def learn_timeframe_performance(db: Session, user_id: int | None) -> dict[str, A
                 f"Timeframe performance: {asset_type} {tf} achieves {wr:.0f}% win rate "
                 f"(avg gain {avg_gain:+.1f}%, n={len(alerts)}) — boost {tf} pattern weights"
             )
-            save_insight(db, user_id, desc, confidence=min(0.8, wr / 100))
+            save_insight(db, user_id, desc, confidence=min(0.8, wr / 100),
+                         wins=winners, losses=len(alerts) - winners)
             insights_created += 1
 
     if tf_stats and len(tf_stats) >= 2:
@@ -2252,7 +2509,9 @@ def mine_signal_synergies(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"{wr:.0f}% win rate (n={len(outcomes)}) vs baseline {overall_wr:.0f}% "
                 f"— pattern combo synergy bonus"
             )
-            save_insight(db, user_id, desc, confidence=min(0.85, wr / 100))
+            w = sum(1 for o in outcomes if o == "winner")
+            save_insight(db, user_id, desc, confidence=min(0.85, wr / 100),
+                         wins=w, losses=len(outcomes) - w)
             synergies_found += 1
 
         if synergies_found >= 5:
@@ -2358,6 +2617,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                 best_score = -999.0
                 best_wr = 0.0
                 best_n = 0
+                best_wins = 0
 
                 for threshold in variations:
                     if op == "lt":
@@ -2380,6 +2640,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                         best_variant = threshold
                         best_wr = wr
                         best_n = len(filtered)
+                        best_wins = wins
 
                 if best_variant is not None and best_score > 0:
                     original_desc = ins.pattern_description[:80]
@@ -2391,6 +2652,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                     save_insight(
                         db, user_id, refined_label,
                         confidence=min(0.85, best_wr / 100),
+                        wins=best_wins, losses=best_n - best_wins,
                     )
                     refined_count += 1
                     log_learning_event(
@@ -2485,6 +2747,29 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception:
         pass
 
+    # Dynamic hypothesis pool status
+    from ...models.trading import TradingHypothesis
+    hypothesis_pool_text = "No hypotheses yet."
+    try:
+        recent_hyps = db.query(TradingHypothesis).order_by(
+            TradingHypothesis.last_tested_at.desc().nullslast()
+        ).limit(15).all()
+        if recent_hyps:
+            lines = []
+            for h in recent_hyps:
+                rate = (h.times_confirmed or 0) / max(1, h.times_tested or 1)
+                result_json = json.loads(h.last_result_json) if h.last_result_json else {}
+                a_avg = result_json.get("group_a_avg", "?")
+                b_avg = result_json.get("group_b_avg", "?")
+                lines.append(
+                    f"  - [{h.status}] {h.description} "
+                    f"(tested {h.times_tested}x, confirm rate {rate:.0%}, "
+                    f"last A={a_avg}, B={b_avg}, origin={h.origin})"
+                )
+            hypothesis_pool_text = "\n".join(lines)
+    except Exception:
+        pass
+
     reflection_prompt = f"""You are an AI trading brain doing a self-reflection on what you've learned.
 
 ## YOUR LEARNED PATTERNS
@@ -2513,6 +2798,9 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 ## RECENTLY CHALLENGED HYPOTHESES
 {challenged_text}
 
+## HYPOTHESIS POOL STATUS
+{hypothesis_pool_text}
+
 Write a LEARNING REPORT in this format:
 
 ### What I've Learned So Far
@@ -2530,27 +2818,39 @@ Write a LEARNING REPORT in this format:
 ### Next Study Goals
 (What should I focus on studying next to get smarter?)
 
+### Active Hypothesis Results
+(Review the hypothesis pool. Which hypotheses are being confirmed? Which are failing?
+ Note any surprises — especially hypotheses you expected to confirm but didn't.)
+
 ### Hypotheses to Test
 IMPORTANT: After your report, output a JSON block with concrete testable hypotheses.
+These will be automatically added to the hypothesis pool and tested against real data.
 Use EXACTLY this format (valid JSON):
 
 ```json
-{{
+{{{{
   "hypotheses": [
-    {{
+    {{{{
       "description": "human-readable description of what to test",
-      "condition_a": "indicator condition for group A (e.g. 'rsi < 30')",
-      "condition_b": "indicator condition for group B (e.g. 'rsi >= 30 and rsi < 50')",
-      "expected_winner": "a"
-    }}
+      "condition_a": "indicator condition for group A (e.g. 'rsi > 65 and ema_stack == true')",
+      "condition_b": "indicator condition for group B (e.g. 'rsi > 65 and ema_stack == false')",
+      "expected_winner": "a",
+      "related_weight": "optional_weight_name_to_influence"
+    }}}}
   ]
-}}
+}}}}
 ```
 
-Generate 3-5 hypotheses based on gaps in your knowledge, challenged hypotheses above,
-or interesting combinations you want to explore. Use indicator fields: rsi, macd_hist,
-macd (vs macd_sig), adx, stoch_k, bb_pct, vol_ratio, ema_stack, gap_pct.
-Conditions should use simple comparisons like "rsi < 30", "adx > 25", "stoch_k < 20".
+Available indicator fields: rsi, macd, macd_sig, macd_hist, adx, stoch_k, bb_pct,
+bb_squeeze (bool), vol_ratio, ema_stack (bool), ema_20, ema_50, ema_100, gap_pct,
+resistance_retests (int), narrow_range (string like NR7), vcp_count (int),
+above_sma20 (bool), regime (string), spy_mom_5d (float).
+
+Generate 3-5 NEW hypotheses based on:
+1. Gaps in your knowledge from the hypothesis pool above
+2. Challenged hypotheses that need follow-up investigation
+3. Interesting indicator combinations not yet tested
+4. Breakout-specific tests (resistance retests, VCP, narrow range patterns)
 
 Keep it conversational and honest. Use actual numbers from the patterns above."""
 
@@ -2580,13 +2880,23 @@ Keep it conversational and honest. Use actual numbers from the patterns above.""
         cond_a = hyp.get("condition_a", "")
         cond_b = hyp.get("condition_b", "")
         expected = hyp.get("expected_winner", "a")
+        related_w = hyp.get("related_weight")
         if desc and cond_a and cond_b:
-            save_insight(
-                db, user_id,
-                f"hypothesis:{desc} | A: {cond_a} | B: {cond_b} | expected: {expected}",
-                confidence=0.5,
-            )
-            hypotheses_saved += 1
+            existing = db.query(TradingHypothesis).filter_by(description=desc).first()
+            if not existing:
+                new_hyp = TradingHypothesis(
+                    description=desc,
+                    condition_a=cond_a,
+                    condition_b=cond_b,
+                    expected_winner=expected,
+                    origin="llm_generated",
+                    status="pending",
+                    related_weight=related_w if related_w else None,
+                )
+                db.add(new_hyp)
+                hypotheses_saved += 1
+    if hypotheses_saved:
+        db.commit()
 
     log_learning_event(
         db, user_id, "review",
@@ -3436,6 +3746,252 @@ def get_learning_status() -> dict[str, Any]:
     return status
 
 
+def _run_pattern_engine_cycle(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Run pattern discovery, testing, and evolution in one cycle."""
+    result: dict[str, Any] = {
+        "hypotheses_generated": 0,
+        "patterns_tested": 0,
+        "patterns_evolved": 0,
+        "web_patterns_created": 0,
+    }
+
+    try:
+        from .pattern_engine import get_active_patterns, update_pattern
+        from ..backtest_service import backtest_pattern
+
+        # Step A: LLM-based hypothesis discovery from internal data
+        hypotheses = discover_pattern_hypotheses(db, user_id)
+        result["hypotheses_generated"] = len(hypotheses)
+
+        # Step B: Web research — browse online for new patterns
+        try:
+            from .web_pattern_researcher import run_web_pattern_research
+            web_report = run_web_pattern_research(db)
+            result["web_patterns_created"] = web_report.get("patterns_created", 0)
+            result["web_searches"] = web_report.get("searches", 0)
+        except Exception as e:
+            logger.warning(f"[learning] Web pattern research failed: {e}")
+
+        # Step C: Test all active patterns
+        patterns = get_active_patterns(db)
+        tested = 0
+        for p in patterns[:10]:
+            try:
+                bt_result = test_pattern_hypothesis(db, p, user_id)
+                if bt_result:
+                    tested += 1
+            except Exception:
+                continue
+        result["patterns_tested"] = tested
+
+        # Step D: Evolve — prune weak, promote strong
+        evolved = evolve_patterns(db)
+        result["patterns_evolved"] = evolved
+
+    except Exception as e:
+        logger.warning(f"[learning] Pattern engine cycle error: {e}")
+
+    return result
+
+
+def discover_pattern_hypotheses(
+    db: Session,
+    user_id: int | None,
+    max_hypotheses: int = 3,
+) -> list[dict[str, Any]]:
+    """Use LLM + recent trading data to propose new ScanPattern hypotheses.
+
+    Analyzes recent high-scoring breakouts and missed opportunities to
+    generate new pattern rules that the current patterns don't capture.
+    """
+    from .pattern_engine import create_pattern, list_patterns, get_active_patterns
+    from ...models.trading import TradingInsight, ScanPattern
+
+    existing = list_patterns(db)
+    existing_names = {p["name"].lower() for p in existing}
+
+    insights = (
+        db.query(TradingInsight)
+        .filter(TradingInsight.active.is_(True))
+        .filter(TradingInsight.confidence >= 0.6)
+        .order_by(TradingInsight.confidence.desc())
+        .limit(20)
+        .all()
+    )
+
+    if len(insights) < 3:
+        return []
+
+    insight_summaries = []
+    for ins in insights[:15]:
+        insight_summaries.append(
+            f"- {ins.pattern_description} (confidence={ins.confidence:.2f}, seen={ins.evidence_count}x)"
+        )
+
+    existing_summaries = []
+    for p in existing[:10]:
+        existing_summaries.append(f"- {p['name']}: {p.get('description', '')}")
+
+    prompt = (
+        "You are a quantitative trading pattern researcher. Based on these high-confidence "
+        "learned trading insights, propose 1-3 NEW composable breakout patterns that are NOT "
+        "already covered by the existing patterns.\n\n"
+        "## Learned Insights:\n" + "\n".join(insight_summaries) + "\n\n"
+        "## Existing Patterns:\n" + ("\n".join(existing_summaries) if existing_summaries else "(none)") + "\n\n"
+        "For each proposed pattern, respond with JSON array. Each element:\n"
+        '{"name": "...", "description": "...", "conditions": [{"indicator": "...", "op": "...", "value": ...}], '
+        '"score_boost": 1.5, "min_base_score": 4.0}\n\n'
+        "Available indicators: rsi_14, ema_20, ema_50, ema_100, price, bb_squeeze, adx, "
+        "rel_vol, macd_hist, resistance_retests, dist_to_resistance_pct, narrow_range, "
+        "vcp_count, vwap_reclaim.\n"
+        "Available ops: >, >=, <, <=, ==, between, any_of.\n"
+        "Respond ONLY with the JSON array, no other text."
+    )
+
+    try:
+        from ..llm_caller import call_llm
+        response = call_llm(prompt, max_tokens=1500)
+        if not response:
+            return []
+
+        import json as _json
+        text = response.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        proposals = _json.loads(text)
+        if not isinstance(proposals, list):
+            proposals = [proposals]
+
+        created = []
+        for prop in proposals[:max_hypotheses]:
+            name = prop.get("name", "").strip()
+            if not name or name.lower() in existing_names:
+                continue
+
+            pattern_data = {
+                "name": name,
+                "description": prop.get("description", ""),
+                "rules_json": _json.dumps({"conditions": prop.get("conditions", [])}),
+                "origin": "brain_discovered",
+                "score_boost": prop.get("score_boost", 1.0),
+                "min_base_score": prop.get("min_base_score", 4.0),
+                "confidence": 0.3,
+                "active": True,
+            }
+            p = create_pattern(db, pattern_data)
+            created.append({"id": p.id, "name": p.name})
+            existing_names.add(name.lower())
+            logger.info(f"[learning] Discovered new pattern hypothesis: {name}")
+
+        return created
+
+    except Exception as e:
+        logger.warning(f"[learning] Pattern hypothesis discovery failed: {e}")
+        return []
+
+
+def test_pattern_hypothesis(
+    db: Session,
+    pattern,
+    user_id: int | None,
+    tickers: list[str] | None = None,
+) -> dict[str, Any] | None:
+    """Backtest a ScanPattern on a sample of tickers and update its confidence."""
+    from ..backtest_service import backtest_pattern
+    from .pattern_engine import update_pattern
+    from .market_data import DEFAULT_SCAN_TICKERS
+
+    if tickers is None:
+        tickers = list(DEFAULT_SCAN_TICKERS[:10])
+
+    wins = 0
+    total = 0
+    returns = []
+
+    for ticker in tickers[:5]:
+        try:
+            result = backtest_pattern(
+                ticker=ticker,
+                pattern_name=pattern.name,
+                rules_json=pattern.rules_json,
+                interval="1d",
+                period="1y",
+            )
+            if not result.get("ok"):
+                continue
+            total += 1
+            wr = result.get("win_rate", 0)
+            ret = result.get("return_pct", 0)
+            if wr > 50:
+                wins += 1
+            returns.append(ret)
+        except Exception:
+            continue
+
+    if total == 0:
+        return None
+
+    avg_return = sum(returns) / len(returns) if returns else 0
+    overall_wr = (wins / total) * 100 if total > 0 else 0
+
+    new_confidence = max(0.1, min(0.95,
+        pattern.confidence * 0.7 + (overall_wr / 100) * 0.3
+    ))
+
+    update_pattern(db, pattern.id, {
+        "confidence": round(new_confidence, 3),
+        "win_rate": round(overall_wr, 1),
+        "avg_return_pct": round(avg_return, 2),
+        "backtest_count": (pattern.backtest_count or 0) + total,
+        "evidence_count": (pattern.evidence_count or 0) + total,
+    })
+
+    logger.info(
+        f"[learning] Tested pattern '{pattern.name}': "
+        f"WR={overall_wr:.0f}%, avg_ret={avg_return:.1f}%, conf={new_confidence:.2f}"
+    )
+
+    return {
+        "pattern_id": pattern.id,
+        "name": pattern.name,
+        "tickers_tested": total,
+        "win_rate": overall_wr,
+        "avg_return": avg_return,
+        "new_confidence": new_confidence,
+    }
+
+
+def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 0.2) -> int:
+    """Prune low-confidence patterns and promote high-confidence ones.
+
+    Returns the number of patterns modified.
+    """
+    from ...models.trading import ScanPattern
+
+    patterns = db.query(ScanPattern).filter_by(active=True).all()
+    modified = 0
+
+    for p in patterns:
+        if p.origin == "builtin":
+            continue
+
+        if (p.evidence_count or 0) >= min_evidence and (p.confidence or 0) < min_confidence:
+            p.active = False
+            modified += 1
+            logger.info(f"[learning] Deactivated low-confidence pattern: {p.name} (conf={p.confidence:.2f})")
+            continue
+
+        if (p.confidence or 0) >= 0.7 and (p.score_boost or 0) < 2.0:
+            p.score_boost = min(p.score_boost + 0.5, 3.0)
+            modified += 1
+            logger.info(f"[learning] Promoted pattern: {p.name} boost→{p.score_boost:.1f}")
+
+    if modified:
+        db.commit()
+    return modified
+
+
 def run_learning_cycle(
     db: Session,
     user_id: int | None,
@@ -3765,7 +4321,22 @@ def run_learning_cycle(
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
 
-        # Step 13: Finalize + log
+        # Step 13b: Pattern engine — discover, test, evolve
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Pattern discovery & evolution"
+        _learning_status["phase"] = "pattern_engine"
+        try:
+            pe_result = _run_pattern_engine_cycle(db, user_id)
+            report["patterns_discovered_engine"] = pe_result.get("hypotheses_generated", 0)
+            report["patterns_tested"] = pe_result.get("patterns_tested", 0)
+            report["patterns_evolved"] = pe_result.get("patterns_evolved", 0)
+        except Exception as e:
+            logger.warning(f"[trading] Pattern engine cycle failed: {e}")
+        _step_time("pattern_engine", step_start, "done")
+
+        # Step 14: Finalize + log
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
         elapsed = time.time() - start

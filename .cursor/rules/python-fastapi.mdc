@@ -1,0 +1,69 @@
+---
+description: Python and FastAPI coding conventions for CHILI
+globs: "**/*.py"
+alwaysApply: false
+---
+
+# Python & FastAPI Conventions
+
+## Naming
+
+- **Files**: `snake_case` — `chat_service.py`, `pattern_engine.py`
+- **Functions**: `snake_case` — `get_identity_ctx`, `run_learning_cycle`
+- **Classes**: `PascalCase` — `TradingInsight`, `ProjectAgentState`
+- **Constants**: `UPPER_SNAKE` — `DEVICE_COOKIE_NAME`, `DEFAULT_SCAN_TICKERS`
+- **Private helpers**: prefix with `_` — `_guard()`, `_score_breakout()`, `_eval_condition()`
+- **DB columns**: `snake_case` — `convo_key`, `user_id`, `created_at`
+
+## Type Hints
+
+Use Python 3.11+ built-in generics. No `typing.List` or `typing.Dict`:
+
+```python
+# GOOD
+def foo(items: list[str], data: dict[str, int]) -> str | None:
+
+# BAD
+def foo(items: List[str], data: Dict[str, int]) -> Optional[str]:
+```
+
+Exception: `Optional` for FastAPI `Query`/`Form` defaults.
+
+## Import Order
+
+1. Standard library (`json`, `time`, `os`, `pathlib`, `threading`, `concurrent.futures`)
+2. Third-party (`fastapi`, `sqlalchemy`, `pydantic`, `pandas`)
+3. Relative app imports (`from ..deps import`, `from ...models.trading import`)
+4. Relative service imports (`from .portfolio import save_insight`)
+
+## Error Handling
+
+- Wrap external calls (LLM, broker APIs, market data) in try/except
+- Log errors with `logger.warning(...)` or `logger.error(...)`
+- Return fallback values instead of crashing — empty string, empty list, `None`
+- Never silently swallow exceptions — always log them
+
+```python
+try:
+    result = external_call()
+except Exception as e:
+    logger.warning("[module] descriptive error: %s", e)
+    result = fallback_value
+```
+
+## Logging
+
+Use Python's `logging` module. Each module gets its own logger:
+
+```python
+import logging
+logger = logging.getLogger(__name__)
+logger.info("[scanner] Scanning %d tickers...", count)
+```
+
+## Concurrency
+
+- `ThreadPoolExecutor` for I/O-bound work (API calls, data fetching)
+- Worker counts scale with CPU: `min(80, max(24, os.cpu_count() * 3))` for I/O
+- `threading.Lock` / `threading.Semaphore` for shared state
+- FastAPI `BackgroundTasks` for fire-and-forget work in endpoints

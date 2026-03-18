@@ -1060,7 +1060,7 @@ def api_run_daytrade_scan(background_tasks: BackgroundTasks):
 def api_run_breakout_scan(background_tasks: BackgroundTasks):
     """Return cached breakout results if fresh, else kick off BG scan and return fast."""
     from ..services.trading.scanner import (
-        get_breakout_cache, run_breakout_scan, _brain_meta,
+        get_breakout_cache, run_breakout_scan, run_crypto_breakout_scan, _brain_meta,
     )
     cache = get_breakout_cache()
     age = cache.get("age_seconds")
@@ -1070,16 +1070,22 @@ def api_run_breakout_scan(background_tasks: BackgroundTasks):
         return JSONResponse({
             "ok": True, "scan_type": "breakout", "cached": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
+            "candidates_scanned": cache.get("total_scanned", 0),
+            "total_sourced": cache.get("total_scanned", 0),
             "brain": _brain_meta(),
         })
     if has_data:
         background_tasks.add_task(run_breakout_scan, 30)
+        background_tasks.add_task(run_crypto_breakout_scan, 20)
         return JSONResponse({
             "ok": True, "scan_type": "breakout", "cached": True, "refreshing": True,
             "matches": len(cache["results"]), "results": cache["results"][:30],
+            "candidates_scanned": cache.get("total_scanned", 0),
+            "total_sourced": cache.get("total_scanned", 0),
             "brain": _brain_meta(),
         })
     background_tasks.add_task(run_breakout_scan, 30)
+    background_tasks.add_task(run_crypto_breakout_scan, 20)
     return JSONResponse({
         "ok": True, "scan_type": "breakout", "warming_up": True,
         "matches": 0, "results": [],
@@ -1125,6 +1131,39 @@ def api_top_picks(request: Request, db: Session = Depends(get_db)):
         "as_of": freshness["as_of"],
         "age_seconds": freshness["age_seconds"],
         "is_stale": freshness["is_stale"],
+    })
+
+
+@router.get("/api/trading/brain/tickers")
+def api_brain_tickers(db: Session = Depends(get_db)):
+    """Return the brain's top known tickers — crypto and stocks — for UI population.
+
+    Pulls from the brain's MarketSnapshot history (recently scored tickers)
+    and the user's watchlist. No hardcoded lists.
+    """
+    from ..models.trading import MarketSnapshot
+    from sqlalchemy import func, desc
+
+    top_crypto = (
+        db.query(MarketSnapshot.ticker, func.max(MarketSnapshot.predicted_score).label("best"))
+        .filter(MarketSnapshot.ticker.like("%-USD"))
+        .group_by(MarketSnapshot.ticker)
+        .order_by(desc("best"))
+        .limit(20)
+        .all()
+    )
+    top_stocks = (
+        db.query(MarketSnapshot.ticker, func.max(MarketSnapshot.predicted_score).label("best"))
+        .filter(~MarketSnapshot.ticker.like("%-USD"))
+        .group_by(MarketSnapshot.ticker)
+        .order_by(desc("best"))
+        .limit(20)
+        .all()
+    )
+    return JSONResponse({
+        "ok": True,
+        "crypto": [{"ticker": r[0], "score": round(float(r[1] or 0), 1)} for r in top_crypto],
+        "stocks": [{"ticker": r[0], "score": round(float(r[1] or 0), 1)} for r in top_stocks],
     })
 
 
@@ -1341,3 +1380,171 @@ def api_data_provider_status():
 
 # Brain, learning, and broker endpoints are now in sub-routers
 # (included via router.include_router at the top)
+
+
+# ── Pattern Engine ─────────────────────────────────────────────────────
+
+@router.get("/api/trading/patterns")
+def api_list_patterns(
+    active_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    from ..services.trading.pattern_engine import list_patterns
+    patterns = list_patterns(db, active_only=active_only)
+    return JSONResponse({"ok": True, "patterns": patterns})
+
+
+class _CreatePatternBody(_BaseModel):
+    name: str
+    description: str = ""
+    rules_json: str = "{}"
+    origin: str = "user"
+    asset_class: str = "all"
+    score_boost: float = 0.0
+    min_base_score: float = 0.0
+
+
+@router.post("/api/trading/patterns")
+def api_create_pattern(
+    body: _CreatePatternBody,
+    db: Session = Depends(get_db),
+):
+    from ..services.trading.pattern_engine import create_pattern
+    try:
+        p = create_pattern(db, body.dict())
+        return JSONResponse({"ok": True, "pattern": {"id": p.id, "name": p.name}})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=400)
+
+
+class _PatternBody(_BaseModel):
+    name: str | None = None
+    description: str | None = None
+    rules_json: str | None = None
+    active: bool | None = None
+    score_boost: float | None = None
+    min_base_score: float | None = None
+    asset_class: str | None = None
+
+
+@router.put("/api/trading/patterns/{pattern_id}")
+def api_update_pattern(
+    pattern_id: int,
+    body: _PatternBody,
+    db: Session = Depends(get_db),
+):
+    from ..services.trading.pattern_engine import update_pattern
+    data = {k: v for k, v in body.dict().items() if v is not None}
+    p = update_pattern(db, pattern_id, data)
+    if not p:
+        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    return JSONResponse({"ok": True})
+
+
+@router.delete("/api/trading/patterns/{pattern_id}")
+def api_delete_pattern(
+    pattern_id: int,
+    db: Session = Depends(get_db),
+):
+    from ..services.trading.pattern_engine import delete_pattern
+    ok = delete_pattern(db, pattern_id)
+    return JSONResponse({"ok": ok})
+
+
+class _SuggestPatternBody(_BaseModel):
+    description: str
+
+
+@router.post("/api/trading/patterns/suggest")
+def api_suggest_pattern(
+    body: _SuggestPatternBody,
+    db: Session = Depends(get_db),
+):
+    """Parse a natural language pattern description into a ScanPattern."""
+    from ..services.llm_caller import call_llm
+    from ..services.trading.pattern_engine import create_pattern
+    import json as _json
+
+    prompt = (
+        "Convert this trading pattern description into a structured JSON pattern rule.\n\n"
+        f'Description: "{body.description}"\n\n'
+        "Respond with a JSON object:\n"
+        '{"name": "Short descriptive name", "description": "...", '
+        '"conditions": [{"indicator": "...", "op": "...", "value": ...}], '
+        '"score_boost": 1.5, "min_base_score": 4.0}\n\n'
+        "Available indicators: rsi_14, ema_20, ema_50, ema_100, price, bb_squeeze, adx, "
+        "rel_vol, macd_hist, resistance_retests, dist_to_resistance_pct, narrow_range, "
+        "vcp_count, vwap_reclaim.\n"
+        "Available ops: >, >=, <, <=, ==, between, any_of.\n"
+        "For 'price' comparisons use 'ref' key pointing to indicator name.\n"
+        "Respond ONLY with the JSON object."
+    )
+
+    try:
+        resp = call_llm(prompt, max_tokens=800)
+        if not resp:
+            return JSONResponse({"ok": False, "error": "LLM returned empty response"}, status_code=500)
+
+        text = resp.strip()
+        if text.startswith("```"):
+            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+
+        parsed = _json.loads(text)
+        pattern_data = {
+            "name": parsed.get("name", "Custom Pattern"),
+            "description": parsed.get("description", body.description),
+            "rules_json": _json.dumps({"conditions": parsed.get("conditions", [])}),
+            "origin": "user",
+            "score_boost": parsed.get("score_boost", 1.0),
+            "min_base_score": parsed.get("min_base_score", 4.0),
+            "confidence": 0.0,
+            "active": True,
+        }
+        p = create_pattern(db, pattern_data)
+        return JSONResponse({
+            "ok": True,
+            "pattern": {
+                "id": p.id, "name": p.name, "description": p.description,
+                "rules_json": p.rules_json, "score_boost": p.score_boost,
+            },
+        })
+    except _json.JSONDecodeError:
+        return JSONResponse({"ok": False, "error": "Could not parse LLM response as JSON"}, status_code=500)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@router.post("/api/trading/patterns/{pattern_id}/backtest")
+def api_backtest_pattern(
+    pattern_id: int,
+    ticker: str = Query("AAPL"),
+    interval: str = Query("1d"),
+    period: str = Query("1y"),
+    db: Session = Depends(get_db),
+):
+    from ..models.trading import ScanPattern
+    from ..services.backtest_service import backtest_pattern
+    p = db.query(ScanPattern).get(pattern_id)
+    if not p:
+        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    result = backtest_pattern(ticker=ticker, pattern_name=p.name, rules_json=p.rules_json,
+                              interval=interval, period=period)
+    return JSONResponse(result)
+
+
+@router.post("/api/trading/patterns/research")
+def api_trigger_pattern_research(
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Trigger web pattern research manually."""
+    from ..services.trading.web_pattern_researcher import run_web_pattern_research
+    background_tasks.add_task(run_web_pattern_research, db=None)
+    return JSONResponse({"ok": True, "message": "Web pattern research started in background"})
+
+
+@router.get("/api/trading/patterns/research/status")
+def api_pattern_research_status():
+    """Get the current status of web pattern research."""
+    from ..services.trading.web_pattern_researcher import get_research_status
+    return JSONResponse({"ok": True, **get_research_status()})

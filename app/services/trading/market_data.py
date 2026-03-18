@@ -578,7 +578,7 @@ def _compute_single_indicator(
 ) -> list[dict] | None:
     """Compute one indicator using the ``ta`` library."""
     from ta.momentum import RSIIndicator, StochRSIIndicator, StochasticOscillator, WilliamsRIndicator
-    from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, PSARIndicator, CCIIndicator
+    from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, PSARIndicator, CCIIndicator, IchimokuIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
     from ta.volume import OnBalanceVolumeIndicator, MFIIndicator, VolumeWeightedAveragePrice
 
@@ -726,6 +726,116 @@ def _compute_single_indicator(
                 has = True
             if has:
                 out.append(rec)
+        return out
+
+    if name == "ichimoku":
+        ich = IchimokuIndicator(high=high, low=low, window1=9, window2=26, window3=52)
+        tenkan = ich.ichimoku_conversion_line()
+        kijun = ich.ichimoku_base_line()
+        senkou_a = ich.ichimoku_a()
+        senkou_b = ich.ichimoku_b()
+        chikou = close.shift(26)
+        out = []
+        for i, ts in enumerate(timestamps):
+            rec: dict[str, Any] = {"time": ts}
+            has = False
+            if pd.notna(tenkan.iloc[i]):
+                rec["tenkan"] = round(float(tenkan.iloc[i]), 4)
+                has = True
+            if pd.notna(kijun.iloc[i]):
+                rec["kijun"] = round(float(kijun.iloc[i]), 4)
+                has = True
+            if pd.notna(senkou_a.iloc[i]):
+                rec["senkou_a"] = round(float(senkou_a.iloc[i]), 4)
+                has = True
+            if pd.notna(senkou_b.iloc[i]):
+                rec["senkou_b"] = round(float(senkou_b.iloc[i]), 4)
+                has = True
+            if pd.notna(chikou.iloc[i]):
+                rec["chikou"] = round(float(chikou.iloc[i]), 4)
+                has = True
+            if has:
+                out.append(rec)
+        return out
+
+    if name == "supertrend":
+        atr_period = 10
+        multiplier = 3
+        atr = AverageTrueRange(high=high, low=low, close=close, window=atr_period).average_true_range()
+        hl2 = (high + low) / 2
+        upper_band = hl2 + multiplier * atr
+        lower_band = hl2 - multiplier * atr
+        out = []
+        for i, ts in enumerate(timestamps):
+            if i == 0:
+                continue
+            prev_upper = upper_band.iloc[i - 1]
+            c = close.iloc[i]
+            u = upper_band.iloc[i]
+            l_ = lower_band.iloc[i]
+            if pd.isna(prev_upper) or pd.isna(c) or pd.isna(u) or pd.isna(l_):
+                continue
+            if c > prev_upper:
+                trend = 1
+                st = l_
+            else:
+                trend = -1
+                st = u
+            rec: dict[str, Any] = {"time": ts, "value": round(float(st), 4), "trend": trend}
+            out.append(rec)
+        return out
+
+    if name in ("pivot", "pivots"):
+        out = []
+        for i, ts in enumerate(timestamps):
+            if i == 0:
+                continue
+            h = float(high.iloc[i - 1])
+            l_ = float(low.iloc[i - 1])
+            c = float(close.iloc[i - 1])
+            p = (h + l_ + c) / 3
+            s1 = 2 * p - h
+            r1 = 2 * p - l_
+            s2 = p - (h - l_)
+            r2 = p + (h - l_)
+            s3 = l_ - 2 * (h - p)
+            r3 = h + 2 * (p - l_)
+            rec: dict[str, Any] = {
+                "time": ts,
+                "pivot": round(p, 4),
+                "r1": round(r1, 4),
+                "r2": round(r2, 4),
+                "r3": round(r3, 4),
+                "s1": round(s1, 4),
+                "s2": round(s2, 4),
+                "s3": round(s3, 4),
+            }
+            out.append(rec)
+        return out
+
+    if name in ("vol_profile", "volume_profile"):
+        n_bins = 30
+        price_min = float(low.min())
+        price_max = float(high.max())
+        if price_min == price_max:
+            return None
+        bin_size = (price_max - price_min) / n_bins
+        bins = [0.0] * n_bins
+        for i in range(len(df)):
+            bar_vol = float(volume.iloc[i]) if pd.notna(volume.iloc[i]) else 0
+            bar_low = float(low.iloc[i])
+            bar_high = float(high.iloc[i])
+            for b in range(n_bins):
+                lvl_lo = price_min + b * bin_size
+                lvl_hi = lvl_lo + bin_size
+                if bar_low <= lvl_hi and bar_high >= lvl_lo:
+                    overlap = (min(bar_high, lvl_hi) - max(bar_low, lvl_lo)) / max(bar_high - bar_low, 1e-10)
+                    bins[b] += bar_vol * overlap
+        max_vol = max(bins) if bins else 1
+        out = []
+        for b in range(n_bins):
+            lvl = price_min + b * bin_size + bin_size / 2
+            out.append({"price": round(lvl, 4), "volume": round(bins[b], 2), "pct": round(bins[b] / max_vol, 4) if max_vol > 0 else 0})
         return out
 
     return None

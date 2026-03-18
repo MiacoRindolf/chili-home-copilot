@@ -293,6 +293,7 @@ def _pattern_keywords(desc: str) -> set[str]:
 def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
+    wins: int = 0, losses: int = 0,
 ) -> TradingInsight:
     from .learning import log_learning_event
     from datetime import datetime
@@ -313,6 +314,8 @@ def save_insight(
             old_conf = ins.confidence
             ins.confidence = round(min(0.95, ins.confidence * 0.7 + confidence * 0.3), 3)
             ins.evidence_count += 1
+            ins.win_count = (ins.win_count or 0) + wins
+            ins.loss_count = (ins.loss_count or 0) + losses
             ins.last_seen = datetime.utcnow()
             ins.pattern_description = pattern
             db.commit()
@@ -330,6 +333,8 @@ def save_insight(
         user_id=user_id,
         pattern_description=pattern,
         confidence=confidence,
+        win_count=wins,
+        loss_count=losses,
     )
     db.add(insight)
     db.commit()

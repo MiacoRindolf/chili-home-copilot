@@ -11,12 +11,13 @@ from datetime import datetime
 from typing import Any, Dict, List
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import case, func
 
 from ..base import AgentBase
 from ....models.project_brain import (
     AgentFinding, AgentGoal, POQuestion, PORequirement, ProjectAgentState,
 )
+from ....models.code_brain import CodeRepo, CodeInsight
 from ...llm_caller import call_llm
 
 logger = logging.getLogger(__name__)
@@ -57,6 +58,10 @@ class ProductOwnerAgent(AgentBase):
         report["gaps"] = len(gaps)
         steps_done += 1
 
+        # 2b. Upgrade legacy questions (add options to old pending questions)
+        upgraded = self._upgrade_optionless_questions(db, user_id, context)
+        report["upgraded_questions"] = upgraded
+
         # 3. Generate questions
         new_qs = self._generate_questions(db, user_id, gaps, context)
         report["new_questions"] = new_qs
@@ -96,6 +101,60 @@ class ProductOwnerAgent(AgentBase):
 
     # ── Step implementations ──────────────────────────────────────────
 
+    def _research_repo(self, db: Session, user_id: int) -> str:
+        """Pull repo metadata, languages, frameworks, and insights from Code Brain."""
+        repos = (
+            db.query(CodeRepo)
+            .filter(CodeRepo.active.is_(True), CodeRepo.user_id == user_id)
+            .all()
+        )
+        if not repos:
+            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).limit(5).all()
+        if not repos:
+            return "No repositories registered yet."
+
+        parts: List[str] = []
+        for r in repos[:5]:
+            langs = ""
+            if r.language_stats:
+                try:
+                    stats = json.loads(r.language_stats)
+                    top = sorted(stats.items(), key=lambda x: x[1], reverse=True)[:5]
+                    langs = ", ".join(f"{l}({c})" for l, c in top)
+                except Exception:
+                    pass
+            fws = r.framework_tags or ""
+            parts.append(
+                f"Repo: {r.name} | {r.file_count} files, {r.total_lines} lines | "
+                f"Languages: {langs or 'unknown'} | Frameworks: {fws or 'none detected'}"
+            )
+
+        insights = (
+            db.query(CodeInsight)
+            .filter(CodeInsight.active.is_(True))
+            .order_by(CodeInsight.confidence.desc())
+            .limit(15)
+            .all()
+        )
+        if insights:
+            parts.append("\nDiscovered patterns & conventions:")
+            for ins in insights:
+                parts.append(f"  - [{ins.category}] {ins.description} (confidence: {ins.confidence:.0%})")
+
+        import os
+        for r in repos[:2]:
+            readme_path = os.path.join(r.path, "README.md")
+            if os.path.isfile(readme_path):
+                try:
+                    with open(readme_path, "r", encoding="utf-8", errors="ignore") as f:
+                        content = f.read(3000).strip()
+                    if content:
+                        parts.append(f"\nREADME ({r.name}):\n{content[:1500]}")
+                except Exception:
+                    pass
+
+        return "\n".join(parts)[:3000]
+
     def _review_context(self, db: Session, user_id: int) -> Dict[str, Any]:
         """Step 1: Gather all existing knowledge about the project."""
         state = self.get_state(db, user_id)
@@ -126,6 +185,8 @@ class ProductOwnerAgent(AgentBase):
             .count()
         )
 
+        repo_context = self._research_repo(db, user_id)
+
         return {
             "state": existing_state,
             "answered_questions": [
@@ -138,12 +199,14 @@ class ProductOwnerAgent(AgentBase):
                 {"title": r.title, "priority": r.priority, "status": r.status}
                 for r in requirements
             ],
+            "repo_context": repo_context,
         }
 
     def _identify_gaps(self, db: Session, user_id: int, context: dict) -> List[str]:
         """Step 2: Use LLM to determine what's still unknown."""
         answered = context.get("answered_questions", [])
         state = context.get("state", {})
+        repo_ctx = context.get("repo_context", "")
 
         answered_text = "\n".join(
             f"- [{qa['category']}] Q: {qa['q']} A: {qa['a']}"
@@ -152,12 +215,19 @@ class ProductOwnerAgent(AgentBase):
 
         state_text = json.dumps(state, indent=2)[:1500] if state else "No existing state."
 
+        repo_section = ""
+        if repo_ctx:
+            repo_section = f"\nRepository analysis:\n{repo_ctx}\n"
+
         prompt = (
             "You are the Product Owner AI for a software project. "
-            "Based on the following known information, identify the TOP 5 knowledge gaps "
-            "that need to be filled to make the project successful.\n\n"
+            "Based on the following known information AND the repository analysis, "
+            "identify the TOP 5 knowledge gaps that need to be filled to make the "
+            "project successful. Focus on product-level decisions the user must make — "
+            "don't ask about things already obvious from the codebase.\n\n"
             f"Existing project understanding:\n{state_text}\n\n"
-            f"Already answered:\n{answered_text}\n\n"
+            f"Already answered:\n{answered_text}\n"
+            f"{repo_section}\n"
             "Return ONLY valid JSON: {\"gaps\": [\"gap1\", \"gap2\", ...]}\n"
         )
 
@@ -177,8 +247,77 @@ class ProductOwnerAgent(AgentBase):
         except Exception:
             return ["Project vision", "Target users", "Key features"]
 
+    def _upgrade_optionless_questions(self, db: Session, user_id: int, context: dict) -> int:
+        """Backfill options for legacy pending questions that lack them."""
+        legacy = (
+            db.query(POQuestion)
+            .filter(
+                POQuestion.user_id == user_id,
+                POQuestion.status == "pending",
+                (POQuestion.options.is_(None)) | (POQuestion.options == "") | (POQuestion.options == "[]"),
+            )
+            .order_by(POQuestion.priority.desc())
+            .limit(5)
+            .all()
+        )
+        if not legacy:
+            return 0
+
+        repo_ctx = context.get("repo_context", "")
+        repo_section = f"\nRepository analysis:\n{repo_ctx}\n" if repo_ctx else ""
+
+        q_texts = "\n".join(
+            f"{i+1}. [{q.category}] {q.question}"
+            for i, q in enumerate(legacy)
+        )
+
+        prompt = (
+            "You are a Product Owner. The following questions were previously generated "
+            "but lack answer options. For EACH question, generate 3-5 concrete, specific "
+            "answer options that are informed by the repository analysis and product best "
+            "practices. Each option should represent a real product decision the user can "
+            "simply click to select.\n\n"
+            f"Questions:\n{q_texts}\n"
+            f"{repo_section}\n"
+            "Return ONLY valid JSON:\n"
+            "{\"upgrades\": [\n"
+            "  {\"index\": 1, \"options\": [\"Option A\", \"Option B\", \"Option C\"]},\n"
+            "  ...\n"
+            "]}\n"
+        )
+
+        reply = call_llm(
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=1000,
+            trace_id="po-upgrade-options",
+        )
+        if not reply:
+            return 0
+
+        try:
+            start = reply.find("{")
+            end = reply.rfind("}")
+            data = json.loads(reply[start: end + 1])
+            upgrades = data.get("upgrades", [])
+        except Exception:
+            return 0
+
+        count = 0
+        for upg in upgrades:
+            idx = upg.get("index", 0) - 1
+            if 0 <= idx < len(legacy):
+                raw_opts = upg.get("options", [])
+                opts = [o.strip() for o in raw_opts if isinstance(o, str) and o.strip()][:5]
+                if opts:
+                    legacy[idx].options = json.dumps(opts)
+                    count += 1
+        if count:
+            db.commit()
+        logger.info("[PO] Upgraded %d legacy questions with options", count)
+        return count
+
     def _generate_questions(self, db: Session, user_id: int, gaps: List[str], context: dict) -> int:
-        """Step 3: Create prioritized questions from the identified gaps."""
+        """Step 3: Create prioritized questions with multiple-choice options."""
         pending = context.get("pending_questions", 0)
         if pending >= 5:
             return 0
@@ -191,21 +330,36 @@ class ProductOwnerAgent(AgentBase):
         }
 
         gap_text = "\n".join(f"- {g}" for g in gaps)
+        repo_ctx = context.get("repo_context", "")
+        repo_section = f"\nRepository analysis:\n{repo_ctx}\n" if repo_ctx else ""
+
         prompt = (
             "You are a Product Owner gathering requirements for a software project. "
-            "Generate 3 specific, actionable questions to fill these knowledge gaps.\n\n"
-            f"Gaps:\n{gap_text}\n\n"
-            "Each question should help clarify the project direction. "
+            "You have already researched the codebase and understand the tech stack.\n\n"
+            f"Knowledge gaps to fill:\n{gap_text}\n"
+            f"{repo_section}\n"
+            "Generate 3 questions to fill these gaps. For EACH question, also generate "
+            "3-5 concrete answer OPTIONS that are informed by the repository analysis "
+            "and general product best practices. The options should reduce the user's "
+            "cognitive burden — they pick the best fit instead of writing from scratch.\n\n"
+            "Make options specific and actionable (not vague). Each option represents a "
+            "real product decision. The last option should always be a creative or "
+            "alternative direction the user might not have considered.\n\n"
             "Categorize each as one of: vision, features, priorities, tech_stack, users, "
             "success_criteria, constraints, domain.\n\n"
             "Return ONLY valid JSON:\n"
-            "{\"questions\": [{\"question\": \"...\", \"category\": \"...\", "
-            "\"context\": \"why this matters\", \"priority\": 1-10}]}\n"
+            "{\"questions\": [{\n"
+            "  \"question\": \"...\",\n"
+            "  \"category\": \"...\",\n"
+            "  \"context\": \"why this matters\",\n"
+            "  \"priority\": 1-10,\n"
+            "  \"options\": [\"Option A\", \"Option B\", \"Option C\"]\n"
+            "}]}\n"
         )
 
         reply = call_llm(
             messages=[{"role": "user", "content": prompt}],
-            max_tokens=600,
+            max_tokens=1200,
             trace_id="po-questions",
         )
         if not reply:
@@ -227,12 +381,15 @@ class ProductOwnerAgent(AgentBase):
             cat = q_data.get("category", "general")
             if cat not in _QUESTION_CATEGORIES:
                 cat = "general"
+            raw_opts = q_data.get("options", [])
+            opts = [o.strip() for o in raw_opts if isinstance(o, str) and o.strip()][:5]
             db.add(POQuestion(
                 user_id=user_id,
                 question=q_text,
                 context=q_data.get("context", ""),
                 category=cat,
                 priority=min(10, max(1, int(q_data.get("priority", 5)))),
+                options=json.dumps(opts) if opts else None,
             ))
             existing.add(q_text)
             added += 1
@@ -243,7 +400,7 @@ class ProductOwnerAgent(AgentBase):
 
     def _research_tech(self, db: Session, user_id: int, context: dict) -> int:
         """Step 4: Web research for modern tech relevant to the project."""
-        from ...config import settings
+        from ....config import settings
         state = context.get("state", {})
         tech_stack = state.get("tech_stack", "")
         domain = state.get("domain", "software project")
@@ -476,7 +633,7 @@ class ProductOwnerAgent(AgentBase):
             db.query(PORequirement)
             .filter(PORequirement.user_id == user_id)
             .order_by(
-                func.case(
+                case(
                     (PORequirement.priority == "critical", 1),
                     (PORequirement.priority == "high", 2),
                     (PORequirement.priority == "medium", 3),
@@ -495,10 +652,12 @@ class ProductOwnerAgent(AgentBase):
             return {"ok": False, "error": "Requirement not found"}
 
         try:
-            from ...planner_service import create_task, list_projects
+            from ...planner_service import create_task, list_projects, list_all_projects
 
             if not project_id:
                 projects = list_projects(db, user_id)
+                if not projects:
+                    projects = list_all_projects(db)
                 if projects:
                     project_id = projects[0]["id"]
                 else:

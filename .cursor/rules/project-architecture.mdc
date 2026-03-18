@@ -1,0 +1,62 @@
+---
+description: CHILI Home Copilot project architecture, structure, and conventions
+alwaysApply: true
+---
+
+# CHILI Home Copilot — Project Architecture
+
+## Identity
+
+**CHILI** (Conversational Home Interface & Life Intelligence) — a FastAPI + Jinja2 household assistant with tiered cloud LLM (Groq primary, Gemini fallback), local Ollama planner, ChromaDB RAG, SQLite persistence, and multiple AI "brain" domains (Trading, Code, Reasoning, Project).
+
+## Directory Layout
+
+```
+app/
+  main.py              # FastAPI app, static mounts, lifespan, router init
+  config.py            # Pydantic Settings with all env vars
+  db.py                # SQLAlchemy engine, SessionLocal, Base
+  deps.py              # get_db, get_identity_ctx, require_paired
+  migrations.py        # Version-tracked SQLite migrations (schema_version table)
+  openai_client.py     # Tiered LLM: Groq → Gemini auto-escalation
+  models/              # SQLAlchemy models split by domain
+    core.py, chat.py, household.py, trading.py, planner.py,
+    projects.py, intercom.py, marketplace.py,
+    code_brain.py, reasoning_brain.py, project_brain.py
+  schemas/             # Pydantic v2 API schemas split by domain
+  prompts/             # LLM prompt templates (.txt files)
+  routers/             # FastAPI APIRouter modules
+    trading_sub/       # Trading sub-routes (ai.py, broker.py, web3.py)
+  services/            # Business logic layer
+    trading/           # Scanner, learning, pattern engine, portfolio, alerts, ML
+    code_brain/        # Code indexer, analyzer, reviewer, graph, trends
+    reasoning_brain/   # User model, interest graph, anticipator, web researcher
+    project_brain/     # Autonomous agents (PO, PM, Arch, BE, FE, UX, QA, DevOps, Security, AI Eng)
+      agents/          # One file per agent
+  templates/           # Jinja2 HTML (extends base.html)
+  static/              # PWA manifest, service worker, JS components, icons
+  modules/             # Optional feature modules (planner)
+data/                  # SQLite DB, ChromaDB, uploads, voice, projects (gitignored)
+tests/                 # pytest with in-memory SQLite fixtures
+certs/                 # SSL certs for local HTTPS (localhost.key, localhost.pem)
+```
+
+## Request Flow
+
+1. User message → `init_chat` (store msg, load recent messages)
+2. Special paths: vision (images), wellness/crisis detection
+3. `plan_and_enrich`: RAG search → personality/memory context → Ollama planner
+4. Planner returns `{type, data, reply}` validated by planner schemas
+5. `execute_tool` runs the action (guests blocked for write actions)
+6. Fallback chain: Ollama → NLU parser → Groq/Gemini general chat
+7. Response stored, personality/memory extraction when applicable
+
+## Key Conventions
+
+- **Relative imports** within `app/`: `from ..deps import get_db`, `from ...models.trading import Trade`
+- **Config**: `pydantic_settings.BaseSettings` in `app/config.py`, loaded once at import as `settings`
+- **Identity**: cookie `chili_device_token` → `get_identity_ctx()` → `{user_id, user_name, is_guest}`
+- **Migrations**: version-tracked in `app/migrations.py` with `schema_version` table
+- **Background jobs**: APScheduler in `trading_scheduler.py` for learning cycles, scans, broker sync
+- **Data directory**: `Path(__file__).resolve().parents[1] / "data"` — always use `pathlib`
+- **HTTPS**: Uvicorn with `--ssl-keyfile certs/localhost.key --ssl-certfile certs/localhost.pem`

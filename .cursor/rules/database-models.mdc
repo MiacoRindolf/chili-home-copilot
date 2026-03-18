@@ -1,0 +1,66 @@
+---
+description: SQLAlchemy database models and query patterns for CHILI
+globs: "app/models/**/*.py,app/db.py,app/deps.py,app/migrations.py"
+alwaysApply: false
+---
+
+# Database & SQLAlchemy Patterns
+
+## Engine & Session
+
+- SQLite via SQLAlchemy ORM — no raw SQL except versioned migrations
+- `SessionLocal` with `autocommit=False, autoflush=False`
+- `get_db()` yield pattern for dependency injection
+
+## Models by Domain
+
+Models are split into domain files under `app/models/`, re-exported from `__init__.py`:
+
+| File | Models |
+|------|--------|
+| `core.py` | User, Device, PairCode, BrokerCredential |
+| `chat.py` | ChatLog, Conversation, ChatMessage |
+| `household.py` | Chore, Birthday, HousemateProfile, UserMemory, UserStatus, ActivityLog |
+| `trading.py` | Trade, TradingInsight, ScanResult, BacktestResult, MarketSnapshot, LearningEvent, BreakoutAlert, ScanPattern, TradingHypothesis, JournalEntry, WatchlistItem |
+| `planner.py` | PlanProject, PlanTask, ProjectMember, TaskComment, TaskActivity, PlanLabel, TaskLabel, TaskWatcher |
+| `project_brain.py` | ProjectAgentState, AgentFinding, AgentResearch, AgentGoal, AgentEvolution, AgentMessage, POQuestion, PORequirement |
+| `code_brain.py` | CodeRepo, CodeInsight, CodeSnapshot, CodeHotspot, CodeLearningEvent, CodeDependency, CodeReview, etc. |
+| `reasoning_brain.py` | ReasoningUserModel, ReasoningInterest, ReasoningResearch, ReasoningHypothesis, etc. |
+
+## Model Structure
+
+```python
+class ModelName(Base):
+    __tablename__ = "table_name"
+    id: int = Column(Integer, primary_key=True, index=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow)
+```
+
+- Always `index=True` on `id` and frequently-queried foreign keys
+- Use `Text` for long content, `String` for short fields
+- Typed column annotations: `field: type = Column(...)`
+- `nullable=False` with `default=` for new required columns
+
+## Migrations
+
+Version-tracked in `app/migrations.py` using a `schema_version` table. Pattern:
+
+```python
+def _migration_NNN_description(conn) -> None:
+    if "table" not in _tables(conn):
+        return
+    cols = _columns(conn, "table")
+    if "new_col" not in cols:
+        conn.execute(text("ALTER TABLE table ADD COLUMN new_col TYPE DEFAULT value"))
+    conn.commit()
+```
+
+Register in the `MIGRATIONS` list at the bottom of the file. Migrations are idempotent and applied in order at startup.
+
+## Query Patterns
+
+```python
+db.query(Model).filter(Model.field == value).order_by(Model.id.desc()).limit(N).all()
+db.query(Model).filter(Model.id == id).first()
+db.add(Model(field=value)); db.commit()
+```
