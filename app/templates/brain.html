@@ -480,6 +480,41 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 /* Reflection box */
 .brain-reflection-box { display: none; padding: 10px 14px; background: var(--bg-header); border: 1px solid rgba(139,92,246,.3); border-radius: 8px; font-size: 11px; line-height: 1.5; margin-bottom: 12px; }
 
+/* Brain Worker Dashboard */
+.bw-section { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; margin-bottom: 14px; }
+.bw-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+.bw-title { font-size: 13px; font-weight: 700; display: flex; align-items: center; gap: 6px; }
+.bw-status-dot { width: 8px; height: 8px; border-radius: 50%; }
+.bw-status-dot.running { background: #22c55e; animation: bpulse 1.5s infinite; }
+.bw-status-dot.paused { background: #f59e0b; }
+.bw-status-dot.stopped { background: #6b7280; }
+.bw-controls { display: flex; gap: 4px; }
+.bw-ctrl-btn { padding: 4px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); cursor: pointer; font-size: 10px; font-weight: 600; transition: all .15s; }
+.bw-ctrl-btn:hover { border-color: var(--accent); background: rgba(139,92,246,.06); }
+.bw-ctrl-btn.primary { background: linear-gradient(135deg,#22c55e,#16a34a); border: none; color: #fff; }
+.bw-ctrl-btn.primary:hover { opacity: .9; }
+.bw-ctrl-btn.danger { background: linear-gradient(135deg,#ef4444,#dc2626); border: none; color: #fff; }
+.bw-ctrl-btn.danger:hover { opacity: .9; }
+.bw-status-row { display: flex; align-items: center; gap: 16px; margin-bottom: 8px; font-size: 11px; }
+.bw-status-label { color: var(--text-muted); }
+.bw-status-value { font-weight: 600; }
+.bw-current { padding: 6px 10px; background: rgba(139,92,246,.06); border-radius: 6px; font-size: 10px; margin-bottom: 10px; }
+.bw-current-step { font-weight: 600; color: #a78bfa; }
+.bw-current-progress { color: var(--text-muted); margin-left: 8px; }
+.bw-stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr)); gap: 8px; margin-bottom: 10px; }
+.bw-stat { text-align: center; padding: 8px; background: rgba(139,92,246,.04); border-radius: 6px; }
+.bw-stat-val { font-size: 16px; font-weight: 700; color: #a78bfa; }
+.bw-stat-lbl { font-size: 9px; color: var(--text-muted); margin-top: 2px; }
+.bw-activity { max-height: 150px; overflow-y: auto; font-size: 10px; }
+.bw-activity-item { padding: 4px 0; border-bottom: 1px solid rgba(128,128,128,.08); display: flex; align-items: center; gap: 6px; }
+.bw-activity-item:last-child { border-bottom: none; }
+.bw-activity-type { font-weight: 600; color: var(--text-muted); min-width: 80px; }
+.bw-activity-summary { flex: 1; color: var(--text-secondary); }
+.bw-activity-time { color: var(--text-muted); font-size: 9px; }
+.bw-collapsed .bw-details { display: none; }
+.bw-toggle-details { font-size: 10px; color: var(--text-muted); cursor: pointer; margin-left: auto; }
+.bw-toggle-details:hover { color: var(--text); }
+
 /* Theme toggle */
 .b-theme-btn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; color: var(--text); font-size: 16px; }
 
@@ -613,6 +648,45 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <button onclick="triggerFullScan()" id="btn-full-scan" class="brain-act-btn brain-act-primary">&#x1F310; Scan Market</button>
         <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
         <button onclick="triggerRetrainML()" id="btn-retrain-ml" class="brain-act-btn brain-act-ml">&#x1F9E0; Train Pattern ML</button>
+      </div>
+
+      <!-- Brain Worker Dashboard -->
+      <div class="bw-section" id="brain-worker-section">
+        <div class="bw-header">
+          <div class="bw-title">
+            <span class="bw-status-dot stopped" id="bw-status-dot"></span>
+            Brain Worker
+            <span class="bw-toggle-details" onclick="toggleBwDetails()">&#x25BC;</span>
+          </div>
+          <div class="bw-controls" id="bw-controls">
+            <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
+            <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
+            <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
+          </div>
+        </div>
+        <div class="bw-status-row">
+          <span><span class="bw-status-label">Status:</span> <span class="bw-status-value" id="bw-status">Stopped</span></span>
+          <span><span class="bw-status-label">Uptime:</span> <span class="bw-status-value" id="bw-uptime">--</span></span>
+          <span><span class="bw-status-label">Cycles:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
+        </div>
+        <div class="bw-current" id="bw-current" style="display:none">
+          <span class="bw-current-step" id="bw-current-step">Idle</span>
+          <span class="bw-current-progress" id="bw-current-progress"></span>
+        </div>
+        <div class="bw-details" id="bw-details">
+          <div class="bw-stats-grid">
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-mined">0</div><div class="bw-stat-lbl">Mined</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-tested">0</div><div class="bw-stat-lbl">Tested</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-validated">0</div><div class="bw-stat-lbl">Validated</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-confirmed">0</div><div class="bw-stat-lbl">Confirmed</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
+          </div>
+          <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Recent Activity</div>
+          <div class="bw-activity" id="bw-activity">
+            <div style="color:var(--text-muted);font-style:italic">No activity yet</div>
+          </div>
+        </div>
       </div>
 
       <div class="brain-reflection-box" id="brain-reflection">
@@ -1140,6 +1214,150 @@ function timeSince(date) {
   var hours = Math.floor(minutes / 60);
   if (hours < 24) return hours + 'h';
   return Math.floor(hours / 24) + 'd';
+}
+
+/* ── Brain Worker Dashboard ──────────────────────────── */
+var _bwPollInterval = null;
+var _bwCollapsed = false;
+
+function toggleBwDetails() {
+  var section = document.getElementById('brain-worker-section');
+  var toggle = section.querySelector('.bw-toggle-details');
+  _bwCollapsed = !_bwCollapsed;
+  if (_bwCollapsed) {
+    section.classList.add('bw-collapsed');
+    toggle.innerHTML = '&#x25B6;';
+  } else {
+    section.classList.remove('bw-collapsed');
+    toggle.innerHTML = '&#x25BC;';
+  }
+}
+
+function updateBrainWorkerUI(data) {
+  var dot = document.getElementById('bw-status-dot');
+  var statusEl = document.getElementById('bw-status');
+  var startBtn = document.getElementById('bw-start-btn');
+  var pauseBtn = document.getElementById('bw-pause-btn');
+  var stopBtn = document.getElementById('bw-stop-btn');
+  var currentEl = document.getElementById('bw-current');
+  var stepEl = document.getElementById('bw-current-step');
+  var progressEl = document.getElementById('bw-current-progress');
+  var uptimeEl = document.getElementById('bw-uptime');
+  var cyclesEl = document.getElementById('bw-cycles');
+  
+  var status = data.status || 'stopped';
+  dot.className = 'bw-status-dot ' + status;
+  statusEl.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+  
+  if (status === 'running' || status === 'paused') {
+    startBtn.style.display = 'none';
+    pauseBtn.style.display = '';
+    stopBtn.style.display = '';
+    pauseBtn.textContent = status === 'paused' ? '▶ Resume' : '⏸ Pause';
+    
+    if (data.started_at) {
+      var started = new Date(data.started_at + 'Z');  // Append Z to indicate UTC
+      uptimeEl.textContent = timeSince(started);
+    }
+    
+    if (data.current_step) {
+      currentEl.style.display = '';
+      stepEl.textContent = data.current_step;
+      progressEl.textContent = data.current_progress || '';
+    } else {
+      currentEl.style.display = 'none';
+    }
+  } else {
+    startBtn.style.display = '';
+    pauseBtn.style.display = 'none';
+    stopBtn.style.display = 'none';
+    currentEl.style.display = 'none';
+    uptimeEl.textContent = '--';
+  }
+  
+  var totals = data.totals || {};
+  cyclesEl.textContent = totals.cycles_completed || 0;
+  document.getElementById('bw-stat-mined').textContent = totals.patterns_mined || 0;
+  document.getElementById('bw-stat-tested').textContent = totals.patterns_tested || 0;
+  document.getElementById('bw-stat-validated').textContent = totals.hypotheses_validated || 0;
+  document.getElementById('bw-stat-confirmed').textContent = totals.hypotheses_confirmed || 0;
+  document.getElementById('bw-stat-spawned').textContent = totals.patterns_spawned || 0;
+  document.getElementById('bw-stat-pruned').textContent = totals.patterns_pruned || 0;
+}
+
+function loadBrainWorkerStatus() {
+  fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) updateBrainWorkerUI(d);
+  }).catch(function(){});
+}
+
+function loadBrainWorkerActivity() {
+  fetch('/api/trading/brain/worker/recent-activity?limit=15').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var container = document.getElementById('bw-activity');
+    if (!d.activity || d.activity.length === 0) {
+      container.innerHTML = '<div style="color:var(--text-muted);font-style:italic">No activity yet</div>';
+      return;
+    }
+    var html = '';
+    d.activity.forEach(function(a) {
+      var time = a.created_at ? timeSince(new Date(a.created_at)) : '';
+      html += '<div class="bw-activity-item">' +
+        '<span class="bw-activity-type">' + (a.type || '').replace(/_/g, ' ') + '</span>' +
+        '<span class="bw-activity-summary">' + escHtml((a.summary || '').substring(0, 100)) + '</span>' +
+        '<span class="bw-activity-time">' + time + '</span>' +
+      '</div>';
+    });
+    container.innerHTML = html;
+  }).catch(function(){});
+}
+
+function startBrainWorker() {
+  var btn = document.getElementById('bw-start-btn');
+  btn.disabled = true;
+  btn.textContent = 'Starting...';
+  fetch('/api/trading/brain/worker/start', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({interval: 30})})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      btn.disabled = false;
+      btn.textContent = '▶ Start';
+      if (d.ok) {
+        setTimeout(loadBrainWorkerStatus, 1000);
+      } else {
+        alert('Failed to start: ' + (d.error || 'Unknown error'));
+      }
+    }).catch(function(e) {
+      btn.disabled = false;
+      btn.textContent = '▶ Start';
+      alert('Error: ' + e);
+    });
+}
+
+function stopBrainWorker() {
+  if (!confirm('Stop the brain worker?')) return;
+  fetch('/api/trading/brain/worker/stop', {method: 'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      if (d.ok) setTimeout(loadBrainWorkerStatus, 1000);
+    }).catch(function(){});
+}
+
+function pauseBrainWorker() {
+  fetch('/api/trading/brain/worker/pause', {method: 'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      if (d.ok) setTimeout(loadBrainWorkerStatus, 500);
+    }).catch(function(){});
+}
+
+function startBwPolling() {
+  loadBrainWorkerStatus();
+  loadBrainWorkerActivity();
+  if (_bwPollInterval) clearInterval(_bwPollInterval);
+  _bwPollInterval = setInterval(function() {
+    loadBrainWorkerStatus();
+    loadBrainWorkerActivity();
+  }, 10000);
 }
 
 /* ── Brain Dashboard (reuses /api/trading/brain/* endpoints) ─── */
@@ -1830,9 +2048,13 @@ function _renderComputedStats(cs) {
 
   if (cs.backtest_avg_win_rate != null) {
     var bwrColor = cs.backtest_avg_win_rate >= 50 ? '#22c55e' : '#ef4444';
+    var runLabel = (cs.backtest_count || 0) + ' runs';
+    if (cs.backtest_total_displayed != null && cs.backtest_total_displayed > (cs.backtest_count || 0)) {
+      runLabel = (cs.backtest_count || 0) + '/' + cs.backtest_total_displayed + ' with trades';
+    }
     cards.push('<div style="padding:5px 8px;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.12);border-radius:6px;text-align:center;flex:1">' +
       '<div style="font-size:13px;font-weight:700;color:' + bwrColor + '">' + cs.backtest_avg_win_rate + '%</div>' +
-      '<div style="font-size:8px;color:var(--text-muted)">Backtest WR (' + (cs.backtest_count||0) + ' runs)</div></div>');
+      '<div style="font-size:8px;color:var(--text-muted)">Backtest WR (' + runLabel + ')</div></div>');
   }
   if (cs.backtest_avg_return != null) {
     var brColor = cs.backtest_avg_return >= 0 ? '#22c55e' : '#ef4444';
@@ -1974,7 +2196,9 @@ function _renderEvBacktests(bts) {
         if (p && p.strategy_id) strategyId = p.strategy_id;
       }
     } catch(e) {}
-    var clickAttr = noTrades ? rowStyle : ' class="bt-clickable" onclick="toggleBtChart(this,' + idx + ',\'' + escHtml(b.ticker) + '\',\'' + escHtml(strategyId || b.strategy_name || '') + '\',\'' + escHtml(periodStr) + '\')" title="Click to view chart"';
+    var btIdVal = (b.id != null && b.id !== '') ? b.id : null;
+    var btIdArg = btIdVal != null ? btIdVal : 'null';
+    var clickAttr = noTrades ? rowStyle : ' class="bt-clickable" onclick="toggleBtChart(this,' + idx + ',\'' + escHtml(b.ticker) + '\',\'' + escHtml(strategyId || b.strategy_name || '') + '\',\'' + escHtml(periodStr) + '\',' + btIdArg + ')" title="Click to view chart"';
     html += '<tr' + (noTrades ? rowStyle : '') + (noTrades ? '' : clickAttr) + '>' +
       '<td><b>' + escHtml(b.ticker) + '</b></td>' +
       '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
@@ -1993,7 +2217,7 @@ function _renderEvBacktests(bts) {
 }
 
 var _btChartInstances = {};
-function toggleBtChart(row, idx, ticker, strategy, period) {
+function toggleBtChart(row, idx, ticker, strategy, period, btId) {
   var chartRow = document.getElementById('bt-chart-row-' + idx);
   if (!chartRow) return;
   var isOpen = chartRow.style.display !== 'none';
@@ -2005,30 +2229,73 @@ function toggleBtChart(row, idx, ticker, strategy, period) {
   var deepLink = (strategy === 'dynamic_pattern' && window._currentEvidencePatternId)
     ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentEvidencePatternId + '&period=' + encodeURIComponent(period)
     : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(period);
+  var loadMsg = btId ? 'Loading chart...' : 'Running backtest for ' + ticker + '...';
   cell.innerHTML = '<div class="bt-chart-wrap">' +
-    '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">Running backtest for ' + escHtml(ticker) + '...</span></div>' +
+    '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">' + loadMsg + '</span></div>' +
     '<div class="bt-chart-container" id="bt-chart-' + idx + '"></div>' +
     '<div class="bt-chart-toolbar">' +
       '<div class="bt-chart-stats" id="bt-chart-stats-' + idx + '"></div>' +
       '<a class="bt-chart-link" href="' + deepLink + '" target="_blank">Open Full Chart &#x2197;</a>' +
     '</div></div>';
 
-  var fetchPromise;
-  if (strategy === 'dynamic_pattern' && window._currentEvidencePatternId) {
-    fetchPromise = fetch('/api/trading/patterns/' + window._currentEvidencePatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
-  } else {
-    fetchPromise = fetch('/api/trading/backtest', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
-    });
-  }
-  fetchPromise.then(function(r){return r.json();}).then(function(d) {
+  function onChartData(d) {
     if (!d.ok) { cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Backtest failed: ' + escHtml(d.error||'unknown') + '</div>'; return; }
     _drawBtMiniChart(idx, d);
-  }).catch(function(e) {
+    if (btId) {
+      fetch('/api/trading/learn/backtest/' + btId + '/refresh', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          return_pct: d.return_pct, win_rate: d.win_rate, sharpe: d.sharpe,
+          max_drawdown: d.max_drawdown, trade_count: d.trade_count || 0,
+          equity_curve: d.equity_curve || [],
+        }),
+      }).then(function(r){return r.json();}).then(function(refreshRes) {
+        if (refreshRes.ok) {
+          var headerRow = chartRow.previousElementSibling;
+          if (headerRow && headerRow.querySelector('td')) {
+            var tc = refreshRes.trade_count || 0;
+            var noTrades = tc === 0;
+            var ret = refreshRes.return_pct;
+            var retClass = ret > 0 ? 'ev-pnl-pos' : (ret < 0 ? 'ev-pnl-neg' : '');
+            var cells = headerRow.querySelectorAll('td');
+            if (cells[2]) {
+              cells[2].className = retClass;
+              cells[2].innerHTML = noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (ret != null ? ret.toFixed(1) + '%' : '--');
+            }
+            if (cells[3]) cells[3].textContent = noTrades ? '--' : (refreshRes.win_rate != null ? refreshRes.win_rate.toFixed(0) + '%' : '--');
+            if (cells[4]) cells[4].textContent = noTrades ? '--' : (refreshRes.sharpe != null ? refreshRes.sharpe.toFixed(2) : '--');
+            if (cells[5]) cells[5].textContent = noTrades ? '--' : (refreshRes.max_drawdown != null ? refreshRes.max_drawdown.toFixed(1) + '%' : '--');
+            if (cells[6]) cells[6].textContent = tc;
+            if (cells[8]) cells[8].textContent = refreshRes.ran_at ? new Date(refreshRes.ran_at).toLocaleDateString() : '--';
+          }
+        }
+      }).catch(function(){});
+    }
+  }
+  function onChartError(e) {
     cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Error: ' + escHtml(e.message) + '</div>';
-  });
+  }
+
+  runFreshBacktest();
+
+  function runFreshBacktest() {
+    if (cell.querySelector('.bt-chart-wrap')) {
+      var loaderSpan = cell.querySelector('.bt-chart-wrap span');
+      if (loaderSpan) loaderSpan.textContent = 'Running backtest for ' + escHtml(ticker) + '...';
+    }
+    var fetchPromise;
+    if (strategy === 'dynamic_pattern' && window._currentEvidencePatternId) {
+      fetchPromise = fetch('/api/trading/patterns/' + window._currentEvidencePatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
+    } else {
+      fetchPromise = fetch('/api/trading/backtest', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
+      });
+    }
+    fetchPromise.then(function(r){return r.json();}).then(onChartData).catch(onChartError);
+  }
 }
 
 function _drawBtMiniChart(idx, data) {
@@ -2073,6 +2340,21 @@ function _drawBtMiniChart(idx, data) {
       lineColor: '#818cf8', topColor: 'rgba(129,140,248,.3)', bottomColor: 'rgba(129,140,248,.02)', lineWidth: 2,
     });
     areaSeries.setData(data.equity_curve);
+  } else if (!(data.ohlc && data.ohlc.length)) {
+    el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;color:var(--text-muted);font-size:11px">Chart data not stored for this run</div>';
+    if (_btChartInstances[idx]) delete _btChartInstances[idx];
+    var statsEl = document.getElementById('bt-chart-stats-' + idx);
+    if (statsEl) {
+      var retColor = (data.return_pct||0) > 0 ? '#22c55e' : (data.return_pct||0) < 0 ? '#ef4444' : 'var(--text-muted)';
+      statsEl.innerHTML =
+        '<span>Return: <b style="color:' + retColor + '">' + (data.return_pct != null ? (data.return_pct > 0 ? '+' : '') + data.return_pct.toFixed(1) + '%' : '--') + '</b></span>' +
+        '<span>Trades: <b>' + (data.trade_count||0) + '</b></span>' +
+        '<span>Win Rate: <b>' + (data.win_rate != null ? data.win_rate.toFixed(0) + '%' : '--') + '</b></span>' +
+        '<span>Sharpe: <b>' + (data.sharpe != null ? data.sharpe.toFixed(2) : '--') + '</b></span>';
+    }
+    var wrap = el.closest('.bt-chart-wrap');
+    if (wrap) { var loader = wrap.querySelector('.brain-pulse'); if (loader) loader.parentElement.style.display = 'none'; }
+    return;
   }
 
   chart.timeScale().fitContent();
@@ -4313,6 +4595,7 @@ function runCodeAgent() {
 document.addEventListener('DOMContentLoaded', function() {
   loadBrainDashboard();
   updateSidebarStatus();
+  startBwPolling();
 });
 </script>
 {% endblock %}

@@ -662,23 +662,31 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     except Exception:
         pass
 
-    # 5. Canonical WR from the single source of truth
-    _sp_id_for_stats = getattr(insight, "scan_pattern_id", None)
-    if _sp_id_for_stats:
-        _ev_stats = compute_pattern_bt_stats(db, [_sp_id_for_stats], ctx["user_id"])
-        _sp_s = _ev_stats.get(_sp_id_for_stats, {})
-        bt_wins = _sp_s.get("wins", 0)
-        bt_losses = _sp_s.get("losses", 0)
-        bt_win_rate = _sp_s.get("win_rate")
+    # 5. WR and avg from the SAME backtests we display (deduplicated, trade_count>0)
+    # Use the same dataset as the table so the summary matches. WR is the average
+    # of each row's win_rate (what the table shows) so it aligns with the column.
+    bt_with_trades = [b for b in backtests_out if (b.get("trade_count") or 0) > 0]
+    bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
+    bt_losses = len(bt_with_trades) - bt_wins
+    # Use avg of row win_rates so summary matches the table's Win Rate column
+    wr_values = [b.get("win_rate") for b in bt_with_trades if b.get("win_rate") is not None]
+    if wr_values:
+        # win_rate in DB is 0-100
+        bt_win_rate = round(sum(wr_values) / len(wr_values), 1)
+    elif bt_with_trades:
+        bt_win_rate = round(bt_wins / max(1, len(bt_with_trades)) * 100, 1)
     else:
-        bt_with_trades = [b for b in backtests_out
-                          if (b.get("trade_count") or 0) > 0
-                          and b.get("relevance", 0) == 100]
-        bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
-        bt_losses = len(bt_with_trades) - bt_wins
-        bt_win_rate = round(bt_wins / max(1, bt_wins + bt_losses) * 100, 1) if (bt_wins + bt_losses) > 0 else None
+        bt_win_rate = None
+    bt_avg_return = (
+        round(sum(b.get("return_pct") or 0 for b in bt_with_trades) / len(bt_with_trades), 1)
+        if bt_with_trades else None
+    )
 
-    computed_stats = _compute_evidence_stats(timeline, hypotheses, trades_out, backtests_out, bt_wins, bt_losses, bt_win_rate)
+    computed_stats = _compute_evidence_stats(
+        timeline, hypotheses, trades_out, backtests_out,
+        bt_wins, bt_losses, bt_win_rate, bt_avg_return,
+        backtest_total_displayed=len(backtests_out),
+    )
 
     return JSONResponse({
         "ok": True,
@@ -699,6 +707,122 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         "hypotheses": hypotheses,
         "trades": trades_out,
         "backtests": backtests_out,
+    })
+
+
+@router.get("/api/trading/learn/backtest/{bt_id}")
+def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(get_db)):
+    """Return stored BacktestResult by id. Used so the expanded chart matches the table header.
+
+    Both header and chart come from the same DB row. Returns 404 if not found or not accessible.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...models.trading import BacktestResult, TradingInsight
+
+    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
+    if not bt:
+        return JSONResponse({"ok": False, "error": "Backtest not found"}, status_code=404)
+
+    # Verify user can see this: either their insight, shared (user_id=None), or sibling pattern
+    ins = db.query(TradingInsight).filter(
+        TradingInsight.id == bt.related_insight_id,
+    ).first() if bt.related_insight_id else None
+    if ins:
+        if ins.user_id is None:
+            pass  # shared/orphan, allow
+        elif ins.user_id == ctx["user_id"]:
+            pass  # own insight, allow
+        else:
+            # Other user's insight: allow only if user has an insight for same pattern (sibling)
+            sp_id = getattr(ins, "scan_pattern_id", None)
+            if sp_id:
+                has_sibling = db.query(TradingInsight.id).filter(
+                    TradingInsight.scan_pattern_id == sp_id,
+                    TradingInsight.user_id == ctx["user_id"],
+                ).limit(1).first()
+                if not has_sibling:
+                    return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
+
+    eq = []
+    try:
+        if bt.equity_curve:
+            eq = json.loads(bt.equity_curve) if isinstance(bt.equity_curve, str) else (bt.equity_curve or [])
+    except Exception:
+        pass
+
+    return JSONResponse({
+        "ok": True,
+        "id": bt.id,
+        "ticker": bt.ticker,
+        "strategy_name": bt.strategy_name,
+        "return_pct": float(bt.return_pct) if bt.return_pct is not None else None,
+        "win_rate": float(bt.win_rate) if bt.win_rate is not None else None,
+        "trade_count": bt.trade_count or 0,
+        "sharpe": float(bt.sharpe) if bt.sharpe is not None else None,
+        "max_drawdown": float(bt.max_drawdown) if bt.max_drawdown is not None else None,
+        "equity_curve": eq,
+        "params": bt.params,
+    })
+
+
+@router.post("/api/trading/learn/backtest/{bt_id}/refresh")
+async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depends(get_db)):
+    """Update stored BacktestResult with fresh backtest results. Keeps header and chart in sync."""
+    ctx = get_identity_ctx(request, db)
+    from datetime import datetime as dt
+    from ...models.trading import BacktestResult, TradingInsight
+
+    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
+    if not bt:
+        return JSONResponse({"ok": False, "error": "Backtest not found"}, status_code=404)
+
+    ins = db.query(TradingInsight).filter(
+        TradingInsight.id == bt.related_insight_id,
+    ).first() if bt.related_insight_id else None
+    if ins:
+        if ins.user_id is None:
+            pass
+        elif ins.user_id == ctx["user_id"]:
+            pass
+        else:
+            sp_id = getattr(ins, "scan_pattern_id", None)
+            if sp_id:
+                has_sibling = db.query(TradingInsight.id).filter(
+                    TradingInsight.scan_pattern_id == sp_id,
+                    TradingInsight.user_id == ctx["user_id"],
+                ).limit(1).first()
+                if not has_sibling:
+                    return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
+
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+
+    ret = body.get("return_pct")
+    bt.return_pct = float(ret) if ret is not None else bt.return_pct
+    wr = body.get("win_rate")
+    bt.win_rate = float(wr) if wr is not None else bt.win_rate
+    sh = body.get("sharpe")
+    bt.sharpe = float(sh) if sh is not None else None
+    md = body.get("max_drawdown")
+    bt.max_drawdown = float(md) if md is not None else bt.max_drawdown
+    bt.trade_count = int(body.get("trade_count", bt.trade_count) or 0)
+    if body.get("equity_curve") is not None:
+        bt.equity_curve = json.dumps(body["equity_curve"]) if isinstance(body["equity_curve"], list) else body["equity_curve"]
+    bt.ran_at = dt.utcnow()
+    db.commit()
+    db.refresh(bt)
+
+    return JSONResponse({
+        "ok": True,
+        "id": bt.id,
+        "return_pct": float(bt.return_pct),
+        "win_rate": float(bt.win_rate),
+        "sharpe": float(bt.sharpe) if bt.sharpe is not None else None,
+        "max_drawdown": float(bt.max_drawdown),
+        "trade_count": bt.trade_count,
+        "ran_at": bt.ran_at.isoformat(),
     })
 
 
@@ -835,11 +959,14 @@ def _compute_evidence_stats(
     bt_wins: int = 0,
     bt_losses: int = 0,
     bt_win_rate: float | None = None,
+    bt_avg_return: float | None = None,
+    backtest_total_displayed: int | None = None,
 ) -> dict:
     """Compute live aggregate stats from the actual evidence data.
 
-    ``bt_wins``, ``bt_losses``, and ``bt_win_rate`` come from
-    :func:`compute_pattern_bt_stats` (the single source of truth).
+    When bt_avg_return is provided, it is used for backtest_avg_return
+    (computed from displayed backtests with trades). Otherwise falls back
+    to averaging all backtests.
     """
     stats: dict = {}
 
@@ -862,9 +989,11 @@ def _compute_evidence_stats(
     if bt_total > 0:
         stats["backtest_avg_win_rate"] = bt_win_rate
         stats["backtest_count"] = bt_total
-    if backtests:
+    if bt_avg_return is not None:
+        stats["backtest_avg_return"] = round(bt_avg_return, 1)
+    elif backtests:
         stats["backtest_avg_return"] = round(
-            sum(b["return_pct"] for b in backtests) / len(backtests), 1
+            sum(b.get("return_pct", 0) for b in backtests) / len(backtests), 1
         )
 
     if timeline:
@@ -898,3 +1027,171 @@ def _extract_keywords_for_matching(text: str, min_len: int = 4) -> list[str]:
             seen.add(w)
             keywords.append(w)
     return keywords[:15]
+
+
+# ── Brain Worker Control ────────────────────────────────────────────────
+
+import subprocess
+import sys
+from pathlib import Path
+
+_BRAIN_WORKER_STATUS_FILE = Path("data/brain_worker_status.json")
+_BRAIN_WORKER_STOP_SIGNAL = Path("data/brain_worker_stop")
+_BRAIN_WORKER_PAUSE_SIGNAL = Path("data/brain_worker_pause")
+
+
+@router.get("/api/trading/brain/worker/status")
+def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
+    """Get brain worker status."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot access worker status"}, status_code=403)
+    
+    if not _BRAIN_WORKER_STATUS_FILE.exists():
+        return JSONResponse({
+            "ok": True,
+            "status": "stopped",
+            "pid": None,
+            "current_step": "",
+            "current_progress": "",
+            "last_cycle": {},
+            "totals": {},
+        })
+    
+    try:
+        with open(_BRAIN_WORKER_STATUS_FILE, "r") as f:
+            data = json.load(f)
+        
+        pid = data.get("pid")
+        is_running = False
+        if pid:
+            try:
+                import psutil
+                proc = psutil.Process(pid)
+                is_running = proc.is_running() and "python" in proc.name().lower()
+            except Exception:
+                pass
+        
+        if not is_running:
+            data["status"] = "stopped"
+        
+        return JSONResponse({"ok": True, **data})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@router.post("/api/trading/brain/worker/start")
+async def api_brain_worker_start(request: Request, db: Session = Depends(get_db)):
+    """Start the brain worker process."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot control worker"}, status_code=403)
+    
+    if _BRAIN_WORKER_STATUS_FILE.exists():
+        try:
+            with open(_BRAIN_WORKER_STATUS_FILE, "r") as f:
+                data = json.load(f)
+            pid = data.get("pid")
+            if pid:
+                try:
+                    import psutil
+                    proc = psutil.Process(pid)
+                    if proc.is_running() and "python" in proc.name().lower():
+                        return JSONResponse({"ok": False, "error": "Worker already running", "pid": pid})
+                except Exception:
+                    pass
+        except Exception:
+            pass
+    
+    if _BRAIN_WORKER_STOP_SIGNAL.exists():
+        _BRAIN_WORKER_STOP_SIGNAL.unlink()
+    if _BRAIN_WORKER_PAUSE_SIGNAL.exists():
+        _BRAIN_WORKER_PAUSE_SIGNAL.unlink()
+    
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    
+    interval = body.get("interval", 30)
+    
+    script_path = Path("scripts/brain_worker.py")
+    if not script_path.exists():
+        return JSONResponse({"ok": False, "error": "Worker script not found"}, status_code=500)
+    
+    try:
+        proc = subprocess.Popen(
+            [sys.executable, str(script_path), "--interval", str(interval)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        return JSONResponse({"ok": True, "pid": proc.pid, "interval": interval})
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
+@router.post("/api/trading/brain/worker/stop")
+def api_brain_worker_stop(request: Request, db: Session = Depends(get_db)):
+    """Stop the brain worker gracefully."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot control worker"}, status_code=403)
+    
+    Path("data").mkdir(exist_ok=True)
+    _BRAIN_WORKER_STOP_SIGNAL.touch()
+    
+    return JSONResponse({"ok": True, "message": "Stop signal sent"})
+
+
+@router.post("/api/trading/brain/worker/pause")
+def api_brain_worker_pause(request: Request, db: Session = Depends(get_db)):
+    """Toggle pause state of the brain worker."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot control worker"}, status_code=403)
+    
+    Path("data").mkdir(exist_ok=True)
+    
+    if _BRAIN_WORKER_PAUSE_SIGNAL.exists():
+        _BRAIN_WORKER_PAUSE_SIGNAL.unlink()
+        return JSONResponse({"ok": True, "paused": False, "message": "Worker resumed"})
+    else:
+        _BRAIN_WORKER_PAUSE_SIGNAL.touch()
+        return JSONResponse({"ok": True, "paused": True, "message": "Worker paused"})
+
+
+@router.get("/api/trading/brain/worker/recent-activity")
+def api_brain_worker_recent_activity(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Get recent learning activity for the brain worker dashboard."""
+    from ...models.trading import LearningEvent
+    from datetime import datetime, timedelta
+    
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot access activity"}, status_code=403)
+    
+    cutoff = datetime.utcnow() - timedelta(hours=24)
+    
+    events = (
+        db.query(LearningEvent)
+        .filter(LearningEvent.created_at >= cutoff)
+        .order_by(LearningEvent.created_at.desc())
+        .limit(limit)
+        .all()
+    )
+    
+    activity = []
+    for e in events:
+        activity.append({
+            "id": e.id,
+            "type": e.event_type,
+            "summary": e.description[:200] if e.description else "",
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        })
+    
+    return JSONResponse({"ok": True, "activity": activity})

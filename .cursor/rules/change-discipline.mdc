@@ -1,0 +1,31 @@
+---
+description: Enforce disciplined approach to code changes - plan first, change incrementally, test each step
+alwaysApply: true
+---
+
+# Change Discipline
+
+## Before Making Changes
+
+1. **Understand the data flow** - Trace what data is stored, returned, and consumed before proposing changes
+2. **Check what exists** - Read the relevant models/schemas to understand what fields exist
+3. **Plan in Plan Mode** - For non-trivial changes, use plan mode to outline the approach first
+
+## During Changes
+
+1. **One change at a time** - Make a single logical change, test it, then proceed
+2. **Don't stack fixes** - If something breaks, step back and reassess rather than patching
+3. **Restart server between changes** - Kill existing process, then start fresh
+
+## When Things Break
+
+1. **Stop and think** - Don't reactively patch; understand WHY it broke
+2. **Consider reverting** - If a change caused cascading issues, revert and try a different approach
+3. **Ask the user** - If unsure, ask rather than guess
+
+## Anti-patterns to Avoid
+
+- Changing multiple files for different purposes in one session
+- Assuming stored data has the same fields as fresh API responses
+- Making changes without reading the affected code first
+- Fixing syntax errors one by one instead of restoring from git

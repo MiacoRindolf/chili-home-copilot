@@ -1036,6 +1036,20 @@ def _filter_rows_by_condition(rows: list[dict], condition_str: str) -> list[dict
         op_str = m.group(2)
         raw_val = m.group(3).strip()
 
+        FIELD_ALIASES = {
+            "rsi_14": "rsi",
+            "rsi14": "rsi",
+            "rel_vol": "vol_ratio",
+            "rvol": "vol_ratio",
+            "relative_volume": "vol_ratio",
+            "macd_histogram": "macd_hist",
+            "stoch": "stoch_k",
+            "stochastic": "stoch_k",
+            "retest_count": "resistance_retests",
+            "retests": "resistance_retests",
+        }
+        field = FIELD_ALIASES.get(field, field)
+
         bool_map = {"true": True, "false": False, "1": True, "0": False}
         if raw_val.lower() in bool_map:
             target_val = bool_map[raw_val.lower()]
@@ -1287,10 +1301,17 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         pass
 
     # ── Load all testable hypotheses ──
+    # Prioritize builtin_seed origin (they have simpler, more testable conditions)
+    from sqlalchemy import case
+    origin_priority = case(
+        (TradingHypothesis.origin == "builtin_seed", 0),
+        (TradingHypothesis.origin == "llm_generated", 1),
+        else_=2,
+    )
     hypotheses = (
         db.query(TradingHypothesis)
         .filter(TradingHypothesis.status.in_(["pending", "testing", "confirmed", "rejected"]))
-        .order_by(TradingHypothesis.times_tested.asc())
+        .order_by(origin_priority, TradingHypothesis.times_tested.asc())
         .limit(50)
         .all()
     )
@@ -1301,7 +1322,8 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         group_a = _filter_rows_by_condition(rows, hyp.condition_a)
         group_b = _filter_rows_by_condition(rows, hyp.condition_b)
 
-        if len(group_a) < 5 or len(group_b) < 5:
+        min_samples = 3 if (hyp.times_tested or 0) == 0 else 5
+        if len(group_a) < min_samples or len(group_b) < min_samples:
             continue
 
         avg_a = sum(r["ret_5d"] for r in group_a) / len(group_a)
@@ -1309,10 +1331,12 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         wr_a = sum(1 for r in group_a if r["ret_5d"] > 0) / len(group_a) * 100
         wr_b = sum(1 for r in group_b if r["ret_5d"] > 0) / len(group_b) * 100
 
+        MIN_DELTA = 1.5  # Require 1.5% difference to be meaningful
+        delta = avg_a - avg_b
         if hyp.expected_winner == "a":
-            confirmed = avg_a > avg_b
+            confirmed = delta > MIN_DELTA
         else:
-            confirmed = avg_b > avg_a
+            confirmed = -delta > MIN_DELTA
 
         finding = {
             "hypothesis": hyp.description,
@@ -1373,6 +1397,9 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
                     confidence=min(0.85, wr_a / 100),
                     wins=wins_a, losses=len(group_a) - wins_a,
                 )
+                spawned_id = _spawn_pattern_from_hypothesis(db, hyp, avg_a, wr_a, user_id)
+                if spawned_id:
+                    finding["spawned_pattern_id"] = spawned_id
 
     db.commit()
 
@@ -1679,6 +1706,108 @@ def _derive_hypotheses_from_patterns(db: Session) -> int:
         db.commit()
         logger.info(f"[learning] Derived {added} hypotheses from ScanPatterns")
     return added
+
+
+def _parse_condition_to_rules(condition_str: str) -> list[dict[str, Any]]:
+    """Parse a hypothesis condition string back into rules_json format.
+
+    E.g. "rsi > 65 and ema_stack == true" -> [{"indicator": "rsi", "op": ">", "value": 65}, ...]
+    """
+    import re
+    rules: list[dict[str, Any]] = []
+
+    parts = re.split(r"\s+and\s+", condition_str.strip(), flags=re.IGNORECASE)
+    for part in parts:
+        part = part.strip()
+        if not part:
+            continue
+
+        match = re.match(
+            r"(\w+)\s*(>=|<=|>|<|==|!=)\s*(.+)",
+            part,
+        )
+        if not match:
+            continue
+
+        indicator = match.group(1)
+        op = match.group(2)
+        raw_val = match.group(3).strip()
+
+        if raw_val.lower() == "true":
+            value: Any = True
+        elif raw_val.lower() == "false":
+            value = False
+        else:
+            try:
+                value = float(raw_val) if "." in raw_val else int(raw_val)
+            except ValueError:
+                value = raw_val
+
+        rules.append({"indicator": indicator, "op": op, "value": value})
+
+    return rules
+
+
+def _spawn_pattern_from_hypothesis(
+    db: Session,
+    hyp,
+    avg_ret: float,
+    win_rate: float,
+    user_id: int | None = None,
+) -> int | None:
+    """Create ScanPattern from confirmed hypothesis condition_a.
+
+    Only spawns if:
+    - avg_ret >= 2.0% and win_rate >= 55%
+    - hypothesis is NOT pattern_derived (those validate existing patterns)
+    - a pattern with this description doesn't already exist
+
+    Returns the new pattern ID, or None if not spawned.
+    """
+    from ...models.trading import ScanPattern, TradingInsight
+
+    if avg_ret < 2.0 or win_rate < 55:
+        return None
+
+    if hyp.origin == "pattern_derived":
+        return None
+
+    rules = _parse_condition_to_rules(hyp.condition_a)
+    if not rules:
+        logger.debug(f"[learning] Could not parse hypothesis condition_a: {hyp.condition_a}")
+        return None
+
+    pattern_name = f"Hyp: {hyp.description[:60]}"
+    existing = db.query(ScanPattern).filter(ScanPattern.name == pattern_name).first()
+    if existing:
+        return None
+
+    pattern = ScanPattern(
+        name=pattern_name,
+        rules_json=json.dumps({"conditions": rules}),
+        origin="hypothesis_confirmed",
+        confidence=min(0.85, win_rate / 100),
+        active=True,
+        timeframe="1d",
+    )
+    db.add(pattern)
+    db.flush()
+
+    insight = TradingInsight(
+        user_id=user_id,
+        pattern_description=f"Pattern spawned from confirmed hypothesis: {hyp.description}",
+        confidence=min(0.85, win_rate / 100),
+        scan_pattern_id=pattern.id,
+        active=True,
+    )
+    db.add(insight)
+    db.commit()
+
+    logger.info(
+        f"[learning] Spawned pattern '{pattern_name}' from hypothesis "
+        f"(avg_ret={avg_ret:.1f}%, WR={win_rate:.0f}%)"
+    )
+    return pattern.id
 
 
 # ── Intraday Breakout Pattern Mining (15m data) ──────────────────────
@@ -4038,6 +4167,7 @@ def test_pattern_hypothesis(
                 rules_json=pattern.rules_json,
                 interval=bt_params["interval"],
                 period=bt_params["period"],
+                exit_config=getattr(pattern, "exit_config", None),
             )
             if not result.get("ok"):
                 continue

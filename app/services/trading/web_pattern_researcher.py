@@ -360,6 +360,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                 rules_json=pattern.rules_json,
                 interval=bt_params["interval"],
                 period=bt_params["period"],
+                exit_config=getattr(pattern, "exit_config", None),
             )
             if not result.get("ok"):
                 continue

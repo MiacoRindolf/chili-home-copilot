@@ -37,3 +37,4 @@ vaderSentiment>=3.3.2
 pytest==9.0.2
 httpx==0.28.1
 playwright>=1.49.0
+psutil>=5.9.0

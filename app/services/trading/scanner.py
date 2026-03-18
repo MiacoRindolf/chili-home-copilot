@@ -510,8 +510,43 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
 
     adjustments: dict[str, float] = {}
     details: list[str] = []
+    hyp_adjusted_weights: set[str] = set()
 
+    # ── Hypothesis-based weight adjustment (takes precedence) ──
+    try:
+        from ...models.trading import TradingHypothesis
+        confirmed_hyps = db.query(TradingHypothesis).filter(
+            TradingHypothesis.status == "confirmed",
+            TradingHypothesis.related_weight.isnot(None),
+        ).all()
+
+        for hyp in confirmed_hyps:
+            weight_key = hyp.related_weight
+            if weight_key not in _DEFAULT_WEIGHTS:
+                continue
+
+            times_tested = hyp.times_tested or 1
+            confirm_rate = (hyp.times_confirmed or 0) / times_tested
+            default = _DEFAULT_WEIGHTS[weight_key]
+
+            boost = 1.0 + (confirm_rate - 0.5) * 0.3
+            new_val = round(default * boost, 3)
+
+            if abs(new_val - default) > 0.02:
+                adjustments[weight_key] = new_val
+                hyp_adjusted_weights.add(weight_key)
+                direction = "up" if boost > 1 else "down"
+                details.append(
+                    f"{weight_key}: {default}->{new_val:.3f} ({direction}, "
+                    f"hyp_confirm={confirm_rate:.0%}, tested={times_tested}x)"
+                )
+    except Exception as e:
+        logger.warning(f"[scanner] Hypothesis weight adjustment failed: {e}")
+
+    # ── Insight-based weight adjustment (skip if already adjusted by hypothesis) ──
     for factor_key, keywords in FACTOR_KEYWORDS.items():
+        if factor_key in hyp_adjusted_weights:
+            continue
         related = [
             ins for ins in insights
             if any(kw in ins.pattern_description.lower() for kw in keywords)

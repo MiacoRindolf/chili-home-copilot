@@ -2034,7 +2034,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <div class="user-profile-info">
           <div class="user-profile-name">{{ user_name }}</div>
           <button class="user-signout-btn" onclick="signOut()">Sign out</button>
-        </div>
+      </div>
       </div>
       {% endif %}
     </div>
@@ -2313,7 +2313,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
             <button onclick="_showSuggestPattern()" class="sig-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;margin-left:6px">+ Suggest Pattern</button>
             <button onclick="_triggerWebResearch()" id="btn-web-research" class="sig-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;margin-left:6px">&#x1F310; Research Web</button>
             <span id="web-research-status" style="font-size:10px;color:var(--text-muted);margin-left:8px;align-self:center"></span>
-          </div>
+      </div>
           <div id="suggest-pattern-form" style="display:none;margin:10px 0;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
             <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text)">Describe your pattern in plain English:</div>
             <textarea id="suggest-pattern-input" rows="3" style="width:100%;padding:8px;font-size:12px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text);border-radius:6px;resize:vertical" placeholder="e.g. RSI above 70, price above all EMAs (20, 50, 100), at least 3 retests of resistance, then consolidation with tight range"></textarea>
@@ -3676,16 +3676,16 @@ function _initOhlcTooltip(chartEl) {
     var _isCr = (currentTicker||'').indexOf('-USD') !== -1;
     tip.style.opacity = '1';
     if (d.open != null && d.close != null) {
-      var chg = d.close - d.open;
-      var pct = d.open !== 0 ? ((chg / d.open) * 100).toFixed(2) : '0.00';
-      var clr = chg >= 0 ? '#22c55e' : '#ef4444';
-      var sign = chg >= 0 ? '+' : '';
-      tip.innerHTML =
-        '<span>O <b>' + smartPrice(d.open, _isCr) + '</b></span>' +
-        '<span>H <b>' + smartPrice(d.high, _isCr) + '</b></span>' +
-        '<span>L <b>' + smartPrice(d.low, _isCr) + '</b></span>' +
-        '<span>C <b style="color:' + clr + '">' + smartPrice(d.close, _isCr) + '</b></span>' +
-        '<span style="color:' + clr + '">' + sign + smartPrice(chg, _isCr) + ' (' + sign + pct + '%)</span>';
+    var chg = d.close - d.open;
+    var pct = d.open !== 0 ? ((chg / d.open) * 100).toFixed(2) : '0.00';
+    var clr = chg >= 0 ? '#22c55e' : '#ef4444';
+    var sign = chg >= 0 ? '+' : '';
+    tip.innerHTML =
+      '<span>O <b>' + smartPrice(d.open, _isCr) + '</b></span>' +
+      '<span>H <b>' + smartPrice(d.high, _isCr) + '</b></span>' +
+      '<span>L <b>' + smartPrice(d.low, _isCr) + '</b></span>' +
+      '<span>C <b style="color:' + clr + '">' + smartPrice(d.close, _isCr) + '</b></span>' +
+      '<span style="color:' + clr + '">' + sign + smartPrice(chg, _isCr) + ' (' + sign + pct + '%)</span>';
     } else if (d.value != null) {
       tip.innerHTML = '<span>Price <b>' + smartPrice(d.value, _isCr) + '</b></span>';
     }
@@ -6774,7 +6774,7 @@ function _renderBestIdeaRow(item) {
   html += '<div class="bi-data-grid">';
 
   // Column 1: Chili's Take + plain-English explanation
-  html += '<div class="bi-take collapsed" onclick="event.stopPropagation();this.classList.toggle(\'collapsed\')">';
+    html += '<div class="bi-take collapsed" onclick="event.stopPropagation();this.classList.toggle(\'collapsed\')">';
   if (thesis) {
     html += '<span class="bi-take-label">Chili\'s Take</span><br>';
     html += escHtml(thesis);
@@ -7487,10 +7487,10 @@ function drawBacktestChart(d) {
       }
     }
   } else if (d.equity_curve && d.equity_curve.length > 1) {
-    btEquitySeries = btChart.addAreaSeries({
-      lineColor: '#3b82f6', topColor: 'rgba(59,130,246,.3)', bottomColor: 'rgba(59,130,246,.02)',
-      lineWidth: 2,
-    });
+  btEquitySeries = btChart.addAreaSeries({
+    lineColor: '#3b82f6', topColor: 'rgba(59,130,246,.3)', bottomColor: 'rgba(59,130,246,.02)',
+    lineWidth: 2,
+  });
     btEquitySeries.setData(d.equity_curve);
   }
 
@@ -7798,7 +7798,7 @@ function saveBrokerCredentials() {
     btn.disabled = false;
     btn.textContent = 'Save & Connect';
     error.textContent = 'Network error. Please try again.';
-  });
+    });
 }
 
 function openApprovalDialog() {
@@ -9780,12 +9780,12 @@ function drawBreakoutAnnotations(r) {
   if (r.bb_squeeze) {
     var lastBarTime = _getLastCandleTime();
     if (lastBarTime) {
-      candleSeries.setMarkers([{
+    candleSeries.setMarkers([{
         time: lastBarTime,
-        position: 'aboveBar', color: '#f59e0b', shape: 'arrowDown',
-        text: 'BB Squeeze'
-      }]);
-    }
+      position: 'aboveBar', color: '#f59e0b', shape: 'arrowDown',
+      text: 'BB Squeeze'
+    }]);
+  }
     legendItems.push({color:'#f59e0b', label:'BB Squeeze active'});
   }
 

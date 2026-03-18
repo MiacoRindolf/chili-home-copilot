@@ -1401,6 +1401,7 @@ def backtest_pattern(
     rules_json: str,
     interval: str = "1d",
     period: str = "1y",
+    exit_config: str | dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest for a ScanPattern.
 
@@ -1416,6 +1417,16 @@ def backtest_pattern(
     except (json.JSONDecodeError, TypeError):
         pass
 
+    exit_cfg: dict[str, Any] | None = None
+    if exit_config is not None:
+        if isinstance(exit_config, dict):
+            exit_cfg = exit_config
+        else:
+            try:
+                exit_cfg = json.loads(exit_config) if exit_config else None
+            except (json.JSONDecodeError, TypeError):
+                pass
+
     if conditions:
         result = run_pattern_backtest(
             ticker=ticker,
@@ -1423,6 +1434,7 @@ def backtest_pattern(
             pattern_name=pattern_name,
             period=period,
             interval=interval,
+            exit_config=exit_cfg,
         )
         result["pattern_name"] = pattern_name
         result["mapped_strategy"] = "dynamic_pattern"
