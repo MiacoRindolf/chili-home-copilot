@@ -1,10 +1,14 @@
-"""Pre-screener: fast server-side filtering via FinViz + yfinance screener.
+"""Pre-screener: fast server-side filtering via Massive.com + yfinance screener.
 
 Instead of fetching OHLCV and computing indicators for 5000+ tickers,
-this module uses FinViz's free pre-computed screener data and Yahoo
-Finance's server-side screener API to narrow the universe to ~200-300
-interesting candidates in seconds.  The scanner then only deep-scores
-this short list.
+this module uses the paid Massive.com API (full-market snapshot in one
+call, technical indicators, Benzinga partner data) and Yahoo Finance's
+server-side screener API to narrow the universe to ~200-300 interesting
+candidates in seconds.  The scanner then only deep-scores this short list.
+
+FinViz web-scraping is retained ONLY as a silent fallback for chart-pattern
+screens (Double Bottom, Multiple Tops, Wedge, Channel Up) that have no
+Massive equivalent.
 """
 from __future__ import annotations
 
@@ -39,7 +43,7 @@ _CRYPTO_EXCLUDE: set[str] = {
 _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
 _CACHE_TTL = 3600  # 1 hour — keep prescreener results longer (64 GB RAM)
-_finviz_sem = threading.Semaphore(3)  # allow 3 concurrent FinViz requests
+_finviz_sem = threading.Semaphore(2)  # only used for chart-pattern fallback
 
 _prescreen_status: dict[str, Any] = {
     "running": False,
@@ -71,18 +75,71 @@ def _cache_set(key: str, val: Any, ttl: int = _CACHE_TTL) -> None:
         _cache[key] = (time.time(), val, ttl)
 
 
-# ── FinViz Screener Queries ───────────────────────────────────────────
+# ── Massive.com Screener Queries (primary) ─────────────────────────────
+
+def _massive_most_active() -> list[str]:
+    from ..massive_client import screen_most_active
+    return screen_most_active(limit=200)
+
+
+def _massive_top_gainers() -> list[str]:
+    from ..massive_client import screen_top_gainers
+    return screen_top_gainers(limit=100)
+
+
+def _massive_top_losers() -> list[str]:
+    from ..massive_client import screen_top_losers
+    return screen_top_losers(limit=100)
+
+
+def _massive_new_high() -> list[str]:
+    from ..massive_client import screen_new_high
+    return screen_new_high(limit=100)
+
+
+def _massive_unusual_volume() -> list[str]:
+    from ..massive_client import screen_unusual_volume
+    return screen_unusual_volume(limit=200)
+
+
+def _massive_most_volatile() -> list[str]:
+    from ..massive_client import screen_most_volatile
+    return screen_most_volatile(limit=100, min_price=1.0)
+
+
+def _massive_high_volume() -> list[str]:
+    from ..massive_client import screen_high_volume
+    return screen_high_volume(limit=200, min_vol=1_000_000, min_price=5.0)
+
+
+def _massive_high_rel_volume() -> list[str]:
+    from ..massive_client import screen_high_relative_volume
+    return screen_high_relative_volume(limit=200, min_ratio=2.0,
+                                       min_prev_vol=200_000, min_price=2.0)
+
+
+def _massive_momentum_gappers() -> list[str]:
+    from ..massive_client import screen_momentum_gappers
+    return screen_momentum_gappers(limit=100)
+
+
+def _massive_upgrades() -> list[str]:
+    from ..massive_client import get_benzinga_ratings
+    return get_benzinga_ratings(action="upgrade", limit=100)
+
+
+def _massive_earnings() -> list[str]:
+    from ..massive_client import get_benzinga_earnings
+    return get_benzinga_earnings(limit=100)
+
+
+# ── FinViz fallback (chart-pattern screens only) ──────────────────────
 
 def _finviz_screen(filters_dict: dict | None = None,
                    signal: str = "",
                    limit: int = 200) -> list[str]:
-    """Run a FinViz screen and return a list of ticker strings.
-
-    Each individual screen result is cached for 60 minutes so that
-    repeated calls (e.g. from different scan types) don't hit FinViz again.
-    A semaphore limits concurrency to 2 simultaneous FinViz requests
-    to avoid HTTP 429 rate-limit errors while still allowing parallelism.
-    """
+    """Run a FinViz screen (used ONLY for chart-pattern signals with no
+    Massive equivalent). Returns [] gracefully on rate-limit."""
     cache_key = f"finviz_{signal or ''}_{'_'.join(sorted((filters_dict or {}).keys()))}"
     cached = _cache_get(cache_key)
     if cached is not None:
@@ -104,72 +161,10 @@ def _finviz_screen(filters_dict: dict | None = None,
                 _cache_set(cache_key, result, ttl=3600)
                 return result
         except Exception as e:
-            logger.warning(f"[prescreener] FinViz screen failed ({signal or filters_dict}): {e}")
+            logger.debug(f"[prescreener] FinViz pattern screen ({signal}): {e}")
         finally:
-            time.sleep(0.5)
+            time.sleep(0.3)
     return []
-
-
-def _finviz_most_active() -> list[str]:
-    return _finviz_screen(signal="Most Active", limit=200)
-
-
-def _finviz_top_gainers() -> list[str]:
-    return _finviz_screen(signal="Top Gainers", limit=100)
-
-
-def _finviz_new_high() -> list[str]:
-    return _finviz_screen(signal="New High", limit=100)
-
-
-def _finviz_oversold() -> list[str]:
-    return _finviz_screen(
-        signal="Oversold",
-        filters_dict={"Price": "Over $1"},
-        limit=100,
-    )
-
-
-def _finviz_unusual_volume() -> list[str]:
-    return _finviz_screen(signal="Unusual Volume", limit=100)
-
-
-def _finviz_bullish_sma() -> list[str]:
-    """Stocks where SMA20 is above SMA50 and price above SMA20."""
-    return _finviz_screen(
-        filters_dict={
-            "20-Day Simple Moving Average": "Price above SMA20",
-            "50-Day Simple Moving Average": "SMA50 below SMA20",
-        },
-        limit=100,
-    )
-
-
-def _finviz_high_volume_tradeable() -> list[str]:
-    """Liquid stocks with average volume > 1M and price > $5."""
-    return _finviz_screen(
-        filters_dict={
-            "Average Volume": "Over 1M",
-            "Price": "Over $5",
-        },
-        limit=200,
-    )
-
-
-def _finviz_overbought() -> list[str]:
-    return _finviz_screen(signal="Overbought", limit=100)
-
-
-def _finviz_most_volatile() -> list[str]:
-    return _finviz_screen(
-        signal="Most Volatile",
-        filters_dict={"Price": "Over $1"},
-        limit=100,
-    )
-
-
-def _finviz_top_losers() -> list[str]:
-    return _finviz_screen(signal="Top Losers", limit=100)
 
 
 def _finviz_double_bottom() -> list[str]:
@@ -178,71 +173,6 @@ def _finviz_double_bottom() -> list[str]:
 
 def _finviz_multiple_tops() -> list[str]:
     return _finviz_screen(signal="Multiple Top", limit=100)
-
-
-def _finviz_upgrades() -> list[str]:
-    return _finviz_screen(signal="Upgrades", limit=100)
-
-
-def _finviz_earnings_before() -> list[str]:
-    return _finviz_screen(signal="Earnings Before", limit=100)
-
-
-def _finviz_recent_insider_buying() -> list[str]:
-    return _finviz_screen(signal="Recent Insider Buying", limit=100)
-
-
-def _finviz_high_relative_volume() -> list[str]:
-    """Stocks with today's volume > 2x average — something is happening."""
-    return _finviz_screen(
-        filters_dict={
-            "Relative Volume": "Over 2",
-            "Average Volume": "Over 200K",
-            "Price": "Over $2",
-        },
-        limit=200,
-    )
-
-
-def _finviz_small_cap_momentum() -> list[str]:
-    """Small-cap stocks with upward price momentum."""
-    return _finviz_screen(
-        filters_dict={
-            "Market Cap.": "Small ($300mln to $2bln)",
-            "Performance": "Week Up",
-            "Average Volume": "Over 200K",
-        },
-        limit=150,
-    )
-
-
-def _finviz_momentum_gappers() -> list[str]:
-    """Low-float momentum gappers: price $2-$20, up > 5%, high relative vol."""
-    from .market_data import fetch_quotes_batch
-
-    tickers = _finviz_screen(
-        filters_dict={
-            "Price": "$1 to $20",
-            "Change": "Up more than 5%",
-            "Relative Volume": "Over 3",
-            "Float Short": "Under 20%",
-            "Average Volume": "Over 100K",
-        },
-        limit=100,
-    )
-    if not tickers:
-        return []
-
-    quotes = fetch_quotes_batch(tickers)
-    filtered: list[str] = []
-    for t in tickers:
-        q = quotes.get(t) or quotes.get(t.upper())
-        if not q:
-            continue
-        price = q.get("price") or q.get("last_price")
-        if price is not None and 2.0 <= float(price) <= 20.0:
-            filtered.append(t)
-    return filtered
 
 
 # ── Yahoo Finance Screener ────────────────────────────────────────────
@@ -372,38 +302,37 @@ def get_prescreened_candidates(
 ) -> list[str]:
     """Return a de-duplicated list of pre-screened candidate tickers.
 
-    Combines multiple FinViz signals + yfinance screens + crypto in
-    parallel.  Results are cached for 30 minutes.
+    Combines Massive.com snapshot filters + yfinance screens + crypto in
+    parallel.  Results are cached for 1 hour.
 
-    Typical output: 600-1200 unique tickers, gathered in 10-30 seconds.
+    Typical output: 800-1500 unique tickers, gathered in 2-5 seconds.
     """
     cached = _cache_get("prescreened_candidates")
     if cached is not None:
-        logger.info(f"[prescreener] Returning {len(cached)} cached candidates")
-        _prescreen_status["candidates"] = len(cached)
-        return cached
+        result = cached[:max_total] if max_total < len(cached) else cached
+        logger.info(f"[prescreener] Returning {len(result)} cached candidates (of {len(cached)} total)")
+        _prescreen_status["candidates"] = len(result)
+        return result
 
     _prescreen_status["running"] = True
     _prescreen_status["sources"] = {}
     start = time.time()
 
     sources: dict[str, Any] = {
-        "finviz_most_active": _finviz_most_active,
-        "finviz_top_gainers": _finviz_top_gainers,
-        "finviz_new_high": _finviz_new_high,
-        "finviz_oversold": _finviz_oversold,
-        "finviz_overbought": _finviz_overbought,
-        "finviz_unusual_volume": _finviz_unusual_volume,
-        "finviz_most_volatile": _finviz_most_volatile,
-        "finviz_bullish_sma": _finviz_bullish_sma,
-        "finviz_high_volume": _finviz_high_volume_tradeable,
-        "finviz_high_rel_volume": _finviz_high_relative_volume,
+        # Massive.com (primary — one cached snapshot, many filters)
+        "massive_most_active": _massive_most_active,
+        "massive_top_gainers": _massive_top_gainers,
+        "massive_new_high": _massive_new_high,
+        "massive_unusual_volume": _massive_unusual_volume,
+        "massive_most_volatile": _massive_most_volatile,
+        "massive_high_volume": _massive_high_volume,
+        "massive_high_rel_volume": _massive_high_rel_volume,
+        "massive_upgrades": _massive_upgrades,
+        "massive_earnings": _massive_earnings,
+        # FinViz (fallback — chart-pattern screens only)
         "finviz_double_bottom": _finviz_double_bottom,
         "finviz_multiple_tops": _finviz_multiple_tops,
-        "finviz_upgrades": _finviz_upgrades,
-        "finviz_earnings_before": _finviz_earnings_before,
-        "finviz_insider_buying": _finviz_recent_insider_buying,
-        "finviz_smallcap_momentum": _finviz_small_cap_momentum,
+        # yfinance server-side screeners (supplementary)
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
         "yf_undervalued_growth": _yf_undervalued_growth,
@@ -459,8 +388,6 @@ def get_prescreened_candidates(
                 seen.add(t)
                 combined.append(t)
 
-    combined = combined[:max_total]
-
     elapsed = time.time() - start
     source_counts = {k: len(v) for k, v in results_by_source.items()}
     logger.info(
@@ -475,7 +402,7 @@ def get_prescreened_candidates(
     _prescreen_status["last_duration_s"] = round(elapsed, 1)
 
     _cache_set("prescreened_candidates", combined)
-    return combined
+    return combined[:max_total] if max_total < len(combined) else combined
 
 
 def invalidate_cache() -> None:
@@ -564,9 +491,9 @@ def get_trending_crypto() -> list[str]:
 def get_daytrade_candidates() -> tuple[list[str], int]:
     """Return (tickers, total_found) suited for intraday / day-trade scanning.
 
-    Combines high-activity FinViz signals (most active, top gainers,
-    top losers, most volatile, unusual volume) for stocks that are
-    moving *today*, plus top crypto movers (crypto trades 24/7).
+    Combines high-activity Massive.com snapshot filters (most active,
+    top gainers, unusual volume, momentum gappers) plus yfinance screens
+    and crypto movers for stocks that are moving *today*.
     Returns the **full** deduplicated universe; downstream callers decide
     how many to score.  Cached for 15 minutes (shorter TTL than swing).
     """
@@ -578,10 +505,10 @@ def get_daytrade_candidates() -> tuple[list[str], int]:
 
     start = time.time()
     sources: dict[str, Any] = {
-        "finviz_most_active": _finviz_most_active,
-        "finviz_top_gainers": _finviz_top_gainers,
-        "finviz_unusual_volume": _finviz_unusual_volume,
-        "finviz_momentum_gappers": _finviz_momentum_gappers,
+        "massive_most_active": _massive_most_active,
+        "massive_top_gainers": _massive_top_gainers,
+        "massive_unusual_volume": _massive_unusual_volume,
+        "massive_momentum_gappers": _massive_momentum_gappers,
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
         "yf_small_cap_gainers": _yf_small_cap_gainers,
@@ -623,38 +550,56 @@ def get_daytrade_candidates() -> tuple[list[str], int]:
 
 # ── Breakout Candidates ───────────────────────────────────────────────
 
-def _finviz_consolidation() -> list[str]:
-    """Low-volatility stocks that may be building up for a breakout."""
-    return _finviz_screen(
-        filters_dict={
-            "Volatility": "Week - Under 3%",
-            "Average Volume": "Over 500K",
-            "Price": "Over $5",
-            "20-Day Simple Moving Average": "Price above SMA20",
-        },
-        limit=150,
-    )
+def _massive_low_volatility() -> list[str]:
+    """Low-volatility stocks with decent volume (potential breakout buildup)."""
+    from ..massive_client import get_full_market_snapshot
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    scored: list[tuple[str, float]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        h, l, c = day.get("h", 0), day.get("l", 0), day.get("c", 0)
+        v = day.get("v", 0)
+        if c < 5.0 or v < 500_000 or h <= 0 or l <= 0:
+            continue
+        volatility = (h - l) / c
+        if volatility < 0.03:
+            scored.append((s.get("ticker", ""), volatility))
+    scored.sort(key=lambda x: x[1])
+    return [t for t, _ in scored[:150]]
 
 
 def _finviz_channel_up() -> list[str]:
-    """Stocks currently in a rising channel pattern."""
+    """Chart-pattern fallback: rising channel."""
     return _finviz_screen(signal="Channel Up", limit=100)
 
 
 def _finviz_wedge() -> list[str]:
-    """Stocks in wedge patterns (often precede breakouts)."""
+    """Chart-pattern fallback: wedge."""
     return _finviz_screen(signal="Wedge", limit=100)
 
 
-def _finviz_near_52w_high() -> list[str]:
-    """Stocks within 5% of 52-week high — potential breakout through."""
-    return _finviz_screen(
-        filters_dict={
-            "52-Week High/Low": "0-5% below High",
-            "Average Volume": "Over 300K",
-        },
-        limit=150,
-    )
+def _massive_near_52w_high() -> list[str]:
+    """Stocks whose current price is within 5% of their recent high."""
+    from ..massive_client import get_full_market_snapshot
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    hits: list[tuple[str, float]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        prev = s.get("prevDay") or {}
+        c = day.get("c", 0)
+        h = day.get("h", 0)
+        v = day.get("v", 0)
+        if c < 5.0 or v < 300_000:
+            continue
+        recent_max = max(h, prev.get("h", 0))
+        if recent_max > 0 and c >= recent_max * 0.95:
+            hits.append((s.get("ticker", ""), c / recent_max))
+    hits.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in hits[:150]]
 
 
 def get_breakout_candidates() -> tuple[list[str], int]:
@@ -673,11 +618,12 @@ def get_breakout_candidates() -> tuple[list[str], int]:
 
     start = time.time()
     sources: dict[str, Any] = {
-        "finviz_consolidation": _finviz_consolidation,
+        "massive_low_volatility": _massive_low_volatility,
+        "massive_near_52w_high": _massive_near_52w_high,
+        "massive_new_high": _massive_new_high,
+        # Chart-pattern fallback (FinViz — graceful on 429)
         "finviz_channel_up": _finviz_channel_up,
         "finviz_wedge": _finviz_wedge,
-        "finviz_near_52w_high": _finviz_near_52w_high,
-        "finviz_new_high": _finviz_new_high,
         "crypto_base": _crypto_candidates,
         "crypto_trending": get_trending_crypto,
     }

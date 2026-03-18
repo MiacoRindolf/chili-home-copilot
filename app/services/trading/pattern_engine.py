@@ -103,15 +103,27 @@ def seed_builtin_patterns(db: Session) -> int:
     """Insert builtin patterns if they don't already exist. Returns count added."""
     existing = {p.name for p in db.query(ScanPattern).filter_by(origin="builtin").all()}
     added = 0
+    from ...services.backtest_service import infer_pattern_timeframe
+    import json as _json2
+
     for bp in _BUILTIN_PATTERNS:
         if bp["name"] in existing:
             continue
+        conds = []
+        try:
+            conds = _json2.loads(bp["rules_json"]).get("conditions", [])
+        except Exception:
+            pass
+        tf = bp.get("timeframe") or infer_pattern_timeframe(
+            conds, name=bp["name"], asset_class=bp.get("asset_class", "all"),
+        )
         p = ScanPattern(
             name=bp["name"],
             description=bp.get("description", ""),
             rules_json=bp["rules_json"],
             origin=bp["origin"],
             asset_class=bp.get("asset_class", "all"),
+            timeframe=tf,
             score_boost=bp.get("score_boost", 0.0),
             min_base_score=bp.get("min_base_score", 0.0),
             confidence=0.5,
@@ -403,12 +415,31 @@ def build_indicator_snapshot(
 
 def create_pattern(db: Session, data: dict[str, Any]) -> ScanPattern:
     """Create a new ScanPattern from a dict."""
+    from ...services.backtest_service import infer_pattern_timeframe
+    import json as _json
+
+    rules_json = data.get("rules_json", "{}")
+    conditions: list[dict] = []
+    try:
+        rules = _json.loads(rules_json) if rules_json else {}
+        conditions = rules.get("conditions", [])
+    except Exception:
+        pass
+
+    tf = data.get("timeframe") or infer_pattern_timeframe(
+        conditions,
+        name=data.get("name", ""),
+        asset_class=data.get("asset_class", "all"),
+        description=data.get("description", ""),
+    )
+
     p = ScanPattern(
         name=data["name"],
         description=data.get("description", ""),
-        rules_json=data.get("rules_json", "{}"),
+        rules_json=rules_json,
         origin=data.get("origin", "user"),
         asset_class=data.get("asset_class", "all"),
+        timeframe=tf,
         score_boost=data.get("score_boost", 0.0),
         min_base_score=data.get("min_base_score", 0.0),
         confidence=data.get("confidence", 0.0),
@@ -426,7 +457,7 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
         return None
     for key in ("name", "description", "rules_json", "active", "score_boost",
                 "min_base_score", "confidence", "evidence_count", "win_rate",
-                "avg_return_pct", "backtest_count", "asset_class"):
+                "avg_return_pct", "backtest_count", "asset_class", "timeframe"):
         if key in data:
             setattr(p, key, data[key])
     db.commit()

@@ -182,7 +182,7 @@ def _backfill_backtests():
     _log = logging.getLogger("chili.backfill")
     try:
         from .db import SessionLocal as _SL
-        from .models.trading import TradingInsight, BacktestResult as _BT
+        from .models.trading import TradingInsight, BacktestResult as _BT, ScanPattern
         from .services.trading.backtest_engine import (
             smart_backtest_insight, _extract_context, _GENERIC_STRATEGY_NAMES,
         )
@@ -209,6 +209,7 @@ def _backfill_backtests():
             )
 
             stale: list = []
+            seen_ids: set[int] = set()
             for ins in all_candidates:
                 existing = bt_by_insight.get(ins.id, [])
 
@@ -228,10 +229,12 @@ def _backfill_backtests():
                         old_count, ins.id,
                     )
                     stale.append(ins)
+                    seen_ids.add(ins.id)
                     continue
 
                 if not existing:
                     stale.append(ins)
+                    seen_ids.add(ins.id)
                     continue
 
                 ctx = _extract_context(
@@ -241,6 +244,67 @@ def _backfill_backtests():
                     has_crypto_bt = any(t.endswith("-USD") for t in existing)
                     if not has_crypto_bt:
                         stale.append(ins)
+                        seen_ids.add(ins.id)
+
+            for ins in all_candidates:
+                if ins.id in seen_ids:
+                    continue
+                sp_id = getattr(ins, "scan_pattern_id", None)
+                if not sp_id:
+                    continue
+                sp = db.query(ScanPattern).get(sp_id)
+                if sp and sp.win_rate is not None and sp.win_rate > 0:
+                    bt_count = len(bt_by_insight.get(ins.id, []))
+                    if bt_count == 0:
+                        _log.info(
+                            "Pattern %d (%s) has WR=%.0f%% but 0 BacktestResults — queuing backfill",
+                            sp.id, sp.name[:40], sp.win_rate if sp.win_rate <= 100 else sp.win_rate,
+                        )
+                        stale.append(ins)
+                        seen_ids.add(ins.id)
+
+            linked_sp_ids = {
+                getattr(ins, "scan_pattern_id", None)
+                for ins in all_candidates
+                if getattr(ins, "scan_pattern_id", None)
+            }
+            orphan_patterns = (
+                db.query(ScanPattern)
+                .filter(
+                    ScanPattern.win_rate.isnot(None),
+                    ScanPattern.win_rate > 0,
+                    ~ScanPattern.id.in_(linked_sp_ids) if linked_sp_ids else ScanPattern.id.isnot(None),
+                )
+                .all()
+            )
+            if orphan_patterns:
+                from .models.core import User
+                user_ids = [
+                    r[0] for r in db.query(User.id).all()
+                ] or [None]
+                for sp in orphan_patterns:
+                    _log.info(
+                        "Orphan pattern %d (%s) has WR but no TradingInsight — creating for %d user(s)",
+                        sp.id, sp.name[:40], len(user_ids),
+                    )
+                    first_ins = None
+                    for uid in user_ids:
+                        new_ins = TradingInsight(
+                            user_id=uid,
+                            scan_pattern_id=sp.id,
+                            pattern_description=f"{sp.name} — {sp.description or ''}",
+                            confidence=sp.confidence or 0.5,
+                            evidence_count=1,
+                            active=True,
+                        )
+                        db.add(new_ins)
+                        db.flush()
+                        seen_ids.add(new_ins.id)
+                        if first_ins is None:
+                            first_ins = new_ins
+                    if first_ins is not None:
+                        stale.append(first_ins)
+                db.commit()
 
             if not stale:
                 _log.info("No insights need backtest backfill")

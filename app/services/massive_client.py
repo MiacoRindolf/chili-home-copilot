@@ -860,3 +860,336 @@ def get_ws_client() -> MassiveWSClient:
     if _ws_client is None:
         _ws_client = MassiveWSClient()
     return _ws_client
+
+
+# ---------------------------------------------------------------------------
+# Full Market Snapshot (for prescreener use)
+# ---------------------------------------------------------------------------
+
+_snapshot_lock = threading.Lock()
+_snapshot_cache: tuple[float, list[dict[str, Any]]] | None = None
+_TTL_FULL_SNAPSHOT = 1800  # 30 min
+
+def get_full_market_snapshot(*, include_otc: bool = False) -> list[dict[str, Any]]:
+    """Fetch the entire US stock market snapshot (~10K tickers) in one call.
+
+    Returns a list of raw ticker snapshot dicts as returned by Massive.
+    Cached for 30 minutes so all prescreener filters share one API call.
+    """
+    global _snapshot_cache
+    if _snapshot_cache is not None:
+        ts, data = _snapshot_cache
+        if time.time() - ts < _TTL_FULL_SNAPSHOT:
+            return data
+
+    with _snapshot_lock:
+        if _snapshot_cache is not None:
+            ts, data = _snapshot_cache
+            if time.time() - ts < _TTL_FULL_SNAPSHOT:
+                return data
+
+        url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers"
+        params: dict[str, Any] = {}
+        if include_otc:
+            params["include_otc"] = "true"
+        resp = _get(url, params)
+        if resp is _NOT_FOUND or not resp or not resp.get("tickers"):
+            logger.warning("[massive] Full market snapshot returned no tickers")
+            return []
+
+        tickers = resp["tickers"]
+        logger.info("[massive] Full market snapshot: %d tickers", len(tickers))
+        _snapshot_cache = (time.time(), tickers)
+        return tickers
+
+
+def get_top_movers(direction: str = "gainers") -> list[dict[str, Any]]:
+    """Fetch top 20 gainers or losers via the dedicated endpoint.
+
+    *direction* must be ``"gainers"`` or ``"losers"``.
+    """
+    cache_key = f"massive:movers:{direction}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/{direction}"
+    data = _get(url)
+    if data is _NOT_FOUND or not data or not data.get("tickers"):
+        return []
+    tickers = data["tickers"]
+    _cache_set(cache_key, tickers)
+    return tickers
+
+
+# ---------------------------------------------------------------------------
+# Technical indicators (RSI, SMA) — per-ticker
+# ---------------------------------------------------------------------------
+
+def get_rsi(ticker: str, *, window: int = 14, timespan: str = "day",
+            limit: int = 1) -> float | None:
+    """Return the latest RSI value for *ticker*, or None on failure."""
+    m_ticker = to_massive_ticker(ticker)
+    cache_key = f"massive:rsi:{m_ticker}:{window}:{timespan}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v1/indicators/rsi/{m_ticker}"
+    data = _get(url, {
+        "timespan": timespan,
+        "window": str(window),
+        "series_type": "close",
+        "limit": str(limit),
+        "order": "desc",
+    })
+    if data is _NOT_FOUND or not data:
+        return None
+    results = data.get("results", {}).get("values", [])
+    if not results:
+        return None
+    val = results[0].get("value")
+    if val is not None:
+        _cache_set(cache_key, float(val))
+        return float(val)
+    return None
+
+
+def get_sma(ticker: str, *, window: int = 20, timespan: str = "day",
+            limit: int = 1) -> float | None:
+    """Return the latest SMA value for *ticker*, or None on failure."""
+    m_ticker = to_massive_ticker(ticker)
+    cache_key = f"massive:sma:{m_ticker}:{window}:{timespan}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v1/indicators/sma/{m_ticker}"
+    data = _get(url, {
+        "timespan": timespan,
+        "window": str(window),
+        "series_type": "close",
+        "limit": str(limit),
+        "order": "desc",
+    })
+    if data is _NOT_FOUND or not data:
+        return None
+    results = data.get("results", {}).get("values", [])
+    if not results:
+        return None
+    val = results[0].get("value")
+    if val is not None:
+        _cache_set(cache_key, float(val))
+        return float(val)
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Benzinga partner endpoints (earnings, analyst ratings)
+# ---------------------------------------------------------------------------
+
+def get_benzinga_ratings(*, action: str = "upgrade", limit: int = 100) -> list[str]:
+    """Return tickers with recent analyst rating actions via Benzinga.
+
+    Gracefully returns ``[]`` if the Massive plan lacks Benzinga access.
+    """
+    cache_key = f"massive:bz_ratings:{action}"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v2/reference/news/benzinga/analyst_ratings"
+    data = _get(url, {"action": action, "limit": str(limit)})
+    if data is _NOT_FOUND or not data:
+        return []
+    tickers: list[str] = []
+    for item in data.get("results", []):
+        t = item.get("ticker")
+        if t:
+            tickers.append(t)
+    _cache_set(cache_key, tickers)
+    return tickers
+
+
+def get_benzinga_earnings(*, limit: int = 100) -> list[str]:
+    """Return tickers with upcoming earnings via Benzinga.
+
+    Gracefully returns ``[]`` if the Massive plan lacks Benzinga access.
+    """
+    cache_key = "massive:bz_earnings"
+    cached = _cache_get(cache_key)
+    if cached is not None:
+        return cached
+
+    url = f"{_base()}/v2/reference/news/benzinga/earnings"
+    data = _get(url, {"limit": str(limit)})
+    if data is _NOT_FOUND or not data:
+        return []
+    tickers: list[str] = []
+    for item in data.get("results", []):
+        t = item.get("ticker")
+        if t:
+            tickers.append(t)
+    _cache_set(cache_key, tickers)
+    return tickers
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-based screener helpers (filter the cached full snapshot)
+# ---------------------------------------------------------------------------
+
+def _snap_tickers(snaps: list[dict[str, Any]]) -> list[str]:
+    """Extract ticker symbols from snapshot objects."""
+    return [s.get("ticker", "") for s in snaps if s.get("ticker")]
+
+
+def screen_most_active(limit: int = 200) -> list[str]:
+    """Top stocks by today's volume."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    valid = [s for s in snaps if (s.get("day") or {}).get("v", 0) > 0]
+    valid.sort(key=lambda s: s.get("day", {}).get("v", 0), reverse=True)
+    return _snap_tickers(valid[:limit])
+
+
+def screen_top_gainers(limit: int = 100) -> list[str]:
+    """Top gaining stocks by % change today."""
+    movers = get_top_movers("gainers")
+    if movers:
+        return _snap_tickers(movers[:limit])
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    valid = [s for s in snaps
+             if s.get("todaysChangePerc") is not None
+             and (s.get("day") or {}).get("v", 0) >= 10_000]
+    valid.sort(key=lambda s: s.get("todaysChangePerc", 0), reverse=True)
+    return _snap_tickers(valid[:limit])
+
+
+def screen_top_losers(limit: int = 100) -> list[str]:
+    """Top losing stocks by % change today."""
+    movers = get_top_movers("losers")
+    if movers:
+        return _snap_tickers(movers[:limit])
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    valid = [s for s in snaps
+             if s.get("todaysChangePerc") is not None
+             and (s.get("day") or {}).get("v", 0) >= 10_000]
+    valid.sort(key=lambda s: s.get("todaysChangePerc", 0))
+    return _snap_tickers(valid[:limit])
+
+
+def screen_most_volatile(limit: int = 100, min_price: float = 1.0) -> list[str]:
+    """Stocks with the largest intraday range relative to close."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    scored: list[tuple[str, float]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        h, l, c = day.get("h", 0), day.get("l", 0), day.get("c", 0)
+        if c < min_price or h <= 0 or l <= 0:
+            continue
+        volatility = (h - l) / c
+        scored.append((s.get("ticker", ""), volatility))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:limit]]
+
+
+def screen_unusual_volume(limit: int = 200) -> list[str]:
+    """Stocks where today's volume is significantly higher than previous day."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    scored: list[tuple[str, float]] = []
+    for s in snaps:
+        day_v = (s.get("day") or {}).get("v", 0)
+        prev_v = (s.get("prevDay") or {}).get("v", 0)
+        if prev_v < 50_000 or day_v < 10_000:
+            continue
+        ratio = day_v / prev_v
+        if ratio > 1.5:
+            scored.append((s.get("ticker", ""), ratio))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:limit]]
+
+
+def screen_high_volume(limit: int = 200, min_vol: int = 1_000_000,
+                       min_price: float = 5.0) -> list[str]:
+    """Liquid stocks with high volume and minimum price."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    valid: list[tuple[str, int]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        v = day.get("v", 0)
+        c = day.get("c", 0)
+        if v >= min_vol and c >= min_price:
+            valid.append((s.get("ticker", ""), v))
+    valid.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in valid[:limit]]
+
+
+def screen_high_relative_volume(limit: int = 200, min_ratio: float = 2.0,
+                                min_prev_vol: int = 200_000,
+                                min_price: float = 2.0) -> list[str]:
+    """Stocks with today's volume > min_ratio * previous day's volume."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    scored: list[tuple[str, float]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        prev = s.get("prevDay") or {}
+        day_v, prev_v = day.get("v", 0), prev.get("v", 0)
+        c = day.get("c", 0)
+        if prev_v < min_prev_vol or c < min_price:
+            continue
+        ratio = day_v / prev_v if prev_v > 0 else 0
+        if ratio >= min_ratio:
+            scored.append((s.get("ticker", ""), ratio))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:limit]]
+
+
+def screen_new_high(limit: int = 100) -> list[str]:
+    """Stocks making new highs today (today's high > previous day high, large % gain)."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    hits: list[tuple[str, float]] = []
+    for s in snaps:
+        day = s.get("day") or {}
+        prev = s.get("prevDay") or {}
+        pct = s.get("todaysChangePerc", 0)
+        if day.get("h", 0) > prev.get("h", 0) and pct > 0 and day.get("v", 0) >= 50_000:
+            hits.append((s.get("ticker", ""), pct))
+    hits.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in hits[:limit]]
+
+
+def screen_momentum_gappers(limit: int = 100) -> list[str]:
+    """Stocks gapping up > 5% with high relative volume (day-trade setup)."""
+    snaps = get_full_market_snapshot()
+    if not snaps:
+        return []
+    scored: list[tuple[str, float]] = []
+    for s in snaps:
+        pct = s.get("todaysChangePerc", 0) or 0
+        day = s.get("day") or {}
+        prev = s.get("prevDay") or {}
+        c = day.get("c", 0)
+        day_v = day.get("v", 0)
+        prev_v = prev.get("v", 0)
+        if pct < 5 or c < 2 or c > 20 or day_v < 100_000:
+            continue
+        rel_vol = day_v / prev_v if prev_v > 0 else 0
+        if rel_vol >= 2:
+            scored.append((s.get("ticker", ""), pct))
+    scored.sort(key=lambda x: x[1], reverse=True)
+    return [t for t, _ in scored[:limit]]

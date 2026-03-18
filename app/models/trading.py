@@ -247,6 +247,7 @@ class ScanPattern(Base):
     rules_json: str = Column(Text, nullable=False, default="{}")
     origin: str = Column(String(30), nullable=False, default="user")
     asset_class: str = Column(String(20), nullable=False, default="all")
+    timeframe: str = Column(String(10), nullable=False, default="1d")
     confidence: float = Column(Float, nullable=False, default=0.0)
     evidence_count: int = Column(Integer, nullable=False, default=0)
     win_rate: Optional[float] = Column(Float, nullable=True)

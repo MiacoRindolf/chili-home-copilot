@@ -338,8 +338,14 @@ def _extract_patterns_from_content(
 
 def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     """Run a quick backtest on the newly discovered pattern and update confidence."""
-    from ..backtest_service import backtest_pattern
+    from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
     from .pattern_engine import update_pattern
+    from .learning import _find_insight_for_pattern
+
+    linked_insight = _find_insight_for_pattern(db, pattern)
+
+    tf = getattr(pattern, "timeframe", "1d") or "1d"
+    bt_params = get_backtest_params(tf)
 
     test_tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "BTC-USD"]
     wins = 0
@@ -352,8 +358,8 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                 ticker=ticker,
                 pattern_name=pattern.name,
                 rules_json=pattern.rules_json,
-                interval="1d",
-                period="1y",
+                interval=bt_params["interval"],
+                period=bt_params["period"],
             )
             if not result.get("ok"):
                 continue
@@ -361,6 +367,15 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             if result.get("win_rate", 0) > 50:
                 wins += 1
             returns.append(result.get("return_pct", 0))
+            if linked_insight:
+                try:
+                    save_backtest(db, linked_insight.user_id, result,
+                                  insight_id=linked_insight.id)
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
         except Exception:
             continue
 

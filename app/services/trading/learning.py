@@ -640,7 +640,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     except Exception:
         pass
 
-    mine_tickers = mine_tickers[:500]
+    mine_tickers = mine_tickers[:1000]
 
     _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     _t0 = time.time()
@@ -1253,7 +1253,7 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     from .market_data import ALL_SCAN_TICKERS
     from ...models.trading import TradingHypothesis
 
-    mine_tickers = list(ALL_SCAN_TICKERS)[:200]
+    mine_tickers = list(ALL_SCAN_TICKERS)[:500]
 
     rows: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -2557,7 +2557,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     if not top_patterns:
         return {"refined": 0, "note": "no patterns to refine"}
 
-    mine_tickers = list(ALL_SCAN_TICKERS)[:300]
+    mine_tickers = list(ALL_SCAN_TICKERS)[:600]
     _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
@@ -3324,7 +3324,7 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
     from .pattern_ml import get_meta_learner
 
     tickers = _build_prediction_tickers(db, tickers)
-    ticker_batch = tickers[:150]
+    ticker_batch = tickers[:400]
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
@@ -3968,6 +3968,16 @@ def discover_pattern_hypotheses(
         return []
 
 
+def _find_insight_for_pattern(db: Session, pattern) -> Any | None:
+    """Find the TradingInsight linked to a ScanPattern (for persisting backtests)."""
+    from ...models.trading import TradingInsight
+    return (
+        db.query(TradingInsight)
+        .filter(TradingInsight.scan_pattern_id == pattern.id)
+        .first()
+    )
+
+
 def test_pattern_hypothesis(
     db: Session,
     pattern,
@@ -3975,12 +3985,17 @@ def test_pattern_hypothesis(
     tickers: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Backtest a ScanPattern on a sample of tickers and update its confidence."""
-    from ..backtest_service import backtest_pattern
+    from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
     from .pattern_engine import update_pattern
     from .market_data import DEFAULT_SCAN_TICKERS
 
     if tickers is None:
         tickers = list(DEFAULT_SCAN_TICKERS[:10])
+
+    linked_insight = _find_insight_for_pattern(db, pattern)
+
+    tf = getattr(pattern, "timeframe", "1d") or "1d"
+    bt_params = get_backtest_params(tf)
 
     wins = 0
     total = 0
@@ -3992,8 +4007,8 @@ def test_pattern_hypothesis(
                 ticker=ticker,
                 pattern_name=pattern.name,
                 rules_json=pattern.rules_json,
-                interval="1d",
-                period="1y",
+                interval=bt_params["interval"],
+                period=bt_params["period"],
             )
             if not result.get("ok"):
                 continue
@@ -4003,6 +4018,15 @@ def test_pattern_hypothesis(
             if wr > 50:
                 wins += 1
             returns.append(ret)
+            if linked_insight:
+                try:
+                    save_backtest(db, linked_insight.user_id, result,
+                                  insight_id=linked_insight.id)
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
         except Exception:
             continue
 
@@ -4380,6 +4404,7 @@ def _create_variant_child(
         rules_json=rules_json or parent.rules_json,
         origin=origin,
         asset_class=parent.asset_class,
+        timeframe=getattr(parent, "timeframe", "1d") or "1d",
         confidence=parent.confidence,
         evidence_count=0,
         backtest_count=0,
@@ -5015,7 +5040,7 @@ def run_learning_cycle(
         logger.info(f"[learning] Step '{name}' took {elapsed}s{suffix}")
 
     try:
-        # Step 1: Pre-filter with FinViz + yfinance screener
+        # Step 1: Pre-filter with Massive.com + yfinance screener
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -5049,7 +5074,7 @@ def run_learning_cycle(
         step_start = time.time()
         _learning_status["current_step"] = "Taking market snapshots"
         _learning_status["phase"] = "snapshots"
-        top_tickers = [r["ticker"] for r in scan_results[:500]]
+        top_tickers = [r["ticker"] for r in scan_results[:800]]
         watchlist = get_watchlist(db, user_id)
         for w in watchlist:
             if w.ticker not in top_tickers:

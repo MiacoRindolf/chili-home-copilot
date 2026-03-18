@@ -568,7 +568,7 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
     """Score a single ticker using multi-signal confluence (1-10).
 
     When *skip_fundamentals* is True the expensive ``get_fundamentals()``
-    call is skipped — used during bulk scans where FinViz already
+    call is skipped — used during bulk scans where the prescreener already
     pre-filtered for fundamental quality.
 
     Results are cached for 3 minutes keyed on (ticker, skip_fundamentals).
@@ -3901,8 +3901,8 @@ def run_full_market_scan(
 ) -> list[dict[str, Any]]:
     """Scan the market using pre-screened candidates, store results, return sorted.
 
-    Uses the prescreener (FinViz + yfinance server-side screens) to narrow
-    the universe to ~200-400 interesting candidates before deep-scoring.
+    Uses the prescreener (Massive.com snapshot + yfinance screens) to narrow
+    the universe to ~800-1500 interesting candidates before deep-scoring.
     """
     from ...models.trading import ScanResult
     from .prescreener import get_prescreened_candidates

@@ -1028,17 +1028,125 @@ def _extract_pattern_indicators(
     return result
 
 
+# ── Timeframe intelligence ────────────────────────────────────────────
+
+_INTRADAY_INDICATORS = {"gap_pct", "vwap_reclaim", "daily_change_pct"}
+_INTRADAY_NAME_HINTS = {
+    "gap and go", "gap-and-go", "gapandgo",
+    "micro-pullback", "micro pullback", "micropullback",
+    "5 pillars", "momentum scanner",
+    "scalp", "intraday", "day trade", "daytrade",
+    "opening range", "orb",
+}
+_SWING_INDICATORS = {
+    "resistance_retests", "vcp_count", "narrow_range",
+    "dist_to_resistance_pct", "retest_range_tightening",
+}
+_SWING_NAME_HINTS = {
+    "vcp", "volume contraction", "tight range",
+    "flag breakout", "flat top", "ema stack",
+    "engulfing", "hammer", "morning star", "doji",
+    "swing", "position",
+}
+
+_TIMEFRAME_PARAMS: dict[str, dict[str, Any]] = {
+    "5m":  {"interval": "5m",  "period": "30d",  "min_bars": 30},
+    "15m": {"interval": "15m", "period": "60d",  "min_bars": 30},
+    "1h":  {"interval": "1h",  "period": "6mo",  "min_bars": 30},
+    "4h":  {"interval": "1h",  "period": "1y",   "min_bars": 30},
+    "1d":  {"interval": "1d",  "period": "2y",   "min_bars": 30},
+}
+
+_EXIT_PARAMS_BY_TIMEFRAME: dict[str, dict[str, tuple[float, int, bool]]] = {
+    "5m": {
+        "breakout": (1.5, 78, False),   # ~1 trading day of 5m bars
+        "mean_rev": (0.8, 24, True),    # ~2 hours
+        "default":  (1.2, 48, True),    # ~4 hours
+    },
+    "15m": {
+        "breakout": (2.0, 26, False),   # ~1 trading day
+        "mean_rev": (1.0, 8, True),     # ~2 hours
+        "default":  (1.5, 16, True),    # ~4 hours
+    },
+    "1h": {
+        "breakout": (2.5, 48, False),   # ~2 days
+        "mean_rev": (1.2, 8, True),     # ~8 hours
+        "default":  (1.8, 24, True),    # ~1 day
+    },
+    "4h": {
+        "breakout": (2.8, 30, False),   # ~5 days
+        "mean_rev": (1.3, 10, True),    # ~40 hours
+        "default":  (2.0, 18, True),    # ~3 days
+    },
+    "1d": {
+        "breakout": (3.0, 50, False),   # ~50 trading days
+        "mean_rev": (1.5, 15, True),    # ~15 days
+        "default":  (2.0, 25, True),    # ~25 days
+    },
+}
+
+
+def infer_pattern_timeframe(
+    conditions: list[dict[str, Any]],
+    name: str = "",
+    asset_class: str = "all",
+    description: str = "",
+) -> str:
+    """Infer the best backtesting timeframe from pattern characteristics.
+
+    Returns one of: '5m', '15m', '1h', '4h', '1d'.
+    """
+    indicators = {c.get("indicator", "") for c in conditions}
+    text_lower = f"{name} {description}".lower()
+
+    intraday_score = 0
+    swing_score = 0
+
+    for ind in indicators:
+        if ind in _INTRADAY_INDICATORS:
+            intraday_score += 2
+        if ind in _SWING_INDICATORS:
+            swing_score += 2
+
+    for hint in _INTRADAY_NAME_HINTS:
+        if hint in text_lower:
+            intraday_score += 3
+            break
+
+    for hint in _SWING_NAME_HINTS:
+        if hint in text_lower:
+            swing_score += 3
+            break
+
+    if asset_class == "crypto":
+        intraday_score += 1
+
+    if intraday_score > swing_score:
+        if "gap" in text_lower or "scalp" in text_lower or "5m" in text_lower:
+            return "5m"
+        if asset_class == "crypto":
+            return "1h"
+        return "15m"
+
+    if asset_class == "crypto" and swing_score <= 2:
+        return "4h"
+
+    return "1d"
+
+
+def get_backtest_params(timeframe: str) -> dict[str, Any]:
+    """Return interval/period/min_bars for a given timeframe."""
+    return _TIMEFRAME_PARAMS.get(timeframe, _TIMEFRAME_PARAMS["1d"]).copy()
+
+
 def _classify_exit_params(
     conditions: list[dict[str, Any]],
+    timeframe: str = "1d",
 ) -> tuple[float, int, bool]:
-    """Infer exit parameters from the pattern's condition indicators.
+    """Infer exit parameters from the pattern's condition indicators AND timeframe.
 
-    Returns ``(atr_mult, max_bars, use_bos)`` tuned to the pattern type:
-
-    - **Breakout** patterns: wide stops, long holds, NO BOS exit (breakouts
-      need room to breathe — BOS cuts winners on normal retracements).
-    - **Mean-reversion** patterns: tight stops, short holds, BOS active.
-    - **Default / trend** patterns: moderate stops, BOS active.
+    Returns ``(atr_mult, max_bars, use_bos)`` tuned to both pattern type and
+    timeframe so that intraday patterns exit within hours, not days.
     """
     _BREAKOUT_INDICATORS = {
         "resistance_retests", "bb_squeeze", "bb_squeeze_firing",
@@ -1070,11 +1178,15 @@ def _classify_exit_params(
             elif op in ("<", "<=") and v <= 40:
                 mean_rev_score += 1
 
+    tf_params = _EXIT_PARAMS_BY_TIMEFRAME.get(
+        timeframe, _EXIT_PARAMS_BY_TIMEFRAME["1d"]
+    )
+
     if breakout_score > mean_rev_score:
-        return 3.0, 50, False  # breakout: wide stop, no BOS
+        return tf_params["breakout"]
     if mean_rev_score > breakout_score:
-        return 1.5, 15, True   # mean-rev: tight stop, BOS active
-    return 2.0, 25, True       # default: moderate, BOS active
+        return tf_params["mean_rev"]
+    return tf_params["default"]
 
 
 def run_pattern_backtest(
@@ -1114,7 +1226,8 @@ def run_pattern_backtest(
             explicit_bos_grace = exit_config.get("bos_grace_bars")
 
     if exit_atr_mult is None or exit_max_bars is None:
-        auto_atr, auto_bars, auto_bos = _classify_exit_params(conditions)
+        tf_key = interval if interval in _EXIT_PARAMS_BY_TIMEFRAME else "1d"
+        auto_atr, auto_bars, auto_bos = _classify_exit_params(conditions, timeframe=tf_key)
         if exit_atr_mult is None:
             exit_atr_mult = auto_atr
         if exit_max_bars is None:

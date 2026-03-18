@@ -585,10 +585,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         if _sp_id:
             _sibling_ins_ids = [
                 r[0] for r in db.query(TradingInsight.id)
-                .filter(
-                    TradingInsight.scan_pattern_id == _sp_id,
-                    TradingInsight.user_id == ctx["user_id"],
-                )
+                .filter(TradingInsight.scan_pattern_id == _sp_id)
                 .all()
             ]
             if pattern_id not in _sibling_ins_ids:

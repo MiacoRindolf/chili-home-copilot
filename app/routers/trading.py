@@ -1596,8 +1596,7 @@ def api_backtest_pattern(
     db: Session = Depends(get_db),
 ):
     from ..models.trading import ScanPattern, TradingInsight
-    from ..services.backtest_service import backtest_pattern
-    # Accept either ScanPattern.id or TradingInsight.id (UI evidence modal uses insight ids).
+    from ..services.backtest_service import backtest_pattern, get_backtest_params
     p = db.query(ScanPattern).get(pattern_id)
     if not p:
         insight = db.query(TradingInsight).get(pattern_id)
@@ -1606,8 +1605,12 @@ def api_backtest_pattern(
             p = db.query(ScanPattern).get(sp_id)
     if not p:
         return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    tf = getattr(p, "timeframe", "1d") or "1d"
+    bt_params = get_backtest_params(tf)
+    use_interval = interval if interval != "1d" else bt_params["interval"]
+    use_period = period if period != "1y" else bt_params["period"]
     result = backtest_pattern(ticker=ticker, pattern_name=p.name, rules_json=p.rules_json,
-                              interval=interval, period=period)
+                              interval=use_interval, period=use_period)
     return JSONResponse(_json_safe(result))
 
 

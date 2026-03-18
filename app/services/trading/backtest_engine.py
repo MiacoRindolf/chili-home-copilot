@@ -408,7 +408,7 @@ def _select_tickers(
 
     try:
         from .prescreener import get_prescreened_candidates
-        hot = get_prescreened_candidates(include_crypto=True, max_total=200)
+        hot = get_prescreened_candidates(include_crypto=True, max_total=800)
         if hot:
             for t in random.sample(hot, min(5, len(hot))):
                 _add(t)
@@ -550,7 +550,7 @@ def smart_backtest_insight(
     db: Session,
     insight,
     *,
-    period: str = "1y",
+    period: str | None = None,
     target_tickers: int = 40,
     update_confidence: bool = True,
 ) -> dict[str, Any]:
@@ -560,9 +560,16 @@ def smart_backtest_insight(
     from a linked ``ScanPattern.rules_json`` or parsed from the insight
     description.  Strategy names are auto-generated from the conditions.
 
+    Automatically selects the correct interval/period based on the linked
+    ScanPattern's ``timeframe`` field (intraday patterns use shorter
+    candles and lookback periods).
+
     Returns ``{"wins": int, "losses": int, "total": int, "backtests_run": int}``.
     """
-    from ..backtest_service import run_pattern_backtest, save_backtest
+    from ..backtest_service import (
+        run_pattern_backtest, save_backtest, get_backtest_params,
+        infer_pattern_timeframe,
+    )
 
     shutdown = _get_shutdown_event()
     desc = insight.pattern_description or ""
@@ -573,26 +580,41 @@ def smart_backtest_insight(
 
     linked = _find_linked_pattern(db, insight)
     exit_config: dict[str, Any] | None = None
+    timeframe = "1d"
 
     if linked:
         conditions, pattern_name, exit_config = linked
+        sp_id = getattr(insight, "scan_pattern_id", None)
+        if sp_id:
+            try:
+                from ...models.trading import ScanPattern
+                sp = db.query(ScanPattern).get(sp_id)
+                if sp:
+                    timeframe = getattr(sp, "timeframe", "1d") or "1d"
+            except Exception:
+                pass
         logger.info(
-            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s)",
-            pattern_name, len(tickers), "custom" if exit_config else "auto",
+            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s, tf=%s)",
+            pattern_name, len(tickers), "custom" if exit_config else "auto", timeframe,
         )
     else:
         conditions = _parse_conditions_from_description(desc)
-        pattern_name = None  # auto-generated from conditions
+        pattern_name = None
         if not conditions:
             logger.info(
                 "[backtest_engine] Skipping insight %d — no conditions extracted from: %s",
                 insight.id, desc[:100],
             )
             return {"wins": 0, "losses": 0, "total": 0, "backtests_run": 0}
+        timeframe = infer_pattern_timeframe(conditions, name=desc[:60])
         logger.info(
-            "[backtest_engine] Parsed %d conditions from description for insight %d — %d tickers",
-            len(conditions), insight.id, len(tickers),
+            "[backtest_engine] Parsed %d conditions from description for insight %d — %d tickers (tf=%s)",
+            len(conditions), insight.id, len(tickers), timeframe,
         )
+
+    bt_params = get_backtest_params(timeframe)
+    bt_interval = bt_params["interval"]
+    bt_period = period or bt_params["period"]
 
     jobs_count = len(tickers)
 
@@ -601,7 +623,8 @@ def smart_backtest_insight(
             return None
         try:
             result = run_pattern_backtest(
-                ticker, conditions, pattern_name=pattern_name, period=period,
+                ticker, conditions, pattern_name=pattern_name,
+                period=bt_period, interval=bt_interval,
                 exit_config=exit_config,
             )
             if result.get("ok"):
