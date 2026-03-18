@@ -4018,6 +4018,8 @@ _COMPLEMENTARY_POOL: list[dict[str, Any]] = [
     {"indicator": "bb_squeeze", "op": "==", "value": True},
     {"indicator": "daily_change_pct", "op": ">=", "value": 3.0},
     {"indicator": "gap_pct", "op": ">", "value": 2.0},
+    {"indicator": "resistance_retests", "op": ">=", "value": 2,
+     "params": {"tolerance_pct": 1.5, "lookback": 20}},
 ]
 
 
@@ -4048,6 +4050,41 @@ def _tweak_threshold(cond: dict[str, Any]) -> dict[str, Any] | None:
         mutated["value"] = new_list
         return mutated
     return None
+
+
+_PARAM_BOUNDS: dict[str, tuple[float, float]] = {
+    "tolerance_pct": (0.5, 5.0),
+    "lookback": (5, 60),
+}
+
+
+def _tweak_params(cond: dict[str, Any]) -> dict[str, Any] | None:
+    """Shift a random numeric param (e.g. tolerance_pct, lookback) by +/-10-25%.
+
+    Returns None when the condition has no tweakable params.
+    """
+    import random
+    params = cond.get("params")
+    if not params or not isinstance(params, dict):
+        return None
+    numeric_keys = [k for k, v in params.items() if isinstance(v, (int, float))]
+    if not numeric_keys:
+        return None
+    key = random.choice(numeric_keys)
+    old_val = params[key]
+    direction = random.choice([-1, 1])
+    pct = random.uniform(0.10, 0.25) * direction
+    new_val = round(old_val * (1 + pct), 2) if old_val != 0 else round(random.uniform(1, 10), 2)
+    lo, hi = _PARAM_BOUNDS.get(key, (None, None))
+    if lo is not None:
+        new_val = max(lo, new_val)
+    if hi is not None:
+        new_val = min(hi, new_val)
+    if isinstance(old_val, int):
+        new_val = int(round(new_val))
+    mutated = dict(cond)
+    mutated["params"] = {**params, key: new_val}
+    return mutated
 
 
 def _find_weakest_condition(
@@ -4086,9 +4123,8 @@ def _pick_complementary_condition(
     candidates = [c for c in _COMPLEMENTARY_POOL if c["indicator"] not in existing_inds]
     if not candidates:
         return None
-    picked = dict(random.choice(candidates))
-    if "ref" in picked:
-        picked = dict(picked)
+    import copy
+    picked = copy.deepcopy(random.choice(candidates))
     return picked
 
 
@@ -4148,7 +4184,10 @@ def _mutate_entry_conditions(
 
     weakest = _find_weakest_condition(conds, loss_report)
 
+    has_params = any(c.get("params") for c in conds)
     ops = ["tweak_threshold", "remove_weakest", "add_complementary"]
+    if has_params:
+        ops.append("tweak_params")
     if db:
         ops.append("cross_breed")
     if weakest is None:
@@ -4172,6 +4211,21 @@ def _mutate_entry_conditions(
                 ind = tweaked.get("indicator", "?")
                 return conds, f"tweak-{ind}-{old_val}->{tweaked['value']}"
         op = "add_complementary"
+
+    if op == "tweak_params":
+        param_idxs = [i for i, c in enumerate(conds) if c.get("params")]
+        if param_idxs:
+            idx = random.choice(param_idxs)
+            tweaked = _tweak_params(conds[idx])
+            if tweaked:
+                old_params = conds[idx].get("params", {})
+                conds[idx] = tweaked
+                ind = tweaked.get("indicator", "?")
+                diff = {k: tweaked["params"][k] for k in tweaked["params"]
+                        if tweaked["params"][k] != old_params.get(k)}
+                diff_str = ",".join(f"{k}={v}" for k, v in diff.items())
+                return conds, f"tweak-params-{ind}-{diff_str}"
+        op = "tweak_threshold"
 
     if op == "remove_weakest" and weakest is not None and len(conds) > 1:
         removed = conds.pop(weakest)

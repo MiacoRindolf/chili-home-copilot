@@ -235,10 +235,111 @@ def api_backfill_status():
     return JSONResponse({"ok": True, **_backfill_state})
 
 
+# ── Canonical backtest stats (single source of truth for WR) ──────────
+
+def compute_pattern_bt_stats(
+    db: Session,
+    scan_pattern_ids: list[int],
+    user_id: int,
+) -> dict[int, dict]:
+    """Return canonical backtest stats per scan_pattern_id.
+
+    Single source of truth for win rate, used by every endpoint.
+    Returns {sp_id: {"wins": int, "losses": int, "total": int,
+                     "win_rate": float|None, "avg_return_pct": float|None,
+                     "tickers": list[str]}}.
+    """
+    if not scan_pattern_ids:
+        return {}
+
+    from sqlalchemy import func as sa_func, case as sa_case
+    from ...models.trading import TradingInsight, BacktestResult
+
+    sp_to_insights: dict[int, list[int]] = {}
+    for row in (
+        db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
+        .filter(
+            TradingInsight.scan_pattern_id.in_(scan_pattern_ids),
+            TradingInsight.user_id == user_id,
+        )
+        .all()
+    ):
+        sp_to_insights.setdefault(row[0], []).append(row[1])
+
+    all_insight_ids: list[int] = []
+    for ids in sp_to_insights.values():
+        all_insight_ids.extend(ids)
+
+    if not all_insight_ids:
+        return {}
+
+    ins_to_sp: dict[int, int] = {}
+    for sp_id, ins_ids in sp_to_insights.items():
+        for iid in ins_ids:
+            ins_to_sp[iid] = sp_id
+
+    stats: dict[int, dict] = {}
+
+    for row in (
+        db.query(
+            BacktestResult.related_insight_id,
+            sa_func.count(BacktestResult.id),
+            sa_func.sum(sa_case((BacktestResult.return_pct > 0, 1), else_=0)),
+            sa_func.avg(BacktestResult.return_pct),
+        )
+        .filter(
+            BacktestResult.related_insight_id.in_(all_insight_ids),
+            BacktestResult.trade_count > 0,
+        )
+        .group_by(BacktestResult.related_insight_id)
+        .all()
+    ):
+        ins_id, total, wins, avg_ret = row
+        sp_id = ins_to_sp.get(ins_id)
+        if sp_id is None:
+            continue
+        existing = stats.get(sp_id)
+        if existing:
+            old_total = existing["total"]
+            existing["total"] += (total or 0)
+            existing["wins"] += int(wins or 0)
+            new_total = existing["total"]
+            existing["avg_return_pct"] = round(
+                (existing["avg_return_pct"] * old_total + float(avg_ret or 0) * (total or 0)) / max(1, new_total), 2
+            )
+        else:
+            stats[sp_id] = {
+                "total": total or 0,
+                "wins": int(wins or 0),
+                "avg_return_pct": round(float(avg_ret or 0), 2),
+            }
+
+    for row in (
+        db.query(BacktestResult.related_insight_id, BacktestResult.ticker)
+        .filter(BacktestResult.related_insight_id.in_(all_insight_ids))
+        .all()
+    ):
+        sp_id = ins_to_sp.get(row[0])
+        if sp_id is None:
+            continue
+        stats.setdefault(sp_id, {"total": 0, "wins": 0, "avg_return_pct": None})
+        stats[sp_id].setdefault("tickers", []).append(row[1])
+
+    for sp_id, s in stats.items():
+        total = s["total"]
+        wins = s["wins"]
+        losses = total - wins
+        s["losses"] = losses
+        s["win_rate"] = round(wins / max(1, total) * 100, 1) if total > 0 else None
+        s["tickers"] = list(set(s.get("tickers", [])))
+
+    return stats
+
+
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-    from ...models.trading import TradingInsight, BacktestResult, ScanPattern
+    from ...models.trading import TradingInsight, ScanPattern
 
     all_insights = db.query(TradingInsight).filter(
         TradingInsight.user_id == ctx["user_id"],
@@ -250,30 +351,11 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         scan_patterns_by_name[sp.name.lower()] = sp
         scan_patterns_by_id[sp.id] = sp
 
-    insight_ids = [ins.id for ins in all_insights]
-    bt_tickers_map: dict[int, list[str]] = {}
-    bt_wl_map: dict[int, tuple[int, int]] = {}
-    if insight_ids:
-        for row in (
-            db.query(
-                BacktestResult.related_insight_id,
-                BacktestResult.ticker,
-                BacktestResult.return_pct,
-                BacktestResult.trade_count,
-            )
-            .filter(
-                BacktestResult.related_insight_id.in_(insight_ids),
-                BacktestResult.related_insight_id.isnot(None),
-            )
-            .all()
-        ):
-            bt_tickers_map.setdefault(row[0], []).append(row[1])
-            if (row[3] or 0) > 0:
-                w, l = bt_wl_map.get(row[0], (0, 0))
-                if (row[2] or 0) > 0:
-                    bt_wl_map[row[0]] = (w + 1, l)
-                else:
-                    bt_wl_map[row[0]] = (w, l + 1)
+    all_sp_ids = list({
+        ins.scan_pattern_id for ins in all_insights
+        if getattr(ins, "scan_pattern_id", None)
+    })
+    bt_stats_map = compute_pattern_bt_stats(db, all_sp_ids, ctx["user_id"])
 
     _SECTOR_TICKERS: dict[str, set[str]] = {
         "tech": {"AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","AVGO","ORCL","CRM","ADBE","AMD","INTC","QCOM","TXN","NFLX","DDOG","NET","SNOW","PLTR","SHOP"},
@@ -313,18 +395,21 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
         }][:5]
 
-        bt_tickers = bt_tickers_map.get(ins.id, [])
+        sp_id_for_agg = getattr(ins, "scan_pattern_id", None)
+        sp_stats = bt_stats_map.get(sp_id_for_agg) if sp_id_for_agg else None
+        bt_tickers = sp_stats.get("tickers", []) if sp_stats else []
         all_tickers = list(set(tickers_found + bt_tickers))
         sectors = _detect_sectors(all_tickers)
         is_crypto = "crypto" in sectors
 
-        bt_wl = bt_wl_map.get(ins.id)
-        if bt_wl:
-            wc, lc = bt_wl
+        if sp_stats:
+            wc = sp_stats["wins"]
+            lc = sp_stats["losses"]
+            real_wr = sp_stats["win_rate"]
         else:
             wc = ins.win_count or 0
             lc = ins.loss_count or 0
-        real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
+            real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
 
         linked_sp = None
         sp_id = getattr(ins, "scan_pattern_id", None)
@@ -485,15 +570,29 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     except Exception:
         pass
 
-    # 4. Backtest results: first by direct link, then by keyword matching
+    # 4. Backtest results: aggregate across ALL insights for same ScanPattern
     backtests_out = []
     seen_bt_ids: set[int] = set()
     try:
+        _sp_id = getattr(insight, "scan_pattern_id", None)
+        _sibling_ins_ids = [pattern_id]
+        if _sp_id:
+            _sibling_ins_ids = [
+                r[0] for r in db.query(TradingInsight.id)
+                .filter(
+                    TradingInsight.scan_pattern_id == _sp_id,
+                    TradingInsight.user_id == ctx["user_id"],
+                )
+                .all()
+            ]
+            if pattern_id not in _sibling_ins_ids:
+                _sibling_ins_ids.append(pattern_id)
+
         linked_bts = (
             db.query(BacktestResult)
-            .filter(BacktestResult.related_insight_id == pattern_id)
+            .filter(BacktestResult.related_insight_id.in_(_sibling_ins_ids))
             .order_by(BacktestResult.ran_at.desc())
-            .limit(60)
+            .limit(500)
             .all()
         )
         for bt in linked_bts:
@@ -553,16 +652,23 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     except Exception:
         pass
 
-    # 5. Compute live aggregate stats from actual evidence
-    computed_stats = _compute_evidence_stats(timeline, hypotheses, trades_out, backtests_out)
+    # 5. Canonical WR from the single source of truth
+    _sp_id_for_stats = getattr(insight, "scan_pattern_id", None)
+    if _sp_id_for_stats:
+        _ev_stats = compute_pattern_bt_stats(db, [_sp_id_for_stats], ctx["user_id"])
+        _sp_s = _ev_stats.get(_sp_id_for_stats, {})
+        bt_wins = _sp_s.get("wins", 0)
+        bt_losses = _sp_s.get("losses", 0)
+        bt_win_rate = _sp_s.get("win_rate")
+    else:
+        bt_with_trades = [b for b in backtests_out
+                          if (b.get("trade_count") or 0) > 0
+                          and b.get("relevance", 0) == 100]
+        bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
+        bt_losses = len(bt_with_trades) - bt_wins
+        bt_win_rate = round(bt_wins / max(1, bt_wins + bt_losses) * 100, 1) if (bt_wins + bt_losses) > 0 else None
 
-    # Compute win/loss directly from actual BacktestResult records (not the
-    # cumulative counters on TradingInsight which can drift from duplicates).
-    bt_with_trades = [b for b in backtests_out if (b.get("trade_count") or 0) > 0]
-    bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
-    bt_losses = len(bt_with_trades) - bt_wins
-    bt_total = bt_wins + bt_losses
-    bt_win_rate = round(bt_wins / max(1, bt_total) * 100, 1) if bt_total > 0 else None
+    computed_stats = _compute_evidence_stats(timeline, hypotheses, trades_out, backtests_out, bt_wins, bt_losses, bt_win_rate)
 
     return JSONResponse({
         "ok": True,
@@ -591,9 +697,8 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
     """Return the full evolution tree for a pattern's ScanPattern lineage."""
     ctx = get_identity_ctx(request, db)
     from ...models.trading import (
-        TradingInsight, ScanPattern, TradingHypothesis, BacktestResult,
+        TradingInsight, ScanPattern, TradingHypothesis,
     )
-    from sqlalchemy import func as sa_func, case as sa_case
 
     insight = db.query(TradingInsight).filter(
         TradingInsight.id == pattern_id,
@@ -633,44 +738,7 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
         queue.extend(children)
 
     all_sp_ids = [p.id for p in all_patterns]
-
-    bt_stats: dict[int, dict] = {}
-    insight_by_sp: dict[int, int] = {}
-    for row in (
-        db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
-        .filter(TradingInsight.scan_pattern_id.in_(all_sp_ids))
-        .all()
-    ):
-        insight_by_sp.setdefault(row[0], row[1])
-
-    linked_insight_ids = list(insight_by_sp.values())
-    if linked_insight_ids:
-        for row in (
-            db.query(
-                BacktestResult.related_insight_id,
-                sa_func.count(BacktestResult.id),
-                sa_func.sum(
-                    sa_case(
-                        (BacktestResult.return_pct > 0, 1), else_=0,
-                    )
-                ),
-                sa_func.avg(BacktestResult.return_pct),
-            )
-            .filter(
-                BacktestResult.related_insight_id.in_(linked_insight_ids),
-                BacktestResult.trade_count > 0,
-            )
-            .group_by(BacktestResult.related_insight_id)
-            .all()
-        ):
-            ins_id, total, wins, avg_ret = row
-            for sp_id_k, ins_id_k in insight_by_sp.items():
-                if ins_id_k == ins_id:
-                    bt_stats[sp_id_k] = {
-                        "total": total or 0,
-                        "wins": int(wins or 0),
-                        "avg_return_pct": round(float(avg_ret or 0), 2),
-                    }
+    bt_stats = compute_pattern_bt_stats(db, all_sp_ids, ctx["user_id"])
 
     hyp_by_sp: dict[int, list] = {sp_id: [] for sp_id in all_sp_ids}
     for h in (
@@ -699,8 +767,8 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
         stats = bt_stats.get(sp.id, {})
         total = stats.get("total", 0)
         wins = stats.get("wins", 0)
-        losses = total - wins
-        wr = round(wins / max(1, total) * 100, 1) if total > 0 else None
+        losses = stats.get("losses", 0)
+        wr = stats.get("win_rate")
 
         exit_cfg = None
         if sp.exit_config:
@@ -751,12 +819,21 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
 
 
 def _compute_evidence_stats(
-    timeline: list, hypotheses: list, trades: list, backtests: list,
+    timeline: list,
+    hypotheses: list,
+    trades: list,
+    backtests: list,
+    bt_wins: int = 0,
+    bt_losses: int = 0,
+    bt_win_rate: float | None = None,
 ) -> dict:
-    """Compute live aggregate stats from the actual evidence data."""
+    """Compute live aggregate stats from the actual evidence data.
+
+    ``bt_wins``, ``bt_losses``, and ``bt_win_rate`` come from
+    :func:`compute_pattern_bt_stats` (the single source of truth).
+    """
     stats: dict = {}
 
-    # From hypotheses: average confirmation rate
     if hypotheses:
         tested = [h for h in hypotheses if h.get("times_tested", 0) > 0]
         if tested:
@@ -764,7 +841,6 @@ def _compute_evidence_stats(
             stats["hypothesis_confirm_rate"] = round(avg_confirm, 1)
             stats["hypotheses_tested"] = len(tested)
 
-    # From trades: real trade win rate and P&L
     if trades:
         closed = [t for t in trades if t.get("pnl") is not None]
         if closed:
@@ -773,17 +849,15 @@ def _compute_evidence_stats(
             stats["trade_count"] = len(closed)
             stats["total_pnl"] = round(sum(t["pnl"] for t in closed), 2)
 
-    # From backtests: average return and win rate
+    bt_total = bt_wins + bt_losses
+    if bt_total > 0:
+        stats["backtest_avg_win_rate"] = bt_win_rate
+        stats["backtest_count"] = bt_total
     if backtests:
         stats["backtest_avg_return"] = round(
             sum(b["return_pct"] for b in backtests) / len(backtests), 1
         )
-        stats["backtest_avg_win_rate"] = round(
-            sum(b["win_rate"] for b in backtests) / len(backtests), 1
-        )
-        stats["backtest_count"] = len(backtests)
 
-    # From timeline: count of confirmations vs challenges
     if timeline:
         stats["confirmations"] = sum(
             1 for e in timeline if e.get("event_type") in ("discovery", "real_trade_validation")
