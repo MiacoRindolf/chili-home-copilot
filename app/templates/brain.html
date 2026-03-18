@@ -294,6 +294,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pattern-card .pc-footer { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:9px; color:var(--text-muted); }
 .pattern-card.is-variant { margin-left:16px; border-left-width:2px; opacity:.85; }
 .pattern-card.is-variant:hover { opacity:1; }
+.pattern-card.is-variant.var-entry { border-left-color:#a855f7; }
+.pattern-card.is-variant.var-exit { border-left-color:#3b82f6; }
+.pattern-card.is-variant.var-combo { border-left-color:#06b6d4; }
+.pc-var-badge { padding:2px 6px; border-radius:4px; font-size:8px; font-weight:700; text-transform:uppercase; letter-spacing:.3px; }
+.pc-var-badge.vb-entry { background:rgba(168,85,247,.12); color:#a855f7; }
+.pc-var-badge.vb-exit { background:rgba(59,130,246,.12); color:#3b82f6; }
+.pc-var-badge.vb-combo { background:rgba(6,182,212,.12); color:#06b6d4; }
+.pc-parent-crumb { font-size:8px; color:var(--text-muted); opacity:.7; margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
 /* Prediction cards */
 .pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
@@ -360,6 +368,50 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .ev-pane { display: none; padding: 10px 0 0; }
 .ev-pane.active { display: block; }
 .ev-empty { text-align: center; padding: 20px 10px; color: var(--text-muted); font-size: 11px; }
+
+/* Evolution tree */
+.evo-tree { display: flex; flex-direction: column; align-items: center; padding: 12px 0; overflow-x: auto; }
+.evo-branch { display: flex; flex-direction: column; align-items: center; }
+.evo-children { display: flex; gap: 0; justify-content: center; position: relative; padding-top: 24px; }
+.evo-children::before { content: ''; position: absolute; top: 0; left: 50%; width: 2px; height: 12px; background: rgba(139,92,246,.35); }
+.evo-child-wrap { display: flex; flex-direction: column; align-items: center; position: relative; padding: 0 10px; }
+.evo-child-wrap::before { content: ''; position: absolute; top: 0; left: 50%; width: 2px; height: 12px; background: rgba(139,92,246,.35); }
+.evo-children > .evo-child-wrap:first-child:not(:last-child)::after,
+.evo-children > .evo-child-wrap:last-child:not(:first-child)::after { content: ''; position: absolute; top: 0; height: 2px; background: rgba(139,92,246,.35); }
+.evo-children > .evo-child-wrap:first-child:not(:last-child)::after { left: 50%; right: 0; width: auto; }
+.evo-children > .evo-child-wrap:last-child:not(:first-child)::after { left: 0; right: 50%; width: auto; }
+.evo-children > .evo-child-wrap:not(:first-child):not(:last-child)::after { content: ''; position: absolute; top: 0; left: 0; right: 0; height: 2px; background: rgba(139,92,246,.35); }
+.evo-children > .evo-child-wrap:only-child::after { display: none; }
+.evo-node-card { min-width: 155px; max-width: 200px; padding: 10px 12px; border-radius: 10px; background: var(--card-bg, rgba(30,30,45,.95)); border: 1.5px solid var(--border); font-size: 10px; line-height: 1.4; position: relative; transition: border-color .2s, box-shadow .2s; cursor: default; }
+.evo-node-card:hover { border-color: rgba(139,92,246,.5); }
+.evo-node-card.is-current { border-color: #8b5cf6; box-shadow: 0 0 12px rgba(139,92,246,.35); }
+.evo-node-card.is-inactive { opacity: .5; }
+.evo-node-card.is-inactive .evo-node-name { text-decoration: line-through; }
+.evo-node-gen { display: inline-block; padding: 1px 6px; border-radius: 6px; font-size: 8px; font-weight: 700; margin-bottom: 4px; }
+.evo-node-gen.g0 { background: rgba(139,92,246,.15); color: #8b5cf6; }
+.evo-node-gen.g1 { background: rgba(59,130,246,.15); color: #3b82f6; }
+.evo-node-gen.g2 { background: rgba(6,182,212,.15); color: #06b6d4; }
+.evo-node-gen.g3 { background: rgba(16,185,129,.15); color: #10b981; }
+.evo-node-name { font-weight: 700; font-size: 11px; color: var(--text); margin-bottom: 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.evo-node-label { font-size: 9px; color: #8b5cf6; font-weight: 600; margin-bottom: 3px; }
+.evo-node-stats { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.evo-wr-bar { flex: 1; height: 5px; border-radius: 3px; background: rgba(128,128,128,.15); overflow: hidden; }
+.evo-wr-fill { height: 100%; border-radius: 3px; transition: width .3s; }
+.evo-node-metrics { display: flex; gap: 6px; margin-top: 4px; color: var(--text-muted); font-size: 9px; }
+.evo-hyp-pills { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 5px; }
+.evo-hyp-pill { padding: 2px 6px; border-radius: 8px; font-size: 8px; font-weight: 600; cursor: pointer; transition: opacity .15s; }
+.evo-hyp-pill:hover { opacity: .8; }
+.evo-hyp-pill.confirmed { background: rgba(34,197,94,.12); color: #22c55e; }
+.evo-hyp-pill.pending { background: rgba(245,158,11,.12); color: #f59e0b; }
+.evo-hyp-pill.rejected { background: rgba(239,68,68,.12); color: #ef4444; }
+.evo-hyp-detail { display: none; padding: 6px; margin-top: 4px; border-radius: 6px; background: rgba(128,128,128,.06); font-size: 9px; line-height: 1.4; color: var(--text-muted); }
+.evo-hyp-detail.open { display: block; }
+.evo-empty-tree { text-align: center; padding: 30px 16px; color: var(--text-muted); font-size: 11px; line-height: 1.6; }
+.evo-origin-badge { display: inline-block; padding: 1px 5px; border-radius: 4px; font-size: 7px; font-weight: 700; text-transform: uppercase; margin-left: 4px; }
+.evo-mut-root { background: rgba(139,92,246,.12); color: #8b5cf6; }
+.evo-mut-exit { background: rgba(59,130,246,.12); color: #3b82f6; }
+.evo-mut-entry { background: rgba(168,85,247,.15); color: #a855f7; }
+.evo-mut-combo { background: rgba(6,182,212,.15); color: #06b6d4; }
 
 /* Timeline items */
 .ev-tl-item { display: flex; gap: 10px; padding: 8px 0; border-bottom: 1px solid rgba(128,128,128,.08); }
@@ -610,7 +662,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
           <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
           <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
-          <span class="pat-chip" data-sig="variants" onclick="togglePatChip(this)">Show Variants</span>
+          <span class="pat-chip" data-sig="hideVariants" onclick="togglePatChip(this)">Hide Variants</span>
           <span class="pat-sep"></span>
           <span class="pat-chip sector-chip" data-sector="crypto" onclick="togglePatChip(this)">Crypto</span>
           <span class="pat-chip sector-chip" data-sector="tech" onclick="togglePatChip(this)">Tech</span>
@@ -1425,7 +1477,7 @@ function _getPatFilters() {
   var sort = document.getElementById('pat-sort').value;
   var search = (document.getElementById('pat-search').value || '').toLowerCase().trim();
   var chips = document.querySelectorAll('#pat-toolbar .pat-chip');
-  var signals = [], sectors = [], backtested = false, showDemoted = false, showVariants = false;
+  var signals = [], sectors = [], backtested = false, showDemoted = false, hideVariants = false;
   chips.forEach(function(c) {
     if (!c.classList.contains('on')) return;
     var sec = c.getAttribute('data-sector');
@@ -1433,10 +1485,10 @@ function _getPatFilters() {
     var s = c.getAttribute('data-sig');
     if (s === 'backtested') backtested = true;
     else if (s === 'demoted') showDemoted = true;
-    else if (s === 'variants') showVariants = true;
+    else if (s === 'hideVariants') hideVariants = true;
     else signals.push(s);
   });
-  return {sort:sort, search:search, signals:signals, backtested:backtested, showDemoted:showDemoted, showVariants:showVariants, sectors:sectors};
+  return {sort:sort, search:search, signals:signals, backtested:backtested, showDemoted:showDemoted, hideVariants:hideVariants, sectors:sectors};
 }
 
 function renderPatterns() {
@@ -1458,7 +1510,7 @@ function renderPatterns() {
     return;
   }
 
-  if (!f.showVariants) all = all.filter(function(p){ return !p.variant; });
+  if (f.hideVariants) all = all.filter(function(p){ return !p.variant; });
   if (f.search) all = all.filter(function(p){ return (p.pattern||'').toLowerCase().indexOf(f.search) !== -1; });
   if (f.signals.length) all = all.filter(function(p){ return f.signals.indexOf(p.signal_type||'neutral') !== -1; });
   if (f.backtested) all = all.filter(function(p){ return ((p.win_count||0) + (p.loss_count||0)) > 0; });
@@ -1488,6 +1540,34 @@ function renderPatterns() {
     }
     return d;
   });
+
+  // Group variants directly after their parent card
+  var grouped = [];
+  var parentIdx = {};
+  all.forEach(function(p, i) {
+    if (!p.variant) {
+      parentIdx[p.scan_pattern_id] = grouped.length;
+      grouped.push(p);
+    }
+  });
+  all.forEach(function(p) {
+    if (p.variant) {
+      var pSpId = p.parent_scan_pattern_id;
+      if (pSpId != null && parentIdx[pSpId] != null) {
+        var insertAt = parentIdx[pSpId] + 1;
+        while (insertAt < grouped.length && grouped[insertAt].variant && grouped[insertAt].parent_scan_pattern_id === pSpId) {
+          insertAt++;
+        }
+        grouped.splice(insertAt, 0, p);
+        Object.keys(parentIdx).forEach(function(k) {
+          if (parentIdx[k] >= insertAt) parentIdx[k]++;
+        });
+      } else {
+        grouped.push(p);
+      }
+    }
+  });
+  all = grouped;
 
   countEl.textContent = 'Showing ' + all.length + ' of ' + totalAll + ' patterns';
 
@@ -1545,15 +1625,29 @@ function renderPatterns() {
     var lastSeen = p.last_seen ? timeSince(new Date(p.last_seen)) + ' ago' : '';
 
     var variantBadge = '';
-    if (p.variant && p.variant.label) {
-      variantBadge = '<span class="pc-signal" style="background:rgba(59,130,246,.12);color:#3b82f6;font-size:8px">' + escHtml(p.variant.label) + ' g' + (p.variant.generation||0) + '</span>';
+    var varTypeCls = '';
+    if (p.variant) {
+      var vo = (p.variant.origin || '').toLowerCase();
+      var vbCls = 'vb-exit', vbLabel = 'exit';
+      if (vo.indexOf('entry') !== -1) { vbCls = 'vb-entry'; vbLabel = 'entry'; varTypeCls = ' var-entry'; }
+      else if (vo.indexOf('combo') !== -1 || vo.indexOf('cross') !== -1) { vbCls = 'vb-combo'; vbLabel = 'combo'; varTypeCls = ' var-combo'; }
+      else { varTypeCls = ' var-exit'; }
+      variantBadge = '<span class="pc-var-badge ' + vbCls + '">' + vbLabel + '</span>';
+      if (p.variant.label) {
+        variantBadge += '<span class="pc-signal" style="background:rgba(128,128,128,.08);color:var(--text-muted);font-size:8px">' + escHtml(p.variant.label) + ' g' + (p.variant.generation||0) + '</span>';
+      }
     }
     var bestExitBadge = '';
     if (p.best_exit && !p.variant) {
       bestExitBadge = '<span class="pc-signal" style="background:rgba(34,197,94,.12);color:#16a34a;font-size:8px">best: ' + escHtml(p.best_exit) + '</span>';
     }
 
-    html += '<div class="pattern-card sig-' + sig + (isDemoted ? ' demoted' : '') + (p.variant ? ' is-variant' : '') + '" style="cursor:pointer" onclick="showPatternDetail(' + p.id + ')"' +
+    var parentCrumb = '';
+    if (p.variant && p.variant.parent_name) {
+      parentCrumb = '<div class="pc-parent-crumb">&#x2514; ' + escHtml(p.variant.parent_name) + '</div>';
+    }
+
+    html += '<div class="pattern-card sig-' + sig + (isDemoted ? ' demoted' : '') + (p.variant ? ' is-variant' + varTypeCls : '') + '" style="cursor:pointer" onclick="showPatternDetail(' + p.id + ')"' +
       (p.parent_scan_pattern_id ? ' data-parent-sp="' + p.parent_scan_pattern_id + '"' : '') +
       (p.scan_pattern_id ? ' data-sp="' + p.scan_pattern_id + '"' : '') +
     '>' +
@@ -1564,6 +1658,7 @@ function renderPatterns() {
         '<span class="pc-conf" style="color:' + heroColor + '">' + heroValue + '<span style="display:block;font-size:8px;font-weight:400;opacity:.6">' + heroLabel + '</span></span>' +
       '</div>' +
       '<div class="pc-desc" title="' + escHtml(p.pattern) + '">' + escHtml(p.pattern) + '</div>' +
+      parentCrumb +
       '<div class="pc-stats">' +
         '<span class="pc-pill">' + p.evidence_count + ' evidence</span>' +
         wrHtml + retHtml +
@@ -1598,11 +1693,13 @@ function showPatternDetail(patternId) {
     '<button class="ev-tab" data-evtab="hypotheses" onclick="_switchEvTab(\'hypotheses\')">Hypotheses <span class="ev-tab-badge" id="ev-badge-hypotheses">-</span></button>' +
     '<button class="ev-tab" data-evtab="trades" onclick="_switchEvTab(\'trades\')">Trades <span class="ev-tab-badge" id="ev-badge-trades">-</span></button>' +
     '<button class="ev-tab" data-evtab="backtests" onclick="_switchEvTab(\'backtests\')">Backtests <span class="ev-tab-badge" id="ev-badge-backtests">-</span></button>' +
+    '<button class="ev-tab" data-evtab="evolution" onclick="_switchEvTab(\'evolution\')">Evolution <span class="ev-tab-badge" id="ev-badge-evolution">-</span></button>' +
   '</div>';
   html += '<div class="ev-pane active" id="ev-pane-timeline"><div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evidence...</div></div>';
   html += '<div class="ev-pane" id="ev-pane-hypotheses"></div>';
   html += '<div class="ev-pane" id="ev-pane-trades"></div>';
   html += '<div class="ev-pane" id="ev-pane-backtests"></div>';
+  html += '<div class="ev-pane" id="ev-pane-evolution"><div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evolution tree...</div></div>';
 
   var footer = p.active ? '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>' : '';
   openBrainModal('Pattern Evidence', html, footer);
@@ -1629,6 +1726,27 @@ function showPatternDetail(patternId) {
     b('backtests', (d.backtests||[]).length);
     if (d.computed_stats) _renderComputedStats(d.computed_stats);
   }).catch(function(){ document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Network error loading evidence.</div>'; });
+
+  fetch('/api/trading/learn/patterns/' + p.id + '/evolution').then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      _renderEvEvolution(d.root, d.current_scan_pattern_id);
+      var badge = document.getElementById('ev-badge-evolution');
+      if (badge) {
+        if (d.root && d.root.children && d.root.children.length > 0) {
+          var countNodes = function(n) { var c = 1; (n.children||[]).forEach(function(ch){ c += countNodes(ch); }); return c; };
+          badge.textContent = countNodes(d.root);
+        } else {
+          badge.textContent = '0';
+        }
+      }
+    } else {
+      _renderEvEvolution(null, null);
+      var badge = document.getElementById('ev-badge-evolution');
+      if (badge) badge.textContent = '0';
+    }
+  }).catch(function(){
+    _renderEvEvolution(null, null);
+  });
 }
 
 function _switchEvTab(tab) {
@@ -1798,6 +1916,150 @@ function _renderEvBacktests(bts) {
     '</tr>';
   });
   html += '</tbody></table>';
+  el.innerHTML = html;
+}
+
+function _renderEvEvolution(root, currentSpId) {
+  var el = document.getElementById('ev-pane-evolution');
+  if (!el) return;
+
+  if (!root) {
+    el.innerHTML = '<div class="evo-empty-tree">' +
+      '<div style="font-size:24px;margin-bottom:8px;opacity:.5">&#x1F331;</div>' +
+      '<div style="font-weight:600;margin-bottom:4px">No evolutionary variants yet</div>' +
+      '<div>Chili\'s brain will fork entry conditions, exit strategies, and cross-breed patterns to evolve them over time.<br>Check back after the next learning cycle.</div>' +
+    '</div>';
+    return;
+  }
+
+  function wrColor(wr) {
+    if (wr == null) return 'var(--text-muted)';
+    if (wr >= 60) return '#22c55e';
+    if (wr >= 40) return '#f59e0b';
+    return '#ef4444';
+  }
+
+  function wrFillColor(wr) {
+    if (wr == null) return 'rgba(128,128,128,.2)';
+    if (wr >= 60) return '#22c55e';
+    if (wr >= 40) return '#f59e0b';
+    return '#ef4444';
+  }
+
+  function originLabel(o) {
+    if (o === 'exit_variant') return 'exit';
+    if (o === 'entry_variant') return 'entry';
+    if (o === 'combo_variant') return 'combo';
+    if (o === 'brain_discovered') return 'brain';
+    return o || 'root';
+  }
+
+  function mutBadgeClass(mt) {
+    if (mt === 'entry') return 'evo-mut-entry';
+    if (mt === 'combo') return 'evo-mut-combo';
+    if (mt === 'exit') return 'evo-mut-exit';
+    return 'evo-mut-root';
+  }
+
+  function genClass(g) {
+    if (g <= 0) return 'g0';
+    if (g === 1) return 'g1';
+    if (g === 2) return 'g2';
+    return 'g3';
+  }
+
+  var _hypCounter = 0;
+
+  function buildNode(node) {
+    var isCurrent = node.is_current;
+    var isInactive = !node.active;
+    var cls = 'evo-node-card';
+    if (isCurrent) cls += ' is-current';
+    if (isInactive) cls += ' is-inactive';
+
+    var gen = node.generation || 0;
+    var wr = node.win_rate;
+    var wrPct = wr != null ? Math.max(0, Math.min(100, wr)) : 0;
+    var displayName = node.variant_label || node.name || 'Pattern #' + node.id;
+    var truncName = displayName.length > 22 ? displayName.substring(0, 20) + '...' : displayName;
+
+    var mt = node.mutation_type || 'root';
+    var h = '<div class="' + cls + '">';
+    h += '<div><span class="evo-node-gen ' + genClass(gen) + '">g' + gen + '</span>';
+    h += '<span class="evo-origin-badge ' + mutBadgeClass(mt) + '">' + escHtml(originLabel(node.origin)) + '</span>';
+    if (isCurrent) h += '<span style="float:right;font-size:8px;color:#8b5cf6;font-weight:700">YOU</span>';
+    h += '</div>';
+
+    if (node.variant_label) {
+      h += '<div class="evo-node-label">' + escHtml(node.variant_label) + '</div>';
+    }
+    h += '<div class="evo-node-name" title="' + escHtml(displayName) + '">' + escHtml(truncName) + '</div>';
+
+    h += '<div class="evo-node-stats">';
+    h += '<span style="font-size:9px;font-weight:700;color:' + wrColor(wr) + ';min-width:32px">' + (wr != null ? wr.toFixed(0) + '%' : '--') + '</span>';
+    h += '<div class="evo-wr-bar"><div class="evo-wr-fill" style="width:' + wrPct + '%;background:' + wrFillColor(wr) + '"></div></div>';
+    h += '</div>';
+
+    h += '<div class="evo-node-metrics">';
+    var avgRet = node.avg_return_pct;
+    var retColor = avgRet != null ? (avgRet >= 0 ? '#22c55e' : '#ef4444') : 'var(--text-muted)';
+    h += '<span style="color:' + retColor + '">' + (avgRet != null ? (avgRet >= 0 ? '+' : '') + avgRet.toFixed(1) + '%' : '--') + '</span>';
+    h += '<span>' + (node.backtest_count || 0) + ' BTs</span>';
+    h += '<span>' + (node.wins || 0) + 'W/' + (node.losses || 0) + 'L</span>';
+    h += '</div>';
+
+    if (node.exit_config) {
+      var ec = node.exit_config;
+      var ecParts = [];
+      if (ec.atr_mult != null) ecParts.push('ATR:' + ec.atr_mult.toFixed(1));
+      if (ec.max_bars != null) ecParts.push('Bars:' + ec.max_bars);
+      if (ec.use_bos === true) ecParts.push('BOS');
+      if (ec.use_bos === false) ecParts.push('No-BOS');
+      if (ecParts.length) {
+        h += '<div style="margin-top:3px;font-size:8px;color:var(--text-muted);opacity:.7">' + ecParts.join(' | ') + '</div>';
+      }
+    }
+
+    if (node.hypotheses && node.hypotheses.length > 0) {
+      h += '<div class="evo-hyp-pills">';
+      node.hypotheses.forEach(function(hyp) {
+        var hid = 'evo-hyp-' + (++_hypCounter);
+        var statusCls = hyp.status === 'confirmed' ? 'confirmed' : (hyp.status === 'rejected' ? 'rejected' : 'pending');
+        h += '<span class="evo-hyp-pill ' + statusCls + '" onclick="var d=document.getElementById(\'' + hid + '\');d.classList.toggle(\'open\')" title="' + escHtml(hyp.description||'').substring(0,80) + '">';
+        h += 'H' + hyp.id + ' ' + hyp.confirm_rate + '%';
+        h += '</span>';
+        h += '<div class="evo-hyp-detail" id="' + hid + '">' + escHtml(hyp.description||'') + '<br><span style="color:#8b5cf6">Tested: ' + hyp.times_tested + ' | ' + hyp.status + '</span></div>';
+      });
+      h += '</div>';
+    }
+
+    if (isInactive) {
+      h += '<div style="margin-top:4px;font-size:8px;color:#ef4444;font-weight:600">DEACTIVATED</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
+  function buildTree(node) {
+    var h = '<div class="evo-branch">';
+    h += buildNode(node);
+
+    if (node.children && node.children.length > 0) {
+      h += '<div class="evo-children">';
+      node.children.forEach(function(child) {
+        h += '<div class="evo-child-wrap">';
+        h += buildTree(child);
+        h += '</div>';
+      });
+      h += '</div>';
+    }
+
+    h += '</div>';
+    return h;
+  }
+
+  var html = '<div class="evo-tree">' + buildTree(root) + '</div>';
   el.innerHTML = html;
 }
 

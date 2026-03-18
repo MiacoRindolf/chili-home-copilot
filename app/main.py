@@ -124,6 +124,57 @@ def _dedup_backtests():
         _log.exception("[dedup] Failed to clean up duplicate backtests")
 
 
+def _repair_wrongly_deactivated():
+    """Re-activate user-seeded patterns and their variants that were
+    incorrectly deactivated by the old aggressive pruning logic."""
+    _log = logging.getLogger("chili.repair")
+    try:
+        from .db import SessionLocal as _SL
+        from .models.trading import ScanPattern, TradingInsight
+        db = _SL()
+        try:
+            _PROTECTED = {"user_seeded", "seed", "user"}
+            roots = (
+                db.query(ScanPattern)
+                .filter(
+                    ScanPattern.active.is_(False),
+                    ScanPattern.origin.in_(list(_PROTECTED)),
+                )
+                .all()
+            )
+            reactivated = 0
+            for rp in roots:
+                rp.active = True
+                reactivated += 1
+                children = db.query(ScanPattern).filter(ScanPattern.parent_id == rp.id).all()
+                for ch in children:
+                    if not ch.active:
+                        ch.active = True
+                        reactivated += 1
+                ins_list = db.query(TradingInsight).filter(
+                    TradingInsight.scan_pattern_id == rp.id,
+                    TradingInsight.active.is_(False),
+                ).all()
+                for ins in ins_list:
+                    ins.active = True
+                    reactivated += 1
+                for ch in children:
+                    ch_ins = db.query(TradingInsight).filter(
+                        TradingInsight.scan_pattern_id == ch.id,
+                        TradingInsight.active.is_(False),
+                    ).all()
+                    for ins in ch_ins:
+                        ins.active = True
+                        reactivated += 1
+            if reactivated:
+                db.commit()
+                _log.info("[repair] Reactivated %d wrongly-deactivated patterns/insights", reactivated)
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("[repair] Failed to repair deactivated patterns")
+
+
 def _backfill_backtests():
     """Background: run smart backtests for insights that lack results or
     still have old generic-strategy backtests that need re-running with
@@ -235,6 +286,7 @@ async def lifespan(app: FastAPI):
     _start_massive_ws()
     _prewarm_market_context()
     _dedup_backtests()
+    _repair_wrongly_deactivated()
     threading.Thread(target=_backfill_backtests, daemon=True).start()
     yield
     _stop_massive_ws()

@@ -335,11 +335,14 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             linked_sp = scan_patterns_by_name.get(name_part)
         variant_info = None
         if linked_sp and linked_sp.parent_id is not None:
+            parent_sp = scan_patterns_by_id.get(linked_sp.parent_id)
             variant_info = {
                 "label": linked_sp.variant_label,
                 "parent_id": linked_sp.parent_id,
                 "generation": linked_sp.generation or 0,
                 "exit_config": linked_sp.exit_config,
+                "origin": linked_sp.origin,
+                "parent_name": parent_sp.name if parent_sp else None,
             }
         best_exit = None
         if linked_sp and linked_sp.parent_id is None and linked_sp.exit_config:
@@ -580,6 +583,170 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         "hypotheses": hypotheses,
         "trades": trades_out,
         "backtests": backtests_out,
+    })
+
+
+@router.get("/api/trading/learn/patterns/{pattern_id}/evolution")
+def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depends(get_db)):
+    """Return the full evolution tree for a pattern's ScanPattern lineage."""
+    ctx = get_identity_ctx(request, db)
+    from ...models.trading import (
+        TradingInsight, ScanPattern, TradingHypothesis, BacktestResult,
+    )
+    from sqlalchemy import func as sa_func, case as sa_case
+
+    insight = db.query(TradingInsight).filter(
+        TradingInsight.id == pattern_id,
+        TradingInsight.user_id == ctx["user_id"],
+    ).first()
+    if not insight:
+        return JSONResponse({"ok": False, "reason": "not found"}, 404)
+
+    sp_id = getattr(insight, "scan_pattern_id", None)
+    if not sp_id:
+        return JSONResponse({"ok": True, "root": None, "current_scan_pattern_id": None})
+
+    current_sp = db.query(ScanPattern).get(sp_id)
+    if not current_sp:
+        return JSONResponse({"ok": True, "root": None, "current_scan_pattern_id": None})
+
+    root = current_sp
+    visited = {root.id}
+    while root.parent_id is not None:
+        parent = db.query(ScanPattern).get(root.parent_id)
+        if not parent or parent.id in visited:
+            break
+        visited.add(parent.id)
+        root = parent
+
+    all_patterns = [root]
+    queue = [root]
+    while queue:
+        node = queue.pop(0)
+        children = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.parent_id == node.id)
+            .order_by(ScanPattern.generation, ScanPattern.id)
+            .all()
+        )
+        all_patterns.extend(children)
+        queue.extend(children)
+
+    all_sp_ids = [p.id for p in all_patterns]
+
+    bt_stats: dict[int, dict] = {}
+    insight_by_sp: dict[int, int] = {}
+    for row in (
+        db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
+        .filter(TradingInsight.scan_pattern_id.in_(all_sp_ids))
+        .all()
+    ):
+        insight_by_sp.setdefault(row[0], row[1])
+
+    linked_insight_ids = list(insight_by_sp.values())
+    if linked_insight_ids:
+        for row in (
+            db.query(
+                BacktestResult.related_insight_id,
+                sa_func.count(BacktestResult.id),
+                sa_func.sum(
+                    sa_case(
+                        (BacktestResult.return_pct > 0, 1), else_=0,
+                    )
+                ),
+                sa_func.avg(BacktestResult.return_pct),
+            )
+            .filter(
+                BacktestResult.related_insight_id.in_(linked_insight_ids),
+                BacktestResult.trade_count > 0,
+            )
+            .group_by(BacktestResult.related_insight_id)
+            .all()
+        ):
+            ins_id, total, wins, avg_ret = row
+            for sp_id_k, ins_id_k in insight_by_sp.items():
+                if ins_id_k == ins_id:
+                    bt_stats[sp_id_k] = {
+                        "total": total or 0,
+                        "wins": int(wins or 0),
+                        "avg_return_pct": round(float(avg_ret or 0), 2),
+                    }
+
+    hyp_by_sp: dict[int, list] = {sp_id: [] for sp_id in all_sp_ids}
+    for h in (
+        db.query(TradingHypothesis)
+        .filter(TradingHypothesis.related_pattern_id.in_(all_sp_ids))
+        .all()
+    ):
+        confirm_rate = (
+            (h.times_confirmed or 0) / max(1, h.times_tested or 1)
+        )
+        hyp_by_sp.setdefault(h.related_pattern_id, []).append({
+            "id": h.id,
+            "description": h.description,
+            "status": h.status,
+            "confirm_rate": round(confirm_rate * 100, 1),
+            "times_tested": h.times_tested or 0,
+        })
+
+    sp_map = {p.id: p for p in all_patterns}
+    children_map: dict[int, list[int]] = {}
+    for p in all_patterns:
+        if p.parent_id is not None:
+            children_map.setdefault(p.parent_id, []).append(p.id)
+
+    def _build_node(sp: "ScanPattern") -> dict:
+        stats = bt_stats.get(sp.id, {})
+        total = stats.get("total", 0)
+        wins = stats.get("wins", 0)
+        losses = total - wins
+        wr = round(wins / max(1, total) * 100, 1) if total > 0 else None
+
+        exit_cfg = None
+        if sp.exit_config:
+            try:
+                exit_cfg = json.loads(sp.exit_config)
+            except (json.JSONDecodeError, TypeError):
+                pass
+
+        child_ids = children_map.get(sp.id, [])
+        children_nodes = [
+            _build_node(sp_map[cid]) for cid in child_ids if cid in sp_map
+        ]
+
+        origin = sp.origin or ""
+        if "entry" in origin:
+            mutation_type = "entry"
+        elif "combo" in origin or "cross" in origin:
+            mutation_type = "combo"
+        elif "exit" in origin or "mut-" in (sp.variant_label or ""):
+            mutation_type = "exit"
+        else:
+            mutation_type = "root"
+
+        return {
+            "id": sp.id,
+            "name": sp.name,
+            "generation": sp.generation or 0,
+            "variant_label": sp.variant_label,
+            "origin": sp.origin,
+            "mutation_type": mutation_type,
+            "active": sp.active,
+            "exit_config": exit_cfg,
+            "win_rate": wr,
+            "wins": wins,
+            "losses": losses,
+            "avg_return_pct": stats.get("avg_return_pct"),
+            "backtest_count": total,
+            "is_current": sp.id == current_sp.id,
+            "hypotheses": hyp_by_sp.get(sp.id, []),
+            "children": children_nodes,
+        }
+
+    return JSONResponse({
+        "ok": True,
+        "root": _build_node(root),
+        "current_scan_pattern_id": current_sp.id,
     })
 
 

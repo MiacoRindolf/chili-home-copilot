@@ -821,20 +821,20 @@ def _run_pattern_backfill_job():
 
 
 def _run_exit_evolution_job():
-    """Periodically fork, compare, and evolve exit-strategy variants."""
-    logger.info("[scheduler] Starting exit-strategy evolution")
+    """Periodically fork, compare, and evolve pattern variants (entry+exit+combo)."""
+    logger.info("[scheduler] Starting full pattern evolution")
     try:
         from ..db import SessionLocal
-        from .trading.learning import evolve_exit_strategies
+        from .trading.learning import evolve_pattern_strategies
 
         db = SessionLocal()
         try:
-            stats = evolve_exit_strategies(db)
-            logger.info("[scheduler] Exit evolution done: %s", stats)
+            stats = evolve_pattern_strategies(db)
+            logger.info("[scheduler] Pattern evolution done: %s", stats)
         finally:
             db.close()
     except Exception as e:
-        logger.warning("[scheduler] Exit evolution failed: %s", e)
+        logger.warning("[scheduler] Pattern evolution failed: %s", e)
 
 
 def start_scheduler():
