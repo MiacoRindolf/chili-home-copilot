@@ -253,21 +253,42 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .bp-num { font-weight: 700; }
 .bp-arrow { color: var(--text-muted); font-size: 10px; }
 
+/* Pattern toolbar */
+.pat-toolbar { display:flex; flex-wrap:wrap; gap:6px; align-items:center; margin-bottom:8px; }
+.pat-toolbar select, .pat-toolbar input[type=text] { padding:4px 8px; border:1px solid var(--border); border-radius:6px; background:var(--bg); color:var(--text); font-size:10px; outline:none; }
+.pat-toolbar select:focus, .pat-toolbar input[type=text]:focus { border-color:var(--accent); }
+.pat-toolbar input[type=text] { flex:1; min-width:100px; max-width:200px; }
+.pat-chip { padding:3px 8px; border:1px solid var(--border); border-radius:12px; font-size:9px; font-weight:600; cursor:pointer; background:var(--bg); color:var(--text-muted); transition:all .15s; user-select:none; }
+.pat-chip:hover { border-color:var(--accent); }
+.pat-chip.on { background:rgba(139,92,246,.15); color:#8b5cf6; border-color:#8b5cf6; }
+.pat-chip.on.bullish { background:rgba(34,197,94,.12); color:#16a34a; border-color:#16a34a; }
+.pat-chip.on.bearish { background:rgba(239,68,68,.12); color:#dc2626; border-color:#dc2626; }
+.pat-count { font-size:10px; color:var(--text-muted); margin-bottom:6px; }
+
 /* Pattern cards */
-.pattern-card { padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; margin-bottom: 8px; background: var(--bg-header); transition: border-color .2s; }
-.pattern-card:hover { border-color: var(--accent); }
-.pattern-card .pc-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; }
-.pattern-card .pc-signal { padding: 2px 8px; border-radius: 10px; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .3px; }
-.pc-signal.bullish { background: rgba(34,197,94,.15); color: #16a34a; }
-.pc-signal.bearish { background: rgba(239,68,68,.15); color: #dc2626; }
-.pc-signal.neutral { background: rgba(107,114,128,.15); color: #6b7280; }
-.pattern-card .pc-desc { font-size: 11px; font-weight: 600; color: var(--text); line-height: 1.4; }
-.pattern-card .pc-stats { display: flex; gap: 10px; font-size: 10px; color: var(--text-muted); margin-top: 4px; flex-wrap: wrap; }
-.pattern-card .pc-stats span { display: flex; align-items: center; gap: 3px; }
-.pattern-card .pc-tickers { display: flex; gap: 4px; margin-top: 4px; flex-wrap: wrap; }
-.pattern-card .pc-ticker { padding: 1px 6px; border-radius: 4px; background: rgba(139,92,246,.1); color: #8b5cf6; font-size: 9px; font-weight: 600; cursor: pointer; }
-.pattern-bar-bg { height: 4px; background: var(--border); border-radius: 2px; margin-top: 4px; }
-.pattern-bar { height: 100%; border-radius: 2px; transition: width .4s; }
+.pattern-card { padding:12px 14px; border:1px solid var(--border); border-radius:10px; margin-bottom:8px; background:var(--bg-header); transition:all .2s; border-left:3px solid var(--border); position:relative; }
+.pattern-card:hover { border-color:var(--accent); box-shadow:0 2px 10px rgba(0,0,0,.06); transform:translateY(-1px); }
+.pattern-card.sig-bullish { border-left-color:#22c55e; }
+.pattern-card.sig-bearish { border-left-color:#ef4444; }
+.pattern-card.sig-neutral { border-left-color:#6b7280; }
+.pattern-card.demoted { opacity:.55; }
+.pattern-card.demoted .pc-desc { text-decoration:line-through; }
+.pattern-card .pc-header { display:flex; align-items:center; gap:6px; margin-bottom:6px; }
+.pattern-card .pc-signal { padding:2px 8px; border-radius:10px; font-size:9px; font-weight:700; text-transform:uppercase; letter-spacing:.3px; }
+.pc-signal.bullish { background:rgba(34,197,94,.15); color:#16a34a; }
+.pc-signal.bearish { background:rgba(239,68,68,.15); color:#dc2626; }
+.pc-signal.neutral { background:rgba(107,114,128,.15); color:#6b7280; }
+.pc-signal.demoted-badge { background:rgba(239,68,68,.1); color:#ef4444; }
+.pattern-card .pc-conf { margin-left:auto; font-weight:700; font-size:13px; }
+.pattern-card .pc-desc { font-size:11px; font-weight:600; color:var(--text); line-height:1.4; display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden; }
+.pattern-card .pc-stats { display:flex; gap:6px; font-size:10px; color:var(--text-muted); margin-top:6px; flex-wrap:wrap; align-items:center; }
+.pattern-card .pc-pill { padding:2px 7px; border-radius:8px; font-size:9px; font-weight:600; background:rgba(139,92,246,.08); }
+.pc-pill.wr-good { background:rgba(34,197,94,.1); color:#16a34a; }
+.pc-pill.wr-mid { background:rgba(245,158,11,.1); color:#d97706; }
+.pc-pill.wr-bad { background:rgba(239,68,68,.1); color:#dc2626; }
+.pattern-card .pc-tickers { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
+.pattern-card .pc-ticker { padding:1px 6px; border-radius:4px; background:rgba(139,92,246,.1); color:#8b5cf6; font-size:9px; font-weight:600; cursor:pointer; }
+.pattern-card .pc-footer { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:9px; color:var(--text-muted); }
 
 /* Prediction cards */
 .pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
@@ -566,7 +587,27 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F9E9;</span> Discovered Patterns</div>
-        <div id="brain-patterns" style="max-height:400px;overflow-y:auto"></div>
+        <div id="backfill-banner" style="display:none;padding:8px 12px;margin-bottom:8px;background:linear-gradient(90deg,rgba(139,92,246,.12),rgba(59,130,246,.08));border:1px solid rgba(139,92,246,.25);border-radius:8px;font-size:11px;color:var(--text-secondary)">
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><div class="brain-pulse" style="width:6px;height:6px"></div><strong style="color:#8b5cf6">Backtesting patterns...</strong> <span id="bf-progress-text"></span></div>
+          <div style="height:4px;background:rgba(139,92,246,.15);border-radius:2px;overflow:hidden"><div id="bf-progress-bar" style="height:100%;background:#8b5cf6;border-radius:2px;transition:width .5s ease;width:0%"></div></div>
+        </div>
+        <div class="pat-toolbar" id="pat-toolbar">
+          <select id="pat-sort" onchange="renderPatterns()">
+            <option value="confidence">Confidence</option>
+            <option value="win_rate">Win Rate</option>
+            <option value="evidence">Evidence</option>
+            <option value="newest">Newest</option>
+            <option value="recent">Recently Active</option>
+          </select>
+          <input type="text" id="pat-search" placeholder="Search patterns..." oninput="renderPatterns()">
+          <span class="pat-chip on bullish" data-sig="bullish" onclick="togglePatChip(this)">Bullish</span>
+          <span class="pat-chip on bearish" data-sig="bearish" onclick="togglePatChip(this)">Bearish</span>
+          <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
+          <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
+          <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
+        </div>
+        <div class="pat-count" id="pat-count"></div>
+        <div id="brain-patterns" style="max-height:500px;overflow-y:auto"></div>
       </div>
 
       <div class="brain-section">
@@ -1160,8 +1201,9 @@ function loadBrainDashboard() {
   loadLearnedPatterns();
   loadBrainPredictions();
   pollLearningStatus();
+  pollBackfillStatus();
   if (brainPollInterval) clearInterval(brainPollInterval);
-  brainPollInterval = setInterval(pollLearningStatus, 3000);
+  brainPollInterval = setInterval(function() { pollLearningStatus(); pollBackfillStatus(); }, 3000);
 }
 
 function showAccuracyDetail(type) {
@@ -1356,26 +1398,110 @@ function loadLearnedPatterns() {
   fetch('/api/trading/learn/patterns').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     window._brainPatterns = {active: d.active, demoted: d.demoted};
-    var el = document.getElementById('brain-patterns');
-    if (!d.active.length && !d.demoted.length) {
-      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px;text-align:center;background:var(--bg-header);border:1px dashed var(--border);border-radius:8px"><div style="font-size:24px;margin-bottom:6px">&#x1F50D;</div>No patterns discovered yet.<br><strong style="color:#8b5cf6">Click "Deep Study" to start.</strong></div>';
-      return;
-    }
-    var html = '';
-    d.active.forEach(function(p, idx) {
-      var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
-      html += '<div class="pattern-card" style="cursor:pointer" onclick="showPatternDetail(' + idx + ',true)"><div class="pc-header"><span class="pc-signal ' + (p.signal_type||'neutral') + '">' + (p.signal_type||'neutral') + '</span><span style="font-weight:700;color:' + barColor + '">' + p.confidence + '%</span></div>' +
-        '<div class="pc-desc">' + escHtml(p.pattern) + '</div>' +
-        '<div class="pc-stats"><span>&#x1F4CA; ' + p.evidence_count + ' evidence</span>' + (p.win_rate != null ? '<span>&#x1F3AF; ' + p.win_rate + '% win (' + (p.win_count||0) + 'W/' + (p.loss_count||0) + 'L)</span>' : '') + '</div>' +
-        '<div style="display:flex;align-items:center;gap:6px;margin-top:4px"><div class="pattern-bar-bg" style="flex:1"><div class="pattern-bar" style="width:' + p.confidence + '%;background:' + barColor + '"></div></div></div></div>';
-    });
-    el.innerHTML = html;
+    renderPatterns();
   });
 }
 
-function showPatternDetail(idx, isActive) {
-  var list = (window._brainPatterns || {})[isActive ? 'active' : 'demoted'] || [];
-  var p = list[idx]; if (!p) return;
+function togglePatChip(el) {
+  el.classList.toggle('on');
+  renderPatterns();
+}
+
+function _getPatFilters() {
+  var sort = document.getElementById('pat-sort').value;
+  var search = (document.getElementById('pat-search').value || '').toLowerCase().trim();
+  var chips = document.querySelectorAll('#pat-toolbar .pat-chip');
+  var signals = [], backtested = false, showDemoted = false;
+  chips.forEach(function(c) {
+    if (!c.classList.contains('on')) return;
+    var s = c.getAttribute('data-sig');
+    if (s === 'backtested') backtested = true;
+    else if (s === 'demoted') showDemoted = true;
+    else signals.push(s);
+  });
+  return {sort: sort, search: search, signals: signals, backtested: backtested, showDemoted: showDemoted};
+}
+
+function renderPatterns() {
+  var data = window._brainPatterns;
+  if (!data) return;
+  var el = document.getElementById('brain-patterns');
+  var countEl = document.getElementById('pat-count');
+
+  var all = (data.active || []).map(function(p){ p._demoted = false; return p; });
+  var f = _getPatFilters();
+  if (f.showDemoted) {
+    (data.demoted || []).forEach(function(p){ var c = Object.assign({}, p); c._demoted = true; all.push(c); });
+  }
+  var totalAll = all.length;
+
+  if (!all.length) {
+    el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px;text-align:center;background:var(--bg-header);border:1px dashed var(--border);border-radius:8px"><div style="font-size:24px;margin-bottom:6px">&#x1F50D;</div>No patterns discovered yet.<br><strong style="color:#8b5cf6">Click "Deep Study" to start.</strong></div>';
+    countEl.textContent = '';
+    return;
+  }
+
+  if (f.search) all = all.filter(function(p){ return (p.pattern||'').toLowerCase().indexOf(f.search) !== -1; });
+  if (f.signals.length) all = all.filter(function(p){ return f.signals.indexOf(p.signal_type||'neutral') !== -1; });
+  if (f.backtested) all = all.filter(function(p){ return ((p.win_count||0) + (p.loss_count||0)) > 0; });
+
+  var sortKey = f.sort;
+  all.sort(function(a,b) {
+    if (sortKey === 'win_rate') return (b.win_rate||0) - (a.win_rate||0);
+    if (sortKey === 'evidence') return (b.evidence_count||0) - (a.evidence_count||0);
+    if (sortKey === 'newest') return (b.created_at||'') > (a.created_at||'') ? 1 : -1;
+    if (sortKey === 'recent') return (b.last_seen||'') > (a.last_seen||'') ? 1 : -1;
+    return (b.confidence||0) - (a.confidence||0);
+  });
+
+  countEl.textContent = 'Showing ' + all.length + ' of ' + totalAll + ' patterns';
+
+  var html = '';
+  all.forEach(function(p) {
+    var confColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+    var sig = p.signal_type || 'neutral';
+    var isDemoted = p._demoted;
+
+    var wrHtml = '';
+    if (p.win_rate != null) {
+      var wrClass = p.win_rate >= 60 ? 'wr-good' : p.win_rate >= 45 ? 'wr-mid' : 'wr-bad';
+      wrHtml = '<span class="pc-pill ' + wrClass + '">' + p.win_rate + '% win</span>' +
+               '<span class="pc-pill">' + (p.win_count||0) + 'W / ' + (p.loss_count||0) + 'L</span>';
+    }
+
+    var retHtml = p.avg_return != null ? '<span class="pc-pill">' + (p.avg_return > 0 ? '+' : '') + p.avg_return + '% avg</span>' : '';
+
+    var tickersHtml = '';
+    if (p.example_tickers && p.example_tickers.length) {
+      tickersHtml = '<div class="pc-tickers">';
+      p.example_tickers.forEach(function(t){ tickersHtml += '<span class="pc-ticker">' + t + '</span>'; });
+      tickersHtml += '</div>';
+    }
+
+    var lastSeen = p.last_seen ? timeSince(new Date(p.last_seen)) + ' ago' : '';
+
+    html += '<div class="pattern-card sig-' + sig + (isDemoted ? ' demoted' : '') + '" style="cursor:pointer" onclick="showPatternDetail(' + p.id + ')">' +
+      '<div class="pc-header">' +
+        '<span class="pc-signal ' + sig + '">' + sig + '</span>' +
+        (isDemoted ? '<span class="pc-signal demoted-badge">demoted</span>' : '') +
+        '<span class="pc-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
+      '</div>' +
+      '<div class="pc-desc" title="' + escHtml(p.pattern) + '">' + escHtml(p.pattern) + '</div>' +
+      '<div class="pc-stats">' +
+        '<span class="pc-pill">' + p.evidence_count + ' evidence</span>' +
+        wrHtml + retHtml +
+      '</div>' +
+      tickersHtml +
+      (lastSeen ? '<div class="pc-footer"><span>Last seen ' + lastSeen + '</span></div>' : '') +
+    '</div>';
+  });
+  el.innerHTML = html;
+}
+
+function showPatternDetail(patternId) {
+  var all = ((window._brainPatterns || {}).active || []).concat((window._brainPatterns || {}).demoted || []);
+  var p = all.find(function(x){ return x.id === patternId; });
+  if (!p) return;
   var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
 
   var html = '<div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(p.pattern) + '</div>';
@@ -1645,6 +1771,25 @@ function pollLearningStatus() {
     pipelineSection._wasRunning = learning.running;
   }).catch(function(){});
   updateSidebarStatus();
+}
+
+/* ── Backfill progress polling ─────────────────── */
+var _bfWasRunning = false;
+function pollBackfillStatus() {
+  fetch('/api/trading/learn/backfill-status').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var banner = document.getElementById('backfill-banner');
+    if (d.running && d.total > 0) {
+      banner.style.display = 'block';
+      var pct = Math.round(d.done / d.total * 100);
+      document.getElementById('bf-progress-text').textContent = d.done + ' / ' + d.total + ' patterns (' + d.filled + ' updated)';
+      document.getElementById('bf-progress-bar').style.width = pct + '%';
+      _bfWasRunning = true;
+    } else {
+      banner.style.display = 'none';
+      if (_bfWasRunning) { _bfWasRunning = false; loadLearnedPatterns(); }
+    }
+  }).catch(function(){});
 }
 
 /* ── Action triggers ──────────────────────────── */

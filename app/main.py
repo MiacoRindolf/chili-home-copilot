@@ -46,43 +46,94 @@ try:
 except Exception:
     pass
 
-# Backfill win_count/loss_count for existing insights that have evidence but no win/loss data
-try:
-    _bf_db = SessionLocal()
-    from .models.trading import TradingInsight as _TI
-    import re as _re
-    _stale = _bf_db.query(_TI).filter(
-        _TI.evidence_count > 0,
-        (_TI.win_count == None) | (_TI.win_count == 0),  # noqa: E711
-        (_TI.loss_count == None) | (_TI.loss_count == 0),  # noqa: E711
-    ).all()
-    _backfilled = 0
-    for _ins in _stale:
-        _m = _re.search(r"(\d+(?:\.\d+)?)%\s*win", _ins.pattern_description or "")
-        if _m:
-            _parsed_wr = float(_m.group(1))
-            _n_match = _re.search(r"\bn[=:]?\s*(\d+)", _ins.pattern_description or "")
-            _samples_match = _re.search(r"(\d+)\s*samples", _ins.pattern_description or "")
-            if _n_match:
-                _n = int(_n_match.group(1))
-            elif _samples_match:
-                _n = int(_samples_match.group(1))
-            else:
-                _n = min(_ins.evidence_count or 1, 20)
-            _n = max(_n, 1)
-            _ins.win_count = round(_parsed_wr / 100 * _n)
-            _ins.loss_count = _n - _ins.win_count
-            _backfilled += 1
-    if _backfilled:
-        _bf_db.commit()
-        logging.getLogger("chili").info(f"Backfilled win/loss counts for {_backfilled} insights")
-    _bf_db.close()
-except Exception:
-    pass
+_backfill_state: dict = {"running": False, "total": 0, "done": 0, "filled": 0}
+
+
+def _backfill_backtests():
+    """Background: run real backtests for insights that have no win/loss data yet."""
+    _log = logging.getLogger("chili.backfill")
+    try:
+        from .db import SessionLocal as _SL
+        from .models.trading import TradingInsight
+        from .services.backtest_service import run_backtest, save_backtest
+        from .services.trading.market_data import DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS
+
+        _STRATEGY_MAP = {
+            "rsi": "rsi_reversal", "macd": "macd", "bollinger": "bb_bounce",
+            "ema": "ema_cross", "sma": "sma_cross",
+            "trend": "trend_follow", "momentum": "trend_follow",
+        }
+        tickers = list(DEFAULT_SCAN_TICKERS[:4]) + list(DEFAULT_CRYPTO_TICKERS[:1])
+
+        from .models.trading import BacktestResult as _BT
+
+        db = _SL()
+        try:
+            ids_with_linked_bts = {
+                r[0] for r in db.query(_BT.related_insight_id).filter(
+                    _BT.related_insight_id.isnot(None)
+                ).distinct().all()
+            }
+            all_candidates = db.query(TradingInsight).filter(
+                TradingInsight.evidence_count > 0,
+            ).all()
+            stale = [ins for ins in all_candidates if ins.id not in ids_with_linked_bts]
+
+            if not stale:
+                _log.info("No insights need backtest backfill")
+                return
+
+            _backfill_state["running"] = True
+            _backfill_state["total"] = len(stale)
+            _backfill_state["done"] = 0
+            _backfill_state["filled"] = 0
+
+            _log.info(f"Running backtest backfill for {len(stale)} insights...")
+            for ins in stale:
+                desc = ins.pattern_description.lower()
+                strategy = "trend_follow"
+                for kw, strat in _STRATEGY_MAP.items():
+                    if kw in desc:
+                        strategy = strat
+                        break
+
+                wins, losses = 0, 0
+                for t in tickers:
+                    try:
+                        result = run_backtest(t, strategy_id=strategy, period="1y")
+                        if result.get("ok") and result.get("trade_count", 0) > 0:
+                            save_backtest(db, ins.user_id, result, insight_id=ins.id)
+                            if result.get("return_pct", 0) > 0:
+                                wins += 1
+                            else:
+                                losses += 1
+                    except Exception:
+                        continue
+
+                if wins + losses > 0:
+                    ins.win_count = (ins.win_count or 0) + wins
+                    ins.loss_count = (ins.loss_count or 0) + losses
+                    ins.evidence_count = (ins.evidence_count or 0) + wins + losses
+                    db.commit()
+                    _backfill_state["filled"] += 1
+
+                _backfill_state["done"] += 1
+
+            _log.info(
+                f"Backtest backfill complete: "
+                f"{_backfill_state['filled']}/{len(stale)} insights updated"
+            )
+        finally:
+            _backfill_state["running"] = False
+            db.close()
+    except Exception as e:
+        _backfill_state["running"] = False
+        _log.warning(f"Backtest backfill failed: {e}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import threading
     start_scheduler()
     try:
         from .services.trading.ml_engine import load_model
@@ -92,6 +143,7 @@ async def lifespan(app: FastAPI):
     _restore_broker_sessions()
     _start_massive_ws()
     _prewarm_market_context()
+    threading.Thread(target=_backfill_backtests, daemon=True).start()
     yield
     _stop_massive_ws()
     stop_scheduler()

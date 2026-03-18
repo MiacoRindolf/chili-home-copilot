@@ -104,6 +104,7 @@ class BacktestResult(Base):
     trade_count: int = Column(Integer, nullable=False, default=0)
     equity_curve: Optional[str] = Column(Text, nullable=True)  # JSON list
     ran_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
 
 
 class MarketSnapshot(Base):

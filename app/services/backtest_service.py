@@ -395,7 +395,10 @@ def run_backtest(
     }
 
 
-def save_backtest(db: Session, user_id: int | None, result: dict[str, Any]) -> BacktestResult:
+def save_backtest(
+    db: Session, user_id: int | None, result: dict[str, Any],
+    *, insight_id: int | None = None,
+) -> BacktestResult:
     """Persist a backtest result to the database."""
     record = BacktestResult(
         user_id=user_id,
@@ -408,6 +411,7 @@ def save_backtest(db: Session, user_id: int | None, result: dict[str, Any]) -> B
         max_drawdown=result.get("max_drawdown", 0),
         trade_count=result.get("trade_count", 0),
         equity_curve=json.dumps(result.get("equity_curve", [])),
+        related_insight_id=insight_id,
     )
     db.add(record)
     db.commit()

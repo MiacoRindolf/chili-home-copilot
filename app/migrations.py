@@ -729,6 +729,24 @@ def _migration_025_insight_win_loss_counts(conn) -> None:
     conn.commit()
 
 
+def _migration_026_reset_backfilled_win_loss(conn) -> None:
+    """Reset fake win/loss counts that were backfilled from description text parsing."""
+    if "trading_insights" not in _tables(conn):
+        return
+    conn.execute(text("UPDATE trading_insights SET win_count = 0, loss_count = 0"))
+    conn.commit()
+
+
+def _migration_027_backtest_insight_link(conn) -> None:
+    """Add related_insight_id column to trading_backtests for direct linking."""
+    if "trading_backtests" not in _tables(conn):
+        return
+    cols = {r[1] for r in conn.execute(text("PRAGMA table_info(trading_backtests)")).fetchall()}
+    if "related_insight_id" not in cols:
+        conn.execute(text("ALTER TABLE trading_backtests ADD COLUMN related_insight_id INTEGER"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -756,6 +774,8 @@ MIGRATIONS = [
     ("023_qa_engineer_tables", _migration_023_qa_engineer_tables),
     ("024_po_question_options", _migration_024_po_question_options),
     ("025_insight_win_loss_counts", _migration_025_insight_win_loss_counts),
+    ("026_reset_backfilled_win_loss", _migration_026_reset_backfilled_win_loss),
+    ("027_backtest_insight_link", _migration_027_backtest_insight_link),
 ]
 
 

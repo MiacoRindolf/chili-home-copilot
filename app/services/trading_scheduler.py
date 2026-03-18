@@ -706,6 +706,16 @@ def _run_project_brain_job():
         db.close()
 
 
+def _run_pattern_backfill_job():
+    """Periodically backtest any patterns that still lack win/loss data."""
+    from ..main import _backfill_backtests, _backfill_state
+    if _backfill_state.get("running"):
+        logger.info("[scheduler] Pattern backfill already running, skipping")
+        return
+    logger.info("[scheduler] Starting pattern backfill for new/untested patterns")
+    _backfill_backtests()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -850,6 +860,15 @@ def start_scheduler():
             replace_existing=True,
             max_instances=1,
             next_run_time=datetime.now() + timedelta(minutes=30),
+        )
+
+        _scheduler.add_job(
+            _run_pattern_backfill_job,
+            trigger=IntervalTrigger(hours=1),
+            id="pattern_backfill",
+            name="Backtest new untested patterns (every 1h)",
+            replace_existing=True,
+            max_instances=1,
         )
 
         _scheduler.start()

@@ -228,6 +228,13 @@ def api_demote_pattern(pattern_id: int, request: Request, db: Session = Depends(
     return JSONResponse({"ok": True, "message": "Pattern demoted"})
 
 
+@router.get("/api/trading/learn/backfill-status")
+def api_backfill_status():
+    """Return progress of the background backtest backfill."""
+    from ...main import _backfill_state
+    return JSONResponse({"ok": True, **_backfill_state})
+
+
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
@@ -389,36 +396,62 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     except Exception:
         pass
 
-    # 4. Backtest results matching this pattern (require 2+ keyword hits for relevance)
+    # 4. Backtest results: first by direct link, then by keyword matching
     backtests_out = []
+    seen_bt_ids: set[int] = set()
     try:
-        bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
-        all_bts = (
+        linked_bts = (
             db.query(BacktestResult)
+            .filter(BacktestResult.related_insight_id == pattern_id)
             .order_by(BacktestResult.ran_at.desc())
-            .limit(200)
+            .limit(30)
             .all()
         )
-        for bt in all_bts:
-            strat_lower = (bt.strategy_name or "").lower()
-            params_lower = (bt.params or "").lower()
-            combined = strat_lower + " " + params_lower
-            hits = sum(1 for kw in bt_keywords if kw in combined)
-            if hits >= 2:
-                backtests_out.append({
-                    "id": bt.id,
-                    "ticker": bt.ticker,
-                    "strategy_name": bt.strategy_name,
-                    "return_pct": bt.return_pct,
-                    "win_rate": bt.win_rate,
-                    "sharpe": bt.sharpe,
-                    "max_drawdown": bt.max_drawdown,
-                    "trade_count": bt.trade_count,
-                    "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
-                    "relevance": hits,
-                })
-                if len(backtests_out) >= 15:
-                    break
+        for bt in linked_bts:
+            seen_bt_ids.add(bt.id)
+            backtests_out.append({
+                "id": bt.id,
+                "ticker": bt.ticker,
+                "strategy_name": bt.strategy_name,
+                "return_pct": bt.return_pct,
+                "win_rate": bt.win_rate,
+                "sharpe": bt.sharpe,
+                "max_drawdown": bt.max_drawdown,
+                "trade_count": bt.trade_count,
+                "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
+                "relevance": 100,
+            })
+
+        if len(backtests_out) < 15:
+            bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
+            all_bts = (
+                db.query(BacktestResult)
+                .order_by(BacktestResult.ran_at.desc())
+                .limit(200)
+                .all()
+            )
+            for bt in all_bts:
+                if bt.id in seen_bt_ids:
+                    continue
+                strat_lower = (bt.strategy_name or "").lower()
+                params_lower = (bt.params or "").lower()
+                combined = strat_lower + " " + params_lower
+                hits = sum(1 for kw in bt_keywords if kw in combined)
+                if hits >= 2:
+                    backtests_out.append({
+                        "id": bt.id,
+                        "ticker": bt.ticker,
+                        "strategy_name": bt.strategy_name,
+                        "return_pct": bt.return_pct,
+                        "win_rate": bt.win_rate,
+                        "sharpe": bt.sharpe,
+                        "max_drawdown": bt.max_drawdown,
+                        "trade_count": bt.trade_count,
+                        "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
+                        "relevance": hits,
+                    })
+                    if len(backtests_out) >= 15:
+                        break
         backtests_out.sort(key=lambda x: -x.get("relevance", 0))
     except Exception:
         pass
