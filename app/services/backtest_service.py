@@ -1030,26 +1030,51 @@ def _extract_pattern_indicators(
 
 # ── Timeframe intelligence ────────────────────────────────────────────
 
-_INTRADAY_INDICATORS = {"gap_pct", "vwap_reclaim", "daily_change_pct"}
-_INTRADAY_NAME_HINTS = {
-    "gap and go", "gap-and-go", "gapandgo",
-    "micro-pullback", "micro pullback", "micropullback",
-    "5 pillars", "momentum scanner",
-    "scalp", "intraday", "day trade", "daytrade",
-    "opening range", "orb",
+_INTRADAY_INDICATORS = {
+    "gap_pct", "vwap_reclaim", "daily_change_pct",
+    "vol_ratio", "relative_volume", "spread",
 }
+
+_EXPLICIT_TF_HINTS: dict[str, list[str]] = {
+    "1m":  ["1m ", "1-min", "1min", "one minute"],
+    "5m":  ["5m ", "5-min", "5min", "five minute"],
+    "15m": ["15m", "15-min", "15min", "quarter hour"],
+    "1h":  ["1h ", "1-hour", "1hour", "hourly", "60m", "60min"],
+    "4h":  ["4h", "4-hour", "4 hour", "4hour", "intraswing"],
+    "1d":  ["daily", "1d ", "eod", "end of day", "weekly", "position"],
+}
+
+_SCALP_HINTS = {
+    "scalp", "scalping", "1m", "tick",
+}
+_FAST_INTRADAY_HINTS = {
+    "gap and go", "gap-and-go", "gapandgo",
+    "opening range", "orb", "premarket", "pre-market",
+    "morning", "power hour", "5m",
+}
+_INTRADAY_HINTS = {
+    "intraday", "day trade", "daytrade",
+    "micro-pullback", "micro pullback", "micropullback",
+    "momentum scanner", "midday", "lunch", "15m", "30m",
+}
+_MID_HINTS = {
+    "4h", "4-hour", "4 hour", "intraswing",
+}
+_SLOW_SWING_HINTS = {
+    "vcp", "volume contraction", "tight range",
+    "swing", "multi-day", "weekly", "position",
+    "52 week", "52-week", "relative volume contraction",
+    "cup and handle", "flat top", "ema stack",
+}
+
 _SWING_INDICATORS = {
     "resistance_retests", "vcp_count", "narrow_range",
     "dist_to_resistance_pct", "retest_range_tightening",
-}
-_SWING_NAME_HINTS = {
-    "vcp", "volume contraction", "tight range",
-    "flag breakout", "flat top", "ema stack",
-    "engulfing", "hammer", "morning star", "doji",
-    "swing", "position",
+    "ema_stack", "sma_cross",
 }
 
 _TIMEFRAME_PARAMS: dict[str, dict[str, Any]] = {
+    "1m":  {"interval": "1m",  "period": "7d",   "min_bars": 30},
     "5m":  {"interval": "5m",  "period": "30d",  "min_bars": 30},
     "15m": {"interval": "15m", "period": "60d",  "min_bars": 30},
     "1h":  {"interval": "1h",  "period": "6mo",  "min_bars": 30},
@@ -1058,30 +1083,35 @@ _TIMEFRAME_PARAMS: dict[str, dict[str, Any]] = {
 }
 
 _EXIT_PARAMS_BY_TIMEFRAME: dict[str, dict[str, tuple[float, int, bool]]] = {
+    "1m": {
+        "breakout": (1.0, 120, False),  # ~2 hours of 1m bars
+        "mean_rev": (0.5, 30, True),    # ~30 minutes
+        "default":  (0.8, 60, True),    # ~1 hour
+    },
     "5m": {
-        "breakout": (1.5, 78, False),   # ~1 trading day of 5m bars
-        "mean_rev": (0.8, 24, True),    # ~2 hours
-        "default":  (1.2, 48, True),    # ~4 hours
+        "breakout": (1.5, 78, False),
+        "mean_rev": (0.8, 24, True),
+        "default":  (1.2, 48, True),
     },
     "15m": {
-        "breakout": (2.0, 26, False),   # ~1 trading day
-        "mean_rev": (1.0, 8, True),     # ~2 hours
-        "default":  (1.5, 16, True),    # ~4 hours
+        "breakout": (2.0, 26, False),
+        "mean_rev": (1.0, 8, True),
+        "default":  (1.5, 16, True),
     },
     "1h": {
-        "breakout": (2.5, 48, False),   # ~2 days
-        "mean_rev": (1.2, 8, True),     # ~8 hours
-        "default":  (1.8, 24, True),    # ~1 day
+        "breakout": (2.5, 48, False),
+        "mean_rev": (1.2, 8, True),
+        "default":  (1.8, 24, True),
     },
     "4h": {
-        "breakout": (2.8, 30, False),   # ~5 days
-        "mean_rev": (1.3, 10, True),    # ~40 hours
-        "default":  (2.0, 18, True),    # ~3 days
+        "breakout": (2.8, 30, False),
+        "mean_rev": (1.3, 10, True),
+        "default":  (2.0, 18, True),
     },
     "1d": {
-        "breakout": (3.0, 50, False),   # ~50 trading days
-        "mean_rev": (1.5, 15, True),    # ~15 days
-        "default":  (2.0, 25, True),    # ~25 days
+        "breakout": (3.0, 50, False),
+        "mean_rev": (1.5, 15, True),
+        "default":  (2.0, 25, True),
     },
 }
 
@@ -1092,12 +1122,23 @@ def infer_pattern_timeframe(
     asset_class: str = "all",
     description: str = "",
 ) -> str:
-    """Infer the best backtesting timeframe from pattern characteristics.
+    """Infer an initial backtesting timeframe from pattern characteristics.
 
-    Returns one of: '5m', '15m', '1h', '4h', '1d'.
+    Returns one of: '1m', '5m', '15m', '1h', '4h', '1d'.
+
+    The logic is intentionally loose — concepts like "breakout" or
+    "pullback" are timeframe-agnostic and should NOT force daily.
+    Only explicit timeframe mentions or strongly intraday/swing
+    indicators pin the timeframe.  Evolution explores the rest.
     """
-    indicators = {c.get("indicator", "") for c in conditions}
     text_lower = f"{name} {description}".lower()
+
+    for tf, hints in _EXPLICIT_TF_HINTS.items():
+        for h in hints:
+            if h in text_lower:
+                return tf
+
+    indicators = {c.get("indicator", "") for c in conditions}
 
     intraday_score = 0
     swing_score = 0
@@ -1108,30 +1149,48 @@ def infer_pattern_timeframe(
         if ind in _SWING_INDICATORS:
             swing_score += 2
 
-    for hint in _INTRADAY_NAME_HINTS:
-        if hint in text_lower:
+    for h in _SCALP_HINTS:
+        if h in text_lower:
+            return "1m"
+
+    for h in _FAST_INTRADAY_HINTS:
+        if h in text_lower:
             intraday_score += 3
             break
 
-    for hint in _SWING_NAME_HINTS:
-        if hint in text_lower:
+    for h in _INTRADAY_HINTS:
+        if h in text_lower:
+            intraday_score += 2
+            break
+
+    for h in _MID_HINTS:
+        if h in text_lower:
+            return "4h"
+
+    for h in _SLOW_SWING_HINTS:
+        if h in text_lower:
             swing_score += 3
             break
 
     if asset_class == "crypto":
-        intraday_score += 1
+        intraday_score += 2
 
-    if intraday_score > swing_score:
-        if "gap" in text_lower or "scalp" in text_lower or "5m" in text_lower:
+    if intraday_score > swing_score and intraday_score >= 3:
+        if intraday_score >= 5:
             return "5m"
         if asset_class == "crypto":
             return "1h"
         return "15m"
 
-    if asset_class == "crypto" and swing_score <= 2:
+    if swing_score > intraday_score and swing_score >= 4:
+        if asset_class == "crypto":
+            return "4h"
+        return "1d"
+
+    if asset_class == "crypto":
         return "4h"
 
-    return "1d"
+    return "1h"
 
 
 def get_backtest_params(timeframe: str) -> dict[str, Any]:

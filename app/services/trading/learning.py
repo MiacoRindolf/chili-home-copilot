@@ -922,7 +922,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
-    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant"}
+    _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant", "tf_variant"}
     for ins in existing:
         sp = None
         if getattr(ins, "scan_pattern_id", None):
@@ -4072,7 +4072,7 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
 
     _PROTECTED_ORIGINS = {
         "builtin", "user_seeded", "seed", "user",
-        "exit_variant", "entry_variant", "combo_variant",
+        "exit_variant", "entry_variant", "combo_variant", "tf_variant",
     }
 
     patterns = db.query(ScanPattern).filter_by(active=True).all()
@@ -4393,6 +4393,7 @@ def _create_variant_child(
     variant_label: str,
     rules_json: str | None = None,
     exit_config_json: str | None = None,
+    timeframe: str | None = None,
 ) -> "ScanPattern":
     """Low-level helper: create a child ScanPattern + linked TradingInsight."""
     from ...models.trading import ScanPattern, TradingInsight
@@ -4404,7 +4405,7 @@ def _create_variant_child(
         rules_json=rules_json or parent.rules_json,
         origin=origin,
         asset_class=parent.asset_class,
-        timeframe=getattr(parent, "timeframe", "1d") or "1d",
+        timeframe=timeframe or getattr(parent, "timeframe", "1d") or "1d",
         confidence=parent.confidence,
         evidence_count=0,
         backtest_count=0,
@@ -4609,19 +4610,97 @@ def fork_combo_variants(db: Session, pattern_id: int) -> list[int]:
     return [child.id]
 
 
+_TIMEFRAME_POOL = ["1m", "5m", "15m", "1h", "4h", "1d"]
+
+_TIMEFRAME_ADJACENCY: dict[str, list[str]] = {
+    "1m":  ["5m", "15m"],
+    "5m":  ["1m", "15m", "1h"],
+    "15m": ["5m", "1h", "4h"],
+    "1h":  ["15m", "4h", "1d"],
+    "4h":  ["1h", "1d", "15m"],
+    "1d":  ["4h", "1h", "15m"],
+}
+
+
+def fork_timeframe_variants(
+    db: Session,
+    pattern_id: int,
+    max_variants: int = 2,
+) -> list[int]:
+    """Create children that test the same pattern on different timeframes.
+
+    A breakout pattern discovered on daily might work even better on 4h, 1h,
+    or even 5m.  Prioritizes adjacent timeframes first (e.g. 1d -> 4h, 1h)
+    then explores further out.  All timeframes are available for any asset.
+    """
+    from ...models.trading import ScanPattern
+    import random
+
+    parent = db.query(ScanPattern).get(pattern_id)
+    if not parent or not parent.active:
+        return []
+
+    existing_children = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
+        .count()
+    )
+    if existing_children >= _MAX_ACTIVE_VARIANTS:
+        return []
+
+    parent_tf = getattr(parent, "timeframe", "1d") or "1d"
+    existing_labels = set(
+        r[0] for r in db.query(ScanPattern.variant_label)
+        .filter(ScanPattern.parent_id == pattern_id)
+        .all() if r[0]
+    )
+
+    adjacent = _TIMEFRAME_ADJACENCY.get(parent_tf, [])
+    remaining = [tf for tf in _TIMEFRAME_POOL if tf != parent_tf and tf not in adjacent]
+    random.shuffle(remaining)
+    candidate_tfs = list(adjacent) + remaining
+
+    slots = min(max_variants, _MAX_ACTIVE_VARIANTS - existing_children)
+
+    created_ids: list[int] = []
+    for tf in candidate_tfs:
+        if len(created_ids) >= slots:
+            break
+        label = f"tf-{tf}"
+        if label in existing_labels:
+            continue
+        child = _create_variant_child(
+            db, parent,
+            origin="tf_variant",
+            variant_label=label,
+            timeframe=tf,
+        )
+        existing_labels.add(label)
+        created_ids.append(child.id)
+        logger.info(
+            "[learning] Forked timeframe variant: %s (%s -> %s, parent=%d, gen=%d)",
+            child.name, parent_tf, tf, parent.id, child.generation,
+        )
+
+    if created_ids:
+        db.commit()
+    return created_ids
+
+
 def fork_pattern_variants(
     db: Session,
     pattern_id: int,
     loss_report: dict[str, Any] | None = None,
 ) -> list[int]:
-    """Fork entry, exit, AND combo variants for a pattern.
+    """Fork entry, exit, combo, AND timeframe variants for a pattern.
 
-    Orchestrates all three axes of evolution.
+    Orchestrates all four axes of evolution.
     """
     created: list[int] = []
     created.extend(fork_exit_variants(db, pattern_id))
     created.extend(fork_entry_variants(db, pattern_id, loss_report=loss_report))
     created.extend(fork_combo_variants(db, pattern_id))
+    created.extend(fork_timeframe_variants(db, pattern_id))
     return created
 
 
@@ -4771,7 +4850,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         .filter(
             ScanPattern.active.is_(True),
             ScanPattern.parent_id.is_(None),
-            ScanPattern.origin.notin_(["exit_variant", "entry_variant", "combo_variant"]),
+            ScanPattern.origin.notin_(["exit_variant", "entry_variant", "combo_variant", "tf_variant"]),
         )
         .all()
     )
@@ -4789,6 +4868,8 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             stats["forked_entry"] += len(entry_ids)
             combo_ids = fork_combo_variants(db, rp.id)
             stats["forked_combo"] += len(combo_ids)
+            tf_ids = fork_timeframe_variants(db, rp.id, max_variants=2)
+            stats["forked_tf"] = stats.get("forked_tf", 0) + len(tf_ids)
 
     # ── 2. Compare phase ─────────────────────────────────────────────
     parents_with_children = (
@@ -4864,6 +4945,10 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             parent.exit_config = winner.exit_config
             parent.updated_at = datetime.utcnow()
             stats["promoted"] += 1
+        elif winner.origin == "tf_variant" and winner.timeframe:
+            parent.timeframe = winner.timeframe
+            parent.updated_at = datetime.utcnow()
+            stats["promoted"] += 1
         elif winner.origin in ("entry_variant", "combo_variant") and winner.rules_json:
             parent.rules_json = winner.rules_json
             parent.updated_at = datetime.utcnow()
@@ -4908,7 +4993,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                 description=(
                     f"Evolution for '{parent.name}': winner={winner.variant_label} "
                     f"({winner.origin}, sharpe={winner_sharpe:.2f}, wr={winner_wr:.0%}). "
-                    f"Compared {len(variant_scores)} variants across exit/entry/combo axes."
+                    f"Compared {len(variant_scores)} variants across exit/entry/combo/timeframe axes."
                     + (f" Loss report: avg_losing_return={loss_report['avg_losing_return']}%, "
                        f"sectors={loss_report.get('sector_losses', {})}"
                        if loss_report else "")

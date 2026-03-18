@@ -579,6 +579,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     # 4. Backtest results: aggregate across ALL insights for same ScanPattern
     backtests_out = []
     seen_bt_ids: set[int] = set()
+    seen_bt_keys: set[tuple[str, str]] = set()
     try:
         _sp_id = getattr(insight, "scan_pattern_id", None)
         _sibling_ins_ids = [pattern_id]
@@ -599,6 +600,10 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
             .all()
         )
         for bt in linked_bts:
+            dedup_key = (bt.ticker or "", bt.strategy_name or "")
+            if dedup_key in seen_bt_keys:
+                continue
+            seen_bt_keys.add(dedup_key)
             seen_bt_ids.add(bt.id)
             backtests_out.append({
                 "id": bt.id,

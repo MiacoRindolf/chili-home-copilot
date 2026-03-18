@@ -175,6 +175,53 @@ def _repair_wrongly_deactivated():
         _log.exception("[repair] Failed to repair deactivated patterns")
 
 
+def _reinfer_pattern_timeframes():
+    """One-time migration: re-infer timeframe for existing patterns that are
+    stuck on the default '1d' when the inference logic would assign something
+    more appropriate (e.g. crypto patterns -> 4h, intraday -> 15m)."""
+    _log = logging.getLogger("chili.reinfer_tf")
+    try:
+        from .db import SessionLocal as _SL
+        from .models.trading import ScanPattern
+        from .services.backtest_service import infer_pattern_timeframe
+        import json as _json
+
+        db = _SL()
+        try:
+            patterns = (
+                db.query(ScanPattern)
+                .filter(ScanPattern.timeframe == "1d")
+                .all()
+            )
+            updated = 0
+            for p in patterns:
+                conditions: list[dict] = []
+                try:
+                    rules = _json.loads(p.rules_json) if p.rules_json else {}
+                    conditions = rules.get("conditions", [])
+                except Exception:
+                    pass
+                new_tf = infer_pattern_timeframe(
+                    conditions,
+                    name=p.name or "",
+                    asset_class=p.asset_class or "all",
+                    description=p.description or "",
+                )
+                if new_tf != "1d":
+                    p.timeframe = new_tf
+                    updated += 1
+            if updated:
+                db.commit()
+                _log.info("[reinfer_tf] Updated timeframe for %d patterns (of %d with '1d')",
+                          updated, len(patterns))
+            else:
+                _log.info("[reinfer_tf] All %d patterns already have correct timeframes", len(patterns))
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("[reinfer_tf] Failed to re-infer pattern timeframes")
+
+
 def _backfill_backtests():
     """Background: run smart backtests for insights that lack results or
     still have old generic-strategy backtests that need re-running with
@@ -351,6 +398,7 @@ async def lifespan(app: FastAPI):
     _prewarm_market_context()
     _dedup_backtests()
     _repair_wrongly_deactivated()
+    _reinfer_pattern_timeframes()
     threading.Thread(target=_backfill_backtests, daemon=True).start()
     yield
     _stop_massive_ws()
