@@ -243,6 +243,51 @@ def list_strategies() -> list[dict[str, str]]:
     ]
 
 
+# ---------------------------------------------------------------------------
+# Auto-generate human-readable strategy name from conditions
+# ---------------------------------------------------------------------------
+
+_INDICATOR_LABELS: dict[str, str] = {
+    "rsi_14": "RSI", "adx": "ADX", "macd_hist": "MACD",
+    "price": "Price", "rel_vol": "RelVol", "gap_pct": "Gap%",
+    "stoch_k": "Stoch", "bb_squeeze": "BB-Squeeze",
+    "bb_squeeze_firing": "BB-Fire",
+    "ema_9": "EMA9", "ema_20": "EMA20", "ema_50": "EMA50",
+    "ema_100": "EMA100", "sma_20": "SMA20", "sma_50": "SMA50",
+    "sma_100": "SMA100", "sma_200": "SMA200",
+    "bb_upper": "BB-Up", "bb_lower": "BB-Low",
+    "daily_change_pct": "DayChg%", "vwap_reclaim": "VWAP",
+    "resistance_retests": "ResRetest", "dist_to_resistance_pct": "Dist-Res%",
+    "narrow_range": "NR", "vcp_count": "VCP",
+    "bullish_engulfing": "BullEngulf", "bearish_engulfing": "BearEngulf",
+    "hammer": "Hammer", "inverted_hammer": "InvHammer",
+    "morning_star": "MornStar", "doji": "Doji",
+}
+
+
+def generate_strategy_name(conditions: list[dict[str, Any]]) -> str:
+    """Build a concise, human-readable strategy name from a conditions list."""
+    if not conditions:
+        return "Dynamic"
+    parts: list[str] = []
+    for c in conditions:
+        ind = c.get("indicator", "")
+        op = c.get("op", "")
+        val = c.get("value")
+        label = _INDICATOR_LABELS.get(ind, ind)
+        if isinstance(val, str):
+            val_label = _INDICATOR_LABELS.get(val, val.upper())
+            parts.append(f"{label}{op}{val_label}")
+        elif isinstance(val, list) and len(val) == 2:
+            parts.append(f"{label} {val[0]}-{val[1]}")
+        elif op == "==" and val == 1:
+            parts.append(label)
+        else:
+            v = int(val) if isinstance(val, float) and val == int(val) else val
+            parts.append(f"{label}{op}{v}")
+    return " + ".join(parts[:6])
+
+
 def _extract_indicators(strat_cls, strategy_id: str, df: pd.DataFrame) -> dict:
     """Compute indicator overlays for charting based on the strategy used."""
     result = {}
@@ -611,6 +656,60 @@ def _compute_series_for_conditions(
         prev_close = close.shift(1)
         gap = (df["Open"] - prev_close) / prev_close.replace(0, np.nan) * 100
         result["gap_pct"] = _safe(gap)
+
+    # -- Candlestick pattern indicators ------------------------------------
+    _open = df["Open"]
+    _body = (close - _open).abs()
+    _range = (df["High"] - df["Low"]).replace(0, np.nan)
+    _upper_shadow = df["High"] - pd.concat([close, _open], axis=1).max(axis=1)
+    _lower_shadow = pd.concat([close, _open], axis=1).min(axis=1) - df["Low"]
+    _bullish = close > _open
+    _bearish = close < _open
+    _prev_open = _open.shift(1)
+    _prev_close = close.shift(1)
+    _prev_bullish = _prev_close > _prev_open
+    _prev_bearish = _prev_close < _prev_open
+
+    if "bullish_engulfing" in needed:
+        be = (_bullish & _prev_bearish &
+              (_open <= _prev_close) & (close >= _prev_open) &
+              (_body > _body.shift(1)))
+        result["bullish_engulfing"] = _safe(be.astype(float))
+
+    if "bearish_engulfing" in needed:
+        be = (_bearish & _prev_bullish &
+              (_open >= _prev_close) & (close <= _prev_open) &
+              (_body > _body.shift(1)))
+        result["bearish_engulfing"] = _safe(be.astype(float))
+
+    if "hammer" in needed:
+        h = ((_lower_shadow >= 2 * _body) &
+             (_upper_shadow <= _body * 0.5) &
+             (_body > 0))
+        result["hammer"] = _safe(h.astype(float))
+
+    if "inverted_hammer" in needed:
+        ih = ((_upper_shadow >= 2 * _body) &
+              (_lower_shadow <= _body * 0.5) &
+              (_body > 0))
+        result["inverted_hammer"] = _safe(ih.astype(float))
+
+    if "morning_star" in needed:
+        p2_open = _open.shift(1)
+        p2_close = close.shift(1)
+        p2_body = _body.shift(1)
+        p1_close = close.shift(2)
+        p1_open = _open.shift(2)
+        p1_mid = (p1_close + p1_open) / 2
+        ms = ((close.shift(2) < _open.shift(2)) &
+              (p2_body < _body.shift(2) * 0.5) &
+              _bullish &
+              (close > p1_mid))
+        result["morning_star"] = _safe(ms.astype(float))
+
+    if "doji" in needed:
+        d = (_body < _range * 0.1)
+        result["doji"] = _safe(d.astype(float))
 
     # -- Bollinger Band squeeze (rolling percentile of BB width) -----------
     if "bb_squeeze" in needed or "bb_squeeze_firing" in needed:
@@ -981,7 +1080,7 @@ def _classify_exit_params(
 def run_pattern_backtest(
     ticker: str,
     conditions: list[dict[str, Any]],
-    pattern_name: str = "Custom Pattern",
+    pattern_name: str | None = None,
     period: str = "1y",
     interval: str = "1d",
     cash: float = 100_000,
@@ -1000,6 +1099,8 @@ def run_pattern_backtest(
     strategy), those values take priority.  Otherwise *exit_atr_mult* /
     *exit_max_bars* are used, falling back to ``_classify_exit_params``.
     """
+    if not pattern_name:
+        pattern_name = generate_strategy_name(conditions)
     use_bos = True
     explicit_bos_buffer: float | None = None
     explicit_bos_grace: int | None = None

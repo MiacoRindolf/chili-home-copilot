@@ -60,6 +60,7 @@ class TradingInsight(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     pattern_description: str = Column(Text, nullable=False)
     confidence: float = Column(Float, nullable=False, default=0.5)
     evidence_count: int = Column(Integer, nullable=False, default=1)

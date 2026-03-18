@@ -294,6 +294,7 @@ def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
     wins: int = 0, losses: int = 0,
+    scan_pattern_id: int | None = None,
 ) -> TradingInsight:
     from .learning import log_learning_event
     from datetime import datetime
@@ -331,6 +332,7 @@ def save_insight(
 
     insight = TradingInsight(
         user_id=user_id,
+        scan_pattern_id=scan_pattern_id,
         pattern_description=pattern,
         confidence=confidence,
         win_count=wins,

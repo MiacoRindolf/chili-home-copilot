@@ -125,21 +125,21 @@ def _dedup_backtests():
 
 
 def _backfill_backtests():
-    """Background: run smart backtests for insights that lack linked results,
-    don't cover the right asset class, or have only generic backtests when a
-    pattern-aware backtest should be used instead."""
+    """Background: run smart backtests for insights that lack results or
+    still have old generic-strategy backtests that need re-running with
+    the unified DynamicPatternStrategy engine."""
     _log = logging.getLogger("chili.backfill")
     try:
         from .db import SessionLocal as _SL
         from .models.trading import TradingInsight, BacktestResult as _BT
         from .services.trading.backtest_engine import (
-            smart_backtest_insight, _extract_context, _find_linked_pattern,
+            smart_backtest_insight, _extract_context, _GENERIC_STRATEGY_NAMES,
         )
 
         db = _SL()
         try:
             bt_by_insight: dict[int, list[str]] = {}
-            bt_strats_by_insight: dict[int, set[str]] = {}
+            bt_has_generic: dict[int, bool] = {}
             for row in (
                 db.query(
                     _BT.related_insight_id, _BT.ticker, _BT.strategy_name,
@@ -148,43 +148,40 @@ def _backfill_backtests():
                 .all()
             ):
                 bt_by_insight.setdefault(row[0], []).append(row[1])
-                bt_strats_by_insight.setdefault(row[0], set()).add(row[2])
+                if row[2] in _GENERIC_STRATEGY_NAMES:
+                    bt_has_generic[row[0]] = True
 
-            all_candidates = db.query(TradingInsight).filter(
-                TradingInsight.evidence_count > 0,
-            ).all()
+            all_candidates = (
+                db.query(TradingInsight)
+                .filter(TradingInsight.active.is_(True))
+                .all()
+            )
 
             stale: list = []
             for ins in all_candidates:
                 existing = bt_by_insight.get(ins.id, [])
-                if not existing:
+
+                if bt_has_generic.get(ins.id):
+                    old_count = (
+                        db.query(_BT)
+                        .filter(_BT.related_insight_id == ins.id)
+                        .delete()
+                    )
+                    ins.win_count = 0
+                    ins.loss_count = 0
+                    ins.evidence_count = max(1, ins.evidence_count)
+                    db.commit()
+                    _log.info(
+                        "Cleared %d generic backtests for insight %d — "
+                        "will re-run with unified dynamic engine",
+                        old_count, ins.id,
+                    )
                     stale.append(ins)
                     continue
 
-                # Check if insight has a linked ScanPattern but only generic
-                # backtests — delete the old ones and re-queue.
-                linked = _find_linked_pattern(db, ins)
-                if linked:
-                    _, pat_name, _exit_cfg = linked
-                    strat_names = bt_strats_by_insight.get(ins.id, set())
-                    has_pattern_bt = pat_name in strat_names
-                    if not has_pattern_bt:
-                        old_count = (
-                            db.query(_BT)
-                            .filter(_BT.related_insight_id == ins.id)
-                            .delete()
-                        )
-                        ins.win_count = 0
-                        ins.loss_count = 0
-                        ins.evidence_count = max(1, ins.evidence_count)
-                        db.commit()
-                        _log.info(
-                            "Cleared %d stale generic backtests for insight %d "
-                            "(%s) — will re-run with pattern-aware engine",
-                            old_count, ins.id, pat_name,
-                        )
-                        stale.append(ins)
-                        continue
+                if not existing:
+                    stale.append(ins)
+                    continue
 
                 ctx = _extract_context(
                     ins.pattern_description or "", db=db, insight_id=ins.id,

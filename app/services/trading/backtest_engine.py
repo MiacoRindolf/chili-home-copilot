@@ -93,18 +93,164 @@ _CRYPTO_HINTS = {
 }
 _STOCK_ONLY_HINTS = {"earnings", "sector", "dividend", "pe ratio", "eps"}
 
-_STRATEGY_KEYWORD_MAP: dict[str, str] = {
-    "rsi": "rsi_reversal",
-    "momentum": "momentum_breakout",
-    "breakout": "momentum_breakout",
-    "ema": "ema_cross",
-    "sma": "sma_cross",
-    "bollinger": "bb_bounce",
-    "squeeze": "bb_bounce",
-    "macd": "macd",
-    "trend": "trend_follow",
-    "vwap": "trend_follow",
+_GENERIC_STRATEGY_NAMES: set[str] = {
+    "SMA Crossover", "EMA Crossover", "RSI Reversal", "Bollinger Bounce",
+    "MACD Crossover", "Trend Following", "Momentum Breakout",
 }
+
+# ---------------------------------------------------------------------------
+# Description → structured conditions parser
+# ---------------------------------------------------------------------------
+
+_DESC_CONDITION_RULES: list[tuple[re.Pattern, list[dict[str, Any]]]] = [
+    # RSI thresholds
+    (re.compile(r"rsi\s*(?:overbought\s*)?\(?[>]\s*(\d+)\)?", re.I),
+     [{"indicator": "rsi_14", "op": ">", "_val_group": 1}]),
+    (re.compile(r"rsi\s*>\s*(\d+)", re.I),
+     [{"indicator": "rsi_14", "op": ">", "_val_group": 1}]),
+    (re.compile(r"rsi\s*<\s*(\d+)", re.I),
+     [{"indicator": "rsi_14", "op": "<", "_val_group": 1}]),
+    (re.compile(r"rsi\s*(?:near-)?oversold\s*\((\d+)[–\-](\d+)\)", re.I),
+     [{"indicator": "rsi_14", "op": "between", "_val_groups": (1, 2)}]),
+    (re.compile(r"deep\s+oversold\s+rsi\s*<\s*(\d+)", re.I),
+     [{"indicator": "rsi_14", "op": "<", "_val_group": 1}]),
+    (re.compile(r"oversold\s+rsi", re.I),
+     [{"indicator": "rsi_14", "op": "<", "value": 35}]),
+    (re.compile(r"overbought\s+rsi", re.I),
+     [{"indicator": "rsi_14", "op": ">", "value": 65}]),
+    (re.compile(r"rsi\s+not\s+overbought", re.I),
+     [{"indicator": "rsi_14", "op": "<", "value": 70}]),
+
+    # ADX
+    (re.compile(r"adx\s*>\s*(\d+)", re.I),
+     [{"indicator": "adx", "op": ">", "_val_group": 1}]),
+    (re.compile(r"adx\s*<\s*(\d+)", re.I),
+     [{"indicator": "adx", "op": "<", "_val_group": 1}]),
+    (re.compile(r"strong\s+trend", re.I),
+     [{"indicator": "adx", "op": ">", "value": 25}]),
+    (re.compile(r"no\s+trend", re.I),
+     [{"indicator": "adx", "op": "<", "value": 15}]),
+
+    # MACD
+    (re.compile(r"macd\s+bullish\s+crossover|macd\s+turning\s+positive|macd\s+positive|macd\s+bullish", re.I),
+     [{"indicator": "macd_hist", "op": ">", "value": 0}]),
+    (re.compile(r"macd\s+(?:turning\s+)?negative|macd\s+flipped\s+negative|macd\s+bearish", re.I),
+     [{"indicator": "macd_hist", "op": "<", "value": 0}]),
+    (re.compile(r"macd\s+histogram\s+positive\s+while\s+macd\s+negative", re.I),
+     [{"indicator": "macd_hist", "op": ">", "value": 0}]),
+
+    # Bollinger Bands
+    (re.compile(r"(?:price\s+)?above\s+upper\s+bollinger|above\s+upper\s+bb|upper\s+bb", re.I),
+     [{"indicator": "price", "op": ">", "value": "bb_upper"}]),
+    (re.compile(r"(?:price\s+)?below\s+lower\s+bollinger|below\s+lower\s+bb|lower\s+bb|near\s+lower\s+bb", re.I),
+     [{"indicator": "price", "op": "<", "value": "bb_lower"}]),
+    (re.compile(r"mid[- ]?bb\s+range|bb\s+squeeze|bollinger\s+squeeze", re.I),
+     [{"indicator": "bb_squeeze", "op": "==", "value": 1}]),
+
+    # EMA / SMA stacking and price relationships
+    (re.compile(r"ema\s+stack(?:ing)?\s+bullish|price\s*>\s*ema\s*20\s*>\s*ema\s*50\s*>\s*ema\s*100", re.I),
+     [{"indicator": "price", "op": ">", "value": "ema_20"},
+      {"indicator": "ema_20", "op": ">", "value": "ema_50"},
+      {"indicator": "ema_50", "op": ">", "value": "ema_100"}]),
+    (re.compile(r"above\s+sma\s*(\d+)", re.I),
+     [{"indicator": "price", "op": ">", "_val_fmt": "sma_{1}"}]),
+    (re.compile(r"above\s+ema\s*(\d+)", re.I),
+     [{"indicator": "price", "op": ">", "_val_fmt": "ema_{1}"}]),
+
+    # Volume
+    (re.compile(r"volume\s+surge\s+(\d+)x", re.I),
+     [{"indicator": "rel_vol", "op": ">", "_val_group": 1}]),
+    (re.compile(r"volume\s+surge|high\s+volume|volume\s+spike", re.I),
+     [{"indicator": "rel_vol", "op": ">", "value": 3}]),
+
+    # Gap
+    (re.compile(r"gap\s+up\s*>?\s*(\d+)%", re.I),
+     [{"indicator": "gap_pct", "op": ">", "_val_group": 1}]),
+    (re.compile(r"gap\s+down\s*>?\s*(\d+)%", re.I),
+     [{"indicator": "gap_pct", "op": "<", "_val_group_neg": 1}]),
+    (re.compile(r"(\d+)%\+?\s*gapper", re.I),
+     [{"indicator": "gap_pct", "op": ">", "_val_group": 1}]),
+
+    # Stochastic
+    (re.compile(r"stochastic\s+oversold\s*\(?\s*k?\s*<\s*(\d+)\)?", re.I),
+     [{"indicator": "stoch_k", "op": "<", "_val_group": 1}]),
+    (re.compile(r"stochastic\s+overbought", re.I),
+     [{"indicator": "stoch_k", "op": ">", "value": 80}]),
+    (re.compile(r"stochastic\s+oversold", re.I),
+     [{"indicator": "stoch_k", "op": "<", "value": 20}]),
+]
+
+
+def _parse_conditions_from_description(desc: str) -> list[dict[str, Any]]:
+    """Extract structured backtest conditions from a natural-language description.
+
+    Returns a list of condition dicts compatible with ``DynamicPatternStrategy``.
+    """
+    conditions: list[dict[str, Any]] = []
+    seen_indicators: set[str] = set()
+
+    for pattern, templates in _DESC_CONDITION_RULES:
+        m = pattern.search(desc)
+        if not m:
+            continue
+        for tmpl in templates:
+            ind = tmpl["indicator"]
+            # Avoid duplicate conditions for the same indicator+op
+            key = f"{ind}_{tmpl['op']}"
+            if key in seen_indicators:
+                continue
+
+            cond: dict[str, Any] = {"indicator": ind, "op": tmpl["op"]}
+
+            if "value" in tmpl:
+                cond["value"] = tmpl["value"]
+            elif "_val_group" in tmpl:
+                try:
+                    cond["value"] = float(m.group(tmpl["_val_group"]))
+                except (IndexError, ValueError, TypeError):
+                    continue
+            elif "_val_group_neg" in tmpl:
+                try:
+                    cond["value"] = -float(m.group(tmpl["_val_group_neg"]))
+                except (IndexError, ValueError, TypeError):
+                    continue
+            elif "_val_groups" in tmpl:
+                try:
+                    g1, g2 = tmpl["_val_groups"]
+                    cond["value"] = [float(m.group(g1)), float(m.group(g2))]
+                except (IndexError, ValueError, TypeError):
+                    continue
+            elif "_val_fmt" in tmpl:
+                try:
+                    cond["value"] = tmpl["_val_fmt"].replace("{1}", m.group(1))
+                except (IndexError, TypeError):
+                    continue
+            elif "_val_group_or_default" in tmpl:
+                grp, default = tmpl["_val_group_or_default"]
+                try:
+                    cond["value"] = float(m.group(grp))
+                except (IndexError, ValueError, TypeError):
+                    cond["value"] = default
+            else:
+                continue
+
+            seen_indicators.add(key)
+            conditions.append(cond)
+
+    # Handle CHILI refinement descriptions: "rsi gt 70", "adx gt 30", etc.
+    chili_m = re.search(r"(?:chili\s+refinement:\s*)(\w+)\s+(gt|lt|gte|lte|eq)\s+(\d+(?:\.\d+)?)", desc, re.I)
+    if chili_m:
+        ind_raw = chili_m.group(1).lower()
+        op_map = {"gt": ">", "lt": "<", "gte": ">=", "lte": "<=", "eq": "=="}
+        op = op_map.get(chili_m.group(2).lower(), ">")
+        val = float(chili_m.group(3))
+        ind_name = {"rsi": "rsi_14", "adx": "adx", "ema": "ema_20", "macd": "macd_hist"}.get(ind_raw, ind_raw)
+        key = f"{ind_name}_{op}"
+        if key not in seen_indicators:
+            conditions.append({"indicator": ind_name, "op": op, "value": val})
+
+    return conditions
+
 
 _TICKER_RE = re.compile(r"\b([A-Z]{2,5}(?:-USD)?)\b")
 _TICKER_STOPWORDS = {
@@ -178,22 +324,11 @@ def _extract_context(
         any(h in desc_lower for h in _STOCK_ONLY_HINTS) and not wants_crypto
     )
 
-    strategies: list[str] = []
-    seen: set[str] = set()
-    for keyword, strat in _STRATEGY_KEYWORD_MAP.items():
-        if keyword in desc_lower and strat not in seen:
-            strategies.append(strat)
-            seen.add(strat)
-    if not strategies:
-        strategies = ["trend_follow"]
-    strategies = strategies[:3]
-
     return {
         "mentioned_tickers": mentioned_tickers[:10],
         "wants_crypto": wants_crypto,
         "crypto_only": crypto_only,
         "stock_only": stock_only,
-        "strategies": strategies,
     }
 
 
@@ -294,6 +429,10 @@ def _find_linked_pattern(
 
     Returns ``(conditions_list, pattern_name, exit_config_dict_or_None)``
     or ``None`` when no matching pattern with valid ``rules_json`` is found.
+
+    Uses ``insight.scan_pattern_id`` (direct FK) when available, falling
+    back to text matching for legacy rows.  When text matching succeeds
+    the FK is back-filled so future lookups are instant.
     """
     import json as _json
     try:
@@ -301,20 +440,73 @@ def _find_linked_pattern(
     except ImportError:
         return None
 
-    desc = insight.pattern_description or ""
-    if not desc:
-        return None
+    pattern = None
 
-    name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
+    # 1) Direct FK lookup (fast path)
+    pid = getattr(insight, "scan_pattern_id", None)
+    if pid:
+        pattern = db.query(ScanPattern).get(pid)
 
-    pattern = db.query(ScanPattern).filter(ScanPattern.name == name_part).first()
-
+    # 2) Text-match fallback for legacy rows without FK
     if not pattern:
-        all_patterns = db.query(ScanPattern).all()
-        for p in all_patterns:
-            if p.name and p.name.lower() in desc.lower():
-                pattern = p
-                break
+        desc = insight.pattern_description or ""
+        if not desc:
+            return None
+
+        name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
+        pattern = db.query(ScanPattern).filter(ScanPattern.name == name_part).first()
+
+        if not pattern:
+            all_patterns = (
+                db.query(ScanPattern)
+                .filter(ScanPattern.active.is_(True), ScanPattern.rules_json.isnot(None))
+                .all()
+            )
+            desc_lower = desc.lower()
+            for p in all_patterns:
+                if p.name and p.name.lower() in desc_lower:
+                    pattern = p
+                    break
+
+            # Word-overlap match for brain-refined descriptions
+            if not pattern and all_patterns:
+                _stop = {
+                    "the", "and", "for", "from", "with", "avg", "win",
+                    "sell", "buy", "signal", "refined", "chili", "sam",
+                    "refinement", "pattern", "above", "below",
+                }
+                desc_words = {
+                    w for w in desc_lower.replace("(", " ").replace(")", " ")
+                    .replace(",", " ").replace(":", " ").split()
+                    if len(w) >= 3 and w not in _stop
+                }
+                best, best_score = None, 0
+                for p in all_patterns:
+                    pname_lower = (p.name or "").lower()
+                    p_words = {
+                        w for w in pname_lower.replace("+", " ").split()
+                        if len(w) >= 3 and w not in _stop
+                    }
+                    if not p_words:
+                        continue
+                    overlap = len(desc_words & p_words)
+                    score = overlap / len(p_words)
+                    if score > best_score and overlap >= 2:
+                        best_score = score
+                        best = p
+                if best and best_score >= 0.4:
+                    pattern = best
+
+        # Back-fill FK for future lookups
+        if pattern and hasattr(insight, "scan_pattern_id"):
+            try:
+                insight.scan_pattern_id = pattern.id
+                db.commit()
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
 
     if not pattern or not pattern.rules_json:
         return None
@@ -364,14 +556,13 @@ def smart_backtest_insight(
 ) -> dict[str, Any]:
     """Run diversified backtests for a single TradingInsight.
 
-    When the insight is linked to a ``ScanPattern`` with valid ``rules_json``,
-    uses **pattern-aware backtesting** (``run_pattern_backtest``) which
-    evaluates the actual composite conditions bar-by-bar.  Otherwise falls
-    back to keyword-mapped generic strategies.
+    Always uses ``DynamicPatternStrategy`` with actual conditions — either
+    from a linked ``ScanPattern.rules_json`` or parsed from the insight
+    description.  Strategy names are auto-generated from the conditions.
 
     Returns ``{"wins": int, "losses": int, "total": int, "backtests_run": int}``.
     """
-    from ..backtest_service import run_backtest, run_pattern_backtest, save_backtest
+    from ..backtest_service import run_pattern_backtest, save_backtest
 
     shutdown = _get_shutdown_event()
     desc = insight.pattern_description or ""
@@ -381,20 +572,29 @@ def smart_backtest_insight(
     )
 
     linked = _find_linked_pattern(db, insight)
-    use_pattern_bt = linked is not None
     exit_config: dict[str, Any] | None = None
 
-    if use_pattern_bt:
+    if linked:
         conditions, pattern_name, exit_config = linked
-        jobs_count = len(tickers)
         logger.info(
             "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s)",
-            pattern_name, jobs_count, "custom" if exit_config else "auto",
+            pattern_name, len(tickers), "custom" if exit_config else "auto",
         )
     else:
-        conditions, pattern_name = [], ""
-        strategies = ctx["strategies"]
-        jobs_count = len(tickers) * len(strategies)
+        conditions = _parse_conditions_from_description(desc)
+        pattern_name = None  # auto-generated from conditions
+        if not conditions:
+            logger.info(
+                "[backtest_engine] Skipping insight %d — no conditions extracted from: %s",
+                insight.id, desc[:100],
+            )
+            return {"wins": 0, "losses": 0, "total": 0, "backtests_run": 0}
+        logger.info(
+            "[backtest_engine] Parsed %d conditions from description for insight %d — %d tickers",
+            len(conditions), insight.id, len(tickers),
+        )
+
+    jobs_count = len(tickers)
 
     def _run_one_pattern(ticker: str) -> dict[str, Any] | None:
         if shutdown.is_set():
@@ -410,28 +610,10 @@ def smart_backtest_insight(
             pass
         return None
 
-    def _run_one_generic(args: tuple[str, str]) -> dict[str, Any] | None:
-        if shutdown.is_set():
-            return None
-        ticker, strategy_id = args
-        try:
-            result = run_backtest(ticker, strategy_id=strategy_id, period=period)
-            if result.get("ok") and result.get("trade_count", 0) > 0:
-                return result
-        except Exception:
-            pass
-        return None
-
     wins, losses, total = 0, 0, 0
 
     with ThreadPoolExecutor(max_workers=_BT_WORKERS) as pool:
-        if use_pattern_bt:
-            futures = pool.map(_run_one_pattern, tickers)
-        else:
-            generic_jobs = [
-                (t, s) for t in tickers for s in ctx["strategies"]
-            ]
-            futures = pool.map(_run_one_generic, generic_jobs)
+        futures = pool.map(_run_one_pattern, tickers)
 
         for result in futures:
             if result is None:
@@ -453,8 +635,25 @@ def smart_backtest_insight(
                     losses += 1
 
     if total > 0:
-        insight.win_count = wins
-        insight.loss_count = losses
+        # Recompute win/loss from ALL linked BacktestResult records so
+        # card and detail views always agree.
+        try:
+            from ...models.trading import BacktestResult as _BT2
+            all_linked = (
+                db.query(_BT2.return_pct, _BT2.trade_count)
+                .filter(
+                    _BT2.related_insight_id == insight.id,
+                    _BT2.trade_count > 0,
+                )
+                .all()
+            )
+            all_wins = sum(1 for r in all_linked if (r[0] or 0) > 0)
+            all_losses = len(all_linked) - all_wins
+            insight.win_count = all_wins
+            insight.loss_count = all_losses
+        except Exception:
+            insight.win_count = wins
+            insight.loss_count = losses
         insight.evidence_count = (insight.evidence_count or 0) + total
 
         if update_confidence and total >= 3:
@@ -464,16 +663,18 @@ def smart_backtest_insight(
             insight.confidence = round(min(0.95, max(0.1, new_conf)), 3)
 
         db.commit()
-    elif jobs_count > 0 and use_pattern_bt:
+    elif jobs_count > 0:
         try:
+            from ..backtest_service import generate_strategy_name as _gsn
+            display_name = pattern_name or _gsn(conditions)
             from ...models.trading import LearningEvent
             evt = LearningEvent(
                 user_id=insight.user_id,
                 event_type="review",
                 description=(
-                    f"Pattern \"{pattern_name}\" produced 0 trades across "
+                    f"Pattern \"{display_name}\" produced 0 trades across "
                     f"{len(tickers)} tickers over {period}. Conditions may be "
-                    f"too restrictive for {interval} bars — consider relaxing "
+                    f"too restrictive — consider relaxing "
                     f"thresholds or testing on lower timeframes."
                 ),
                 confidence_before=insight.confidence,
@@ -485,7 +686,7 @@ def smart_backtest_insight(
             logger.warning(
                 "[backtest_engine] 0 trades for '%s' across %d tickers — "
                 "logged LearningEvent",
-                pattern_name, len(tickers),
+                display_name, len(tickers),
             )
         except Exception:
             logger.exception("[backtest_engine] Failed to log zero-trade event")

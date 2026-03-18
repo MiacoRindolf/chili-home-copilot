@@ -1035,6 +1035,177 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
     conn.commit()
 
 
+def _migration_032_seed_candlestick_patterns(conn) -> None:
+    """Seed 3 profitable candlestick chart patterns with confirmation rules.
+
+    Source: 'Top 3 MOST Profitable Candlestick Chart Patterns (Full Training)'
+    YouTube video + QuantifiedStrategies.com backtest data (56K trades).
+    """
+    import json as _json
+
+    if "scan_patterns" not in _tables(conn):
+        return
+
+    _PATTERNS = [
+        {
+            "name": "Bullish Engulfing + RSI Oversold + Volume Surge",
+            "desc": (
+                "Bullish engulfing candle at oversold RSI (< 40) with "
+                "elevated relative volume (>= 1.5x) and price above EMA 50 "
+                "(uptrend context). Backtested at 60-65% win rate with "
+                "confirmation. [User-seeded from candlestick patterns research]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "bullish_engulfing", "op": "==", "value": True},
+                    {"indicator": "rsi_14", "op": "<", "value": 40},
+                    {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+                    {"indicator": "price", "op": ">", "ref": "ema_50"},
+                ]
+            },
+        },
+        {
+            "name": "Hammer Reversal at Support with Volume",
+            "desc": (
+                "Hammer candle (long lower wick, small body near top) at "
+                "deeply oversold RSI (< 35), near support (within 2% of "
+                "resistance), with volume confirmation (>= 1.5x). "
+                "Inverted hammer variant ranks #1 in 56K-trade backtests "
+                "with 60% win rate. [User-seeded from candlestick patterns research]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "hammer", "op": "==", "value": True},
+                    {"indicator": "rsi_14", "op": "<", "value": 35},
+                    {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+                    {"indicator": "price", "op": ">", "ref": "ema_100"},
+                ]
+            },
+        },
+        {
+            "name": "Morning Star Reversal + Trend Confirmation",
+            "desc": (
+                "Three-candle morning star reversal pattern (bearish candle, "
+                "small-body candle, then bullish candle closing above the "
+                "first candle's midpoint). Confirmed by RSI below 45 "
+                "(room to run) and MACD histogram turning positive. "
+                "Strong in stocks and crypto. "
+                "[User-seeded from candlestick patterns research]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "morning_star", "op": "==", "value": True},
+                    {"indicator": "rsi_14", "op": "<", "value": 45},
+                    {"indicator": "macd_hist", "op": ">", "value": 0},
+                    {"indicator": "price", "op": ">", "ref": "ema_50"},
+                ]
+            },
+        },
+    ]
+
+    for pat in _PATTERNS:
+        existing = conn.execute(
+            text("SELECT id FROM scan_patterns WHERE name = :n"),
+            {"n": pat["name"]},
+        ).fetchone()
+        if existing:
+            continue
+        conn.execute(text(
+            "INSERT INTO scan_patterns "
+            "(name, description, rules_json, origin, asset_class, confidence, "
+            " evidence_count, backtest_count, score_boost, min_base_score, "
+            " active, created_at, updated_at) "
+            "VALUES (:name, :desc, :rules, 'user_seeded', 'all', 0.5, "
+            " 0, 0, 1.5, 4.0, 1, datetime('now'), datetime('now'))"
+        ), {
+            "name": pat["name"],
+            "desc": pat["desc"],
+            "rules": _json.dumps(pat["rules"]),
+        })
+    conn.commit()
+
+    if "trading_insights" not in _tables(conn):
+        return
+
+    user_ids = [
+        r[0] for r in conn.execute(
+            text("SELECT DISTINCT user_id FROM trading_insights")
+        ).fetchall()
+    ]
+    if not user_ids:
+        user_ids = [None]
+
+    for pat in _PATTERNS:
+        pat_desc = f"{pat['name']} \u2014 {pat['desc']}"
+        for uid in user_ids:
+            existing = conn.execute(
+                text(
+                    "SELECT id FROM trading_insights "
+                    "WHERE pattern_description LIKE :pat AND "
+                    "      (user_id IS :uid OR (user_id IS NULL AND :uid IS NULL))"
+                ),
+                {"pat": f"{pat['name']}%", "uid": uid},
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(text(
+                "INSERT INTO trading_insights "
+                "(user_id, pattern_description, confidence, evidence_count, "
+                " last_seen, created_at, active, win_count, loss_count) "
+                "VALUES (:uid, :desc, 0.5, 0, datetime('now'), "
+                " datetime('now'), 1, 0, 0)"
+            ), {"uid": uid, "desc": pat_desc})
+    conn.commit()
+
+
+def _migration_033_insight_pattern_fk(conn) -> None:
+    """Add scan_pattern_id FK to trading_insights and backfill from text matching."""
+    if "trading_insights" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_insights")
+    if "scan_pattern_id" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_insights ADD COLUMN scan_pattern_id INTEGER"
+        ))
+        conn.commit()
+
+    if "scan_patterns" not in _tables(conn):
+        return
+
+    patterns = conn.execute(text(
+        "SELECT id, name FROM scan_patterns WHERE name IS NOT NULL"
+    )).fetchall()
+    if not patterns:
+        return
+
+    insights = conn.execute(text(
+        "SELECT id, pattern_description FROM trading_insights "
+        "WHERE scan_pattern_id IS NULL"
+    )).fetchall()
+
+    for ins_id, desc in insights:
+        if not desc:
+            continue
+        name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
+        matched_id = None
+        for pid, pname in patterns:
+            if pname == name_part:
+                matched_id = pid
+                break
+        if not matched_id:
+            desc_lower = desc.lower()
+            for pid, pname in patterns:
+                if pname and pname.lower() in desc_lower:
+                    matched_id = pid
+                    break
+        if matched_id:
+            conn.execute(text(
+                "UPDATE trading_insights SET scan_pattern_id = :pid WHERE id = :iid"
+            ), {"pid": matched_id, "iid": ins_id})
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1068,6 +1239,8 @@ MIGRATIONS = [
     ("029_seed_rsi_ema_insight", _migration_029_seed_rsi_ema_insight),
     ("030_pattern_exit_evolution", _migration_030_pattern_exit_evolution),
     ("031_seed_ross_cameron_patterns", _migration_031_seed_ross_cameron_patterns),
+    ("032_seed_candlestick_patterns", _migration_032_seed_candlestick_patterns),
+    ("033_insight_pattern_fk", _migration_033_insight_pattern_fk),
 ]
 
 

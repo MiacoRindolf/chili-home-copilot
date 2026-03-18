@@ -3801,7 +3801,9 @@ def discover_pattern_hypotheses(
         "Available indicators: rsi_14, ema_9, ema_20, ema_50, ema_100, price, bb_squeeze, "
         "bb_squeeze_firing, adx, rel_vol, macd_hist, resistance_retests, "
         "dist_to_resistance_pct, narrow_range, vcp_count, vwap_reclaim, "
-        "daily_change_pct, gap_pct.\n"
+        "daily_change_pct, gap_pct, "
+        "bullish_engulfing, bearish_engulfing, hammer, inverted_hammer, "
+        "morning_star, doji.\n"
         "Available ops: >, >=, <, <=, ==, between, any_of.\n"
         "Respond ONLY with the JSON array, no other text."
     )
@@ -3838,6 +3840,28 @@ def discover_pattern_hypotheses(
                 "active": True,
             }
             p = create_pattern(db, pattern_data)
+
+            user_ids_q = [
+                r[0] for r in db.query(TradingInsight.user_id)
+                .filter(TradingInsight.active.is_(True))
+                .distinct()
+                .all()
+            ]
+            if not user_ids_q:
+                user_ids_q = [user_id]
+            for uid in user_ids_q:
+                db.add(TradingInsight(
+                    user_id=uid,
+                    scan_pattern_id=p.id,
+                    pattern_description=f"{p.name} — {p.description or ''}",
+                    confidence=p.confidence or 0.3,
+                    evidence_count=0,
+                    win_count=0,
+                    loss_count=0,
+                    active=True,
+                ))
+            db.commit()
+
             created.append({"id": p.id, "name": p.name})
             existing_names.add(name.lower())
             logger.info(f"[learning] Discovered new pattern hypothesis: {name}")
@@ -4062,6 +4086,7 @@ def fork_exit_variants(db: Session, pattern_id: int) -> list[int]:
         for uid in user_ids:
             insight = TradingInsight(
                 user_id=uid,
+                scan_pattern_id=child.id,
                 pattern_description=(
                     f"{child_name} — {parent.description or ''}"
                 ),
@@ -4298,6 +4323,7 @@ def evolve_exit_strategies(db: Session) -> dict[str, Any]:
                     for uid in user_ids:
                         db.add(TradingInsight(
                             user_id=uid,
+                            scan_pattern_id=child.id,
                             pattern_description=f"{child.name} — {parent.description or ''}",
                             confidence=parent.confidence,
                             evidence_count=0,

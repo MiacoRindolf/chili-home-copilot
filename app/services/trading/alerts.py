@@ -239,6 +239,19 @@ def dispatch_alert(
         )
         db.add(record)
         db.commit()
+
+        try:
+            from ...routers.trading import _broadcast_alert_sync
+            _broadcast_alert_sync({
+                "ticker": ticker or "",
+                "alert_type": alert_type,
+                "price": price,
+                "message": message[:200] if message else "",
+                "trade_type": trade_type,
+                "duration_estimate": duration_estimate,
+            })
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"[alerts] dispatch_alert DB error: {e}")
         try:

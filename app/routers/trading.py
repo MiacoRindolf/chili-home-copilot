@@ -8,7 +8,9 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
+import asyncio
+
+from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -1546,6 +1548,7 @@ def api_suggest_pattern(
         if not existing_insight:
             insight = TradingInsight(
                 user_id=uid,
+                scan_pattern_id=p.id,
                 pattern_description=insight_desc,
                 confidence=0.5,
                 evidence_count=1,
@@ -1604,3 +1607,162 @@ def api_pattern_research_status():
     """Get the current status of web pattern research."""
     from ..services.trading.web_pattern_researcher import get_research_status
     return JSONResponse({"ok": True, **get_research_status()})
+
+
+# ---------------------------------------------------------------------------
+# Real-time WebSocket: live chart ticks + global alert push
+# ---------------------------------------------------------------------------
+
+import threading as _th
+
+_live_clients: set[WebSocket] = set()
+_live_clients_tlock = _th.Lock()
+
+
+async def broadcast_trading_alert(alert_data: dict[str, Any]) -> None:
+    """Push an alert to every connected live-trading WebSocket client."""
+    msg = json.dumps({"type": "alert", **alert_data})
+    with _live_clients_tlock:
+        clients = list(_live_clients)
+    stale: list[WebSocket] = []
+    for ws_c in clients:
+        try:
+            await ws_c.send_text(msg)
+        except Exception:
+            stale.append(ws_c)
+    if stale:
+        with _live_clients_tlock:
+            for ws_c in stale:
+                _live_clients.discard(ws_c)
+
+
+def _broadcast_alert_sync(alert_data: dict[str, Any]) -> None:
+    """Thread-safe wrapper so scheduler / alert code can call from sync context."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop and loop.is_running():
+        loop.create_task(broadcast_trading_alert(alert_data))
+    else:
+        try:
+            asyncio.run(broadcast_trading_alert(alert_data))
+        except RuntimeError:
+            pass
+
+
+@router.websocket("/ws/trading/live")
+async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
+    """Stream real-time price ticks for *ticker* and broadcast alerts globally."""
+    await ws.accept()
+    logger.info("[live-ws] Client connected for %s", ticker)
+
+    with _live_clients_tlock:
+        _live_clients.add(ws)
+
+    tick_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
+    massive_available = False
+    m_ticker = ""
+    _on_tick = None
+
+    try:
+        from ..services.massive_client import (
+            get_ws_client,
+            register_tick_listener,
+            unregister_tick_listener,
+            to_massive_ticker,
+            QuoteSnapshot,
+            TradeSnapshot,
+        )
+
+        m_ticker = to_massive_ticker(ticker).upper()
+
+        def _on_tick_cb(sym: str, snap):
+            try:
+                if hasattr(snap, "size") and snap.size:
+                    data = {"type": "tick", "price": snap.price,
+                            "size": snap.size, "time": snap.timestamp}
+                else:
+                    data = {"type": "tick", "price": snap.price,
+                            "size": 0, "time": snap.timestamp}
+                tick_queue.put_nowait(data)
+            except Exception:
+                pass
+
+        _on_tick = _on_tick_cb
+        ws_client = get_ws_client()
+        if ws_client.running:
+            ws_client.subscribe([m_ticker])
+            register_tick_listener(m_ticker, _on_tick)
+            massive_available = True
+            logger.info("[live-ws] Subscribed to Massive WS ticks for %s", m_ticker)
+        else:
+            logger.info("[live-ws] Massive WS not running, using poll fallback for %s", ticker)
+    except Exception as exc:
+        logger.warning("[live-ws] Massive WS setup failed: %s", exc)
+        massive_available = False
+
+    async def _poll_fallback():
+        """Periodic REST poll — always runs as heartbeat, faster when Massive WS is off."""
+        import time as _time
+        interval = 5 if massive_available else 1
+        while True:
+            try:
+                quote = await asyncio.to_thread(ts.fetch_quote, ticker)
+                if quote and quote.get("price") is not None:
+                    await tick_queue.put({
+                        "type": "tick",
+                        "price": float(quote["price"]),
+                        "size": 0,
+                        "time": _time.time(),
+                    })
+            except Exception:
+                pass
+            await asyncio.sleep(interval)
+
+    poll_task = asyncio.create_task(_poll_fallback())
+
+    try:
+        async def _sender():
+            while True:
+                msg = await tick_queue.get()
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    return
+
+        async def _receiver():
+            try:
+                while True:
+                    msg = await ws.receive()
+                    if msg.get("type") == "websocket.disconnect":
+                        return
+                    text = msg.get("text")
+                    if text:
+                        try:
+                            cmd = json.loads(text)
+                            if cmd.get("action") == "ping":
+                                await ws.send_json({"type": "pong"})
+                        except (json.JSONDecodeError, TypeError):
+                            pass
+            except WebSocketDisconnect:
+                return
+
+        await asyncio.gather(_sender(), _receiver())
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("[live-ws] Handler error for %s: %s", ticker, exc)
+    finally:
+        if poll_task:
+            poll_task.cancel()
+        if massive_available and _on_tick and m_ticker:
+            try:
+                from ..services.massive_client import unregister_tick_listener
+                unregister_tick_listener(m_ticker, _on_tick)
+            except Exception:
+                pass
+        with _live_clients_tlock:
+            _live_clients.discard(ws)
+        logger.info("[live-ws] Client disconnected for %s", ticker)

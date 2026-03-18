@@ -726,13 +726,13 @@ def _run_pattern_backfill_job():
         from ..db import SessionLocal
         from ..models.trading import TradingInsight, BacktestResult
         from .trading.backtest_engine import (
-            smart_backtest_insight, _extract_context, _find_linked_pattern,
+            smart_backtest_insight, _extract_context, _GENERIC_STRATEGY_NAMES,
         )
 
         db = SessionLocal()
         try:
             bt_by_insight: dict[int, list[str]] = {}
-            bt_strats_by_insight: dict[int, set[str]] = {}
+            bt_has_generic: dict[int, bool] = {}
             for row in (
                 db.query(
                     BacktestResult.related_insight_id,
@@ -743,39 +743,36 @@ def _run_pattern_backfill_job():
                 .all()
             ):
                 bt_by_insight.setdefault(row[0], []).append(row[1])
-                bt_strats_by_insight.setdefault(row[0], set()).add(row[2])
+                if row[2] in _GENERIC_STRATEGY_NAMES:
+                    bt_has_generic[row[0]] = True
 
-            candidates = db.query(TradingInsight).filter(
-                TradingInsight.evidence_count > 0,
-                TradingInsight.active.is_(True),
-            ).order_by(TradingInsight.last_seen.desc()).all()
+            candidates = (
+                db.query(TradingInsight)
+                .filter(TradingInsight.active.is_(True))
+                .order_by(TradingInsight.last_seen.desc())
+                .all()
+            )
 
             need_backtest = []
             for ins in candidates:
                 existing = bt_by_insight.get(ins.id, [])
 
-                # Linked to a ScanPattern but only generic backtests? Clear & re-queue.
-                linked = _find_linked_pattern(db, ins)
-                if linked:
-                    _, pat_name, _exit_cfg = linked
-                    strat_names = bt_strats_by_insight.get(ins.id, set())
-                    if pat_name not in strat_names and existing:
-                        old_count = (
-                            db.query(BacktestResult)
-                            .filter(BacktestResult.related_insight_id == ins.id)
-                            .delete()
-                        )
-                        ins.win_count = 0
-                        ins.loss_count = 0
-                        ins.evidence_count = max(1, ins.evidence_count)
-                        db.commit()
-                        logger.info(
-                            "[scheduler] Cleared %d stale generic backtests "
-                            "for insight %d (%s)",
-                            old_count, ins.id, pat_name,
-                        )
-                        need_backtest.append(ins)
-                        continue
+                if bt_has_generic.get(ins.id):
+                    old_count = (
+                        db.query(BacktestResult)
+                        .filter(BacktestResult.related_insight_id == ins.id)
+                        .delete()
+                    )
+                    ins.win_count = 0
+                    ins.loss_count = 0
+                    ins.evidence_count = max(1, ins.evidence_count)
+                    db.commit()
+                    logger.info(
+                        "[scheduler] Cleared %d generic backtests for insight %d",
+                        old_count, ins.id,
+                    )
+                    need_backtest.append(ins)
+                    continue
 
                 if len(existing) >= 50:
                     continue

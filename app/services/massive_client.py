@@ -641,9 +641,53 @@ class QuoteSnapshot:
     timestamp: float = 0.0  # time.time() when received
 
 
+@dataclass
+class TradeSnapshot:
+    price: float
+    size: int = 0
+    timestamp: float = 0.0
+
+
 _ws_cache: dict[str, QuoteSnapshot] = {}
 _ws_cache_lock = threading.Lock()
 _WS_STALENESS = 5.0  # seconds before a WS quote is considered stale
+
+# Tick listener registry — callbacks receive (symbol, QuoteSnapshot|TradeSnapshot)
+from typing import Callable
+TickCallback = Callable[[str, QuoteSnapshot | TradeSnapshot], None]
+_tick_listeners: dict[str, list[TickCallback]] = {}
+_tick_listeners_lock = threading.Lock()
+
+
+def register_tick_listener(ticker: str, callback: TickCallback) -> None:
+    """Register *callback* to receive every tick for *ticker*."""
+    sym = ticker.upper()
+    with _tick_listeners_lock:
+        _tick_listeners.setdefault(sym, []).append(callback)
+
+
+def unregister_tick_listener(ticker: str, callback: TickCallback) -> None:
+    """Remove a previously registered tick listener."""
+    sym = ticker.upper()
+    with _tick_listeners_lock:
+        cbs = _tick_listeners.get(sym)
+        if cbs:
+            try:
+                cbs.remove(callback)
+            except ValueError:
+                pass
+            if not cbs:
+                del _tick_listeners[sym]
+
+
+def _fire_tick_listeners(sym: str, snap: QuoteSnapshot | TradeSnapshot) -> None:
+    with _tick_listeners_lock:
+        cbs = list(_tick_listeners.get(sym, []))
+    for cb in cbs:
+        try:
+            cb(sym, snap)
+        except Exception:
+            pass
 
 
 def get_ws_quote(ticker: str) -> QuoteSnapshot | None:
@@ -714,10 +758,10 @@ class MassiveWSClient:
             return
         self._subscriptions.update(new)
         try:
-            sub_msg = json.dumps({
-                "action": "subscribe",
-                "params": ",".join(f"Q.{t}" for t in new),
-            })
+            params = ",".join(
+                f"Q.{t},T.{t}" for t in new
+            )
+            sub_msg = json.dumps({"action": "subscribe", "params": params})
             self._ws.send(sub_msg)
         except Exception as e:
             logger.warning(f"[massive-ws] subscribe error: {e}")
@@ -766,7 +810,9 @@ class MassiveWSClient:
     def _subscribe_all(self):
         if not self._subscriptions:
             return
-        params = ",".join(f"Q.{t}" for t in self._subscriptions)
+        params = ",".join(
+            f"Q.{t},T.{t}" for t in self._subscriptions
+        )
         self._ws.send(json.dumps({"action": "subscribe", "params": params}))
 
     def _handle_messages(self, raw: str):
@@ -778,21 +824,31 @@ class MassiveWSClient:
             msgs = [msgs]
         now = time.time()
         for msg in msgs:
-            if msg.get("ev") != "Q":
-                continue
+            ev = msg.get("ev")
             sym = msg.get("sym", "").upper()
             if not sym:
                 continue
-            snap = QuoteSnapshot(
-                price=(msg.get("bp", 0) + msg.get("ap", 0)) / 2 if msg.get("bp") and msg.get("ap") else msg.get("bp") or msg.get("ap") or 0,
-                bid=msg.get("bp"),
-                ask=msg.get("ap"),
-                bid_size=msg.get("bs"),
-                ask_size=msg.get("as"),
-                timestamp=now,
-            )
-            with _ws_cache_lock:
-                _ws_cache[sym] = snap
+
+            if ev == "Q":
+                snap = QuoteSnapshot(
+                    price=(msg.get("bp", 0) + msg.get("ap", 0)) / 2 if msg.get("bp") and msg.get("ap") else msg.get("bp") or msg.get("ap") or 0,
+                    bid=msg.get("bp"),
+                    ask=msg.get("ap"),
+                    bid_size=msg.get("bs"),
+                    ask_size=msg.get("as"),
+                    timestamp=now,
+                )
+                with _ws_cache_lock:
+                    _ws_cache[sym] = snap
+                _fire_tick_listeners(sym, snap)
+
+            elif ev == "T":
+                trade = TradeSnapshot(
+                    price=float(msg.get("p", 0)),
+                    size=int(msg.get("s", 0)),
+                    timestamp=now,
+                )
+                _fire_tick_listeners(sym, trade)
 
 
 # Singleton instance

@@ -245,14 +245,22 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ).order_by(TradingInsight.confidence.desc()).limit(200).all()
 
     scan_patterns_by_name: dict[str, ScanPattern] = {}
+    scan_patterns_by_id: dict[int, ScanPattern] = {}
     for sp in db.query(ScanPattern).all():
         scan_patterns_by_name[sp.name.lower()] = sp
+        scan_patterns_by_id[sp.id] = sp
 
     insight_ids = [ins.id for ins in all_insights]
     bt_tickers_map: dict[int, list[str]] = {}
+    bt_wl_map: dict[int, tuple[int, int]] = {}
     if insight_ids:
         for row in (
-            db.query(BacktestResult.related_insight_id, BacktestResult.ticker)
+            db.query(
+                BacktestResult.related_insight_id,
+                BacktestResult.ticker,
+                BacktestResult.return_pct,
+                BacktestResult.trade_count,
+            )
             .filter(
                 BacktestResult.related_insight_id.in_(insight_ids),
                 BacktestResult.related_insight_id.isnot(None),
@@ -260,6 +268,12 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             .all()
         ):
             bt_tickers_map.setdefault(row[0], []).append(row[1])
+            if (row[3] or 0) > 0:
+                w, l = bt_wl_map.get(row[0], (0, 0))
+                if (row[2] or 0) > 0:
+                    bt_wl_map[row[0]] = (w + 1, l)
+                else:
+                    bt_wl_map[row[0]] = (w, l + 1)
 
     _SECTOR_TICKERS: dict[str, set[str]] = {
         "tech": {"AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","AVGO","ORCL","CRM","ADBE","AMD","INTC","QCOM","TXN","NFLX","DDOG","NET","SNOW","PLTR","SHOP"},
@@ -304,12 +318,21 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         sectors = _detect_sectors(all_tickers)
         is_crypto = "crypto" in sectors
 
-        wc = ins.win_count or 0
-        lc = ins.loss_count or 0
+        bt_wl = bt_wl_map.get(ins.id)
+        if bt_wl:
+            wc, lc = bt_wl
+        else:
+            wc = ins.win_count or 0
+            lc = ins.loss_count or 0
         real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
 
-        name_part = desc.split("\u2014")[0].split(" - ")[0].strip().lower()
-        linked_sp = scan_patterns_by_name.get(name_part)
+        linked_sp = None
+        sp_id = getattr(ins, "scan_pattern_id", None)
+        if sp_id:
+            linked_sp = scan_patterns_by_id.get(sp_id)
+        if not linked_sp:
+            name_part = desc.split("\u2014")[0].split(" - ")[0].strip().lower()
+            linked_sp = scan_patterns_by_name.get(name_part)
         variant_info = None
         if linked_sp and linked_sp.parent_id is not None:
             variant_info = {
