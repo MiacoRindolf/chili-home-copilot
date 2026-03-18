@@ -238,10 +238,47 @@ def api_backfill_status():
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-    from ...models.trading import TradingInsight
+    from ...models.trading import TradingInsight, BacktestResult, ScanPattern
+
     all_insights = db.query(TradingInsight).filter(
         TradingInsight.user_id == ctx["user_id"],
-    ).order_by(TradingInsight.confidence.desc()).limit(50).all()
+    ).order_by(TradingInsight.confidence.desc()).limit(200).all()
+
+    scan_patterns_by_name: dict[str, ScanPattern] = {}
+    for sp in db.query(ScanPattern).all():
+        scan_patterns_by_name[sp.name.lower()] = sp
+
+    insight_ids = [ins.id for ins in all_insights]
+    bt_tickers_map: dict[int, list[str]] = {}
+    if insight_ids:
+        for row in (
+            db.query(BacktestResult.related_insight_id, BacktestResult.ticker)
+            .filter(
+                BacktestResult.related_insight_id.in_(insight_ids),
+                BacktestResult.related_insight_id.isnot(None),
+            )
+            .all()
+        ):
+            bt_tickers_map.setdefault(row[0], []).append(row[1])
+
+    _SECTOR_TICKERS: dict[str, set[str]] = {
+        "tech": {"AAPL","MSFT","GOOGL","AMZN","NVDA","META","TSLA","AVGO","ORCL","CRM","ADBE","AMD","INTC","QCOM","TXN","NFLX","DDOG","NET","SNOW","PLTR","SHOP"},
+        "finance": {"JPM","V","MA","BAC","GS","MS","AXP","BLK","SCHW","CME","HOOD","SOFI","COIN","SQ","PYPL"},
+        "healthcare": {"UNH","JNJ","LLY","ABBV","MRK","PFE","TMO","AMGN","GILD","VRTX","REGN","ISRG","MRNA"},
+        "consumer": {"WMT","COST","HD","LOW","TGT","PG","KO","PEP","MCD","SBUX","NKE","LULU","CMG"},
+        "industrial": {"CAT","DE","HON","UPS","BA","LMT","RTX","GE","EMR","ETN","AXON"},
+        "energy": {"XOM","CVX","COP","SLB","EOG","MPC","OXY","HAL","ENPH","FSLR"},
+    }
+
+    def _detect_sectors(tickers: list[str]) -> list[str]:
+        has_crypto = any(t.endswith("-USD") for t in tickers)
+        sectors: list[str] = []
+        if has_crypto:
+            sectors.append("crypto")
+        for sec, sec_set in _SECTOR_TICKERS.items():
+            if any(t in sec_set for t in tickers):
+                sectors.append(sec)
+        return sectors
 
     active = []
     demoted = []
@@ -260,11 +297,30 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         tickers_found = [t for t in ticker_match if len(t) >= 2 and t not in {
             "RSI", "MACD", "EMA", "SMA", "ADX", "ATR", "AND", "THE", "FOR",
             "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
-        }][:3]
+        }][:5]
+
+        bt_tickers = bt_tickers_map.get(ins.id, [])
+        all_tickers = list(set(tickers_found + bt_tickers))
+        sectors = _detect_sectors(all_tickers)
+        is_crypto = "crypto" in sectors
 
         wc = ins.win_count or 0
         lc = ins.loss_count or 0
         real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
+
+        name_part = desc.split("\u2014")[0].split(" - ")[0].strip().lower()
+        linked_sp = scan_patterns_by_name.get(name_part)
+        variant_info = None
+        if linked_sp and linked_sp.parent_id is not None:
+            variant_info = {
+                "label": linked_sp.variant_label,
+                "parent_id": linked_sp.parent_id,
+                "generation": linked_sp.generation or 0,
+                "exit_config": linked_sp.exit_config,
+            }
+        best_exit = None
+        if linked_sp and linked_sp.parent_id is None and linked_sp.exit_config:
+            best_exit = linked_sp.variant_label or "evolved"
 
         entry = {
             "id": ins.id,
@@ -278,8 +334,15 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "loss_count": lc,
             "avg_return": float(ret_match.group(1)) if ret_match else None,
             "example_tickers": tickers_found,
+            "bt_tickers": list(set(bt_tickers))[:8],
+            "is_crypto": is_crypto,
+            "sectors": sectors,
             "created_at": ins.created_at.isoformat(),
             "last_seen": ins.last_seen.isoformat() if ins.last_seen else None,
+            "variant": variant_info,
+            "best_exit": best_exit,
+            "scan_pattern_id": linked_sp.id if linked_sp else None,
+            "parent_scan_pattern_id": linked_sp.parent_id if linked_sp else None,
         }
         if ins.active:
             active.append(entry)
@@ -404,7 +467,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
             db.query(BacktestResult)
             .filter(BacktestResult.related_insight_id == pattern_id)
             .order_by(BacktestResult.ran_at.desc())
-            .limit(30)
+            .limit(60)
             .all()
         )
         for bt in linked_bts:
@@ -419,6 +482,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
                 "max_drawdown": bt.max_drawdown,
                 "trade_count": bt.trade_count,
                 "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
+                "params": bt.params,
                 "relevance": 100,
             })
 
@@ -448,16 +512,31 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
                         "max_drawdown": bt.max_drawdown,
                         "trade_count": bt.trade_count,
                         "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
+                        "params": bt.params,
                         "relevance": hits,
                     })
                     if len(backtests_out) >= 15:
                         break
-        backtests_out.sort(key=lambda x: -x.get("relevance", 0))
+        backtests_out.sort(
+            key=lambda x: (
+                0 if (x.get("trade_count") or 0) > 0 else 1,  # trades first
+                -(x.get("return_pct") or 0),                   # highest return
+                -x.get("relevance", 0),
+            )
+        )
     except Exception:
         pass
 
     # 5. Compute live aggregate stats from actual evidence
     computed_stats = _compute_evidence_stats(timeline, hypotheses, trades_out, backtests_out)
+
+    # Compute win/loss directly from actual BacktestResult records (not the
+    # cumulative counters on TradingInsight which can drift from duplicates).
+    bt_with_trades = [b for b in backtests_out if (b.get("trade_count") or 0) > 0]
+    bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
+    bt_losses = len(bt_with_trades) - bt_wins
+    bt_total = bt_wins + bt_losses
+    bt_win_rate = round(bt_wins / max(1, bt_total) * 100, 1) if bt_total > 0 else None
 
     return JSONResponse({
         "ok": True,
@@ -466,9 +545,9 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
             "pattern": desc,
             "confidence": round(insight.confidence * 100, 1),
             "evidence_count": insight.evidence_count,
-            "win_count": insight.win_count or 0,
-            "loss_count": insight.loss_count or 0,
-            "win_rate": round((insight.win_count or 0) / max(1, (insight.win_count or 0) + (insight.loss_count or 0)) * 100, 1) if ((insight.win_count or 0) + (insight.loss_count or 0)) > 0 else None,
+            "win_count": bt_wins,
+            "loss_count": bt_losses,
+            "win_rate": bt_win_rate,
             "active": insight.active,
             "created_at": insight.created_at.isoformat(),
             "last_seen": insight.last_seen.isoformat() if insight.last_seen else None,

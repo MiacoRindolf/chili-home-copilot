@@ -254,6 +254,10 @@ class ScanPattern(Base):
     score_boost: float = Column(Float, nullable=False, default=0.0)
     min_base_score: float = Column(Float, nullable=False, default=0.0)
     active: bool = Column(Boolean, nullable=False, default=True)
+    parent_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    exit_config: Optional[str] = Column(Text, nullable=True)
+    variant_label: Optional[str] = Column(String(40), nullable=True)
+    generation: int = Column(Integer, nullable=False, default=0)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 

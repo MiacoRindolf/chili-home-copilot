@@ -1184,88 +1184,45 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
 
 
 def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
-    """Run backtests on a sample of tickers to validate discovered patterns.
+    """Run smart, diversified backtests to validate discovered patterns.
 
-    Maps pattern types to the most relevant backtesting strategy and runs
-    backtests on the top-scored tickers. Updates pattern confidence based
-    on backtest win rates.
+    Uses the centralized ``smart_backtest_insight`` engine which picks
+    contextually relevant tickers across sectors, maps multiple strategies,
+    and runs them in parallel.
     """
-    from ..backtest_service import run_backtest, save_backtest, STRATEGIES
-
-    PATTERN_STRATEGY_MAP = {
-        "rsi": "rsi_reversal",
-        "macd": "macd",
-        "bollinger": "bb_bounce",
-        "ema": "ema_cross",
-        "sma": "sma_cross",
-        "trend": "trend_follow",
-        "momentum": "trend_follow",
-    }
+    from .backtest_engine import smart_backtest_insight
 
     insights = get_insights(db, user_id, limit=20)
     if not insights:
         return 0
 
-    test_tickers = list(DEFAULT_SCAN_TICKERS[:18]) + list(DEFAULT_CRYPTO_TICKERS[:7])
-
-    def _run_single_bt(args: tuple) -> dict[str, Any] | None:
-        ticker, strategy_id = args
-        if _shutting_down.is_set():
-            return None
-        try:
-            result = run_backtest(ticker, strategy_id=strategy_id, period="1y")
-            if result.get("ok") and result.get("trade_count", 0) > 0:
-                return result
-        except Exception:
-            pass
-        return None
-
     backtests_run = 0
-    _bt_workers = max(8, (os.cpu_count() or 4) * 2)
+    for ins in insights[:20]:
+        if _shutting_down.is_set():
+            break
+        old_conf = ins.confidence
+        try:
+            result = smart_backtest_insight(
+                db, ins, target_tickers=25, update_confidence=True,
+            )
+        except Exception:
+            continue
 
-    for ins in insights[:10]:
-        desc_lower = ins.pattern_description.lower()
-        strategy_id = None
-        for keyword, strat in PATTERN_STRATEGY_MAP.items():
-            if keyword in desc_lower:
-                strategy_id = strat
-                break
-        if not strategy_id:
-            strategy_id = "trend_follow"
+        total = result["total"]
+        wins = result["wins"]
+        backtests_run += result["backtests_run"]
 
-        jobs = [(t, strategy_id) for t in test_tickers[:10]]
-        wins = 0
-        total = 0
-        with ThreadPoolExecutor(max_workers=_bt_workers) as pool:
-            for result in pool.map(_run_single_bt, jobs):
-                if result is None:
-                    continue
-                save_backtest(db, user_id, result)
-                total += 1
-                if result.get("return_pct", 0) > 0:
-                    wins += 1
-                backtests_run += 1
+        if total >= 3 and abs(ins.confidence - old_conf) > 0.01:
+            log_learning_event(
+                db, user_id, "backtest_validation",
+                f"Pattern backtested ({wins}/{total} profitable): "
+                f"{ins.pattern_description[:80]} | conf {old_conf:.0%}->{ins.confidence:.0%}",
+                confidence_before=old_conf,
+                confidence_after=ins.confidence,
+                related_insight_id=ins.id,
+            )
 
-        if total >= 3:
-            bt_win_rate = wins / total
-            old_conf = ins.confidence
-            new_conf = old_conf * 0.7 + bt_win_rate * 0.3
-            ins.confidence = round(min(0.95, max(0.1, new_conf)), 3)
-            ins.evidence_count += total
-            ins.win_count = (ins.win_count or 0) + wins
-            ins.loss_count = (ins.loss_count or 0) + (total - wins)
-            db.commit()
-            if abs(new_conf - old_conf) > 0.01:
-                log_learning_event(
-                    db, user_id, "backtest_validation",
-                    f"Pattern backtested ({wins}/{total} profitable): "
-                    f"{ins.pattern_description[:80]} | conf {old_conf:.0%}->{ins.confidence:.0%}",
-                    confidence_before=old_conf,
-                    confidence_after=ins.confidence,
-                    related_insight_id=ins.id,
-                )
-
-    logger.info(f"[learning] Auto-backtest: {backtests_run} backtests across {len(insights[:10])} patterns")
+    logger.info(f"[learning] Auto-backtest: {backtests_run} backtests across {len(insights[:20])} patterns")
     return backtests_run
 
 
@@ -3841,9 +3798,10 @@ def discover_pattern_hypotheses(
         "For each proposed pattern, respond with JSON array. Each element:\n"
         '{"name": "...", "description": "...", "conditions": [{"indicator": "...", "op": "...", "value": ...}], '
         '"score_boost": 1.5, "min_base_score": 4.0}\n\n'
-        "Available indicators: rsi_14, ema_20, ema_50, ema_100, price, bb_squeeze, adx, "
-        "rel_vol, macd_hist, resistance_retests, dist_to_resistance_pct, narrow_range, "
-        "vcp_count, vwap_reclaim.\n"
+        "Available indicators: rsi_14, ema_9, ema_20, ema_50, ema_100, price, bb_squeeze, "
+        "bb_squeeze_firing, adx, rel_vol, macd_hist, resistance_retests, "
+        "dist_to_resistance_pct, narrow_range, vcp_count, vwap_reclaim, "
+        "daily_change_pct, gap_pct.\n"
         "Available ops: >, >=, <, <=, ==, between, any_of.\n"
         "Respond ONLY with the JSON array, no other text."
     )
@@ -3990,6 +3948,373 @@ def evolve_patterns(db: Session, min_evidence: int = 5, min_confidence: float = 
     if modified:
         db.commit()
     return modified
+
+
+# ── Exit-strategy evolution ─────────────────────────────────────────
+
+_EXIT_VARIANTS: list[dict[str, Any]] = [
+    {
+        "label": "No-BOS-breakout",
+        "config": {
+            "use_bos": False, "atr_mult": 3.0, "max_bars": 50,
+            "bos_buffer_pct": 0, "bos_grace_bars": 0,
+        },
+    },
+    {
+        "label": "BOS-tight",
+        "config": {
+            "use_bos": True, "atr_mult": 2.0, "max_bars": 25,
+            "bos_buffer_pct": 0.003, "bos_grace_bars": 3,
+        },
+    },
+    {
+        "label": "BOS-moderate",
+        "config": {
+            "use_bos": True, "atr_mult": 2.5, "max_bars": 35,
+            "bos_buffer_pct": 0.008, "bos_grace_bars": 4,
+        },
+    },
+    {
+        "label": "BOS-wide",
+        "config": {
+            "use_bos": True, "atr_mult": 3.0, "max_bars": 50,
+            "bos_buffer_pct": 0.015, "bos_grace_bars": 6,
+        },
+    },
+]
+
+_MAX_ACTIVE_VARIANTS = 4
+
+
+def fork_exit_variants(db: Session, pattern_id: int) -> list[int]:
+    """Clone *pattern_id* into exit-strategy variant children.
+
+    Each variant shares the parent's ``rules_json`` (entry conditions) but
+    carries a distinct ``exit_config``.  A ``TradingInsight`` is created for
+    each child so the backtest engine picks them up automatically.
+
+    Returns the list of newly created child ``ScanPattern.id`` values.
+    """
+    from ...models.trading import ScanPattern, TradingInsight
+
+    parent = db.query(ScanPattern).get(pattern_id)
+    if not parent or not parent.active:
+        return []
+
+    existing_children = (
+        db.query(ScanPattern)
+        .filter(ScanPattern.parent_id == pattern_id, ScanPattern.active.is_(True))
+        .count()
+    )
+    if existing_children >= _MAX_ACTIVE_VARIANTS:
+        return []
+
+    slots_available = _MAX_ACTIVE_VARIANTS - existing_children
+    existing_labels = set(
+        r[0] for r in db.query(ScanPattern.variant_label)
+        .filter(ScanPattern.parent_id == pattern_id)
+        .all() if r[0]
+    )
+
+    created_ids: list[int] = []
+
+    for variant in _EXIT_VARIANTS:
+        if len(created_ids) >= slots_available:
+            break
+        if variant["label"] in existing_labels:
+            continue
+
+        child_name = f"{parent.name} [{variant['label']}]"
+        config_json = json.dumps(variant["config"])
+
+        child = ScanPattern(
+            name=child_name,
+            description=parent.description,
+            rules_json=parent.rules_json,
+            origin="exit_variant",
+            asset_class=parent.asset_class,
+            confidence=parent.confidence,
+            evidence_count=0,
+            backtest_count=0,
+            score_boost=0.0,
+            min_base_score=parent.min_base_score,
+            active=True,
+            parent_id=parent.id,
+            exit_config=config_json,
+            variant_label=variant["label"],
+            generation=(parent.generation or 0) + 1,
+        )
+        db.add(child)
+        db.flush()
+
+        user_ids = [
+            r[0] for r in db.query(TradingInsight.user_id)
+            .filter(
+                TradingInsight.pattern_description.like(f"{parent.name}%"),
+                TradingInsight.active.is_(True),
+            )
+            .distinct()
+            .all()
+        ]
+        if not user_ids:
+            user_ids = [None]
+
+        for uid in user_ids:
+            insight = TradingInsight(
+                user_id=uid,
+                pattern_description=(
+                    f"{child_name} — {parent.description or ''}"
+                ),
+                confidence=parent.confidence,
+                evidence_count=0,
+                win_count=0,
+                loss_count=0,
+                active=True,
+            )
+            db.add(insight)
+
+        created_ids.append(child.id)
+        logger.info(
+            "[learning] Forked exit variant: %s (parent=%d, gen=%d)",
+            child_name, parent.id, child.generation,
+        )
+
+    if created_ids:
+        db.commit()
+    return created_ids
+
+
+def _mutate_exit_config(config: dict[str, Any]) -> dict[str, Any]:
+    """Create a small random mutation of an exit config."""
+    import random
+    mutated = dict(config)
+
+    atr = mutated.get("atr_mult", 2.0)
+    mutated["atr_mult"] = round(atr * random.uniform(0.85, 1.15), 2)
+    mutated["atr_mult"] = max(1.0, min(5.0, mutated["atr_mult"]))
+
+    max_bars = mutated.get("max_bars", 25)
+    mutated["max_bars"] = max(10, min(80, max_bars + random.randint(-5, 5)))
+
+    if mutated.get("use_bos"):
+        buf = mutated.get("bos_buffer_pct", 0.003)
+        mutated["bos_buffer_pct"] = round(
+            max(0.001, min(0.03, buf * random.uniform(0.8, 1.2))), 4
+        )
+        grace = mutated.get("bos_grace_bars", 3)
+        mutated["bos_grace_bars"] = max(2, min(10, grace + random.randint(-1, 1)))
+
+    return mutated
+
+
+def evolve_exit_strategies(db: Session) -> dict[str, Any]:
+    """Evolutionary loop for exit-strategy variants.
+
+    1. **Fork** — root patterns without children get initial exit variants.
+    2. **Compare** — variants with enough backtests are ranked; the best is
+       promoted and underperformers are deactivated.
+    3. **Mutate** — the winning variant spawns 1-2 new mutations.
+
+    Returns summary stats for logging.
+    """
+    from ...models.trading import (
+        ScanPattern, TradingInsight, BacktestResult, LearningEvent,
+    )
+
+    stats: dict[str, Any] = {"forked": 0, "promoted": 0, "deactivated": 0, "mutated": 0}
+
+    # ── 1. Fork phase ────────────────────────────────────────────────
+    root_patterns = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.parent_id.is_(None),
+            ScanPattern.origin != "exit_variant",
+        )
+        .all()
+    )
+
+    for rp in root_patterns:
+        child_count = (
+            db.query(func.count(ScanPattern.id))
+            .filter(ScanPattern.parent_id == rp.id, ScanPattern.active.is_(True))
+            .scalar()
+        )
+        if child_count == 0:
+            ids = fork_exit_variants(db, rp.id)
+            stats["forked"] += len(ids)
+
+    # ── 2. Compare phase ─────────────────────────────────────────────
+    parents_with_children = (
+        db.query(ScanPattern.parent_id)
+        .filter(ScanPattern.parent_id.isnot(None), ScanPattern.active.is_(True))
+        .distinct()
+        .all()
+    )
+
+    min_bt_per_variant = 5
+
+    for (parent_id,) in parents_with_children:
+        parent = db.query(ScanPattern).get(parent_id)
+        if not parent:
+            continue
+
+        siblings = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.parent_id == parent_id, ScanPattern.active.is_(True))
+            .all()
+        )
+        if len(siblings) < 2:
+            continue
+
+        variant_scores: list[tuple[ScanPattern, float, float, int]] = []
+
+        for sib in siblings:
+            bts = (
+                db.query(BacktestResult)
+                .join(
+                    TradingInsight,
+                    TradingInsight.id == BacktestResult.related_insight_id,
+                )
+                .filter(
+                    TradingInsight.pattern_description.like(f"{sib.name}%"),
+                    BacktestResult.trade_count > 0,
+                )
+                .all()
+            )
+            if len(bts) < min_bt_per_variant:
+                variant_scores = []
+                break
+
+            sharpes = [bt.sharpe for bt in bts if bt.sharpe is not None]
+            avg_sharpe = sum(sharpes) / len(sharpes) if sharpes else 0
+            wins = sum(1 for bt in bts if (bt.return_pct or 0) > 0)
+            wr = wins / len(bts) if bts else 0
+            variant_scores.append((sib, avg_sharpe, wr, len(bts)))
+
+        if not variant_scores or len(variant_scores) < 2:
+            continue
+
+        variant_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        winner = variant_scores[0][0]
+        winner_sharpe = variant_scores[0][1]
+        winner_wr = variant_scores[0][2]
+
+        if winner.exit_config:
+            parent.exit_config = winner.exit_config
+            parent.updated_at = datetime.utcnow()
+            logger.info(
+                "[learning] Promoted exit config from '%s' → parent '%s' "
+                "(sharpe=%.2f, wr=%.0f%%)",
+                winner.variant_label, parent.name, winner_sharpe, winner_wr * 100,
+            )
+            stats["promoted"] += 1
+
+        for loser, l_sharpe, l_wr, _ in variant_scores[1:]:
+            if winner_sharpe - l_sharpe > 0.3 or (winner_wr - l_wr) > 0.2:
+                loser.active = False
+                stats["deactivated"] += 1
+                logger.info(
+                    "[learning] Deactivated underperformer: '%s' (sharpe=%.2f vs %.2f)",
+                    loser.variant_label, l_sharpe, winner_sharpe,
+                )
+
+        try:
+            evt = LearningEvent(
+                user_id=None,
+                event_type="exit_evolution",
+                description=(
+                    f"Exit evolution for '{parent.name}': winner={winner.variant_label} "
+                    f"(sharpe={winner_sharpe:.2f}, wr={winner_wr:.0%}). "
+                    f"Compared {len(variant_scores)} variants."
+                ),
+                confidence_before=parent.confidence,
+                confidence_after=parent.confidence,
+            )
+            db.add(evt)
+        except Exception:
+            pass
+
+        # ── 3. Mutate phase ──────────────────────────────────────────
+        active_children = (
+            db.query(func.count(ScanPattern.id))
+            .filter(ScanPattern.parent_id == parent_id, ScanPattern.active.is_(True))
+            .scalar()
+        )
+        mutations_to_spawn = min(2, _MAX_ACTIVE_VARIANTS - active_children)
+
+        if mutations_to_spawn > 0 and winner.exit_config:
+            try:
+                base_config = json.loads(winner.exit_config)
+            except (json.JSONDecodeError, TypeError):
+                base_config = None
+
+            if base_config:
+                for _ in range(mutations_to_spawn):
+                    mutated = _mutate_exit_config(base_config)
+                    mut_label = (
+                        f"mut-g{(winner.generation or 0) + 1}-"
+                        f"atr{mutated['atr_mult']:.1f}"
+                    )
+
+                    existing = db.query(ScanPattern).filter(
+                        ScanPattern.parent_id == parent_id,
+                        ScanPattern.variant_label == mut_label,
+                    ).first()
+                    if existing:
+                        continue
+
+                    child = ScanPattern(
+                        name=f"{parent.name} [{mut_label}]",
+                        description=parent.description,
+                        rules_json=parent.rules_json,
+                        origin="exit_variant",
+                        asset_class=parent.asset_class,
+                        confidence=parent.confidence,
+                        evidence_count=0,
+                        backtest_count=0,
+                        score_boost=0.0,
+                        min_base_score=parent.min_base_score,
+                        active=True,
+                        parent_id=parent.id,
+                        exit_config=json.dumps(mutated),
+                        variant_label=mut_label,
+                        generation=(winner.generation or 0) + 1,
+                    )
+                    db.add(child)
+                    db.flush()
+
+                    user_ids = [
+                        r[0] for r in db.query(TradingInsight.user_id)
+                        .filter(
+                            TradingInsight.pattern_description.like(f"{parent.name}%"),
+                            TradingInsight.active.is_(True),
+                        )
+                        .distinct()
+                        .all()
+                    ]
+                    if not user_ids:
+                        user_ids = [None]
+                    for uid in user_ids:
+                        db.add(TradingInsight(
+                            user_id=uid,
+                            pattern_description=f"{child.name} — {parent.description or ''}",
+                            confidence=parent.confidence,
+                            evidence_count=0,
+                            win_count=0,
+                            loss_count=0,
+                            active=True,
+                        ))
+
+                    stats["mutated"] += 1
+                    logger.info(
+                        "[learning] Mutated new variant: '%s' from '%s'",
+                        mut_label, winner.variant_label,
+                    )
+
+    db.commit()
+    logger.info("[learning] Exit evolution complete: %s", stats)
+    return stats
 
 
 def run_learning_cycle(

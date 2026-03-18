@@ -1458,11 +1458,13 @@ class _SuggestPatternBody(_BaseModel):
 @router.post("/api/trading/patterns/suggest")
 def api_suggest_pattern(
     body: _SuggestPatternBody,
+    request: Request,
     db: Session = Depends(get_db),
 ):
-    """Parse a natural language pattern description into a ScanPattern."""
+    """Parse a natural language pattern description into a ScanPattern, TradingHypothesis, and TradingInsight."""
     from ..services.llm_caller import call_llm
     from ..services.trading.pattern_engine import create_pattern
+    from ..models.trading import TradingHypothesis, TradingInsight
     import json as _json
 
     prompt = (
@@ -1490,10 +1492,11 @@ def api_suggest_pattern(
             text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
 
         parsed = _json.loads(text)
+        conditions = parsed.get("conditions", [])
         pattern_data = {
             "name": parsed.get("name", "Custom Pattern"),
             "description": parsed.get("description", body.description),
-            "rules_json": _json.dumps({"conditions": parsed.get("conditions", [])}),
+            "rules_json": _json.dumps({"conditions": conditions}),
             "origin": "user",
             "score_boost": parsed.get("score_boost", 1.0),
             "min_base_score": parsed.get("min_base_score", 4.0),
@@ -1501,12 +1504,65 @@ def api_suggest_pattern(
             "active": True,
         }
         p = create_pattern(db, pattern_data)
+
+        hypothesis_id = None
+        if len(conditions) >= 2:
+            cond_a_parts = {c.get("indicator", "?"): c for c in conditions}
+            partial = conditions[:-1]
+            cond_b_parts = {c.get("indicator", "?"): c for c in partial}
+
+            hyp_desc = (
+                f"Full pattern '{p.name}' ({len(conditions)} conditions) "
+                f"outperforms partial ({len(partial)} conditions, "
+                f"without {conditions[-1].get('indicator', '?')})"
+            )
+            existing = db.query(TradingHypothesis).filter(
+                TradingHypothesis.description == hyp_desc,
+            ).first()
+            if not existing:
+                hyp = TradingHypothesis(
+                    description=hyp_desc,
+                    condition_a=_json.dumps(cond_a_parts),
+                    condition_b=_json.dumps(cond_b_parts),
+                    expected_winner="a",
+                    origin="user",
+                    status="pending",
+                    related_pattern_id=p.id,
+                )
+                db.add(hyp)
+                db.commit()
+                db.refresh(hyp)
+                hypothesis_id = hyp.id
+
+        ctx = get_identity_ctx(request, db)
+        uid = ctx.get("user_id")
+        insight_desc = (
+            f"{p.name} — {p.description or body.description} [User-suggested pattern]"
+        )
+        existing_insight = db.query(TradingInsight).filter(
+            TradingInsight.pattern_description.like(f"{p.name}%"),
+            TradingInsight.user_id == uid,
+        ).first()
+        if not existing_insight:
+            insight = TradingInsight(
+                user_id=uid,
+                pattern_description=insight_desc,
+                confidence=0.5,
+                evidence_count=1,
+                active=True,
+                win_count=0,
+                loss_count=0,
+            )
+            db.add(insight)
+            db.commit()
+
         return JSONResponse({
             "ok": True,
             "pattern": {
                 "id": p.id, "name": p.name, "description": p.description,
                 "rules_json": p.rules_json, "score_boost": p.score_boost,
             },
+            "hypothesis_id": hypothesis_id,
         })
     except _json.JSONDecodeError:
         return JSONResponse({"ok": False, "error": "Could not parse LLM response as JSON"}, status_code=500)

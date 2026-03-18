@@ -747,6 +747,294 @@ def _migration_027_backtest_insight_link(conn) -> None:
         conn.commit()
 
 
+def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
+    """Seed the RSI>70 + EMA stack + resistance retest breakout pattern."""
+    import json as _json
+
+    pat_name = "RSI Overbought + EMA Stack + Resistance Retest Breakout"
+    rules = _json.dumps({
+        "conditions": [
+            {"indicator": "rsi_14", "op": ">", "value": 70},
+            {"indicator": "price", "op": ">", "ref": "ema_20"},
+            {"indicator": "price", "op": ">", "ref": "ema_50"},
+            {"indicator": "price", "op": ">", "ref": "ema_100"},
+            {"indicator": "resistance_retests", "op": ">=", "value": 2,
+             "params": {"tolerance_pct": 1.5, "lookback": 20}},
+            {"indicator": "bb_squeeze", "op": "==", "value": True},
+        ]
+    })
+
+    if "scan_patterns" in _tables(conn):
+        existing = conn.execute(
+            text("SELECT id FROM scan_patterns WHERE name = :n"), {"n": pat_name}
+        ).fetchone()
+        if not existing:
+            conn.execute(text(
+                "INSERT INTO scan_patterns "
+                "(name, description, rules_json, origin, asset_class, confidence, "
+                " evidence_count, backtest_count, score_boost, min_base_score, "
+                " active, created_at, updated_at) "
+                "VALUES (:name, :desc, :rules, :origin, :ac, 0.0, 0, 0, 1.5, 4.0, "
+                " 1, datetime('now'), datetime('now'))"
+            ), {
+                "name": pat_name,
+                "desc": (
+                    "RSI overbought (>70) with full bullish EMA stack "
+                    "(price > EMA20 > EMA50 > EMA100), at least 2 resistance "
+                    "retests, and Bollinger squeeze consolidation before breakout."
+                ),
+                "rules": rules,
+                "origin": "user_seeded",
+                "ac": "all",
+            })
+            conn.commit()
+
+    if "trading_hypotheses" in _tables(conn):
+        hyp_desc = (
+            "RSI>70 + full EMA stack + resistance retest + BB squeeze "
+            "outperforms RSI>70 + EMA stack alone (without consolidation/retest)"
+        )
+        existing = conn.execute(
+            text("SELECT id FROM trading_hypotheses WHERE description = :d"),
+            {"d": hyp_desc},
+        ).fetchone()
+        if not existing:
+            cond_a = _json.dumps({
+                "rsi_14": ">70", "ema_stack": "bullish",
+                "resistance_retests": ">=2", "bb_squeeze": True,
+            })
+            cond_b = _json.dumps({
+                "rsi_14": ">70", "ema_stack": "bullish",
+            })
+            conn.execute(text(
+                "INSERT INTO trading_hypotheses "
+                "(description, condition_a, condition_b, expected_winner, "
+                " origin, status, times_tested, times_confirmed, "
+                " times_rejected, created_at) "
+                "VALUES (:desc, :ca, :cb, 'a', 'user_seeded', 'pending', "
+                " 0, 0, 0, datetime('now'))"
+            ), {"desc": hyp_desc, "ca": cond_a, "cb": cond_b})
+            conn.commit()
+
+
+def _migration_029_seed_rsi_ema_insight(conn) -> None:
+    """Create a TradingInsight for the seeded RSI+EMA pattern so it shows in the Brain UI."""
+    if "trading_insights" not in _tables(conn):
+        return
+
+    pat_desc = (
+        "RSI Overbought + EMA Stack + Resistance Retest Breakout — "
+        "RSI overbought (>70) with full bullish EMA stack "
+        "(price > EMA20 > EMA50 > EMA100), at least 2 resistance "
+        "retests, and Bollinger squeeze consolidation before breakout. "
+        "[User-seeded pattern]"
+    )
+
+    user_ids = [
+        r[0] for r in conn.execute(
+            text("SELECT DISTINCT user_id FROM trading_insights")
+        ).fetchall()
+    ]
+    if not user_ids:
+        user_ids = [None]
+
+    for uid in user_ids:
+        existing = conn.execute(
+            text(
+                "SELECT id FROM trading_insights "
+                "WHERE pattern_description LIKE :pat AND user_id IS :uid"
+            ),
+            {"pat": "RSI Overbought + EMA Stack%", "uid": uid},
+        ).fetchone()
+        if existing:
+            continue
+        conn.execute(text(
+            "INSERT INTO trading_insights "
+            "(user_id, pattern_description, confidence, evidence_count, "
+            " last_seen, created_at, active, win_count, loss_count) "
+            "VALUES (:uid, :desc, 0.5, 1, datetime('now'), datetime('now'), "
+            " 1, 0, 0)"
+        ), {"uid": uid, "desc": pat_desc})
+    conn.commit()
+
+
+def _migration_030_pattern_exit_evolution(conn) -> None:
+    """Add columns for exit-strategy evolution: parent_id, exit_config,
+    variant_label, generation on scan_patterns."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "parent_id" not in cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN parent_id INTEGER"))
+    if "exit_config" not in cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN exit_config TEXT"))
+    if "variant_label" not in cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN variant_label VARCHAR(40)"))
+    if "generation" not in cols:
+        conn.execute(text(
+            "ALTER TABLE scan_patterns ADD COLUMN generation INTEGER NOT NULL DEFAULT 0"
+        ))
+    conn.commit()
+
+
+def _migration_031_seed_ross_cameron_patterns(conn) -> None:
+    """Seed 5 Ross Cameron patterns from Warrior Trading methodology.
+
+    Source: 2025 Small Account Tool Kit PDF + '5 Step Stock Picking Trick'
+    YouTube video by Ross Cameron.
+    """
+    import json as _json
+
+    if "scan_patterns" not in _tables(conn):
+        return
+
+    _PATTERNS = [
+        {
+            "name": "RC 5 Pillars Momentum Scanner",
+            "desc": (
+                "Ross Cameron's 5 Pillars: relative volume >= 5x, price $1-$20, "
+                "daily move >= 10%, gap up > 3%. Identifies 'A quality' small-cap "
+                "momentum stocks with high demand and news-driven catalysts. "
+                "[User-seeded from Warrior Trading]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "rel_vol", "op": ">=", "value": 5.0},
+                    {"indicator": "price", "op": "between", "value": [1.0, 20.0]},
+                    {"indicator": "daily_change_pct", "op": ">=", "value": 10.0},
+                    {"indicator": "gap_pct", "op": ">", "value": 3.0},
+                ]
+            },
+        },
+        {
+            "name": "RC Small Cap Micro-Pullback",
+            "desc": (
+                "Ross Cameron's primary entry: buy micro-pullbacks on the front "
+                "side of momentum in $5-$10 stocks. RSI dipping (40-70) while "
+                "price holds above EMA 9 and MACD stays positive. "
+                "[User-seeded from Warrior Trading]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "rel_vol", "op": ">=", "value": 5.0},
+                    {"indicator": "price", "op": "between", "value": [5.0, 10.0]},
+                    {"indicator": "rsi_14", "op": "between", "value": [40, 70]},
+                    {"indicator": "price", "op": ">", "ref": "ema_9"},
+                    {"indicator": "macd_hist", "op": ">", "value": 0},
+                ]
+            },
+        },
+        {
+            "name": "RC Gap and Go",
+            "desc": (
+                "Ross Cameron's Gap and Go: stock gaps up >= 5% on news with "
+                "extreme relative volume (>= 5x), RSI strong (>= 60), confirming "
+                "momentum continuation above the gap. Price $1-$20 small-cap range. "
+                "[User-seeded from Warrior Trading]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "gap_pct", "op": ">=", "value": 5.0},
+                    {"indicator": "rel_vol", "op": ">=", "value": 5.0},
+                    {"indicator": "price", "op": "between", "value": [1.0, 20.0]},
+                    {"indicator": "rsi_14", "op": ">=", "value": 60},
+                    {"indicator": "daily_change_pct", "op": ">=", "value": 5.0},
+                ]
+            },
+        },
+        {
+            "name": "RC Bull Flag Breakout",
+            "desc": (
+                "Ross Cameron's Bull Flag Breakout: Bollinger squeeze firing "
+                "(consolidation breaking out) on small-cap stocks with elevated "
+                "relative volume (>= 3x), RSI > 50, and price above EMA 20. "
+                "[User-seeded from Warrior Trading]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "rel_vol", "op": ">=", "value": 3.0},
+                    {"indicator": "price", "op": "between", "value": [1.0, 20.0]},
+                    {"indicator": "bb_squeeze_firing", "op": "==", "value": True},
+                    {"indicator": "rsi_14", "op": ">", "value": 50},
+                    {"indicator": "price", "op": ">", "ref": "ema_20"},
+                ]
+            },
+        },
+        {
+            "name": "RC Flat Top Breakout",
+            "desc": (
+                "Ross Cameron's Flat Top Breakout: price within 1% of resistance "
+                "that has been tested >= 2 times, with elevated relative volume "
+                "(>= 3x) and RSI 50-75. Horizontal resistance breakout on "
+                "small-cap stocks. [User-seeded from Warrior Trading]"
+            ),
+            "rules": {
+                "conditions": [
+                    {"indicator": "dist_to_resistance_pct", "op": "<=", "value": 1.0},
+                    {"indicator": "resistance_retests", "op": ">=", "value": 2},
+                    {"indicator": "rel_vol", "op": ">=", "value": 3.0},
+                    {"indicator": "rsi_14", "op": "between", "value": [50, 75]},
+                    {"indicator": "price", "op": "between", "value": [1.0, 20.0]},
+                ]
+            },
+        },
+    ]
+
+    for pat in _PATTERNS:
+        existing = conn.execute(
+            text("SELECT id FROM scan_patterns WHERE name = :n"),
+            {"n": pat["name"]},
+        ).fetchone()
+        if existing:
+            continue
+        conn.execute(text(
+            "INSERT INTO scan_patterns "
+            "(name, description, rules_json, origin, asset_class, confidence, "
+            " evidence_count, backtest_count, score_boost, min_base_score, "
+            " active, created_at, updated_at) "
+            "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', 0.5, "
+            " 0, 0, 1.5, 4.0, 1, datetime('now'), datetime('now'))"
+        ), {
+            "name": pat["name"],
+            "desc": pat["desc"],
+            "rules": _json.dumps(pat["rules"]),
+        })
+    conn.commit()
+
+    if "trading_insights" not in _tables(conn):
+        return
+
+    user_ids = [
+        r[0] for r in conn.execute(
+            text("SELECT DISTINCT user_id FROM trading_insights")
+        ).fetchall()
+    ]
+    if not user_ids:
+        user_ids = [None]
+
+    for pat in _PATTERNS:
+        pat_desc = f"{pat['name']} \u2014 {pat['desc']}"
+        for uid in user_ids:
+            existing = conn.execute(
+                text(
+                    "SELECT id FROM trading_insights "
+                    "WHERE pattern_description LIKE :pat AND "
+                    "      (user_id IS :uid OR (user_id IS NULL AND :uid IS NULL))"
+                ),
+                {"pat": f"{pat['name']}%", "uid": uid},
+            ).fetchone()
+            if existing:
+                continue
+            conn.execute(text(
+                "INSERT INTO trading_insights "
+                "(user_id, pattern_description, confidence, evidence_count, "
+                " last_seen, created_at, active, win_count, loss_count) "
+                "VALUES (:uid, :desc, 0.5, 0, datetime('now'), "
+                " datetime('now'), 1, 0, 0)"
+            ), {"uid": uid, "desc": pat_desc})
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -776,6 +1064,10 @@ MIGRATIONS = [
     ("025_insight_win_loss_counts", _migration_025_insight_win_loss_counts),
     ("026_reset_backfilled_win_loss", _migration_026_reset_backfilled_win_loss),
     ("027_backtest_insight_link", _migration_027_backtest_insight_link),
+    ("028_seed_rsi_ema_breakout_pattern", _migration_028_seed_rsi_ema_breakout_pattern),
+    ("029_seed_rsi_ema_insight", _migration_029_seed_rsi_ema_insight),
+    ("030_pattern_exit_evolution", _migration_030_pattern_exit_evolution),
+    ("031_seed_ross_cameron_patterns", _migration_031_seed_ross_cameron_patterns),
 ]
 
 

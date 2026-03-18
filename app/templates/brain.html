@@ -263,6 +263,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pat-chip.on { background:rgba(139,92,246,.15); color:#8b5cf6; border-color:#8b5cf6; }
 .pat-chip.on.bullish { background:rgba(34,197,94,.12); color:#16a34a; border-color:#16a34a; }
 .pat-chip.on.bearish { background:rgba(239,68,68,.12); color:#dc2626; border-color:#dc2626; }
+.pat-chip.sector-chip.on { background:rgba(59,130,246,.12); color:#3b82f6; border-color:#3b82f6; }
+.pat-chip.sector-chip[data-sector="crypto"].on { background:rgba(245,158,11,.12); color:#d97706; border-color:#d97706; }
+.pat-sep { width:1px; height:16px; background:var(--border); margin:0 2px; flex-shrink:0; }
 .pat-count { font-size:10px; color:var(--text-muted); margin-bottom:6px; }
 
 /* Pattern cards */
@@ -289,6 +292,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pattern-card .pc-tickers { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
 .pattern-card .pc-ticker { padding:1px 6px; border-radius:4px; background:rgba(139,92,246,.1); color:#8b5cf6; font-size:9px; font-weight:600; cursor:pointer; }
 .pattern-card .pc-footer { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:9px; color:var(--text-muted); }
+.pattern-card.is-variant { margin-left:16px; border-left-width:2px; opacity:.85; }
+.pattern-card.is-variant:hover { opacity:1; }
 
 /* Prediction cards */
 .pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 8px; }
@@ -605,6 +610,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
           <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
           <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
+          <span class="pat-chip" data-sig="variants" onclick="togglePatChip(this)">Show Variants</span>
+          <span class="pat-sep"></span>
+          <span class="pat-chip sector-chip" data-sector="crypto" onclick="togglePatChip(this)">Crypto</span>
+          <span class="pat-chip sector-chip" data-sector="tech" onclick="togglePatChip(this)">Tech</span>
+          <span class="pat-chip sector-chip" data-sector="finance" onclick="togglePatChip(this)">Finance</span>
+          <span class="pat-chip sector-chip" data-sector="healthcare" onclick="togglePatChip(this)">Healthcare</span>
+          <span class="pat-chip sector-chip" data-sector="consumer" onclick="togglePatChip(this)">Consumer</span>
+          <span class="pat-chip sector-chip" data-sector="industrial" onclick="togglePatChip(this)">Industrial</span>
+          <span class="pat-chip sector-chip" data-sector="energy" onclick="togglePatChip(this)">Energy</span>
         </div>
         <div class="pat-count" id="pat-count"></div>
         <div id="brain-patterns" style="max-height:500px;overflow-y:auto"></div>
@@ -1411,15 +1425,18 @@ function _getPatFilters() {
   var sort = document.getElementById('pat-sort').value;
   var search = (document.getElementById('pat-search').value || '').toLowerCase().trim();
   var chips = document.querySelectorAll('#pat-toolbar .pat-chip');
-  var signals = [], backtested = false, showDemoted = false;
+  var signals = [], sectors = [], backtested = false, showDemoted = false, showVariants = false;
   chips.forEach(function(c) {
     if (!c.classList.contains('on')) return;
+    var sec = c.getAttribute('data-sector');
+    if (sec) { sectors.push(sec); return; }
     var s = c.getAttribute('data-sig');
     if (s === 'backtested') backtested = true;
     else if (s === 'demoted') showDemoted = true;
+    else if (s === 'variants') showVariants = true;
     else signals.push(s);
   });
-  return {sort: sort, search: search, signals: signals, backtested: backtested, showDemoted: showDemoted};
+  return {sort:sort, search:search, signals:signals, backtested:backtested, showDemoted:showDemoted, showVariants:showVariants, sectors:sectors};
 }
 
 function renderPatterns() {
@@ -1441,26 +1458,59 @@ function renderPatterns() {
     return;
   }
 
+  if (!f.showVariants) all = all.filter(function(p){ return !p.variant; });
   if (f.search) all = all.filter(function(p){ return (p.pattern||'').toLowerCase().indexOf(f.search) !== -1; });
   if (f.signals.length) all = all.filter(function(p){ return f.signals.indexOf(p.signal_type||'neutral') !== -1; });
   if (f.backtested) all = all.filter(function(p){ return ((p.win_count||0) + (p.loss_count||0)) > 0; });
+  if (f.sectors.length) all = all.filter(function(p) {
+    var ps = p.sectors || [];
+    return f.sectors.some(function(s){ return ps.indexOf(s) !== -1; });
+  });
 
   var sortKey = f.sort;
   all.sort(function(a,b) {
-    if (sortKey === 'win_rate') return (b.win_rate||0) - (a.win_rate||0);
-    if (sortKey === 'evidence') return (b.evidence_count||0) - (a.evidence_count||0);
-    if (sortKey === 'newest') return (b.created_at||'') > (a.created_at||'') ? 1 : -1;
-    if (sortKey === 'recent') return (b.last_seen||'') > (a.last_seen||'') ? 1 : -1;
-    return (b.confidence||0) - (a.confidence||0);
+    var d = 0;
+    if (sortKey === 'win_rate') {
+      d = (b.win_rate||0) - (a.win_rate||0);
+      if (d === 0) d = ((b.win_count||0)+(b.loss_count||0)) - ((a.win_count||0)+(a.loss_count||0));
+      if (d === 0) d = (b.confidence||0) - (a.confidence||0);
+    } else if (sortKey === 'evidence') {
+      d = (b.evidence_count||0) - (a.evidence_count||0);
+      if (d === 0) d = (b.confidence||0) - (a.confidence||0);
+    } else if (sortKey === 'newest') {
+      var ca = a.created_at||'', cb = b.created_at||'';
+      d = ca < cb ? 1 : ca > cb ? -1 : 0;
+    } else if (sortKey === 'recent') {
+      var la = a.last_seen||'', lb = b.last_seen||'';
+      d = la < lb ? 1 : la > lb ? -1 : 0;
+    } else {
+      d = (b.confidence||0) - (a.confidence||0);
+    }
+    return d;
   });
 
   countEl.textContent = 'Showing ' + all.length + ' of ' + totalAll + ' patterns';
 
   var html = '';
   all.forEach(function(p) {
-    var confColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
     var sig = p.signal_type || 'neutral';
     var isDemoted = p._demoted;
+
+    var heroValue, heroLabel, heroColor;
+    if (sortKey === 'win_rate') {
+      var wr = p.win_rate != null ? p.win_rate : 0;
+      heroValue = wr + '%';
+      heroLabel = 'win rate';
+      heroColor = wr >= 60 ? '#22c55e' : wr >= 45 ? '#f59e0b' : '#ef4444';
+    } else if (sortKey === 'evidence') {
+      heroValue = p.evidence_count || 0;
+      heroLabel = 'evidence';
+      heroColor = '#8b5cf6';
+    } else {
+      heroValue = p.confidence + '%';
+      heroLabel = 'confidence';
+      heroColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
+    }
 
     var wrHtml = '';
     if (p.win_rate != null) {
@@ -1468,23 +1518,50 @@ function renderPatterns() {
       wrHtml = '<span class="pc-pill ' + wrClass + '">' + p.win_rate + '% win</span>' +
                '<span class="pc-pill">' + (p.win_count||0) + 'W / ' + (p.loss_count||0) + 'L</span>';
     }
+    if (sortKey !== 'confidence') {
+      wrHtml += '<span class="pc-pill" style="opacity:.7">' + p.confidence + '% conf</span>';
+    }
 
     var retHtml = p.avg_return != null ? '<span class="pc-pill">' + (p.avg_return > 0 ? '+' : '') + p.avg_return + '% avg</span>' : '';
 
     var tickersHtml = '';
-    if (p.example_tickers && p.example_tickers.length) {
+    var sectors = p.sectors || [];
+    var tagsHtml = '';
+    sectors.forEach(function(sec) {
+      if (sec === 'crypto') {
+        tagsHtml += '<span class="pc-pill" style="background:rgba(245,158,11,.1);color:#d97706">crypto</span>';
+      } else {
+        tagsHtml += '<span class="pc-pill" style="background:rgba(59,130,246,.1);color:#3b82f6">' + sec + '</span>';
+      }
+    });
+    var displayTickers = (p.example_tickers && p.example_tickers.length) ? p.example_tickers : (p.bt_tickers || []).slice(0, 4);
+    if (displayTickers.length || tagsHtml) {
       tickersHtml = '<div class="pc-tickers">';
-      p.example_tickers.forEach(function(t){ tickersHtml += '<span class="pc-ticker">' + t + '</span>'; });
+      if (tagsHtml) tickersHtml += tagsHtml;
+      displayTickers.forEach(function(t){ tickersHtml += '<span class="pc-ticker">' + t + '</span>'; });
       tickersHtml += '</div>';
     }
 
     var lastSeen = p.last_seen ? timeSince(new Date(p.last_seen)) + ' ago' : '';
 
-    html += '<div class="pattern-card sig-' + sig + (isDemoted ? ' demoted' : '') + '" style="cursor:pointer" onclick="showPatternDetail(' + p.id + ')">' +
+    var variantBadge = '';
+    if (p.variant && p.variant.label) {
+      variantBadge = '<span class="pc-signal" style="background:rgba(59,130,246,.12);color:#3b82f6;font-size:8px">' + escHtml(p.variant.label) + ' g' + (p.variant.generation||0) + '</span>';
+    }
+    var bestExitBadge = '';
+    if (p.best_exit && !p.variant) {
+      bestExitBadge = '<span class="pc-signal" style="background:rgba(34,197,94,.12);color:#16a34a;font-size:8px">best: ' + escHtml(p.best_exit) + '</span>';
+    }
+
+    html += '<div class="pattern-card sig-' + sig + (isDemoted ? ' demoted' : '') + (p.variant ? ' is-variant' : '') + '" style="cursor:pointer" onclick="showPatternDetail(' + p.id + ')"' +
+      (p.parent_scan_pattern_id ? ' data-parent-sp="' + p.parent_scan_pattern_id + '"' : '') +
+      (p.scan_pattern_id ? ' data-sp="' + p.scan_pattern_id + '"' : '') +
+    '>' +
       '<div class="pc-header">' +
         '<span class="pc-signal ' + sig + '">' + sig + '</span>' +
         (isDemoted ? '<span class="pc-signal demoted-badge">demoted</span>' : '') +
-        '<span class="pc-conf" style="color:' + confColor + '">' + p.confidence + '%</span>' +
+        variantBadge + bestExitBadge +
+        '<span class="pc-conf" style="color:' + heroColor + '">' + heroValue + '<span style="display:block;font-size:8px;font-weight:400;opacity:.6">' + heroLabel + '</span></span>' +
       '</div>' +
       '<div class="pc-desc" title="' + escHtml(p.pattern) + '">' + escHtml(p.pattern) + '</div>' +
       '<div class="pc-stats">' +
@@ -1695,18 +1772,28 @@ function _renderEvTrades(trades) {
 function _renderEvBacktests(bts) {
   var el = document.getElementById('ev-pane-backtests');
   if (!bts.length) { el.innerHTML = '<div class="ev-empty">No backtest results found for this pattern.</div>'; return; }
-  var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Strategy</th><th>Return</th><th>Win Rate</th><th>Sharpe</th><th>Max DD</th><th>Trades</th><th>Date</th></tr></thead><tbody>';
+  var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Strategy</th><th>Return</th><th>Win Rate</th><th>Sharpe</th><th>Max DD</th><th>Trades</th><th>Period</th><th>Ran</th></tr></thead><tbody>';
   bts.forEach(function(b) {
     var retClass = b.return_pct > 0 ? 'ev-pnl-pos' : (b.return_pct < 0 ? 'ev-pnl-neg' : '');
+    var noTrades = (b.trade_count || 0) === 0;
+    var rowStyle = noTrades ? ' style="opacity:.5"' : '';
     var dateStr = b.ran_at ? new Date(b.ran_at).toLocaleDateString() : '--';
-    html += '<tr>' +
+    var periodStr = '--';
+    try {
+      if (b.params) {
+        var p = typeof b.params === 'string' ? JSON.parse(b.params) : b.params;
+        if (p && p.period) periodStr = p.period;
+      }
+    } catch(e) {}
+    html += '<tr' + rowStyle + '>' +
       '<td><b>' + escHtml(b.ticker) + '</b></td>' +
       '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
-      '<td class="' + retClass + '">' + (b.return_pct != null ? b.return_pct.toFixed(1) + '%' : '--') + '</td>' +
-      '<td>' + (b.win_rate != null ? b.win_rate.toFixed(0) + '%' : '--') + '</td>' +
-      '<td>' + (b.sharpe != null ? b.sharpe.toFixed(2) : '--') + '</td>' +
-      '<td>' + (b.max_drawdown != null ? b.max_drawdown.toFixed(1) + '%' : '--') + '</td>' +
+      '<td class="' + retClass + '">' + (noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (b.return_pct != null ? b.return_pct.toFixed(1) + '%' : '--')) + '</td>' +
+      '<td>' + (noTrades ? '--' : (b.win_rate != null ? b.win_rate.toFixed(0) + '%' : '--')) + '</td>' +
+      '<td>' + (noTrades ? '--' : (b.sharpe != null ? b.sharpe.toFixed(2) : '--')) + '</td>' +
+      '<td>' + (noTrades ? '--' : (b.max_drawdown != null ? b.max_drawdown.toFixed(1) + '%' : '--')) + '</td>' +
       '<td>' + (b.trade_count||0) + '</td>' +
+      '<td>' + periodStr + '</td>' +
       '<td>' + dateStr + '</td>' +
     '</tr>';
   });

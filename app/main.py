@@ -49,35 +49,150 @@ except Exception:
 _backfill_state: dict = {"running": False, "total": 0, "done": 0, "filled": 0}
 
 
-def _backfill_backtests():
-    """Background: run real backtests for insights that have no win/loss data yet."""
-    _log = logging.getLogger("chili.backfill")
+def _dedup_backtests():
+    """One-time cleanup: remove duplicate BacktestResults per
+    (related_insight_id, ticker, strategy_name), keeping only the newest
+    record in each group. Then recompute win/loss counters on TradingInsight.
+    """
+    _log = logging.getLogger("chili.dedup")
     try:
         from .db import SessionLocal as _SL
-        from .models.trading import TradingInsight
-        from .services.backtest_service import run_backtest, save_backtest
-        from .services.trading.market_data import DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS
-
-        _STRATEGY_MAP = {
-            "rsi": "rsi_reversal", "macd": "macd", "bollinger": "bb_bounce",
-            "ema": "ema_cross", "sma": "sma_cross",
-            "trend": "trend_follow", "momentum": "trend_follow",
-        }
-        tickers = list(DEFAULT_SCAN_TICKERS[:4]) + list(DEFAULT_CRYPTO_TICKERS[:1])
-
-        from .models.trading import BacktestResult as _BT
+        from .models.trading import TradingInsight, BacktestResult as _BT
 
         db = _SL()
         try:
-            ids_with_linked_bts = {
-                r[0] for r in db.query(_BT.related_insight_id).filter(
-                    _BT.related_insight_id.isnot(None)
-                ).distinct().all()
-            }
+            from sqlalchemy import func
+
+            groups = (
+                db.query(
+                    _BT.related_insight_id,
+                    _BT.ticker,
+                    _BT.strategy_name,
+                    func.count(_BT.id).label("cnt"),
+                    func.max(_BT.id).label("keep_id"),
+                )
+                .filter(_BT.related_insight_id.isnot(None))
+                .group_by(_BT.related_insight_id, _BT.ticker, _BT.strategy_name)
+                .having(func.count(_BT.id) > 1)
+                .all()
+            )
+            if not groups:
+                _log.info("[dedup] No duplicate backtests found")
+                return
+
+            total_deleted = 0
+            insight_ids: set[int] = set()
+            for row in groups:
+                ins_id, ticker, strat, cnt, keep_id = row
+                deleted = (
+                    db.query(_BT)
+                    .filter(
+                        _BT.related_insight_id == ins_id,
+                        _BT.ticker == ticker,
+                        _BT.strategy_name == strat,
+                        _BT.id != keep_id,
+                    )
+                    .delete(synchronize_session=False)
+                )
+                total_deleted += deleted
+                insight_ids.add(ins_id)
+
+            db.flush()
+
+            for ins_id in insight_ids:
+                ins = db.get(TradingInsight, ins_id)
+                if not ins:
+                    continue
+                bts = (
+                    db.query(_BT)
+                    .filter(_BT.related_insight_id == ins_id)
+                    .all()
+                )
+                with_trades = [b for b in bts if (b.trade_count or 0) > 0]
+                ins.win_count = sum(1 for b in with_trades if (b.return_pct or 0) > 0)
+                ins.loss_count = len(with_trades) - ins.win_count
+                ins.evidence_count = max(1, ins.evidence_count or 1)
+
+            db.commit()
+            _log.info(
+                "[dedup] Removed %d duplicate backtests across %d insights",
+                total_deleted, len(insight_ids),
+            )
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("[dedup] Failed to clean up duplicate backtests")
+
+
+def _backfill_backtests():
+    """Background: run smart backtests for insights that lack linked results,
+    don't cover the right asset class, or have only generic backtests when a
+    pattern-aware backtest should be used instead."""
+    _log = logging.getLogger("chili.backfill")
+    try:
+        from .db import SessionLocal as _SL
+        from .models.trading import TradingInsight, BacktestResult as _BT
+        from .services.trading.backtest_engine import (
+            smart_backtest_insight, _extract_context, _find_linked_pattern,
+        )
+
+        db = _SL()
+        try:
+            bt_by_insight: dict[int, list[str]] = {}
+            bt_strats_by_insight: dict[int, set[str]] = {}
+            for row in (
+                db.query(
+                    _BT.related_insight_id, _BT.ticker, _BT.strategy_name,
+                )
+                .filter(_BT.related_insight_id.isnot(None))
+                .all()
+            ):
+                bt_by_insight.setdefault(row[0], []).append(row[1])
+                bt_strats_by_insight.setdefault(row[0], set()).add(row[2])
+
             all_candidates = db.query(TradingInsight).filter(
                 TradingInsight.evidence_count > 0,
             ).all()
-            stale = [ins for ins in all_candidates if ins.id not in ids_with_linked_bts]
+
+            stale: list = []
+            for ins in all_candidates:
+                existing = bt_by_insight.get(ins.id, [])
+                if not existing:
+                    stale.append(ins)
+                    continue
+
+                # Check if insight has a linked ScanPattern but only generic
+                # backtests — delete the old ones and re-queue.
+                linked = _find_linked_pattern(db, ins)
+                if linked:
+                    _, pat_name, _exit_cfg = linked
+                    strat_names = bt_strats_by_insight.get(ins.id, set())
+                    has_pattern_bt = pat_name in strat_names
+                    if not has_pattern_bt:
+                        old_count = (
+                            db.query(_BT)
+                            .filter(_BT.related_insight_id == ins.id)
+                            .delete()
+                        )
+                        ins.win_count = 0
+                        ins.loss_count = 0
+                        ins.evidence_count = max(1, ins.evidence_count)
+                        db.commit()
+                        _log.info(
+                            "Cleared %d stale generic backtests for insight %d "
+                            "(%s) — will re-run with pattern-aware engine",
+                            old_count, ins.id, pat_name,
+                        )
+                        stale.append(ins)
+                        continue
+
+                ctx = _extract_context(
+                    ins.pattern_description or "", db=db, insight_id=ins.id,
+                )
+                if ctx["wants_crypto"]:
+                    has_crypto_bt = any(t.endswith("-USD") for t in existing)
+                    if not has_crypto_bt:
+                        stale.append(ins)
 
             if not stale:
                 _log.info("No insights need backtest backfill")
@@ -88,35 +203,14 @@ def _backfill_backtests():
             _backfill_state["done"] = 0
             _backfill_state["filled"] = 0
 
-            _log.info(f"Running backtest backfill for {len(stale)} insights...")
+            _log.info(f"Running smart backtest backfill for {len(stale)} insights...")
             for ins in stale:
-                desc = ins.pattern_description.lower()
-                strategy = "trend_follow"
-                for kw, strat in _STRATEGY_MAP.items():
-                    if kw in desc:
-                        strategy = strat
-                        break
-
-                wins, losses = 0, 0
-                for t in tickers:
-                    try:
-                        result = run_backtest(t, strategy_id=strategy, period="1y")
-                        if result.get("ok") and result.get("trade_count", 0) > 0:
-                            save_backtest(db, ins.user_id, result, insight_id=ins.id)
-                            if result.get("return_pct", 0) > 0:
-                                wins += 1
-                            else:
-                                losses += 1
-                    except Exception:
-                        continue
-
-                if wins + losses > 0:
-                    ins.win_count = (ins.win_count or 0) + wins
-                    ins.loss_count = (ins.loss_count or 0) + losses
-                    ins.evidence_count = (ins.evidence_count or 0) + wins + losses
-                    db.commit()
-                    _backfill_state["filled"] += 1
-
+                try:
+                    result = smart_backtest_insight(db, ins, target_tickers=25)
+                    if result["total"] > 0:
+                        _backfill_state["filled"] += 1
+                except Exception:
+                    pass
                 _backfill_state["done"] += 1
 
             _log.info(
@@ -143,6 +237,7 @@ async def lifespan(app: FastAPI):
     _restore_broker_sessions()
     _start_massive_ws()
     _prewarm_market_context()
+    _dedup_backtests()
     threading.Thread(target=_backfill_backtests, daemon=True).start()
     yield
     _stop_massive_ws()

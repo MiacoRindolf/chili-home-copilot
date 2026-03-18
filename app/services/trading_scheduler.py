@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
+from sqlalchemy import func
 
 logger = logging.getLogger(__name__)
 
@@ -707,13 +708,136 @@ def _run_project_brain_job():
 
 
 def _run_pattern_backfill_job():
-    """Periodically backtest any patterns that still lack win/loss data."""
-    from ..main import _backfill_backtests, _backfill_state
+    """Periodically backtest patterns: new ones and recently reinforced ones.
+
+    Skips patterns that already have 50+ linked backtests with a stable
+    win rate (the engine will still pick them up during the full learning
+    cycle).  Prioritizes patterns with recent evidence but few backtests.
+    Insights linked to a ScanPattern that only have generic backtests get
+    their old results cleared and are re-queued for pattern-aware backtesting.
+    """
+    from ..main import _backfill_state
     if _backfill_state.get("running"):
         logger.info("[scheduler] Pattern backfill already running, skipping")
         return
-    logger.info("[scheduler] Starting pattern backfill for new/untested patterns")
-    _backfill_backtests()
+
+    logger.info("[scheduler] Starting smart pattern backfill")
+    try:
+        from ..db import SessionLocal
+        from ..models.trading import TradingInsight, BacktestResult
+        from .trading.backtest_engine import (
+            smart_backtest_insight, _extract_context, _find_linked_pattern,
+        )
+
+        db = SessionLocal()
+        try:
+            bt_by_insight: dict[int, list[str]] = {}
+            bt_strats_by_insight: dict[int, set[str]] = {}
+            for row in (
+                db.query(
+                    BacktestResult.related_insight_id,
+                    BacktestResult.ticker,
+                    BacktestResult.strategy_name,
+                )
+                .filter(BacktestResult.related_insight_id.isnot(None))
+                .all()
+            ):
+                bt_by_insight.setdefault(row[0], []).append(row[1])
+                bt_strats_by_insight.setdefault(row[0], set()).add(row[2])
+
+            candidates = db.query(TradingInsight).filter(
+                TradingInsight.evidence_count > 0,
+                TradingInsight.active.is_(True),
+            ).order_by(TradingInsight.last_seen.desc()).all()
+
+            need_backtest = []
+            for ins in candidates:
+                existing = bt_by_insight.get(ins.id, [])
+
+                # Linked to a ScanPattern but only generic backtests? Clear & re-queue.
+                linked = _find_linked_pattern(db, ins)
+                if linked:
+                    _, pat_name, _exit_cfg = linked
+                    strat_names = bt_strats_by_insight.get(ins.id, set())
+                    if pat_name not in strat_names and existing:
+                        old_count = (
+                            db.query(BacktestResult)
+                            .filter(BacktestResult.related_insight_id == ins.id)
+                            .delete()
+                        )
+                        ins.win_count = 0
+                        ins.loss_count = 0
+                        ins.evidence_count = max(1, ins.evidence_count)
+                        db.commit()
+                        logger.info(
+                            "[scheduler] Cleared %d stale generic backtests "
+                            "for insight %d (%s)",
+                            old_count, ins.id, pat_name,
+                        )
+                        need_backtest.append(ins)
+                        continue
+
+                if len(existing) >= 50:
+                    continue
+                if not existing:
+                    need_backtest.append(ins)
+                    continue
+                ctx = _extract_context(
+                    ins.pattern_description or "", db=db, insight_id=ins.id,
+                )
+                if ctx["wants_crypto"] and not any(
+                    t.endswith("-USD") for t in existing
+                ):
+                    need_backtest.append(ins)
+                    continue
+                if len(existing) < 50:
+                    need_backtest.append(ins)
+
+            if not need_backtest:
+                logger.info("[scheduler] All patterns sufficiently backtested")
+                return
+
+            _backfill_state["running"] = True
+            _backfill_state["total"] = len(need_backtest)
+            _backfill_state["done"] = 0
+            _backfill_state["filled"] = 0
+
+            for ins in need_backtest:
+                try:
+                    result = smart_backtest_insight(db, ins, target_tickers=25)
+                    if result["total"] > 0:
+                        _backfill_state["filled"] += 1
+                except Exception:
+                    pass
+                _backfill_state["done"] += 1
+
+            logger.info(
+                f"[scheduler] Pattern backfill complete: "
+                f"{_backfill_state['filled']}/{len(need_backtest)} updated"
+            )
+        finally:
+            _backfill_state["running"] = False
+            db.close()
+    except Exception as e:
+        _backfill_state["running"] = False
+        logger.warning(f"[scheduler] Pattern backfill failed: {e}")
+
+
+def _run_exit_evolution_job():
+    """Periodically fork, compare, and evolve exit-strategy variants."""
+    logger.info("[scheduler] Starting exit-strategy evolution")
+    try:
+        from ..db import SessionLocal
+        from .trading.learning import evolve_exit_strategies
+
+        db = SessionLocal()
+        try:
+            stats = evolve_exit_strategies(db)
+            logger.info("[scheduler] Exit evolution done: %s", stats)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("[scheduler] Exit evolution failed: %s", e)
 
 
 def start_scheduler():
@@ -871,6 +995,16 @@ def start_scheduler():
             max_instances=1,
         )
 
+        _scheduler.add_job(
+            _run_exit_evolution_job,
+            trigger=IntervalTrigger(hours=2),
+            id="exit_evolution",
+            name="Exit-strategy evolution (every 2h)",
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=datetime.now() + timedelta(minutes=90),
+        )
+
         _scheduler.start()
         logger.info(
             f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
@@ -879,7 +1013,8 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
-            "stock breakout scanner market hours every 15min, web pattern research every 12h)"
+            "stock breakout scanner market hours every 15min, web pattern research every 12h, "
+            "exit-strategy evolution every 2h)"
         )
 
 

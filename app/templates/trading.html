@@ -2474,6 +2474,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <button onclick="askSmartPick()" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x1F4B0; What Should I Buy?</button>
         <button onclick="runAnalysis()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">&#x1F4CA; Analyze Chart</button>
         <button onclick="askBrainExplain()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F9E0; Brain Insights</button>
+        <button onclick="_promptPatternSuggest()" style="background:linear-gradient(135deg,#f59e0b,#d97706)">&#x1F4A1; Suggest Pattern</button>
       </div>
       <div class="ai-learn-btns">
         <button onclick="askLearn('What is RSI and how do I use it?')" class="learn-btn">What is RSI?</button>
@@ -4600,6 +4601,8 @@ function loadInsights() { /* no-op: brain dashboard now lives at /brain */ }
 
 /* ── AI Chat ────────────────────────────────────── */
 var SMART_PICK_PATTERNS = /\b(what.*(buy|invest|trade|pick|recommend)|should\s+i\s+buy|best\s+stock|top\s+pick|give\s+me\s+a\s+stock|which\s+stock|what\s+to\s+buy|find\s+me|scan.*market|suggest.*stock)/i;
+var PATTERN_SUGGEST_PATTERNS = /\b(add\s+(a\s+)?pattern|test\s+(this\s+)?pattern|seed\s+(a\s+)?pattern|try\s+(this\s+)?strategy|create\s+(a\s+)?pattern|new\s+pattern|suggest\s+(a\s+)?pattern|pattern\s*:)/i;
+var PATTERN_INDICATOR_COMBO = /\b(rsi|ema|sma|bollinger|macd|adx|vwap|squeeze)\b.*\b(rsi|ema|sma|bollinger|macd|adx|vwap|squeeze|above|below|greater|less)\b/i;
 var chatHistory = [];
 var _streamAbort = null;
 var _acDebounce = null;
@@ -5173,6 +5176,80 @@ function _streamAnalyze(msg, isSmartPick) {
 
 var LIQUIDATION_PATTERN = /sell.*?(all|everything|my).*?(coins?|tokens?|crypto).*?(transfer|send|move).*?coinbase|sell.*?metamask.*?(send|transfer|move|coinbase)|metamask.*?(sell|liquidat|send|move|transfer).*?coinbase|liquidat.*?metamask|move.*?metamask.*?coinbase|transfer.*?(everything|all).*?coinbase|swap.*?(all|everything).*?coinbase|send.*?(all|everything).*?coinbase/i;
 
+function _handlePatternSuggest(msg) {
+  _showThinking('Creating pattern from your description...');
+  fetch('/api/trading/patterns/suggest', {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({description: msg}),
+  }).then(function(r){ return r.json(); }).then(function(d) {
+    removeLastAiMsg();
+    if (!d.ok) {
+      appendAiMsg('assistant', 'Sorry, I could not create a pattern from that description: ' + (d.error || 'Unknown error'));
+      return;
+    }
+    var p = d.pattern;
+    var rules = [];
+    try {
+      var parsed = JSON.parse(p.rules_json || '{}');
+      (parsed.conditions || []).forEach(function(c) {
+        var line = c.indicator + ' ' + c.op + ' ' + (c.ref || c.value);
+        if (c.params) line += ' (' + JSON.stringify(c.params) + ')';
+        rules.push(line);
+      });
+    } catch(e) {}
+
+    var html = '**Pattern Created: ' + escHtml(p.name) + '**\n\n';
+    if (p.description) html += p.description + '\n\n';
+    if (rules.length) {
+      html += '**Rules:**\n';
+      rules.forEach(function(r){ html += '- `' + r + '`\n'; });
+      html += '\n';
+    }
+    html += 'Score boost: **+' + (p.score_boost || 0) + '** | ';
+    html += d.hypothesis_id ? 'Hypothesis created for validation' : 'Will be tested in the next learning cycle';
+    appendAiMsg('assistant', html);
+
+    var msgs = document.getElementById('ai-msgs');
+    var lastMsg = msgs.lastElementChild;
+    if (lastMsg) {
+      var chips = document.createElement('div');
+      chips.className = 'ai-followup-chips';
+      chips.innerHTML =
+        '<button onclick="_backtestSuggestedPattern(' + p.id + ')">Backtest This Pattern</button>' +
+        '<button onclick="askLearn(\'Explain the pattern: ' + escHtml(p.name).replace(/'/g, "\\'") + '\')">Explain Pattern</button>';
+      lastMsg.appendChild(chips);
+    }
+  }).catch(function(e) {
+    removeLastAiMsg();
+    appendAiMsg('assistant', 'Error creating pattern: ' + (e.message || 'Network error'));
+  });
+}
+
+function _backtestSuggestedPattern(patternId) {
+  _showThinking('Running backtest on the pattern...');
+  fetch('/api/trading/patterns/' + patternId + '/backtest', {method: 'POST'})
+    .then(function(r){ return r.json(); })
+    .then(function(d) {
+      removeLastAiMsg();
+      if (!d.ok) {
+        appendAiMsg('assistant', 'Backtest failed: ' + (d.error || 'Unknown error'));
+        return;
+      }
+      var r = d.result || d;
+      var html = '**Backtest Results**\n\n';
+      html += '- Win Rate: **' + ((r.win_rate || 0) * 100).toFixed(1) + '%**\n';
+      html += '- Return: **' + (r.return_pct || 0).toFixed(1) + '%**\n';
+      html += '- Trades: **' + (r.trade_count || 0) + '**\n';
+      html += '- Sharpe: **' + (r.sharpe || 0).toFixed(2) + '**\n';
+      html += '- Max Drawdown: **' + (r.max_drawdown || 0).toFixed(1) + '%**\n';
+      appendAiMsg('assistant', html);
+    }).catch(function(e) {
+      removeLastAiMsg();
+      appendAiMsg('assistant', 'Backtest error: ' + (e.message || 'Network error'));
+    });
+}
+
 function sendAiChat() {
   var inp = document.getElementById('ai-input');
   var msg = inp.value.trim();
@@ -5188,6 +5265,11 @@ function sendAiChat() {
 
   if (LIQUIDATION_PATTERN.test(msg)) {
     _handleLiquidationIntent();
+    return;
+  }
+
+  if (PATTERN_SUGGEST_PATTERNS.test(msg) || PATTERN_INDICATOR_COMBO.test(msg)) {
+    _handlePatternSuggest(msg);
     return;
   }
 
@@ -5220,6 +5302,18 @@ function askBrainExplain() {
     'Also tell me: What is your current market thesis? What are you most confident about right now?';
   appendAiMsg('user', 'What has your Brain learned? Explain it to me.');
   _streamAnalyze(msg, false);
+}
+
+function _promptPatternSuggest() {
+  appendAiMsg('assistant',
+    '**Describe a trading pattern** and I\'ll create it for Chili\'s brain to test and validate.\n\n' +
+    'Examples:\n' +
+    '- "RSI above 70 with price above EMA 20, 50, 100 and resistance retesting"\n' +
+    '- "MACD bullish crossover with BB squeeze and volume spike"\n' +
+    '- "Price near VWAP with ADX > 25 and narrow range"\n\n' +
+    'Just describe the conditions naturally — I\'ll convert them into rules.'
+  );
+  document.getElementById('ai-input').focus();
 }
 
 function askPatternExplain(patternDesc) {

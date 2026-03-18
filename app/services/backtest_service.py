@@ -2,17 +2,21 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from backtesting import Backtest, Strategy
-from backtesting.lib import crossover
+from backtesting.lib import FractionalBacktest, crossover
 from sqlalchemy.orm import Session
 
 from .trading.market_data import fetch_ohlcv_df as _fetch_ohlcv_df
 
 from ..models.trading import BacktestResult
+
+logger = logging.getLogger(__name__)
 
 
 # ── Helper indicators ───────────────────────────────────────────────────
@@ -395,22 +399,76 @@ def run_backtest(
     }
 
 
+def _sanitize_float(v: Any, default: float = 0.0) -> float:
+    """Convert NaN / Inf / None to a safe float for SQLite storage."""
+    import math
+    if v is None:
+        return default
+    try:
+        f = float(v)
+        if math.isnan(f) or math.isinf(f):
+            return default
+        return f
+    except (TypeError, ValueError):
+        return default
+
+
 def save_backtest(
     db: Session, user_id: int | None, result: dict[str, Any],
     *, insight_id: int | None = None,
 ) -> BacktestResult:
-    """Persist a backtest result to the database."""
+    """Persist a backtest result to the database.
+
+    If a record for the same (insight, ticker, strategy) already exists the
+    existing row is **updated** instead of creating a duplicate.
+    """
+    ticker = result.get("ticker", "")
+    strategy = result.get("strategy", "")
+    ret_pct = _sanitize_float(result.get("return_pct"))
+    wr = _sanitize_float(result.get("win_rate"))
+    sharpe = result.get("sharpe")
+    if sharpe is not None:
+        sharpe = _sanitize_float(sharpe, 0.0) or None
+    md = _sanitize_float(result.get("max_drawdown"))
+    tc = int(result.get("trade_count", 0) or 0)
+    eq = result.get("equity_curve", [])
+    if tc == 0:
+        eq = []
+    params_json = json.dumps({"strategy_id": result.get("strategy_id"), "period": result.get("period")})
+
+    if insight_id:
+        existing = (
+            db.query(BacktestResult)
+            .filter(
+                BacktestResult.related_insight_id == insight_id,
+                BacktestResult.ticker == ticker,
+                BacktestResult.strategy_name == strategy,
+            )
+            .first()
+        )
+        if existing:
+            existing.return_pct = ret_pct
+            existing.win_rate = wr
+            existing.sharpe = sharpe
+            existing.max_drawdown = md
+            existing.trade_count = tc
+            existing.equity_curve = json.dumps(eq)
+            existing.params = params_json
+            db.commit()
+            db.refresh(existing)
+            return existing
+
     record = BacktestResult(
         user_id=user_id,
-        ticker=result.get("ticker", ""),
-        strategy_name=result.get("strategy", ""),
-        params=json.dumps({"strategy_id": result.get("strategy_id"), "period": result.get("period")}),
-        return_pct=result.get("return_pct", 0),
-        win_rate=result.get("win_rate", 0),
-        sharpe=result.get("sharpe"),
-        max_drawdown=result.get("max_drawdown", 0),
-        trade_count=result.get("trade_count", 0),
-        equity_curve=json.dumps(result.get("equity_curve", [])),
+        ticker=ticker,
+        strategy_name=strategy,
+        params=params_json,
+        return_pct=ret_pct,
+        win_rate=wr,
+        sharpe=sharpe,
+        max_drawdown=md,
+        trade_count=tc,
+        equity_curve=json.dumps(eq),
         related_insight_id=insight_id,
     )
     db.add(record)
@@ -418,6 +476,640 @@ def save_backtest(
     db.refresh(record)
     return record
 
+
+# ── Pattern-aware backtesting ────────────────────────────────────────
+
+def _compute_swing_lows(df: pd.DataFrame, lookback: int = 10) -> list:
+    """Compute rolling most-recent confirmed swing low (no look-ahead bias).
+
+    A swing low at bar *i* is confirmed at bar ``i + lookback`` once we know
+    ``low[i]`` is the minimum within ``[i - lookback, i + lookback]``.  The
+    returned list gives the value of the most recent confirmed swing low at
+    each bar, or ``None`` when no swing low has been confirmed yet.
+
+    Uses a 10-bar lookback by default so that swing lows represent meaningful
+    structural levels rather than intraday noise.
+
+    Used by ``DynamicPatternStrategy`` for Break-of-Structure (BOS) exits:
+    if price closes more than 0.3 % below the latest swing low, the uptrend
+    structure is considered broken and the position is closed.
+    """
+    lows = df["Low"].astype(float).values
+    n = len(lows)
+    result: list[float | None] = [None] * n
+    last_confirmed: float | None = None
+
+    for confirm_bar in range(2 * lookback, n):
+        candidate = confirm_bar - lookback
+        window_start = max(0, candidate - lookback)
+        window_end = min(n, candidate + lookback + 1)
+        if lows[candidate] <= lows[window_start:window_end].min():
+            last_confirmed = float(lows[candidate])
+        result[confirm_bar] = last_confirmed
+
+    return result
+
+
+def _compute_atr_series(df: pd.DataFrame, period: int = 14) -> list:
+    """Compute ATR as a plain list for exit logic in DynamicPatternStrategy."""
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    close = df["Close"].astype(float)
+    tr = pd.concat([
+        high - low,
+        (high - close.shift(1)).abs(),
+        (low - close.shift(1)).abs(),
+    ], axis=1).max(axis=1)
+    atr = tr.rolling(period).mean()
+    return [None if pd.isna(v) else float(v) for v in atr]
+
+
+def _compute_series_for_conditions(
+    df: pd.DataFrame,
+    conditions: list[dict[str, Any]],
+) -> dict[str, list]:
+    """Pre-compute full-length indicator series required by pattern conditions.
+
+    Only computes indicators actually referenced by the conditions, keeping the
+    work proportional to pattern complexity.  Returns a dict mapping indicator
+    key to a Python list of per-bar values (None where data is unavailable).
+    """
+    needed: set[str] = set()
+    for cond in conditions:
+        ind = cond.get("indicator", "")
+        if ind:
+            needed.add(ind)
+        ref = cond.get("ref")
+        if ref:
+            needed.add(ref)
+
+    close = df["Close"].astype(float)
+    high = df["High"].astype(float)
+    low = df["Low"].astype(float)
+    volume = df["Volume"].astype(float)
+    n = len(df)
+
+    result: dict[str, list] = {}
+
+    def _safe(series: pd.Series) -> list:
+        return [None if pd.isna(v) else float(v) for v in series]
+
+    # -- Price (just close) ------------------------------------------------
+    if "price" in needed:
+        result["price"] = _safe(close)
+
+    # -- RSI ---------------------------------------------------------------
+    if "rsi_14" in needed:
+        try:
+            from ta.momentum import RSIIndicator
+            result["rsi_14"] = _safe(RSIIndicator(close, window=14).rsi())
+        except Exception:
+            result["rsi_14"] = _safe(_rsi(close, 14))
+
+    # -- EMAs --------------------------------------------------------------
+    for span in (9, 12, 20, 21, 26, 50, 100, 200):
+        key = f"ema_{span}"
+        if key in needed:
+            result[key] = _safe(close.ewm(span=span, adjust=False).mean())
+
+    # -- SMAs --------------------------------------------------------------
+    for span in (10, 20, 50, 100, 200):
+        key = f"sma_{span}"
+        if key in needed:
+            result[key] = _safe(close.rolling(span).mean())
+
+    # -- ADX ---------------------------------------------------------------
+    if "adx" in needed:
+        try:
+            from ta.trend import ADXIndicator
+            result["adx"] = _safe(ADXIndicator(high, low, close, window=14).adx())
+        except Exception:
+            result["adx"] = [None] * n
+
+    # -- MACD histogram ----------------------------------------------------
+    if "macd_hist" in needed:
+        try:
+            from ta.trend import MACD
+            result["macd_hist"] = _safe(MACD(close).macd_diff())
+        except Exception:
+            result["macd_hist"] = [None] * n
+
+    # -- Relative volume ---------------------------------------------------
+    if "rel_vol" in needed:
+        vol_avg = volume.rolling(20).mean()
+        rv = volume / vol_avg.replace(0, np.nan)
+        result["rel_vol"] = _safe(rv)
+
+    # -- Daily change % (bar-over-bar) -------------------------------------
+    if "daily_change_pct" in needed:
+        prev_close = close.shift(1)
+        pct = (close - prev_close) / prev_close.replace(0, np.nan) * 100
+        result["daily_change_pct"] = _safe(pct)
+
+    # -- Gap % (open vs previous close) ------------------------------------
+    if "gap_pct" in needed:
+        prev_close = close.shift(1)
+        gap = (df["Open"] - prev_close) / prev_close.replace(0, np.nan) * 100
+        result["gap_pct"] = _safe(gap)
+
+    # -- Bollinger Band squeeze (rolling percentile of BB width) -----------
+    if "bb_squeeze" in needed or "bb_squeeze_firing" in needed:
+        try:
+            from ta.volatility import BollingerBands
+            bb = BollingerBands(close, window=20, window_dev=2)
+            bb_width = bb.bollinger_wband()
+        except Exception:
+            bb_mid = close.rolling(20).mean()
+            bb_std_s = close.rolling(20).std()
+            bb_width = 2 * bb_std_s / bb_mid.replace(0, np.nan)
+
+        pct_20 = bb_width.rolling(50).quantile(0.20)
+        sq = bb_width <= pct_20
+        # Fall back for bars with < 50 history: use pct-rank approach
+        for i in range(20, min(50, n)):
+            bw_slice = bb_width.iloc[:i + 1].dropna()
+            if len(bw_slice) >= 20:
+                curr_w = bb_width.iloc[i]
+                if pd.notna(curr_w):
+                    pct_rank = float((bw_slice < curr_w).sum() / len(bw_slice) * 100)
+                    sq.iloc[i] = pct_rank < 25
+
+        result["bb_squeeze"] = [
+            bool(v) if pd.notna(v) else None for v in sq
+        ]
+        if "bb_squeeze_firing" in needed:
+            prev_sq = sq.shift(1)
+            result["bb_squeeze_firing"] = [
+                bool(v) if pd.notna(v) else None for v in (prev_sq & ~sq)
+            ]
+
+    # -- Resistance (rolling 20-bar high) ----------------------------------
+    resistance_s = high.rolling(20).max()
+    if "resistance" in needed:
+        result["resistance"] = _safe(resistance_s)
+
+    if "dist_to_resistance_pct" in needed:
+        dist = (resistance_s - close) / close.replace(0, np.nan) * 100
+        result["dist_to_resistance_pct"] = _safe(dist)
+
+    # -- Resistance retests (rolling count of bars near resistance) --------
+    if "resistance_retests" in needed:
+        tol_pct = 1.5
+        lookback = 20
+        for cond in conditions:
+            if cond.get("indicator") == "resistance_retests":
+                params = cond.get("params", {})
+                tol_pct = params.get("tolerance_pct", 1.5)
+                lookback = params.get("lookback", 20)
+                break
+
+        retests: list = [None] * n
+        for i in range(lookback, n):
+            res = float(high.iloc[i - lookback: i + 1].max())
+            threshold = res * (tol_pct / 100.0)
+            lower_band = res - threshold
+            count = sum(
+                1 for j in range(i - lookback, i + 1)
+                if float(high.iloc[j]) >= lower_band
+            )
+            retests[i] = count
+        result["resistance_retests"] = retests
+
+    # -- Retest range tightening -------------------------------------------
+    if "retest_range_tightening" in needed:
+        lookback = 20
+        for cond in conditions:
+            if cond.get("indicator") in (
+                "resistance_retests", "retest_range_tightening",
+            ):
+                lookback = cond.get("params", {}).get("lookback", 20)
+                break
+        tightening: list = [None] * n
+        for i in range(lookback, n):
+            h_slice = high.iloc[i - lookback: i + 1]
+            half = len(h_slice) // 2
+            if half > 0:
+                first_r = float(h_slice.iloc[:half].max() - h_slice.iloc[:half].min())
+                second_r = float(h_slice.iloc[half:].max() - h_slice.iloc[half:].min())
+                tightening[i] = bool(first_r > 0 and second_r < first_r * 0.75)
+            else:
+                tightening[i] = False
+        result["retest_range_tightening"] = tightening
+
+    # -- VWAP reclaim ------------------------------------------------------
+    if "vwap_reclaim" in needed:
+        cum_vol = volume.cumsum()
+        vwap = (close * volume).cumsum() / cum_vol.replace(0, np.nan)
+        prev_close = close.shift(1)
+        vol_avg = volume.rolling(20).mean().replace(0, np.nan)
+        rel_v = volume / vol_avg
+        reclaim = (prev_close < vwap) & (close > vwap) & (rel_v >= 1.2)
+        result["vwap_reclaim"] = [
+            bool(v) if pd.notna(v) else None for v in reclaim
+        ]
+
+    # -- Narrow range (NR4 / NR7) -----------------------------------------
+    if "narrow_range" in needed:
+        bar_range = high - low
+        nr: list = [None] * n
+        for i in range(6, n):
+            curr = float(bar_range.iloc[i])
+            ranges_7 = [float(bar_range.iloc[i - j]) for j in range(7)]
+            past_7 = ranges_7[1:]
+            if past_7 and curr <= min(past_7):
+                nr[i] = "NR7"
+            else:
+                past_4 = ranges_7[1:4]
+                if past_4 and curr <= min(past_4):
+                    nr[i] = "NR4"
+        result["narrow_range"] = nr
+
+    # -- VCP count (Volume Contraction Pattern) ----------------------------
+    if "vcp_count" in needed:
+        vcp: list = [None] * n
+        vcp_lb = 40
+        for i in range(vcp_lb, n):
+            h_seg = high.iloc[i - vcp_lb: i + 1]
+            l_seg = low.iloc[i - vcp_lb: i + 1]
+            v_seg = volume.iloc[i - vcp_lb: i + 1]
+            lb = len(h_seg)
+            window = max(3, lb // 4)
+            swings: list[tuple[float, float]] = []
+            for start in range(0, lb - window + 1, window):
+                end_idx = min(start + window, lb)
+                seg_r = float(h_seg.iloc[start:end_idx].max() - l_seg.iloc[start:end_idx].min())
+                seg_v = float(v_seg.iloc[start:end_idx].mean())
+                if seg_r > 0 and seg_v > 0:
+                    swings.append((seg_r, seg_v))
+            contractions = 0
+            for k in range(1, len(swings)):
+                rp, vp = swings[k - 1]
+                rc, vc = swings[k]
+                if rp > 0 and rc < rp * 0.85 and vc < vp:
+                    contractions += 1
+                else:
+                    contractions = 0
+            vcp[i] = contractions
+        result["vcp_count"] = vcp
+
+    return result
+
+
+# ── Condition evaluation (backtest version) ──────────────────────────
+
+def _eval_condition_bt(cond: dict, snap: dict[str, Any]) -> bool:
+    """Evaluate a single pattern condition against a bar snapshot.
+
+    Mirrors ``pattern_engine._eval_condition`` exactly so that entry signals
+    during backtesting match live scanner behavior.
+    """
+    ind_key = cond.get("indicator", "")
+    op = cond.get("op", "")
+    value = cond.get("value")
+    ref = cond.get("ref")
+
+    actual = snap.get(ind_key)
+    if actual is None:
+        return False
+
+    if ref:
+        ref_val = snap.get(ref)
+        if ref_val is None:
+            return False
+        value = ref_val
+
+    try:
+        if op == ">":
+            return float(actual) > float(value)
+        elif op == ">=":
+            return float(actual) >= float(value)
+        elif op == "<":
+            return float(actual) < float(value)
+        elif op == "<=":
+            return float(actual) <= float(value)
+        elif op == "==":
+            return actual == value
+        elif op == "!=":
+            return actual != value
+        elif op == "between":
+            if isinstance(value, list) and len(value) == 2:
+                return float(value[0]) <= float(actual) <= float(value[1])
+        elif op == "any_of":
+            if isinstance(value, list):
+                return actual in value
+        elif op == "not_in":
+            if isinstance(value, list):
+                return actual not in value
+    except (TypeError, ValueError):
+        return False
+    return False
+
+
+# ── Dynamic pattern strategy ─────────────────────────────────────────
+
+class DynamicPatternStrategy(Strategy):
+    """Strategy that evaluates actual pattern rules_json conditions bar-by-bar.
+
+    Class attributes are set dynamically via ``type()`` before each run so that
+    ``backtesting.py`` picks up the correct conditions and pre-computed data.
+
+    Exit logic (three-pronged):
+    1. ATR trailing stop — highest-since-entry minus ``_exit_atr_mult * ATR``
+    2. Max hold period — ``_exit_max_bars`` bars since entry
+    3. Break of Structure (BOS) — price closes below the most recent confirmed
+       swing low, signalling the uptrend structure is broken.  BOS buffer and
+       grace period scale with volatility (ATR/price ratio) so that crypto's
+       normal large wicks don't trigger premature exits.
+    """
+    _conditions: list = []
+    _indicator_arrays: dict = {}
+    _exit_atr_mult: float = 2.0
+    _exit_max_bars: int = 20
+    _atr_array: list = []
+    _swing_low_array: list = []
+    _explicit_bos_buffer: float | None = None
+    _explicit_bos_grace: int | None = None
+
+    def init(self):
+        self._bars_in_trade = 0
+        self._highest_since_entry = 0.0
+
+        if self._explicit_bos_buffer is not None:
+            self._bos_buffer_pct = self._explicit_bos_buffer
+            self._bos_grace = self._explicit_bos_grace or 3
+            return
+
+        self._bos_grace = 3
+        self._bos_buffer_pct = 0.003
+
+        prices = self.data.Close
+        if len(prices) > 20 and len(self._atr_array) > 20:
+            recent_atr = [
+                a for a in self._atr_array[-20:] if a is not None and a > 0
+            ]
+            if recent_atr:
+                avg_atr = sum(recent_atr) / len(recent_atr)
+                avg_price = float(sum(prices[-20:]) / 20)
+                vol_ratio = avg_atr / max(avg_price, 1e-9)
+                if vol_ratio > 0.03:
+                    self._bos_grace = 6
+                    self._bos_buffer_pct = 0.015
+                elif vol_ratio > 0.015:
+                    self._bos_grace = 4
+                    self._bos_buffer_pct = 0.008
+
+    def next(self):
+        i = len(self.data.Close) - 1
+
+        snap: dict[str, Any] = {"price": float(self.data.Close[-1])}
+        for key, arr in self._indicator_arrays.items():
+            if i < len(arr):
+                snap[key] = arr[i]
+
+        all_met = True
+        for cond in self._conditions:
+            if not _eval_condition_bt(cond, snap):
+                all_met = False
+                break
+
+        if all_met and not self.position:
+            self.buy()
+            self._bars_in_trade = 0
+            self._highest_since_entry = float(self.data.Close[-1])
+        elif self.position:
+            self._bars_in_trade += 1
+            price = float(self.data.Close[-1])
+            self._highest_since_entry = max(self._highest_since_entry, price)
+
+            atr_val = 0.0
+            if i < len(self._atr_array) and self._atr_array[i] is not None:
+                atr_val = self._atr_array[i]
+
+            trailing_stop = self._highest_since_entry - self._exit_atr_mult * atr_val
+
+            bos_triggered = False
+            if (self._bars_in_trade >= self._bos_grace
+                    and i < len(self._swing_low_array)):
+                swing_low = self._swing_low_array[i]
+                if swing_low is not None and swing_low > 0:
+                    bos_threshold = swing_low * (1 - self._bos_buffer_pct)
+                    if price < bos_threshold:
+                        bos_triggered = True
+
+            if (price < trailing_stop
+                    or self._bars_in_trade >= self._exit_max_bars
+                    or bos_triggered):
+                self.position.close()
+
+
+def _extract_pattern_indicators(
+    indicator_arrays: dict[str, list],
+    df: pd.DataFrame,
+) -> dict[str, list[dict]]:
+    """Build chartable indicator overlays from the pre-computed series."""
+    skip = {
+        "price", "bb_squeeze", "bb_squeeze_firing", "vwap_reclaim",
+        "narrow_range", "retest_range_tightening",
+    }
+    result: dict[str, list[dict]] = {}
+    timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
+    for key, arr in indicator_arrays.items():
+        if key in skip:
+            continue
+        points = []
+        for idx, val in enumerate(arr):
+            if val is not None and idx < len(timestamps):
+                try:
+                    points.append({"time": timestamps[idx], "value": round(float(val), 4)})
+                except (TypeError, ValueError):
+                    pass
+        if points:
+            label = key.upper().replace("_", " ")
+            result[label] = points
+    return result
+
+
+def _classify_exit_params(
+    conditions: list[dict[str, Any]],
+) -> tuple[float, int, bool]:
+    """Infer exit parameters from the pattern's condition indicators.
+
+    Returns ``(atr_mult, max_bars, use_bos)`` tuned to the pattern type:
+
+    - **Breakout** patterns: wide stops, long holds, NO BOS exit (breakouts
+      need room to breathe — BOS cuts winners on normal retracements).
+    - **Mean-reversion** patterns: tight stops, short holds, BOS active.
+    - **Default / trend** patterns: moderate stops, BOS active.
+    """
+    _BREAKOUT_INDICATORS = {
+        "resistance_retests", "bb_squeeze", "bb_squeeze_firing",
+        "narrow_range", "vcp_count", "dist_to_resistance_pct",
+        "retest_range_tightening", "resistance",
+    }
+    _MEAN_REV_INDICATORS = {"vwap_reclaim"}
+
+    breakout_score = 0
+    mean_rev_score = 0
+
+    for cond in conditions:
+        ind = cond.get("indicator", "")
+        op = cond.get("op", "")
+        value = cond.get("value")
+
+        if ind in _BREAKOUT_INDICATORS:
+            breakout_score += 2
+        if ind in _MEAN_REV_INDICATORS:
+            mean_rev_score += 2
+
+        if ind == "rsi_14":
+            try:
+                v = float(value) if value is not None else 0
+            except (TypeError, ValueError):
+                v = 0
+            if op in (">", ">=") and v >= 60:
+                breakout_score += 1
+            elif op in ("<", "<=") and v <= 40:
+                mean_rev_score += 1
+
+    if breakout_score > mean_rev_score:
+        return 3.0, 50, False  # breakout: wide stop, no BOS
+    if mean_rev_score > breakout_score:
+        return 1.5, 15, True   # mean-rev: tight stop, BOS active
+    return 2.0, 25, True       # default: moderate, BOS active
+
+
+def run_pattern_backtest(
+    ticker: str,
+    conditions: list[dict[str, Any]],
+    pattern_name: str = "Custom Pattern",
+    period: str = "1y",
+    interval: str = "1d",
+    cash: float = 100_000,
+    commission: float = 0.001,
+    exit_atr_mult: float | None = None,
+    exit_max_bars: int | None = None,
+    exit_config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run a backtest using actual pattern conditions as entry signals.
+
+    Instead of mapping to a generic strategy, this evaluates the pattern's
+    ``rules_json`` conditions bar-by-bar to generate entry signals.  Exits
+    use an ATR trailing stop with a maximum hold period.
+
+    When *exit_config* is provided (from a ScanPattern's evolved exit
+    strategy), those values take priority.  Otherwise *exit_atr_mult* /
+    *exit_max_bars* are used, falling back to ``_classify_exit_params``.
+    """
+    use_bos = True
+    explicit_bos_buffer: float | None = None
+    explicit_bos_grace: int | None = None
+
+    if exit_config:
+        exit_atr_mult = exit_config.get("atr_mult", exit_atr_mult)
+        exit_max_bars = exit_config.get("max_bars", exit_max_bars)
+        use_bos = exit_config.get("use_bos", True)
+        if use_bos:
+            explicit_bos_buffer = exit_config.get("bos_buffer_pct")
+            explicit_bos_grace = exit_config.get("bos_grace_bars")
+
+    if exit_atr_mult is None or exit_max_bars is None:
+        auto_atr, auto_bars, auto_bos = _classify_exit_params(conditions)
+        if exit_atr_mult is None:
+            exit_atr_mult = auto_atr
+        if exit_max_bars is None:
+            exit_max_bars = auto_bars
+        if not exit_config:
+            use_bos = auto_bos
+
+    df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
+    if df.empty or len(df) < 30:
+        return {"ok": False, "error": f"Not enough data for {ticker}"}
+
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
+    indicator_arrays = _compute_series_for_conditions(df, conditions)
+    atr = _compute_atr_series(df)
+    swing_lows = _compute_swing_lows(df) if use_bos else []
+
+    strat_cls = type("_DynPat", (DynamicPatternStrategy,), {
+        "_conditions": conditions,
+        "_indicator_arrays": indicator_arrays,
+        "_exit_atr_mult": exit_atr_mult,
+        "_exit_max_bars": exit_max_bars,
+        "_atr_array": atr,
+        "_swing_low_array": swing_lows,
+        "_explicit_bos_buffer": explicit_bos_buffer,
+        "_explicit_bos_grace": explicit_bos_grace,
+    })
+
+    bt = FractionalBacktest(df, strat_cls, cash=cash, commission=commission, exclusive_orders=True)
+    stats = bt.run()
+
+    equity = stats.get("_equity_curve")
+    equity_data = []
+    if equity is not None and not equity.empty:
+        for ts, row in equity.iterrows():
+            equity_data.append({
+                "time": int(pd.Timestamp(ts).timestamp()),
+                "value": round(float(row["Equity"]), 2),
+            })
+
+    ohlc_data = []
+    for ts, row in df.iterrows():
+        ohlc_data.append({
+            "time": int(pd.Timestamp(ts).timestamp()),
+            "open": round(float(row["Open"]), 4),
+            "high": round(float(row["High"]), 4),
+            "low": round(float(row["Low"]), 4),
+            "close": round(float(row["Close"]), 4),
+        })
+
+    trades_list = []
+    raw_trades = stats.get("_trades")
+    if raw_trades is not None and not raw_trades.empty:
+        idx_timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
+        for _, t in raw_trades.iterrows():
+            entry_bar = int(t.get("EntryBar", 0))
+            exit_bar = int(t.get("ExitBar", 0))
+            entry_ts = idx_timestamps[entry_bar] if entry_bar < len(idx_timestamps) else None
+            exit_ts = idx_timestamps[exit_bar] if exit_bar < len(idx_timestamps) else None
+            trades_list.append({
+                "entry_time": entry_ts,
+                "exit_time": exit_ts,
+                "entry_price": round(float(t.get("EntryPrice", 0)), 4),
+                "exit_price": round(float(t.get("ExitPrice", 0)), 4),
+                "pnl": round(float(t.get("PnL", 0)), 2),
+                "return_pct": round(float(t.get("ReturnPct", 0)) * 100, 2),
+                "size": int(t.get("Size", 0)),
+            })
+
+    indicators = _extract_pattern_indicators(indicator_arrays, df)
+
+    return {
+        "ok": True,
+        "ticker": ticker.upper(),
+        "strategy": pattern_name,
+        "strategy_id": "dynamic_pattern",
+        "period": period,
+        "return_pct": round(float(stats.get("Return [%]", 0)), 2),
+        "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
+        "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),
+        "sharpe": round(float(stats.get("Sharpe Ratio", 0)), 2) if stats.get("Sharpe Ratio") else None,
+        "max_drawdown": round(float(stats.get("Max. Drawdown [%]", 0)), 2),
+        "trade_count": int(stats.get("# Trades", 0)),
+        "avg_trade_pct": round(float(stats.get("Avg. Trade [%]", 0)), 2),
+        "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
+        "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
+        "equity_curve": equity_data,
+        "ohlc": ohlc_data,
+        "trades": trades_list,
+        "indicators": indicators,
+    }
+
+
+# ── Legacy generic-strategy fallback for backtest_pattern ────────────
 
 _PATTERN_STRATEGY_MAP = {
     "rsi": "momentum_breakout",
@@ -440,34 +1132,39 @@ def backtest_pattern(
     interval: str = "1d",
     period: str = "1y",
 ) -> dict[str, Any]:
-    """Run the most appropriate backtest strategy for a ScanPattern.
+    """Run a backtest for a ScanPattern.
 
-    Maps pattern name/rules to the closest pre-built strategy and runs
-    the backtest on the requested interval.
+    If the pattern has valid ``rules_json`` conditions, uses the pattern-aware
+    ``run_pattern_backtest`` which evaluates the actual composite conditions
+    bar-by-bar.  Falls back to a generic strategy mapping only when conditions
+    are absent or unparseable.
     """
+    conditions: list[dict[str, Any]] = []
+    try:
+        rules = json.loads(rules_json) if rules_json else {}
+        conditions = rules.get("conditions", [])
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    if conditions:
+        result = run_pattern_backtest(
+            ticker=ticker,
+            conditions=conditions,
+            pattern_name=pattern_name,
+            period=period,
+            interval=interval,
+        )
+        result["pattern_name"] = pattern_name
+        result["mapped_strategy"] = "dynamic_pattern"
+        return result
+
+    # Fallback: map pattern keywords to a generic pre-built strategy
     strategy_id = "momentum_breakout"
     name_lower = pattern_name.lower()
     for keyword, sid in _PATTERN_STRATEGY_MAP.items():
         if keyword in name_lower:
             strategy_id = sid
             break
-
-    try:
-        rules = json.loads(rules_json) if rules_json else {}
-        conditions = rules.get("conditions", [])
-        for cond in conditions:
-            ind = cond.get("indicator", "").lower()
-            if "rsi" in ind:
-                strategy_id = "momentum_breakout"
-                break
-            elif "bb" in ind or "squeeze" in ind:
-                strategy_id = "bb_bounce"
-                break
-            elif "macd" in ind:
-                strategy_id = "macd"
-                break
-    except (json.JSONDecodeError, TypeError):
-        pass
 
     result = run_backtest(
         ticker=ticker,
