@@ -178,9 +178,12 @@ def api_trigger_learning(background_tasks: BackgroundTasks, request: Request, db
 
 @router.post("/api/trading/learn/deep-study")
 def api_deep_study(request: Request, db: Session = Depends(get_db)):
-    ctx = get_identity_ctx(request, db)
-    result = ts.deep_study(db, ctx["user_id"])
-    return JSONResponse(result)
+    try:
+        ctx = get_identity_ctx(request, db)
+        result = ts.deep_study(db, ctx["user_id"])
+        return JSONResponse(result)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @router.post("/api/trading/learn/retrain-ml")
@@ -951,6 +954,83 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
     })
 
 
+# ── Backtest Queue Management ────────────────────────────────────────────
+
+@router.get("/api/trading/backtest-queue/status")
+def api_backtest_queue_status(db: Session = Depends(get_db)):
+    """Get the current backtest queue status."""
+    from app.services.trading.backtest_queue import get_queue_status
+    status = get_queue_status(db)
+    return JSONResponse({"ok": True, **status})
+
+
+@router.post("/api/trading/patterns/{pattern_id}/boost")
+def api_boost_pattern(pattern_id: int, db: Session = Depends(get_db)):
+    """Boost a ScanPattern to the front of the backtest queue."""
+    from app.services.trading.backtest_queue import boost_pattern
+    from ...models.trading import ScanPattern
+    
+    pattern = db.query(ScanPattern).get(pattern_id)
+    if not pattern:
+        return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
+    
+    success = boost_pattern(db, pattern_id, priority=100)
+    if success:
+        return JSONResponse({
+            "ok": True,
+            "message": f"Pattern '{pattern.name}' boosted to front of queue",
+            "pattern_id": pattern_id,
+        })
+    return JSONResponse({"ok": False, "reason": "Failed to boost pattern"}, status_code=500)
+
+
+@router.post("/api/trading/patterns/{pattern_id}/clear-boost")
+def api_clear_pattern_boost(pattern_id: int, db: Session = Depends(get_db)):
+    """Clear the boost priority for a ScanPattern."""
+    from app.services.trading.backtest_queue import clear_boost
+    from ...models.trading import ScanPattern
+    
+    pattern = db.query(ScanPattern).get(pattern_id)
+    if not pattern:
+        return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
+    
+    success = clear_boost(db, pattern_id)
+    if success:
+        return JSONResponse({
+            "ok": True,
+            "message": f"Boost cleared for pattern '{pattern.name}'",
+            "pattern_id": pattern_id,
+        })
+    return JSONResponse({"ok": False, "reason": "Failed to clear boost"}, status_code=500)
+
+
+@router.get("/api/trading/backtest-queue/pending")
+def api_backtest_queue_pending(
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=100),
+):
+    """Get the list of pending patterns in the backtest queue."""
+    from app.services.trading.backtest_queue import get_pending_patterns
+    
+    patterns = get_pending_patterns(db, limit=limit)
+    return JSONResponse({
+        "ok": True,
+        "patterns": [
+            {
+                "id": p.id,
+                "name": p.name,
+                "origin": p.origin,
+                "priority": p.backtest_priority,
+                "last_backtest_at": p.last_backtest_at.isoformat() if p.last_backtest_at else None,
+                "win_rate": p.win_rate,
+                "active": p.active,
+            }
+            for p in patterns
+        ],
+        "count": len(patterns),
+    })
+
+
 def _compute_evidence_stats(
     timeline: list,
     hypotheses: list,
@@ -1042,42 +1122,60 @@ _BRAIN_WORKER_PAUSE_SIGNAL = Path("data/brain_worker_pause")
 
 @router.get("/api/trading/brain/worker/status")
 def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
-    """Get brain worker status."""
-    ctx = get_identity_ctx(request, db)
-    if ctx.get("demo"):
-        return JSONResponse({"ok": False, "error": "Demo users cannot access worker status"}, status_code=403)
+    """Get brain worker status.
     
+    Non-blocking: reads status file first, then checks process liveness.
+    DB identity check is done but failures are tolerated to avoid blocking
+    when the database is locked by the brain worker.
+    """
+    # Try to get identity, but don't block on DB lock
+    try:
+        ctx = get_identity_ctx(request, db)
+        if ctx.get("demo"):
+            return JSONResponse({"ok": False, "error": "Demo users cannot access worker status"}, status_code=403)
+    except Exception:
+        # DB likely locked — proceed anyway for status reads
+        pass
+    
+    default_stopped = {
+        "ok": True,
+        "status": "stopped",
+        "pid": None,
+        "current_step": "",
+        "current_progress": "",
+        "last_cycle": {},
+        "totals": {},
+    }
     if not _BRAIN_WORKER_STATUS_FILE.exists():
-        return JSONResponse({
-            "ok": True,
-            "status": "stopped",
-            "pid": None,
-            "current_step": "",
-            "current_progress": "",
-            "last_cycle": {},
-            "totals": {},
-        })
-    
+        return JSONResponse(default_stopped)
+
     try:
         with open(_BRAIN_WORKER_STATUS_FILE, "r") as f:
             data = json.load(f)
-        
-        pid = data.get("pid")
-        is_running = False
-        if pid:
-            try:
-                import psutil
-                proc = psutil.Process(pid)
-                is_running = proc.is_running() and "python" in proc.name().lower()
-            except Exception:
-                pass
-        
-        if not is_running:
-            data["status"] = "stopped"
-        
-        return JSONResponse({"ok": True, **data})
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    except FileNotFoundError:
+        return JSONResponse(default_stopped)
+    except (json.JSONDecodeError, OSError) as e:
+        # Corrupt or partial write (e.g. worker wrote mid-read) — return stopped so UI doesn't 500
+        return JSONResponse({**default_stopped, "error": str(e)})
+
+    pid = data.get("pid")
+    is_running = False
+    if pid:
+        try:
+            import psutil
+            proc = psutil.Process(pid)
+            is_running = proc.is_running() and "python" in proc.name().lower()
+        except Exception:
+            pass
+
+    if not is_running:
+        data["status"] = "stopped"
+        try:
+            _BRAIN_WORKER_STATUS_FILE.unlink()
+        except Exception:
+            pass
+
+    return JSONResponse({"ok": True, **data})
 
 
 @router.post("/api/trading/brain/worker/start")

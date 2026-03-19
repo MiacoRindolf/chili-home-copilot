@@ -98,10 +98,22 @@ def api_brain_domains():
 
 @router.get("/api/brain/status")
 def api_brain_status():
-    """Unified Brain health across all domains."""
-    trading_st = ts.get_learning_status()
-    code_st = cb_learning.get_code_learning_status()
-    reasoning_st = rb_learning.get_reasoning_status()
+    """Unified Brain health across all domains. Partial status on per-domain errors."""
+    trading_st = {"running": False, "last_run": None, "phase": "idle"}
+    code_st = {"running": False, "last_run": None, "phase": "idle"}
+    reasoning_st = {"running": False, "last_run": None, "phase": "idle"}
+    try:
+        trading_st = ts.get_learning_status()
+    except Exception:
+        pass
+    try:
+        code_st = cb_learning.get_code_learning_status()
+    except Exception:
+        pass
+    try:
+        reasoning_st = rb_learning.get_reasoning_status()
+    except Exception:
+        pass
     return JSONResponse({
         "ok": True,
         "trading": trading_st,

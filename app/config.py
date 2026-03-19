@@ -96,6 +96,12 @@ class Settings(BaseSettings):
     # Learning schedule
     learning_interval_hours: int = 2  # how often to run learning cycle (hours)
 
+    # Brain resource / queue tuning (target ~45% CPU when desired)
+    brain_max_cpu_pct: int | None = 45   # cap CPU-bound parallelism (None = no cap)
+    brain_backtest_parallel: int = 6     # patterns to backtest in parallel
+    brain_queue_batch_size: int = 50     # patterns to pull from queue per cycle
+    brain_use_gpu_ml: bool = False       # use GPU for pattern meta-learner (LightGBM) when available
+
     # Code Brain
     code_brain_repos: str = ""         # comma-separated local repo paths to index
     code_brain_interval_hours: int = 4  # how often to run code learning cycle
@@ -117,6 +123,11 @@ class Settings(BaseSettings):
     top_picks_warn_age_min: int = 15   # warn when picks batch is older than N minutes
     proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes
     pick_warn_drift_pct: float = 10.0  # warn when price has drifted >N% from entry
+
+    # Database — PostgreSQL recommended for production (concurrent web + worker).
+    # Leave empty to use SQLite (data/chili.db) for backward compatibility.
+    # Example: postgresql://user:pass@localhost:5432/chili
+    database_url: str = ""
 
     @property
     def primary_api_key(self) -> str:

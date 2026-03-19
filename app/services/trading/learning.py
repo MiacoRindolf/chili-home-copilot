@@ -291,6 +291,7 @@ def take_snapshots_parallel(
 
     _t0 = time.time()
     fetched: list[tuple[str, dict | None, dict | None]] = []
+    total = len(tickers)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {executor.submit(_snapshot_data, t): t for t in tickers}
         for future in as_completed(futures):
@@ -301,6 +302,12 @@ def take_snapshots_parallel(
                 fetched.append(future.result())
             except Exception:
                 pass
+            # Progress logging every 100 tickers
+            done = len(fetched)
+            if done % 100 == 0 or done == total:
+                elapsed = round(time.time() - _t0, 1)
+                logger.info(f"[learning] Snapshot progress: {done}/{total} ({elapsed}s)")
+                _learning_status["current_step"] = f"Taking market snapshots ({done}/{total})"
 
     _fetch_elapsed = round(time.time() - _t0, 1)
     logger.info(
@@ -1256,6 +1263,137 @@ def _auto_backtest_patterns(db: Session, user_id: int | None) -> int:
     return backtests_run
 
 
+# Backward-compat alias (referenced by stale .pyc or external code)
+auto_backtest_active_insights = _auto_backtest_patterns
+
+
+def _backtest_one_pattern_from_queue(pattern_id: int, user_id: int | None) -> tuple[int, int]:
+    """Run backtest for one pattern in a worker thread (own DB session). Returns (backtests_run, 1)."""
+    from ...db import SessionLocal
+    from .backtest_queue import mark_pattern_tested
+    from .backtest_engine import smart_backtest_insight
+    from ...models.trading import TradingInsight, ScanPattern
+
+    db = SessionLocal()
+    try:
+        pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+        if not pattern:
+            return (0, 0)
+        insight = db.query(TradingInsight).filter(
+            TradingInsight.scan_pattern_id == pattern.id
+        ).first()
+        if not insight:
+            insight = TradingInsight(
+                user_id=user_id,
+                pattern_description=f"{pattern.name} — Composable pattern backtest",
+                confidence=pattern.confidence or 0.5,
+                evidence_count=0,
+                scan_pattern_id=pattern.id,
+            )
+            db.add(insight)
+            db.commit()
+        result = smart_backtest_insight(
+            db, insight,
+            target_tickers=50,
+            update_confidence=True,
+        )
+        total = result.get("total", 0)
+        wins = result.get("wins", 0)
+        backtests_run = result.get("backtests_run", 0)
+        win_rate = wins / total if total >= 3 else None
+        avg_return = result.get("avg_return")
+        mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+        if total >= 3:
+            log_learning_event(
+                db, user_id, "pattern_backtest_queue",
+                f"Queue backtest: '{pattern.name}' ({wins}/{total} profitable, "
+                f"{win_rate * 100:.0f}%wr) — priority was {pattern.backtest_priority}",
+                related_insight_id=insight.id,
+            )
+        return (backtests_run, 1)
+    except Exception as e:
+        logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
+        try:
+            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+            if pattern:
+                mark_pattern_tested(db, pattern)
+        except Exception:
+            pass
+        return (0, 1)
+    finally:
+        db.close()
+
+
+def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int | None = None) -> dict[str, Any]:
+    """Process ScanPatterns from the priority queue (parallel when configured).
+    
+    Uses BRAIN_BACKTEST_PARALLEL workers and BRAIN_QUEUE_BATCH_SIZE (or batch_size)
+    to run multiple pattern backtests concurrently, each with its own DB session.
+    """
+    from ...config import settings
+    from .backtest_queue import get_pending_patterns, get_queue_status
+
+    if batch_size is None:
+        batch_size = settings.brain_queue_batch_size
+    patterns = get_pending_patterns(db, limit=batch_size)
+
+    if not patterns:
+        status = get_queue_status(db)
+        return {
+            "backtests_run": 0,
+            "patterns_processed": 0,
+            "queue_empty": status["queue_empty"],
+            **status,
+        }
+
+    max_workers = settings.brain_backtest_parallel
+    if settings.brain_max_cpu_pct is not None and _CPU_COUNT:
+        cap = max(1, int(_CPU_COUNT * settings.brain_max_cpu_pct / 100))
+        max_workers = min(max_workers, cap)
+    max_workers = min(max_workers, len(patterns))
+
+    pattern_ids = [p.id for p in patterns]
+    backtests_run = 0
+    patterns_processed = 0
+
+    if max_workers <= 1:
+        for pid in pattern_ids:
+            if _shutting_down.is_set():
+                break
+            bt, proc = _backtest_one_pattern_from_queue(pid, user_id)
+            backtests_run += bt
+            patterns_processed += proc
+    else:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {
+                executor.submit(_backtest_one_pattern_from_queue, pid, user_id): pid
+                for pid in pattern_ids
+            }
+            for fut in as_completed(futures):
+                if _shutting_down.is_set():
+                    break
+                try:
+                    bt, proc = fut.result()
+                    backtests_run += bt
+                    patterns_processed += proc
+                except Exception as e:
+                    logger.warning("[backtest_queue] Worker error: %s", e)
+                    patterns_processed += 1
+
+    status = get_queue_status(db)
+    logger.info(
+        "[learning] Queue backtest: %d backtests across %d patterns | "
+        "Queue: %d pending, %d boosted",
+        backtests_run, patterns_processed, status["pending"], status["boosted"]
+    )
+    return {
+        "backtests_run": backtests_run,
+        "patterns_processed": patterns_processed,
+        "queue_empty": status["queue_empty"],
+        **status,
+    }
+
+
 def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     """Dynamically test hypotheses from the TradingHypothesis table against real data.
 
@@ -2041,9 +2179,13 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
 
 def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, Any]:
     """Compute per-pattern win rates from resolved BreakoutAlert outcomes
-    and feed them back into TradingInsight records for weight evolution.
+    and feed them back into both TradingInsight and ScanPattern records.
+    
+    Updates:
+    - TradingInsight: win_count, loss_count, confidence
+    - ScanPattern: win_rate, avg_return_pct (real trade feedback)
     """
-    from ...models.trading import BreakoutAlert
+    from ...models.trading import BreakoutAlert, ScanPattern
 
     try:
         cutoff = datetime.utcnow() - timedelta(days=180)
@@ -2059,11 +2201,64 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
 
     from collections import defaultdict
     groups: dict[str, list] = defaultdict(list)
+    pattern_outcomes: dict[int, list] = defaultdict(list)  # scan_pattern_id -> outcomes
+    
     for alert in resolved:
         key = f"{alert.asset_type}|{alert.alert_tier}"
         groups[key].append(alert)
+        
+        # Also group by scan_pattern_id via related insight
+        if alert.related_insight_id:
+            insight = db.query(TradingInsight).get(alert.related_insight_id)
+            if insight and insight.scan_pattern_id:
+                pattern_outcomes[insight.scan_pattern_id].append({
+                    "outcome": alert.outcome,
+                    "gain_pct": alert.max_gain_pct or 0,
+                    "drawdown_pct": alert.max_drawdown_pct or 0,
+                })
 
     patterns_created = 0
+    patterns_updated = 0
+    
+    # Update ScanPattern stats directly with real trade outcomes
+    for pattern_id, outcomes in pattern_outcomes.items():
+        if len(outcomes) < 3:
+            continue
+        
+        pattern = db.query(ScanPattern).get(pattern_id)
+        if not pattern:
+            continue
+        
+        winners = sum(1 for o in outcomes if o["outcome"] == "winner")
+        total = len(outcomes)
+        new_win_rate = winners / total
+        
+        avg_gain = sum(o["gain_pct"] for o in outcomes) / total
+        
+        # Exponential moving average to blend new data with existing
+        old_wr = pattern.win_rate or 0.5
+        old_ret = pattern.avg_return_pct or 0.0
+        
+        # Blend factor based on sample size (more data = more trust in new stats)
+        blend = min(0.8, total / 50)  # up to 80% weight for new data
+        
+        pattern.win_rate = round(old_wr * (1 - blend) + new_win_rate * blend, 4)
+        pattern.avg_return_pct = round(old_ret * (1 - blend) + avg_gain * blend, 2)
+        pattern.trade_count = (pattern.trade_count or 0) + total
+        pattern.updated_at = datetime.utcnow()
+        
+        patterns_updated += 1
+        
+        logger.info(
+            "[learning] Updated ScanPattern '%s' (id=%d) from real trades: "
+            "win_rate=%.1f%% (was %.1f%%), avg_return=%.2f%% (was %.2f%%), n=%d",
+            pattern.name, pattern.id,
+            pattern.win_rate * 100, old_wr * 100,
+            pattern.avg_return_pct, old_ret,
+            total,
+        )
+
+    # Also create/update TradingInsight summaries by asset_type/tier (existing logic)
     for key, alerts in groups.items():
         if len(alerts) < 3:
             continue
@@ -2117,6 +2312,7 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
 
     return {
         "patterns_learned": patterns_created,
+        "scan_patterns_updated": patterns_updated,
         "total_resolved": len(resolved),
     }
 
@@ -2771,17 +2967,65 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
 
 
 def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Intensive AI-powered learning: mine patterns, then ask LLM to reflect
-    and generate structured testable hypotheses for the next validation cycle."""
+    """Intensive AI-powered learning: analyze pattern performance, evolution results,
+    and generate testable hypotheses for the next validation cycle."""
+    from ...models.trading import ScanPattern, BacktestResult
+    
     discoveries = mine_patterns(db, user_id)
 
-    insights = get_insights(db, user_id, limit=30)
+    # ── ScanPattern performance (the new pattern-based system) ──
+    active_patterns = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True)
+    ).order_by(ScanPattern.win_rate.desc().nullslast()).limit(30).all()
+    
+    pattern_text_lines = []
+    for p in active_patterns:
+        wr = f"{p.win_rate*100:.0f}%" if p.win_rate else "?"
+        avg_ret = f"{p.avg_return_pct:+.1f}%" if p.avg_return_pct else "?"
+        trades = p.trade_count or 0
+        origin = p.origin or "manual"
+        variant = f" ({p.variant_label})" if p.variant_label else ""
+        pattern_text_lines.append(
+            f"- {p.name}{variant}: {wr}wr, {avg_ret} avg, {trades} trades, origin={origin}"
+        )
+    pattern_text = "\n".join(pattern_text_lines) if pattern_text_lines else "No ScanPatterns yet."
+    
+    # ── Pattern evolution stats ──
+    root_patterns = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True),
+        ScanPattern.parent_id.is_(None),
+    ).count()
+    variant_patterns = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True),
+        ScanPattern.parent_id.isnot(None),
+    ).count()
+    evolution_text = f"- Root patterns: {root_patterns}\n- Active variants: {variant_patterns}"
+    
+    # ── Recent backtest performance ──
+    recent_bts = db.query(BacktestResult).order_by(
+        BacktestResult.ran_at.desc()
+    ).limit(50).all()
+    if recent_bts:
+        avg_sharpe = sum(bt.sharpe or 0 for bt in recent_bts) / len(recent_bts)
+        avg_return = sum(bt.return_pct or 0 for bt in recent_bts) / len(recent_bts)
+        total_trades = sum(bt.trade_count or 0 for bt in recent_bts)
+        winners = sum(1 for bt in recent_bts if (bt.return_pct or 0) > 0)
+        backtest_text = (
+            f"- Last {len(recent_bts)} backtests: avg sharpe={avg_sharpe:.2f}, "
+            f"avg return={avg_return:+.1f}%, total trades={total_trades}, "
+            f"profitable={winners}/{len(recent_bts)} ({winners/len(recent_bts)*100:.0f}%)"
+        )
+    else:
+        backtest_text = "No recent backtests."
+
+    # ── Legacy TradingInsight patterns ──
+    insights = get_insights(db, user_id, limit=15)
     insight_lines = []
     for ins in insights:
         insight_lines.append(
-            f"- [{ins.confidence:.0%} conf, {ins.evidence_count} evidence] {ins.pattern_description}"
+            f"- [{ins.confidence:.0%} conf, {ins.evidence_count} evidence] {ins.pattern_description[:80]}"
         )
-    insight_text = "\n".join(insight_lines) if insight_lines else "No patterns learned yet."
+    insight_text = "\n".join(insight_lines) if insight_lines else "No TradingInsights yet."
 
     snap_count = db.query(MarketSnapshot).count()
     filled_count = db.query(MarketSnapshot).filter(
@@ -2802,7 +3046,7 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
     pattern_stats_text = "No per-pattern trade data yet."
     if pattern_stats:
         lines = []
-        for ps in pattern_stats[:15]:
+        for ps in pattern_stats[:10]:
             lines.append(
                 f"  - {ps['pattern']}: {ps['trades']} trades, "
                 f"{ps['win_rate']:.0f}%wr, avg P&L ${ps['avg_pnl']:.2f}"
@@ -2874,7 +3118,17 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 
     reflection_prompt = f"""You are an AI trading brain doing a self-reflection on what you've learned.
 
-## YOUR LEARNED PATTERNS
+## SCAN PATTERNS (Composable Rule Engine)
+These are the evolved, backtested trading patterns the brain has learned:
+{pattern_text}
+
+## PATTERN EVOLUTION STATUS
+{evolution_text}
+
+## BACKTEST PERFORMANCE
+{backtest_text}
+
+## TRADING INSIGHTS (Discovered Correlations)
 {insight_text}
 
 ## DATA STATS
@@ -2883,12 +3137,12 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 - New patterns discovered this session: {len(discoveries)}
 - Recent scan: {buy_count} buys, {sell_count} sells, {hold_count} holds
 
-## USER'S TRADING PERFORMANCE
+## USER'S REAL TRADING PERFORMANCE
 - Total trades: {stats.get('total_trades', 0)}
 - Win rate: {stats.get('win_rate', 0)}%
 - Total P&L: ${stats.get('total_pnl', 0)}
 
-## PER-PATTERN TRADE PERFORMANCE
+## PER-PATTERN TRADE PERFORMANCE (Real Trades)
 {pattern_stats_text}
 
 ## CURRENT MARKET REGIME
@@ -2905,20 +3159,23 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
 
 Write a LEARNING REPORT in this format:
 
-### What I've Learned So Far
-(Summarize the top 3-5 most reliable patterns, explain each in plain English)
+### Top Performing Patterns
+(Summarize the top 3-5 ScanPatterns by win rate and backtest performance. Explain what conditions each pattern looks for in plain English.)
+
+### Evolution Insights
+(What pattern variants are being promoted? Which types of exits/entries work best? What's the evolution process discovering?)
 
 ### What's Working
-(Which patterns have the highest confidence and best returns?)
+(Which patterns have the highest confidence and best returns? Are real trades matching backtest expectations?)
 
-### What I'm Still Figuring Out
-(What areas need more data? What hypotheses are you testing?)
+### What's Not Working
+(Which patterns have poor backtests? What hypotheses have been rejected? Any fakeout patterns to avoid?)
 
 ### My Current Market Read
 (Based on the patterns + regime, what's the overall market telling you?)
 
 ### Next Study Goals
-(What should I focus on studying next to get smarter?)
+(What should the brain focus on? More timeframe variants? Different exit strategies? New combo patterns?)
 
 ### Active Hypothesis Results
 (Review the hypothesis pool. Which hypotheses are being confirmed? Which are failing?
@@ -5180,6 +5437,80 @@ def evolve_exit_strategies(db: Session) -> dict[str, Any]:
     return evolve_pattern_strategies(db)
 
 
+def _get_evolution_insights(db: Session) -> dict[str, Any]:
+    """Gather insights from specialized mining to guide evolution.
+    
+    Returns a dict with:
+    - synergies: list of signal combo insights (for combo variant creation)
+    - fakeouts: list of fakeout pattern insights (for variant penalization)
+    - timeframe_perf: dict of asset_type -> best_timeframe (for timeframe variants)
+    - exit_tweaks: list of exit optimization insights (for exit variants)
+    """
+    result = {
+        "synergies": [],
+        "fakeouts": [],
+        "timeframe_perf": {},
+        "exit_tweaks": [],
+    }
+    
+    try:
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(days=30)
+        
+        recent_insights = (
+            db.query(TradingInsight)
+            .filter(
+                TradingInsight.active.is_(True),
+                TradingInsight.confidence >= 0.4,
+                TradingInsight.created_at >= cutoff,
+            )
+            .all()
+        )
+        
+        for insight in recent_insights:
+            desc = (insight.pattern_description or "").lower()
+            
+            if "synergy" in desc or "combo" in desc or "+" in desc[:50]:
+                result["synergies"].append({
+                    "id": insight.id,
+                    "description": insight.pattern_description,
+                    "confidence": insight.confidence,
+                })
+            elif "fakeout" in desc or "false break" in desc:
+                result["fakeouts"].append({
+                    "id": insight.id,
+                    "description": insight.pattern_description,
+                    "confidence": insight.confidence,
+                })
+            elif "timeframe" in desc and "achieves" in desc:
+                if "stock" in desc:
+                    if "1d" in desc:
+                        result["timeframe_perf"]["stocks"] = "1d"
+                    elif "15m" in desc or "intraday" in desc:
+                        result["timeframe_perf"]["stocks"] = "15m"
+                elif "crypto" in desc:
+                    if "1d" in desc:
+                        result["timeframe_perf"]["crypto"] = "1d"
+                    elif "4h" in desc:
+                        result["timeframe_perf"]["crypto"] = "4h"
+            elif "exit" in desc and ("atr" in desc or "stop" in desc or "target" in desc):
+                result["exit_tweaks"].append({
+                    "id": insight.id,
+                    "description": insight.pattern_description,
+                    "confidence": insight.confidence,
+                })
+        
+        logger.info(
+            "[evolution] Gathered %d synergies, %d fakeouts, %d timeframe prefs, %d exit tweaks from insights",
+            len(result["synergies"]), len(result["fakeouts"]),
+            len(result["timeframe_perf"]), len(result["exit_tweaks"]),
+        )
+    except Exception as e:
+        logger.warning("[evolution] Failed to gather insights: %s", e)
+    
+    return result
+
+
 def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
     """Full evolutionary loop: entry, exit, AND combo variants.
 
@@ -5203,7 +5534,14 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         "promoted": 0, "deactivated": 0,
         "mutated_exit": 0, "mutated_entry": 0,
         "loss_reports": 0,
+        "insights_consumed": 0,
     }
+
+    # Gather insights from specialized mining to guide evolution
+    evo_insights = _get_evolution_insights(db)
+    fakeout_patterns = {i["description"][:100].lower() for i in evo_insights.get("fakeouts", [])}
+    synergy_combos = evo_insights.get("synergies", [])
+    preferred_timeframes = evo_insights.get("timeframe_perf", {})
 
     # ── 1. Fork phase ────────────────────────────────────────────────
     root_patterns = (
@@ -5294,7 +5632,33 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             avg_sharpe = sum(sharpes) / len(sharpes) if sharpes else 0
             wins = sum(1 for bt in bts if (bt.return_pct or 0) > 0)
             wr = wins / len(bts) if bts else 0
-            variant_scores.append((sib, avg_sharpe, wr, len(bts)))
+            
+            # Apply insight-based adjustments
+            insight_adj = 0.0
+            sib_name_lower = (sib.name or "").lower()
+            sib_label_lower = (sib.variant_label or "").lower()
+            
+            # Penalize variants that match known fakeout patterns
+            for fakeout_desc in fakeout_patterns:
+                if any(k in sib_name_lower or k in sib_label_lower 
+                       for k in ["low_vol", "rejection", "false"] if k in fakeout_desc):
+                    insight_adj -= 0.2
+                    stats["insights_consumed"] = stats.get("insights_consumed", 0) + 1
+                    break
+            
+            # Boost combo variants matching synergy insights
+            if sib.origin == "combo_variant" and synergy_combos:
+                sib_rules = sib.rules_json or ""
+                for syn in synergy_combos:
+                    syn_desc = (syn.get("description") or "").lower()
+                    if ("rsi" in syn_desc and "rsi" in sib_rules.lower()) or \
+                       ("macd" in syn_desc and "macd" in sib_rules.lower()) or \
+                       ("volume" in syn_desc and "vol" in sib_rules.lower()):
+                        insight_adj += 0.15 * syn.get("confidence", 0.5)
+                        stats["insights_consumed"] = stats.get("insights_consumed", 0) + 1
+            
+            adj_sharpe = avg_sharpe + insight_adj
+            variant_scores.append((sib, adj_sharpe, wr, len(bts)))
 
         if not variant_scores or len(variant_scores) < 2:
             continue
@@ -5462,6 +5826,7 @@ def run_learning_cycle(
     from .scanner import run_full_market_scan, _scan_status
     from .journal import daily_market_journal, check_signal_events
 
+    _shutting_down.clear()  # allow new cycle (e.g. after worker was stopped)
     if _learning_status["running"]:
         return {"ok": False, "reason": "Learning cycle already in progress"}
     if _shutting_down.is_set():
@@ -5586,16 +5951,32 @@ def run_learning_cycle(
         _step_time("active_seek", step_start,
                     f"{seek_result.get('sought', 0)} boosted")
 
-        # Step 6: Backtest discovered patterns (expanded)
+        # Step 6: Backtest TradingInsights (legacy)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        _learning_status["current_step"] = "Backtesting patterns"
+        _learning_status["current_step"] = "Backtesting insights"
         _learning_status["phase"] = "backtesting"
         bt_count = _auto_backtest_patterns(db, user_id)
         report["backtests_run"] = bt_count
+        _step_time("backtest_insights", step_start, f"{bt_count} insight backtests via {_provider}")
+        
+        # Step 6b: Backtest ScanPatterns from priority queue
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        _learning_status["current_step"] = "Backtesting patterns from queue"
+        _learning_status["phase"] = "queue_backtesting"
+        queue_result = _auto_backtest_from_queue(db, user_id)
+        report["queue_backtests_run"] = queue_result.get("backtests_run", 0)
+        report["queue_patterns_processed"] = queue_result.get("patterns_processed", 0)
+        report["queue_pending"] = queue_result.get("pending", 0)
+        report["queue_empty"] = queue_result.get("queue_empty", True)
+        report["backtests_run"] = bt_count + queue_result.get("backtests_run", 0)
         _learning_status["steps_completed"] = 8
-        _step_time("backtest", step_start, f"{bt_count} backtests via {_provider}")
+        _step_time("backtest_queue", step_start,
+                   f"{queue_result.get('patterns_processed', 0)} patterns, "
+                   f"{queue_result.get('pending', 0)} still pending")
 
         # Step 8: Self-validation & weight evolution (with dynamic hypotheses)
         if _shutting_down.is_set():

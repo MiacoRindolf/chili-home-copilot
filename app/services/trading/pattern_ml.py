@@ -276,6 +276,56 @@ class PatternMetaLearner:
 
     # ── training ──────────────────────────────────────────────────
 
+    def _make_meta_learner_clf(self):
+        """Build classifier: LightGBM GPU if enabled and available, else sklearn GBM."""
+        from sklearn.ensemble import GradientBoostingClassifier
+
+        try:
+            from ...config import settings
+            if getattr(settings, "brain_use_gpu_ml", False):
+                import lightgbm as lgb
+                try:
+                    clf = lgb.LGBMClassifier(
+                        n_estimators=120,
+                        max_depth=4,
+                        learning_rate=0.08,
+                        subsample=0.8,
+                        min_child_samples=5,
+                        random_state=42,
+                        device="gpu",
+                        verbose=-1,
+                    )
+                    clf.device = "gpu"
+                    logger.info("[pattern_ml] Using LightGBM GPU for meta-learner")
+                    return clf
+                except Exception as e:
+                    logger.warning("[pattern_ml] LightGBM GPU failed (%s), trying CPU", e)
+                try:
+                    clf = lgb.LGBMClassifier(
+                        n_estimators=120,
+                        max_depth=4,
+                        learning_rate=0.08,
+                        subsample=0.8,
+                        min_child_samples=5,
+                        random_state=42,
+                        device="cpu",
+                        verbose=-1,
+                    )
+                    logger.info("[pattern_ml] Using LightGBM CPU for meta-learner")
+                    return clf
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug("[pattern_ml] GPU/lightgbm path skipped: %s", e)
+        return GradientBoostingClassifier(
+            n_estimators=120,
+            max_depth=4,
+            learning_rate=0.08,
+            subsample=0.8,
+            min_samples_leaf=5,
+            random_state=42,
+        )
+
     def train(self, db) -> dict[str, Any]:
         """Train on ``MarketSnapshot`` rows using pattern features."""
         from sklearn.ensemble import GradientBoostingClassifier
@@ -345,18 +395,13 @@ class PatternMetaLearner:
         X = np.array(X_rows)
         y = np.array(y_rows)
 
-        clf = GradientBoostingClassifier(
-            n_estimators=120,
-            max_depth=4,
-            learning_rate=0.08,
-            subsample=0.8,
-            min_samples_leaf=5,
-            random_state=42,
-        )
+        # Optional GPU path via LightGBM when BRAIN_USE_GPU_ML=true
+        clf = self._make_meta_learner_clf()
 
         cv_folds = min(5, max(2, len(X) // 20))
+        n_jobs_cv = 1 if getattr(clf, "device", None) == "gpu" else -1
         cv_scores = cross_val_score(
-            clf, X, y, cv=cv_folds, scoring="accuracy", n_jobs=-1,
+            clf, X, y, cv=cv_folds, scoring="accuracy", n_jobs=n_jobs_cv,
         )
 
         clf.fit(X, y)
