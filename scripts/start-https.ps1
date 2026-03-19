@@ -1,9 +1,20 @@
 $ProjectRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 Set-Location $ProjectRoot
 
+# Free 8000 (will self-elevate to Admin if needed to kill stubborn processes)
+& "$PSScriptRoot\free-port.ps1" -Port 8000
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "free-port.ps1 failed (exit $LASTEXITCODE). Port 8000 may still be in use - not starting uvicorn." -ForegroundColor Red
+    Write-Host "Run: .\scripts\diagnose-port-8000.ps1" -ForegroundColor Yellow
+    exit 1
+}
+
 $Cert = "localhost+2.pem"
 $Key = "localhost+2-key.pem"
-
+if (-not (Test-Path $Cert) -or -not (Test-Path $Key)) {
+    $Cert = "certs/localhost.pem"
+    $Key = "certs/localhost.key"
+}
 if (-not (Test-Path $Cert) -or -not (Test-Path $Key)) {
     Write-Host "Certificates not found. Generating..." -ForegroundColor Yellow
 
