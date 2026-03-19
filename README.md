@@ -28,8 +28,8 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
  │         │             Tool Exec  OpenAI SSE  │
  │         │                  │    (streaming)  │
  │         ▼                  ▼         │       │
- │       SQLite DB ◄──────────┘─────────┘       │
- │  (conversations, chat_messages)              │
+ │       PostgreSQL ◄──────────┘─────────┘      │
+ │  (conversations, chat_messages, …)          │
  │                                              │
  │  Identity: cookie ──► Device ──► User        │
  │  Conversations: sidebar, auto-title, CRUD    │
@@ -95,7 +95,7 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - Guests see a single continuous thread; paired users get full conversation management
 
 ### Chat Memory
-- Persistent conversation history per user stored in SQLite (`chat_messages` + `conversations` tables)
+- Persistent conversation history per user stored in PostgreSQL (`chat_messages` + `conversations` tables)
 - Memory scoped by `convo_key`: paired users get named conversations, guests get isolated threads
 - Last 12 messages sent as context window to the planner for multi-turn conversations
 
@@ -130,7 +130,7 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 | Layer | Technology |
 |-------|-----------|
 | Backend | Python 3.11, FastAPI |
-| Database | SQLite via SQLAlchemy |
+| Database | PostgreSQL via SQLAlchemy |
 | LLM (local) | Ollama (llama3 for planning, nomic-embed-text for embeddings) |
 | LLM (cloud) | Tiered cascade: Groq (free) → Gemini (free) → OpenAI (paid last resort) |
 | Vector Store | ChromaDB (local, persistent) |
@@ -138,30 +138,37 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 | Charts | LightweightCharts (TradingView), yfinance for market data |
 | Validation | Pydantic v2 (strict schemas, discriminated unions) |
 | Frontend | Server-rendered HTML + vanilla JS (`fetch()` for chat) |
-| Container | Docker + Docker Compose (Ollama sidecar) |
+| Container | Docker + Docker Compose (PostgreSQL + Ollama + app) |
 | Environment | Conda (`chili-env`) or Docker |
 
 ## Quick Start
 
+### PostgreSQL (required)
+
+- **Docker Compose** (`scripts/docker-setup.sh`): includes a **PostgreSQL 15** service; the `chili` container gets `DATABASE_URL=postgresql://chili:chili@postgres:5432/chili` automatically. The DB is also published on the host as **`localhost:5433`** (`chili` / `chili` / `chili`).
+- **Local / Conda**: set **`DATABASE_URL`** in `.env` (see `.env.example`). The app applies the schema on startup (`create_all` + versioned migrations).
+
+- More: **[docs/DATABASE_POSTGRES.md](docs/DATABASE_POSTGRES.md)** (`pytest`, legacy import, Compose details).
+- Pattern trade analytics (per-trade rows, evidence hypotheses, Brain UI): **[docs/PATTERN_TRADE_ANALYTICS.md](docs/PATTERN_TRADE_ANALYTICS.md)**.
+
 ### Option A: Docker (recommended)
 
-The fastest way to get CHILI running. One command pulls Ollama + models, starts the app, and ingests documents.
+The fastest way to get CHILI running: **PostgreSQL**, Ollama, model pulls, the app, and RAG ingest.
 
 ```bash
 git clone https://github.com/MiacoRindolf/chili-home-copilot.git
 cd chili-home-copilot
 
-# (Optional) Set up OpenAI for general chat
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Optional: edit .env for API keys, etc. DATABASE_URL is set inside Compose for the app container.
 
-# Start everything
+# Start everything (postgres + ollama + chili)
 bash scripts/docker-setup.sh
 ```
 
 Open [http://localhost:8000/chat](http://localhost:8000/chat) to start chatting.
 
-To stop: `docker compose down`. To stop and wipe data: `docker compose down -v`.
+To stop: `docker compose down`. To stop and wipe **all** data (Postgres, Ollama models cache volume, app data): `docker compose down -v`.
 
 ### Option B: Local (Conda)
 
@@ -182,9 +189,8 @@ conda activate chili-env
 # Install dependencies
 pip install -r requirements.txt
 
-# (Optional) Set up OpenAI for general chat
 cp .env.example .env
-# Edit .env and add your OPENAI_API_KEY
+# Edit .env: set DATABASE_URL (PostgreSQL) and optionally OPENAI_API_KEY
 
 # Pull the LLM and embedding models
 ollama pull llama3
@@ -193,17 +199,55 @@ ollama pull nomic-embed-text
 # (Optional) Ingest household documents for RAG
 python -m app.ingest
 
-# Start the server
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Start the server (HTTPS; frees port 8000 first on Windows to avoid WinError 10048)
+.\scripts\start-https.ps1
 ```
 
-Open [http://localhost:8000/chat](http://localhost:8000/chat) to start chatting.
+Open [https://localhost:8000/chat](https://localhost:8000/chat) to start chatting. If port 8000 is already in use, see [Port 8000 already in use](#port-8000-already-in-use-windows-winerror-10048) below.
 
 > **RAG setup**: Drop `.txt` files into the `docs/` folder (house rules, WiFi info, recipes, etc.) and run `python -m app.ingest` to make them searchable via chat. Example files are included.
 
 ### LAN Access
 
-CHILI is designed for household use. Run with `--host 0.0.0.0` and access from any device on your local network using your machine's LAN IP (e.g., `http://192.168.1.x:8000`).
+CHILI is designed for household use. When using `.\scripts\start-https.ps1`, the server binds `0.0.0.0`; access from any device on your local network using your machine's LAN IP (e.g., `https://192.168.1.x:8000`).
+
+### Port 8000 already in use (Windows `WinError 10048`)
+
+Another `uvicorn`/Python process is still listening (often an old terminal, a second Cursor terminal, or a **reload supervisor** that respawns workers). Free the port, then start again:
+
+```powershell
+.\scripts\free-port.ps1 -Port 8000
+```
+
+This script **does not require Administrator** for normal dev: it stops listeners first, targets the **parent** of the process holding the socket (fixes `uvicorn --reload`), retries a few times, and only pops **UAC** if something is still bound after that.
+
+`scripts\start-https.ps1` runs `free-port.ps1` automatically before starting the server.
+
+Avoid relying on `Stop-Process` on the raw listener PID alone — with `--reload`, that PID can come back immediately; use `free-port.ps1` instead.
+
+**Still 10048 after `free-port`?** Windows may have **reserved** the port (Hyper-V / WSL excluded range). The script exits with an error and suggests another port. Quick fix:
+
+```powershell
+$env:CHILI_PORT = '8010'
+.\scripts\start-https.ps1
+```
+
+Or let the repo pick the first free port among 8000, 8010, 8020, …:
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+**Brain worker won’t stop / port still stuck:** run a full reset **in Windows PowerShell** (Cursor’s sandbox cannot always kill your processes):
+
+```powershell
+cd C:\dev\chili-home-copilot
+.\scripts\reset-chili-dev.ps1
+# optional: free port + open new window with HTTPS uvicorn
+.\scripts\reset-chili-dev.ps1 -StartUvicorn
+```
+
+**CHILI running as a Windows service on 8000:** If you run the app as a service (e.g. NSSM) bound to port 8000, it will conflict with a manual dev server. Either **stop the service** before starting local dev, or use a different port for dev: `$env:CHILI_PORT='8010'; .\scripts\start-https.ps1`.
 
 ## Project Structure
 
@@ -260,11 +304,11 @@ docs/
 ├── house-info.txt       # Example: WiFi, landlord, trash, parking
 ├── house-rules.txt      # Example: quiet hours, kitchen, guests
 ├── recipes.txt          # Example: household favorite recipes
-data/                    # SQLite DB, ChromaDB, uploads, ticker cache (gitignored)
-tests/                   # pytest suite with in-memory SQLite fixtures
+data/                    # ChromaDB, uploads, ticker cache, optional legacy .db (gitignored)
+tests/                   # pytest (PostgreSQL; see docs/DATABASE_POSTGRES.md)
 chili_mobile/            # Flutter mobile app (Android/iOS)
 Dockerfile               # Container image for CHILI app
-docker-compose.yml       # Full stack: CHILI + Ollama
+docker-compose.yml       # Full stack: PostgreSQL + Ollama + CHILI
 scripts/
 ├── docker-setup.sh      # One-command Docker bootstrap
 ├── start-https.ps1      # HTTPS setup for LAN (mkcert)
@@ -283,7 +327,7 @@ requirements.txt         # Pinned Python dependencies
 | **`convo_key` scoping** | Paired users get `user:<id>` so conversations follow the person across devices. Guests get `guest:<token>` for isolated threads. |
 | **Rule-based fallback** | If Ollama is down, CHILI still works via regex parsing. Graceful degradation over hard failure. |
 | **Temperature 0** | Tool-calling needs deterministic output. Creative variation in action planning causes schema validation failures. |
-| **SQLite** | Zero-config, single-file database. Perfect for a household app that runs on one machine. Easily swappable via SQLAlchemy. |
+| **PostgreSQL** | Required relational store (concurrent web + worker). `DATABASE_URL` in `.env`; migrations in `app/migrations.py`. Legacy `chili.db` import: `scripts/migrate_legacy_sqlite_to_postgres.py`. |
 | **RAG with local embeddings** | Ollama `nomic-embed-text` keeps embeddings local (no cloud API keys). ChromaDB provides persistent vector storage with zero infrastructure. |
 | **RAG is additive** | Document search enhances the planner without replacing tool-calling. Existing chore/birthday actions work identically whether RAG context is present or not. |
 | **Simple paragraph chunking** | Household docs are short and structured. Splitting by paragraph with a 500-char cap is sufficient without complex chunking libraries. |
@@ -291,7 +335,7 @@ requirements.txt         # Pinned Python dependencies
 | **gpt-4o-mini default** | Cheapest OpenAI model with strong quality. ~$0.15/1M input tokens makes it viable for household use without budget worries. |
 | **Personality via extraction** | Every 20 messages, OpenAI summarizes the user's traits from conversation history. Cheaper and simpler than per-message analysis, and quality improves with more data. |
 | **User-editable profiles** | Auto-extraction can be wrong. The `/profile` page lets housemates correct CHILI's understanding, building trust and improving personalization. |
-| **Docker with Ollama sidecar** | `docker-compose.yml` runs Ollama as a service container with a health check. The app uses `OLLAMA_HOST` env var so the same code works locally and in Docker without config changes. |
+| **Docker Compose stack** | `docker-compose.yml` runs PostgreSQL (with health check), Ollama, and CHILI. The app container gets `DATABASE_URL` pointed at the `postgres` service; `OLLAMA_HOST` targets Ollama on the Compose network. |
 | **Pinned requirements.txt** | Exact versions for reproducible builds. Conda is great for local dev, but `pip install -r requirements.txt` works everywhere -- Docker, CI, VMs. |
 | **SSE streaming** | Server-Sent Events let the frontend display tokens as they arrive from OpenAI, matching the ChatGPT typing experience. Tool actions (instant) send the full reply as one chunk. |
 | **Conversation sidebar for users only** | Paired users get multi-conversation management (create, switch, delete). Guests see a single shared thread -- no sidebar clutter, simpler UX for casual visitors. |

@@ -1,0 +1,50 @@
+---
+description: Always start the server with HTTPS using SSL certificates
+alwaysApply: true
+---
+
+# Server Configuration - HTTPS Required
+
+When starting or restarting the server for this project, **always use HTTPS**.
+
+## Startup Command (default)
+
+**Use the repo script** so the port is freed before bind (avoids WinError 10048 on Windows):
+
+```powershell
+.\scripts\start-https.ps1
+```
+
+- Runs `scripts\free-port.ps1` first, then starts uvicorn with `--reload` and SSL.
+- Alternate port: `$env:CHILI_PORT='8010'; .\scripts\start-https.ps1`
+- Certificates: `certs/localhost.pem`, `certs/localhost.key` (or `localhost+2.pem` / `localhost+2-key.pem` if present).
+
+## HTTP / alternate ports
+
+```powershell
+.\scripts\start-dev.ps1
+```
+
+Picks first free port among 8000, 8010, 8020, … and runs HTTP (no SSL).
+
+## Advanced: manual uvicorn
+
+Only if you need custom uvicorn flags: **ensure port 8000 is free first** (otherwise you may get WinError 10048 / "Unable to connect"):
+
+```powershell
+.\scripts\free-port.ps1 -Port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8000 --ssl-keyfile certs/localhost.key --ssl-certfile certs/localhost.pem
+```
+
+Do **not** suggest raw uvicorn as the default; prefer `start-https.ps1`.
+
+## Certificate Files
+
+Located in `certs/` folder:
+- `certs/localhost.pem` (certificate)
+- `certs/localhost.key` (private key)
+
+## Access URLs
+
+- Local: `https://localhost:8000`
+- LAN: `https://<LAN-IP>:8000`
