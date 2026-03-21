@@ -1,0 +1,30 @@
+---
+description: Use conda chili-env for all Python installs and runs in this project
+alwaysApply: true
+---
+
+# Conda Environment - chili-env
+
+For this project (CHILI products), **always use the conda environment `chili-env`** for:
+
+- Installing Python packages (e.g. `pip install`, new dependencies)
+- Running scripts (e.g. `python scripts/brain_worker.py`, `uvicorn`)
+- Running tests
+
+## Commands
+
+```powershell
+# Activate first (if not already)
+conda activate chili-env
+
+# Install from requirements
+pip install -r requirements.txt
+
+# Install a new package
+pip install <package>
+
+# Run the app (server rule uses chili-env or direct uvicorn after activate)
+uvicorn app.main:app ...
+```
+
+When suggesting installs or terminal commands that run Python, assume `chili-env` is the active environment or use `conda run -n chili-env ...` if the shell may not have it activated.

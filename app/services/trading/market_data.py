@@ -160,7 +160,9 @@ def fetch_ohlcv(
 
     # --- Massive path (primary) ---
     _massive_dead = False
+    _massive_tried = False
     if _use_massive():
+        _massive_tried = True
         try:
             bars = _massive.get_aggregates(
                 ticker, interval=interval, period=period,
@@ -176,6 +178,13 @@ def fetch_ohlcv(
             logger.warning(f"[market_data] Massive OHLCV failed for {ticker}: {e}")
 
     if _massive_dead:
+        return []
+
+    # For crypto: if Massive was tried and returned empty, don't fall back to yfinance
+    # Many crypto tickers don't exist on yfinance or use different formats
+    _is_crypto = ticker.upper().endswith("-USD")
+    if _is_crypto and _massive_tried:
+        logger.debug(f"[market_data] Skipping yfinance fallback for crypto {ticker} (Massive already tried)")
         return []
 
     # --- Polygon path (secondary) ---
@@ -241,7 +250,9 @@ def fetch_ohlcv_df(
 
     # --- Massive path (primary) ---
     _massive_dead = False
+    _massive_tried = False
     if _use_massive():
+        _massive_tried = True
         try:
             df = _massive.get_aggregates_df(
                 ticker, interval=interval, period=period,
@@ -255,6 +266,12 @@ def fetch_ohlcv_df(
             logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
 
     if _massive_dead:
+        return pd.DataFrame()
+
+    # For crypto: if Massive was tried and returned empty, don't fall back to yfinance
+    _is_crypto = ticker.upper().endswith("-USD")
+    if _is_crypto and _massive_tried:
+        logger.debug(f"[market_data] Skipping yfinance fallback for crypto {ticker} (Massive already tried)")
         return pd.DataFrame()
 
     # --- Polygon path (secondary) ---

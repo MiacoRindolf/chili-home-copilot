@@ -3,7 +3,7 @@
 CHILI uses a production-style LLM architecture:
 
 **LLM = planner** (chooses an action)  
-**Code = executor** (performs the action against SQLite)
+**Code = executor** (performs the action against PostgreSQL via SQLAlchemy)
 
 This design prevents the model from directly modifying state and makes the system safer and testable.
 

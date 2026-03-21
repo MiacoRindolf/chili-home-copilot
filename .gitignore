@@ -28,3 +28,6 @@ localhost+2-key.pem
 
 # pytest
 .pytest_cache/
+
+# local route dumps (scripts/_dump_routes.py)
+routes_dump.txt

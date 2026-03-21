@@ -225,22 +225,85 @@ STRATEGIES: dict[str, dict[str, Any]] = {
         "cls": TrendFollowing,
         "name": "Trend Following",
         "description": "Multi-indicator trend: SMA + EMA + RSI confluence for high-confidence entries.",
-        "params": {"sma_len": (30, 80, 10)},
+        "params": {"sma_len": (30, 80, 10), "ema_fast": (8, 20, 2), "ema_slow": (20, 40, 2)},
     },
     "momentum_breakout": {
         "cls": MomentumBreakout,
         "name": "Momentum Breakout",
         "description": "RSI momentum + full EMA stack alignment. Captures strong continuation breakouts.",
-        "params": {"rsi_threshold": (55, 75, 5), "ema_fast": (10, 30, 5)},
+        "params": {
+            "rsi_threshold": (55, 75, 5),
+            "ema_fast": (10, 30, 5),
+            "ema_mid": (30, 70, 10),
+            "ema_slow": (80, 120, 10),
+        },
     },
 }
 
 
-def list_strategies() -> list[dict[str, str]]:
-    return [
-        {"id": k, "name": v["name"], "description": v["description"]}
-        for k, v in STRATEGIES.items()
-    ]
+def _coerce_strategy_params(
+    strat_cls: type,
+    strategy_id: str,
+    raw: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Filter and coerce user-provided params to types expected by backtesting.py."""
+    if not raw:
+        return {}
+    meta = (STRATEGIES.get(strategy_id) or {}).get("params") or {}
+    allowed = set(meta.keys())
+    out: dict[str, Any] = {}
+    for k, v in raw.items():
+        if k not in allowed:
+            continue
+        default = getattr(strat_cls, k, None)
+        spec = meta.get(k)
+        try:
+            if isinstance(default, bool):
+                out[k] = bool(v)
+            elif spec is not None and isinstance(spec[0], float):
+                out[k] = float(v)
+            elif isinstance(default, int) and not isinstance(default, bool):
+                out[k] = int(v)
+            elif isinstance(default, float):
+                out[k] = float(v)
+            elif isinstance(v, (int, float)):
+                out[k] = int(v) if float(v) == int(float(v)) else float(v)
+            else:
+                out[k] = v
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def list_strategies() -> list[dict[str, Any]]:
+    """Return built-in strategies with optional tunable param metadata for the UI."""
+    out: list[dict[str, Any]] = []
+    for k, v in STRATEGIES.items():
+        entry: dict[str, Any] = {
+            "id": k,
+            "name": v["name"],
+            "description": v["description"],
+            "kind": "builtin",
+        }
+        cls = v["cls"]
+        params_meta = v.get("params")
+        tunables: list[dict[str, Any]] = []
+        if params_meta:
+            for pname, spec in params_meta.items():
+                lo, hi, step = spec[0], spec[1], spec[2]
+                default = getattr(cls, pname, lo)
+                tunables.append(
+                    {
+                        "name": pname,
+                        "min": lo,
+                        "max": hi,
+                        "step": step,
+                        "default": int(default) if isinstance(default, (int, float)) and float(default) == int(default) else default,
+                    }
+                )
+        entry["tunables"] = tunables
+        out.append(entry)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -288,7 +351,12 @@ def generate_strategy_name(conditions: list[dict[str, Any]]) -> str:
     return " + ".join(parts[:6])
 
 
-def _extract_indicators(strat_cls, strategy_id: str, df: pd.DataFrame) -> dict:
+def _extract_indicators(
+    strat_cls,
+    strategy_id: str,
+    df: pd.DataFrame,
+    strategy_params: dict[str, Any] | None = None,
+) -> dict:
     """Compute indicator overlays for charting based on the strategy used."""
     result = {}
     close = df["Close"]
@@ -302,31 +370,52 @@ def _extract_indicators(strat_cls, strategy_id: str, df: pd.DataFrame) -> dict:
         return pts
 
     if strategy_id == "sma_cross":
-        result["SMA 10"] = _series_to_points(_sma(close, 10))
-        result["SMA 30"] = _series_to_points(_sma(close, 30))
+        fast = int((strategy_params or {}).get("fast", getattr(strat_cls, "fast", 10)))
+        slow = int((strategy_params or {}).get("slow", getattr(strat_cls, "slow", 30)))
+        result[f"SMA {fast}"] = _series_to_points(_sma(close, fast))
+        result[f"SMA {slow}"] = _series_to_points(_sma(close, slow))
     elif strategy_id == "ema_cross":
-        result["EMA 12"] = _series_to_points(_ema(close, 12))
-        result["EMA 26"] = _series_to_points(_ema(close, 26))
+        fast = int((strategy_params or {}).get("fast", getattr(strat_cls, "fast", 12)))
+        slow = int((strategy_params or {}).get("slow", getattr(strat_cls, "slow", 26)))
+        result[f"EMA {fast}"] = _series_to_points(_ema(close, fast))
+        result[f"EMA {slow}"] = _series_to_points(_ema(close, slow))
     elif strategy_id == "rsi_reversal":
-        result["RSI 14"] = _series_to_points(_rsi(close, 14))
+        rsi_n = int((strategy_params or {}).get("rsi_period", getattr(strat_cls, "rsi_period", 14)))
+        result[f"RSI {rsi_n}"] = _series_to_points(_rsi(close, rsi_n))
     elif strategy_id == "bb_bounce":
-        result["BB Upper"] = _series_to_points(_bollinger_upper(close, 20, 2))
-        result["BB Mid"] = _series_to_points(_bollinger_mid(close, 20))
-        result["BB Lower"] = _series_to_points(_bollinger_lower(close, 20, 2))
+        bb_n = int((strategy_params or {}).get("bb_period", getattr(strat_cls, "bb_period", 20)))
+        bb_s = float((strategy_params or {}).get("bb_std", getattr(strat_cls, "bb_std", 2)))
+        result["BB Upper"] = _series_to_points(_bollinger_upper(close, bb_n, bb_s))
+        result["BB Mid"] = _series_to_points(_bollinger_mid(close, bb_n))
+        result["BB Lower"] = _series_to_points(_bollinger_lower(close, bb_n, bb_s))
     elif strategy_id == "macd":
-        ema_f = _ema(close, 12)
-        ema_s = _ema(close, 26)
+        mfast = int((strategy_params or {}).get("fast", getattr(strat_cls, "fast", 12)))
+        mslow = int((strategy_params or {}).get("slow", getattr(strat_cls, "slow", 26)))
+        msig = int((strategy_params or {}).get("signal", getattr(strat_cls, "signal", 9)))
+        ema_f = _ema(close, mfast)
+        ema_s = _ema(close, mslow)
         macd_line = pd.Series(ema_f.values - ema_s.values, index=close.index)
-        signal_line = _ema(macd_line, 9)
+        signal_line = _ema(macd_line, msig)
         histogram = macd_line - signal_line
         result["MACD"] = _series_to_points(macd_line)
         result["Signal"] = _series_to_points(signal_line)
         result["Histogram"] = _series_to_points(histogram)
     elif strategy_id == "trend_follow":
-        result["SMA 50"] = _series_to_points(_sma(close, 50))
-        result["EMA 12"] = _series_to_points(_ema(close, 12))
-        result["EMA 26"] = _series_to_points(_ema(close, 26))
+        sma_n = int((strategy_params or {}).get("sma_len", getattr(strat_cls, "sma_len", 50)))
+        ef = int((strategy_params or {}).get("ema_fast", getattr(strat_cls, "ema_fast", 12)))
+        es = int((strategy_params or {}).get("ema_slow", getattr(strat_cls, "ema_slow", 26)))
+        result[f"SMA {sma_n}"] = _series_to_points(_sma(close, sma_n))
+        result[f"EMA {ef}"] = _series_to_points(_ema(close, ef))
+        result[f"EMA {es}"] = _series_to_points(_ema(close, es))
         result["RSI 14"] = _series_to_points(_rsi(close, 14))
+    elif strategy_id == "momentum_breakout":
+        ef = int((strategy_params or {}).get("ema_fast", getattr(strat_cls, "ema_fast", 20)))
+        em = int((strategy_params or {}).get("ema_mid", getattr(strat_cls, "ema_mid", 50)))
+        es = int((strategy_params or {}).get("ema_slow", getattr(strat_cls, "ema_slow", 100)))
+        result["RSI 14"] = _series_to_points(_rsi(close, 14))
+        result[f"EMA {ef}"] = _series_to_points(_ema(close, ef))
+        result[f"EMA {em}"] = _series_to_points(_ema(close, em))
+        result[f"EMA {es}"] = _series_to_points(_ema(close, es))
 
     return result
 
@@ -341,6 +430,7 @@ def run_backtest(
     commission: float = 0.001,
     optimize: bool = False,
     interval: str = "1d",
+    strategy_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest and return results dict."""
     if strategy_id not in STRATEGIES:
@@ -356,6 +446,7 @@ def run_backtest(
 
     strat_info = STRATEGIES[strategy_id]
     strat_cls = strat_info["cls"]
+    coerced = _coerce_strategy_params(strat_cls, strategy_id, strategy_params)
 
     bt = Backtest(df, strat_cls, cash=cash, commission=commission, exclusive_orders=True)
 
@@ -370,9 +461,9 @@ def run_backtest(
         try:
             stats = bt.optimize(**param_ranges, maximize="Return [%]")
         except Exception:
-            stats = bt.run()
+            stats = bt.run(**coerced)
     else:
-        stats = bt.run()
+        stats = bt.run(**coerced)
 
     equity = stats.get("_equity_curve")
     equity_data = []
@@ -420,7 +511,7 @@ def run_backtest(
             })
 
     # Indicator overlays (strategy-specific)
-    indicators = _extract_indicators(strat_cls, strategy_id, df)
+    indicators = _extract_indicators(strat_cls, strategy_id, df, coerced or None)
 
     return {
         "ok": True,
@@ -445,7 +536,7 @@ def run_backtest(
 
 
 def _sanitize_float(v: Any, default: float = 0.0) -> float:
-    """Convert NaN / Inf / None to a safe float for SQLite storage."""
+    """Convert NaN / Inf / None to a safe float for database storage (PostgreSQL)."""
     import math
     if v is None:
         return default
@@ -460,7 +551,9 @@ def _sanitize_float(v: Any, default: float = 0.0) -> float:
 
 def save_backtest(
     db: Session, user_id: int | None, result: dict[str, Any],
-    *, insight_id: int | None = None,
+    *,
+    insight_id: int | None = None,
+    scan_pattern_id: int | None = None,
 ) -> BacktestResult:
     """Persist a backtest result to the database.
 
@@ -469,6 +562,7 @@ def save_backtest(
     """
     ticker = result.get("ticker", "")
     strategy = result.get("strategy", "")
+    resolved_sp_id = scan_pattern_id if scan_pattern_id is not None else result.get("scan_pattern_id")
     ret_pct = _sanitize_float(result.get("return_pct"))
     wr = _sanitize_float(result.get("win_rate"))
     sharpe = result.get("sharpe")
@@ -499,8 +593,13 @@ def save_backtest(
             existing.trade_count = tc
             existing.equity_curve = json.dumps(eq)
             existing.params = params_json
+            if resolved_sp_id is not None:
+                existing.scan_pattern_id = int(resolved_sp_id)
             db.commit()
             db.refresh(existing)
+            _persist_pattern_trade_analytics(
+                db, user_id, resolved_sp_id, insight_id, existing, result,
+            )
             return existing
 
     record = BacktestResult(
@@ -515,11 +614,41 @@ def save_backtest(
         trade_count=tc,
         equity_curve=json.dumps(eq),
         related_insight_id=insight_id,
+        scan_pattern_id=int(resolved_sp_id) if resolved_sp_id is not None else None,
     )
     db.add(record)
     db.commit()
     db.refresh(record)
+    _persist_pattern_trade_analytics(
+        db, user_id, resolved_sp_id, insight_id, record, result,
+    )
     return record
+
+
+def _persist_pattern_trade_analytics(
+    db: Session,
+    user_id: int | None,
+    scan_pattern_id: int | None,
+    insight_id: int | None,
+    record: BacktestResult,
+    result: dict[str, Any],
+) -> None:
+    if not scan_pattern_id or not result.get("trades"):
+        return
+    try:
+        from .trading.pattern_trade_storage import persist_rows_from_backtest_result
+
+        persist_rows_from_backtest_result(
+            db,
+            user_id=user_id,
+            scan_pattern_id=int(scan_pattern_id),
+            related_insight_id=insight_id,
+            backtest_row=record,
+            result=result,
+            source="insight_backtest" if insight_id else "queue_backtest",
+        )
+    except Exception:
+        pass
 
 
 # ── Pattern-aware backtesting ────────────────────────────────────────
@@ -1402,6 +1531,12 @@ def backtest_pattern(
     interval: str = "1d",
     period: str = "1y",
     exit_config: str | dict[str, Any] | None = None,
+    *,
+    cash: float = 100_000,
+    commission: float = 0.001,
+    rules_json_override: str | None = None,
+    append_conditions: list[dict[str, Any]] | None = None,
+    exit_config_overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest for a ScanPattern.
 
@@ -1409,13 +1544,20 @@ def backtest_pattern(
     ``run_pattern_backtest`` which evaluates the actual composite conditions
     bar-by-bar.  Falls back to a generic strategy mapping only when conditions
     are absent or unparseable.
+
+    Optional ``rules_json_override`` replaces the pattern's stored rules entirely.
+    ``append_conditions`` are AND-appended to the parsed conditions list.
     """
+    raw_rules = rules_json_override if rules_json_override is not None else rules_json
     conditions: list[dict[str, Any]] = []
     try:
-        rules = json.loads(rules_json) if rules_json else {}
+        rules = json.loads(raw_rules) if raw_rules else {}
         conditions = rules.get("conditions", [])
     except (json.JSONDecodeError, TypeError):
         pass
+
+    if append_conditions:
+        conditions = list(conditions) + list(append_conditions)
 
     exit_cfg: dict[str, Any] | None = None
     if exit_config is not None:
@@ -1427,6 +1569,9 @@ def backtest_pattern(
             except (json.JSONDecodeError, TypeError):
                 pass
 
+    if exit_config_overlay:
+        exit_cfg = {**(exit_cfg or {}), **exit_config_overlay}
+
     if conditions:
         result = run_pattern_backtest(
             ticker=ticker,
@@ -1434,6 +1579,8 @@ def backtest_pattern(
             pattern_name=pattern_name,
             period=period,
             interval=interval,
+            cash=cash,
+            commission=commission,
             exit_config=exit_cfg,
         )
         result["pattern_name"] = pattern_name
@@ -1453,6 +1600,8 @@ def backtest_pattern(
         strategy_id=strategy_id,
         period=period,
         interval=interval,
+        cash=cash,
+        commission=commission,
     )
     result["pattern_name"] = pattern_name
     result["mapped_strategy"] = strategy_id

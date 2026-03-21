@@ -8,6 +8,7 @@ from app.models import User, Device
 from app.models.trading import (
     WatchlistItem, Trade, JournalEntry, TradingInsight,
     ScanResult, BacktestResult, MarketSnapshot, LearningEvent,
+    ScanPattern,
 )
 from app.services import trading_service as ts
 from app.pairing import DEVICE_COOKIE_NAME
@@ -507,6 +508,51 @@ class TestBrainAPI:
         data = resp.json()
         assert "active" in data
         assert "demoted" in data
+
+    @patch("app.services.backtest_service._fetch_ohlcv_df")
+    def test_pattern_backtest_with_insight_id_not_404(self, mock_fetch, db, client):
+        """Using insight id in pattern backtest must not return 404 when insight exists and resolves."""
+        import pandas as pd
+        import numpy as np
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="Test RSI pattern",
+            description="RSI oversold",
+            rules_json='{"conditions":[{"indicator":"rsi_14","op":"<","value":35}]}',
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        insight = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="RSI oversold bounce",
+            confidence=0.8,
+            evidence_count=3,
+        )
+        db.add(insight)
+        db.commit()
+        db.refresh(insight)
+        dates = pd.date_range("2024-01-01", periods=60, freq="D")
+        mock_fetch.return_value = pd.DataFrame({
+            "Open": np.random.uniform(180, 200, 60),
+            "High": np.random.uniform(200, 210, 60),
+            "Low": np.random.uniform(175, 185, 60),
+            "Close": np.linspace(185, 205, 60),
+            "Volume": np.random.randint(1_000_000, 5_000_000, 60),
+        }, index=dates)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.post(
+            f"/api/trading/patterns/{insight.id}/backtest",
+            params={"ticker": "AAPL", "period": "1y", "interval": "1d"},
+            json={},
+        )
+        assert resp.status_code != 404, "Pattern not found when using insight id (UI sends insight:id)"
+        data = resp.json()
+        assert "ok" in data
+        if data.get("ok"):
+            assert "ticker" in data and "strategy" in data
 
 
 class TestTopPicksFreshness:

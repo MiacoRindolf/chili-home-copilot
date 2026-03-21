@@ -1,32 +1,111 @@
+# Full stack: postgres + ollama + CHILI app + Brain HTTP + brain worker (optional delegation to Brain).
+# See docs/DOCKER_FULL_STACK.md
 services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: chili
+      POSTGRES_PASSWORD: chili
+      POSTGRES_DB: chili
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      # Host port 5433 avoids clashing with a local PostgreSQL on 5432.
+      # From the host: postgresql://chili:chili@localhost:5433/chili
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U chili -d chili"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
   ollama:
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
+    # ollama image has no curl/wget; use CLI against the local daemon
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      test: ["CMD", "ollama", "list"]
       interval: 10s
-      timeout: 5s
-      retries: 5
+      timeout: 10s
+      retries: 12
+      start_period: 40s
 
   chili:
     build: .
+    image: chili-app:local
     ports:
       - "8000:8000"
     env_file:
       - path: .env
         required: false
     environment:
+      # Must use service hostname `postgres`; overrides DATABASE_URL from .env when using Compose.
       - OLLAMA_HOST=http://ollama:11434
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      # HTTPS in the container (self-signed). Hardcoded so host .env cannot accidentally
+      # set CHILI_TLS=0 and break https:// in the browser (PR_END_OF_FILE_ERROR).
+      # For plain HTTP in Docker, use: docker compose run -e CHILI_TLS=0 … or a compose override.
+      - CHILI_TLS=1
     volumes:
       - chili_data:/app/data
       - ./docs:/app/docs
     depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  # Brain HTTP service (strangler — see chili-brain/README.md)
+  brain:
+    build:
+      context: .
+      dockerfile: chili-brain/Dockerfile
+    image: chili-brain:local
+    ports:
+      - "8090:8090"
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
+    volumes:
+      - chili_data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  # Continuous learning worker: in-process cycle by default. Set CHILI_USE_BRAIN_SERVICE=1 to delegate to `brain`.
+  brain-worker:
+    image: chili-app:local
+    command: ["python", "scripts/brain_worker.py", "--interval", "30"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_USE_BRAIN_SERVICE=${CHILI_USE_BRAIN_SERVICE:-0}
+      - BRAIN_SERVICE_URL=${BRAIN_SERVICE_URL:-http://brain:8090}
+      - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
+    volumes:
+      - chili_data:/app/data
+    depends_on:
+      chili:
+        condition: service_started
+      postgres:
+        condition: service_healthy
       ollama:
         condition: service_healthy
 
 volumes:
   ollama_data:
   chili_data:
+  postgres_data:

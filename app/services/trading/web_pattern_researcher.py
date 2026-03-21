@@ -370,8 +370,13 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             returns.append(result.get("return_pct", 0))
             if linked_insight:
                 try:
-                    save_backtest(db, linked_insight.user_id, result,
-                                  insight_id=linked_insight.id)
+                    save_backtest(
+                        db,
+                        linked_insight.user_id,
+                        result,
+                        insight_id=linked_insight.id,
+                        scan_pattern_id=pattern.id,
+                    )
                 except Exception:
                     try:
                         db.rollback()

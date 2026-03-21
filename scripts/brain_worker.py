@@ -16,7 +16,7 @@ Runs as a separate process, continuously executing the FULL learning cycle:
 - Journal, signals, ML training
 
 Status is written to data/brain_worker_status.json for monitoring.
-Control via signal files in data/ directory.
+Control via signal files in data/ directory (stop, pause, wake to skip idle sleep).
 
 Usage:
     python scripts/brain_worker.py [--interval MINUTES] [--once]
@@ -29,6 +29,7 @@ import signal
 import argparse
 import logging
 import atexit
+import threading
 from datetime import datetime
 from pathlib import Path
 
@@ -49,10 +50,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-DATA_DIR = Path("data")
+# Repo-root data/ — must match app.db.DATA_DIR (not process cwd)
+DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 STATUS_FILE = DATA_DIR / "brain_worker_status.json"
 STOP_SIGNAL = DATA_DIR / "brain_worker_stop"
 PAUSE_SIGNAL = DATA_DIR / "brain_worker_pause"
+WAKE_SIGNAL = DATA_DIR / "brain_worker_wake"
 LOCK_FILE = DATA_DIR / "brain_worker.lock"
 
 DEFAULT_CYCLE_INTERVAL = 30  # minutes
@@ -123,6 +126,7 @@ class BrainWorkerStatus:
         self.started_at = datetime.utcnow().isoformat()
         self.current_step = ""
         self.current_progress = ""
+        self.wake_skip_idle = threading.Event()
         self.last_cycle = {}
         self.totals = {
             "cycles_completed": 0,
@@ -135,6 +139,7 @@ class BrainWorkerStatus:
             "hypotheses_confirmed": 0,
             "patterns_spawned": 0,
             "patterns_evolved": 0,
+            "patterns_variant_promoted": 0,
             "patterns_pruned": 0,
             "insights_decayed": 0,
         }
@@ -197,6 +202,168 @@ def check_pause_signal() -> bool:
     return PAUSE_SIGNAL.exists()
 
 
+def check_wake_signal() -> bool:
+    """If wake file exists (from UI 'Run next cycle'), remove it and skip idle sleep."""
+    if WAKE_SIGNAL.exists():
+        try:
+            WAKE_SIGNAL.unlink()
+        except OSError:
+            pass
+        return True
+    return False
+
+
+def check_any_wake() -> bool:
+    """File wake and/or PostgreSQL wake (reliable when API and worker disagree on data/)."""
+    got = False
+    if check_wake_signal():
+        got = True
+    db = SessionLocal()
+    try:
+        from app.services.brain_worker_signals import consume_db_wake
+
+        if consume_db_wake(db):
+            got = True
+    except Exception as e:
+        logger.warning("[brain] DB wake consume failed: %s", e)
+    finally:
+        db.close()
+    return got
+
+
+def _consume_wake_queued_during_cycle(status: BrainWorkerStatus) -> bool:
+    """If DB wake was peeked during a long cycle, consume it now and skip idle."""
+    if not status.wake_skip_idle.is_set():
+        return False
+    db = SessionLocal()
+    try:
+        from app.services.brain_worker_signals import consume_db_wake
+
+        consume_db_wake(db)
+    except Exception as e:
+        logger.warning("[brain] DB wake consume after cycle failed: %s", e)
+    finally:
+        db.close()
+    status.wake_skip_idle.clear()
+    logger.info("[brain] Wake was queued during cycle — skipping idle sleep")
+    return True
+
+
+def _brain_db_poll_loop(
+    stop_polling: threading.Event,
+    status: BrainWorkerStatus,
+    wake_skip_idle: threading.Event,
+    track_learning_progress: bool,
+) -> None:
+    """PostgreSQL stop/wake/heartbeat + optional learning progress; file stop; ~4s cadence."""
+    from app.services.brain_worker_signals import (
+        clear_stop_requested,
+        is_stop_requested,
+        peek_wake_requested,
+        update_worker_heartbeat,
+    )
+    from app.services.trading.learning import get_learning_status, signal_shutdown
+
+    while not stop_polling.is_set():
+        if check_stop_signal():
+            logger.info("[brain] Stop file seen during cycle, requesting shutdown")
+            signal_shutdown()
+
+        db = SessionLocal()
+        try:
+            if is_stop_requested(db):
+                logger.info("[brain] DB stop requested during cycle, cooperative shutdown")
+                signal_shutdown()
+                clear_stop_requested(db)
+            if peek_wake_requested(db):
+                wake_skip_idle.set()
+            update_worker_heartbeat(db)
+            db.commit()
+        except Exception as e:
+            logger.warning("[brain] DB control poll tick failed: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+        if track_learning_progress:
+            try:
+                ls = get_learning_status()
+                if ls.get("running"):
+                    phase = ls.get("phase", "")
+                    step = ls.get("current_step", "")
+                    steps_done = ls.get("steps_completed", 0)
+                    total_steps = ls.get("total_steps", 23)
+                    progress = f"Step {steps_done}/{total_steps}"
+                    status.set_step(step or phase, progress)
+            except Exception:
+                pass
+
+        stop_polling.wait(4.0)
+
+
+def _get_live_queue_status():
+    """Return current backtest queue (pending count, queue_empty) from DB."""
+    from app.services.trading.backtest_queue import get_queue_status
+    db = SessionLocal()
+    try:
+        status = get_queue_status(db, use_cache=False)
+        return status.get("pending", 0), status.get("queue_empty", True)
+    finally:
+        db.close()
+
+
+def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None:
+    """Map `run_learning_cycle` return dict into worker cycle_stats (in-process or remote)."""
+    if result.get("ok", True):
+        cycle_stats["tickers_scanned"] = result.get("tickers_scanned", 0)
+        cycle_stats["snapshots_taken"] = result.get("snapshots_taken", 0)
+        cycle_stats["patterns_mined"] = result.get("patterns_discovered", 0)
+        cycle_stats["patterns_tested"] = result.get("backtests_run", 0)
+        cycle_stats["hypotheses_validated"] = result.get("hypotheses_tested", 0)
+        cycle_stats["hypotheses_confirmed"] = result.get("hypotheses_challenged", 0)
+        cycle_stats["insights_decayed"] = result.get("insights_decayed", 0)
+        cycle_stats["patterns_pruned"] = result.get("insights_pruned", 0)
+        cycle_stats["patterns_spawned"] = result.get("hypothesis_patterns_spawned", 0)
+        evo = result.get("evolution", {})
+        if isinstance(evo, dict):
+            cycle_stats["patterns_evolved"] = (
+                int(evo.get("forked_exit", 0) or 0)
+                + int(evo.get("forked_entry", 0) or 0)
+                + int(evo.get("forked_combo", 0) or 0)
+                + int(evo.get("forked_tf", 0) or 0)
+                + int(evo.get("forked_scope", 0) or 0)
+                + int(evo.get("mutated_exit", 0) or 0)
+                + int(evo.get("mutated_entry", 0) or 0)
+            )
+            cycle_stats["patterns_variant_promoted"] = int(evo.get("promoted", 0) or 0)
+            cycle_stats["patterns_pruned"] += int(evo.get("deactivated", 0) or 0)
+        cycle_stats["queue_empty"] = result.get("queue_empty", True)
+        cycle_stats["queue_pending"] = result.get("queue_pending", 0)
+        cycle_stats["step_timings"] = result.get("step_timings", {})
+        cycle_stats["elapsed_s"] = result.get("elapsed_s")
+        logger.info(
+            f"[brain] Full cycle completed | "
+            f"Scanned: {cycle_stats['tickers_scanned']}, "
+            f"Mined: {cycle_stats['patterns_mined']}, "
+            f"Tested: {cycle_stats['patterns_tested']}, "
+            f"Hypotheses: {cycle_stats['hypotheses_validated']}"
+        )
+    else:
+        logger.warning(f"[brain] Learning cycle returned: {result.get('reason', 'unknown')}")
+        if db is not None:
+            try:
+                from app.services.trading.backtest_queue import get_queue_status
+
+                qstatus = get_queue_status(db, use_cache=False)
+                cycle_stats["queue_empty"] = qstatus.get("queue_empty", True)
+                cycle_stats["queue_pending"] = qstatus.get("pending", 0)
+            except Exception as qe:
+                logger.warning(f"[brain] Could not get live queue status: {qe}")
+
+
 def run_learning_cycle(status: BrainWorkerStatus) -> dict:
     """Execute the FULL learning cycle (all 23 steps).
     
@@ -205,8 +372,6 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
     """
     from app.services.trading.learning import (
         run_learning_cycle as full_learning_cycle,
-        get_learning_status,
-        signal_shutdown,
     )
 
     cycle_stats = {
@@ -217,108 +382,97 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
         "hypotheses_confirmed": 0,
         "patterns_spawned": 0,
         "patterns_evolved": 0,
+        "patterns_variant_promoted": 0,
         "patterns_pruned": 0,
         "tickers_scanned": 0,
         "snapshots_taken": 0,
         "insights_decayed": 0,
     }
-    
-    db = SessionLocal()
-    
-    try:
-        status.set_step("Running full learning cycle", "Starting...")
-        logger.info("[brain] Starting FULL learning cycle (23 steps)")
-        
-        # Check if another learning cycle is already running
-        learning_status = get_learning_status()
-        if learning_status.get("running"):
-            logger.warning("[brain] Another learning cycle is already running, skipping")
-            return cycle_stats
-        
-        # Start a thread to poll learning status and update worker status
-        import threading
-        stop_polling = threading.Event()
-        
-        def poll_learning_status():
-            while not stop_polling.is_set():
-                try:
-                    if check_stop_signal():
-                        logger.info("[brain] Stop signal seen during cycle, requesting shutdown")
-                        signal_shutdown()
-                        break
-                    ls = get_learning_status()
-                    if ls.get("running"):
-                        phase = ls.get("phase", "")
-                        step = ls.get("current_step", "")
-                        steps_done = ls.get("steps_completed", 0)
-                        total_steps = ls.get("total_steps", 23)
-                        progress = f"Step {steps_done}/{total_steps}"
-                        status.set_step(step or phase, progress)
-                except Exception:
-                    pass
-                stop_polling.wait(2)
-        
-        poll_thread = threading.Thread(target=poll_learning_status, daemon=True)
-        poll_thread.start()
-        
-        try:
-            # Run the full learning cycle
-            result = full_learning_cycle(db, user_id=None, full_universe=True)
-            
-            # Map results to our stats format
-            if result.get("ok", True):
-                cycle_stats["tickers_scanned"] = result.get("tickers_scanned", 0)
-                cycle_stats["snapshots_taken"] = result.get("snapshots_taken", 0)
-                cycle_stats["patterns_mined"] = result.get("patterns_discovered", 0)
-                cycle_stats["patterns_tested"] = result.get("backtests_run", 0)
-                cycle_stats["hypotheses_validated"] = result.get("hypotheses_tested", 0)
-                cycle_stats["hypotheses_confirmed"] = result.get("hypotheses_challenged", 0)
-                cycle_stats["insights_decayed"] = result.get("insights_decayed", 0)
-                cycle_stats["patterns_pruned"] = result.get("insights_pruned", 0)
-                
-                # Evolution stats
-                evo = result.get("evolution", {})
-                if isinstance(evo, dict):
-                    cycle_stats["patterns_evolved"] = (
-                        evo.get("forked_exit", 0) +
-                        evo.get("forked_entry", 0) +
-                        evo.get("forked_combo", 0)
-                    )
-                    cycle_stats["patterns_spawned"] = evo.get("promoted", 0)
-                    cycle_stats["patterns_pruned"] += evo.get("deactivated", 0)
-                
-                # Backtest queue status so worker knows whether to sleep or continue
-                cycle_stats["queue_empty"] = result.get("queue_empty", True)
-                cycle_stats["queue_pending"] = result.get("queue_pending", 0)
-                # Step timings for speed / bottleneck visibility
-                cycle_stats["step_timings"] = result.get("step_timings", {})
-                cycle_stats["elapsed_s"] = result.get("elapsed_s")
 
-                logger.info(
-                    f"[brain] Full cycle completed | "
-                    f"Scanned: {cycle_stats['tickers_scanned']}, "
-                    f"Mined: {cycle_stats['patterns_mined']}, "
-                    f"Tested: {cycle_stats['patterns_tested']}, "
-                    f"Hypotheses: {cycle_stats['hypotheses_validated']}"
+    use_remote = os.environ.get("CHILI_USE_BRAIN_SERVICE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+    status.wake_skip_idle.clear()
+    stop_polling = threading.Event()
+    wake_skip = status.wake_skip_idle
+
+    def poll_loop():
+        _brain_db_poll_loop(
+            stop_polling,
+            status,
+            wake_skip,
+            track_learning_progress=not use_remote,
+        )
+
+    poll_thread = threading.Thread(target=poll_loop, daemon=True, name="brain-db-poll")
+    poll_thread.start()
+
+    try:
+        if use_remote:
+            status.set_step("Running full learning cycle", "Brain HTTP service...")
+            logger.info("[brain] CHILI_USE_BRAIN_SERVICE enabled — delegating to Brain service")
+            try:
+                from app.services.brain_client import run_learning_cycle_via_brain_service
+
+                result = run_learning_cycle_via_brain_service()
+                db_remote = SessionLocal()
+                try:
+                    _apply_learning_result_to_stats(result, cycle_stats, db_remote)
+                finally:
+                    db_remote.close()
+            except Exception as e:
+                logger.error(f"[brain] Remote learning cycle failed: {e}")
+                import traceback
+
+                traceback.print_exc()
+                try:
+                    live_pending, live_empty = _get_live_queue_status()
+                    cycle_stats["queue_empty"] = live_empty
+                    cycle_stats["queue_pending"] = live_pending
+                except Exception as qe:
+                    logger.warning(f"[brain] Could not get live queue status: {qe}")
+            cycle_stats["completed"] = datetime.utcnow().isoformat()
+            return cycle_stats
+
+        db = SessionLocal()
+        try:
+            status.set_step("Running full learning cycle", "Starting...")
+            logger.info("[brain] Starting FULL learning cycle (24 steps)")
+            # Do not skip here: run_learning_cycle() clears stale locks and returns
+            # {"ok": False} if a non-stale cycle is already in progress.
+
+            result = full_learning_cycle(db, user_id=None, full_universe=True)
+            if not result.get("ok", True):
+                logger.warning(
+                    "[brain] Learning cycle did not run: %s",
+                    result.get("reason", result),
                 )
-            else:
-                logger.warning(f"[brain] Learning cycle returned: {result.get('reason', 'unknown')}")
-                
+            _apply_learning_result_to_stats(result, cycle_stats, db)
+
+            cycle_stats["completed"] = datetime.utcnow().isoformat()
+
+        except Exception as e:
+            logger.error(f"[brain] Full learning cycle failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+            try:
+                live_pending, live_empty = _get_live_queue_status()
+                cycle_stats["queue_empty"] = live_empty
+                cycle_stats["queue_pending"] = live_pending
+            except Exception as qe:
+                logger.warning(f"[brain] Could not get live queue status: {qe}")
+
         finally:
-            stop_polling.set()
-            poll_thread.join(timeout=3)
-        
-        cycle_stats["completed"] = datetime.utcnow().isoformat()
-        
-    except Exception as e:
-        logger.error(f"[brain] Full learning cycle failed: {e}")
-        import traceback
-        traceback.print_exc()
-        
+            db.close()
+
+        return cycle_stats
     finally:
-        db.close()
-    
-    return cycle_stats
+        stop_polling.set()
+        poll_thread.join(timeout=8)
 
 
 def _cleanup_on_exit():
@@ -363,6 +517,8 @@ def main():
     # Clean up any stale signal files
     if STOP_SIGNAL.exists():
         STOP_SIGNAL.unlink()
+    if WAKE_SIGNAL.exists():
+        WAKE_SIGNAL.unlink()
     
     def handle_shutdown(signum, frame):
         logger.info("[brain] Received shutdown signal")
@@ -373,10 +529,27 @@ def main():
     signal.signal(signal.SIGTERM, handle_shutdown)
     
     logger.info(f"[brain] Brain Worker starting (PID: {status.pid})")
+    logger.info(f"[brain] DATA_DIR (must match app DB / API): {DATA_DIR.resolve()}")
     logger.info(f"[brain] Cycle interval: {args.interval} minutes")
     
     status.status = "running"
     status.save()
+
+    # Fresh process: clear stale DB stop from a prior run so we don't exit immediately.
+    db_boot = SessionLocal()
+    try:
+        from app.services.brain_worker_signals import clear_stop_requested
+
+        clear_stop_requested(db_boot)
+        db_boot.commit()
+    except Exception as e:
+        logger.warning("[brain] Could not clear DB stop flag on startup: %s", e)
+        try:
+            db_boot.rollback()
+        except Exception:
+            pass
+    finally:
+        db_boot.close()
     
     try:
         while True:
@@ -385,6 +558,7 @@ def main():
                 status.status = "paused"
                 status.set_step("Paused", "Waiting for resume...")
                 logger.info("[brain] Paused, waiting for resume signal...")
+                _db_heartbeat_tick()
                 time.sleep(10)
             
             status.status = "running"
@@ -404,8 +578,8 @@ def main():
                     for key in ["tickers_scanned", "snapshots_taken", "patterns_mined", 
                                "patterns_tested", "queue_patterns_processed",
                                "hypotheses_validated", "hypotheses_confirmed", 
-                               "patterns_spawned", "patterns_evolved", "patterns_pruned",
-                               "insights_decayed"]:
+                               "patterns_spawned", "patterns_evolved", "patterns_variant_promoted",
+                               "patterns_pruned", "insights_decayed"]:
                         status.totals[key] += cycle_stats.get(key, 0)
                     
                     cycle_duration = time.time() - cycle_start
@@ -444,14 +618,26 @@ def main():
                 logger.info("[brain] Single cycle mode, exiting")
                 break
             
-            # Check for stop signal
-            if check_stop_signal():
+            # Check for stop signal (file or DB)
+            if check_stop_signal() or _check_db_stop_idle():
                 logger.info("[brain] Stop signal received, shutting down")
                 break
+
+            # Wake queued during the long cycle (peeked in DB poll) or file/DB after cycle
+            if _consume_wake_queued_during_cycle(status) or check_any_wake():
+                logger.info("[brain] Wake after cycle — skipping idle sleep")
+                continue
             
-            # Determine sleep time based on queue status
+            # Determine sleep time based on queue status (re-check live so we don't sleep long if queue refilled)
             queue_empty = cycle_stats.get("queue_empty", True)
             queue_pending = cycle_stats.get("queue_pending", 0)
+            try:
+                live_pending, live_empty = _get_live_queue_status()
+                if live_pending > 0:
+                    queue_empty = False
+                    queue_pending = live_pending
+            except Exception as e:
+                logger.warning(f"[brain] Could not re-check queue before sleep: {e}")
             
             if queue_empty:
                 # Queue is empty - sleep for full interval
@@ -466,14 +652,26 @@ def main():
             
             status.save()
             
-            # Sleep with stop signal checks
-            for _ in range(sleep_seconds // 10):
-                if check_stop_signal():
+            # Sleep in short chunks with stop / wake checks (wake skips remaining idle sleep)
+            remaining = sleep_seconds
+            stop_during_idle_sleep = False
+            while remaining > 0:
+                if check_stop_signal() or _check_db_stop_idle():
                     logger.info("[brain] Stop signal received during sleep")
+                    stop_during_idle_sleep = True
                     break
-                time.sleep(10)
-            else:
-                time.sleep(sleep_seconds % 10)
+                if check_any_wake():
+                    logger.info("[brain] Wake during idle sleep — starting next cycle now")
+                    break
+                _db_heartbeat_tick()
+                # Shorter chunks = faster response to brain_worker_wake (UI "Run next cycle")
+                chunk = min(5, remaining)
+                time.sleep(chunk)
+                remaining -= chunk
+
+            if stop_during_idle_sleep:
+                logger.info("[brain] Shutting down after stop during idle")
+                break
     
     finally:
         status.clear()

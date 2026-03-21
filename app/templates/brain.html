@@ -23,7 +23,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .b-header nav a:hover { color: var(--accent); background: rgba(99,102,241,.06); }
 .b-header nav a.active { color: var(--accent); background: rgba(99,102,241,.08); }
 
-.b-body { display: flex; min-height: calc(100vh - 45px); }
+.b-body { display: flex; height: calc(100vh - 45px); min-height: 0; overflow: hidden; }
 
 /* Domain sidebar */
 .b-sidebar {
@@ -49,7 +49,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 
 /* Main content */
-.b-main { flex: 1; padding: 20px 24px; overflow-y: auto; }
+.b-main { flex: 1; padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#domain-trading { display: flex; flex: 1; min-height: 0; min-width: 0; align-self: stretch; }
+.trading-main-content { flex: 1; min-width: 0; overflow-y: auto; padding-right: 0; }
+.tba-panel {
+  width: 380px; min-width: 320px; flex-shrink: 0;
+  display: flex; flex-direction: column; align-self: stretch;
+  border-left: 1px solid var(--border); background: var(--bg-header);
+}
+.tba-panel-header {
+  padding: 12px 14px; border-bottom: 1px solid var(--border);
+  font-size: 12px; font-weight: 700; color: var(--text); flex-shrink: 0;
+}
+.tba-panel-body { flex: 1; min-height: 0; display: flex; flex-direction: column; padding: 10px 12px; }
+.tba-panel .tba-chips { margin-bottom: 8px; }
+.tba-panel .tba-messages { flex: 1; min-height: 160px; max-height: none; margin-bottom: 10px; }
+.tba-panel .tba-input-row { flex-shrink: 0; }
 .b-main-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
 .b-main-header h2 { font-size: 18px; font-weight: 700; }
 
@@ -525,6 +540,53 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .bw-boost-btn:hover { background: rgba(249,115,22,.15); border-color: #f97316; }
 .bw-boost-btn.boosted { background: #f97316; color: #fff; border-color: #f97316; }
 
+/* Trading Brain Assistant */
+.tba-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+.tba-chip {
+  padding: 5px 10px; border-radius: 6px; font-size: 10px; font-weight: 500;
+  background: rgba(139,92,246,.08); border: 1px solid rgba(139,92,246,.25); color: var(--text);
+  cursor: pointer; transition: all .15s; white-space: nowrap;
+}
+.tba-chip:hover { background: rgba(139,92,246,.14); border-color: rgba(139,92,246,.4); }
+.tba-messages {
+  min-height: 120px; max-height: 320px; overflow-y: auto;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px;
+  font-size: 12px; line-height: 1.5;
+}
+.tba-msg { margin-bottom: 12px; }
+.tba-msg.user { text-align: right; }
+.tba-msg.user .tba-msg-bubble { display: inline-block; max-width: 85%; background: rgba(139,92,246,.12); border: 1px solid rgba(139,92,246,.2); border-radius: 10px; padding: 8px 12px; text-align: left; }
+.tba-msg.assistant .tba-msg-bubble { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; }
+.tba-msg-bubble p { margin: 0 0 6px; }
+.tba-msg-bubble p:last-child { margin-bottom: 0; }
+.tba-msg-bubble ul, .tba-msg-bubble ol { margin: 4px 0; padding-left: 20px; }
+.tba-msg-role { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 4px; }
+.tba-input-row { display: flex; flex-direction: column; gap: 8px; }
+.tba-input {
+  width: 100%; resize: vertical; min-height: 44px; max-height: 120px;
+  padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--bg); color: var(--text); font-size: 12px; font-family: inherit;
+}
+.tba-input:focus { outline: none; border-color: var(--accent); }
+.tba-buttons { display: flex; gap: 8px; }
+.tba-btn { padding: 8px 16px; border-radius: 8px; border: none; cursor: pointer; font-size: 11px; font-weight: 600; transition: all .15s; }
+.tba-send { background: linear-gradient(135deg,#8b5cf6,#6d28d9); color: #fff; }
+.tba-send:hover { opacity: .9; }
+.tba-send:disabled { opacity: .5; cursor: not-allowed; }
+.tba-clear { background: var(--card); border: 1px solid var(--border); color: var(--text-muted); }
+.tba-clear:hover { border-color: var(--accent); color: var(--text); }
+.tba-loading { font-size: 11px; color: var(--text-muted); font-style: italic; }
+
+/* Cycle AI report flip card */
+.cr-flip-scene { max-width: 100%; min-height: 160px; margin-bottom: 8px; perspective: 1000px; }
+.cr-flip-inner { position: relative; width: 100%; min-height: 160px; transition: transform 0.55s ease; transform-style: preserve-3d; cursor: pointer; }
+.cr-flip-inner.is-flipped { transform: rotateY(180deg); }
+.cr-flip-face { position: absolute; left: 0; top: 0; width: 100%; min-height: 160px; backface-visibility: hidden; -webkit-backface-visibility: hidden; border-radius: 8px; padding: 12px; box-sizing: border-box; background: var(--card); border: 1px solid var(--border); }
+.cr-flip-back { transform: rotateY(180deg); }
+.cr-back-scroll { max-height: 280px; overflow-y: auto; font-size: 11px; line-height: 1.55; text-align: left; }
+.cr-back-scroll h1, .cr-back-scroll h2, .cr-back-scroll h3 { font-size: 12px; margin: 0.6em 0 0.3em; }
+.cr-flip-front-preview { font-size: 11px; color: var(--text-secondary); margin-top: 8px; line-height: 1.45; max-height: 72px; overflow: hidden; }
+
 /* Theme toggle */
 .b-theme-btn { background: none; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; cursor: pointer; color: var(--text); font-size: 16px; }
 
@@ -637,6 +699,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
     <!-- ═══ Trading Domain ═══ -->
     <div id="domain-trading">
+      <div class="trading-main-content">
       <div class="b-main-header">
         <h2>Trading Brain</h2>
         <span id="brain-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
@@ -658,6 +721,33 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
       </div>
 
+      <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
+        <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Cycle AI reports</div>
+        <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">One summary per learning cycle (newest first). Flip for full report.</p>
+        <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No cycle reports yet — run a learning cycle.</div>
+        <div id="cycle-report-ui" style="display:none">
+          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+            <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
+            <span id="cycle-report-pos" style="font-size:10px;color:var(--text-muted)"></span>
+            <button type="button" class="bw-ctrl-btn" id="cycle-report-next" onclick="cycleReportNav(1)">Older &#x2192;</button>
+          </div>
+          <div class="cr-flip-scene">
+            <div class="cr-flip-inner" id="cycle-report-flip-inner" onclick="toggleCycleReportFlip(event)">
+              <div class="cr-flip-face cr-flip-front">
+                <div id="cycle-report-front-date" style="font-size:11px;font-weight:700;color:var(--accent)"></div>
+                <div id="cycle-report-front-metrics" style="font-size:10px;color:var(--text-muted);margin-top:6px"></div>
+                <div class="cr-flip-front-preview" id="cycle-report-front-preview"></div>
+                <div style="font-size:9px;color:var(--text-muted);margin-top:10px">Click to flip for full report</div>
+              </div>
+              <div class="cr-flip-face cr-flip-back">
+                <div id="cycle-report-back-md" class="cr-back-scroll prose-dark"></div>
+                <div style="font-size:9px;color:var(--text-muted);margin-top:8px">Click to flip back</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <!-- Brain Worker Dashboard -->
       <div class="bw-section" id="brain-worker-section">
         <div class="bw-header">
@@ -668,9 +758,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
           <div class="bw-controls" id="bw-controls">
             <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
+            <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip the idle wait and start the next learning cycle now">&#x23ED; Run next cycle</button>
             <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
             <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
           </div>
+        </div>
+        <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:6px 0 8px 0;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
+          <strong>How it works:</strong> The <strong>worker</strong> is a <em>separate</em> OS process (<code style="font-size:9px">scripts/brain_worker.py</code>), not this HTTPS server. It must use the same <strong>DATABASE_URL</strong> as the app (same <code>.env</code> when you start the worker).
+          <strong>Run next cycle</strong> only skips <em>idle sleep</em> between full learning cycles; it does not interrupt a cycle that is already running.
+          <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug — same rules as the worker).
         </div>
         <div class="bw-status-row">
           <span><span class="bw-status-label">Status:</span> <span class="bw-status-value" id="bw-status">Stopped</span></span>
@@ -691,8 +787,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-confirmed">0</div><div class="bw-stat-lbl">Confirmed</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-evolved">0</div><div class="bw-stat-lbl">Evolved</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-decayed">0</div><div class="bw-stat-lbl">Decayed</div></div>
+          </div>
+          <div class="bw-evidence-panel" id="bw-evidence-panel" style="margin-top:10px;padding:8px;border-radius:6px;background:var(--card);border:1px solid var(--border);font-size:11px">
+            <div style="font-weight:600;margin-bottom:6px;color:var(--text-muted)">Pattern evidence (trade analytics)</div>
+            <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+              <span>Pattern ID</span>
+              <input type="number" id="bw-evidence-pattern-id" min="1" step="1" style="width:72px;padding:4px;border-radius:4px;border:1px solid var(--border);background:var(--bg)" placeholder="id" />
+            </label>
+            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">
+              <button type="button" class="btn btn-sm" id="bw-evidence-load" style="font-size:10px">Load analytics</button>
+              <button type="button" class="btn btn-sm" id="bw-evidence-propose" style="font-size:10px">Propose hypotheses</button>
+              <button type="button" class="btn btn-sm" id="bw-evidence-ml" style="font-size:10px">Train ML (rows)</button>
+            </div>
+            <pre id="bw-evidence-out" style="margin:0;max-height:160px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted)"></pre>
           </div>
           <div class="bw-queue-status" id="bw-queue-status">
             <div class="bw-queue-header">
@@ -704,10 +814,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <span><span class="bw-queue-label">Boosted:</span> <span id="bw-queue-boosted">0</span></span>
               <span><span class="bw-queue-label">Tested:</span> <span id="bw-queue-tested">--</span></span>
             </div>
+            <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+              <button type="button" class="bw-ctrl-btn" id="bw-queue-batch-btn" onclick="runQueueBatchFromWeb()" style="font-size:10px" title="Runs one queue batch inside the web server process (no brain_worker required)">Process queue on server</button>
+              <span style="font-size:9px;color:var(--text-muted)">Background job; check server logs for [learning] Queue backtest</span>
+            </div>
           </div>
           <div class="bw-timings" id="bw-last-cycle-timings" style="font-size:10px;color:var(--text-muted);margin-top:6px;margin-bottom:6px">
             <span class="bw-timings-label">Last cycle: --</span>
             <span class="bw-timings-steps" id="bw-step-timings"></span>
+          </div>
+          <div class="bw-cycle-chart-wrap" style="margin-top:8px;margin-bottom:8px">
+            <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cycle history</div>
+            <div id="bw-cycle-chart" style="width:100%;height:100px;border-radius:6px;overflow:hidden;background:var(--card);border:1px solid var(--border)"></div>
+            <div id="bw-cycle-chart-legend" style="font-size:9px;color:var(--text-muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
+              <span><span style="color:#8b5cf6">&#x25CF;</span> Patterns tested</span>
+              <span><span style="color:#22c55e">&#x25CF;</span> Duration (s)</span>
+            </div>
           </div>
           <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Recent Activity</div>
           <div class="bw-activity" id="bw-activity">
@@ -804,6 +926,29 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence History</div>
         <div id="brain-chart" style="width:100%;height:180px"></div>
       </div>
+      </div><!-- .trading-main-content -->
+
+      <aside class="tba-panel" id="trading-brain-assistant-section">
+        <div class="tba-panel-header">&#x1F916; Trading Brain Assistant</div>
+        <div class="tba-panel-body">
+          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask about worker status, queue, patterns, evolution. Grounded in the trading DB.</p>
+          <div class="tba-chips" id="tba-chips">
+            <button type="button" class="tba-chip" data-msg="What is the worker doing?">What is the worker doing?</button>
+            <button type="button" class="tba-chip" data-msg="Backtest queue status">Backtest queue status</button>
+            <button type="button" class="tba-chip" data-msg="What should we evolve next?">What should we evolve next?</button>
+            <button type="button" class="tba-chip" data-msg="Search patterns mentioning BTC">Search patterns mentioning BTC</button>
+            <button type="button" class="tba-chip" data-msg="Summarize recent activity">Summarize recent activity</button>
+          </div>
+          <div class="tba-messages" id="tba-messages"></div>
+          <div class="tba-input-row">
+            <textarea id="tba-input" class="tba-input" rows="2" placeholder="Ask the trading brain..." maxlength="2000"></textarea>
+            <div class="tba-buttons">
+              <button type="button" class="tba-btn tba-send" id="tba-send">Send</button>
+              <button type="button" class="tba-btn tba-clear" id="tba-clear">Clear</button>
+            </div>
+          </div>
+        </div>
+      </aside>
     </div>
 
     <!-- ═══ Project Domain ═══ -->
@@ -1178,7 +1323,56 @@ function openBrainModal(title, bodyHtml, footerHtml) {
   else { footer.innerHTML = ''; footer.style.display = 'none'; }
   document.getElementById('brain-modal-overlay').classList.add('active');
 }
-function closeBrainModal() { document.getElementById('brain-modal-overlay').classList.remove('active'); }
+var _evWrProgressChart = null;
+function _disposeEvWrProgressChart() {
+  if (_evWrProgressChart) {
+    try { _evWrProgressChart.remove(); } catch (e) {}
+    _evWrProgressChart = null;
+  }
+}
+function _renderEvWrProgress(series) {
+  _disposeEvWrProgressChart();
+  var wrap = document.getElementById('ev-wr-progress-wrap');
+  var el = document.getElementById('ev-wr-progress-chart');
+  if (!wrap || !el) return;
+  wrap.style.display = 'block';
+  if (!series || series.length === 0) {
+    el.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:8px">No backtest runs with trades in history to chart yet.</div>';
+    return;
+  }
+  var chartData = series.map(function(pt) { return { time: pt.time, value: pt.win_rate }; });
+  /* Lightweight-charts needs strictly increasing time; backend de-dupes; pad single point */
+  if (chartData.length === 1) {
+    chartData.push({ time: chartData[0].time + 1, value: chartData[0].value });
+  }
+  el.innerHTML = '';
+  try {
+    var isDark = document.documentElement.getAttribute('data-theme') === 'dark' || window.matchMedia('(prefers-color-scheme: dark)').matches;
+    var bgColor = isDark ? '#1a1a2e' : '#ffffff';
+    var gridColor = isDark ? 'rgba(255,255,255,.08)' : 'rgba(0,0,0,.06)';
+    _evWrProgressChart = LightweightCharts.createChart(el, {
+      width: el.clientWidth,
+      height: 140,
+      layout: { background: { type: 'solid', color: bgColor }, textColor: isDark ? '#a0a0b0' : '#666', fontSize: 10 },
+      grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
+      rightPriceScale: { borderColor: gridColor },
+      timeScale: { borderColor: gridColor },
+    });
+    var line = _evWrProgressChart.addLineSeries({ color: '#22c55e', lineWidth: 2 });
+    line.setData(chartData);
+    _evWrProgressChart.timeScale().fitContent();
+    new ResizeObserver(function() {
+      if (_evWrProgressChart && el) _evWrProgressChart.applyOptions({ width: el.clientWidth });
+    }).observe(el);
+  } catch (err) {
+    console.error('Pattern evidence win-rate chart:', err);
+    el.innerHTML = '<div style="padding:12px;font-size:11px;color:#ef4444;text-align:center">Could not draw chart (see browser console).</div>';
+  }
+}
+function closeBrainModal() {
+  _disposeEvWrProgressChart();
+  document.getElementById('brain-modal-overlay').classList.remove('active');
+}
 document.addEventListener('keydown', function(e) {
   if (e.key === 'Escape' && document.getElementById('brain-modal-overlay').classList.contains('active')) closeBrainModal();
 });
@@ -1203,7 +1397,7 @@ function setSidebarBannerFallback() {
 
 function updateSidebarStatus() {
   var banner = document.getElementById('sidebar-status');
-  fetch('/api/brain/status').then(function(r) {
+  return fetch('/api/brain/status').then(function(r) {
     if (!r.ok) { setSidebarBannerFallback(); return null; }
     return r.json();
   }).then(function(d) {
@@ -1255,6 +1449,9 @@ function timeSince(date) {
 /* ── Brain Worker Dashboard ──────────────────────────── */
 var _bwPollInterval = null;
 var _bwCollapsed = false;
+var _bwCycleHistory = [];
+var _bwCycleHistoryMax = 40;
+var _bwCycleChart = null;
 
 function toggleBwDetails() {
   var section = document.getElementById('brain-worker-section');
@@ -1273,6 +1470,7 @@ function updateBrainWorkerUI(data) {
   var dot = document.getElementById('bw-status-dot');
   var statusEl = document.getElementById('bw-status');
   var startBtn = document.getElementById('bw-start-btn');
+  var wakeBtn = document.getElementById('bw-wake-btn');
   var pauseBtn = document.getElementById('bw-pause-btn');
   var stopBtn = document.getElementById('bw-stop-btn');
   var currentEl = document.getElementById('bw-current');
@@ -1290,6 +1488,11 @@ function updateBrainWorkerUI(data) {
     pauseBtn.style.display = '';
     stopBtn.style.display = '';
     pauseBtn.textContent = status === 'paused' ? '▶ Resume' : '⏸ Pause';
+    /* Wake applies as soon as the worker is between cycles (idle sleep). If clicked during
+       a long cycle, the wake file is kept until the next sleep — always show when running. */
+    if (wakeBtn) {
+      wakeBtn.style.display = (status === 'running') ? '' : 'none';
+    }
     
     if (data.started_at) {
       var started = new Date(data.started_at + 'Z');  // Append Z to indicate UTC
@@ -1299,12 +1502,18 @@ function updateBrainWorkerUI(data) {
     if (data.current_step) {
       currentEl.style.display = '';
       stepEl.textContent = data.current_step;
-      progressEl.textContent = data.current_progress || '';
+      var progressText = data.current_progress || '';
+      if (data.current_step === 'Idle' && progressText.indexOf('Queue empty') !== -1 && data.queue_pending_live > 0) {
+        var nextMatch = progressText.match(/Next cycle in (\d+ \w+)/i);
+        progressText = data.queue_pending_live + ' pending (next cycle in ' + (nextMatch ? nextMatch[1] : '?') + ')';
+      }
+      progressEl.textContent = progressText;
     } else {
       currentEl.style.display = 'none';
     }
   } else {
     startBtn.style.display = '';
+    if (wakeBtn) wakeBtn.style.display = 'none';
     pauseBtn.style.display = 'none';
     stopBtn.style.display = 'none';
     currentEl.style.display = 'none';
@@ -1321,6 +1530,8 @@ function updateBrainWorkerUI(data) {
   document.getElementById('bw-stat-confirmed').textContent = totals.hypotheses_confirmed || 0;
   document.getElementById('bw-stat-evolved').textContent = totals.patterns_evolved || 0;
   document.getElementById('bw-stat-spawned').textContent = totals.patterns_spawned || 0;
+  var promEl = document.getElementById('bw-stat-promoted');
+  if (promEl) promEl.textContent = totals.patterns_variant_promoted || 0;
   document.getElementById('bw-stat-pruned').textContent = totals.patterns_pruned || 0;
   document.getElementById('bw-stat-decayed').textContent = totals.insights_decayed || 0;
 
@@ -1339,7 +1550,7 @@ function updateBrainWorkerUI(data) {
     }
   }
   if (stepsEl && typeof stepTimings === 'object' && Object.keys(stepTimings).length > 0) {
-    var keys = ['backtest_queue', 'mine', 'ml_train', 'backtest_insights', 'scan', 'evolve'];
+    var keys = ['backtest_queue', 'pattern_variant_evolution', 'mine', 'ml_train', 'backtest_insights', 'scan', 'evolve', 'cycle_ai_report', 'pattern_engine'];
     var parts = [];
     keys.forEach(function(k) {
       if (stepTimings[k] != null) parts.push(k.replace(/_/g, ' ') + ': ' + stepTimings[k] + 's');
@@ -1348,16 +1559,66 @@ function updateBrainWorkerUI(data) {
   } else if (stepsEl) {
     stepsEl.textContent = '';
   }
+
+  if (lastCycle.completed && (durationSec != null && durationSec > 0)) {
+    var tested = lastCycle.patterns_tested || 0;
+    var existing = _bwCycleHistory.some(function(h) { return h.completed === lastCycle.completed; });
+    if (!existing) {
+      var t = new Date(lastCycle.completed).getTime() / 1000;
+      _bwCycleHistory.push({
+        completed: lastCycle.completed,
+        time: t,
+        tested: tested,
+        duration: Math.round(parseFloat(durationSec)),
+      });
+      _bwCycleHistory.sort(function(a, b) { return a.time - b.time; });
+      if (_bwCycleHistory.length > _bwCycleHistoryMax) _bwCycleHistory = _bwCycleHistory.slice(-_bwCycleHistoryMax);
+      _updateBwCycleChart();
+    }
+  }
+}
+
+function _updateBwCycleChart() {
+  var el = document.getElementById('bw-cycle-chart');
+  if (!el || _bwCycleHistory.length === 0) {
+    if (el) el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:10px;color:var(--text-muted)">Complete a cycle to see history</div>';
+    if (_bwCycleChart) { _bwCycleChart.remove(); _bwCycleChart = null; }
+    return;
+  }
+  var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
+  var testedData = _bwCycleHistory.map(function(h) { return { time: h.time, value: h.tested }; });
+  var durationData = _bwCycleHistory.map(function(h) { return { time: h.time, value: h.duration }; });
+  if (!_bwCycleChart) {
+    el.innerHTML = '';
+    _bwCycleChart = LightweightCharts.createChart(el, {
+      width: el.clientWidth, height: el.clientHeight || 100,
+      layout: { background: { type: 'solid', color: isDark ? '#0f172a' : '#f8fafc' }, textColor: isDark ? '#9ca3af' : '#6b7280' },
+      grid: { vertLines: { visible: false }, horzLines: { color: isDark ? '#1f2937' : '#f3f4f6' } },
+      rightPriceScale: { visible: true, borderVisible: false },
+      leftPriceScale: { visible: true, borderVisible: false },
+      timeScale: { borderVisible: false }, handleScroll: false, handleScale: false,
+    });
+    _bwCycleChart.addLineSeries({ color: '#8b5cf6', lineWidth: 2, priceScaleId: 'left', title: 'Tested' }).setData(testedData);
+    _bwCycleChart.addLineSeries({ color: '#22c55e', lineWidth: 2, priceScaleId: 'right', title: 'Duration (s)' }).setData(durationData);
+    _bwCycleChart.timeScale().fitContent();
+    new ResizeObserver(function() { if (_bwCycleChart) _bwCycleChart.applyOptions({ width: el.clientWidth }); }).observe(el);
+  } else {
+    var testedSeries = _bwCycleChart.series()[0];
+    var durationSeries = _bwCycleChart.series()[1];
+    if (testedSeries) testedSeries.setData(testedData);
+    if (durationSeries) durationSeries.setData(durationData);
+    _bwCycleChart.timeScale().fitContent();
+  }
 }
 
 function loadBrainWorkerStatus() {
-  fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
+  return fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
     if (d.ok) updateBrainWorkerUI(d);
   }).catch(function(){});
 }
 
 function loadBacktestQueueStatus() {
-  fetch('/api/trading/backtest-queue/status').then(function(r){return r.json();}).then(function(d) {
+  return fetch('/api/trading/backtest-queue/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var badge = document.getElementById('bw-queue-badge');
     var pendingEl = document.getElementById('bw-queue-pending');
@@ -1407,8 +1668,108 @@ function boostPattern(patternId, buttonEl) {
     });
 }
 
+var _tbaMessages = [];
+
+function _tbaRenderMessages() {
+  var container = document.getElementById('tba-messages');
+  if (!container) return;
+  container.innerHTML = '';
+  _tbaMessages.forEach(function(m) {
+    var wrap = document.createElement('div');
+    wrap.className = 'tba-msg ' + m.role;
+    var roleEl = document.createElement('div');
+    roleEl.className = 'tba-msg-role';
+    roleEl.textContent = m.role === 'user' ? 'You' : 'Assistant';
+    var bubble = document.createElement('div');
+    bubble.className = 'tba-msg-bubble';
+    if (m.role === 'assistant' && typeof marked !== 'undefined') {
+      try { bubble.innerHTML = marked.parse(m.content || ''); } catch(e) { bubble.textContent = m.content || ''; }
+    } else {
+      bubble.textContent = m.content || '';
+    }
+    wrap.appendChild(roleEl);
+    wrap.appendChild(bubble);
+    container.appendChild(wrap);
+  });
+  container.scrollTop = container.scrollHeight;
+}
+
+function _tbaSend() {
+  var input = document.getElementById('tba-input');
+  var sendBtn = document.getElementById('tba-send');
+  if (!input || !sendBtn) return;
+  var text = (input.value || '').trim();
+  if (!text) return;
+  _tbaMessages.push({ role: 'user', content: text });
+  input.value = '';
+  _tbaRenderMessages();
+  sendBtn.disabled = true;
+  var loadingEl = document.createElement('div');
+  loadingEl.className = 'tba-msg assistant';
+  loadingEl.innerHTML = '<div class="tba-msg-role">Assistant</div><div class="tba-msg-bubble tba-loading">Thinking...</div>';
+  document.getElementById('tba-messages').appendChild(loadingEl);
+  document.getElementById('tba-messages').scrollTop = document.getElementById('tba-messages').scrollHeight;
+
+  var payload = { messages: _tbaMessages.slice(0, -1).concat([{ role: 'user', content: text }]), include_pattern_search: true, refresh: false };
+  fetch('/api/brain/trading/assistant/chat', {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  .then(function(r) { return r.json(); })
+  .then(function(d) {
+    var container = document.getElementById('tba-messages');
+    var loading = container && container.querySelector('.tba-loading');
+    if (loading && loading.closest('.tba-msg')) loading.closest('.tba-msg').remove();
+    if (d.ok && d.reply) {
+      _tbaMessages.push({ role: 'assistant', content: d.reply });
+      _tbaRenderMessages();
+    } else {
+      _tbaMessages.push({ role: 'assistant', content: d.error || 'Sorry, I could not reply. Check that the LLM is configured in settings.' });
+      _tbaRenderMessages();
+    }
+  })
+  .catch(function() {
+    var container = document.getElementById('tba-messages');
+    var loading = container && container.querySelector('.tba-loading');
+    if (loading && loading.closest('.tba-msg')) loading.closest('.tba-msg').remove();
+    _tbaMessages.push({ role: 'assistant', content: 'Network error. Please try again.' });
+    _tbaRenderMessages();
+  })
+  .finally(function() { if (sendBtn) sendBtn.disabled = false; });
+}
+
+function _tbaClear() {
+  _tbaMessages = [];
+  var container = document.getElementById('tba-messages');
+  if (container) container.innerHTML = '';
+  var input = document.getElementById('tba-input');
+  if (input) input.value = '';
+}
+
+function initTradingBrainAssistant() {
+  var chips = document.querySelectorAll('.tba-chip');
+  chips.forEach(function(chip) {
+    chip.onclick = function() {
+      var input = document.getElementById('tba-input');
+      if (input && chip.dataset.msg) input.value = chip.dataset.msg;
+    };
+  });
+  var sendBtn = document.getElementById('tba-send');
+  var clearBtn = document.getElementById('tba-clear');
+  if (sendBtn) sendBtn.onclick = _tbaSend;
+  if (clearBtn) clearBtn.onclick = _tbaClear;
+  var input = document.getElementById('tba-input');
+  if (input) {
+    input.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); _tbaSend(); }
+    });
+  }
+}
+
 function loadBrainWorkerActivity() {
-  fetch('/api/trading/brain/worker/recent-activity?limit=15').then(function(r){return r.json();}).then(function(d) {
+  return fetch('/api/trading/brain/worker/recent-activity?limit=15').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var container = document.getElementById('bw-activity');
     if (!d.activity || d.activity.length === 0) {
@@ -1458,33 +1819,221 @@ function startBrainWorker() {
     });
 }
 
+/** POST to brain worker control endpoints; same-origin, tolerant of non-JSON errors. */
+function _brainWorkerControlPost(url, onSuccess) {
+  fetch(url, { method: 'POST', credentials: 'same-origin' })
+    .then(function(r) {
+      return r.text().then(function(t) {
+        var j = {};
+        try { j = t ? JSON.parse(t) : {}; } catch (e) { j = { ok: false, error: 'Invalid response (HTTP ' + r.status + ')' }; }
+        return { httpOk: r.ok, status: r.status, body: j };
+      });
+    })
+    .then(function(res) {
+      if (res.httpOk && res.body && res.body.ok) {
+        if (onSuccess) onSuccess();
+      } else {
+        var msg = (res.body && res.body.error) ? res.body.error : ('Request failed (HTTP ' + res.status + ')');
+        alert(msg);
+      }
+    })
+    .catch(function(err) {
+      var m = (err && err.message) ? err.message : String(err);
+      alert('Could not reach CHILI. Is the server running? ' + m);
+    });
+}
+
 function stopBrainWorker() {
   if (!confirm('Stop the brain worker?')) return;
-  fetch('/api/trading/brain/worker/stop', {method: 'POST'})
-    .then(function(r){return r.json();})
-    .then(function(d) {
-      if (d.ok) setTimeout(loadBrainWorkerStatus, 1000);
-    }).catch(function(){});
+  _brainWorkerControlPost('/api/trading/brain/worker/stop', function() {
+    setTimeout(loadBrainWorkerStatus, 1000);
+  });
 }
 
 function pauseBrainWorker() {
-  fetch('/api/trading/brain/worker/pause', {method: 'POST'})
-    .then(function(r){return r.json();})
-    .then(function(d) {
-      if (d.ok) setTimeout(loadBrainWorkerStatus, 500);
-    }).catch(function(){});
+  _brainWorkerControlPost('/api/trading/brain/worker/pause', function() {
+    setTimeout(loadBrainWorkerStatus, 500);
+  });
+}
+
+function bwOpenQueueDebug() {
+  fetch('/api/trading/brain/worker/queue-debug?limit=50', { credentials: 'same-origin' })
+    .then(function(r) {
+      return r.json().then(function(d) {
+        return { httpOk: r.ok, body: d };
+      }).catch(function() {
+        return { httpOk: r.ok, body: { ok: false, error: 'Invalid JSON' } };
+      });
+    })
+    .then(function(res) {
+      var d = res.body || {};
+      if (!res.httpOk || !d.ok) {
+        alert(d.error || ('Request failed (' + (res.httpOk ? 'bad response' : 'HTTP error') + ')'));
+        return;
+      }
+      var ids = (d.eligible_pending_pattern_ids || []).join(', ');
+      if (!ids) ids = '(none eligible)';
+      alert((d.note || '') + '\n\nFirst ' + (d.limit || 50) + ' IDs:\n' + ids);
+    })
+    .catch(function(err) {
+      alert('Could not reach CHILI. ' + (err.message || err));
+    });
+}
+
+function runQueueBatchFromWeb() {
+  if (!confirm('Run one backtest queue batch in the background on this web server?\n\nDoes not require the separate brain_worker process. Check server logs for [learning] Queue backtest.')) return;
+  var btn = document.getElementById('bw-queue-batch-btn');
+  if (btn) { btn.disabled = true; }
+  fetch('/api/trading/brain/worker/run-queue-batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: '{}',
+  })
+    .then(function(r) {
+      return r.json().then(function(d) {
+        return { httpOk: r.ok, status: r.status, body: d };
+      }).catch(function() {
+        return { httpOk: r.ok, status: r.status, body: {} };
+      });
+    })
+    .then(function(result) {
+      if (btn) { btn.disabled = false; }
+      if (result.httpOk && result.body && result.body.ok) {
+        alert(result.body.message || 'Queue batch started.');
+        setTimeout(loadBrainWorkerStatus, 1500);
+        setTimeout(function() { loadBacktestQueueStatus().catch(function(){}); }, 2000);
+      } else {
+        var msg = (result.body && result.body.error) ? result.body.error : ('Server error (' + (result.status || '') + ')');
+        alert(msg);
+      }
+    })
+    .catch(function(e) {
+      if (btn) { btn.disabled = false; }
+      alert('Error: ' + (e.message || e));
+    });
+}
+
+function wakeBrainWorker() {
+  var btn = document.getElementById('bw-wake-btn');
+  var prevLabel = btn ? btn.textContent : '';
+  if (btn) { btn.disabled = true; }
+  fetch('/api/trading/brain/worker/wake-cycle', { method: 'POST', credentials: 'same-origin' })
+    .then(function(r) {
+      return r.json().then(function(d) {
+        return { httpOk: r.ok, status: r.status, body: d };
+      }).catch(function() {
+        return { httpOk: r.ok, status: r.status, body: { ok: false, error: 'Invalid JSON (HTTP ' + r.status + ')' } };
+      });
+    })
+    .then(function(result) {
+      if (btn) { btn.disabled = false; }
+      if (result.httpOk && result.body && result.body.ok) {
+        if (btn) {
+          btn.textContent = 'Queued…';
+          setTimeout(function() { if (btn) btn.textContent = prevLabel; }, 2500);
+        }
+        var body = result.body;
+        var notes = body.notes || [];
+        var warnings = body.warnings || [];
+        var msg = body.message || 'Wake queued.';
+        var heartbeatFresh = body.worker_heartbeat_fresh === true;
+        var parts = [];
+        if (!heartbeatFresh) {
+          parts.push(msg);
+          if (warnings.length) parts.push(warnings.join('\n\n'));
+          if (notes.length) parts.push(notes.join('\n'));
+          parts.push('Wake only affects the separate brain_worker.py process using this database.');
+          alert(parts.filter(Boolean).join('\n\n'));
+        } else {
+          if (notes.length) {
+            var noteWarn = notes.some(function(n) {
+              return /dead|Could not verify|Could not read|paused/i.test(String(n));
+            });
+            if (noteWarn || warnings.length) {
+              alert([msg, warnings.join('\n\n'), notes.join('\n')].filter(Boolean).join('\n\n'));
+            } else {
+              console.info('[brain worker wake]', msg, notes, body.last_heartbeat_at || '');
+            }
+          } else if (warnings.length) {
+            alert([msg, warnings.join('\n\n')].filter(Boolean).join('\n\n'));
+          }
+        }
+        setTimeout(loadBrainWorkerStatus, 500);
+      } else {
+        var err = (result.body && result.body.error) ? result.body.error : ('Request failed (HTTP ' + (result.status || '') + ')');
+        alert(err);
+      }
+    })
+    .catch(function(err) {
+      if (btn) { btn.disabled = false; }
+      var m = (err && err.message) ? err.message : String(err);
+      alert('Could not reach CHILI. Is the server running? ' + m);
+    });
+}
+
+var _bwEvidenceWired = false;
+function wirePatternEvidencePanel() {
+  if (_bwEvidenceWired) return;
+  var loadBtn = document.getElementById('bw-evidence-load');
+  var propBtn = document.getElementById('bw-evidence-propose');
+  var mlBtn = document.getElementById('bw-evidence-ml');
+  var out = document.getElementById('bw-evidence-out');
+  if (!loadBtn || !out) return;
+  _bwEvidenceWired = true;
+  function pid() {
+    var el = document.getElementById('bw-evidence-pattern-id');
+    var v = el ? parseInt(el.value, 10) : 0;
+    return v > 0 ? v : 0;
+  }
+  loadBtn.addEventListener('click', function() {
+    var id = pid();
+    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
+    out.textContent = 'Loading…';
+    fetch('/api/trading/brain/pattern/' + id + '/trade-analytics')
+      .then(function(r){return r.json();})
+      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
+      .catch(function(){ out.textContent = 'Request failed'; });
+  });
+  if (propBtn) propBtn.addEventListener('click', function() {
+    var id = pid();
+    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
+    out.textContent = 'Proposing…';
+    fetch('/api/trading/brain/pattern/' + id + '/evidence/propose', {method: 'POST'})
+      .then(function(r){return r.json();})
+      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
+      .catch(function(){ out.textContent = 'Request failed'; });
+  });
+  if (mlBtn) mlBtn.addEventListener('click', function() {
+    var id = pid();
+    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
+    out.textContent = 'Training…';
+    fetch('/api/trading/brain/pattern/' + id + '/trade-ml')
+      .then(function(r){return r.json();})
+      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
+      .catch(function(){ out.textContent = 'Request failed'; });
+  });
 }
 
 function startBwPolling() {
-  loadBrainWorkerStatus();
-  loadBrainWorkerActivity();
-  loadBacktestQueueStatus();
+  wirePatternEvidencePanel();
+  var qLink = document.getElementById('bw-queue-debug-link');
+  if (qLink && !qLink._bwWired) {
+    qLink._bwWired = true;
+    qLink.addEventListener('click', function(ev) {
+      ev.preventDefault();
+      bwOpenQueueDebug();
+    });
+  }
+  function refreshBwChain() {
+    return loadBrainWorkerStatus()
+      .catch(function(){})
+      .then(function() { return loadBrainWorkerActivity().catch(function(){}); })
+      .then(function() { return loadBacktestQueueStatus().catch(function(){}); });
+  }
+  refreshBwChain();
   if (_bwPollInterval) clearInterval(_bwPollInterval);
-  _bwPollInterval = setInterval(function() {
-    loadBrainWorkerStatus();
-    loadBrainWorkerActivity();
-    loadBacktestQueueStatus();
-  }, 10000);
+  _bwPollInterval = setInterval(refreshBwChain, 10000);
 }
 
 /* ── Brain Dashboard (reuses /api/trading/brain/* endpoints) ─── */
@@ -1623,10 +2172,12 @@ function loadBrainDashboard() {
   loadBrainActivity();
   loadLearnedPatterns();
   loadBrainPredictions();
-  pollLearningStatus();
-  pollBackfillStatus();
+  loadCycleAiReportsPage(true);
+  pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
   if (brainPollInterval) clearInterval(brainPollInterval);
-  brainPollInterval = setInterval(function() { pollLearningStatus(); pollBackfillStatus(); }, 3000);
+  brainPollInterval = setInterval(function() {
+    pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
+  }, 3000);
 }
 
 function showAccuracyDetail(type) {
@@ -2049,7 +2600,7 @@ function renderPatterns() {
            p.ticker_scope) + '</span>' : '') +
         '<span class="pc-conf" style="color:' + heroColor + '">' + heroValue + '<span style="display:block;font-size:8px;font-weight:400;opacity:.6">' + heroLabel + '</span></span>' +
       '</div>' +
-      '<div class="pc-desc" title="' + escHtml(p.pattern) + '">' + escHtml(p.pattern) + '</div>' +
+      '<div class="pc-desc" title="' + escHtml(p.pattern_display || p.pattern) + '">' + escHtml(p.pattern_display || p.pattern) + '</div>' +
       parentCrumb +
       '<div class="pc-stats">' +
         '<span class="pc-pill">' + p.evidence_count + ' evidence</span>' +
@@ -2082,17 +2633,22 @@ function showPatternByScanPatternId(spId) {
 }
 
 function showPatternDetail(patternId) {
+  _disposeEvWrProgressChart();
   var all = ((window._brainPatterns || {}).active || []).concat((window._brainPatterns || {}).demoted || []);
   var p = all.find(function(x){ return x.id === patternId; });
   if (!p) return;
   var barColor = p.confidence >= 70 ? '#22c55e' : p.confidence >= 50 ? '#f59e0b' : '#ef4444';
 
-  var html = '<div style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(p.pattern) + '</div>';
+  var patLine = p.pattern_display || p.pattern;
+  var html = '<div id="ev-pattern-desc" style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(patLine) + '</div>';
   html += '<div id="ev-stat-cards" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_count != null && (p.win_count + (p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : '') + '</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700;color:' + barColor + '">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div></div>';
   html += '<div id="ev-computed-row" style="display:none;margin-top:8px"></div>';
+  html += '<div id="ev-wr-progress-wrap" style="display:none;margin-top:10px">' +
+    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> (between Live Evidence Stats and the tabs — not inside Timeline). Each point = deduped win rate after another backtest with trades (latest per ticker/strategy).</div>' +
+    '<div id="ev-wr-progress-chart" style="height:140px;width:100%"></div></div>';
   if (p.example_tickers && p.example_tickers.length) {
     html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
     p.example_tickers.forEach(function(t) { html += '<span class="pc-ticker" onclick="goToTicker(\'' + t + '\');closeBrainModal()" style="cursor:pointer">' + t + '</span>'; });
@@ -2121,10 +2677,20 @@ function showPatternDetail(patternId) {
   }
   openBrainModal('Pattern Evidence', html, footer);
   window._currentEvidencePatternId = p.id;
+  /* Backtest API expects ScanPattern id; learn/patterns uses TradingInsight id */
+  window._currentBacktestPatternId = p.scan_pattern_id || p.id;
   window._evoTabLoaded = false;
 
   fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) { document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Could not load evidence.</div>'; return; }
+    if (d.resolved_scan_pattern_id) {
+      window._currentBacktestPatternId = d.resolved_scan_pattern_id;
+    }
+    var pd = d.pattern_display || (d.insight && d.insight.pattern_display);
+    if (pd) {
+      var descEl = document.getElementById('ev-pattern-desc');
+      if (descEl) descEl.textContent = pd;
+    }
     _renderEvTimeline(d.timeline || []);
     _renderEvHypotheses(d.hypotheses || []);
     _renderEvTrades(d.trades || []);
@@ -2144,6 +2710,7 @@ function showPatternDetail(patternId) {
     b('trades', (d.trades||[]).length);
     b('backtests', (d.backtests||[]).length);
     if (d.computed_stats) _renderComputedStats(d.computed_stats);
+    _renderEvWrProgress(d.win_rate_progress || []);
   }).catch(function(){ document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Network error loading evidence.</div>'; });
 }
 
@@ -2362,8 +2929,8 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
   var cell = chartRow.querySelector('td');
   if (cell.querySelector('.bt-chart-wrap')) return;
 
-  var deepLink = (strategy === 'dynamic_pattern' && window._currentEvidencePatternId)
-    ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentEvidencePatternId + '&period=' + encodeURIComponent(period)
+  var deepLink = (strategy === 'dynamic_pattern' && window._currentBacktestPatternId)
+    ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentBacktestPatternId + '&period=' + encodeURIComponent(period)
     : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(period);
   var loadMsg = btId ? 'Loading chart...' : 'Running backtest for ' + ticker + '...';
   cell.innerHTML = '<div class="bt-chart-wrap">' +
@@ -2421,8 +2988,8 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
       if (loaderSpan) loaderSpan.textContent = 'Running backtest for ' + escHtml(ticker) + '...';
     }
     var fetchPromise;
-    if (strategy === 'dynamic_pattern' && window._currentEvidencePatternId) {
-      fetchPromise = fetch('/api/trading/patterns/' + window._currentEvidencePatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
+    if (window._currentBacktestPatternId) {
+      fetchPromise = fetch('/api/trading/patterns/' + window._currentBacktestPatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
     } else {
       fetchPromise = fetch('/api/trading/backtest', {
         method: 'POST',
@@ -2671,6 +3238,101 @@ function demotePattern(patternId) {
   });
 }
 
+/* ── Cycle AI reports (paginated, flip card) ───── */
+var _cycleReportOffset = 0;
+var _cycleReportTotal = 0;
+
+function toggleCycleReportFlip(ev) {
+  if (ev && ev.target && ev.target.closest && ev.target.closest('a')) return;
+  var inner = document.getElementById('cycle-report-flip-inner');
+  if (inner) inner.classList.toggle('is-flipped');
+}
+
+function cycleReportNav(delta) {
+  var next = _cycleReportOffset + delta;
+  if (next < 0) return;
+  if (_cycleReportTotal > 0 && next >= _cycleReportTotal) return;
+  _cycleReportOffset = next;
+  loadCycleAiReportsPage(false);
+}
+
+function _cycleMetricsLine(m) {
+  if (!m || typeof m !== 'object') return '';
+  var parts = [];
+  if (m.tickers_scored != null) parts.push('scored ' + m.tickers_scored);
+  if (m.patterns_discovered != null) parts.push('patterns ' + m.patterns_discovered);
+  if (m.backtests_run != null) parts.push('backtests ' + m.backtests_run);
+  if (m.elapsed_s != null) parts.push(Math.round(m.elapsed_s) + 's');
+  if (m.data_provider) parts.push(String(m.data_provider));
+  return parts.length ? parts.join(' · ') : '';
+}
+
+function loadCycleAiReportsPage(resetOffset) {
+  if (resetOffset) _cycleReportOffset = 0;
+  var emptyEl = document.getElementById('cycle-report-empty');
+  var uiEl = document.getElementById('cycle-report-ui');
+  if (!emptyEl || !uiEl) return;
+  fetch('/api/trading/brain/cycle-reports?limit=1&offset=' + encodeURIComponent(_cycleReportOffset))
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok) {
+        emptyEl.style.display = 'block';
+        uiEl.style.display = 'none';
+        return;
+      }
+      _cycleReportTotal = d.total || 0;
+      if (!d.items || !d.items.length) {
+        emptyEl.style.display = 'block';
+        uiEl.style.display = 'none';
+        return;
+      }
+      emptyEl.style.display = 'none';
+      uiEl.style.display = 'block';
+      var it = d.items[0];
+      var prevBtn = document.getElementById('cycle-report-prev');
+      var nextBtn = document.getElementById('cycle-report-next');
+      if (prevBtn) prevBtn.disabled = _cycleReportOffset <= 0;
+      if (nextBtn) nextBtn.disabled = _cycleReportTotal <= 0 || (_cycleReportOffset + 1 >= _cycleReportTotal);
+      var posEl = document.getElementById('cycle-report-pos');
+      if (posEl) posEl.textContent = _cycleReportTotal ? (_cycleReportOffset + 1) + ' / ' + _cycleReportTotal : '';
+      var flip = document.getElementById('cycle-report-flip-inner');
+      if (flip) flip.classList.remove('is-flipped');
+      var when = it.created_at ? new Date(it.created_at) : null;
+      var dateEl = document.getElementById('cycle-report-front-date');
+      if (dateEl) {
+        dateEl.textContent = (when && !isNaN(when.getTime())) ? when.toLocaleString() : (it.created_at || '');
+      }
+      var metEl = document.getElementById('cycle-report-front-metrics');
+      if (metEl) metEl.textContent = _cycleMetricsLine(it.metrics);
+      var prevEl = document.getElementById('cycle-report-front-preview');
+      if (prevEl) prevEl.textContent = it.preview || '';
+      var backMd = document.getElementById('cycle-report-back-md');
+      if (backMd) backMd.innerHTML = '<div style="color:var(--text-muted)">Loading…</div>';
+      fetch('/api/trading/brain/cycle-reports/' + encodeURIComponent(it.id))
+        .then(function(r) { return r.json(); })
+        .then(function(det) {
+          if (!backMd) return;
+          if (!det.ok || det.content == null || det.content === '') {
+            backMd.innerHTML = '<pre style="white-space:pre-wrap">' + escHtml(it.preview || '') + '</pre>';
+            return;
+          }
+          if (typeof marked !== 'undefined') {
+            try { backMd.innerHTML = '<div class="cycle-md">' + marked.parse(det.content) + '</div>'; }
+            catch (e2) { backMd.innerHTML = '<pre style="white-space:pre-wrap">' + escHtml(det.content) + '</pre>'; }
+          } else {
+            backMd.innerHTML = '<pre style="white-space:pre-wrap">' + escHtml(det.content) + '</pre>';
+          }
+        })
+        .catch(function() {
+          if (backMd) backMd.innerHTML = '<pre style="white-space:pre-wrap">' + escHtml(it.preview || '') + '</pre>';
+        });
+    })
+    .catch(function() {
+      emptyEl.style.display = 'block';
+      uiEl.style.display = 'none';
+    });
+}
+
 /* ── Learning pipeline status polling ─────────── */
 var _PIPELINE_STEPS = [
   {id:'pre-filter',label:'Pre-Filter',icon:'&#x26A1;'},{id:'scan',label:'Deep Score',icon:'&#x1F50D;'},{id:'snapshot',label:'Snapshots',icon:'&#x1F4F8;'},
@@ -2679,7 +3341,7 @@ var _PIPELINE_STEPS = [
 ];
 
 function pollLearningStatus() {
-  fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
+  return fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var learning = d.learning, scan = d.scan, scheduler = d.scheduler;
     var pipelineSection = document.getElementById('brain-pipeline-section');
@@ -2716,14 +3378,13 @@ function pollLearningStatus() {
 
     if (!learning.running && pipelineSection._wasRunning) loadBrainDashboard();
     pipelineSection._wasRunning = learning.running;
-  }).catch(function(){});
-  updateSidebarStatus();
+  }).catch(function(){}).then(function() { return updateSidebarStatus(); });
 }
 
 /* ── Backfill progress polling ─────────────────── */
 var _bfWasRunning = false;
 function pollBackfillStatus() {
-  fetch('/api/trading/learn/backfill-status').then(function(r){return r.json();}).then(function(d) {
+  return fetch('/api/trading/learn/backfill-status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var banner = document.getElementById('backfill-banner');
     if (d.running && d.total > 0) {
@@ -4737,6 +5398,7 @@ document.addEventListener('DOMContentLoaded', function() {
   loadBrainDashboard();
   updateSidebarStatus();
   startBwPolling();
+  initTradingBrainAssistant();
 });
 </script>
 {% endblock %}

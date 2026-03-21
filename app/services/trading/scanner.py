@@ -818,6 +818,44 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
             score += get_adaptive_weight("swing_below_major_mas")
             signals.append("Below SMA50 & EMA50 — falling-knife risk")
 
+        # ── Composable Pattern Engine evaluation (composite pattern rules) ──
+        try:
+            from .pattern_engine import evaluate_patterns, build_indicator_snapshot, get_active_patterns
+            from ...db import SessionLocal as _SL
+            _pe_db = _SL()
+            try:
+                _asset_class = "crypto" if is_crypto_ticker else "stocks"
+                _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
+                if _pe_patterns:
+                    _pe_snap = build_indicator_snapshot(
+                        ticker=ticker,
+                        price=price,
+                        rsi=float(rsi_val) if pd.notna(rsi_val) else None,
+                        macd_hist=float(macd_hist) if pd.notna(macd_hist) else None,
+                        adx=float(adx_val) if pd.notna(adx_val) else None,
+                        bb_pct=(price - float(bb_lower)) / (float(bb_upper) - float(bb_lower))
+                            if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
+                        vol_ratio=vol_latest / vol_avg if vol_avg > 0 else None,
+                        ema_stack_bullish=ema_stack_bullish,
+                        ema_stack_bearish=ema_stack_bearish,
+                        extra={
+                            "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                            "ema_20": float(ema_20) if pd.notna(ema_20) else None,
+                            "ema_50": float(ema_50) if pd.notna(ema_50) else None,
+                            "sma_20": float(sma_20) if pd.notna(sma_20) else None,
+                            "sma_50": float(sma_50) if pd.notna(sma_50) else None,
+                        },
+                    )
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    for m in _pe_matches:
+                        if score >= m.get("min_base_score", 0):
+                            score += m["score_boost"]
+                            signals.append(f"Pattern: {m['name']} (+{m['score_boost']:.1f})")
+            finally:
+                _pe_db.close()
+        except Exception as _pe_err:
+            pass  # Pattern engine errors should not break basic scoring
+
         score = max(1.0, min(10.0, score))
 
         _buy_thresh = get_adaptive_weight("swing_signal_buy")

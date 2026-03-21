@@ -21,7 +21,7 @@ Follow this workflow:
    - the specific files to inspect or create (by path)
    - the kind of change (new endpoint, new service method, model migration, scheduler job, pattern engine rule, agent capability, etc.)
 4. Call out any risks, unknowns, or design decisions I should resolve before coding:
-   - DB migration safety (new columns need `DEFAULT` for SQLite `ALTER TABLE`)
+   - DB migration safety (new columns need sensible `DEFAULT` for PostgreSQL `ALTER TABLE` where applicable)
    - Circular import risks (use `llm_caller.py` instead of importing `chat_service` in services)
    - Scheduler job conflicts or interval tuning
    - Frontend state management considerations (module-level vars, localStorage persistence)

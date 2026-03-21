@@ -166,9 +166,11 @@ cp .env.example .env
 bash scripts/docker-setup.sh
 ```
 
-Open [http://localhost:8000/chat](http://localhost:8000/chat) to start chatting.
+Open **[https://localhost:8000/chat](https://localhost:8000/chat)** to start chatting (Docker serves **HTTPS** with a container-generated certificate; your browser will show a warning — use **Advanced → Continue** for local dev).
 
 To stop: `docker compose down`. To stop and wipe **all** data (Postgres, Ollama models cache volume, app data): `docker compose down -v`.
+
+To use **plain HTTP** inside the container only (e.g. debugging), run with `-e CHILI_TLS=0` or add a `docker-compose.override.yml` that sets `CHILI_TLS=0` on the `chili` service (the default in `docker-compose.yml` is **HTTPS**, `CHILI_TLS=1`).
 
 ### Option B: Local (Conda)
 
@@ -221,7 +223,7 @@ Another `uvicorn`/Python process is still listening (often an old terminal, a se
 
 This script **does not require Administrator** for normal dev: it stops listeners first, targets the **parent** of the process holding the socket (fixes `uvicorn --reload`), retries a few times, and only pops **UAC** if something is still bound after that.
 
-`scripts\start-https.ps1` runs `free-port.ps1` automatically before starting the server.
+`scripts\start-https.ps1` runs `free-port.ps1` twice (with a short delay between) before starting the server so the port is reliably free and WinError 10048 is avoided.
 
 Avoid relying on `Stop-Process` on the raw listener PID alone — with `--reload`, that PID can come back immediately; use `free-port.ps1` instead.
 

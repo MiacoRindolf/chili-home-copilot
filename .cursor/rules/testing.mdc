@@ -8,35 +8,15 @@ alwaysApply: false
 
 ## Framework
 
-pytest with `httpx` (`TestClient`). In-memory SQLite for isolation.
+pytest with `httpx` (`TestClient`). **PostgreSQL required:** set `TEST_DATABASE_URL` (or `DATABASE_URL`) to a dedicated test database before collection. `tests/conftest.py` sets `DATABASE_URL` before importing the app, then truncates application tables (except `schema_version`) around each test.
 
 ## Fixtures (conftest.py)
 
-```python
-@pytest.fixture()
-def db():
-    engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False}, poolclass=StaticPool)
-    Base.metadata.create_all(bind=engine)
-    session = sessionmaker(bind=engine)()
-    yield session
-    session.close()
+- `db` — session on the shared engine; truncates tables before/after each test
+- `client` — `TestClient` with `get_db` overridden to use `db`
+- `paired_client` — seeds `User` + `Device` and sets the device cookie
 
-@pytest.fixture()
-def client(db):
-    app.dependency_overrides[get_db] = lambda: (yield db)
-    with TestClient(app) as c:
-        yield c
-    app.dependency_overrides.clear()
-
-@pytest.fixture()
-def paired_client(db, client):
-    user = User(name="TestUser")
-    db.add(user); db.commit(); db.refresh(user)
-    db.add(Device(token="test-token", user_id=user.id, label="Test", client_ip_last="127.0.0.1"))
-    db.commit()
-    client.cookies.set(DEVICE_COOKIE_NAME, "test-token")
-    return client, user
-```
+See `docs/DATABASE_POSTGRES.md` for Docker examples and `chili_test` setup.
 
 ## Test Conventions
 
@@ -60,6 +40,7 @@ def paired_client(db, client):
 ## Running Tests
 
 ```bash
+set TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/chili_test
 pytest tests/ -v
 pytest tests/test_scanner_scoring.py -v -k "test_specific"
 ```

@@ -849,15 +849,16 @@ def start_scheduler():
 
         _scheduler = BackgroundScheduler(daemon=True)
 
-        _scheduler.add_job(
-            _run_learning_job,
-            trigger=IntervalTrigger(hours=_learning_hours),
-            id="learning_cycle",
-            name=f"Full market learning cycle (every {_learning_hours}h)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(minutes=3),
-        )
+        # DISABLED: Brain Worker now handles the full learning cycle continuously
+        # _scheduler.add_job(
+        #     _run_learning_job,
+        #     trigger=IntervalTrigger(hours=_learning_hours),
+        #     id="learning_cycle",
+        #     name=f"Full market learning cycle (every {_learning_hours}h)",
+        #     replace_existing=True,
+        #     max_instances=1,
+        #     next_run_time=datetime.now() + timedelta(minutes=3),
+        # )
 
         _scheduler.add_job(
             _run_weekly_review_job,
@@ -983,24 +984,18 @@ def start_scheduler():
             next_run_time=datetime.now() + timedelta(minutes=30),
         )
 
-        _scheduler.add_job(
-            _run_pattern_backfill_job,
-            trigger=IntervalTrigger(hours=1),
-            id="pattern_backfill",
-            name="Backtest new untested patterns (every 1h)",
-            replace_existing=True,
-            max_instances=1,
-        )
+        # DISABLED: Brain Worker now handles pattern backtesting as part of the full learning cycle
+        # _scheduler.add_job(
+        #     _run_pattern_backfill_job,
+        #     trigger=IntervalTrigger(hours=1),
+        #     id="pattern_backfill",
+        #     name="Backtest new untested patterns (every 1h)",
+        #     replace_existing=True,
+        #     max_instances=1,
+        # )
 
-        _scheduler.add_job(
-            _run_exit_evolution_job,
-            trigger=IntervalTrigger(hours=2),
-            id="exit_evolution",
-            name="Exit-strategy evolution (every 2h)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(minutes=90),
-        )
+        # Pattern variant evolution (fork/compare/promote) runs inside run_learning_cycle
+        # (brain worker / full cycle), not as a separate scheduler job — avoids double runs.
 
         _scheduler.start()
         logger.info(
@@ -1010,8 +1005,8 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
-            "stock breakout scanner market hours every 15min, web pattern research every 12h, "
-            "exit-strategy evolution every 2h)"
+            "stock breakout scanner market hours every 15min, web pattern research every 12h; "
+            "pattern variant evolution is owned by the learning cycle / brain worker)"
         )
 
 
@@ -1035,8 +1030,8 @@ def get_scheduler_info() -> dict:
     jobs = []
     for job in _scheduler.get_jobs():
         jobs.append({
-            "id": job.id,
-            "name": job.name,
+            "id": str(job.id),
+            "name": str(job.name) if job.name is not None else "",
             "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
         })
 

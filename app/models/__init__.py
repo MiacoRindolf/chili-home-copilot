@@ -1,6 +1,6 @@
 """SQLAlchemy models. Re-export all for backward compatibility: from app.models import User, Chore, ..."""
 
-from .core import BrokerCredential, Device, PairCode, User
+from .core import BrainWorkerControl, BrokerCredential, Device, PairCode, User
 from .projects import Project, ProjectFile
 from .chat import ChatLog, ChatMessage, Conversation
 from .household import ActivityLog, Birthday, Chore, HousemateProfile, UserMemory, UserStatus
@@ -20,9 +20,13 @@ from .trading import (
     BacktestResult,
     BreakoutAlert,
     JournalEntry,
+    LearningCycleAiReport,
     LearningEvent,
     MarketSnapshot,
+    PatternEvidenceHypothesis,
+    PatternTradeRow,
     ScanResult,
+    ScanPattern,
     Trade,
     TradingInsight,
     WatchlistItem,
@@ -65,6 +69,7 @@ __all__ = [
     "Device",
     "PairCode",
     "BrokerCredential",
+    "BrainWorkerControl",
     "Project",
     "ProjectFile",
     "ChatLog",
@@ -91,9 +96,13 @@ __all__ = [
     "Trade",
     "JournalEntry",
     "TradingInsight",
+    "ScanPattern",
+    "PatternTradeRow",
+    "PatternEvidenceHypothesis",
     "ScanResult",
     "BacktestResult",
     "MarketSnapshot",
+    "LearningCycleAiReport",
     "LearningEvent",
     "CodeRepo",
     "CodeInsight",

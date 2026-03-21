@@ -2,11 +2,22 @@ import logging
 import uuid
 from datetime import datetime
 
+
+class _DefaultTraceIdFilter(logging.Filter):
+    """chili.* child loggers often call .info() without extra={'trace_id': ...}."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "trace_id", None) is None:
+            record.trace_id = "-"
+        return True
+
+
 logger = logging.getLogger("chili")
 logger.setLevel(logging.INFO)
 
 if not logger.handlers:
     handler = logging.StreamHandler()
+    handler.addFilter(_DefaultTraceIdFilter())
     formatter = logging.Formatter(
         fmt="%(asctime)s | %(levelname)s | trace=%(trace_id)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",

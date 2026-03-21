@@ -1,6 +1,6 @@
 """Pydantic schemas for the Trading module API."""
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,8 +106,27 @@ class BacktestRequest(BaseModel):
     ticker: str
     strategy: str = "sma_cross"
     period: str = "1y"
+    interval: str = "1d"
     cash: float = Field(10000, gt=0)
     commission: float = Field(0.001, ge=0)
+    # Optional overrides for built-in strategies (e.g. fast/slow for SMA crossover)
+    strategy_params: dict[str, Any] | None = None
+
+
+class PatternBacktestRequest(BaseModel):
+    """Optional JSON body for POST /api/trading/patterns/{id}/backtest."""
+
+    ticker: Optional[str] = None
+    period: Optional[str] = None
+    interval: Optional[str] = None
+    cash: Optional[float] = Field(None, gt=0)
+    commission: Optional[float] = Field(None, ge=0)
+    # Full replacement for the pattern's stored rules_json (must be valid JSON string)
+    rules_json_override: Optional[str] = None
+    # Extra AND conditions appended after the pattern's conditions
+    append_conditions: Optional[list[dict[str, Any]]] = None
+    # Merged on top of the ScanPattern's exit_config
+    exit_config: Optional[dict[str, Any]] = None
 
 
 # ── Scanner ─────────────────────────────────────────────────────────────

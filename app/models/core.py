@@ -50,3 +50,15 @@ class BrokerCredential(Base):
     encrypted_data = Column(Text, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BrainWorkerControl(Base):
+    """Singleton row (id=1): cross-process wake/stop/heartbeat for brain_worker (PostgreSQL)."""
+
+    __tablename__ = "brain_worker_control"
+
+    id = Column(Integer, primary_key=True)
+    wake_requested = Column(Boolean, nullable=False, default=False)
+    stop_requested = Column(Boolean, nullable=False, default=False)
+    last_heartbeat_at = Column(DateTime, nullable=True)
+    updated_at = Column(DateTime, nullable=True)

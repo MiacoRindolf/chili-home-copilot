@@ -2,15 +2,19 @@ from pathlib import Path
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
+from .config import settings
+
 DATA_DIR = Path(__file__).resolve().parents[1] / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-DB_PATH = DATA_DIR / "chili.db"
-DATABASE_URL = f"sqlite:///{DB_PATH}"
-
+# PostgreSQL only — DATABASE_URL validated in config (see .env.example).
+DATABASE_URL = settings.database_url
 engine = create_engine(
     DATABASE_URL,
-    connect_args={"check_same_thread": False, "timeout": 30},
+    pool_size=settings.database_pool_size,
+    max_overflow=settings.database_max_overflow,
+    pool_pre_ping=True,  # detect stale connections
+    pool_recycle=3600,  # avoid stale server-side disconnects on long-lived CHILI + worker
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

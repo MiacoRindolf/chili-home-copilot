@@ -2342,7 +2342,8 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <!-- Backtest -->
       <div class="t-tab-content" id="tab-backtest">
         <div class="bt-form">
-          <select id="bt-strategy"></select>
+          <select id="bt-strategy" title="Built-in strategies or CHILI Brain discovered patterns"></select>
+          <div id="bt-strategy-params" class="bt-strategy-params" style="flex-basis:100%;margin-top:4px"></div>
           <select id="bt-period">
             <option value="6mo">6 months</option>
             <option value="1y" selected>1 year</option>
@@ -2350,8 +2351,42 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
             <option value="5y">5 years</option>
           </select>
           <input id="bt-cash" type="number" value="10000" step="1000" style="width:90px" placeholder="Cash $" />
-          <button onclick="runBacktest()">Run Backtest</button>
+          <button type="button" onclick="runBacktest()">Run Backtest</button>
         </div>
+        <details id="bt-advanced" class="bt-advanced" style="display:none;margin:8px 0;font-size:12px;max-width:900px">
+          <summary style="cursor:pointer;color:var(--text-secondary)">Advanced — pattern rules &amp; exits (CHILI Brain / dynamic)</summary>
+          <p style="color:var(--text-muted);margin:6px 0 8px">Add entry conditions and tune exit; or use <strong>Edit as JSON</strong> for raw overrides.</p>
+          <div class="bt-form-section" style="margin-top:10px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <strong style="font-size:12px">Append entry conditions (AND)</strong>
+              <button type="button" class="bt-add-row" onclick="btAddConditionRow()" style="padding:2px 8px;font-size:11px;cursor:pointer">+ Add row</button>
+            </div>
+            <div id="bt-conditions-rows"></div>
+          </div>
+          <div class="bt-form-section" style="margin-top:12px">
+            <strong style="font-size:12px">Exit config</strong>
+            <div style="display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center;margin-top:6px">
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
+                ATR mult <input type="number" id="bt-exit-atr" step="0.1" min="0.5" max="5" placeholder="e.g. 2" style="width:56px" title="Trailing stop ATR multiplier" />
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
+                Max bars <input type="number" id="bt-exit-max-bars" min="5" max="200" placeholder="e.g. 40" style="width:56px" title="Max hold bars" />
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+                <input type="checkbox" id="bt-exit-use-bos" checked title="Break of structure exit" /> Use BOS
+              </label>
+            </div>
+          </div>
+          <details class="bt-json-details" style="margin-top:10px;border:1px solid var(--border-color, #374151);border-radius:4px;padding:6px">
+            <summary style="cursor:pointer;color:var(--text-muted);font-size:11px">Edit as JSON</summary>
+            <label style="display:block;margin-top:6px;font-size:11px">Append entry conditions (JSON array)</label>
+            <textarea id="bt-append-conditions" rows="2" style="width:100%;font-family:monospace;font-size:11px" placeholder='[{"indicator":"rsi_14","op":"&lt;","value":35}]'></textarea>
+            <label style="display:block;margin-top:6px;font-size:11px">Exit config overlay (JSON object)</label>
+            <textarea id="bt-exit-config" rows="2" style="width:100%;font-family:monospace;font-size:11px" placeholder='{"atr_mult":2.5,"max_bars":40}'></textarea>
+            <label style="display:block;margin-top:6px;font-size:11px">Full rules JSON override (replaces pattern)</label>
+            <textarea id="bt-rules-override" rows="4" style="width:100%;font-family:monospace;font-size:11px" placeholder='{"conditions":[...]}'></textarea>
+          </details>
+        </details>
         <div class="bt-results" id="bt-results"></div>
         <div id="bt-chart-area"></div>
         <div id="bt-indicator-pane"></div>
@@ -2959,7 +2994,43 @@ document.addEventListener('DOMContentLoaded', function() {
   _initDrawingListeners();
   _initPaneDrag();
   buildIndicatorPanel();
-  loadStrategies();
+  loadStrategies().then(function() {
+    var _urlParams = new URLSearchParams(window.location.search);
+    if (_urlParams.get('tab') !== 'backtest') return;
+    var _dlTicker = _urlParams.get('ticker');
+    var _dlStrategy = _urlParams.get('strategy');
+    var _dlPeriod = _urlParams.get('period');
+    var _dlPattern = _urlParams.get('pattern_id');
+    setTimeout(function() {
+      if (_dlTicker) selectTicker(_dlTicker);
+      switchTabByName('backtest');
+      setTimeout(function() {
+        var sel = document.getElementById('bt-strategy');
+        if (sel) {
+          if (_dlPattern) {
+            var target = 'insight:' + _dlPattern;
+            for (var i = 0; i < sel.options.length; i++) {
+              if (sel.options[i].value === target) { sel.value = target; break; }
+            }
+          } else if (_dlStrategy) {
+            for (var j = 0; j < sel.options.length; j++) {
+              if (sel.options[j].value === _dlStrategy) { sel.value = _dlStrategy; break; }
+            }
+          }
+        }
+        if (_dlPeriod) {
+          var per = document.getElementById('bt-period');
+          if (per) {
+            for (var k = 0; k < per.options.length; k++) {
+              if (per.options[k].value === _dlPeriod) { per.value = _dlPeriod; break; }
+            }
+          }
+        }
+        renderBtStrategyParams();
+        runBacktest();
+      }, 600);
+    }, 500);
+  });
   loadScreenerPresets();
   loadPortfolio();
   loadTrades();
@@ -2995,28 +3066,6 @@ document.addEventListener('DOMContentLoaded', function() {
   // Load brain tickers -> populate Quick Add Crypto + resolve default ticker
   _initFromBrain();
 
-  // Deep-link: auto-open backtest tab from brain page links
-  var _urlParams = new URLSearchParams(window.location.search);
-  if (_urlParams.get('tab') === 'backtest') {
-    var _dlTicker = _urlParams.get('ticker');
-    var _dlStrategy = _urlParams.get('strategy');
-    var _dlPeriod = _urlParams.get('period');
-    setTimeout(function() {
-      if (_dlTicker) selectTicker(_dlTicker);
-      switchTabByName('backtest');
-      setTimeout(function() {
-        if (_dlStrategy) {
-          var sel = document.getElementById('bt-strategy');
-          if (sel) { for (var i = 0; i < sel.options.length; i++) { if (sel.options[i].value === _dlStrategy) { sel.value = _dlStrategy; break; } } }
-        }
-        if (_dlPeriod) {
-          var per = document.getElementById('bt-period');
-          if (per) { for (var i = 0; i < per.options.length; i++) { if (per.options[i].value === _dlPeriod) { per.value = _dlPeriod; break; } } }
-        }
-        runBacktest();
-      }, 600);
-    }, 500);
-  }
 });
 
 function _initFromBrain() {
@@ -6124,7 +6173,9 @@ function _stopScanProgressPoll() {
   if (_scanProgressInterval) { clearInterval(_scanProgressInterval); _scanProgressInterval = null; }
 }
 
+var _dtScanRetries = 0;
 function runDaytradeScan() {
+  if (typeof _cachedScanTickers === 'undefined') _cachedScanTickers = [];
   var btn = document.getElementById('btn-daytrade');
   var status = document.getElementById('daytrade-status');
   var results = document.getElementById('daytrade-results');
@@ -6137,6 +6188,7 @@ function runDaytradeScan() {
 
   fetch('/api/trading/scan/daytrade', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d) {
+    _dtScanRetries = 0;
     if (d.warming_up) {
       status.textContent = 'Brain is computing day-trade data — refreshing in 5s...';
       results.innerHTML = '';
@@ -6160,6 +6212,13 @@ function runDaytradeScan() {
   }).catch(function(err) {
     console.error('[runDaytradeScan] error:', err);
     _stopScanProgressPoll();
+    if (_dtScanRetries < 2 && (err.message || '').indexOf('NetworkError') !== -1) {
+      _dtScanRetries++;
+      status.textContent = 'Network error, retrying in 2s...';
+      setTimeout(function(){ runDaytradeScan(); }, 2000);
+      return;
+    }
+    _dtScanRetries = 0;
     btn.disabled = false;
     btn.textContent = 'Scan Day Trades';
     status.textContent = '';
@@ -6167,7 +6226,9 @@ function runDaytradeScan() {
   });
 }
 
+var _boScanRetries = 0;
 function runBreakoutScan() {
+  if (typeof _cachedScanTickers === 'undefined') _cachedScanTickers = [];
   var btn = document.getElementById('btn-breakout');
   var status = document.getElementById('breakout-status');
   var results = document.getElementById('breakout-results');
@@ -6180,6 +6241,7 @@ function runBreakoutScan() {
 
   fetch('/api/trading/scan/breakouts', {method:'POST'})
     .then(function(r){return r.json();}).then(function(d) {
+    _boScanRetries = 0;
     if (d.warming_up) {
       status.textContent = 'Brain is computing breakout data — refreshing in 5s...';
       results.innerHTML = '';
@@ -6224,6 +6286,13 @@ function runBreakoutScan() {
   }).catch(function(err) {
     console.error('[runBreakoutScan] error:', err);
     _stopScanProgressPoll();
+    if (_boScanRetries < 2 && (err.message || '').indexOf('NetworkError') !== -1) {
+      _boScanRetries++;
+      status.textContent = 'Network error, retrying in 2s...';
+      setTimeout(function(){ runBreakoutScan(); }, 2000);
+      return;
+    }
+    _boScanRetries = 0;
     btn.disabled = false;
     btn.textContent = 'Scan Breakouts';
     status.textContent = '';
@@ -7329,19 +7398,188 @@ function loadPortfolio() {
 }
 
 /* ── Backtest ──────────────────────────────────── */
+window._btStrategyCatalog = { builtins: [], brain: [] };
+
 function loadStrategies() {
-  fetch('/api/trading/backtest/strategies').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
+  return Promise.all([
+    fetch('/api/trading/backtest/strategies').then(function(r) { return r.json(); }),
+    fetch('/api/trading/learn/patterns').then(function(r) { return r.json(); }).catch(function() { return { ok: false }; }),
+  ]).then(function(pair) {
+    var d = pair[0];
+    var lp = pair[1];
     var sel = document.getElementById('bt-strategy');
+    if (!sel) return Promise.resolve();
     sel.innerHTML = '';
-    d.strategies.forEach(function(s) {
-      var opt = document.createElement('option');
-      opt.value = s.id;
-      opt.textContent = s.name;
-      opt.title = s.description;
-      sel.appendChild(opt);
-    });
+    window._btStrategyCatalog.builtins = d.ok ? d.strategies : [];
+    if (d.ok) {
+      var ogB = document.createElement('optgroup');
+      ogB.label = 'Built-in';
+      d.strategies.forEach(function(s) {
+        var opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = s.name;
+        opt.title = s.description || '';
+        ogB.appendChild(opt);
+      });
+      sel.appendChild(ogB);
+    }
+    window._btStrategyCatalog.brain = [];
+    if (lp && lp.ok && lp.active && lp.active.length) {
+      var ogC = document.createElement('optgroup');
+      ogC.label = 'CHILI Brain';
+      lp.active.forEach(function(p) {
+        var opt = document.createElement('option');
+        opt.value = 'insight:' + p.id;
+        var label = (p.pattern_display || p.pattern || '').replace(/\s+/g, ' ').trim();
+        if (label.length > 72) label = label.slice(0, 69) + '...';
+        opt.textContent = label || ('Pattern #' + p.id);
+        opt.title = (p.pattern || '') + ' — backtest uses insight id; server resolves pattern.';
+        ogC.appendChild(opt);
+        window._btStrategyCatalog.brain.push(p);
+      });
+      sel.appendChild(ogC);
+    }
+    sel.removeEventListener('change', _onBtStrategyChange);
+    sel.addEventListener('change', _onBtStrategyChange);
+    renderBtStrategyParams();
   });
+}
+
+function _onBtStrategyChange() {
+  renderBtStrategyParams();
+  if (document.getElementById('bt-strategy').value.indexOf('insight:') === 0) {
+    var rows = document.getElementById('bt-conditions-rows');
+    if (rows && rows.children.length === 0) btAddConditionRow();
+  }
+}
+
+var _btConditionIndicators = [
+  'rsi_14', 'ema_9', 'ema_20', 'ema_50', 'ema_100', 'sma_20', 'sma_50', 'sma_100',
+  'bb_squeeze', 'bb_upper', 'bb_lower', 'macd_hist', 'adx', 'price', 'rel_vol', 'gap_pct'
+];
+var _btConditionOps = ['<', '<=', '==', '>=', '>', '!='];
+
+function btAddConditionRow() {
+  var container = document.getElementById('bt-conditions-rows');
+  if (!container) return;
+  var idx = container.children.length;
+  var row = document.createElement('div');
+  row.className = 'bt-condition-row';
+  row.style.cssText = 'display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap';
+  var selInd = document.createElement('select');
+  selInd.setAttribute('data-bt-cond', 'indicator');
+  selInd.style.fontSize = '11px';
+  _btConditionIndicators.forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o;
+    opt.textContent = o;
+    selInd.appendChild(opt);
+  });
+  var selOp = document.createElement('select');
+  selOp.setAttribute('data-bt-cond', 'op');
+  selOp.style.fontSize = '11px';
+  _btConditionOps.forEach(function(o) {
+    var opt = document.createElement('option');
+    opt.value = o;
+    opt.textContent = o;
+    selOp.appendChild(opt);
+  });
+  var inpVal = document.createElement('input');
+  inpVal.type = 'text';
+  inpVal.setAttribute('data-bt-cond', 'value');
+  inpVal.placeholder = 'e.g. 35 or 70';
+  inpVal.style.cssText = 'width:80px;font-size:11px;padding:2px 4px';
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.textContent = 'Remove';
+  btn.style.cssText = 'font-size:10px;padding:2px 6px;cursor:pointer';
+  btn.onclick = function() { row.remove(); };
+  row.appendChild(selInd);
+  row.appendChild(selOp);
+  row.appendChild(inpVal);
+  row.appendChild(btn);
+  container.appendChild(row);
+}
+
+function _collectBtAppendConditionsFromForm() {
+  var rows = document.getElementById('bt-conditions-rows');
+  if (!rows || !rows.children.length) return null;
+  var list = [];
+  for (var i = 0; i < rows.children.length; i++) {
+    var r = rows.children[i];
+    var ind = r.querySelector('[data-bt-cond="indicator"]');
+    var op = r.querySelector('[data-bt-cond="op"]');
+    var val = r.querySelector('[data-bt-cond="value"]');
+    if (!ind || !op || !val) continue;
+    var v = val.value.trim();
+    if (!v) continue;
+    var num = parseFloat(v);
+    var value = isNaN(num) ? v : (num === parseInt(v, 10) ? parseInt(v, 10) : num);
+    list.push({ indicator: ind.value, op: op.value, value: value });
+  }
+  return list.length ? list : null;
+}
+
+function _collectBtExitConfigFromForm() {
+  var atr = document.getElementById('bt-exit-atr');
+  var bars = document.getElementById('bt-exit-max-bars');
+  var bos = document.getElementById('bt-exit-use-bos');
+  if (!atr && !bars && !bos) return null;
+  var cfg = {};
+  if (atr && atr.value.trim() !== '') { var n = parseFloat(atr.value); if (!isNaN(n)) cfg.atr_mult = n; }
+  if (bars && bars.value.trim() !== '') { var n = parseInt(bars.value, 10); if (!isNaN(n)) cfg.max_bars = n; }
+  if (bos) cfg.use_bos = bos.checked;
+  return Object.keys(cfg).length ? cfg : null;
+}
+
+function renderBtStrategyParams() {
+  var sel = document.getElementById('bt-strategy');
+  var container = document.getElementById('bt-strategy-params');
+  var adv = document.getElementById('bt-advanced');
+  if (!sel || !container) return;
+  var val = sel.value || '';
+  container.innerHTML = '';
+  if (val.indexOf('insight:') === 0) {
+    if (adv) adv.style.display = 'block';
+    var condRows = document.getElementById('bt-conditions-rows');
+    if (condRows && condRows.children.length === 0) btAddConditionRow();
+    return;
+  }
+  if (adv) adv.style.display = 'none';
+  var meta = (window._btStrategyCatalog.builtins || []).find(function(s) { return s.id === val; });
+  if (!meta || !meta.tunables || !meta.tunables.length) return;
+  var row = document.createElement('div');
+  row.className = 'bt-param-row';
+  row.style.cssText = 'display:flex;flex-wrap:wrap;gap:8px;align-items:center;';
+  meta.tunables.forEach(function(t) {
+    var lab = document.createElement('label');
+    lab.style.cssText = 'font-size:11px;color:var(--text-secondary);display:inline-flex;align-items:center;gap:4px;';
+    lab.textContent = t.name + ': ';
+    var inp = document.createElement('input');
+    inp.type = 'number';
+    inp.setAttribute('data-param', t.name);
+    inp.step = t.step != null ? t.step : 1;
+    if (t.min != null) inp.min = t.min;
+    if (t.max != null) inp.max = t.max;
+    inp.value = t.default != null ? t.default : '';
+    inp.style.width = '76px';
+    lab.appendChild(inp);
+    row.appendChild(lab);
+  });
+  container.appendChild(row);
+}
+
+function _collectBuiltinStrategyParams() {
+  var params = {};
+  var container = document.getElementById('bt-strategy-params');
+  if (!container) return params;
+  container.querySelectorAll('input[data-param]').forEach(function(inp) {
+    var k = inp.getAttribute('data-param');
+    if (!k) return;
+    var v = parseFloat(inp.value);
+    if (!isNaN(v)) params[k] = v;
+  });
+  return params;
 }
 
 var _btIndicatorChart = null;
@@ -7352,7 +7590,8 @@ var _indicatorColors = [
 ];
 
 function runBacktest() {
-  var strategy = document.getElementById('bt-strategy').value;
+  var strategyEl = document.getElementById('bt-strategy');
+  var strategy = strategyEl ? strategyEl.value : 'sma_cross';
   var period = document.getElementById('bt-period').value;
   var cash = parseFloat(document.getElementById('bt-cash').value) || 10000;
   var results = document.getElementById('bt-results');
@@ -7362,17 +7601,14 @@ function runBacktest() {
   document.getElementById('bt-legend').innerHTML = '';
   document.getElementById('bt-trade-log').innerHTML = '';
 
-  fetch('/api/trading/backtest', {
-    method:'POST', headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ticker: currentTicker, strategy: strategy, period: period, cash: cash, commission: 0.001})
-  }).then(function(r){return r.json();}).then(function(d) {
+  function _applyResult(d) {
     if (!d.ok) { results.innerHTML = '<em style="color:#ef4444">'+escHtml(d.error||'Backtest failed')+'</em>'; return; }
-
     var retCls = d.return_pct >= 0 ? 'pnl-pos' : 'pnl-neg';
     var bhCls = d.buy_hold_pct >= 0 ? 'pnl-pos' : 'pnl-neg';
-
+    var stratLine = d.strategy + ' on ' + d.ticker + ' (' + d.period + ')';
+    if (d.mapped_strategy) stratLine += ' <span style="color:var(--text-muted);font-weight:400">[' + d.mapped_strategy + ']</span>';
     results.innerHTML =
-      '<div style="font-size:13px;font-weight:600;margin-bottom:6px">'+d.strategy+' on '+d.ticker+' ('+d.period+')</div>' +
+      '<div style="font-size:13px;font-weight:600;margin-bottom:6px">' + stratLine + '</div>' +
       '<div class="bt-stats">' +
         '<div class="bt-stat"><div class="bt-val '+retCls+'">'+d.return_pct+'%</div><div class="bt-lbl">Strategy Return</div></div>' +
         '<div class="bt-stat"><div class="bt-val '+bhCls+'">'+d.buy_hold_pct+'%</div><div class="bt-lbl">Buy & Hold</div></div>' +
@@ -7383,11 +7619,65 @@ function runBacktest() {
         '<div class="bt-stat"><div class="bt-val">$'+d.final_equity+'</div><div class="bt-lbl">Final Equity</div></div>' +
         (d.profit_factor ? '<div class="bt-stat"><div class="bt-val">'+d.profit_factor+'</div><div class="bt-lbl">Profit Factor</div></div>' : '') +
       '</div>';
-
     drawBacktestChart(d);
     renderTradeLog(d.trades || []);
     switchTab(document.querySelector('[data-tab="backtest"]'));
-  }).catch(function() { results.innerHTML = '<em style="color:#ef4444">Error running backtest</em>'; });
+  }
+
+  if (strategy.indexOf('insight:') === 0) {
+    var pid = strategy.slice('insight:'.length);
+    var body = { ticker: currentTicker, period: period, interval: '1d', cash: cash, commission: 0.001 };
+    var appendFromForm = _collectBtAppendConditionsFromForm();
+    if (appendFromForm) {
+      body.append_conditions = appendFromForm;
+    } else {
+      var appendEl = document.getElementById('bt-append-conditions');
+      if (appendEl && appendEl.value.trim()) {
+        try { body.append_conditions = JSON.parse(appendEl.value.trim()); } catch (err) {
+          results.innerHTML = '<em style="color:#ef4444">Append conditions JSON error: ' + escHtml(String(err.message || err)) + '</em>';
+          return;
+        }
+      }
+    }
+    var exitFromForm = _collectBtExitConfigFromForm();
+    if (exitFromForm) {
+      body.exit_config = exitFromForm;
+    }
+    var exitEl = document.getElementById('bt-exit-config');
+    if (exitEl && exitEl.value.trim()) {
+      try {
+        var exitJson = JSON.parse(exitEl.value.trim());
+        body.exit_config = body.exit_config ? Object.assign({}, body.exit_config, exitJson) : exitJson;
+      } catch (err) {
+        results.innerHTML = '<em style="color:#ef4444">Exit config JSON error: ' + escHtml(String(err.message || err)) + '</em>';
+        return;
+      }
+    }
+    var rulesEl = document.getElementById('bt-rules-override');
+    if (rulesEl && rulesEl.value.trim()) body.rules_json_override = rulesEl.value.trim();
+    fetch('/api/trading/patterns/' + encodeURIComponent(pid) + '/backtest?ticker=' + encodeURIComponent(currentTicker) + '&period=' + encodeURIComponent(period) + '&interval=1d', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }).then(function(r) { return r.json(); }).then(_applyResult).catch(function() { results.innerHTML = '<em style="color:#ef4444">Error running backtest</em>'; });
+    return;
+  }
+
+  var sp = _collectBuiltinStrategyParams();
+  var payload = {
+    ticker: currentTicker,
+    strategy: strategy,
+    period: period,
+    interval: '1d',
+    cash: cash,
+    commission: 0.001,
+    strategy_params: Object.keys(sp).length ? sp : null,
+  };
+  fetch('/api/trading/backtest', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }).then(function(r) { return r.json(); }).then(_applyResult).catch(function() { results.innerHTML = '<em style="color:#ef4444">Error running backtest</em>'; });
 }
 
 function drawBacktestChart(d) {
@@ -7411,13 +7701,15 @@ function drawBacktestChart(d) {
   var indicators = d.indicators || {};
   var indNames = Object.keys(indicators);
 
+  function _isRsiName(n) { return n.indexOf('RSI ') === 0; }
+  var rsiKey = indNames.find(_isRsiName);
   var hasSeparatePane = indNames.some(function(n) {
-    return n === 'RSI 14' || n === 'MACD' || n === 'Signal' || n === 'Histogram';
+    return _isRsiName(n) || n === 'MACD' || n === 'Signal' || n === 'Histogram';
   });
   var overlayIndicators = {};
   var paneIndicators = {};
   indNames.forEach(function(name) {
-    if (name === 'RSI 14' || name === 'MACD' || name === 'Signal' || name === 'Histogram') {
+    if (_isRsiName(name) || name === 'MACD' || name === 'Signal' || name === 'Histogram') {
       paneIndicators[name] = indicators[name];
     } else {
       overlayIndicators[name] = indicators[name];
@@ -7545,9 +7837,10 @@ function drawBacktestChart(d) {
       }
     });
 
-    // RSI reference lines
-    if (paneIndicators['RSI 14']) {
-      var rsiData = paneIndicators['RSI 14'];
+    // RSI reference lines (any period)
+    var _rsiSeriesKey = rsiKey && paneIndicators[rsiKey] ? rsiKey : indNames.find(_isRsiName);
+    if (_rsiSeriesKey && paneIndicators[_rsiSeriesKey]) {
+      var rsiData = paneIndicators[_rsiSeriesKey];
       if (rsiData.length > 0) {
         var ref70 = rsiData.map(function(p){ return {time:p.time, value:70}; });
         var ref30 = rsiData.map(function(p){ return {time:p.time, value:30}; });

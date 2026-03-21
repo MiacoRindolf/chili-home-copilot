@@ -1,4 +1,5 @@
 """Centralized configuration for CHILI. Loads from .env with type safety."""
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -95,12 +96,17 @@ class Settings(BaseSettings):
 
     # Learning schedule
     learning_interval_hours: int = 2  # how often to run learning cycle (hours)
+    # If a cycle crashes without clearing _learning_status["running"], the brain worker would skip
+    # forever; clear the lock after this many seconds (default 3h).
+    learning_cycle_stale_seconds: int = 10800
 
-    # Brain resource / queue tuning (target ~45% CPU when desired)
-    brain_max_cpu_pct: int | None = 45   # cap CPU-bound parallelism (None = no cap)
-    brain_backtest_parallel: int = 6     # patterns to backtest in parallel
-    brain_queue_batch_size: int = 50     # patterns to pull from queue per cycle
-    brain_use_gpu_ml: bool = False       # use GPU for pattern meta-learner (LightGBM) when available
+    # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
+    brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
+    brain_backtest_parallel: int = 14     # ScanPatterns to backtest in parallel (queue step)
+    brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
+    brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
+    brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
+    brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) — ML train step only, not queue BT
 
     # Code Brain
     code_brain_repos: str = ""         # comma-separated local repo paths to index
@@ -124,10 +130,42 @@ class Settings(BaseSettings):
     proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes
     pick_warn_drift_pct: float = 10.0  # warn when price has drifted >N% from entry
 
-    # Database — PostgreSQL recommended for production (concurrent web + worker).
-    # Leave empty to use SQLite (data/chili.db) for backward compatibility.
+    # Database — PostgreSQL only (required). See .env.example and docs/DATABASE_POSTGRES.md.
     # Example: postgresql://user:pass@localhost:5432/chili
-    database_url: str = ""
+    database_url: str = Field(..., description="PostgreSQL connection URL")
+    # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
+    database_pool_size: int = 25
+    database_max_overflow: int = 55
+
+    # Optional shared secret so an external Brain UI (different port / origin) can trigger
+    # GET/POST /api/v1/brain-next-cycle without chili_device_token. Set in .env as BRAIN_V1_WAKE_SECRET.
+    # Send header: X-Chili-Brain-Wake-Secret: <same value>. Use a long random string; never commit it.
+    brain_v1_wake_secret: str = ""
+
+    # Brain HTTP service (chili-brain/) — when set, workers or scripts can delegate via brain_client
+    brain_service_url: str = ""  # e.g. http://brain:8090 (Compose) or http://127.0.0.1:8090
+    brain_internal_secret: str = ""  # Bearer token for POST /v1/run-learning-cycle (match CHILI_BRAIN_INTERNAL_SECRET on brain)
+
+    @field_validator("database_url")
+    @classmethod
+    def _postgres_database_url(cls, v: str) -> str:
+        url = (v or "").strip()
+        if not url:
+            raise ValueError(
+                "DATABASE_URL is required. Set a PostgreSQL URL in .env "
+                "(see .env.example), e.g. postgresql://user:pass@localhost:5432/chili"
+            )
+        lowered = url.lower()
+        if not (
+            lowered.startswith("postgresql://")
+            or lowered.startswith("postgresql+psycopg2://")
+            or lowered.startswith("postgresql+psycopg://")
+        ):
+            raise ValueError(
+                "DATABASE_URL must be a PostgreSQL URL "
+                "(postgresql://... or postgresql+psycopg2://...). See .env.example."
+            )
+        return url
 
     @property
     def primary_api_key(self) -> str:

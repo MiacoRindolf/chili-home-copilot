@@ -1,0 +1,18 @@
+#!/bin/sh
+set -e
+# docker-compose `command:` (e.g. brain-worker) passes args here — run them instead of uvicorn.
+if [ "$#" -gt 0 ]; then
+  exec "$@"
+fi
+# Log mode for docker logs (runtime evidence: HTTPS vs HTTP).
+echo "[docker-entrypoint-chili] CHILI_TLS=${CHILI_TLS:-unset} (0=plain HTTP, else=HTTPS)"
+# CHILI_TLS=0 disables TLS (plain HTTP) for debugging only.
+if [ "${CHILI_TLS:-1}" != "0" ]; then
+  exec uvicorn app.main:app \
+    --host 0.0.0.0 \
+    --port 8000 \
+    --ssl-certfile /app/docker-certs/server.pem \
+    --ssl-keyfile /app/docker-certs/server.key
+else
+  exec uvicorn app.main:app --host 0.0.0.0 --port 8000
+fi

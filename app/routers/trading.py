@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import re
 from datetime import datetime
 from typing import Any
 
@@ -11,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 import asyncio
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_identity_ctx
@@ -28,6 +30,7 @@ from .trading_sub import ai_router, broker_router, web3_router
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
+    PatternBacktestRequest,
     JournalCreate,
     PickRecheckRequest,
     ScanRequest,
@@ -132,21 +135,9 @@ def _json_safe(value: Any) -> Any:
 # ── Page ────────────────────────────────────────────────────────────────
 
 @router.get("/trading", response_class=HTMLResponse)
-def trading_page(request: Request, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+def trading_page(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-
-    # Auto-trigger learning cycle on page load if stale (>1 hr since last run)
-    if ts.should_run_learning():
-        from ..db import SessionLocal
-
-        def _bg_learn(user_id):
-            sdb = SessionLocal()
-            try:
-                ts.run_learning_cycle(sdb, user_id, full_universe=True)
-            finally:
-                sdb.close()
-
-        background_tasks.add_task(_bg_learn, ctx["user_id"])
+    # Brain Worker handles all learning cycles - no auto-trigger on page load
 
     identity = ctx["identity"]
     avatar_url = ""
@@ -829,8 +820,13 @@ def api_run_backtest(
 ):
     ctx = get_identity_ctx(request, db)
     result = bt_svc.run_backtest(
-        ticker=body.ticker, strategy_id=body.strategy, period=body.period,
-        cash=body.cash, commission=body.commission,
+        ticker=body.ticker,
+        strategy_id=body.strategy,
+        period=body.period,
+        interval=body.interval,
+        cash=body.cash,
+        commission=body.commission,
+        strategy_params=body.strategy_params,
     )
     if not result.get("ok"):
         return JSONResponse(_json_safe(result), status_code=400)
@@ -1594,28 +1590,38 @@ def api_backtest_pattern(
     interval: str = Query("1d"),
     period: str = Query("1y"),
     db: Session = Depends(get_db),
+    body: PatternBacktestRequest | None = Body(default=None),
 ):
-    from ..models.trading import ScanPattern, TradingInsight
     from ..services.backtest_service import backtest_pattern, get_backtest_params
-    p = db.query(ScanPattern).get(pattern_id)
-    if not p:
-        insight = db.query(TradingInsight).get(pattern_id)
-        sp_id = getattr(insight, "scan_pattern_id", None) if insight else None
-        if sp_id:
-            p = db.query(ScanPattern).get(sp_id)
+    from ..services.trading.pattern_resolution import resolve_to_scan_pattern
+
+    req = body or PatternBacktestRequest()
+    p = resolve_to_scan_pattern(db, pattern_id)
     if not p:
         return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
     tf = getattr(p, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
     use_interval = interval if interval != "1d" else bt_params["interval"]
     use_period = period if period != "1y" else bt_params["period"]
+    if req.interval:
+        use_interval = req.interval
+    if req.period:
+        use_period = req.period
+    use_ticker = (req.ticker or ticker).strip().upper()
+    cash = req.cash if req.cash is not None else 100_000.0
+    commission = req.commission if req.commission is not None else 0.001
     result = backtest_pattern(
-        ticker=ticker,
+        ticker=use_ticker,
         pattern_name=p.name,
         rules_json=p.rules_json,
         interval=use_interval,
         period=use_period,
         exit_config=getattr(p, "exit_config", None),
+        cash=cash,
+        commission=commission,
+        rules_json_override=req.rules_json_override,
+        append_conditions=req.append_conditions,
+        exit_config_overlay=req.exit_config,
     )
     return JSONResponse(_json_safe(result))
 

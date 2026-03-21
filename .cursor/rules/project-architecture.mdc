@@ -7,7 +7,7 @@ alwaysApply: true
 
 ## Identity
 
-**CHILI** (Conversational Home Interface & Life Intelligence) — a FastAPI + Jinja2 household assistant with tiered cloud LLM (Groq primary, Gemini fallback), local Ollama planner, ChromaDB RAG, SQLite persistence, and multiple AI "brain" domains (Trading, Code, Reasoning, Project).
+**CHILI** (Conversational Home Interface & Life Intelligence) — a FastAPI + Jinja2 household assistant with tiered cloud LLM (Groq primary, Gemini fallback), local Ollama planner, ChromaDB RAG, PostgreSQL persistence, and multiple AI "brain" domains (Trading, Code, Reasoning, Project).
 
 ## Directory Layout
 
@@ -17,7 +17,7 @@ app/
   config.py            # Pydantic Settings with all env vars
   db.py                # SQLAlchemy engine, SessionLocal, Base
   deps.py              # get_db, get_identity_ctx, require_paired
-  migrations.py        # Version-tracked SQLite migrations (schema_version table)
+  migrations.py        # Version-tracked PostgreSQL migrations (schema_version table)
   openai_client.py     # Tiered LLM: Groq → Gemini auto-escalation
   models/              # SQLAlchemy models split by domain
     core.py, chat.py, household.py, trading.py, planner.py,
@@ -36,9 +36,10 @@ app/
   templates/           # Jinja2 HTML (extends base.html)
   static/              # PWA manifest, service worker, JS components, icons
   modules/             # Optional feature modules (planner)
-data/                  # SQLite DB, ChromaDB, uploads, voice, projects (gitignored)
-tests/                 # pytest with in-memory SQLite fixtures
+data/                  # ChromaDB, uploads, voice, projects; optional legacy .db (gitignored)
+tests/                 # pytest with PostgreSQL (TEST_DATABASE_URL); see docs/DATABASE_POSTGRES.md
 certs/                 # SSL certs for local HTTPS (localhost.key, localhost.pem)
+docker-compose.yml     # PostgreSQL + Ollama + CHILI; app gets DATABASE_URL -> postgres:5432
 ```
 
 ## Request Flow

@@ -64,11 +64,17 @@ _TTL_SEARCH = 3600     # 1 hour for search results
 _TTL_FUNDAMENTALS = 86400  # 24 hours for fundamental data
 _TTL_TICKER_INFO = 3600   # 1 hour for ticker info strip
 _TTL_NEWS = 600        # 10 minutes for ticker news
-_TTL_DEAD = 14400      # 4 hours for known-bad tickers
+_TTL_DEAD = 14400      # 4 hours for known-bad stock tickers
+_TTL_DEAD_CRYPTO = 1800  # 30 minutes for crypto (they may just be new/different format)
 _MAX_CACHE_SIZE = 10_000   # 64 GB RAM — keep much more in memory
 
 _dead_tickers: dict[str, float] = {}
 _dead_lock = threading.Lock()
+
+
+def _is_crypto(symbol: str) -> bool:
+    """Check if a symbol is a crypto ticker."""
+    return symbol.upper().endswith("-USD")
 
 
 def _cache_get(key: str) -> Any | None:
@@ -113,17 +119,26 @@ def _is_dead(symbol: str) -> bool:
         ts = _dead_tickers.get(symbol)
         if ts is None:
             return False
-        if time.time() - ts > _TTL_DEAD:
+        ttl = _TTL_DEAD_CRYPTO if _is_crypto(symbol) else _TTL_DEAD
+        if time.time() - ts > ttl:
             del _dead_tickers[symbol]
             return False
         return True
 
 
-def _mark_dead(symbol: str) -> None:
-    """Add ticker to the negative cache after confirmed failure."""
+def _mark_dead(symbol: str, force: bool = False) -> None:
+    """Add ticker to the negative cache after confirmed failure.
+    
+    For crypto tickers, use shorter TTL since they may be new coins or
+    use different formats on different APIs.
+    """
+    if _is_crypto(symbol) and not force:
+        ttl = _TTL_DEAD_CRYPTO
+    else:
+        ttl = _TTL_DEAD
     with _dead_lock:
         _dead_tickers[symbol] = time.time()
-    logger.info(f"[yf_session] Marked {symbol} as dead (skip for {_TTL_DEAD}s)")
+    logger.info(f"[yf_session] Marked {symbol} as dead (skip for {ttl}s)")
 
 
 # ---------------------------------------------------------------------------
@@ -166,8 +181,14 @@ def get_history(symbol: str, **kwargs) -> Any:
     except Exception as e:
         logger.warning(f"[yf_session] history({symbol}) failed: {e}")
         df = pd.DataFrame()
+        # Only mark as dead on actual errors, not just empty data
+        if "delisted" in str(e).lower() or "no data" in str(e).lower():
+            _mark_dead(symbol)
 
-    if df.empty:
+    # For crypto, don't mark as dead just because yfinance returned empty
+    # - The coin might be new or use a different format
+    # - Massive or CoinGecko may still have the data
+    if df.empty and not _is_crypto(symbol):
         _mark_dead(symbol)
 
     _cache_set(cache_key, df)

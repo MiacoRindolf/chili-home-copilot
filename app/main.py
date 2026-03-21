@@ -11,18 +11,29 @@ logging.basicConfig(
     stream=sys.stderr,
 )
 
+# Install chili.* handler (trace_id formatter + default filter) before any chili.dedup / lifespan logs
+from . import logger as _chili_log_setup  # noqa: F401
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
+from starlette.requests import Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, auth, brain, chat, health_routes, pages, marketplace, mobile, trading
+from .routers import admin, auth, brain, brain_v1_compat, chat, health_routes, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
-from .models import MarketplaceModule
+from .models import (  # noqa: F401 — register ORM tables
+    BrainWorkerControl,
+    LearningCycleAiReport,
+    MarketplaceModule,
+    PatternEvidenceHypothesis,
+    PatternTradeRow,
+)
 from .services.trading_scheduler import start_scheduler, stop_scheduler
 
 # Suppress noisy WinError 10054 tracebacks from asyncio on Windows
@@ -439,24 +450,81 @@ def _backfill_backtests():
         _log.warning(f"Backtest backfill failed: {e}")
 
 
+def _run_deferred_startup() -> None:
+    """Heavy startup work (runs in a daemon thread).
+
+    Uvicorn binds the listening socket only *after* FastAPI lifespan yields.
+    Running this work synchronously before yield blocked the port for several
+    seconds, causing browsers to show connection timeouts during reload.
+    Order: DB maintenance first, then WS, prewarm, backfill thread, scheduler.
+    """
+    import threading
+    import time as _time
+
+    _log = logging.getLogger("chili.startup")
+    # region agent log
+    from .debug_agent_log import agent_log as _agent_log
+
+    _t0 = _time.perf_counter()
+    _agent_log("H1", "lifespan", "deferred_thread_begin", {})
+    # endregion
+    try:
+        # Robinhood restore can block on device approval / MFA — must not run in lifespan
+        # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
+        _restore_broker_sessions()
+        _dedup_backtests()
+        _repair_wrongly_deactivated()
+        _ensure_ticker_scope_columns()
+        _reinfer_pattern_timeframes()
+        _recompute_all_ticker_scopes()
+        _start_massive_ws()
+        _prewarm_market_context()
+        threading.Thread(target=_backfill_backtests, daemon=True).start()
+        start_scheduler()
+    except Exception:
+        _log.exception("[startup] Deferred startup failed")
+    # region agent log
+    _agent_log(
+        "H1",
+        "lifespan",
+        "deferred_thread_complete",
+        {"elapsed_ms": round((_time.perf_counter() - _t0) * 1000, 1)},
+    )
+    # endregion
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
-    start_scheduler()
+    import time as _time
+    # region agent log
+    from .debug_agent_log import agent_log as _agent_log
+
+    _ls_t0 = _time.perf_counter()
+    _agent_log("H1", "lifespan", "startup_begin", {})
+    # endregion
+    # Load ML model first (doesn't need DB)
     try:
         from .services.trading.ml_engine import load_model
         load_model()
     except Exception:
         pass
-    _restore_broker_sessions()
-    _start_massive_ws()
-    _prewarm_market_context()
-    _dedup_backtests()
-    _repair_wrongly_deactivated()
-    _ensure_ticker_scope_columns()
-    _reinfer_pattern_timeframes()
-    _recompute_all_ticker_scopes()
-    threading.Thread(target=_backfill_backtests, daemon=True).start()
+    # Defer heavy DB + scheduler startup so lifespan yields immediately; uvicorn
+    # binds the socket only after yield (see uvicorn.server.Server.startup).
+    # Broker restore runs inside _run_deferred_startup (not here) so Robinhood login
+    # cannot block application startup.
+    threading.Thread(target=_run_deferred_startup, daemon=True, name="chili-deferred-startup").start()
+    # region agent log
+    _agent_log(
+        "H1",
+        "lifespan",
+        "before_yield_ready",
+        {
+            "elapsed_ms": round((_time.perf_counter() - _ls_t0) * 1000, 1),
+            "deferred_in_background": True,
+        },
+    )
+    # endregion
     yield
     _stop_massive_ws()
     stop_scheduler()
@@ -510,6 +578,47 @@ def _prewarm_market_context():
 
 app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)
 
+
+class _DebugRequestMiddleware(BaseHTTPMiddleware):
+    """Log selected routes to debug-f139e5.log (H2/H3/H4)."""
+
+    async def dispatch(self, request: Request, call_next):
+        # region agent log
+        import time as _time
+
+        from .debug_agent_log import agent_log as _agent_log
+
+        p = request.url.path
+        if p == "/brain" or p.startswith("/api/brain"):
+            _agent_log(
+                "H2",
+                "middleware",
+                "request_in",
+                {
+                    "path": p,
+                    "scheme": request.url.scheme,
+                    "method": request.method,
+                },
+            )
+        t0 = _time.perf_counter()
+        # endregion
+        response = await call_next(request)
+        # region agent log
+        if p == "/brain" or p.startswith("/api/brain"):
+            _agent_log(
+                "H3",
+                "middleware",
+                "request_out",
+                {
+                    "path": p,
+                    "status": getattr(response, "status_code", None),
+                    "ms": round((_time.perf_counter() - t0) * 1000, 1),
+                },
+            )
+        # endregion
+        return response
+
+
 # Session middleware (authlib OAuth stores nonce/state here)
 from .config import settings as _cfg
 app.add_middleware(SessionMiddleware, secret_key=_cfg.session_secret)
@@ -522,6 +631,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(_DebugRequestMiddleware)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -555,6 +666,7 @@ app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(brain.router)
+app.include_router(brain_v1_compat.router)
 app.include_router(pages.router)
 app.include_router(health_routes.router)
 app.include_router(marketplace.router)
@@ -584,3 +696,9 @@ try:
 except Exception:
     # Fail-soft on marketplace load; core app must still boot.
     pass
+
+# region agent log
+from .debug_agent_log import agent_log as _agent_log_main_done
+
+_agent_log_main_done("H5", "main_module", "import_and_routers_complete", {})
+# endregion

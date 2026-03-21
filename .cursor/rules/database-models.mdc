@@ -8,7 +8,7 @@ alwaysApply: false
 
 ## Engine & Session
 
-- SQLite via SQLAlchemy ORM — no raw SQL except versioned migrations
+- PostgreSQL via SQLAlchemy ORM — no raw SQL except versioned migrations in `app/migrations.py`
 - `SessionLocal` with `autocommit=False, autoflush=False`
 - `get_db()` yield pattern for dependency injection
 

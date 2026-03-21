@@ -4,6 +4,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 
 from ..db import Base
 
@@ -106,6 +107,7 @@ class BacktestResult(Base):
     equity_curve: Optional[str] = Column(Text, nullable=True)  # JSON list
     ran_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
 
 
 class MarketSnapshot(Base):
@@ -262,8 +264,72 @@ class ScanPattern(Base):
     generation: int = Column(Integer, nullable=False, default=0)
     ticker_scope: str = Column(String(20), nullable=False, default="universal")
     scope_tickers: Optional[str] = Column(Text, nullable=True)
+    trade_count: int = Column(Integer, nullable=False, default=0)
+    backtest_priority: int = Column(Integer, nullable=False, default=0)
+    last_backtest_at: Optional[datetime] = Column(DateTime, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class PatternTradeRow(Base):
+    """One simulated or historical pattern occurrence for trade-level analytics.
+
+    See docs/PATTERN_TRADE_ANALYTICS.md for unit of observation and schema versions.
+    """
+
+    __tablename__ = "trading_pattern_trades"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    backtest_result_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    ticker: str = Column(String(20), nullable=False, index=True)
+    as_of_ts: datetime = Column(DateTime, nullable=False, index=True)
+    timeframe: str = Column(String(10), nullable=False, default="1d")
+    asset_class: str = Column(String(20), nullable=False, default="stock")
+    fwd_ret_1b: Optional[float] = Column(Float, nullable=True)
+    fwd_ret_3b: Optional[float] = Column(Float, nullable=True)
+    fwd_ret_5b: Optional[float] = Column(Float, nullable=True)
+    fwd_ret_10b: Optional[float] = Column(Float, nullable=True)
+    mfe_pct: Optional[float] = Column(Float, nullable=True)
+    mae_pct: Optional[float] = Column(Float, nullable=True)
+    hold_bars: Optional[int] = Column(Integer, nullable=True)
+    r_multiple: Optional[float] = Column(Float, nullable=True)
+    outcome_return_pct: Optional[float] = Column(Float, nullable=True)
+    label_win: Optional[bool] = Column(Boolean, nullable=True)
+    features_json: dict = Column(JSONB, nullable=False)  # always set at insert
+    source: str = Column(String(40), nullable=False, default="queue_backtest")
+    feature_schema_version: str = Column(String(20), nullable=False, default="1")
+    code_version: Optional[str] = Column(String(40), nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternEvidenceHypothesis(Base):
+    """Evidence card from pattern trade analytics (distinct from TradingHypothesis A/B pool)."""
+
+    __tablename__ = "trading_pattern_evidence_hypotheses"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    scan_pattern_id: int = Column(Integer, nullable=False, index=True)
+    title: str = Column(String(200), nullable=False)
+    predicate_json: dict = Column(JSONB, nullable=False)
+    status: str = Column(String(20), nullable=False, default="proposed")
+    metrics_json: dict = Column(JSONB, nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class LearningCycleAiReport(Base):
+    """LLM-generated (or fallback) summary of one completed learning cycle."""
+
+    __tablename__ = "trading_learning_cycle_ai_reports"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    content: str = Column(Text, nullable=False)
+    metrics_json: dict = Column(JSONB, nullable=False, default=lambda: {})
 
 
 class TradingHypothesis(Base):

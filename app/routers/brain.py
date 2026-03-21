@@ -43,12 +43,26 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["brain"])
 
 
+@router.get("/api/v1/brain/users")
+def legacy_api_v1_brain_users():
+    """Empty list for embedded/legacy clients that probe this path (avoids 404 noise in console)."""
+    return JSONResponse([])
+
+
 # ── Page ────────────────────────────────────────────────────────────────
 
 @router.get("/brain", response_class=HTMLResponse)
 def brain_page(request: Request, db: Session = Depends(get_db)):
+    # region agent log
+    import time as _time
+
+    from ..debug_agent_log import agent_log as _agent_log
+
+    _bp_t0 = _time.perf_counter()
+    _agent_log("H3", "brain_page", "handler_entry", {})
+    # endregion
     ctx = get_identity_ctx(request, db)
-    return request.app.state.templates.TemplateResponse(
+    resp = request.app.state.templates.TemplateResponse(
         request, "brain.html",
         {
             "title": "Chili Brain",
@@ -56,6 +70,15 @@ def brain_page(request: Request, db: Session = Depends(get_db)):
             "user_name": ctx["user_name"],
         },
     )
+    # region agent log
+    _agent_log(
+        "H3",
+        "brain_page",
+        "handler_exit",
+        {"ms": round((_time.perf_counter() - _bp_t0) * 1000, 1)},
+    )
+    # endregion
+    return resp
 
 
 # ── Cross-domain status ────────────────────────────────────────────────
@@ -157,6 +180,72 @@ def api_brain_trading_learn(
 
     background_tasks.add_task(_bg, ctx["user_id"])
     return JSONResponse({"ok": True, "message": "Learning cycle started"})
+
+
+@router.post("/api/brain/trading/worker/wake-cycle")
+def api_brain_trading_worker_wake_cycle(request: Request, db: Session = Depends(get_db)):
+    """Skip brain worker idle sleep (delegates to trading worker API)."""
+    from ..routers.trading_sub.ai import api_brain_worker_wake_cycle as _wake
+    return _wake(request, db)
+
+
+@router.post("/api/brain/trading/worker/stop")
+def api_brain_trading_worker_stop(request: Request, db: Session = Depends(get_db)):
+    """Stop brain worker (delegates to trading worker API)."""
+    from ..routers.trading_sub.ai import api_brain_worker_stop as _stop
+    return _stop(request, db)
+
+
+@router.post("/api/brain/trading/worker/pause")
+def api_brain_trading_worker_pause(request: Request, db: Session = Depends(get_db)):
+    """Pause / resume brain worker (delegates to trading worker API)."""
+    from ..routers.trading_sub.ai import api_brain_worker_pause as _pause
+    return _pause(request, db)
+
+
+@router.post("/api/brain/trading/worker/run-queue-batch")
+async def api_brain_trading_worker_run_queue_batch(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    """Run one backtest queue batch in the web process (delegates to trading worker API)."""
+    from ..routers.trading_sub.ai import api_brain_worker_run_queue_batch as _run
+    return await _run(request, background_tasks, db)
+
+
+class _TradingAssistantMessage(BaseModel):
+    role: str
+    content: str
+
+
+class _TradingAssistantChatBody(BaseModel):
+    messages: list[_TradingAssistantMessage]
+    include_pattern_search: bool = True
+    refresh: bool = False
+
+
+@router.post("/api/brain/trading/assistant/chat")
+def api_brain_trading_assistant_chat(
+    body: _TradingAssistantChatBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Chat with the Trading Brain Assistant (LLM grounded in trading DB and worker state)."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot use the assistant"}, status_code=403)
+    from ..services.trading.brain_assistant import chat as trading_assistant_chat
+    conversation = [{"role": m.role, "content": m.content} for m in body.messages]
+    result = trading_assistant_chat(
+        db,
+        ctx["user_id"],
+        conversation,
+        include_pattern_search=body.include_pattern_search,
+        refresh=body.refresh,
+    )
+    status = 200 if result.get("ok") else 400
+    return JSONResponse(result, status_code=status)
 
 
 # ══════════════════════════════════════════════════════════════════════════

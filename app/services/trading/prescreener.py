@@ -79,48 +79,48 @@ def _cache_set(key: str, val: Any, ttl: int = _CACHE_TTL) -> None:
 
 def _massive_most_active() -> list[str]:
     from ..massive_client import screen_most_active
-    return screen_most_active(limit=200)
+    return screen_most_active(limit=500)  # Premium: increased from 200
 
 
 def _massive_top_gainers() -> list[str]:
     from ..massive_client import screen_top_gainers
-    return screen_top_gainers(limit=100)
+    return screen_top_gainers(limit=300)  # Premium: increased from 100
 
 
 def _massive_top_losers() -> list[str]:
     from ..massive_client import screen_top_losers
-    return screen_top_losers(limit=100)
+    return screen_top_losers(limit=300)  # Premium: increased from 100
 
 
 def _massive_new_high() -> list[str]:
     from ..massive_client import screen_new_high
-    return screen_new_high(limit=100)
+    return screen_new_high(limit=300)  # Premium: increased from 100
 
 
 def _massive_unusual_volume() -> list[str]:
     from ..massive_client import screen_unusual_volume
-    return screen_unusual_volume(limit=200)
+    return screen_unusual_volume(limit=500)  # Premium: increased from 200
 
 
 def _massive_most_volatile() -> list[str]:
     from ..massive_client import screen_most_volatile
-    return screen_most_volatile(limit=100, min_price=1.0)
+    return screen_most_volatile(limit=300, min_price=1.0)  # Premium: increased from 100
 
 
 def _massive_high_volume() -> list[str]:
     from ..massive_client import screen_high_volume
-    return screen_high_volume(limit=200, min_vol=1_000_000, min_price=5.0)
+    return screen_high_volume(limit=500, min_vol=1_000_000, min_price=5.0)  # Premium: increased from 200
 
 
 def _massive_high_rel_volume() -> list[str]:
     from ..massive_client import screen_high_relative_volume
-    return screen_high_relative_volume(limit=200, min_ratio=2.0,
-                                       min_prev_vol=200_000, min_price=2.0)
+    return screen_high_relative_volume(limit=500, min_ratio=2.0,
+                                       min_prev_vol=200_000, min_price=2.0)  # Premium: increased from 200
 
 
 def _massive_momentum_gappers() -> list[str]:
     from ..massive_client import screen_momentum_gappers
-    return screen_momentum_gappers(limit=100)
+    return screen_momentum_gappers(limit=300)  # Premium: increased from 100
 
 
 def _massive_upgrades() -> list[str]:
@@ -298,14 +298,14 @@ def _core_tickers() -> list[str]:
 
 def get_prescreened_candidates(
     include_crypto: bool = True,
-    max_total: int = 1500,
+    max_total: int = 3000,  # Premium: increased from 1500
 ) -> list[str]:
     """Return a de-duplicated list of pre-screened candidate tickers.
 
     Combines Massive.com snapshot filters + yfinance screens + crypto in
     parallel.  Results are cached for 1 hour.
 
-    Typical output: 800-1500 unique tickers, gathered in 2-5 seconds.
+    With premium Massive API: 1500-3000 unique tickers, gathered in 2-5 seconds.
     """
     cached = _cache_get("prescreened_candidates")
     if cached is not None:
@@ -380,7 +380,7 @@ def get_prescreened_candidates(
                 seen.add(t_upper)
                 combined.append(t_upper)
 
-    if len(combined) < 600:
+    if len(combined) < 1000:  # Premium: increased threshold from 600
         fallback = _static_active_stocks()
         results_by_source["static_fallback"] = fallback
         for t in fallback:

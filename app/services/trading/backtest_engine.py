@@ -265,7 +265,19 @@ _TICKER_STOPWORDS = {
 }
 
 # Max workers for parallel backtest execution
-_BT_WORKERS = max(8, (os.cpu_count() or 4) * 2)
+def _bt_workers() -> int:
+    """Threads per insight for parallel ticker backtests (bounded when many patterns run in parallel)."""
+    base = max(8, (os.cpu_count() or 4) * 2)
+    try:
+        from ...config import settings
+        cap = getattr(settings, "brain_smart_bt_max_workers", None)
+        if cap is not None:
+            return max(4, min(base, int(cap)))
+    except Exception:
+        pass
+    return base
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -445,110 +457,120 @@ def _select_tickers(
 # Link insight → ScanPattern (for pattern-aware backtesting)
 # ---------------------------------------------------------------------------
 
-def _find_linked_pattern(
-    db: Session, insight,
-) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None] | None:
-    """Find the ScanPattern conditions linked to a TradingInsight.
-
-    Returns ``(conditions_list, pattern_name, exit_config_dict_or_None)``
-    or ``None`` when no matching pattern with valid ``rules_json`` is found.
-
-    Uses ``insight.scan_pattern_id`` (direct FK) when available, falling
-    back to text matching for legacy rows.  When text matching succeeds
-    the FK is back-filled so future lookups are instant.
-    """
+def _rules_tuple_from_scan_pattern(
+    pattern,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None, int] | None:
+    """Parse ``ScanPattern`` into (conditions, name, exit_config, pattern.id) or None."""
     import json as _json
-    try:
-        from ...models.trading import ScanPattern
-    except ImportError:
-        return None
-
-    pattern = None
-
-    # 1) Direct FK lookup (fast path)
-    pid = getattr(insight, "scan_pattern_id", None)
-    if pid:
-        pattern = db.query(ScanPattern).get(pid)
-
-    # 2) Text-match fallback for legacy rows without FK
-    if not pattern:
-        desc = insight.pattern_description or ""
-        if not desc:
-            return None
-
-        name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
-        pattern = db.query(ScanPattern).filter(ScanPattern.name == name_part).first()
-
-        if not pattern:
-            all_patterns = (
-                db.query(ScanPattern)
-                .filter(ScanPattern.active.is_(True), ScanPattern.rules_json.isnot(None))
-                .all()
-            )
-            desc_lower = desc.lower()
-            for p in all_patterns:
-                if p.name and p.name.lower() in desc_lower:
-                    pattern = p
-                    break
-
-            # Word-overlap match for brain-refined descriptions
-            if not pattern and all_patterns:
-                _stop = {
-                    "the", "and", "for", "from", "with", "avg", "win",
-                    "sell", "buy", "signal", "refined", "chili", "sam",
-                    "refinement", "pattern", "above", "below",
-                }
-                desc_words = {
-                    w for w in desc_lower.replace("(", " ").replace(")", " ")
-                    .replace(",", " ").replace(":", " ").split()
-                    if len(w) >= 3 and w not in _stop
-                }
-                best, best_score = None, 0
-                for p in all_patterns:
-                    pname_lower = (p.name or "").lower()
-                    p_words = {
-                        w for w in pname_lower.replace("+", " ").split()
-                        if len(w) >= 3 and w not in _stop
-                    }
-                    if not p_words:
-                        continue
-                    overlap = len(desc_words & p_words)
-                    score = overlap / len(p_words)
-                    if score > best_score and overlap >= 2:
-                        best_score = score
-                        best = p
-                if best and best_score >= 0.4:
-                    pattern = best
-
-        # Back-fill FK for future lookups
-        if pattern and hasattr(insight, "scan_pattern_id"):
-            try:
-                insight.scan_pattern_id = pattern.id
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
 
     if not pattern or not pattern.rules_json:
         return None
-
     exit_cfg = None
     if pattern.exit_config:
         try:
             exit_cfg = _json.loads(pattern.exit_config)
         except (_json.JSONDecodeError, TypeError):
             pass
-
     try:
         rules = _json.loads(pattern.rules_json)
         conditions = rules.get("conditions", [])
         if conditions:
-            return conditions, pattern.name, exit_cfg
+            return conditions, pattern.name, exit_cfg, int(pattern.id)
     except (_json.JSONDecodeError, TypeError):
         pass
     return None
+
+
+def _find_linked_pattern(
+    db: Session, insight,
+) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None, int] | None:
+    """Find ScanPattern conditions for a TradingInsight.
+
+    Returns ``(conditions, pattern_name, exit_config, scan_pattern_id)`` or ``None``.
+
+    When insight.scan_pattern_id is set, uses a direct lookup (one query). Otherwise
+    uses resolve_to_scan_pattern (FK + backtests) and falls back to description-based
+    matching for legacy rows.
+    """
+    try:
+        from ...models.trading import ScanPattern
+    except ImportError:
+        return None
+
+    sp_id = getattr(insight, "scan_pattern_id", None)
+    if sp_id is not None:
+        pattern = db.get(ScanPattern, int(sp_id))
+        if pattern:
+            tup = _rules_tuple_from_scan_pattern(pattern)
+            if tup:
+                return tup
+
+    from .pattern_resolution import resolve_to_scan_pattern
+
+    pattern = resolve_to_scan_pattern(db, int(insight.id))
+    if pattern:
+        tup = _rules_tuple_from_scan_pattern(pattern)
+        if tup:
+            return tup
+
+    desc = (insight.pattern_description or "").strip()
+    if not desc:
+        return None
+
+    name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
+    pattern = db.query(ScanPattern).filter(ScanPattern.name == name_part).first()
+
+    if not pattern:
+        all_patterns = (
+            db.query(ScanPattern)
+            .filter(ScanPattern.active.is_(True), ScanPattern.rules_json.isnot(None))
+            .all()
+        )
+        desc_lower = desc.lower()
+        for p in all_patterns:
+            if p.name and p.name.lower() in desc_lower:
+                pattern = p
+                break
+
+        if not pattern and all_patterns:
+            _stop = {
+                "the", "and", "for", "from", "with", "avg", "win",
+                "sell", "buy", "signal", "refined", "chili", "sam",
+                "refinement", "pattern", "above", "below",
+            }
+            desc_words = {
+                w for w in desc_lower.replace("(", " ").replace(")", " ")
+                .replace(",", " ").replace(":", " ").split()
+                if len(w) >= 3 and w not in _stop
+            }
+            best, best_score = None, 0
+            for p in all_patterns:
+                pname_lower = (p.name or "").lower()
+                p_words = {
+                    w for w in pname_lower.replace("+", " ").split()
+                    if len(w) >= 3 and w not in _stop
+                }
+                if not p_words:
+                    continue
+                overlap = len(desc_words & p_words)
+                score = overlap / len(p_words)
+                if score > best_score and overlap >= 2:
+                    best_score = score
+                    best = p
+            if best and best_score >= 0.4:
+                pattern = best
+
+    if pattern and hasattr(insight, "scan_pattern_id"):
+        try:
+            insight.scan_pattern_id = pattern.id
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
+    return _rules_tuple_from_scan_pattern(pattern)
 
 
 # ---------------------------------------------------------------------------
@@ -603,10 +625,11 @@ def smart_backtest_insight(
     timeframe = "1d"
     _scope = "universal"
     _scope_tickers: list[str] | None = None
+    linked_scan_pattern_id: int | None = None
 
     if linked:
-        conditions, pattern_name, exit_config = linked
-        sp_id = getattr(insight, "scan_pattern_id", None)
+        conditions, pattern_name, exit_config, linked_scan_pattern_id = linked
+        sp_id = getattr(insight, "scan_pattern_id", None) or linked_scan_pattern_id
         if sp_id:
             try:
                 from ...models.trading import ScanPattern
@@ -673,14 +696,20 @@ def smart_backtest_insight(
 
     wins, losses, total = 0, 0, 0
 
-    with ThreadPoolExecutor(max_workers=_BT_WORKERS) as pool:
+    with ThreadPoolExecutor(max_workers=_bt_workers()) as pool:
         futures = pool.map(_run_one_pattern, tickers)
 
         for result in futures:
             if result is None:
                 continue
             try:
-                save_backtest(db, insight.user_id, result, insight_id=insight.id)
+                save_backtest(
+                    db,
+                    insight.user_id,
+                    result,
+                    insight_id=insight.id,
+                    scan_pattern_id=linked_scan_pattern_id,
+                )
             except Exception:
                 try:
                     db.rollback()

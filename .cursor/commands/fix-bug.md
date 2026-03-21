@@ -36,7 +36,7 @@ Follow this workflow:
      - What to look for (e.g. wrong query, missing column migration, stale cache, race condition, circular import, wrong ticker format, API key issue)
      - The kind of change likely needed (data fix, logic change, migration, template fix, scheduler adjustment, etc.).
    - Call out any tradeoffs or risky areas:
-     - Migrations on existing SQLite data (need `DEFAULT` values)
+     - Migrations on existing PostgreSQL data (need `DEFAULT` values or backfills where applicable)
      - Server restart required (PID check, port conflicts)
      - Breaking changes to API response shape (`{"ok": true/false}` convention)
      - Frontend state that may be stale after server restart

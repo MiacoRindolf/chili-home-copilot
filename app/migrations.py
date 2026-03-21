@@ -1,4 +1,4 @@
-"""Lightweight version-tracked migrations for SQLite. Run at app startup."""
+"""Version-tracked schema migrations for PostgreSQL. Run at app startup."""
 from __future__ import annotations
 
 from sqlalchemy import inspect as sa_inspect, text
@@ -76,7 +76,7 @@ def _migration_007_backfill_project_members(conn) -> None:
     )).fetchall()
     for row in rows:
         conn.execute(text(
-            "INSERT INTO project_members (project_id, user_id, role, joined_at) VALUES (:pid, :uid, 'owner', datetime('now'))"
+            "INSERT INTO project_members (project_id, user_id, role, joined_at) VALUES (:pid, :uid, 'owner', CURRENT_TIMESTAMP)"
         ), {"pid": row[0], "uid": row[1]})
     if rows:
         conn.commit()
@@ -160,7 +160,7 @@ def _migration_014_code_brain_tables(conn) -> None:
                 language_stats TEXT, framework_tags TEXT,
                 file_count INTEGER DEFAULT 0, total_lines INTEGER DEFAULT 0,
                 last_indexed TEXT, last_commit_hash TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 active INTEGER DEFAULT 1
             )
         """))
@@ -172,8 +172,8 @@ def _migration_014_code_brain_tables(conn) -> None:
                 description TEXT NOT NULL, confidence REAL DEFAULT 0.5,
                 evidence_count INTEGER DEFAULT 1, evidence_files TEXT,
                 active INTEGER DEFAULT 1,
-                last_seen TEXT NOT NULL DEFAULT (datetime('now')),
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                last_seen TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
     if "code_snapshots" not in tables:
@@ -184,7 +184,7 @@ def _migration_014_code_brain_tables(conn) -> None:
                 language TEXT, line_count INTEGER DEFAULT 0,
                 function_count INTEGER DEFAULT 0, class_count INTEGER DEFAULT 0,
                 complexity_score REAL DEFAULT 0.0, last_modified TEXT,
-                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+                snapshot_date TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
     if "code_hotspots" not in tables:
@@ -195,7 +195,7 @@ def _migration_014_code_brain_tables(conn) -> None:
                 churn_score REAL DEFAULT 0.0, complexity_score REAL DEFAULT 0.0,
                 combined_score REAL DEFAULT 0.0, commit_count INTEGER DEFAULT 0,
                 last_commit_date TEXT,
-                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+                snapshot_date TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
     if "code_learning_events" not in tables:
@@ -204,7 +204,7 @@ def _migration_014_code_brain_tables(conn) -> None:
                 id INTEGER PRIMARY KEY,
                 user_id INTEGER, repo_id INTEGER, event_type TEXT NOT NULL,
                 description TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
     conn.commit()
@@ -226,7 +226,7 @@ def _migration_015_reasoning_brain_tables(conn) -> None:
                 active_goals TEXT,
                 knowledge_gaps TEXT,
                 source_memory_count INTEGER DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 active INTEGER NOT NULL DEFAULT 1
             )
         """
@@ -244,8 +244,8 @@ def _migration_015_reasoning_brain_tables(conn) -> None:
                 weight REAL NOT NULL DEFAULT 0.0,
                 related_topics TEXT,
                 source TEXT,
-                last_seen TEXT NOT NULL DEFAULT (datetime('now')),
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                last_seen TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 active INTEGER NOT NULL DEFAULT 1
             )
         """
@@ -262,7 +262,7 @@ def _migration_015_reasoning_brain_tables(conn) -> None:
                 summary TEXT NOT NULL,
                 sources TEXT,
                 relevance_score REAL NOT NULL DEFAULT 0.0,
-                searched_at TEXT NOT NULL DEFAULT (datetime('now')),
+                searched_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 stale INTEGER NOT NULL DEFAULT 0
             )
         """
@@ -279,7 +279,7 @@ def _migration_015_reasoning_brain_tables(conn) -> None:
                 domain TEXT,
                 context TEXT,
                 confidence REAL NOT NULL DEFAULT 0.5,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 acted_on INTEGER NOT NULL DEFAULT 0,
                 dismissed INTEGER NOT NULL DEFAULT 0
             )
@@ -295,7 +295,7 @@ def _migration_015_reasoning_brain_tables(conn) -> None:
                 user_id INTEGER,
                 event_type TEXT NOT NULL,
                 description TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """
             )
@@ -319,7 +319,7 @@ def _migration_016_reasoning_learning_structures(conn) -> None:
                 confidence_before REAL,
                 confidence_after REAL,
                 evidence_count INTEGER NOT NULL DEFAULT 0,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 completed_at TEXT
             )
         """
@@ -338,7 +338,7 @@ def _migration_016_reasoning_learning_structures(conn) -> None:
                 evidence_for INTEGER NOT NULL DEFAULT 0,
                 evidence_against INTEGER NOT NULL DEFAULT 0,
                 tested_at TEXT,
-                created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                created_at TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP),
                 active INTEGER NOT NULL DEFAULT 1
             )
         """
@@ -353,7 +353,7 @@ def _migration_016_reasoning_learning_structures(conn) -> None:
                 user_id INTEGER NOT NULL,
                 dimension TEXT NOT NULL,
                 confidence_value REAL NOT NULL DEFAULT 0.0,
-                snapshot_date TEXT NOT NULL DEFAULT (datetime('now'))
+                snapshot_date TEXT NOT NULL DEFAULT (CURRENT_TIMESTAMP)
             )
         """
             )
@@ -367,20 +367,20 @@ def _migration_017_code_brain_innovation(conn) -> None:
     if "code_dependencies" not in tables:
         conn.execute(text("""
             CREATE TABLE code_dependencies (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 repo_id INTEGER NOT NULL,
                 source_file VARCHAR(500) NOT NULL,
                 target_file VARCHAR(500) NOT NULL,
                 import_name VARCHAR(300),
-                is_circular BOOLEAN NOT NULL DEFAULT 0,
-                created_at DATETIME DEFAULT (datetime('now'))
+                is_circular BOOLEAN NOT NULL DEFAULT FALSE,
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_code_dep_repo ON code_dependencies(repo_id)"))
     if "code_quality_snapshots" not in tables:
         conn.execute(text("""
             CREATE TABLE code_quality_snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 repo_id INTEGER NOT NULL,
                 total_files INTEGER DEFAULT 0,
                 total_lines INTEGER DEFAULT 0,
@@ -390,14 +390,14 @@ def _migration_017_code_brain_innovation(conn) -> None:
                 test_ratio REAL DEFAULT 0.0,
                 hotspot_count INTEGER DEFAULT 0,
                 insight_count INTEGER DEFAULT 0,
-                recorded_at DATETIME DEFAULT (datetime('now'))
+                recorded_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_code_qs_repo ON code_quality_snapshots(repo_id)"))
     if "code_reviews" not in tables:
         conn.execute(text("""
             CREATE TABLE code_reviews (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 repo_id INTEGER NOT NULL,
                 user_id INTEGER,
                 commit_hash VARCHAR(50) NOT NULL,
@@ -405,7 +405,7 @@ def _migration_017_code_brain_innovation(conn) -> None:
                 summary TEXT,
                 findings_json TEXT,
                 overall_score REAL DEFAULT 5.0,
-                reviewed_at DATETIME DEFAULT (datetime('now'))
+                reviewed_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_code_rev_repo ON code_reviews(repo_id)"))
@@ -413,7 +413,7 @@ def _migration_017_code_brain_innovation(conn) -> None:
     if "code_dep_alerts" not in tables:
         conn.execute(text("""
             CREATE TABLE code_dep_alerts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 repo_id INTEGER NOT NULL,
                 package_name VARCHAR(200) NOT NULL,
                 current_version VARCHAR(50),
@@ -421,15 +421,15 @@ def _migration_017_code_brain_innovation(conn) -> None:
                 severity VARCHAR(20) NOT NULL DEFAULT 'info',
                 alert_type VARCHAR(30) NOT NULL DEFAULT 'outdated',
                 ecosystem VARCHAR(10) NOT NULL DEFAULT 'pip',
-                resolved BOOLEAN NOT NULL DEFAULT 0,
-                detected_at DATETIME DEFAULT (datetime('now'))
+                resolved BOOLEAN NOT NULL DEFAULT FALSE,
+                detected_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_code_depalert_repo ON code_dep_alerts(repo_id)"))
     if "code_search_index" not in tables:
         conn.execute(text("""
             CREATE TABLE code_search_index (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 repo_id INTEGER NOT NULL,
                 file_path VARCHAR(500) NOT NULL,
                 symbol_name VARCHAR(300) NOT NULL,
@@ -437,7 +437,7 @@ def _migration_017_code_brain_innovation(conn) -> None:
                 signature TEXT,
                 docstring TEXT,
                 line_number INTEGER DEFAULT 0,
-                indexed_at DATETIME DEFAULT (datetime('now'))
+                indexed_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_code_search_repo ON code_search_index(repo_id)"))
@@ -447,10 +447,10 @@ def _migration_017_code_brain_innovation(conn) -> None:
 
 def _migration_018_breakout_alert_outcome_cols(conn) -> None:
     """Add exit-optimization and context columns to trading_breakout_alerts."""
-    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    tables = _tables(conn)
     if "trading_breakout_alerts" not in tables:
         return
-    existing = {r[1] for r in conn.execute(text("PRAGMA table_info(trading_breakout_alerts)")).fetchall()}
+    existing = _columns(conn, "trading_breakout_alerts")
     new_cols = [
         ("time_to_peak_hours", "REAL"),
         ("time_to_stop_hours", "REAL"),
@@ -475,19 +475,19 @@ def _migration_018_breakout_alert_outcome_cols(conn) -> None:
 
 def _migration_019_project_brain_tables(conn) -> None:
     """Create tables for the autonomous Project Brain agent framework."""
-    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    tables = _tables(conn)
 
     if "project_agent_states" not in tables:
         conn.execute(text("""
             CREATE TABLE project_agent_states (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_name VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 state_json TEXT,
                 confidence REAL DEFAULT 0.0,
                 last_cycle_at DATETIME,
-                created_at DATETIME DEFAULT (datetime('now')),
-                updated_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_pas_agent ON project_agent_states(agent_name)"))
@@ -495,7 +495,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "agent_findings" not in tables:
         conn.execute(text("""
             CREATE TABLE agent_findings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_name VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 category VARCHAR(50) NOT NULL,
@@ -504,8 +504,8 @@ def _migration_019_project_brain_tables(conn) -> None:
                 severity VARCHAR(20) NOT NULL DEFAULT 'info',
                 evidence_json TEXT,
                 status VARCHAR(20) NOT NULL DEFAULT 'new',
-                created_at DATETIME DEFAULT (datetime('now')),
-                updated_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_af_agent ON agent_findings(agent_name)"))
@@ -513,7 +513,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "agent_research" not in tables:
         conn.execute(text("""
             CREATE TABLE agent_research (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_name VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 topic VARCHAR(300) NOT NULL,
@@ -521,8 +521,8 @@ def _migration_019_project_brain_tables(conn) -> None:
                 summary TEXT NOT NULL,
                 sources_json TEXT,
                 relevance_score REAL DEFAULT 0.0,
-                searched_at DATETIME DEFAULT (datetime('now')),
-                stale BOOLEAN DEFAULT 0
+                searched_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                stale BOOLEAN DEFAULT FALSE
             )
         """))
         conn.execute(text("CREATE INDEX ix_ar_agent ON agent_research(agent_name)"))
@@ -530,7 +530,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "agent_goals" not in tables:
         conn.execute(text("""
             CREATE TABLE agent_goals (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_name VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 description TEXT NOT NULL,
@@ -538,7 +538,7 @@ def _migration_019_project_brain_tables(conn) -> None:
                 status VARCHAR(20) NOT NULL DEFAULT 'active',
                 progress REAL DEFAULT 0.0,
                 evidence_count INTEGER DEFAULT 0,
-                created_at DATETIME DEFAULT (datetime('now')),
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
                 completed_at DATETIME
             )
         """))
@@ -547,7 +547,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "agent_evolutions" not in tables:
         conn.execute(text("""
             CREATE TABLE agent_evolutions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 agent_name VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 dimension VARCHAR(100) NOT NULL,
@@ -555,7 +555,7 @@ def _migration_019_project_brain_tables(conn) -> None:
                 confidence_before REAL DEFAULT 0.0,
                 confidence_after REAL DEFAULT 0.0,
                 trigger VARCHAR(200) NOT NULL DEFAULT 'cycle',
-                created_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_ae_agent ON agent_evolutions(agent_name)"))
@@ -563,14 +563,14 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "agent_messages" not in tables:
         conn.execute(text("""
             CREATE TABLE agent_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 from_agent VARCHAR(50) NOT NULL,
                 to_agent VARCHAR(50) NOT NULL,
                 user_id INTEGER,
                 message_type VARCHAR(50) NOT NULL,
                 content_json TEXT NOT NULL,
-                acknowledged BOOLEAN DEFAULT 0,
-                created_at DATETIME DEFAULT (datetime('now'))
+                acknowledged BOOLEAN DEFAULT FALSE,
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_am_to ON agent_messages(to_agent)"))
@@ -578,7 +578,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "po_questions" not in tables:
         conn.execute(text("""
             CREATE TABLE po_questions (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 question TEXT NOT NULL,
                 context TEXT,
@@ -586,7 +586,7 @@ def _migration_019_project_brain_tables(conn) -> None:
                 priority INTEGER DEFAULT 5,
                 status VARCHAR(20) NOT NULL DEFAULT 'pending',
                 answer TEXT,
-                asked_at DATETIME DEFAULT (datetime('now')),
+                asked_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
                 answered_at DATETIME
             )
         """))
@@ -594,7 +594,7 @@ def _migration_019_project_brain_tables(conn) -> None:
     if "po_requirements" not in tables:
         conn.execute(text("""
             CREATE TABLE po_requirements (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 title VARCHAR(300) NOT NULL,
                 description TEXT NOT NULL,
@@ -602,8 +602,8 @@ def _migration_019_project_brain_tables(conn) -> None:
                 status VARCHAR(20) NOT NULL DEFAULT 'draft',
                 acceptance_criteria TEXT,
                 source_questions_json TEXT,
-                created_at DATETIME DEFAULT (datetime('now')),
-                updated_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
 
@@ -631,12 +631,12 @@ def _migration_021_broker_credentials_table(conn) -> None:
     if "broker_credentials" not in tables:
         conn.execute(text("""
             CREATE TABLE broker_credentials (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER NOT NULL REFERENCES users(id),
                 broker TEXT NOT NULL,
                 encrypted_data TEXT NOT NULL,
-                created_at DATETIME DEFAULT (datetime('now')),
-                updated_at DATETIME DEFAULT (datetime('now')),
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
                 UNIQUE(user_id, broker)
             )
         """))
@@ -656,12 +656,12 @@ def _migration_022_alert_trade_type_cols(conn) -> None:
 
 def _migration_023_qa_engineer_tables(conn) -> None:
     """Create tables for the QA Engineer agent: test cases, test runs, bug reports."""
-    tables = {r[0] for r in conn.execute(text("SELECT name FROM sqlite_master WHERE type='table'")).fetchall()}
+    tables = _tables(conn)
 
     if "qa_test_cases" not in tables:
         conn.execute(text("""
             CREATE TABLE qa_test_cases (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 name VARCHAR(300) NOT NULL,
                 steps_json TEXT,
@@ -669,7 +669,7 @@ def _migration_023_qa_engineer_tables(conn) -> None:
                 priority VARCHAR(20) NOT NULL DEFAULT 'medium',
                 status VARCHAR(20) NOT NULL DEFAULT 'active',
                 last_run_at DATETIME,
-                created_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_qa_tc_user ON qa_test_cases(user_id)"))
@@ -677,14 +677,14 @@ def _migration_023_qa_engineer_tables(conn) -> None:
     if "qa_test_runs" not in tables:
         conn.execute(text("""
             CREATE TABLE qa_test_runs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 test_name VARCHAR(300) NOT NULL,
-                passed BOOLEAN NOT NULL DEFAULT 0,
+                passed BOOLEAN NOT NULL DEFAULT FALSE,
                 errors_json TEXT,
                 duration_ms INTEGER DEFAULT 0,
                 screenshot_path VARCHAR(500),
-                created_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_qa_tr_user ON qa_test_runs(user_id)"))
@@ -692,7 +692,7 @@ def _migration_023_qa_engineer_tables(conn) -> None:
     if "qa_bug_reports" not in tables:
         conn.execute(text("""
             CREATE TABLE qa_bug_reports (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 title VARCHAR(300) NOT NULL,
                 description TEXT NOT NULL DEFAULT '',
@@ -700,8 +700,8 @@ def _migration_023_qa_engineer_tables(conn) -> None:
                 screenshot_path VARCHAR(500),
                 reproduction_steps TEXT,
                 status VARCHAR(20) NOT NULL DEFAULT 'open',
-                created_at DATETIME DEFAULT (datetime('now')),
-                updated_at DATETIME DEFAULT (datetime('now'))
+                created_at DATETIME DEFAULT (CURRENT_TIMESTAMP),
+                updated_at DATETIME DEFAULT (CURRENT_TIMESTAMP)
             )
         """))
         conn.execute(text("CREATE INDEX ix_qa_br_user ON qa_bug_reports(user_id)"))
@@ -711,7 +711,7 @@ def _migration_023_qa_engineer_tables(conn) -> None:
 
 def _migration_024_po_question_options(conn) -> None:
     """Add options column to po_questions for multiple-choice interview flow."""
-    cols = {r[1] for r in conn.execute(text("PRAGMA table_info('po_questions')")).fetchall()}
+    cols = _columns(conn, "po_questions")
     if "options" not in cols:
         conn.execute(text("ALTER TABLE po_questions ADD COLUMN options TEXT"))
     conn.commit()
@@ -741,7 +741,7 @@ def _migration_027_backtest_insight_link(conn) -> None:
     """Add related_insight_id column to trading_backtests for direct linking."""
     if "trading_backtests" not in _tables(conn):
         return
-    cols = {r[1] for r in conn.execute(text("PRAGMA table_info(trading_backtests)")).fetchall()}
+    cols = _columns(conn, "trading_backtests")
     if "related_insight_id" not in cols:
         conn.execute(text("ALTER TABLE trading_backtests ADD COLUMN related_insight_id INTEGER"))
         conn.commit()
@@ -771,11 +771,12 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
         if not existing:
             conn.execute(text(
                 "INSERT INTO scan_patterns "
-                "(name, description, rules_json, origin, asset_class, confidence, "
+                "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
                 " evidence_count, backtest_count, score_boost, min_base_score, "
-                " active, created_at, updated_at) "
-                "VALUES (:name, :desc, :rules, :origin, :ac, 0.0, 0, 0, 1.5, 4.0, "
-                " 1, datetime('now'), datetime('now'))"
+                " active, generation, ticker_scope, trade_count, backtest_priority, "
+                " created_at, updated_at) "
+                "VALUES (:name, :desc, :rules, :origin, :ac, '1d', 0.0, 0, 0, 1.5, 4.0, "
+                " TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ), {
                 "name": pat_name,
                 "desc": (
@@ -812,7 +813,7 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
                 " origin, status, times_tested, times_confirmed, "
                 " times_rejected, created_at) "
                 "VALUES (:desc, :ca, :cb, 'a', 'user_seeded', 'pending', "
-                " 0, 0, 0, datetime('now'))"
+                " 0, 0, 0, CURRENT_TIMESTAMP)"
             ), {"desc": hyp_desc, "ca": cond_a, "cb": cond_b})
             conn.commit()
 
@@ -838,22 +839,25 @@ def _migration_029_seed_rsi_ema_insight(conn) -> None:
     if not user_ids:
         user_ids = [None]
 
+    now_sql = "CURRENT_TIMESTAMP"
+    user_match = "user_id IS NOT DISTINCT FROM :uid"
     for uid in user_ids:
         existing = conn.execute(
             text(
                 "SELECT id FROM trading_insights "
-                "WHERE pattern_description LIKE :pat AND user_id IS :uid"
+                "WHERE pattern_description LIKE :pat AND " + user_match
             ),
             {"pat": "RSI Overbought + EMA Stack%", "uid": uid},
         ).fetchone()
         if existing:
             continue
+        active_val = "TRUE"
         conn.execute(text(
             "INSERT INTO trading_insights "
             "(user_id, pattern_description, confidence, evidence_count, "
             " last_seen, created_at, active, win_count, loss_count) "
-            "VALUES (:uid, :desc, 0.5, 1, datetime('now'), datetime('now'), "
-            " 1, 0, 0)"
+            f"VALUES (:uid, :desc, 0.5, 1, {now_sql}, {now_sql}, "
+            f" {active_val}, 0, 0)"
         ), {"uid": uid, "desc": pat_desc})
     conn.commit()
 
@@ -989,11 +993,12 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
             continue
         conn.execute(text(
             "INSERT INTO scan_patterns "
-            "(name, description, rules_json, origin, asset_class, confidence, "
+            "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
             " evidence_count, backtest_count, score_boost, min_base_score, "
-            " active, created_at, updated_at) "
-            "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', 0.5, "
-            " 0, 0, 1.5, 4.0, 1, datetime('now'), datetime('now'))"
+            " active, generation, ticker_scope, trade_count, backtest_priority, "
+            " created_at, updated_at) "
+            "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', '1d', 0.5, "
+            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1012,14 +1017,16 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
     if not user_ids:
         user_ids = [None]
 
+    user_match = "user_id IS NOT DISTINCT FROM :uid"
+    now_sql = "CURRENT_TIMESTAMP"
+    active_val = "TRUE"
     for pat in _PATTERNS:
         pat_desc = f"{pat['name']} \u2014 {pat['desc']}"
         for uid in user_ids:
             existing = conn.execute(
                 text(
                     "SELECT id FROM trading_insights "
-                    "WHERE pattern_description LIKE :pat AND "
-                    "      (user_id IS :uid OR (user_id IS NULL AND :uid IS NULL))"
+                    "WHERE pattern_description LIKE :pat AND " + user_match
                 ),
                 {"pat": f"{pat['name']}%", "uid": uid},
             ).fetchone()
@@ -1029,8 +1036,7 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
                 "INSERT INTO trading_insights "
                 "(user_id, pattern_description, confidence, evidence_count, "
                 " last_seen, created_at, active, win_count, loss_count) "
-                "VALUES (:uid, :desc, 0.5, 0, datetime('now'), "
-                " datetime('now'), 1, 0, 0)"
+                f"VALUES (:uid, :desc, 0.5, 0, {now_sql}, {now_sql}, {active_val}, 0, 0)"
             ), {"uid": uid, "desc": pat_desc})
     conn.commit()
 
@@ -1112,11 +1118,12 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
             continue
         conn.execute(text(
             "INSERT INTO scan_patterns "
-            "(name, description, rules_json, origin, asset_class, confidence, "
+            "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
             " evidence_count, backtest_count, score_boost, min_base_score, "
-            " active, created_at, updated_at) "
-            "VALUES (:name, :desc, :rules, 'user_seeded', 'all', 0.5, "
-            " 0, 0, 1.5, 4.0, 1, datetime('now'), datetime('now'))"
+            " active, generation, ticker_scope, trade_count, backtest_priority, "
+            " created_at, updated_at) "
+            "VALUES (:name, :desc, :rules, 'user_seeded', 'all', '1d', 0.5, "
+            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1135,14 +1142,16 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
     if not user_ids:
         user_ids = [None]
 
+    user_match = "user_id IS NOT DISTINCT FROM :uid"
+    now_sql = "CURRENT_TIMESTAMP"
+    active_val = "TRUE"
     for pat in _PATTERNS:
         pat_desc = f"{pat['name']} \u2014 {pat['desc']}"
         for uid in user_ids:
             existing = conn.execute(
                 text(
                     "SELECT id FROM trading_insights "
-                    "WHERE pattern_description LIKE :pat AND "
-                    "      (user_id IS :uid OR (user_id IS NULL AND :uid IS NULL))"
+                    "WHERE pattern_description LIKE :pat AND " + user_match
                 ),
                 {"pat": f"{pat['name']}%", "uid": uid},
             ).fetchone()
@@ -1152,8 +1161,7 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
                 "INSERT INTO trading_insights "
                 "(user_id, pattern_description, confidence, evidence_count, "
                 " last_seen, created_at, active, win_count, loss_count) "
-                "VALUES (:uid, :desc, 0.5, 0, datetime('now'), "
-                " datetime('now'), 1, 0, 0)"
+                f"VALUES (:uid, :desc, 0.5, 0, {now_sql}, {now_sql}, {active_val}, 0, 0)"
             ), {"uid": uid, "desc": pat_desc})
     conn.commit()
 
@@ -1206,6 +1214,185 @@ def _migration_033_insight_pattern_fk(conn) -> None:
     conn.commit()
 
 
+def _migration_034_pattern_backtest_queue(conn) -> None:
+    """Add backtest queue columns to scan_patterns for priority-based processing."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    sp_cols = _columns(conn, "scan_patterns")
+    if "trade_count" not in sp_cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN trade_count INTEGER DEFAULT 0"))
+        conn.commit()
+    if "backtest_priority" not in sp_cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN backtest_priority INTEGER DEFAULT 0"))
+        conn.commit()
+    if "last_backtest_at" not in sp_cols:
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN last_backtest_at DATETIME"))
+        conn.commit()
+
+
+def _migration_035_backtest_scan_pattern_fk(conn) -> None:
+    """Add scan_pattern_id to trading_backtests; backfill from insights and strategy names."""
+    if "trading_backtests" not in _tables(conn):
+        return
+    bt_cols = _columns(conn, "trading_backtests")
+    if "scan_pattern_id" not in bt_cols:
+        conn.execute(text("ALTER TABLE trading_backtests ADD COLUMN scan_pattern_id INTEGER"))
+        conn.commit()
+
+    if "trading_insights" in _tables(conn):
+        conn.execute(text(
+            "UPDATE trading_backtests SET scan_pattern_id = ("
+            "SELECT ti.scan_pattern_id FROM trading_insights ti "
+            "WHERE ti.id = trading_backtests.related_insight_id"
+            ") WHERE related_insight_id IS NOT NULL AND scan_pattern_id IS NULL"
+        ))
+        conn.commit()
+
+    if "scan_patterns" not in _tables(conn) or "trading_insights" not in _tables(conn):
+        return
+
+    patterns = conn.execute(text(
+        "SELECT id, name FROM scan_patterns WHERE name IS NOT NULL"
+    )).fetchall()
+    if not patterns:
+        return
+    name_lower_to_id: dict[str, int] = {}
+    for pid, pname in patterns:
+        key = (pname or "").strip().lower()
+        if key and key not in name_lower_to_id:
+            name_lower_to_id[key] = int(pid)
+
+    null_insights = conn.execute(text(
+        "SELECT id FROM trading_insights WHERE scan_pattern_id IS NULL"
+    )).fetchall()
+    for (iid,) in null_insights:
+        rows = conn.execute(
+            text(
+                "SELECT DISTINCT strategy_name FROM trading_backtests "
+                "WHERE related_insight_id = :iid AND strategy_name IS NOT NULL"
+            ),
+            {"iid": iid},
+        ).fetchall()
+        matched = None
+        for (sn,) in rows:
+            key = (sn or "").strip().lower()
+            matched = name_lower_to_id.get(key)
+            if matched:
+                break
+        if matched:
+            conn.execute(
+                text("UPDATE trading_insights SET scan_pattern_id = :pid WHERE id = :iid"),
+                {"pid": matched, "iid": iid},
+            )
+
+    conn.commit()
+
+    conn.execute(text(
+        "UPDATE trading_backtests SET scan_pattern_id = ("
+        "SELECT ti.scan_pattern_id FROM trading_insights ti "
+        "WHERE ti.id = trading_backtests.related_insight_id"
+        ") WHERE related_insight_id IS NOT NULL AND scan_pattern_id IS NULL"
+    ))
+    conn.commit()
+
+
+def _migration_036_pattern_trade_analytics(conn) -> None:
+    """Pattern trade analytics: per-occurrence rows + evidence hypothesis cards."""
+    tables = _tables(conn)
+    if "trading_pattern_trades" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_trades (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                scan_pattern_id INTEGER,
+                related_insight_id INTEGER,
+                backtest_result_id INTEGER,
+                ticker VARCHAR(20) NOT NULL,
+                as_of_ts TIMESTAMP NOT NULL,
+                timeframe VARCHAR(10) NOT NULL DEFAULT '1d',
+                asset_class VARCHAR(20) NOT NULL DEFAULT 'stock',
+                fwd_ret_1b REAL,
+                fwd_ret_3b REAL,
+                fwd_ret_5b REAL,
+                fwd_ret_10b REAL,
+                mfe_pct REAL,
+                mae_pct REAL,
+                hold_bars INTEGER,
+                r_multiple REAL,
+                outcome_return_pct REAL,
+                label_win BOOLEAN,
+                features_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                source VARCHAR(40) NOT NULL DEFAULT 'queue_backtest',
+                feature_schema_version VARCHAR(20) NOT NULL DEFAULT '1',
+                code_version VARCHAR(40),
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_ptt_pattern_asof ON trading_pattern_trades (scan_pattern_id, as_of_ts)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ptt_ticker_asof ON trading_pattern_trades (ticker, as_of_ts)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ptt_pattern_ticker ON trading_pattern_trades (scan_pattern_id, ticker)"
+        ))
+        conn.commit()
+    if "trading_pattern_evidence_hypotheses" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_evidence_hypotheses (
+                id SERIAL PRIMARY KEY,
+                scan_pattern_id INTEGER NOT NULL,
+                title VARCHAR(200) NOT NULL,
+                predicate_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                status VARCHAR(20) NOT NULL DEFAULT 'proposed',
+                metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_peh_pattern ON trading_pattern_evidence_hypotheses (scan_pattern_id)"
+        ))
+        conn.commit()
+
+
+def _migration_037_learning_cycle_ai_reports(conn) -> None:
+    """Persist per-cycle AI deep-study reports for the Brain UI."""
+    tables = _tables(conn)
+    if "trading_learning_cycle_ai_reports" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_learning_cycle_ai_reports (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                content TEXT NOT NULL,
+                metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_tlcai_user_created ON trading_learning_cycle_ai_reports (user_id, created_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_038_brain_worker_control_stop_heartbeat(conn) -> None:
+    """stop_requested + last_heartbeat_at for cooperative stop and stale-PID detection."""
+    if "brain_worker_control" not in _tables(conn):
+        return
+    cols = _columns(conn, "brain_worker_control")
+    if "stop_requested" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE brain_worker_control ADD COLUMN stop_requested BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+        )
+        conn.commit()
+    if "last_heartbeat_at" not in cols:
+        conn.execute(text("ALTER TABLE brain_worker_control ADD COLUMN last_heartbeat_at TIMESTAMP"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1241,6 +1428,11 @@ MIGRATIONS = [
     ("031_seed_ross_cameron_patterns", _migration_031_seed_ross_cameron_patterns),
     ("032_seed_candlestick_patterns", _migration_032_seed_candlestick_patterns),
     ("033_insight_pattern_fk", _migration_033_insight_pattern_fk),
+    ("034_pattern_backtest_queue", _migration_034_pattern_backtest_queue),
+    ("035_backtest_scan_pattern_fk", _migration_035_backtest_scan_pattern_fk),
+    ("036_pattern_trade_analytics", _migration_036_pattern_trade_analytics),
+    ("037_learning_cycle_ai_reports", _migration_037_learning_cycle_ai_reports),
+    ("038_brain_worker_control_stop_heartbeat", _migration_038_brain_worker_control_stop_heartbeat),
 ]
 
 
@@ -1248,7 +1440,8 @@ def run_migrations(engine: Engine) -> None:
     """Create schema_version table if missing, then run any migrations not yet applied."""
     with engine.connect() as conn:
         conn.execute(text(
-            "CREATE TABLE IF NOT EXISTS schema_version (version_id TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')))"
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            "version_id TEXT PRIMARY KEY, applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
         ))
         conn.commit()
 
