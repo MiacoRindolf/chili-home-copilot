@@ -144,7 +144,7 @@ class Settings(BaseSettings):
     pick_warn_drift_pct: float = 10.0  # warn when price has drifted >N% from entry
 
     # Database — PostgreSQL only (required). See .env.example and docs/DATABASE_POSTGRES.md.
-    # Example: postgresql://user:pass@localhost:5432/chili
+    # Example (host → Docker Compose postgres): postgresql://chili:chili@localhost:5433/chili
     database_url: str = Field(..., description="PostgreSQL connection URL")
     # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
     database_pool_size: int = 25
@@ -171,7 +171,7 @@ class Settings(BaseSettings):
         if not url:
             raise ValueError(
                 "DATABASE_URL is required. Set a PostgreSQL URL in .env "
-                "(see .env.example), e.g. postgresql://user:pass@localhost:5432/chili"
+                "(see .env.example), e.g. postgresql://chili:chili@localhost:5433/chili"
             )
         lowered = url.lower()
         if not (

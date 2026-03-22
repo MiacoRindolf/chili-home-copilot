@@ -22,7 +22,7 @@ def _ensure_postgres_test_url() -> str:
     if not raw:
         raise RuntimeError(
             "Tests require PostgreSQL. Set TEST_DATABASE_URL (preferred) or DATABASE_URL to a "
-            "dedicated test database, e.g. postgresql://user:pass@localhost:5432/chili_test — "
+            "dedicated test database, e.g. postgresql://chili:chili@localhost:5433/chili_test — "
             "see docs/DATABASE_POSTGRES.md"
         )
     lowered = raw.lower()

@@ -145,8 +145,8 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 
 ### PostgreSQL (required)
 
-- **Docker Compose** (`scripts/docker-setup.sh`): includes a **PostgreSQL 15** service; the `chili` container gets `DATABASE_URL=postgresql://chili:chili@postgres:5432/chili` automatically. The DB is also published on the host as **`localhost:5433`** (`chili` / `chili` / `chili`).
-- **Local / Conda**: set **`DATABASE_URL`** in `.env` (see `.env.example`). The app applies the schema on startup (`create_all` + versioned migrations).
+- **Docker Compose** (`scripts/docker-setup.sh`): includes a **PostgreSQL 16** service; the `chili` container gets `DATABASE_URL=postgresql://chili:chili@postgres:5432/chili` automatically. The DB is also published on the host as **`localhost:5433`** (`chili` / `chili` / `chili`).
+- **Local / Conda**: set **`DATABASE_URL`** in `.env` to **`postgresql://chili:chili@localhost:5433/chili`** so the host app uses the same database as Compose (see `.env.example`). The app applies the schema on startup (`create_all` + versioned migrations).
 
 - More: **[docs/DATABASE_POSTGRES.md](docs/DATABASE_POSTGRES.md)** (`pytest`, legacy import, Compose details).
 - Pattern trade analytics (per-trade rows, evidence hypotheses, Brain UI): **[docs/PATTERN_TRADE_ANALYTICS.md](docs/PATTERN_TRADE_ANALYTICS.md)**.

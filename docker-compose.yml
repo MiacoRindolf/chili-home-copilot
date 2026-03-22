@@ -2,7 +2,8 @@
 # See docs/DOCKER_FULL_STACK.md
 services:
   postgres:
-    image: postgres:15-alpine
+    # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
+    image: postgres:16-alpine
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili

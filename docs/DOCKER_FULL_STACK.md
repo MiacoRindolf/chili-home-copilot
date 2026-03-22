@@ -4,7 +4,7 @@
 
 | Service | Image | Port | Role |
 |---------|--------|------|------|
-| `postgres` | postgres:15 | 5433→5432 | Database |
+| `postgres` | postgres:16 | 5433→5432 | Database |
 | `ollama` | ollama | 11434 | Local LLM |
 | `chili` | `chili-app:local` | 8000 | Main FastAPI app (**HTTPS** — self-signed cert baked into the image; browser will warn) |
 | `brain` | `chili-brain:local` | 8090 | Brain HTTP API (`chili-brain/Dockerfile`) — **HTTP** on the Docker network so the worker client does not need custom TLS trust |
