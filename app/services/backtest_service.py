@@ -448,7 +448,14 @@ def run_backtest(
     strat_cls = strat_info["cls"]
     coerced = _coerce_strategy_params(strat_cls, strategy_id, strategy_params)
 
-    bt = Backtest(df, strat_cls, cash=cash, commission=commission, exclusive_orders=True)
+    bt = Backtest(
+        df,
+        strat_cls,
+        cash=cash,
+        commission=commission,
+        exclusive_orders=True,
+        finalize_trades=True,
+    )
 
     if optimize and strat_info.get("params"):
         param_ranges = {}
@@ -573,7 +580,11 @@ def save_backtest(
     eq = result.get("equity_curve", [])
     if tc == 0:
         eq = []
-    params_json = json.dumps({"strategy_id": result.get("strategy_id"), "period": result.get("period")})
+    params_json = json.dumps({
+        "strategy_id": result.get("strategy_id"),
+        "period": result.get("period"),
+        "interval": result.get("interval"),
+    })
 
     if insight_id:
         existing = (
@@ -1324,6 +1335,18 @@ def get_backtest_params(timeframe: str) -> dict[str, Any]:
     return _TIMEFRAME_PARAMS.get(timeframe, _TIMEFRAME_PARAMS["1d"]).copy()
 
 
+def get_brain_backtest_window(timeframe: str) -> tuple[str, str]:
+    """Return ``(period, interval)`` used by ``smart_backtest_insight`` for a linked pattern.
+
+    The brain resolves ``ScanPattern.timeframe`` → ``get_backtest_params`` and, when no
+    custom ``period`` is passed into ``smart_backtest_insight``, uses both ``period`` and
+    ``interval`` from that map. Callers (UI rerun, backfill) should use this so stored
+    runs match the learning scheduler / batch backtests.
+    """
+    bp = get_backtest_params(timeframe)
+    return bp["period"], bp["interval"]
+
+
 def _classify_exit_params(
     conditions: list[dict[str, Any]],
     timeframe: str = "1d",
@@ -1443,7 +1466,14 @@ def run_pattern_backtest(
         "_explicit_bos_grace": explicit_bos_grace,
     })
 
-    bt = FractionalBacktest(df, strat_cls, cash=cash, commission=commission, exclusive_orders=True)
+    bt = FractionalBacktest(
+        df,
+        strat_cls,
+        cash=cash,
+        commission=commission,
+        exclusive_orders=True,
+        finalize_trades=True,
+    )
     stats = bt.run()
 
     equity = stats.get("_equity_curve")
@@ -1492,6 +1522,7 @@ def run_pattern_backtest(
         "strategy": pattern_name,
         "strategy_id": "dynamic_pattern",
         "period": period,
+        "interval": interval,
         "return_pct": round(float(stats.get("Return [%]", 0)), 2),
         "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
         "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),

@@ -582,15 +582,39 @@ def _sibling_insight_ids_for_pattern(
     return ids
 
 
+def _evidence_backtest_asset_universe(
+    db: Session,
+    desc: str,
+    scan_pattern_id: int | None,
+    insight_id: int | None = None,
+) -> str:
+    """Match backtest_engine: crypto-only / stocks-only / all for evidence aggregation."""
+    from ...models.trading import ScanPattern
+    from ...services.trading.backtest_engine import (
+        _extract_context,
+        effective_backtest_asset_universe,
+    )
+
+    ac = None
+    if scan_pattern_id:
+        sp = db.query(ScanPattern).get(scan_pattern_id)
+        if sp:
+            ac = getattr(sp, "asset_class", None)
+    ctx = _extract_context(desc or "", db=db, insight_id=insight_id)
+    return effective_backtest_asset_universe(ac, ctx)
+
+
 def _compute_deduped_backtest_win_stats(
     db: Session,
     sibling_insight_ids: list[int],
     desc: str,
     *,
     linked_limit: int = 500,
+    asset_universe: str = "all",
 ) -> dict:
     """Same backtest list + win stats as the pattern evidence modal (dedupe: latest per ticker/strategy)."""
     from ...models.trading import BacktestResult
+    from ...services.trading.market_data import is_crypto as _is_crypto_bt
 
     backtests_out: list[dict] = []
     seen_bt_ids: set[int] = set()
@@ -604,6 +628,10 @@ def _compute_deduped_backtest_win_stats(
             .all()
         )
         for bt in linked_bts:
+            if asset_universe == "crypto" and not _is_crypto_bt(bt.ticker or ""):
+                continue
+            if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
+                continue
             dedup_key = (bt.ticker or "", bt.strategy_name or "")
             if dedup_key in seen_bt_keys:
                 continue
@@ -623,7 +651,8 @@ def _compute_deduped_backtest_win_stats(
                 "relevance": 100,
             })
 
-        if len(backtests_out) < 15:
+        # Keyword padding from global backtests muddles crypto vs stock evidence; skip when restricted.
+        if len(backtests_out) < 15 and asset_universe == "all":
             bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
             all_bts = (
                 db.query(BacktestResult)
@@ -689,6 +718,7 @@ def _deduped_win_rate_progress_series(
     desc: str = "",
     *,
     row_limit: int = 4000,
+    asset_universe: str = "all",
 ) -> list[dict]:
     """Chronological series: after each qualifying backtest, deduped win rate (latest per ticker/strategy).
 
@@ -696,6 +726,7 @@ def _deduped_win_rate_progress_series(
     evidence backtest list, so the line chart aligns with what users see in the Backtests tab.
     """
     from ...models.trading import BacktestResult
+    from ...services.trading.market_data import is_crypto as _is_crypto_bt
 
     seen_ids: set[int] = set()
     rows: list = []
@@ -706,10 +737,14 @@ def _deduped_win_rate_progress_series(
         .limit(row_limit)
         .all()
     ):
+        if asset_universe == "crypto" and not _is_crypto_bt(bt.ticker or ""):
+            continue
+        if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
+            continue
         rows.append(bt)
         seen_ids.add(bt.id)
 
-    if (desc or "").strip():
+    if (desc or "").strip() and asset_universe == "all":
         bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
         if bt_keywords:
             # Newest-first pool (matches evidence keyword padding), not oldest-N rows.
@@ -840,7 +875,12 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         sp_resolved = _resolve_scan_pattern_id_for_insight(db, ins)
         scan_pid = getattr(ins, "scan_pattern_id", None)
         sibs = _sibling_insight_ids_for_pattern(db, ins.id, scan_pid, sp_resolved)
-        panel = _compute_deduped_backtest_win_stats(db, sibs, desc)
+        _bt_univ = _evidence_backtest_asset_universe(
+            db, desc, sp_resolved, insight_id=ins.id,
+        )
+        panel = _compute_deduped_backtest_win_stats(
+            db, sibs, desc, asset_universe=_bt_univ,
+        )
         wc = int(panel["bt_wins"])
         lc = int(panel["bt_losses"])
         real_wr = panel["bt_win_rate"]
@@ -851,10 +891,8 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         sectors = _detect_sectors(all_tickers)
         is_crypto = "crypto" in sectors
 
-        if real_wr is None and (wc + lc) == 0:
-            wc = ins.win_count or 0
-            lc = ins.loss_count or 0
-            real_wr = round(wc / max(1, wc + lc) * 100, 1) if (wc + lc) > 0 else None
+        # Win rate / W–L here come only from deduped BacktestResult rows (same source as evidence modal).
+        # Do not fall back to TradingInsight.win_count — those can be stale or from pre-cleanup runs.
 
         pattern_display = (
             _sync_win_stats_in_description(desc, real_wr, wc, lc)
@@ -1029,13 +1067,20 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         pass
 
     # 4–5. Backtests + win rate: deduped list (latest per ticker/strategy), same as pattern cards
-    panel = _compute_deduped_backtest_win_stats(db, sibling_ids, desc)
+    _ev_univ = _evidence_backtest_asset_universe(
+        db, desc, sp_resolved_id, insight_id=pattern_id,
+    )
+    panel = _compute_deduped_backtest_win_stats(
+        db, sibling_ids, desc, asset_universe=_ev_univ,
+    )
     backtests_out = panel["backtests_out"]
     bt_wins = int(panel["bt_wins"])
     bt_losses = int(panel["bt_losses"])
     bt_win_rate = panel["bt_win_rate"]
     bt_avg_return = panel["bt_avg_return"]
-    win_rate_progress = _deduped_win_rate_progress_series(db, sibling_ids, desc)
+    win_rate_progress = _deduped_win_rate_progress_series(
+        db, sibling_ids, desc, asset_universe=_ev_univ,
+    )
 
     pattern_display = (
         _sync_win_stats_in_description(desc, bt_win_rate, bt_wins, bt_losses)
@@ -1060,9 +1105,11 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
             "pattern_display": pattern_display,
             "confidence": round(insight.confidence * 100, 1),
             "evidence_count": insight.evidence_count,
+            # Same source as "backtests" tab: deduped BacktestResult rows with trades only
             "win_count": bt_wins,
             "loss_count": bt_losses,
             "win_rate": bt_win_rate,
+            "has_saved_backtest_stats": (bt_wins + bt_losses) > 0,
             "active": insight.active,
             "created_at": insight.created_at.isoformat(),
             "last_seen": insight.last_seen.isoformat() if insight.last_seen else None,
@@ -1128,6 +1175,102 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
         "equity_curve": eq,
         "params": bt.params,
     })
+
+
+def _access_backtest_row(
+    ctx: dict,
+    db: Session,
+    bt,
+    ins,
+) -> bool:
+    """Return True if the user may read/update this BacktestResult row."""
+    if not ins:
+        return True
+    if ins.user_id is None:
+        return True
+    if ins.user_id == ctx.get("user_id"):
+        return True
+    sp_id = getattr(ins, "scan_pattern_id", None)
+    if sp_id:
+        has_sibling = db.query(TradingInsight.id).filter(
+            TradingInsight.scan_pattern_id == sp_id,
+            TradingInsight.user_id == ctx["user_id"],
+        ).limit(1).first()
+        return bool(has_sibling)
+    return False
+
+
+@router.post("/api/trading/learn/backtest/{bt_id}/rerun")
+def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depends(get_db)):
+    """Re-run using **brain** ``period``/``interval`` for ``ScanPattern.timeframe``
+    (``get_brain_backtest_window`` — same as ``smart_backtest_insight``) and current rules.
+
+    Use this for the evidence mini-chart so it matches Chili brain batch backtests.
+
+    Results can still differ from an older save if OHLCV, rules, or providers changed.
+    """
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        return JSONResponse({"ok": False, "error": "Sign in required"}, status_code=401)
+    from ...models.trading import BacktestResult, TradingInsight, ScanPattern
+    from ...services.backtest_service import (
+        backtest_pattern,
+        get_brain_backtest_window,
+        save_backtest,
+    )
+
+    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
+    if not bt:
+        return JSONResponse({"ok": False, "error": "Backtest not found"}, status_code=404)
+
+    ins = (
+        db.query(TradingInsight).filter(TradingInsight.id == bt.related_insight_id).first()
+        if bt.related_insight_id
+        else None
+    )
+    if ins and not _access_backtest_row(ctx, db, bt, ins):
+        return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
+
+    sp_id = bt.scan_pattern_id or (getattr(ins, "scan_pattern_id", None) if ins else None)
+    if not sp_id:
+        return JSONResponse({"ok": False, "error": "No ScanPattern linked to this backtest"}, status_code=400)
+    p = db.query(ScanPattern).get(sp_id)
+    if not p:
+        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+
+    tf = getattr(p, "timeframe", "1d") or "1d"
+    use_period, use_interval = get_brain_backtest_window(tf)
+
+    result = backtest_pattern(
+        ticker=bt.ticker,
+        pattern_name=p.name,
+        rules_json=p.rules_json,
+        interval=use_interval,
+        period=use_period,
+        exit_config=getattr(p, "exit_config", None),
+        cash=100_000.0,
+        commission=0.001,
+    )
+    if not result.get("ok"):
+        return JSONResponse(
+            {"ok": False, "error": result.get("error", "backtest failed")},
+            status_code=400,
+        )
+
+    uid = ins.user_id if ins else bt.user_id
+    rec = save_backtest(
+        db, uid, result,
+        insight_id=bt.related_insight_id,
+        scan_pattern_id=int(sp_id),
+    )
+    ran_at = getattr(rec, "ran_at", None)
+    out = {
+        **result,
+        "ok": True,
+        "backtest_id": rec.id,
+        "ran_at": ran_at.isoformat() if ran_at else None,
+    }
+    return JSONResponse(to_jsonable(out))
 
 
 @router.post("/api/trading/learn/backtest/{bt_id}/refresh")
@@ -1561,8 +1704,6 @@ def api_pattern_trade_ml(
 
 # ── Brain Worker Control ────────────────────────────────────────────────
 
-import subprocess
-import sys
 from pathlib import Path
 
 _BRAIN_WORKER_STATUS_FILE = DATA_DIR / "brain_worker_status.json"
@@ -1617,7 +1758,7 @@ def _clear_stale_brain_worker_status_if_needed(db: Session, force: bool) -> dict
             pass
         return extra
 
-    liv = _brain_worker_liveness(int(pid))
+    liv = _worker_liveness(int(pid) if pid else None)
     if liv == "dead":
         try:
             _BRAIN_WORKER_STATUS_FILE.unlink()
@@ -1694,6 +1835,20 @@ def _brain_worker_liveness(pid: int) -> str:
     return "dead"
 
 
+def _worker_liveness(pid: int | None) -> str:
+    """Prefer Docker Compose ``brain-worker`` container state when that container exists."""
+    try:
+        from ...services.brain_worker_docker import find_brain_worker_container, brain_worker_liveness_for_ui
+
+        if find_brain_worker_container() is not None:
+            return brain_worker_liveness_for_ui()
+    except Exception:
+        pass
+    if pid is not None:
+        return _brain_worker_liveness(int(pid))
+    return "dead"
+
+
 @router.get("/api/trading/brain/worker/status")
 def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
     """Get brain worker status.
@@ -1735,7 +1890,7 @@ def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
         return JSONResponse({**default_stopped, "error": str(e)})
 
     pid = data.get("pid")
-    liv = _brain_worker_liveness(int(pid)) if pid else "dead"
+    liv = _worker_liveness(int(pid) if pid else None)
     if liv == "dead":
         data["status"] = "stopped"
         try:
@@ -1762,7 +1917,7 @@ def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/api/trading/brain/worker/start")
 async def api_brain_worker_start(request: Request, db: Session = Depends(get_db)):
-    """Start the brain worker process."""
+    """Start the Docker Compose ``brain-worker`` service (not a subprocess on this host)."""
     ctx = get_identity_ctx(request, db)
     if ctx.get("demo"):
         return JSONResponse({"ok": False, "error": "Demo users cannot control worker"}, status_code=403)
@@ -1775,7 +1930,19 @@ async def api_brain_worker_start(request: Request, db: Session = Depends(get_db)
     force = bool(body.get("force"))
     interval = body.get("interval", 30)
 
+    from ...services.brain_worker_docker import brain_worker_container_running, brain_worker_start_docker
+
     stale_meta = _clear_stale_brain_worker_status_if_needed(db, force)
+
+    if brain_worker_container_running():
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "Worker already running (Docker)",
+                "mode": "docker",
+                **stale_meta,
+            },
+        )
 
     if _BRAIN_WORKER_STATUS_FILE.exists():
         try:
@@ -1788,7 +1955,7 @@ async def api_brain_worker_start(request: Request, db: Session = Depends(get_db)
                     heartbeat_is_stale,
                 )
 
-                liv = _brain_worker_liveness(int(pid))
+                liv = _worker_liveness(int(pid) if pid else None)
                 ctrl = get_worker_control_snapshot(db)
                 stale_hb = heartbeat_is_stale(ctrl.last_heartbeat_at if ctrl else None)
                 if liv == "alive" and not stale_hb:
@@ -1828,28 +1995,27 @@ async def api_brain_worker_start(request: Request, db: Session = Depends(get_db)
         except Exception:
             pass
 
-    script_path = DATA_DIR.parent / "scripts" / "brain_worker.py"
-    if not script_path.exists():
-        return JSONResponse({"ok": False, "error": "Worker script not found"}, status_code=500)
-
-    try:
-        proc = subprocess.Popen(
-            [sys.executable, str(script_path), "--interval", str(interval)],
-            cwd=str(DATA_DIR.parent),
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True,
-        )
+    res = brain_worker_start_docker()
+    if not res.get("ok"):
         return JSONResponse(
             {
-                "ok": True,
-                "pid": proc.pid,
-                "interval": interval,
+                "ok": False,
+                "error": res.get("error", "docker_start_failed"),
+                "hint": res.get("hint"),
                 **stale_meta,
-            }
+            },
+            status_code=500,
         )
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return JSONResponse(
+        {
+            "ok": True,
+            "mode": "docker",
+            "interval_requested": interval,
+            "interval_note": "Cycle interval is configured on the brain-worker service in docker-compose.yml (not from this request).",
+            "docker": res,
+            **stale_meta,
+        }
+    )
 
 
 @router.post("/api/trading/brain/worker/stop")
@@ -1874,7 +2040,26 @@ def api_brain_worker_stop(request: Request, db: Session = Depends(get_db)):
     except OSError:
         pass
 
-    return JSONResponse({"ok": True, "message": "Stop queued in database and legacy file touched"})
+    from ...services.brain_worker_docker import brain_worker_stop_docker
+
+    dr = brain_worker_stop_docker()
+    if not dr.get("ok"):
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": dr.get("error", "docker_stop_failed"),
+                "message": "Database stop was set; Docker stop failed.",
+                "docker": dr,
+            },
+            status_code=500,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "message": "Stop queued in database; brain-worker container stopped.",
+            "docker": dr,
+        }
+    )
 
 
 @router.post("/api/trading/brain/worker/pause")
@@ -1934,7 +2119,7 @@ def api_brain_worker_wake_cycle(request: Request, db: Session = Depends(get_db))
                 sdata = json.load(f)
             pid = sdata.get("pid")
             if pid:
-                liv = _brain_worker_liveness(int(pid))
+                liv = _worker_liveness(int(pid) if pid else None)
                 if liv == "dead":
                     notes.append(
                         "Local status PID looks dead; DB wake is still set for any worker using this database."
@@ -2030,17 +2215,19 @@ def api_brain_worker_queue_debug(
     if ctx.get("demo"):
         return JSONResponse({"ok": False, "error": "Demo users cannot access queue debug"}, status_code=403)
 
-    from ...services.trading.backtest_queue import RETEST_INTERVAL_DAYS, get_pending_patterns
+    from ...services.trading.backtest_queue import get_pending_patterns, get_retest_interval_days
 
     ids = get_pending_patterns(db, limit=limit, ids_only=True)
+    rd = get_retest_interval_days()
     return JSONResponse(
         {
             "ok": True,
             "eligible_pending_pattern_ids": ids,
             "limit": limit,
+            "retest_interval_days": rd,
             "note": (
                 f"Same eligibility as worker queue: active patterns that are boosted, "
-                f"never backtested, or last_backtest older than {RETEST_INTERVAL_DAYS} days."
+                f"never backtested, or last_backtest older than {rd} days."
             ),
         }
     )

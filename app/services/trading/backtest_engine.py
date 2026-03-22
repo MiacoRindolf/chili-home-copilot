@@ -349,6 +349,41 @@ def _extract_context(
     }
 
 
+def effective_backtest_asset_universe(
+    asset_class_from_pattern: str | None,
+    ctx: dict[str, Any],
+) -> str:
+    """Return ``crypto``, ``stocks``, or ``all`` for backtest ticker pools.
+
+    Explicit ``ScanPattern.asset_class`` wins over description-derived context.
+    """
+    raw = (asset_class_from_pattern or "all").strip().lower()
+    if raw in ("stock", "equity", "equities"):
+        raw = "stocks"
+    if raw == "crypto":
+        return "crypto"
+    if raw == "stocks":
+        return "stocks"
+    if ctx.get("crypto_only") and not ctx.get("stock_only"):
+        return "crypto"
+    if ctx.get("stock_only") and not ctx.get("crypto_only"):
+        return "stocks"
+    return "all"
+
+
+def _ticker_allowed_for_universe(ticker: str, universe: str) -> bool:
+    from .market_data import is_crypto
+
+    t = (ticker or "").strip().upper()
+    if not t:
+        return False
+    if universe == "crypto":
+        return is_crypto(t)
+    if universe == "stocks":
+        return not is_crypto(t)
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Dynamic ticker selection
 # ---------------------------------------------------------------------------
@@ -363,17 +398,24 @@ def _select_tickers(
     target_count: int = 40,
     ticker_scope: str = "universal",
     scope_tickers: list[str] | None = None,
+    asset_class: str | None = None,
 ) -> list[str]:
     """Build a ticker pool for backtesting, respecting the pattern's scope.
 
     * ``ticker_specific`` -- 60 % from scope tickers, 40 % exploration
     * ``sector`` -- 60 % from scope sectors, 40 % exploration
     * ``universal`` -- broad diversification across all sectors + crypto
+
+    When ``asset_class`` / context restricts to crypto or stocks only, exploration
+    and prescreened samples stay within that universe.
     """
+    universe = effective_backtest_asset_universe(asset_class, ctx)
     pool: list[str] = []
     pool_set: set[str] = set()
 
     def _add(ticker: str) -> None:
+        if not _ticker_allowed_for_universe(ticker, universe):
+            return
         if ticker not in pool_set:
             pool.append(ticker)
             pool_set.add(ticker)
@@ -381,30 +423,53 @@ def _select_tickers(
     for t in ctx["mentioned_tickers"]:
         _add(t)
 
-    if ticker_scope == "ticker_specific" and scope_tickers:
-        for t in scope_tickers:
+    # ``ticker_specific`` stores tickers; ``sector`` stores sector keys (e.g. mega_tech, crypto).
+    scoped_tickers: list[str] | None = None
+    sector_names: list[str] | None = None
+    if scope_tickers:
+        if ticker_scope == "ticker_specific":
+            scoped_tickers = [
+                t for t in scope_tickers if _ticker_allowed_for_universe(t, universe)
+            ]
+        elif ticker_scope == "sector":
+            sector_names = [
+                s for s in scope_tickers
+                if isinstance(s, str) and s in SECTOR_TICKERS
+            ]
+
+    if ticker_scope == "ticker_specific" and scoped_tickers:
+        for t in scoped_tickers:
             _add(t)
         bias_count = max(1, int(target_count * 0.6)) - len(pool)
-        if bias_count > 0 and scope_tickers:
-            extras = scope_tickers * ((bias_count // len(scope_tickers)) + 1)
+        if bias_count > 0 and scoped_tickers:
+            extras = scoped_tickers * ((bias_count // len(scoped_tickers)) + 1)
             random.shuffle(extras)
             for t in extras[:bias_count]:
                 _add(t)
-    elif ticker_scope == "sector" and scope_tickers:
+    elif ticker_scope == "sector" and sector_names:
         bias_count = max(1, int(target_count * 0.6)) - len(pool)
-        for sector_name in scope_tickers:
+        for sector_name in sector_names:
             sector_list = SECTOR_TICKERS.get(sector_name, [])
-            avail = [t for t in sector_list if t not in pool_set]
-            per = max(1, bias_count // max(1, len(scope_tickers)))
-            for t in random.sample(avail, min(per, len(avail))):
-                _add(t)
+            avail = [
+                t for t in sector_list
+                if t not in pool_set and _ticker_allowed_for_universe(t, universe)
+            ]
+            per = max(1, bias_count // max(1, len(sector_names)))
+            if avail:
+                for t in random.sample(avail, min(per, len(avail))):
+                    _add(t)
 
     crypto_list = SECTOR_TICKERS.get("crypto", [])
     stock_sectors = [k for k in SECTOR_TICKERS if k != "crypto"]
 
     remaining = target_count - len(pool)
-    n_crypto = int(remaining * _DEFAULT_CRYPTO_RATIO)
-    n_stocks = remaining - n_crypto
+    if universe == "crypto":
+        n_crypto, n_stocks = remaining, 0
+    elif universe == "stocks":
+        n_crypto, n_stocks = 0, remaining
+    else:
+        n_crypto = int(remaining * _DEFAULT_CRYPTO_RATIO)
+        n_stocks = remaining - n_crypto
 
     already_crypto = sum(1 for t in pool if t.endswith("-USD"))
     already_stocks = len(pool) - already_crypto
@@ -443,10 +508,15 @@ def _select_tickers(
 
     try:
         from .prescreener import get_prescreened_candidates
-        hot = get_prescreened_candidates(include_crypto=True, max_total=800)
+        hot = get_prescreened_candidates(
+            include_crypto=(universe != "stocks"),
+            max_total=800,
+        )
         if hot:
-            for t in random.sample(hot, min(5, len(hot))):
-                _add(t)
+            hot_f = [t for t in hot if _ticker_allowed_for_universe(t, universe)]
+            if hot_f:
+                for t in random.sample(hot_f, min(5, len(hot_f))):
+                    _add(t)
     except Exception:
         pass
 
@@ -625,6 +695,7 @@ def smart_backtest_insight(
     timeframe = "1d"
     _scope = "universal"
     _scope_tickers: list[str] | None = None
+    _asset_class: str | None = None
     linked_scan_pattern_id: int | None = None
 
     if linked:
@@ -638,6 +709,7 @@ def smart_backtest_insight(
                 if sp:
                     timeframe = getattr(sp, "timeframe", "1d") or "1d"
                     _scope = getattr(sp, "ticker_scope", "universal") or "universal"
+                    _asset_class = getattr(sp, "asset_class", None) or "all"
                     _raw_st = getattr(sp, "scope_tickers", None)
                     if _raw_st:
                         try:
@@ -655,17 +727,25 @@ def smart_backtest_insight(
                 insight.id, desc[:100],
             )
             return {"wins": 0, "losses": 0, "total": 0, "backtests_run": 0}
-        timeframe = infer_pattern_timeframe(conditions, name=desc[:60])
+        ac = effective_backtest_asset_universe(None, ctx)
+        timeframe = infer_pattern_timeframe(
+            conditions,
+            name=desc[:60],
+            asset_class=ac if ac != "all" else "all",
+            description=desc[:500],
+        )
 
     tickers = _select_tickers(
         ctx, db=db, insight_id=insight.id, target_count=target_tickers,
         ticker_scope=_scope, scope_tickers=_scope_tickers,
+        asset_class=_asset_class,
     )
 
     if linked:
         logger.info(
-            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s, tf=%s, scope=%s)",
+            "[backtest_engine] Pattern-aware BT for '%s' — %d tickers (exit_config=%s, tf=%s, scope=%s, asset=%s)",
             pattern_name, len(tickers), "custom" if exit_config else "auto", timeframe, _scope,
+            effective_backtest_asset_universe(_asset_class, ctx),
         )
     else:
         logger.info(

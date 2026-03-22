@@ -108,6 +108,19 @@ class Settings(BaseSettings):
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
     brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) — ML train step only, not queue BT
 
+    # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
+    brain_retest_interval_days: int = 7
+    # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
+    brain_queue_exploration_enabled: bool = True
+    brain_queue_exploration_max: int = 40
+
+    # Evolution: variant ranking = weight_sharpe * adj_sharpe + weight_wr * wr + weight_return * avg_return_pct
+    brain_evolution_weight_sharpe: float = 1.0
+    brain_evolution_weight_wr: float = 2.0
+    brain_evolution_weight_return: float = 0.01
+    brain_evolution_min_trades: int = 5
+    brain_evolution_min_trades_penalty: float = 0.25  # scales fitness when n_backtests < min_trades
+
     # Code Brain
     code_brain_repos: str = ""         # comma-separated local repo paths to index
     code_brain_interval_hours: int = 4  # how often to run code learning cycle
@@ -145,6 +158,11 @@ class Settings(BaseSettings):
     # Brain HTTP service (chili-brain/) — when set, workers or scripts can delegate via brain_client
     brain_service_url: str = ""  # e.g. http://brain:8090 (Compose) or http://127.0.0.1:8090
     brain_internal_secret: str = ""  # Bearer token for POST /v1/run-learning-cycle (match CHILI_BRAIN_INTERNAL_SECRET on brain)
+
+    # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).
+    brain_worker_compose_service: str = "brain-worker"
+    # Optional: restrict to one compose project label (empty = match any project with that service name)
+    brain_worker_compose_project: str = ""
 
     @field_validator("database_url")
     @classmethod

@@ -258,6 +258,34 @@ def _ensure_ticker_scope_columns():
         _log.exception("[migrate] Failed to add ticker_scope columns")
 
 
+def _cleanup_cross_asset_backtests():
+    """Backfill ScanPattern.asset_class from hints, remove stock rows on crypto patterns (and vice versa), recompute insights/scopes."""
+    _log = logging.getLogger("chili.asset_cleanup")
+    try:
+        from .db import SessionLocal as _SL
+        from .services.trading.backtest_asset_cleanup import run_cross_asset_backtest_cleanup
+
+        db = _SL()
+        try:
+            stats = run_cross_asset_backtest_cleanup(db)
+            if (
+                stats.get("patterns_asset_backfilled")
+                or stats.get("backtests_deleted")
+                or stats.get("scopes_recomputed")
+            ):
+                _log.info(
+                    "[asset_cleanup] backfilled=%d deleted_bts=%d insights=%d scopes=%d",
+                    stats.get("patterns_asset_backfilled", 0),
+                    stats.get("backtests_deleted", 0),
+                    stats.get("insights_recomputed", 0),
+                    stats.get("scopes_recomputed", 0),
+                )
+        finally:
+            db.close()
+    except Exception:
+        _log.exception("[asset_cleanup] failed")
+
+
 def _recompute_all_ticker_scopes():
     """One-time: classify ticker_scope for all patterns with enough backtest data."""
     _log = logging.getLogger("chili.scope_recompute")
@@ -475,6 +503,7 @@ def _run_deferred_startup() -> None:
         _dedup_backtests()
         _repair_wrongly_deactivated()
         _ensure_ticker_scope_columns()
+        _cleanup_cross_asset_backtests()
         _reinfer_pattern_timeframes()
         _recompute_all_ticker_scopes()
         _start_massive_ws()

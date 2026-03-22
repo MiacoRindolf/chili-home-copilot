@@ -1338,14 +1338,29 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
     to run multiple pattern backtests concurrently, each with its own DB session.
     """
     from ...config import settings
-    from .backtest_queue import RETEST_INTERVAL_DAYS, get_pending_patterns, get_queue_status
+    from .backtest_queue import (
+        get_exploration_pattern_ids,
+        get_pending_patterns,
+        get_queue_status,
+        get_retest_interval_days,
+    )
 
     if batch_size is None:
         batch_size = settings.brain_queue_batch_size
-    pattern_ids = get_pending_patterns(db, limit=batch_size, ids_only=True)
+    pattern_ids = list(get_pending_patterns(db, limit=batch_size, ids_only=True))
+    exploration_added = 0
+
+    if getattr(settings, "brain_queue_exploration_enabled", True):
+        explore_cap = max(0, int(getattr(settings, "brain_queue_exploration_max", 40)))
+        slots = min(batch_size - len(pattern_ids), explore_cap)
+        if slots > 0:
+            extra = get_exploration_pattern_ids(db, set(pattern_ids), slots)
+            exploration_added = len(extra)
+            pattern_ids.extend(extra)
 
     if not pattern_ids:
         status = get_queue_status(db, use_cache=False)
+        rd = get_retest_interval_days()
         logger.info(
             "[learning] Queue backtest: no eligible patterns (batch_size=%s) | "
             "queue_pending=%s queue_empty=%s boosted=%s — "
@@ -1354,20 +1369,23 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             status.get("pending"),
             status.get("queue_empty"),
             status.get("boosted"),
-            RETEST_INTERVAL_DAYS,
+            rd,
         )
         return {
             "backtests_run": 0,
             "patterns_processed": 0,
             "queue_empty": status["queue_empty"],
+            "queue_exploration_added": 0,
             **status,
         }
 
     logger.info(
-        "[learning] Queue backtest: starting batch | eligible_pattern_ids=%s (count=%s) batch_size=%s",
+        "[learning] Queue backtest: starting batch | pattern_ids=%s (count=%s) batch_size=%s "
+        "exploration_added=%s",
         pattern_ids[:50],
         len(pattern_ids),
         batch_size,
+        exploration_added,
     )
 
     max_workers = settings.brain_backtest_parallel
@@ -1418,6 +1436,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         "backtests_run": backtests_run,
         "patterns_processed": patterns_processed,
         "queue_empty": status["queue_empty"],
+        "queue_exploration_added": exploration_added,
         **status,
     }
 
@@ -4434,10 +4453,22 @@ def test_pattern_hypothesis(
     """Backtest a ScanPattern on a sample of tickers and update its confidence."""
     from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
     from .pattern_engine import update_pattern
-    from .market_data import DEFAULT_SCAN_TICKERS
+    from .market_data import (
+        ALL_SCAN_TICKERS,
+        DEFAULT_CRYPTO_TICKERS,
+        DEFAULT_SCAN_TICKERS,
+    )
 
     if tickers is None:
-        tickers = list(DEFAULT_SCAN_TICKERS[:10])
+        ac = (getattr(pattern, "asset_class", None) or "all").strip().lower()
+        if ac in ("stock", "equity", "equities"):
+            ac = "stocks"
+        if ac == "crypto":
+            tickers = list(DEFAULT_CRYPTO_TICKERS[:10])
+        elif ac == "stocks":
+            tickers = list(DEFAULT_SCAN_TICKERS[:10])
+        else:
+            tickers = list(ALL_SCAN_TICKERS[:12])
 
     linked_insight = _find_insight_for_pattern(db, pattern)
 
@@ -4591,6 +4622,16 @@ def recompute_ticker_scope(db: Session, pattern_id: int) -> str | None:
         )
         .all()
     )
+    from .market_data import is_crypto as _is_crypto
+
+    ac = (pat.asset_class or "all").strip().lower()
+    if ac in ("stock", "equity", "equities"):
+        ac = "stocks"
+    if ac == "crypto":
+        bts = [b for b in bts if _is_crypto(b.ticker or "")]
+    elif ac == "stocks":
+        bts = [b for b in bts if not _is_crypto(b.ticker or "")]
+
     if len(bts) < 5:
         return pat.ticker_scope
 
@@ -5562,9 +5603,11 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
 
     Returns summary stats for logging.
     """
+    from ...config import settings as _evo_settings
     from ...models.trading import (
         ScanPattern, TradingInsight, BacktestResult, LearningEvent,
     )
+    from .evolution_objective import compute_variant_fitness
 
     stats: dict[str, Any] = {
         "forked_exit": 0, "forked_entry": 0, "forked_combo": 0,
@@ -5617,7 +5660,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         .all()
     )
 
-    min_bt_per_variant = 5
+    min_bt_per_variant = max(1, int(getattr(_evo_settings, "brain_evolution_min_trades", 5)))
     loss_reports_by_parent: dict[int, dict[str, Any]] = {}
 
     for (parent_id,) in parents_with_children:
@@ -5695,15 +5738,19 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                         stats["insights_consumed"] = stats.get("insights_consumed", 0) + 1
             
             adj_sharpe = avg_sharpe + insight_adj
-            variant_scores.append((sib, adj_sharpe, wr, len(bts)))
+            avg_ret = sum(float(bt.return_pct or 0) for bt in bts) / len(bts)
+            fitness = compute_variant_fitness(
+                adj_sharpe, wr, avg_ret, len(bts), settings=_evo_settings,
+            )
+            variant_scores.append((sib, fitness, adj_sharpe, wr, len(bts)))
 
         if not variant_scores or len(variant_scores) < 2:
             continue
 
-        variant_scores.sort(key=lambda x: (x[1], x[2]), reverse=True)
+        variant_scores.sort(key=lambda x: x[1], reverse=True)
         winner = variant_scores[0][0]
-        winner_sharpe = variant_scores[0][1]
-        winner_wr = variant_scores[0][2]
+        winner_sharpe = variant_scores[0][2]
+        winner_wr = variant_scores[0][3]
 
         if winner.origin == "exit_variant" and winner.exit_config:
             parent.exit_config = winner.exit_config
@@ -5732,8 +5779,8 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
 
         # ── 3. Loss analysis for worst variant ───────────────────────
         worst = variant_scores[-1][0]
-        worst_sharpe = variant_scores[-1][1]
-        worst_wr = variant_scores[-1][2]
+        worst_sharpe = variant_scores[-1][2]
+        worst_wr = variant_scores[-1][3]
         loss_report = None
         if worst_wr < 0.5:
             loss_report = _analyze_variant_losses(db, worst.id)
@@ -5741,7 +5788,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
                 loss_reports_by_parent[parent_id] = loss_report
                 stats["loss_reports"] += 1
 
-        for loser, l_sharpe, l_wr, l_bt_count in variant_scores[1:]:
+        for loser, _l_fit, l_sharpe, l_wr, l_bt_count in variant_scores[1:]:
             if l_bt_count < 8:
                 continue
             sharpe_gap = winner_sharpe - l_sharpe
@@ -6038,6 +6085,7 @@ def run_learning_cycle(
         queue_result = _auto_backtest_from_queue(db, user_id)
         report["queue_backtests_run"] = queue_result.get("backtests_run", 0)
         report["queue_patterns_processed"] = queue_result.get("patterns_processed", 0)
+        report["queue_exploration_added"] = queue_result.get("queue_exploration_added", 0)
         report["queue_pending"] = queue_result.get("pending", 0)
         report["queue_empty"] = queue_result.get("queue_empty", True)
         report["backtests_run"] = bt_count + queue_result.get("backtests_run", 0)

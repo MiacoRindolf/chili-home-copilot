@@ -764,7 +764,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
         </div>
         <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:6px 0 8px 0;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
-          <strong>How it works:</strong> The <strong>worker</strong> is a <em>separate</em> OS process (<code style="font-size:9px">scripts/brain_worker.py</code>), not this HTTPS server. It must use the same <strong>DATABASE_URL</strong> as the app (same <code>.env</code> when you start the worker).
+          <strong>How it works:</strong> <strong>Start / Stop</strong> control the Docker Compose <code style="font-size:9px">brain-worker</code> service (same image as the app, running <code>scripts/brain_worker.py</code>), not a subprocess inside this web server. In Docker, the <code>chili</code> container needs the Docker socket mounted so the API can start that service. Same <strong>DATABASE_URL</strong> / shared volume as this app.
           <strong>Run next cycle</strong> only skips <em>idle sleep</em> between full learning cycles; it does not interrupt a cycle that is already running.
           <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug — same rules as the worker).
         </div>
@@ -790,19 +790,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-decayed">0</div><div class="bw-stat-lbl">Decayed</div></div>
-          </div>
-          <div class="bw-evidence-panel" id="bw-evidence-panel" style="margin-top:10px;padding:8px;border-radius:6px;background:var(--card);border:1px solid var(--border);font-size:11px">
-            <div style="font-weight:600;margin-bottom:6px;color:var(--text-muted)">Pattern evidence (trade analytics)</div>
-            <label style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-              <span>Pattern ID</span>
-              <input type="number" id="bw-evidence-pattern-id" min="1" step="1" style="width:72px;padding:4px;border-radius:4px;border:1px solid var(--border);background:var(--bg)" placeholder="id" />
-            </label>
-            <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px">
-              <button type="button" class="btn btn-sm" id="bw-evidence-load" style="font-size:10px">Load analytics</button>
-              <button type="button" class="btn btn-sm" id="bw-evidence-propose" style="font-size:10px">Propose hypotheses</button>
-              <button type="button" class="btn btn-sm" id="bw-evidence-ml" style="font-size:10px">Train ML (rows)</button>
-            </div>
-            <pre id="bw-evidence-out" style="margin:0;max-height:160px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted)"></pre>
           </div>
           <div class="bw-queue-status" id="bw-queue-status">
             <div class="bw-queue-header">
@@ -1972,51 +1959,51 @@ function wakeBrainWorker() {
     });
 }
 
-var _bwEvidenceWired = false;
-function wirePatternEvidencePanel() {
-  if (_bwEvidenceWired) return;
-  var loadBtn = document.getElementById('bw-evidence-load');
-  var propBtn = document.getElementById('bw-evidence-propose');
-  var mlBtn = document.getElementById('bw-evidence-ml');
-  var out = document.getElementById('bw-evidence-out');
-  if (!loadBtn || !out) return;
-  _bwEvidenceWired = true;
-  function pid() {
-    var el = document.getElementById('bw-evidence-pattern-id');
-    var v = el ? parseInt(el.value, 10) : 0;
-    return v > 0 ? v : 0;
+/** Row-level trade analytics (ScanPattern id). Same APIs as former Brain Worker panel. */
+function _evTradeAnalyticsSpId() {
+  return window._currentBacktestPatternId || null;
+}
+function evTradeAnalyticsLoad() {
+  var out = document.getElementById('ev-trade-analytics-out');
+  var spId = _evTradeAnalyticsSpId();
+  if (!spId) {
+    if (out) { out.style.display = 'block'; out.textContent = 'No ScanPattern linked to this insight yet. Try again after evidence loads, or ensure the pattern is linked.'; }
+    return;
   }
-  loadBtn.addEventListener('click', function() {
-    var id = pid();
-    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
-    out.textContent = 'Loading…';
-    fetch('/api/trading/brain/pattern/' + id + '/trade-analytics')
-      .then(function(r){return r.json();})
-      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
-      .catch(function(){ out.textContent = 'Request failed'; });
-  });
-  if (propBtn) propBtn.addEventListener('click', function() {
-    var id = pid();
-    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
-    out.textContent = 'Proposing…';
-    fetch('/api/trading/brain/pattern/' + id + '/evidence/propose', {method: 'POST'})
-      .then(function(r){return r.json();})
-      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
-      .catch(function(){ out.textContent = 'Request failed'; });
-  });
-  if (mlBtn) mlBtn.addEventListener('click', function() {
-    var id = pid();
-    if (!id) { out.textContent = 'Enter a pattern ID'; return; }
-    out.textContent = 'Training…';
-    fetch('/api/trading/brain/pattern/' + id + '/trade-ml')
-      .then(function(r){return r.json();})
-      .then(function(d){ out.textContent = JSON.stringify(d, null, 2); })
-      .catch(function(){ out.textContent = 'Request failed'; });
-  });
+  if (out) { out.style.display = 'block'; out.textContent = 'Loading…'; }
+  fetch('/api/trading/brain/pattern/' + spId + '/trade-analytics')
+    .then(function(r){return r.json();})
+    .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
+    .catch(function(){ if (out) out.textContent = 'Request failed'; });
+}
+function evTradeAnalyticsPropose() {
+  var out = document.getElementById('ev-trade-analytics-out');
+  var spId = _evTradeAnalyticsSpId();
+  if (!spId) {
+    if (out) { out.style.display = 'block'; out.textContent = 'No ScanPattern linked to this insight yet.'; }
+    return;
+  }
+  if (out) { out.style.display = 'block'; out.textContent = 'Proposing…'; }
+  fetch('/api/trading/brain/pattern/' + spId + '/evidence/propose', {method: 'POST'})
+    .then(function(r){return r.json();})
+    .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
+    .catch(function(){ if (out) out.textContent = 'Request failed'; });
+}
+function evTradeAnalyticsMl() {
+  var out = document.getElementById('ev-trade-analytics-out');
+  var spId = _evTradeAnalyticsSpId();
+  if (!spId) {
+    if (out) { out.style.display = 'block'; out.textContent = 'No ScanPattern linked to this insight yet.'; }
+    return;
+  }
+  if (out) { out.style.display = 'block'; out.textContent = 'Training…'; }
+  fetch('/api/trading/brain/pattern/' + spId + '/trade-ml')
+    .then(function(r){return r.json();})
+    .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
+    .catch(function(){ if (out) out.textContent = 'Request failed'; });
 }
 
 function startBwPolling() {
-  wirePatternEvidencePanel();
   var qLink = document.getElementById('bw-queue-debug-link');
   if (qLink && !qLink._bwWired) {
     qLink._bwWired = true;
@@ -2461,8 +2448,13 @@ function renderPatterns() {
   all.sort(function(a,b) {
     var d = 0;
     if (sortKey === 'win_rate') {
+      var nA = (a.win_count||0)+(a.loss_count||0);
+      var nB = (b.win_count||0)+(b.loss_count||0);
+      if (nA > 0 && nB === 0) return -1;
+      if (nA === 0 && nB > 0) return 1;
+      if (nA === 0 && nB === 0) return (b.confidence||0) - (a.confidence||0);
       d = (b.win_rate||0) - (a.win_rate||0);
-      if (d === 0) d = ((b.win_count||0)+(b.loss_count||0)) - ((a.win_count||0)+(a.loss_count||0));
+      if (d === 0) d = nB - nA;
       if (d === 0) d = (b.confidence||0) - (a.confidence||0);
     } else if (sortKey === 'evidence') {
       d = (b.evidence_count||0) - (a.evidence_count||0);
@@ -2516,10 +2508,15 @@ function renderPatterns() {
 
     var heroValue, heroLabel, heroColor;
     if (sortKey === 'win_rate') {
-      var wr = p.win_rate != null ? p.win_rate : 0;
-      heroValue = wr + '%';
-      heroLabel = 'win rate';
-      heroColor = wr >= 60 ? '#22c55e' : wr >= 45 ? '#f59e0b' : '#ef4444';
+      if (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0) {
+        heroValue = p.win_rate + '%';
+        heroLabel = 'win rate';
+        heroColor = p.win_rate >= 60 ? '#22c55e' : p.win_rate >= 45 ? '#f59e0b' : '#ef4444';
+      } else {
+        heroValue = '—';
+        heroLabel = 'no BT WR yet';
+        heroColor = 'var(--text-muted)';
+      }
     } else if (sortKey === 'evidence') {
       heroValue = p.evidence_count || 0;
       heroLabel = 'evidence';
@@ -2531,10 +2528,12 @@ function renderPatterns() {
     }
 
     var wrHtml = '';
-    if (p.win_rate != null) {
+    if (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0) {
       var wrClass = p.win_rate >= 60 ? 'wr-good' : p.win_rate >= 45 ? 'wr-mid' : 'wr-bad';
       wrHtml = '<span class="pc-pill ' + wrClass + '">' + p.win_rate + '% win</span>' +
                '<span class="pc-pill">' + (p.win_count||0) + 'W / ' + (p.loss_count||0) + 'L</span>';
+    } else {
+      wrHtml = '<span class="pc-pill" style="opacity:.85;border-style:dashed" title="No saved per-ticker backtests with trades yet">no BT WR</span>';
     }
     if (sortKey !== 'confidence') {
       wrHtml += '<span class="pc-pill" style="opacity:.7">' + p.confidence + '% conf</span>';
@@ -2643,9 +2642,19 @@ function showPatternDetail(patternId) {
   var html = '<div id="ev-pattern-desc" style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(patLine) + '</div>';
   html += '<div id="ev-stat-cards" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence</div></div>' +
-    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '--') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_count != null && (p.win_count + (p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : '') + '</div></div>' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '<span style="color:var(--text-muted)">--</span>') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : ' <span style="font-size:8px">(saved backtests)</span>') + '</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700;color:' + barColor + '">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div></div>';
   html += '<div id="ev-computed-row" style="display:none;margin-top:8px"></div>';
+  html += '<div id="ev-trade-analytics-row" style="margin-top:10px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card)">' +
+    '<div style="font-size:10px;font-weight:600;color:var(--text-muted);margin-bottom:4px">Trade analytics (row-level)</div>' +
+    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Uses your linked <strong>ScanPattern</strong> (same id as Boost). Output appears below when you run an action.</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:6px">' +
+    '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsLoad()">Load analytics</button>' +
+    '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsPropose()">Propose hypotheses</button>' +
+    '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsMl()">Train ML (rows)</button>' +
+    '</div>' +
+    '<pre id="ev-trade-analytics-out" style="display:none;margin-top:8px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg)"></pre>' +
+    '</div>';
   html += '<div id="ev-wr-progress-wrap" style="display:none;margin-top:10px">' +
     '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> (between Live Evidence Stats and the tabs — not inside Timeline). Each point = deduped win rate after another backtest with trades (latest per ticker/strategy).</div>' +
     '<div id="ev-wr-progress-chart" style="height:140px;width:100%"></div></div>';
@@ -2677,8 +2686,8 @@ function showPatternDetail(patternId) {
   }
   openBrainModal('Pattern Evidence', html, footer);
   window._currentEvidencePatternId = p.id;
-  /* Backtest API expects ScanPattern id; learn/patterns uses TradingInsight id */
-  window._currentBacktestPatternId = p.scan_pattern_id || p.id;
+  /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
+  window._currentBacktestPatternId = p.scan_pattern_id || null;
   window._evoTabLoaded = false;
 
   fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(function(r){return r.json();}).then(function(d) {
@@ -2695,14 +2704,25 @@ function showPatternDetail(patternId) {
     _renderEvHypotheses(d.hypotheses || []);
     _renderEvTrades(d.trades || []);
     _renderEvBacktests(d.backtests || []);
-    if (d.insight && d.insight.win_rate != null) {
+    if (d.insight) {
       var wrEl = document.getElementById('ev-wr-val');
       var wrLbl = document.getElementById('ev-wr-label');
+      var wc = d.insight.win_count != null ? d.insight.win_count : 0;
+      var lc = d.insight.loss_count != null ? d.insight.loss_count : 0;
+      var hasBt = (wc + lc) > 0 && d.insight.win_rate != null;
       if (wrEl) {
-        var wrColor = d.insight.win_rate >= 50 ? '#22c55e' : '#ef4444';
-        wrEl.innerHTML = '<span style="color:' + wrColor + '">' + d.insight.win_rate + '%</span>';
+        if (hasBt) {
+          var wrColor = d.insight.win_rate >= 50 ? '#22c55e' : '#ef4444';
+          wrEl.innerHTML = '<span style="color:' + wrColor + '">' + d.insight.win_rate + '%</span>';
+        } else {
+          wrEl.innerHTML = '<span style="color:var(--text-muted)">--</span>';
+        }
       }
-      if (wrLbl) wrLbl.innerHTML = 'Win Rate (' + (d.insight.win_count||0) + 'W/' + (d.insight.loss_count||0) + 'L)';
+      if (wrLbl) {
+        wrLbl.innerHTML = hasBt
+          ? 'Win Rate (' + wc + 'W/' + lc + 'L)'
+          : 'Win Rate <span style="font-size:8px">(no saved backtests)</span>';
+      }
     }
     var b = function(id,n){ var el=document.getElementById('ev-badge-'+id); if(el) el.textContent=n; };
     b('timeline', (d.timeline||[]).length);
@@ -2932,7 +2952,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
   var deepLink = (strategy === 'dynamic_pattern' && window._currentBacktestPatternId)
     ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentBacktestPatternId + '&period=' + encodeURIComponent(period)
     : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(period);
-  var loadMsg = btId ? 'Loading chart...' : 'Running backtest for ' + ticker + '...';
+  var loadMsg = btId ? 'Re-running backtest (aligned period/interval)…' : 'Running backtest for ' + ticker + '...';
   cell.innerHTML = '<div class="bt-chart-wrap">' +
     '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">' + loadMsg + '</span></div>' +
     '<div class="bt-chart-container" id="bt-chart-' + idx + '"></div>' +
@@ -2941,9 +2961,33 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
       '<a class="bt-chart-link" href="' + deepLink + '" target="_blank">Open Full Chart &#x2197;</a>' +
     '</div></div>';
 
-  function onChartData(d) {
+  function patchBacktestEvidenceRow(headerRow, res) {
+    if (!headerRow || !headerRow.querySelector('td')) return;
+    var tc = res.trade_count || 0;
+    var noTrades = tc === 0;
+    var ret = res.return_pct;
+    var retClass = ret > 0 ? 'ev-pnl-pos' : (ret < 0 ? 'ev-pnl-neg' : '');
+    var cells = headerRow.querySelectorAll('td');
+    if (cells[2]) {
+      cells[2].className = retClass;
+      cells[2].innerHTML = noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (ret != null ? ret.toFixed(1) + '%' : '--');
+    }
+    if (cells[3]) cells[3].textContent = noTrades ? '--' : (res.win_rate != null ? res.win_rate.toFixed(0) + '%' : '--');
+    if (cells[4]) cells[4].textContent = noTrades ? '--' : (res.sharpe != null ? res.sharpe.toFixed(2) : '--');
+    if (cells[5]) cells[5].textContent = noTrades ? '--' : (res.max_drawdown != null ? res.max_drawdown.toFixed(1) + '%' : '--');
+    if (cells[6]) cells[6].textContent = tc;
+    if (cells[8]) cells[8].textContent = res.ran_at ? new Date(res.ran_at).toLocaleDateString() : '--';
+  }
+
+  function onChartData(d, opts) {
+    opts = opts || {};
     if (!d.ok) { cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Backtest failed: ' + escHtml(d.error||'unknown') + '</div>'; return; }
     _drawBtMiniChart(idx, d);
+    /* POST /rerun already persists + returns stats; skip duplicate /refresh. Legacy POST pattern/backtest still uses /refresh to sync DB. */
+    if (opts.skipRefresh) {
+      patchBacktestEvidenceRow(chartRow.previousElementSibling, d);
+      return;
+    }
     if (btId) {
       fetch('/api/trading/learn/backtest/' + btId + '/refresh', {
         method: 'POST',
@@ -2954,25 +2998,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
           equity_curve: d.equity_curve || [],
         }),
       }).then(function(r){return r.json();}).then(function(refreshRes) {
-        if (refreshRes.ok) {
-          var headerRow = chartRow.previousElementSibling;
-          if (headerRow && headerRow.querySelector('td')) {
-            var tc = refreshRes.trade_count || 0;
-            var noTrades = tc === 0;
-            var ret = refreshRes.return_pct;
-            var retClass = ret > 0 ? 'ev-pnl-pos' : (ret < 0 ? 'ev-pnl-neg' : '');
-            var cells = headerRow.querySelectorAll('td');
-            if (cells[2]) {
-              cells[2].className = retClass;
-              cells[2].innerHTML = noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (ret != null ? ret.toFixed(1) + '%' : '--');
-            }
-            if (cells[3]) cells[3].textContent = noTrades ? '--' : (refreshRes.win_rate != null ? refreshRes.win_rate.toFixed(0) + '%' : '--');
-            if (cells[4]) cells[4].textContent = noTrades ? '--' : (refreshRes.sharpe != null ? refreshRes.sharpe.toFixed(2) : '--');
-            if (cells[5]) cells[5].textContent = noTrades ? '--' : (refreshRes.max_drawdown != null ? refreshRes.max_drawdown.toFixed(1) + '%' : '--');
-            if (cells[6]) cells[6].textContent = tc;
-            if (cells[8]) cells[8].textContent = refreshRes.ran_at ? new Date(refreshRes.ran_at).toLocaleDateString() : '--';
-          }
-        }
+        if (refreshRes.ok) patchBacktestEvidenceRow(chartRow.previousElementSibling, refreshRes);
       }).catch(function(){});
     }
   }
@@ -2980,9 +3006,16 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
     cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Error: ' + escHtml(e.message) + '</div>';
   }
 
-  runFreshBacktest();
+  if (btId) {
+    fetch('/api/trading/learn/backtest/' + btId + '/rerun', { method: 'POST' })
+      .then(function(r){return r.json();})
+      .then(function(d){ onChartData(d, { skipRefresh: true }); })
+      .catch(onChartError);
+  } else {
+    runFreshBacktestOnly();
+  }
 
-  function runFreshBacktest() {
+  function runFreshBacktestOnly() {
     if (cell.querySelector('.bt-chart-wrap')) {
       var loaderSpan = cell.querySelector('.bt-chart-wrap span');
       if (loaderSpan) loaderSpan.textContent = 'Running backtest for ' + escHtml(ticker) + '...';
@@ -2997,7 +3030,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
         body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
       });
     }
-    fetchPromise.then(function(r){return r.json();}).then(onChartData).catch(onChartError);
+    fetchPromise.then(function(r){return r.json();}).then(function(d){ onChartData(d, {}); }).catch(onChartError);
   }
 }
 

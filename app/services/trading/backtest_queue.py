@@ -18,7 +18,13 @@ from ...models.trading import ScanPattern
 
 logger = logging.getLogger(__name__)
 
-RETEST_INTERVAL_DAYS = 7  # Re-backtest patterns weekly
+
+def get_retest_interval_days() -> int:
+    """Days after which an active pattern is eligible for routine re-backtest (from Settings)."""
+    from ...config import settings
+
+    return max(1, int(getattr(settings, "brain_retest_interval_days", 7)))
+
 
 # Dashboard polls this frequently; cache avoids hammering Postgres when the pool is busy.
 _QUEUE_STATUS_LOCK = threading.Lock()
@@ -50,7 +56,7 @@ def get_pending_patterns(
 
     When ids_only=True, returns a list of pattern IDs only (lighter; workers load by id).
     """
-    cutoff = datetime.utcnow() - timedelta(days=RETEST_INTERVAL_DAYS)
+    cutoff = datetime.utcnow() - timedelta(days=get_retest_interval_days())
 
     needs_backtest = or_(
         ScanPattern.backtest_priority > 0,
@@ -161,7 +167,7 @@ def get_queue_status(db: Session, *, use_cache: bool = True) -> dict[str, Any]:
             ):
                 return dict(_QUEUE_STATUS_CACHE)
 
-    cutoff = datetime.utcnow() - timedelta(days=RETEST_INTERVAL_DAYS)
+    cutoff = datetime.utcnow() - timedelta(days=get_retest_interval_days())
 
     base = db.query(ScanPattern).filter(ScanPattern.active.is_(True))
     needs_backtest_expr = or_(
@@ -226,3 +232,32 @@ def get_next_pattern(db: Session) -> ScanPattern | None:
     """Get the single highest-priority pattern to process next."""
     patterns = get_pending_patterns(db, limit=1)
     return patterns[0] if patterns else None
+
+
+def get_exploration_pattern_ids(
+    db: Session,
+    exclude_ids: set[int],
+    limit: int,
+) -> list[int]:
+    """Extra backtest targets when the retest queue is thin.
+
+    Prefers **variant** rows (``parent_id`` set) for evolution signal, then oldest
+    ``last_backtest_at`` so the worker keeps gathering fresh stats instead of idling.
+    """
+    if limit <= 0:
+        return []
+    q = db.query(ScanPattern.id).filter(ScanPattern.active.is_(True))
+    if exclude_ids:
+        q = q.filter(~ScanPattern.id.in_(exclude_ids))
+    # Variants first (non-null parent_id), then stalest last_backtest
+    variant_first = case((ScanPattern.parent_id.isnot(None), 0), else_=1)
+    rows = (
+        q.order_by(
+            variant_first.asc(),
+            ScanPattern.last_backtest_at.asc().nullsfirst(),
+            ScanPattern.id.asc(),
+        )
+        .limit(limit)
+        .all()
+    )
+    return [r[0] for r in rows]

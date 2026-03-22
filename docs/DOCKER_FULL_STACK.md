@@ -8,7 +8,7 @@
 | `ollama` | ollama | 11434 | Local LLM |
 | `chili` | `chili-app:local` | 8000 | Main FastAPI app (**HTTPS** — self-signed cert baked into the image; browser will warn) |
 | `brain` | `chili-brain:local` | 8090 | Brain HTTP API (`chili-brain/Dockerfile`) — **HTTP** on the Docker network so the worker client does not need custom TLS trust |
-| `brain-worker` | `chili-app:local` | — | Continuous learning loop (`scripts/brain_worker.py`) |
+| `brain-worker` | `chili-app:local` | — | Continuous learning loop (`scripts/brain_worker.py`). **Start/Stop in the Brain UI** drives this service via the Docker API (the `chili` service mounts `/var/run/docker.sock`). |
 
 Shared volume: **`chili_data`** → `/app/data` (status files, caches, ML pickles).
 
