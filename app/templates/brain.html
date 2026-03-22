@@ -214,6 +214,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-section { margin-bottom: 16px; }
 .brain-section-title { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 8px; display: flex; align-items: center; gap: 6px; }
 .brain-section-title .bs-icon { font-size: 14px; }
+.tp-tradeable-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 10px; }
+.tp-tradeable-card {
+  border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px;
+  background: var(--card); transition: border-color .15s, box-shadow .15s;
+}
+.tp-tradeable-card:hover { border-color: rgba(99,102,241,.35); box-shadow: 0 2px 12px rgba(99,102,241,.06); }
+.brain-quant-doctrine {
+  font-size: 10px;
+  line-height: 1.55;
+  color: var(--text-secondary);
+  background: var(--card, rgba(99,102,241,.06));
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  margin-bottom: 14px;
+}
+.brain-quant-doctrine ul { margin: 8px 0 0 1.1em; padding: 0; }
+.brain-quant-doctrine li { margin-bottom: 5px; }
+.brain-quant-doctrine strong { color: var(--text); }
 
 /* Thesis card */
 .brain-thesis-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; position: relative; overflow: hidden; }
@@ -304,6 +323,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .pc-pill.wr-good { background:rgba(34,197,94,.1); color:#16a34a; }
 .pc-pill.wr-mid { background:rgba(245,158,11,.1); color:#d97706; }
 .pc-pill.wr-bad { background:rgba(239,68,68,.1); color:#dc2626; }
+.pc-evidence-strip { display:flex; flex-wrap:wrap; gap:5px; margin:6px 0 2px 0; align-items:center; }
+.pc-pill-muted { opacity:.72; border:1px dashed var(--border); background:transparent !important; color:var(--text-muted) !important; }
 .pattern-card .pc-tickers { display:flex; gap:4px; margin-top:6px; flex-wrap:wrap; }
 .pattern-card .pc-ticker { padding:1px 6px; border-radius:4px; background:rgba(139,92,246,.1); color:#8b5cf6; font-size:9px; font-weight:600; cursor:pointer; }
 .pattern-card .pc-footer { display:flex; align-items:center; justify-content:space-between; margin-top:6px; font-size:9px; color:var(--text-muted); }
@@ -705,6 +726,18 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <span id="brain-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
       </div>
 
+      <div class="brain-quant-doctrine" id="brain-quant-doctrine">
+        <strong style="font-size:11px;color:var(--text)">Quant operating model</strong>
+        <span style="display:block;font-size:9px;color:var(--text-muted);margin-top:2px">Research discipline for this desk — robust evidence, not one hero curve.</span>
+        <ul>
+          <li><strong>Hypothesis first</strong> — treat each pattern as testable; say what would falsify it.</li>
+          <li><strong>Universe &amp; timeframe</strong> — asset class, symbols or filters, and bar size before trusting stats.</li>
+          <li><strong>In-sample vs out-of-sample</strong> — prefer OOS / hold-out when CHILI exposes it; flag when only IS exists.</li>
+          <li><strong>Costs &amp; tails</strong> — commission/spread proxies in backtests; max drawdown and streak risk matter.</li>
+          <li><strong>Sample size</strong> — low trade counts are noisy; stability beats a single pretty equity line.</li>
+        </ul>
+      </div>
+
       <div class="brain-section" id="brain-pipeline-section" style="display:none">
         <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Learning In Progress</div>
         <div class="brain-live-pipeline" id="brain-pipeline-steps"></div>
@@ -736,6 +769,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <div class="cr-flip-face cr-flip-front">
                 <div id="cycle-report-front-date" style="font-size:11px;font-weight:700;color:var(--accent)"></div>
                 <div id="cycle-report-front-metrics" style="font-size:10px;color:var(--text-muted);margin-top:6px"></div>
+                <div id="cycle-report-front-robustness" style="font-size:9px;color:var(--text-secondary);margin-top:5px;line-height:1.45"></div>
                 <div class="cr-flip-front-preview" id="cycle-report-front-preview"></div>
                 <div style="font-size:9px;color:var(--text-muted);margin-top:10px">Click to flip for full report</div>
               </div>
@@ -856,6 +890,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </div>
       </div>
 
+      <div class="brain-section" id="brain-tradeable-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F9E0;</span> Tradeable patterns
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:420px;line-height:1.35">Promoted scan patterns meeting OOS / sample-size gates. Open in Trading to run a pattern backtest.</span>
+          <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading…</div>
+      </div>
+
       <div class="brain-section">
         <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
           <span class="bs-icon">&#x1F52E;</span> Live Predictions
@@ -918,11 +961,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <aside class="tba-panel" id="trading-brain-assistant-section">
         <div class="tba-panel-header">&#x1F916; Trading Brain Assistant</div>
         <div class="tba-panel-body">
-          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask about worker status, queue, patterns, evolution. Grounded in the trading DB.</p>
+          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask about worker status, queue, patterns, evolution — and evidence quality (OOS, drawdown, sample size). Grounded in the trading DB.</p>
           <div class="tba-chips" id="tba-chips">
             <button type="button" class="tba-chip" data-msg="What is the worker doing?">What is the worker doing?</button>
             <button type="button" class="tba-chip" data-msg="Backtest queue status">Backtest queue status</button>
             <button type="button" class="tba-chip" data-msg="What should we evolve next?">What should we evolve next?</button>
+            <button type="button" class="tba-chip" data-msg="Which learned patterns have the strongest evidence (trade count, OOS, drawdown)?">Strongest pattern evidence</button>
+            <button type="button" class="tba-chip" data-msg="Explain how CHILI separates in-sample vs out-of-sample in pattern backtests and what to trust.">IS vs OOS in backtests</button>
             <button type="button" class="tba-chip" data-msg="Search patterns mentioning BTC">Search patterns mentioning BTC</button>
             <button type="button" class="tba-chip" data-msg="Summarize recent activity">Summarize recent activity</button>
           </div>
@@ -1317,6 +1362,41 @@ function _disposeEvWrProgressChart() {
     _evWrProgressChart = null;
   }
 }
+
+/** Read fetch Response as text; parse JSON only when body looks like JSON (avoids JSON.parse on HTML error pages). */
+function parseFetchJson(r) {
+  return r.text().then(function(t) {
+    var trimmed = (t || '').trim();
+    var first = trimmed.charAt(0);
+    if (first === '{' || first === '[') {
+      try {
+        return JSON.parse(trimmed);
+      } catch (e) {
+        return Promise.reject(new Error('Invalid JSON in response (HTTP ' + r.status + '): ' + e.message));
+      }
+    }
+    if (!r.ok) {
+      var snippet = trimmed.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 120);
+      return Promise.reject(new Error('HTTP ' + r.status + (snippet ? ': ' + snippet : '')));
+    }
+    return Promise.reject(new Error('Expected JSON; got: ' + (trimmed.slice(0, 80).replace(/\s+/g, ' ') || 'empty')));
+  });
+}
+
+/** Pattern-card badge text for sector / ticker_specific scope (never throws on bad JSON). */
+function _fmtScopeTickersBadge(p) {
+  if (!p || !p.ticker_scope || p.ticker_scope === 'universal') return '';
+  if (!p.scope_tickers) return escHtml(p.ticker_scope);
+  try {
+    var arr = JSON.parse(p.scope_tickers);
+    if (!Array.isArray(arr)) return escHtml(p.ticker_scope);
+    var parts = arr.map(function(t) { return escHtml(String(t)); });
+    if (p.ticker_scope === 'sector') return 'sector: ' + parts.join(', ');
+    if (p.ticker_scope === 'ticker_specific') return 'tickers: ' + parts.slice(0, 3).join(', ');
+  } catch (e) {}
+  return escHtml(p.ticker_scope);
+}
+
 function _renderEvWrProgress(series) {
   _disposeEvWrProgressChart();
   var wrap = document.getElementById('ev-wr-progress-wrap');
@@ -1324,7 +1404,7 @@ function _renderEvWrProgress(series) {
   if (!wrap || !el) return;
   wrap.style.display = 'block';
   if (!series || series.length === 0) {
-    el.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:8px">No backtest runs with trades in history to chart yet.</div>';
+    el.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:8px">No sibling-linked backtest history yet (run backtests from this pattern).</div>';
     return;
   }
   var chartData = series.map(function(pt) { return { time: pt.time, value: pt.win_rate }; });
@@ -1972,9 +2052,9 @@ function evTradeAnalyticsLoad() {
   }
   if (out) { out.style.display = 'block'; out.textContent = 'Loading…'; }
   fetch('/api/trading/brain/pattern/' + spId + '/trade-analytics')
-    .then(function(r){return r.json();})
+    .then(parseFetchJson)
     .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
-    .catch(function(){ if (out) out.textContent = 'Request failed'; });
+    .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
 }
 function evTradeAnalyticsPropose() {
   var out = document.getElementById('ev-trade-analytics-out');
@@ -1985,9 +2065,9 @@ function evTradeAnalyticsPropose() {
   }
   if (out) { out.style.display = 'block'; out.textContent = 'Proposing…'; }
   fetch('/api/trading/brain/pattern/' + spId + '/evidence/propose', {method: 'POST'})
-    .then(function(r){return r.json();})
+    .then(parseFetchJson)
     .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
-    .catch(function(){ if (out) out.textContent = 'Request failed'; });
+    .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
 }
 function evTradeAnalyticsMl() {
   var out = document.getElementById('ev-trade-analytics-out');
@@ -1998,9 +2078,9 @@ function evTradeAnalyticsMl() {
   }
   if (out) { out.style.display = 'block'; out.textContent = 'Training…'; }
   fetch('/api/trading/brain/pattern/' + spId + '/trade-ml')
-    .then(function(r){return r.json();})
+    .then(parseFetchJson)
     .then(function(d){ if (out) out.textContent = JSON.stringify(d, null, 2); })
-    .catch(function(){ if (out) out.textContent = 'Request failed'; });
+    .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
 }
 
 function startBwPolling() {
@@ -2158,6 +2238,7 @@ function loadBrainDashboard() {
   });
   loadBrainActivity();
   loadLearnedPatterns();
+  loadTradeablePatterns();
   loadBrainPredictions();
   loadCycleAiReportsPage(true);
   pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
@@ -2165,6 +2246,8 @@ function loadBrainDashboard() {
   brainPollInterval = setInterval(function() {
     pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
   }, 3000);
+  if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
+  window._tradeablePatternsInterval = setInterval(loadTradeablePatterns, 120000);
 }
 
 function showAccuracyDetail(type) {
@@ -2271,6 +2354,55 @@ function showThesisDetail() {
   if (typeof marked !== 'undefined') { try { html += '<div style="line-height:1.7">' + marked.parse(d.thesis||'') + '</div>'; } catch(e) { html += '<pre>' + escHtml(d.thesis) + '</pre>'; } }
   else html += '<pre>' + escHtml(d.thesis) + '</pre>';
   openBrainModal('Market Thesis', html, '<button onclick="closeBrainModal();loadBrainThesis()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff">&#x1F504; Regenerate</button>');
+}
+
+function loadTradeablePatterns() {
+  var container = document.getElementById('brain-tradeable-patterns');
+  if (!container) return;
+  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading tradeable patterns…</div>';
+  fetch('/api/trading/brain/tradeable-patterns').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok || !d.patterns) {
+      container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Could not load tradeable patterns.</div>';
+      return;
+    }
+    if (!d.patterns.length) {
+      container.innerHTML = '<div style="padding:10px;color:var(--text-muted);line-height:1.5">No patterns match the current gates (promoted status, min OOS win rate, min trades). Run the brain worker to promote more patterns, or adjust <code style="font-size:9px">brain_tradeable_*</code> in config.</div>';
+      return;
+    }
+    var html = '<div class="tp-tradeable-grid">';
+    d.patterns.forEach(function(p) {
+      var wr = p.display_win_rate_pct != null ? p.display_win_rate_pct + '%' : '--';
+      var wrNote = p.display_wr_source === 'oos' ? 'OOS' : (p.display_wr_source === 'in_sample' ? 'IS' : '');
+      var trades = p.trade_count_for_gate != null ? p.trade_count_for_gate : '--';
+      var bench = '';
+      if (p.bench_passes_gate === true) {
+        bench = '<span style="font-size:8px;padding:2px 6px;border-radius:4px;background:rgba(34,197,94,.15);color:#22c55e">Bench pass</span>';
+      } else if (p.bench_passes_gate === false) {
+        bench = '<span style="font-size:8px;color:var(--text-muted)">Bench: no</span>';
+      }
+      var rawName = (p.name || ('Pattern #' + p.id));
+      var name = escHtml(rawName.length > 64 ? rawName.slice(0, 61) + '…' : rawName);
+      var tf = escHtml(p.timeframe || '—');
+      var ac = escHtml(p.asset_class || '—');
+      var promo = escHtml((p.promotion_status || '').replace(/</g, ''));
+      var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
+      html += '<div class="tp-tradeable-card">' +
+        '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px;line-height:1.35">' + name + '</div>' +
+        '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:10px;color:var(--text-secondary)">' +
+          '<span><strong style="color:var(--text)">' + wr + '</strong> WR' + (wrNote ? ' <span style="color:var(--text-muted)">(' + wrNote + ')</span>' : '') + '</span>' +
+          '<span>' + trades + ' trades</span>' +
+          '<span>' + tf + ' · ' + ac + '</span>' +
+          '<span style="font-size:8px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent)">' + promo + '</span>' +
+          bench +
+        '</div>' +
+        '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading →</a>' +
+      '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }).catch(function() {
+    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load.</div>';
+  });
 }
 
 function loadBrainPredictions() {
@@ -2386,11 +2518,11 @@ function filterBrainEvents(filter, btn) {
 }
 
 function loadLearnedPatterns() {
-  fetch('/api/trading/learn/patterns').then(function(r){return r.json();}).then(function(d) {
+  fetch('/api/trading/learn/patterns').then(parseFetchJson).then(function(d) {
     if (!d.ok) return;
     window._brainPatterns = {active: d.active, demoted: d.demoted};
     renderPatterns();
-  });
+  }).catch(function(){});
 }
 
 function togglePatChip(el) {
@@ -2538,8 +2670,63 @@ function renderPatterns() {
     if (sortKey !== 'confidence') {
       wrHtml += '<span class="pc-pill" style="opacity:.7">' + p.confidence + '% conf</span>';
     }
+    if (p.promotion_status && p.promotion_status !== 'legacy') {
+      var ps = String(p.promotion_status).replace(/_/g, ' ');
+      wrHtml += '<span class="pc-pill" style="opacity:.85;font-size:9px" title="Promotion gate">' + escHtml(ps) + '</span>';
+    }
+    if (p.backtest_spread_used != null || p.backtest_commission_used != null) {
+      var fr = [];
+      if (p.backtest_commission_used != null) fr.push('fee ' + (p.backtest_commission_used * 100).toFixed(2) + '%');
+      if (p.backtest_spread_used != null) fr.push('spr ' + (p.backtest_spread_used * 10000).toFixed(1) + 'bp');
+      wrHtml += '<span class="pc-pill" style="opacity:.65;font-size:9px" title="Backtest friction assumptions">' + fr.join(' · ') + '</span>';
+    }
 
     var retHtml = p.avg_return != null ? '<span class="pc-pill">' + (p.avg_return > 0 ? '+' : '') + p.avg_return + '% avg</span>' : '';
+
+    var btTrades = p.bt_total_trades;
+    var hasSimTrades = btTrades != null && btTrades > 0;
+    var ddVal = p.bt_worst_max_drawdown;
+    var ddStr = '—';
+    if (ddVal != null && ddVal !== undefined && hasSimTrades) {
+      var ddn = typeof ddVal === 'number' ? ddVal : parseFloat(ddVal);
+      if (!isNaN(ddn)) ddStr = ddn.toFixed(1) + '%';
+    }
+    var oosWrVal = p.oos_win_rate;
+    var oosWrStr = (oosWrVal != null && oosWrVal !== undefined) ? (oosWrVal + '%') : '—';
+    var oosPillClass = 'pc-pill';
+    if (oosWrVal != null && oosWrVal !== undefined) {
+      oosPillClass += oosWrVal >= 50 ? ' wr-good' : oosWrVal >= 40 ? ' wr-mid' : ' wr-bad';
+    } else {
+      oosPillClass += ' pc-pill-muted';
+    }
+    var oosTitle = 'Pattern-level OOS win rate (held-out bars).';
+    if (oosWrVal == null || oosWrVal === undefined) oosTitle += ' Not evaluated yet.';
+    if (p.oos_trade_count != null && p.oos_trade_count > 0) oosTitle += ' OOS trades: ' + p.oos_trade_count + '.';
+    var tradesStr = hasSimTrades ? String(btTrades) : '—';
+    var evidenceStrip = '<div class="pc-evidence-strip">' +
+      '<span class="pc-pill' + (hasSimTrades ? '' : ' pc-pill-muted') + '" title="Total simulated trades across deduped backtests (sibling-linked insights, one row per ticker).">' +
+        'Trades <b>' + tradesStr + '</b></span>' +
+      '<span class="pc-pill' + (ddStr !== '—' ? '' : ' pc-pill-muted') + '" title="Worst max drawdown among those backtests (most negative %).">' +
+        'Max DD <b>' + ddStr + '</b></span>' +
+      '<span class="' + oosPillClass + '" title="' + escHtml(oosTitle) + '">' +
+        'OOS WR <b>' + oosWrStr + '</b></span>' +
+      '</div>';
+
+    var benchStrip = '';
+    if (p.bench_fold_summary) {
+      var bGate = p.bench_passes_gate;
+      var bPillClass = 'pc-pill';
+      if (bGate === true) bPillClass += ' wr-good';
+      else if (bGate === false) bPillClass += ' wr-bad';
+      else bPillClass += ' pc-pill-muted';
+      var bTip = 'Benchmark walk-forward (config tickers, contiguous windows). Positive folds / total. ';
+      if (p.bench_evaluated_at) bTip += 'Evaluated: ' + p.bench_evaluated_at + '. ';
+      if (bGate === true) bTip += 'Passes fold-ratio gate.';
+      else if (bGate === false) bTip += 'Does not pass fold-ratio gate.';
+      benchStrip = '<div class="pc-evidence-strip" style="margin-top:2px">' +
+        '<span class="' + bPillClass + '" style="font-size:8px" title="' + escHtml(bTip) + '">Bench <b>' +
+        escHtml(p.bench_fold_summary) + '</b></span></div>';
+    }
 
     var tickersHtml = '';
     var sectors = p.sectors || [];
@@ -2594,15 +2781,15 @@ function renderPatterns() {
         variantBadge + bestExitBadge +
         (p.ticker_scope && p.ticker_scope !== 'universal' ?
           '<span class="evo-origin-badge" style="background:rgba(234,179,8,.12);color:#eab308;font-size:7px">' +
-          (p.ticker_scope === 'sector' ? 'sector' + (p.scope_tickers ? ': ' + JSON.parse(p.scope_tickers).join(', ') : '') :
-           p.ticker_scope === 'ticker_specific' ? 'tickers' + (p.scope_tickers ? ': ' + JSON.parse(p.scope_tickers).slice(0,3).join(', ') : '') :
-           p.ticker_scope) + '</span>' : '') +
+          _fmtScopeTickersBadge(p) + '</span>' : '') +
         '<span class="pc-conf" style="color:' + heroColor + '">' + heroValue + '<span style="display:block;font-size:8px;font-weight:400;opacity:.6">' + heroLabel + '</span></span>' +
       '</div>' +
       '<div class="pc-desc" title="' + escHtml(p.pattern_display || p.pattern) + '">' + escHtml(p.pattern_display || p.pattern) + '</div>' +
       parentCrumb +
+      evidenceStrip +
+      benchStrip +
       '<div class="pc-stats">' +
-        '<span class="pc-pill">' + p.evidence_count + ' evidence</span>' +
+        '<span class="pc-pill">' + p.evidence_count + ' evidence files</span>' +
         wrHtml + retHtml +
       '</div>' +
       tickersHtml +
@@ -2615,19 +2802,77 @@ function renderPatterns() {
   el.innerHTML = html;
 }
 
+function _syncEvPineStrategyUi() {
+  var id = window._currentBacktestPatternId;
+  var fetchBtn = document.getElementById('ev-pine-fetch-btn');
+  if (fetchBtn) fetchBtn.disabled = !id;
+}
+
+function evPineStrategyFetch() {
+  var id = window._currentBacktestPatternId;
+  if (!id) return;
+  var ta = document.getElementById('ev-pine-text');
+  var warnEl = document.getElementById('ev-pine-warnings');
+  var copyBtn = document.getElementById('ev-pine-copy-btn');
+  if (copyBtn) copyBtn.disabled = true;
+  if (ta) { ta.style.display = 'block'; ta.value = 'Loading…'; }
+  if (warnEl) { warnEl.style.display = 'none'; warnEl.textContent = ''; }
+  fetch('/api/trading/patterns/' + encodeURIComponent(id) + '/export/pine?kind=strategy').then(parseFetchJson).then(function(d) {
+    if (!d.ok) {
+      if (ta) ta.value = '';
+      if (warnEl) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = d.error || 'Export failed';
+      }
+      return;
+    }
+    if (ta) ta.value = d.pine || '';
+    if (copyBtn) copyBtn.disabled = !(d.pine);
+    if (warnEl) {
+      if (d.warnings && d.warnings.length) {
+        warnEl.style.display = 'block';
+        warnEl.textContent = d.warnings.join(' ');
+      } else {
+        warnEl.style.display = 'none';
+        warnEl.textContent = '';
+      }
+    }
+  }).catch(function(err) {
+    if (ta) ta.value = '';
+    if (warnEl) {
+      warnEl.style.display = 'block';
+      warnEl.textContent = (err && err.message) ? err.message : 'Network error';
+    }
+  });
+}
+
+function evPineStrategyCopy() {
+  var ta = document.getElementById('ev-pine-text');
+  if (!ta || !ta.value) return;
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(ta.value).catch(function() {
+      ta.select();
+      try { document.execCommand('copy'); } catch (e) {}
+    });
+  } else {
+    ta.select();
+    try { document.execCommand('copy'); } catch (e) {}
+  }
+}
+
 function showPatternByScanPatternId(spId) {
   var all = ((window._brainPatterns || {}).active || []).concat((window._brainPatterns || {}).demoted || []);
   var p = all.find(function(x){ return x.scan_pattern_id === spId; });
   if (p) {
     showPatternDetail(p.id);
   } else {
-    fetch('/api/trading/learn/patterns').then(function(r){return r.json();}).then(function(d) {
+    fetch('/api/trading/learn/patterns').then(parseFetchJson).then(function(d) {
       if (!d.ok) return;
       window._brainPatterns = {active: d.active, demoted: d.demoted};
       var refreshed = (d.active || []).concat(d.demoted || []);
       var found = refreshed.find(function(x){ return x.scan_pattern_id === spId; });
       if (found) showPatternDetail(found.id);
-    });
+    }).catch(function(){});
   }
 }
 
@@ -2641,7 +2886,7 @@ function showPatternDetail(patternId) {
   var patLine = p.pattern_display || p.pattern;
   var html = '<div id="ev-pattern-desc" style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(patLine) + '</div>';
   html += '<div id="ev-stat-cards" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
-    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence</div></div>' +
+    '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence files</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '<span style="color:var(--text-muted)">--</span>') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : ' <span style="font-size:8px">(saved backtests)</span>') + '</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700;color:' + barColor + '">' + p.confidence + '%</div><div style="font-size:9px;color:var(--text-muted)">Confidence</div></div></div>';
   html += '<div id="ev-computed-row" style="display:none;margin-top:8px"></div>';
@@ -2655,8 +2900,18 @@ function showPatternDetail(patternId) {
     '</div>' +
     '<pre id="ev-trade-analytics-out" style="display:none;margin-top:8px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg)"></pre>' +
     '</div>';
+  html += '<div id="ev-pine-strategy-row" style="margin-top:10px;padding:8px;border-radius:6px;border:1px solid var(--border);background:var(--card)">' +
+    '<div style="font-size:10px;font-weight:600;color:var(--text-muted);margin-bottom:4px">TradingView Pine strategy</div>' +
+    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Exports this <strong>ScanPattern</strong> as a Pine <strong>strategy</strong> for Strategy Tester. Exits follow signal on/off only — CHILI may use ATR or time-based exits.</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
+    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load Pine strategy</button>' +
+    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy to clipboard</button>' +
+    '</div>' +
+    '<div id="ev-pine-warnings" style="display:none;margin-top:8px;font-size:9px;color:#f59e0b;line-height:1.45"></div>' +
+    '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;min-height:180px;box-sizing:border-box;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
+    '</div>';
   html += '<div id="ev-wr-progress-wrap" style="display:none;margin-top:10px">' +
-    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> (between Live Evidence Stats and the tabs — not inside Timeline). Each point = deduped win rate after another backtest with trades (latest per ticker/strategy).</div>' +
+    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> — sibling-linked backtests only (latest per ticker/strategy in the recent window). Same formula as the header; last point matches aggregate WR.</div>' +
     '<div id="ev-wr-progress-chart" style="height:140px;width:100%"></div></div>';
   if (p.example_tickers && p.example_tickers.length) {
     html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
@@ -2667,7 +2922,7 @@ function showPatternDetail(patternId) {
   html += '<div class="ev-tabs" id="ev-tabs">' +
     '<button class="ev-tab active" data-evtab="timeline" onclick="_switchEvTab(\'timeline\')">Timeline <span class="ev-tab-badge" id="ev-badge-timeline">-</span></button>' +
     '<button class="ev-tab" data-evtab="hypotheses" onclick="_switchEvTab(\'hypotheses\')">Hypotheses <span class="ev-tab-badge" id="ev-badge-hypotheses">-</span></button>' +
-    '<button class="ev-tab" data-evtab="trades" onclick="_switchEvTab(\'trades\')">Trades <span class="ev-tab-badge" id="ev-badge-trades">-</span></button>' +
+    '<button class="ev-tab" data-evtab="trades" onclick="_switchEvTab(\'trades\')">Journal <span class="ev-tab-badge" id="ev-badge-trades">-</span></button>' +
     '<button class="ev-tab" data-evtab="backtests" onclick="_switchEvTab(\'backtests\')">Backtests <span class="ev-tab-badge" id="ev-badge-backtests">-</span></button>' +
     '<button class="ev-tab" data-evtab="evolution" onclick="_switchEvTab(\'evolution\')">Evolution <span class="ev-tab-badge" id="ev-badge-evolution">-</span></button>' +
   '</div>';
@@ -2689,12 +2944,19 @@ function showPatternDetail(patternId) {
   /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
   window._currentBacktestPatternId = p.scan_pattern_id || null;
   window._evoTabLoaded = false;
+  _syncEvPineStrategyUi();
 
-  fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) { document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Could not load evidence.</div>'; return; }
+  fetch('/api/trading/learn/patterns/' + p.id + '/evidence').then(parseFetchJson).then(function(d) {
+    if (!d.ok) {
+      var tl = document.getElementById('ev-pane-timeline');
+      if (tl) tl.innerHTML = '<div class="ev-empty">Could not load evidence.</div>';
+      _syncEvPineStrategyUi();
+      return;
+    }
     if (d.resolved_scan_pattern_id) {
       window._currentBacktestPatternId = d.resolved_scan_pattern_id;
     }
+    _syncEvPineStrategyUi();
     var pd = d.pattern_display || (d.insight && d.insight.pattern_display);
     if (pd) {
       var descEl = document.getElementById('ev-pattern-desc');
@@ -2731,7 +2993,11 @@ function showPatternDetail(patternId) {
     b('backtests', (d.backtests||[]).length);
     if (d.computed_stats) _renderComputedStats(d.computed_stats);
     _renderEvWrProgress(d.win_rate_progress || []);
-  }).catch(function(){ document.getElementById('ev-pane-timeline').innerHTML = '<div class="ev-empty">Network error loading evidence.</div>'; });
+  }).catch(function(err) {
+    var msg = (err && err.message) ? escHtml(err.message) : 'Network error loading evidence.';
+    var el = document.getElementById('ev-pane-timeline');
+    if (el) el.innerHTML = '<div class="ev-empty">Could not load evidence: ' + msg + '</div>';
+  });
 }
 
 function _switchEvTab(tab) {
@@ -2741,7 +3007,7 @@ function _switchEvTab(tab) {
     window._evoTabLoaded = true;
     var evoPane = document.getElementById('ev-pane-evolution');
     if (evoPane) evoPane.innerHTML = '<div class="ev-empty" style="padding:16px"><span style="display:inline-block;width:16px;height:16px;border:2px solid #8b5cf6;border-top-color:transparent;border-radius:50%;animation:spin .6s linear infinite"></span> Loading evolution tree...</div>';
-    fetch('/api/trading/learn/patterns/' + window._currentEvidencePatternId + '/evolution').then(function(r){return r.json();}).then(function(d) {
+    fetch('/api/trading/learn/patterns/' + window._currentEvidencePatternId + '/evolution').then(parseFetchJson).then(function(d) {
       if (d.ok) {
         _renderEvEvolution(d.root, d.current_scan_pattern_id);
         var badge = document.getElementById('ev-badge-evolution');
@@ -2760,6 +3026,8 @@ function _switchEvTab(tab) {
       }
     }).catch(function(){
       _renderEvEvolution(null, null);
+      var badge = document.getElementById('ev-badge-evolution');
+      if (badge) badge.textContent = '0';
     });
   }
 }
@@ -2880,7 +3148,7 @@ function _renderEvHypotheses(hyps) {
 
 function _renderEvTrades(trades) {
   var el = document.getElementById('ev-pane-trades');
-  if (!trades.length) { el.innerHTML = '<div class="ev-empty">No matching trades found for this pattern.</div>'; return; }
+  if (!trades.length) { el.innerHTML = '<div class="ev-empty">No journal trades tagged for this pattern (simulated backtests are under Backtests).</div>'; return; }
   var html = '<table class="ev-table"><thead><tr><th>Ticker</th><th>Dir</th><th>Entry</th><th>Exit</th><th>P&amp;L</th><th>Status</th><th>Date</th></tr></thead><tbody>';
   trades.forEach(function(t) {
     var pnlClass = t.pnl > 0 ? 'ev-pnl-pos' : (t.pnl < 0 ? 'ev-pnl-neg' : '');
@@ -2997,7 +3265,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
           max_drawdown: d.max_drawdown, trade_count: d.trade_count || 0,
           equity_curve: d.equity_curve || [],
         }),
-      }).then(function(r){return r.json();}).then(function(refreshRes) {
+      }).then(parseFetchJson).then(function(refreshRes) {
         if (refreshRes.ok) patchBacktestEvidenceRow(chartRow.previousElementSibling, refreshRes);
       }).catch(function(){});
     }
@@ -3008,7 +3276,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
 
   if (btId) {
     fetch('/api/trading/learn/backtest/' + btId + '/rerun', { method: 'POST' })
-      .then(function(r){return r.json();})
+      .then(parseFetchJson)
       .then(function(d){ onChartData(d, { skipRefresh: true }); })
       .catch(onChartError);
   } else {
@@ -3030,7 +3298,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
         body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
       });
     }
-    fetchPromise.then(function(r){return r.json();}).then(function(d){ onChartData(d, {}); }).catch(onChartError);
+    fetchPromise.then(parseFetchJson).then(function(d){ onChartData(d, {}); }).catch(onChartError);
   }
 }
 
@@ -3300,6 +3568,30 @@ function _cycleMetricsLine(m) {
   return parts.length ? parts.join(' · ') : '';
 }
 
+/** Quant triad for cycle card: cycle-level counts where available; OOS/DD/trades point to pattern cards. */
+function _cycleRobustnessLine(m) {
+  if (!m || typeof m !== 'object') return '';
+  var parts = [];
+  if (m.backtests_run != null) {
+    parts.push('<span title="Backtest jobs finished this cycle (insights + queue)"><b>BT runs</b> ' + m.backtests_run + '</span>');
+  } else {
+    parts.push('<span class="pc-pill-muted" style="display:inline-block;padding:1px 6px;border-radius:6px;font-size:8px"><b>BT runs</b> —</span>');
+  }
+  if (m.patterns_tested != null) {
+    parts.push('<span title="Pattern-engine tests this cycle"><b>Engine tests</b> ' + m.patterns_tested + '</span>');
+  } else {
+    parts.push('<span title="Engine test count is recorded on newer cycles"><b>Engine tests</b> —</span>');
+  }
+  var evo = m.evolution && typeof m.evolution === 'object' ? m.evolution : {};
+  if (evo.promoted != null && evo.promoted > 0) {
+    parts.push('<span title="Variants promoted after compare"><b>Promoted</b> ' + evo.promoted + '</span>');
+  }
+  parts.push('<span style="opacity:.7" title="Held-out win rate lives on each ScanPattern; see cards below"><b>OOS WR</b> —</span>');
+  parts.push('<span style="opacity:.7" title="Drawdown is per backtest; open a pattern for the equity table"><b>Max DD</b> —</span>');
+  parts.push('<span style="opacity:.7" title="Simulated trade totals are summed on each pattern card"><b>Trades</b> —</span>');
+  return parts.join(' <span style="opacity:.25">|</span> ');
+}
+
 function loadCycleAiReportsPage(resetOffset) {
   if (resetOffset) _cycleReportOffset = 0;
   var emptyEl = document.getElementById('cycle-report-empty');
@@ -3337,6 +3629,8 @@ function loadCycleAiReportsPage(resetOffset) {
       }
       var metEl = document.getElementById('cycle-report-front-metrics');
       if (metEl) metEl.textContent = _cycleMetricsLine(it.metrics);
+      var robEl = document.getElementById('cycle-report-front-robustness');
+      if (robEl) robEl.innerHTML = _cycleRobustnessLine(it.metrics || {});
       var prevEl = document.getElementById('cycle-report-front-preview');
       if (prevEl) prevEl.textContent = it.preview || '';
       var backMd = document.getElementById('cycle-report-back-md');

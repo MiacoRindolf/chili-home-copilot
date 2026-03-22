@@ -3001,13 +3001,34 @@ document.addEventListener('DOMContentLoaded', function() {
     var _dlStrategy = _urlParams.get('strategy');
     var _dlPeriod = _urlParams.get('period');
     var _dlPattern = _urlParams.get('pattern_id');
+    var _dlScanPattern = _urlParams.get('scan_pattern_id');
     setTimeout(function() {
       if (_dlTicker) selectTicker(_dlTicker);
       switchTabByName('backtest');
       setTimeout(function() {
         var sel = document.getElementById('bt-strategy');
         if (sel) {
-          if (_dlPattern) {
+          if (_dlScanPattern) {
+            var targetSp = 'scan_pattern:' + _dlScanPattern;
+            var foundSp = false;
+            for (var si = 0; si < sel.options.length; si++) {
+              if (sel.options[si].value === targetSp) { sel.value = targetSp; foundSp = true; break; }
+            }
+            if (!foundSp) {
+              var og = sel.querySelector('optgroup[label="CHILI Brain"]');
+              if (!og) {
+                og = document.createElement('optgroup');
+                og.label = 'CHILI Brain';
+                sel.appendChild(og);
+              }
+              var optSp = document.createElement('option');
+              optSp.value = targetSp;
+              optSp.textContent = 'Scan pattern #' + _dlScanPattern;
+              optSp.title = 'Opened from Brain tradeable list; resolves to ScanPattern id.';
+              og.appendChild(optSp);
+              sel.value = optSp.value;
+            }
+          } else if (_dlPattern) {
             var target = 'insight:' + _dlPattern;
             for (var i = 0; i < sel.options.length; i++) {
               if (sel.options[i].value === target) { sel.value = target; break; }
@@ -7447,7 +7468,8 @@ function loadStrategies() {
 
 function _onBtStrategyChange() {
   renderBtStrategyParams();
-  if (document.getElementById('bt-strategy').value.indexOf('insight:') === 0) {
+  var _v = document.getElementById('bt-strategy').value;
+  if (_v.indexOf('insight:') === 0 || _v.indexOf('scan_pattern:') === 0) {
     var rows = document.getElementById('bt-conditions-rows');
     if (rows && rows.children.length === 0) btAddConditionRow();
   }
@@ -7624,8 +7646,8 @@ function runBacktest() {
     switchTab(document.querySelector('[data-tab="backtest"]'));
   }
 
-  if (strategy.indexOf('insight:') === 0) {
-    var pid = strategy.slice('insight:'.length);
+  if (strategy.indexOf('insight:') === 0 || strategy.indexOf('scan_pattern:') === 0) {
+    var pid = strategy.indexOf('insight:') === 0 ? strategy.slice('insight:'.length) : strategy.slice('scan_pattern:'.length);
     var body = { ticker: currentTicker, period: period, interval: '1d', cash: cash, commission: 0.001 };
     var appendFromForm = _collectBtAppendConditionsFromForm();
     if (appendFromForm) {

@@ -6,7 +6,7 @@ import logging
 import math
 import re
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal, cast
 
 logger = logging.getLogger(__name__)
 
@@ -279,9 +279,47 @@ def api_get_trades(
             "broker_source": t.broker_source,
             "broker_status": t.broker_status,
             "broker_order_id": t.broker_order_id,
+            "filled_at": t.filled_at.isoformat() if t.filled_at else None,
+            "avg_fill_price": t.avg_fill_price,
+            "tca_reference_entry_price": t.tca_reference_entry_price,
+            "tca_entry_slippage_bps": t.tca_entry_slippage_bps,
+            "tca_reference_exit_price": t.tca_reference_exit_price,
+            "tca_exit_slippage_bps": t.tca_exit_slippage_bps,
+            "strategy_proposal_id": t.strategy_proposal_id,
+            "scan_pattern_id": t.scan_pattern_id,
         }
         for t in trades
     ]})
+
+
+@router.get("/api/trading/tca/summary")
+def api_tca_summary(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(90, ge=1, le=730),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Rolling TCA aggregates: mean entry slippage (bps) vs proposal/reference by ticker."""
+    from ..services.trading.tca_service import tca_summary_by_ticker
+
+    ctx = get_identity_ctx(request, db)
+    out = tca_summary_by_ticker(db, ctx["user_id"], days=days, limit=limit)
+    return JSONResponse(_json_safe(out))
+
+
+@router.get("/api/trading/attribution/live-vs-research")
+def api_attribution_live_vs_research(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(90, ge=1, le=730),
+    limit: int = Query(50, ge=1, le=200),
+):
+    """Closed trades with ``scan_pattern_id`` vs pattern OOS / research stats."""
+    from ..services.trading.attribution_service import live_vs_research_by_pattern
+
+    ctx = get_identity_ctx(request, db)
+    out = live_vs_research_by_pattern(db, ctx["user_id"], days=days, limit=limit)
+    return JSONResponse(_json_safe(out))
 
 
 @router.post("/api/trading/trades")
@@ -330,6 +368,7 @@ def api_close_trade(
         exit_price=body.exit_price,
         exit_date=body.exit_date,
         notes=body.notes,
+        reference_exit_price=body.reference_exit_price,
     )
     if not trade:
         return JSONResponse({"ok": False, "error": "Trade not found or already closed"}, status_code=404)
@@ -422,6 +461,20 @@ def api_sell_trade(
                     trade.exit_price = body.limit_price or trade.entry_price
                     trade.exit_date = datetime.utcnow()
                     trade.pnl = round((trade.exit_price - trade.entry_price) * trade.quantity, 2)
+                    try:
+                        from ..services.trading.tca_service import (
+                            apply_tca_on_trade_close,
+                            resolve_exit_reference_price,
+                        )
+
+                        trade.tca_reference_exit_price = resolve_exit_reference_price(
+                            trade.ticker,
+                            explicit=body.limit_price,
+                            fill_fallback=float(trade.exit_price),
+                        )
+                        apply_tca_on_trade_close(trade)
+                    except Exception:
+                        pass
                 else:
                     trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), {src} order {order_id} ({broker_state})"
             else:
@@ -455,6 +508,20 @@ def api_sell_trade(
         trade.exit_price = exit_price
         trade.exit_date = datetime.utcnow()
         trade.pnl = round((exit_price - trade.entry_price) * trade.quantity, 2)
+        try:
+            from ..services.trading.tca_service import (
+                apply_tca_on_trade_close,
+                resolve_exit_reference_price,
+            )
+
+            trade.tca_reference_exit_price = resolve_exit_reference_price(
+                trade.ticker,
+                explicit=body.limit_price,
+                fill_fallback=float(exit_price),
+            )
+            apply_tca_on_trade_close(trade)
+        except Exception:
+            pass
     else:
         realized_pnl = round((exit_price - trade.entry_price) * body.quantity, 2)
         trade.quantity = round(trade.quantity - body.quantity, 6)
@@ -1463,6 +1530,45 @@ def api_delete_pattern(
     return JSONResponse({"ok": ok})
 
 
+@router.get("/api/trading/patterns/{pattern_id}/export/pine")
+def api_export_pattern_pine(
+    pattern_id: int,
+    kind: str = "strategy",
+    db: Session = Depends(get_db),
+):
+    """Export pattern rules as TradingView Pine Script v5 (best-effort; see ``warnings``).
+
+    ``kind=strategy`` (default): ``strategy()`` for Strategy Tester.
+    ``kind=indicator``: ``indicator()`` with plotshape / alerts.
+    """
+    from ..models.trading import ScanPattern
+    from ..services.trading.pine_export import scan_pattern_to_pine
+
+    k = (kind or "strategy").strip().lower()
+    if k not in ("strategy", "indicator"):
+        return JSONResponse(
+            {"ok": False, "error": "kind must be strategy or indicator"},
+            status_code=400,
+        )
+
+    p = db.query(ScanPattern).get(pattern_id)
+    if not p:
+        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    pine, warnings = scan_pattern_to_pine(
+        p, kind=cast(Literal["strategy", "indicator"], k)
+    )
+    return JSONResponse(
+        {
+            "ok": True,
+            "pine": pine,
+            "warnings": warnings,
+            "pattern_id": p.id,
+            "name": p.name,
+            "kind": k,
+        }
+    )
+
+
 class _SuggestPatternBody(_BaseModel):
     description: str
 
@@ -1607,9 +1713,12 @@ def api_backtest_pattern(
         use_interval = req.interval
     if req.period:
         use_period = req.period
+    from ..config import settings
+
     use_ticker = (req.ticker or ticker).strip().upper()
     cash = req.cash if req.cash is not None else 100_000.0
-    commission = req.commission if req.commission is not None else 0.001
+    commission = req.commission if req.commission is not None else float(settings.backtest_commission)
+    spread = req.spread if req.spread is not None else float(settings.backtest_spread)
     result = backtest_pattern(
         ticker=use_ticker,
         pattern_name=p.name,
@@ -1619,6 +1728,8 @@ def api_backtest_pattern(
         exit_config=getattr(p, "exit_config", None),
         cash=cash,
         commission=commission,
+        spread=spread,
+        oos_holdout_fraction=req.oos_holdout_fraction,
         rules_json_override=req.rules_json_override,
         append_conditions=req.append_conditions,
         exit_config_overlay=req.exit_config,
