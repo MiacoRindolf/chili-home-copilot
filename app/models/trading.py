@@ -298,6 +298,11 @@ class ScanPattern(Base):
     # Miner / evolution taxonomy: compression_expansion vs high_vol_regime (separate OOS gates).
     hypothesis_family: Optional[str] = Column(String(32), nullable=True)
 
+    # Quant research: multi-holdout / bootstrap stats, two-tier queue (prescreen -> full), paper shadow book.
+    oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    queue_tier: str = Column(String(16), nullable=False, default="full")
+    paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 

@@ -525,7 +525,8 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
                 "avg_return_pct", "backtest_count", "asset_class", "timeframe",
                 "promotion_status", "oos_win_rate", "oos_avg_return_pct", "oos_trade_count",
                 "backtest_spread_used", "backtest_commission_used", "oos_evaluated_at",
-                "bench_walk_forward_json", "hypothesis_family"):
+                "bench_walk_forward_json", "hypothesis_family", "oos_validation_json",
+                "queue_tier", "paper_book_json"):
         if key in data:
             setattr(p, key, data[key])
     db.commit()

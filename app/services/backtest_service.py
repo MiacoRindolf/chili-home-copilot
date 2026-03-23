@@ -17,6 +17,7 @@ from .trading.market_data import fetch_ohlcv_df as _fetch_ohlcv_df
 
 from ..config import settings
 from ..models.trading import BacktestResult
+from .trading.research_kpis import build_research_kpis
 
 logger = logging.getLogger(__name__)
 
@@ -522,6 +523,16 @@ def run_backtest(
     # Indicator overlays (strategy-specific)
     indicators = _extract_indicators(strat_cls, strategy_id, df, coerced or None)
 
+    _eq_df = stats.get("_equity_curve")
+    _raw_tr = stats.get("_trades")
+    _kpis = build_research_kpis(
+        stats,
+        equity_df=_eq_df if _eq_df is not None and not getattr(_eq_df, "empty", True) else None,
+        close_series=df["Close"],
+        interval=interval,
+        raw_trades=_raw_tr if _raw_tr is not None and not _raw_tr.empty else None,
+    )
+
     return {
         "ok": True,
         "ticker": ticker.upper(),
@@ -543,6 +554,7 @@ def run_backtest(
         "ohlc": ohlc_data,
         "trades": trades_list,
         "indicators": indicators,
+        "kpis": _kpis,
     }
 
 
@@ -611,6 +623,7 @@ def save_backtest(
         "oos_trade_count": result.get("oos_trade_count"),
         "in_sample_bars": result.get("in_sample_bars"),
         "out_of_sample_bars": result.get("out_of_sample_bars"),
+        "kpis": result.get("kpis"),
     })
 
     if insight_id:
@@ -1546,6 +1559,16 @@ def _run_dynamic_pattern_slice(
 
     indicators = _extract_pattern_indicators(indicator_arrays, work)
 
+    _eq_bt = stats.get("_equity_curve")
+    _raw_tr = stats.get("_trades")
+    _kpis = build_research_kpis(
+        stats,
+        equity_df=_eq_bt if _eq_bt is not None and not getattr(_eq_bt, "empty", True) else None,
+        close_series=work["Close"],
+        interval=interval,
+        raw_trades=_raw_tr if _raw_tr is not None and not _raw_tr.empty else None,
+    )
+
     return {
         "ok": True,
         "ticker": ticker.upper(),
@@ -1567,6 +1590,7 @@ def _run_dynamic_pattern_slice(
         "ohlc": ohlc_data,
         "trades": trades_list,
         "indicators": indicators,
+        "kpis": _kpis,
     }
 
 
@@ -1731,7 +1755,7 @@ def run_pattern_backtest(
             out["in_sample"] = {
                 k: r_is[k] for k in (
                     "win_rate", "return_pct", "trade_count", "sharpe",
-                    "max_drawdown", "profit_factor",
+                    "max_drawdown", "profit_factor", "kpis",
                 ) if k in r_is
             }
             if r_oos.get("ok"):
@@ -1742,6 +1766,9 @@ def run_pattern_backtest(
                     "win_rate": r_oos.get("win_rate"),
                     "return_pct": r_oos.get("return_pct"),
                     "trade_count": r_oos.get("trade_count"),
+                    "profit_factor": r_oos.get("profit_factor"),
+                    "avg_trade_pct": r_oos.get("avg_trade_pct"),
+                    "kpis": r_oos.get("kpis"),
                 }
             else:
                 out["oos_win_rate"] = None
@@ -1749,6 +1776,44 @@ def run_pattern_backtest(
                 out["oos_trade_count"] = None
                 out["out_of_sample"] = None
             out["oos_ok"] = bool(r_oos.get("ok"))
+
+            extra_raw = (getattr(settings, "brain_oos_robustness_extra_fractions", "") or "").strip()
+            rob_fracs: list[float] = []
+            if extra_raw:
+                for part in extra_raw.split(","):
+                    try:
+                        fx = float(part.strip())
+                        if 0.05 < fx < 0.45 and abs(fx - float(oos_frac)) > 0.015:
+                            rob_fracs.append(fx)
+                    except ValueError:
+                        pass
+            rob_wrs: list[float] = []
+            rob_pfs: list[Any] = []
+            rob_atps: list[Any] = []
+            for fx in rob_fracs:
+                si2 = int(len(df) * (1.0 - float(fx)))
+                o2 = len(df) - si2
+                if si2 >= 30 and o2 >= 12:
+                    r2 = _run_slice(df.iloc[si2:], False)
+                    if r2.get("ok"):
+                        rob_wrs.append(float(r2.get("win_rate") or 0))
+                        rob_pfs.append(r2.get("profit_factor"))
+                        rob_atps.append(r2.get("avg_trade_pct"))
+            if rob_wrs or out.get("oos_win_rate") is not None:
+                primary_wr = (
+                    float(out["oos_win_rate"])
+                    if out.get("oos_win_rate") is not None
+                    else None
+                )
+                all_wrs = ([primary_wr] if primary_wr is not None else []) + rob_wrs
+                out["oos_robustness"] = {
+                    "primary_holdout_fraction": float(oos_frac),
+                    "extra_holdout_fractions": rob_fracs,
+                    "oos_win_rates_extra": rob_wrs,
+                    "profit_factors_extra": rob_pfs,
+                    "avg_trade_pcts_extra": rob_atps,
+                    "oos_wr_min": min(all_wrs) if all_wrs else None,
+                }
             return out
 
     out = _run_slice(df, True)

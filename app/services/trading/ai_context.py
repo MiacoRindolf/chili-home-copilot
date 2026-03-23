@@ -426,10 +426,30 @@ def build_ai_context(
     if backtests:
         lines = ["## BACKTEST HISTORY (best strategies for this stock)"]
         for bt in backtests:
+            kpi_bits = ""
+            try:
+                from .research_kpis import parse_kpis_from_backtest_params
+
+                k = parse_kpis_from_backtest_params(bt.params) or {}
+                so = k.get("sortino_ratio")
+                ir = k.get("information_ratio")
+                ca = k.get("calmar_ratio")
+                if so is not None or ir is not None or ca is not None:
+                    kpi_bits = " | KPIs:" + "".join(
+                        x
+                        for x in (
+                            f" Sortino {so}" if so is not None else "",
+                            f" IR {ir}" if ir is not None else "",
+                            f" Calmar {ca}" if ca is not None else "",
+                        )
+                        if x
+                    )
+            except Exception:
+                kpi_bits = ""
             lines.append(
                 f"- {bt.strategy_name}: {bt.return_pct:+.1f}% return, "
                 f"{bt.win_rate:.0f}% win rate, {bt.trade_count} trades, "
-                f"Sharpe {bt.sharpe or 'N/A'}, Max DD {bt.max_drawdown:.1f}%"
+                f"Sharpe {bt.sharpe or 'N/A'}, Max DD {bt.max_drawdown:.1f}%{kpi_bits}"
             )
         parts.append("\n".join(lines))
 

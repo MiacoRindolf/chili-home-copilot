@@ -1026,6 +1026,35 @@ def _check_top_picks_for_proposals(
 # ── Helpers ───────────────────────────────────────────────────────────
 
 
+def _scan_pattern_id_from_proposal(proposal) -> int | None:
+    """Best-effort link closed trades to ScanPattern for live vs research attribution."""
+    raw = getattr(proposal, "signals_json", None)
+    if not raw:
+        return None
+    try:
+        sig = json.loads(raw) if isinstance(raw, str) else raw
+    except Exception:
+        return None
+    if isinstance(sig, list):
+        for item in sig:
+            if not isinstance(item, dict):
+                continue
+            for key in ("scan_pattern_id", "pattern_id", "scanPatternId"):
+                if item.get(key) is not None:
+                    try:
+                        return int(item[key])
+                    except (TypeError, ValueError):
+                        pass
+    elif isinstance(sig, dict):
+        for key in ("scan_pattern_id", "pattern_id"):
+            if sig.get(key) is not None:
+                try:
+                    return int(sig[key])
+                except (TypeError, ValueError):
+                    pass
+    return None
+
+
 def _execute_proposal(
     db: Session,
     proposal,
@@ -1045,6 +1074,8 @@ def _execute_proposal(
     """
     from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
     from ...models.trading import Trade
+
+    _prop_spid = _scan_pattern_id_from_proposal(proposal)
 
     ticker = proposal.ticker
     quantity = proposal.quantity
@@ -1088,11 +1119,13 @@ def _execute_proposal(
             quantity=quantity,
             status="open",
             broker_source="manual",
+            scan_pattern_id=_prop_spid,
             tca_reference_entry_price=float(proposal.entry_price),
             indicator_snapshot=json.dumps({
                 "stop_loss": proposal.stop_loss,
                 "take_profit": proposal.take_profit,
                 "proposal_id": proposal.id,
+                "scan_pattern_id": _prop_spid,
             }),
             tags="proposal-approved",
             notes=f"Approved from proposal #{proposal.id} (manual — broker not connected)",

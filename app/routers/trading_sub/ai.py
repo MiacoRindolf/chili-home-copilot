@@ -27,6 +27,43 @@ _log = logging.getLogger(__name__)
 # Sibling-linked BacktestResult rows only (no global keyword padding). Keep panel + chart pools aligned.
 _EVIDENCE_LINKED_BACKTEST_LIMIT = 4000
 
+
+def _research_kpi_summary_for_scan_patterns(
+    db: Session,
+    scan_pattern_ids: list[int],
+) -> dict[int, dict[str, Any]]:
+    """Mean KPIs across recent BacktestResult rows per ScanPattern (from stored params.kpis)."""
+    from collections import defaultdict
+
+    from ...models.trading import BacktestResult
+    from ...services.trading.research_kpis import aggregate_kpis_from_params_rows
+
+    if not scan_pattern_ids:
+        return {}
+    cap = min(2000, max(200, len(scan_pattern_ids) * 60))
+    rows = (
+        db.query(BacktestResult.scan_pattern_id, BacktestResult.params)
+        .filter(
+            BacktestResult.scan_pattern_id.in_(scan_pattern_ids),
+            BacktestResult.trade_count > 0,
+        )
+        .order_by(BacktestResult.ran_at.desc())
+        .limit(cap)
+        .all()
+    )
+    by_sp: dict[int, list[str | None]] = defaultdict(list)
+    for spid, params in rows:
+        if spid is None:
+            continue
+        by_sp[int(spid)].append(params)
+    out: dict[int, dict[str, Any]] = {}
+    for spid in scan_pattern_ids:
+        agg = aggregate_kpis_from_params_rows(by_sp.get(spid, []), max_samples=60)
+        if agg.get("sample_count", 0):
+            out[spid] = agg
+    return out
+
+
 _TRADING_PROMPT: str | None = None
 _TRADING_PROMPT_MTIME: float = 0.0
 
@@ -145,6 +182,7 @@ def api_tradeable_patterns(
 
     rows = q.limit(lim).all()
     sp_ids = [p.id for p in rows]
+    kpi_by_sp = _research_kpi_summary_for_scan_patterns(db, sp_ids)
     insight_by_sp: dict[int, int] = {}
     if sp_ids:
         pairs = (
@@ -174,6 +212,14 @@ def api_tradeable_patterns(
 
         tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
 
+        stress_pass = None
+        if isinstance(bench, dict):
+            stress_pass = bench.get("stress_passes_gate")
+
+        oos_val = getattr(p, "oos_validation_json", None) or {}
+        if not isinstance(oos_val, dict):
+            oos_val = {}
+
         out.append(
             {
                 "id": p.id,
@@ -191,7 +237,11 @@ def api_tradeable_patterns(
                 "display_wr_source": wr_source,
                 "trade_count_for_gate": int(tc or 0),
                 "bench_passes_gate": bench_pass,
+                "bench_stress_passes_gate": stress_pass,
+                "oos_validation": oos_val,
+                "queue_tier": getattr(p, "queue_tier", None),
                 "linked_insight_id": insight_by_sp.get(p.id),
+                "research_kpi_summary": kpi_by_sp.get(p.id),
             }
         )
 
@@ -843,6 +893,7 @@ def _compute_deduped_backtest_win_stats(
     """
     from ...models.trading import BacktestResult
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
+    from ...services.trading.research_kpis import parse_kpis_from_backtest_params
 
     backtests_out: list[dict] = []
     seen_bt_keys: set[tuple[str, str]] = set()
@@ -872,6 +923,7 @@ def _compute_deduped_backtest_win_stats(
                         pdisp = str(pr["period"])
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pdisp = None
+            _kpis = parse_kpis_from_backtest_params(bt.params)
             backtests_out.append({
                 "id": bt.id,
                 "ticker": bt.ticker,
@@ -885,6 +937,7 @@ def _compute_deduped_backtest_win_stats(
                 "params": bt.params,
                 "period_display": pdisp or "--",
                 "relevance": 100,
+                "kpis": _kpis,
             })
         backtests_out.sort(
             key=lambda x: (

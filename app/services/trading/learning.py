@@ -7,7 +7,7 @@ import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 import pandas as pd
@@ -160,6 +160,10 @@ def brain_apply_oos_promotion_gate(
     max_is_oos_gap_pct: float | None = None,
     min_oos_aggregate_trades: int | None = None,
     oos_aggregate_trade_count: int | None = None,
+    mean_oos_expectancy_pct: float | None = None,
+    mean_oos_profit_factor: float | None = None,
+    oos_wr_robust_min: float | None = None,
+    oos_bootstrap_wr_ci_low: float | None = None,
 ) -> tuple[str, bool]:
     """Return ``(promotion_status, allow_active)``.
 
@@ -197,7 +201,175 @@ def brain_apply_oos_promotion_gate(
         return "rejected_oos", False
     if gap > max_gap:
         return "rejected_oos", False
+
+    min_exp = getattr(settings, "brain_oos_min_expectancy_pct", None)
+    if min_exp is not None and mean_oos_expectancy_pct is not None:
+        if float(mean_oos_expectancy_pct) < float(min_exp):
+            return "rejected_oos", False
+
+    min_pf = getattr(settings, "brain_oos_min_profit_factor", None)
+    if min_pf is not None and mean_oos_profit_factor is not None:
+        if float(mean_oos_profit_factor) < float(min_pf):
+            return "rejected_oos", False
+
+    if getattr(settings, "brain_oos_require_robustness_wr_above_gate", False):
+        if oos_wr_robust_min is not None and float(oos_wr_robust_min) < min_wr:
+            return "rejected_oos", False
+
+    ci_floor = getattr(settings, "brain_oos_bootstrap_ci_min_wr", None)
+    if ci_floor is not None and oos_bootstrap_wr_ci_low is not None:
+        if float(oos_bootstrap_wr_ci_low) < float(ci_floor):
+            return "rejected_oos", False
+
     return "promoted", True
+
+
+def get_research_funnel_snapshot(db: Session) -> dict[str, Any]:
+    """Aggregate ScanPattern promotion + backtest queue for Brain research funnel UI."""
+    from sqlalchemy import func
+
+    from ...models.trading import ScanPattern
+    from .backtest_queue import get_queue_status
+
+    rows = (
+        db.query(ScanPattern.promotion_status, func.count(ScanPattern.id))
+        .filter(ScanPattern.active.is_(True))
+        .group_by(ScanPattern.promotion_status)
+        .all()
+    )
+    promo_active = {str(r[0] or ""): int(r[1]) for r in rows}
+
+    rows_i = (
+        db.query(ScanPattern.promotion_status, func.count(ScanPattern.id))
+        .filter(ScanPattern.active.is_(False))
+        .group_by(ScanPattern.promotion_status)
+        .all()
+    )
+    promo_inactive = {str(r[0] or ""): int(r[1]) for r in rows_i}
+
+    qt_rows = (
+        db.query(ScanPattern.queue_tier, func.count(ScanPattern.id))
+        .filter(ScanPattern.active.is_(True))
+        .group_by(ScanPattern.queue_tier)
+        .all()
+    )
+    queue_tier_counts = {str(r[0] or "full"): int(r[1]) for r in qt_rows}
+
+    total_sp = int(db.query(func.count(ScanPattern.id)).scalar() or 0)
+
+    return {
+        "promotion_status_active": promo_active,
+        "promotion_status_inactive": promo_inactive,
+        "queue_tier_active": queue_tier_counts,
+        "scan_patterns_total": total_sp,
+        "queue": get_queue_status(db, use_cache=False),
+    }
+
+
+def get_pattern_pipeline_near(db: Session, *, limit: int = 14) -> list[dict[str, Any]]:
+    """Active ScanPatterns in pending_oos or candidate, for Brain pipeline visibility."""
+    from ...models.trading import ScanPattern
+
+    lim = max(1, min(int(limit), 40))
+    rows = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.promotion_status.in_(["pending_oos", "candidate"]),
+        )
+        .order_by(
+            ScanPattern.oos_win_rate.desc().nullslast(),
+            ScanPattern.oos_trade_count.desc().nullslast(),
+            ScanPattern.id.desc(),
+        )
+        .limit(lim)
+        .all()
+    )
+    out: list[dict[str, Any]] = []
+    for p in rows:
+        out.append({
+            "id": p.id,
+            "name": (p.name or "")[:120],
+            "promotion_status": p.promotion_status,
+            "oos_win_rate": float(p.oos_win_rate) if p.oos_win_rate is not None else None,
+            "oos_trade_count": int(p.oos_trade_count) if p.oos_trade_count is not None else None,
+            "timeframe": p.timeframe,
+            "asset_class": p.asset_class,
+        })
+    return out
+
+
+def get_attribution_coverage_stats(db: Session, user_id: int | None) -> dict[str, Any]:
+    from sqlalchemy import func
+
+    from ...models.trading import Trade
+
+    if user_id is None:
+        return {
+            "closed_trades": 0,
+            "closed_with_scan_pattern_id": 0,
+            "coverage_pct": None,
+        }
+    closed = (
+        db.query(func.count(Trade.id))
+        .filter(Trade.user_id == user_id, Trade.status == "closed")
+        .scalar()
+        or 0
+    )
+    with_sp = (
+        db.query(func.count(Trade.id))
+        .filter(
+            Trade.user_id == user_id,
+            Trade.status == "closed",
+            Trade.scan_pattern_id.isnot(None),
+        )
+        .scalar()
+        or 0
+    )
+    pct = round(100.0 * with_sp / closed, 2) if closed else None
+    return {
+        "closed_trades": int(closed),
+        "closed_with_scan_pattern_id": int(with_sp),
+        "coverage_pct": pct,
+    }
+
+
+def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
+    """Demote patterns when live closed-trade win rate lags research OOS by a margin."""
+    from ...config import settings
+
+    if not getattr(settings, "brain_live_depromotion_enabled", False):
+        return {"ok": True, "skipped": True}
+    uid = getattr(settings, "brain_default_user_id", None)
+    if uid is None:
+        return {"ok": True, "skipped": True, "reason": "no_brain_default_user_id"}
+
+    from ...models.trading import ScanPattern
+    from .attribution_service import live_vs_research_by_pattern
+
+    rep = live_vs_research_by_pattern(db, int(uid), days=120, limit=200)
+    patterns = rep.get("patterns") or []
+    min_n = int(getattr(settings, "brain_live_depromotion_min_closed_trades", 8))
+    max_gap = float(getattr(settings, "brain_live_depromotion_max_gap_pct", 25.0))
+    demoted = 0
+    for row in patterns:
+        n_live = int(row.get("live_closed_trades") or 0)
+        if n_live < min_n:
+            continue
+        oos_wr = row.get("research_oos_win_rate_pct")
+        live_wr = row.get("live_win_rate_pct")
+        pid = row.get("scan_pattern_id")
+        if oos_wr is None or live_wr is None or pid is None:
+            continue
+        if float(live_wr) < float(oos_wr) - max_gap:
+            p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
+            if p and p.active and (p.promotion_status or "") == "promoted":
+                p.active = False
+                p.promotion_status = "degraded_live"
+                demoted += 1
+    if demoted:
+        db.commit()
+    return {"ok": True, "demoted": demoted}
 
 
 # ── Learning Event Logger (extracted to learning_events.py) ───────────
@@ -521,9 +693,15 @@ def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] 
 def backfill_future_returns(db: Session) -> int:
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    unfilled = db.query(MarketSnapshot).filter(
-        MarketSnapshot.future_return_5d.is_(None),
-    ).limit(3000).all()
+    # Oldest first: recent snapshots often lack enough *forward* daily bars yet;
+    # unordered LIMIT was skewing attempts toward rows that always fail.
+    unfilled = (
+        db.query(MarketSnapshot)
+        .filter(MarketSnapshot.future_return_5d.is_(None))
+        .order_by(MarketSnapshot.snapshot_date.asc())
+        .limit(3000)
+        .all()
+    )
 
     if not unfilled:
         return 0
@@ -538,25 +716,96 @@ def backfill_future_returns(db: Session) -> int:
             except Exception:
                 pass
 
+    _bf_stats: dict[str, int] = {
+        "skip_recent": 0,
+        "bad_snap": 0,
+        "empty": 0,
+        "bad_px": 0,
+        "no_anchor": 0,
+        "no_forward": 0,
+        "exc": 0,
+        "ok": 0,
+    }
+    _bf_lock = threading.Lock()
+
+    def _snap_utc_date(snap) -> date | None:
+        raw = snap.snapshot_date
+        if raw is None:
+            return None
+        ts = pd.Timestamp(raw)
+        if ts.tzinfo is None:
+            ts = ts.tz_localize("UTC")
+        return ts.tz_convert("UTC").date()
+
     def _fetch_returns(snap):
         try:
+            snap_d = _snap_utc_date(snap)
+            if snap_d is None:
+                with _bf_lock:
+                    _bf_stats["bad_snap"] += 1
+                return None
+            today_utc = datetime.now(timezone.utc).date()
+            # Same UTC calendar day: daily provider data usually has no "next" close yet.
+            if snap_d >= today_utc:
+                with _bf_lock:
+                    _bf_stats["skip_recent"] += 1
+                return None
+
+            start_cal = snap_d - timedelta(days=14)
             df = fetch_ohlcv_df(
-                snap.ticker, interval="1d", period="15d",
-                start=str(snap.snapshot_date)[:10],
+                snap.ticker,
+                interval="1d",
+                period="60d",
+                start=start_cal.isoformat(),
             )
-            if len(df) < 2:
+            if df.empty or len(df) < 2:
+                with _bf_lock:
+                    _bf_stats["empty"] += 1
                 return None
-            base_price = snap.close_price
+            if not isinstance(df.index, pd.DatetimeIndex):
+                df.index = pd.to_datetime(df.index, utc=True)
+            base_price = float(snap.close_price)
             if base_price <= 0:
+                with _bf_lock:
+                    _bf_stats["bad_px"] += 1
                 return None
-            def _ret(idx):
-                return round((float(df["Close"].iloc[idx]) - base_price) / base_price * 100, 2)
-            r1 = _ret(1) if len(df) >= 2 else None
-            r3 = _ret(3) if len(df) >= 4 else None
-            r5 = _ret(5) if len(df) >= 6 else None
-            r10 = _ret(10) if len(df) >= 11 else None
+
+            pos = None
+            for i in range(len(df) - 1, -1, -1):
+                bar_ts = pd.Timestamp(df.index[i])
+                if bar_ts.tzinfo is None:
+                    bar_ts = bar_ts.tz_localize("UTC")
+                bar_d = bar_ts.tz_convert("UTC").date()
+                if bar_d <= snap_d:
+                    pos = i
+                    break
+            if pos is None:
+                with _bf_lock:
+                    _bf_stats["no_anchor"] += 1
+                return None
+            if pos + 1 >= len(df):
+                with _bf_lock:
+                    _bf_stats["no_forward"] += 1
+                return None
+
+            def _ret_forward(off: int):
+                j = pos + off
+                if j >= len(df):
+                    return None
+                return round(
+                    (float(df["Close"].iloc[j]) - base_price) / base_price * 100, 2
+                )
+
+            r1 = _ret_forward(1)
+            r3 = _ret_forward(3)
+            r5 = _ret_forward(5)
+            r10 = _ret_forward(10)
+            with _bf_lock:
+                _bf_stats["ok"] += 1
             return (snap.id, r1, r3, r5, r10)
         except Exception:
+            with _bf_lock:
+                _bf_stats["exc"] += 1
             return None
 
     _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
@@ -571,10 +820,13 @@ def backfill_future_returns(db: Session) -> int:
             if r:
                 results.append(r)
 
+    st = _bf_stats
     logger.info(
         f"[learning] Backfill returns fetch: {len(results)}/{len(unfilled)} snapshots "
-        f"in {time.time() - _t0:.1f}s ({_workers} workers, "
-        f"{len(tickers)} unique tickers)"
+        f"in {time.time() - _t0:.1f}s ({_workers} workers, {len(tickers)} tickers) "
+        f"[skip_recent={st['skip_recent']} bad_snap={st['bad_snap']} empty={st['empty']} "
+        f"bad_px={st['bad_px']} no_anchor={st['no_anchor']} no_forward={st['no_forward']} "
+        f"exc={st['exc']} ok_rows={st['ok']}]"
     )
     updated = 0
     snap_map = {s.id: s for s in unfilled}
@@ -1448,6 +1700,61 @@ def _backtest_one_pattern_from_queue(pattern_id: int, user_id: int | None) -> tu
             )
             db.add(insight)
             db.commit()
+        _tier = (getattr(pattern, "queue_tier", None) or "full").strip().lower()
+        _prescreen = bool(getattr(settings, "brain_queue_prescreen_enabled", False))
+        if _prescreen and _tier == "prescreen":
+            result = smart_backtest_insight(
+                db,
+                insight,
+                target_tickers=max(
+                    2, int(getattr(settings, "brain_queue_prescreen_tickers", 4))
+                ),
+                update_confidence=True,
+                period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
+            )
+            total = result.get("total", 0)
+            wins = result.get("wins", 0)
+            backtests_run = result.get("backtests_run", 0)
+            wr_pct = (wins / total * 100.0) if total > 0 else 0.0
+            min_pre = float(
+                getattr(settings, "brain_queue_prescreen_min_win_rate_pct", 45.0)
+            )
+            win_rate = wins / total if total >= 3 else None
+            avg_return = result.get("avg_return")
+            mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
+            if pattern and total >= 2 and wr_pct >= min_pre:
+                pattern.queue_tier = "full"
+                pattern.backtest_priority = max(int(pattern.backtest_priority or 0), 50)
+                db.commit()
+                from .backtest_queue import invalidate_queue_status_cache
+
+                invalidate_queue_status_cache()
+                log_learning_event(
+                    db,
+                    user_id,
+                    "pattern_backtest_queue",
+                    f"Prescreen pass: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr) → full tier",
+                    related_insight_id=insight.id,
+                )
+            elif pattern and total >= 2:
+                pattern.active = False
+                pattern.promotion_status = "rejected_prescreen"
+                db.commit()
+                from .backtest_queue import invalidate_queue_status_cache
+
+                invalidate_queue_status_cache()
+                log_learning_event(
+                    db,
+                    user_id,
+                    "pattern_backtest_queue",
+                    f"Prescreen reject: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr)",
+                    related_insight_id=insight.id,
+                )
+            else:
+                mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
+            return (backtests_run, 1)
+
         result = smart_backtest_insight(
             db, insight,
             target_tickers=max(20, getattr(settings, "brain_queue_target_tickers", 50)),
@@ -2164,6 +2471,12 @@ def _mine_intraday_breakout_patterns(ticker: str) -> list[dict]:
         df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
         if df.empty or len(df) < 80:
             return []
+        from ...config import settings as _bqs
+        from .market_data import assess_ohlcv_bar_quality
+
+        _bq = assess_ohlcv_bar_quality(df)
+        if not _bq.get("ok") and getattr(_bqs, "brain_bar_quality_strict", False):
+            return []
     except Exception:
         return []
 
@@ -2255,6 +2568,55 @@ def _mine_intraday_one_ticker(ticker: str, budget: BrainResourceBudget | None) -
         if budget is not None:
             budget.record_miner_error("intraday_compression")
         return []
+
+
+def _bridge_compression_scanpattern_from_miner(
+    db: Session, user_id: int | None
+) -> int:
+    """When enabled, enqueue a prescreen-tier ScanPattern from miner-positive cycle."""
+    from ...models.trading import ScanPattern, TradingInsight
+    from .pattern_engine import _BUILTIN_PATTERNS
+
+    name = "Brain miner: BB squeeze prescreen (15m)"
+    if db.query(ScanPattern).filter(ScanPattern.name == name).first():
+        return 0
+    rules_json: str | None = None
+    for bp in _BUILTIN_PATTERNS:
+        if bp.get("name") == "BB Squeeze Breakout":
+            rules_json = bp.get("rules_json")
+            break
+    if not rules_json:
+        return 0
+    p = ScanPattern(
+        name=name,
+        description="Auto-queued from intraday compression miner (prescreen tier).",
+        rules_json=rules_json,
+        origin="brain_discovered",
+        asset_class="all",
+        timeframe="15m",
+        confidence=0.45,
+        active=True,
+        promotion_status="pending_oos",
+        hypothesis_family=BRAIN_HYPOTHESIS_FAMILY_COMPRESSION,
+        queue_tier="prescreen",
+    )
+    db.add(p)
+    db.flush()
+    ins = TradingInsight(
+        user_id=user_id,
+        pattern_description=f"{name} — composable pattern backtest",
+        confidence=0.45,
+        scan_pattern_id=p.id,
+        active=True,
+        hypothesis_family=BRAIN_HYPOTHESIS_FAMILY_COMPRESSION,
+    )
+    db.add(ins)
+    db.commit()
+    from .backtest_queue import invalidate_queue_status_cache
+
+    invalidate_queue_status_cache()
+    logger.info("[learning] Miner→ScanPattern bridge id=%s (prescreen)", p.id)
+    return 1
 
 
 def mine_intraday_patterns(
@@ -2399,10 +2761,23 @@ def mine_intraday_patterns(
         )
         discoveries += 1
 
+    bridge_n = 0
+    from ...config import settings as _s_bridge
+    if (
+        getattr(_s_bridge, "brain_miner_scanpattern_bridge_enabled", False)
+        and discoveries > 0
+        and (budget is None or budget.try_pattern_inject())
+    ):
+        try:
+            bridge_n = _bridge_compression_scanpattern_from_miner(db, user_id)
+        except Exception as e:
+            logger.warning("[learning] miner ScanPattern bridge failed: %s", e)
+
     log_learning_event(
         db, user_id, "intraday_pattern_mining",
         f"Mined {len(rows)} intraday bars from {len(tickers)} tickers, "
-        f"{discoveries} breakout pattern discoveries [{_fam}]",
+        f"{discoveries} breakout pattern discoveries [{_fam}]"
+        + (f", bridge={bridge_n}" if bridge_n else ""),
     )
 
     return {
@@ -2410,6 +2785,7 @@ def mine_intraday_patterns(
         "tickers": len(tickers),
         "discoveries": discoveries,
         "hypothesis_family": _fam,
+        "scanpattern_bridge_created": bridge_n,
     }
 
 
@@ -4422,6 +4798,30 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     _meta = get_meta_learner()
     ml_stats = _meta.get_stats()
 
+    research_kpi_benchmarks: dict[str, Any] = {"sample_count": 0}
+    try:
+        from ...models.trading import BacktestResult
+        from .research_kpis import aggregate_kpis_from_params_rows
+
+        param_rows = [
+            r[0]
+            for r in (
+                db.query(BacktestResult.params)
+                .filter(
+                    BacktestResult.scan_pattern_id.isnot(None),
+                    BacktestResult.trade_count > 0,
+                )
+                .order_by(BacktestResult.ran_at.desc())
+                .limit(800)
+                .all()
+            )
+        ]
+        research_kpi_benchmarks = aggregate_kpis_from_params_rows(
+            param_rows, max_samples=800,
+        )
+    except Exception:
+        pass
+
     return {
         "total_patterns": total_patterns,
         "avg_confidence": avg_confidence,
@@ -4460,6 +4860,12 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         "ml_trained_at": ml_stats.get("trained_at"),
         "ml_feature_importances": ml_stats.get("feature_importances"),
         "ml_active_patterns": ml_stats.get("active_patterns", 0),
+        "research_funnel": get_research_funnel_snapshot(db),
+        "attribution_coverage": get_attribution_coverage_stats(db, user_id),
+        "last_cycle_funnel": get_learning_status().get("last_cycle_funnel"),
+        "last_cycle_budget": get_learning_status().get("last_cycle_budget"),
+        "research_kpi_benchmarks": research_kpi_benchmarks,
+        "pattern_pipeline_near": get_pattern_pipeline_near(db, limit=14),
     }
 
 
@@ -4608,6 +5014,8 @@ _learning_status: dict[str, Any] = {
     "tickers_processed": 0,
     "step_timings": {},
     "data_provider": None,
+    "last_cycle_funnel": None,
+    "last_cycle_budget": None,
 }
 
 
@@ -4847,6 +5255,9 @@ def test_pattern_hypothesis(
     oos_rets: list[float] = []
     oos_ticker_hits = 0
     oos_trade_sum = 0
+    oos_avg_trade_pcts: list[float] = []
+    oos_profit_factors: list[float] = []
+    oos_robust_mins: list[float] = []
 
     for ticker in tickers[:5]:
         try:
@@ -4873,6 +5284,26 @@ def test_pattern_hypothesis(
                 oos_trade_sum += int(result.get("oos_trade_count") or 0)
                 if result.get("oos_return_pct") is not None:
                     oos_rets.append(float(result["oos_return_pct"]))
+                oo = result.get("out_of_sample") or {}
+                if isinstance(oo, dict):
+                    _atp = oo.get("avg_trade_pct")
+                    if _atp is not None:
+                        try:
+                            oos_avg_trade_pcts.append(float(_atp))
+                        except (TypeError, ValueError):
+                            pass
+                    _pf = oo.get("profit_factor")
+                    if _pf is not None:
+                        try:
+                            oos_profit_factors.append(float(_pf))
+                        except (TypeError, ValueError):
+                            pass
+                _rob = result.get("oos_robustness") or {}
+                if isinstance(_rob, dict) and _rob.get("oos_wr_min") is not None:
+                    try:
+                        oos_robust_mins.append(float(_rob["oos_wr_min"]))
+                    except (TypeError, ValueError):
+                        pass
             if linked_insight:
                 try:
                     save_backtest(
@@ -4898,6 +5329,35 @@ def test_pattern_hypothesis(
     mean_is_wr = sum(is_wrs) / len(is_wrs) if is_wrs else 0.0
     mean_oos_wr = sum(oos_wrs) / len(oos_wrs) if oos_wrs else None
     mean_oos_ret = sum(oos_rets) / len(oos_rets) if oos_rets else None
+    mean_oos_exp = (
+        sum(oos_avg_trade_pcts) / len(oos_avg_trade_pcts)
+        if oos_avg_trade_pcts
+        else None
+    )
+    mean_oos_pf = (
+        sum(oos_profit_factors) / len(oos_profit_factors)
+        if oos_profit_factors
+        else None
+    )
+    agg_robust_min = min(oos_robust_mins) if oos_robust_mins else None
+
+    import random
+
+    from ...config import settings as _oset
+
+    n_boot = int(getattr(_oset, "brain_oos_bootstrap_iterations", 0) or 0)
+    ci_low: float | None = None
+    ci_high: float | None = None
+    if n_boot > 0 and len(oos_wrs) >= 2:
+        means_bt: list[float] = []
+        for _ in range(n_boot):
+            sample = [random.choice(oos_wrs) for _ in range(len(oos_wrs))]
+            means_bt.append(sum(sample) / len(sample))
+        means_bt.sort()
+        lo_i = max(0, int(n_boot * 0.025))
+        hi_i = min(n_boot - 1, int(n_boot * 0.975))
+        ci_low = means_bt[lo_i]
+        ci_high = means_bt[hi_i]
 
     new_confidence = max(0.1, min(0.95,
         pattern.confidence * 0.7 + (ticker_vote_wr / 100) * 0.3
@@ -4909,8 +5369,28 @@ def test_pattern_hypothesis(
         mean_is_win_rate=mean_is_wr,
         mean_oos_win_rate=mean_oos_wr,
         oos_tickers_with_result=oos_ticker_hits,
+        mean_oos_expectancy_pct=mean_oos_exp,
+        mean_oos_profit_factor=mean_oos_pf,
+        oos_wr_robust_min=agg_robust_min,
+        oos_bootstrap_wr_ci_low=ci_low,
         **_oos_kw,
     )
+
+    prev_ov = getattr(pattern, "oos_validation_json", None) or {}
+    if not isinstance(prev_ov, dict):
+        prev_ov = {}
+    oos_validation_merged: dict[str, Any] = {
+        **prev_ov,
+        "evaluated_at": datetime.utcnow().isoformat() + "Z",
+        "expectancy_oos_mean": round(mean_oos_exp, 4) if mean_oos_exp is not None else None,
+        "profit_factor_oos_mean": round(mean_oos_pf, 4) if mean_oos_pf is not None else None,
+        "oos_wr_robust_min": round(agg_robust_min, 2) if agg_robust_min is not None else None,
+        "bootstrap_mean_oos_wr_ci": (
+            [round(ci_low, 2), round(ci_high, 2)]
+            if ci_low is not None and ci_high is not None
+            else None
+        ),
+    }
 
     patch: dict[str, Any] = {
         "confidence": round(new_confidence, 3),
@@ -4925,9 +5405,15 @@ def test_pattern_hypothesis(
         "backtest_spread_used": bt_kw.get("spread"),
         "backtest_commission_used": bt_kw.get("commission"),
         "oos_evaluated_at": datetime.utcnow(),
+        "oos_validation_json": oos_validation_merged,
     }
     if not allow_active:
         patch["active"] = False
+    if prom_stat == "promoted" and getattr(_oset, "brain_paper_book_on_promotion", False):
+        patch["paper_book_json"] = {
+            "opened_at": datetime.utcnow().isoformat() + "Z",
+            "entries": [],
+        }
 
     from ...config import settings as _settings_bench
     bench_passes: bool | None = None
@@ -6880,6 +7366,14 @@ def run_learning_cycle(
         else:
             _learning_status["steps_completed"] = 24
 
+        # Step 13d: Live vs research depromotion (optional)
+        if not _shutting_down.is_set():
+            try:
+                report["live_depromotion"] = run_live_pattern_depromotion(db)
+            except Exception as e:
+                logger.warning("[learning] live depromotion failed: %s", e)
+                report["live_depromotion"] = {"ok": False, "error": str(e)}
+
         # Step 14: Finalize + log
         _learning_status["current_step"] = "Finalizing"
         _learning_status["phase"] = "finalizing"
@@ -6924,6 +7418,28 @@ def run_learning_cycle(
         _learning_status["last_duration_s"] = round(elapsed, 1)
         report["elapsed_s"] = round(elapsed, 1)
         report["step_timings"] = dict(_learning_status.get("step_timings", {}))
+        report["funnel_snapshot"] = {
+            "prescreen_candidates": report.get("prescreen_candidates"),
+            "tickers_scored": report.get("tickers_scored"),
+            "snapshots_taken": report.get("snapshots_taken"),
+            "patterns_discovered": report.get("patterns_discovered"),
+            "returns_backfilled": report.get("returns_backfilled"),
+            "queue_backtests_run": report.get("queue_backtests_run"),
+            "backtests_run": report.get("backtests_run"),
+            "live_depromotion": report.get("live_depromotion"),
+        }
+        try:
+            _snap = get_research_funnel_snapshot(db)
+            report["funnel_snapshot"]["promotion_active"] = _snap.get(
+                "promotion_status_active"
+            )
+            report["funnel_snapshot"]["queue_pending"] = (_snap.get("queue") or {}).get(
+                "pending"
+            )
+            _learning_status["last_cycle_funnel"] = dict(report["funnel_snapshot"])
+            _learning_status["last_cycle_budget"] = report.get("brain_resource_budget")
+        except Exception:
+            pass
 
     logger.info(
         f"[learning] Learning cycle finished in {elapsed:.0f}s "

@@ -1778,6 +1778,34 @@ def _migration_046_hypothesis_family_columns(conn) -> None:
             conn.commit()
 
 
+def _migration_047_scan_pattern_research_quant_columns(conn) -> None:
+    """OOS validation JSON, queue tier for two-stage backtests, optional paper book."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "oos_validation_json" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns ADD COLUMN oos_validation_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+        conn.commit()
+    if "queue_tier" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns ADD COLUMN queue_tier VARCHAR(16) NOT NULL DEFAULT 'full'"
+            )
+        )
+        conn.commit()
+    if "paper_book_json" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns ADD COLUMN paper_book_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1826,6 +1854,7 @@ MIGRATIONS = [
     ("044_trading_insight_scan_pattern_constraints", _migration_044_trading_insight_scan_pattern_constraints),
     ("045_trading_alert_scan_pattern_id", _migration_045_trading_alert_scan_pattern_id),
     ("046_hypothesis_family_columns", _migration_046_hypothesis_family_columns),
+    ("047_scan_pattern_research_quant_columns", _migration_047_scan_pattern_research_quant_columns),
 ]
 
 

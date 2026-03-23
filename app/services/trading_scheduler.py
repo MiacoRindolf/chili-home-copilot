@@ -1032,12 +1032,27 @@ def get_scheduler_info() -> dict:
         return {"running": False, "jobs": []}
 
     jobs = []
-    for job in _scheduler.get_jobs():
-        jobs.append({
-            "id": str(job.id),
-            "name": str(job.name) if job.name is not None else "",
-            "next_run": job.next_run_time.isoformat() if job.next_run_time else None,
-        })
+    for _i, job in enumerate(_scheduler.get_jobs()):
+        try:
+            jid = str(getattr(job, "id", ""))
+            jname = getattr(job, "name", None)
+            jname_s = str(jname) if jname is not None else ""
+            nrt = getattr(job, "next_run_time", None)
+            next_iso = nrt.isoformat() if nrt is not None else None
+        except Exception as e:
+            logger.warning(
+                "[scheduler] get_scheduler_info: skip job type=%s: %s",
+                type(job).__name__,
+                e,
+            )
+            continue
+        jobs.append(
+            {
+                "id": jid,
+                "name": jname_s,
+                "next_run": next_iso,
+            }
+        )
 
     return {
         "running": _scheduler.running,

@@ -94,6 +94,10 @@ class Settings(BaseSettings):
     massive_ws_url: str = "wss://socket.massive.com"
     massive_use_websocket: bool = True
     massive_max_rps: int = 100
+    # Shared ``requests`` Session to api.massive.com: urllib3 pool must exceed peak concurrent
+    # threads (batch OHLCV + snapshot batches + backtests) or logs "Connection pool is full".
+    massive_http_pool_connections: int = 128
+    massive_http_pool_maxsize: int = 512
 
     # Polygon.io market data (secondary fallback — replaces yfinance for speed)
     polygon_api_key: str = ""
@@ -101,15 +105,15 @@ class Settings(BaseSettings):
     use_polygon: bool = False  # feature flag: set USE_POLYGON=true in .env to enable
     polygon_max_rps: int = 5  # soft cap; governor will smooth bursts around this
 
-    # Learning schedule
-    learning_interval_hours: int = 2  # how often to run learning cycle (hours)
+    # Learning schedule (1h = faster research cycles if worker + OHLCV provider keep up)
+    learning_interval_hours: int = 1
     # If a cycle crashes without clearing _learning_status["running"], the brain worker would skip
     # forever; clear the lock after this many seconds (default 3h).
     learning_cycle_stale_seconds: int = 10800
 
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
-    brain_backtest_parallel: int = 14     # ScanPatterns to backtest in parallel (queue step)
+    brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
@@ -211,9 +215,9 @@ class Settings(BaseSettings):
     brain_oos_min_oos_trades_high_vol_family: Optional[int] = None
 
     # Per learning-cycle resource caps (miners). Zero cap = unlimited for that dimension.
-    brain_budget_ohlcv_per_cycle: int = 200
-    brain_budget_miner_rows_per_cycle: int = 80000
-    brain_budget_pattern_injects_per_cycle: int = 24
+    brain_budget_ohlcv_per_cycle: int = 280
+    brain_budget_miner_rows_per_cycle: int = 100000
+    brain_budget_pattern_injects_per_cycle: int = 32
     brain_budget_miner_error_trip: int = 5
 
     # Secondary miners: high-vol regime hypothesis (crypto 15m) — additive to compression intraday miner.
@@ -231,10 +235,40 @@ class Settings(BaseSettings):
     brain_bench_min_bars_per_window: int = 35
     brain_bench_min_positive_fold_ratio: float = 0.375
     # Cost-stress benchmark: multiply spread/commission for a second walk-forward eval (stored on bench JSON).
-    brain_bench_cost_stress_spread_mult: float = 1.0
-    brain_bench_cost_stress_commission_mult: float = 1.0
-    # When True, stress eval must also pass passes_gate (defaults stress mults to 2.0/1.5 if both 1.0).
+    brain_bench_cost_stress_spread_mult: float = 2.0
+    brain_bench_cost_stress_commission_mult: float = 1.5
+    # When True, stress eval must also pass passes_gate (stress uses mults above; code bumps 1.0/1.0 to 2.0/1.5 if needed).
     brain_bench_require_stress_pass: bool = False
+
+    # OOS gates beyond win rate (None = off). Enabling thins promotions; set in .env only on purpose.
+    brain_oos_min_expectancy_pct: Optional[float] = None
+    brain_oos_min_profit_factor: Optional[float] = None
+    # Extra holdout fractions on the same OHLCV window (comma-separated); empty = primary holdout only.
+    brain_oos_robustness_extra_fractions: str = ""
+    # If True, min OOS win rate must hold for every evaluated extra holdout (per ticker), not only primary.
+    brain_oos_require_robustness_wr_above_gate: bool = False
+    # Bootstrap on vector of per-ticker OOS win rates (0 = disabled).
+    brain_oos_bootstrap_iterations: int = 0
+    # Reject promotion when bootstrap CI lower bound for mean OOS WR is below this (None = skip).
+    brain_oos_bootstrap_ci_min_wr: Optional[float] = None
+
+    # Two-tier queue: cheap prescreen then full backtest (final OOS gate unchanged).
+    brain_queue_prescreen_enabled: bool = True
+    brain_queue_prescreen_tickers: int = 6
+    brain_queue_prescreen_period: str = "3mo"
+    brain_queue_prescreen_min_win_rate_pct: float = 45.0
+
+    # Live vs research: downgrade patterns when realized win rate lags research OOS materially.
+    brain_live_depromotion_enabled: bool = False
+    brain_live_depromotion_min_closed_trades: int = 8
+    brain_live_depromotion_max_gap_pct: float = 25.0
+
+    # When a pattern is promoted, initialize paper_book_json for optional shadow tracking.
+    brain_paper_book_on_promotion: bool = False
+
+    # OHLCV quality: log warnings from assess_ohlcv_bar_quality; strict can skip miner rows (future hook).
+    brain_bar_quality_strict: bool = False
+    brain_bar_quality_max_gap_bars: int = 5
 
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0
@@ -246,10 +280,10 @@ class Settings(BaseSettings):
     # with only 1–2 evaluable conditions, a high ratio floor produced zero candidates forever.
     pattern_imminent_min_readiness: float = 0.58
     pattern_imminent_readiness_cap: float = 0.995
-    pattern_imminent_max_per_run: int = 8
-    pattern_imminent_cooldown_hours: float = 4.0
-    pattern_imminent_max_tickers_per_run: int = 120
-    pattern_imminent_scope_tickers_cap: int = 25
+    pattern_imminent_max_per_run: int = 12
+    pattern_imminent_cooldown_hours: float = 3.0
+    pattern_imminent_max_tickers_per_run: int = 160
+    pattern_imminent_scope_tickers_cap: int = 32
     pattern_imminent_evaluable_ratio_floor: float = 0.35
     pattern_imminent_eta_scale_k: float = 1.5
 

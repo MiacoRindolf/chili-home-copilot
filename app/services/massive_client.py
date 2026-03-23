@@ -138,11 +138,26 @@ def _cache_set(key: str, val: Any) -> None:
 # ---------------------------------------------------------------------------
 # HTTP helpers
 # ---------------------------------------------------------------------------
+def _mount_massive_adapters(sess: requests.Session) -> None:
+    """Size urllib3 pool from settings so concurrent batch workers do not exhaust it."""
+    from requests.adapters import HTTPAdapter
+
+    pc = max(10, int(getattr(settings, "massive_http_pool_connections", 128)))
+    pm = max(pc, int(getattr(settings, "massive_http_pool_maxsize", 512)))
+    adapter = HTTPAdapter(pool_connections=pc, pool_maxsize=pm)
+    sess.mount("https://", adapter)
+    sess.mount("http://", adapter)
+    logger.info(
+        "[massive] HTTP pool api.massive.com: pool_connections=%s pool_maxsize=%s "
+        "(raise MASSIVE_HTTP_* if you still see urllib3 'pool is full')",
+        pc,
+        pm,
+    )
+
+
 _session = requests.Session()
 _session.headers.update({"Accept": "application/json"})
-from requests.adapters import HTTPAdapter
-_session.mount("https://", HTTPAdapter(pool_connections=80, pool_maxsize=80))
-_session.mount("http://", HTTPAdapter(pool_connections=80, pool_maxsize=80))
+_mount_massive_adapters(_session)
 
 _MAX_RETRIES = 2
 _BACKOFF_BASE = 1.0
@@ -620,6 +635,9 @@ def get_aggregates_batch(
         return {}
     if max_workers <= 0:
         max_workers = min(80, max(30, settings.massive_max_rps))
+    # Use at most half the urllib3 pool for this batch (scan/backtest may overlap other requests)
+    _pool_cap = max(16, int(settings.massive_http_pool_maxsize) // 2)
+    max_workers = min(max_workers, _pool_cap)
 
     uncached: list[str] = []
     results: dict[str, list[dict[str, Any]]] = {}
@@ -712,6 +730,8 @@ def _get_crypto_snapshots_batch(
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     results: dict[str, dict[str, Any]] = {}
+    _pool_cap = max(16, int(settings.massive_http_pool_maxsize) // 2)
+    max_workers = min(max_workers, _pool_cap)
 
     def _fetch(t: str):
         q = get_last_quote(t)

@@ -885,6 +885,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Performance</div>
         <div class="brain-pipeline" id="brain-pipeline"></div>
+        <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
+        <div id="brain-research-kpi-benchmarks" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5"></div>
+        <div id="brain-pipeline-near" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
         <div class="brain-kpis" id="brain-kpis">
           <div class="brain-kpi" style="opacity:.3"></div>
           <div class="brain-kpi" style="opacity:.3"></div>
@@ -2152,6 +2155,66 @@ function loadBrainDashboard() {
       '<span class="bp-arrow">&rarr;</span>' +
       '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + verLabel + '</span></span>';
 
+    var rfEl = document.getElementById('brain-research-funnel');
+    if (rfEl && d.research_funnel) {
+      var qf = d.research_funnel.queue || {};
+      var pa = d.research_funnel.promotion_status_active || {};
+      var pin = d.research_funnel.promotion_status_inactive || {};
+      var qt = d.research_funnel.queue_tier_active || {};
+      var cov = d.attribution_coverage || {};
+      var bud = d.last_cycle_budget || {};
+      var rej = (pa.rejected_oos||0) + (pa.rejected_bench||0) + (pa.rejected_bench_stress||0) + (pa.rejected_prescreen||0);
+      rfEl.innerHTML =
+        '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research funnel</div>' +
+        '<div>Backtest queue pending: <strong>' + (qf.pending!=null?qf.pending:'—') + '</strong> · ScanPatterns total: <strong>' + (d.research_funnel.scan_patterns_total||0) + '</strong></div>' +
+        '<div>Active by promo: promoted <strong>' + (pa.promoted||0) + '</strong>, pending OOS <strong>' + (pa.pending_oos||0) + '</strong>, candidates <strong>' + (pa.candidate||0) + '</strong>, legacy <strong>' + (pa.legacy||0) + '</strong>, rejected sum <strong>' + rej + '</strong></div>' +
+        '<div>Inactive: rejected OOS <strong>' + (pin.rejected_oos||0) + '</strong>, degraded live <strong>' + (pin.degraded_live||0) + '</strong>, rejected prescreen <strong>' + (pin.rejected_prescreen||0) + '</strong></div>' +
+        (Object.keys(qt).length ? '<div>Queue tier (active): ' + Object.keys(qt).map(function(k){ return k + ' <strong>' + qt[k] + '</strong>'; }).join(' · ') + '</div>' : '') +
+        (cov.coverage_pct!=null ? '<div>Live attribution: <strong>' + cov.coverage_pct + '%</strong> of closed trades carry <code style="font-size:9px">scan_pattern_id</code> (' + (cov.closed_with_scan_pattern_id||0) + '/' + (cov.closed_trades||0) + ')</div>' : '') +
+        (bud.ohlcv_used!=null ? '<div>Last cycle budget: OHLCV ' + bud.ohlcv_used + '/' + (bud.ohlcv_cap||'∞') + ', miner rows ' + (bud.miner_rows_used||0) + '/' + (bud.miner_rows_cap||'∞') + '</div>' : '') +
+        '<div style="font-size:9px;color:var(--text-muted);margin-top:6px;max-width:52rem">Per-ticker rows in pattern evidence can show few trades; promotion uses <strong>aggregate</strong> OOS stats across many tickers.</div>';
+    } else if (rfEl) { rfEl.innerHTML = ''; }
+
+    var pipeNear = document.getElementById('brain-pipeline-near');
+    if (pipeNear) {
+      var pn = d.pattern_pipeline_near;
+      if (pn && pn.length) {
+        var rows = pn.map(function(x) {
+          var wr = x.oos_win_rate != null ? x.oos_win_rate + '% OOS' : 'OOS pending';
+          var tc = x.oos_trade_count != null ? x.oos_trade_count + ' agg. trades' : '';
+          var st = escHtml((x.promotion_status||'').replace(/</g,''));
+          var rawName = x.name || ('#' + x.id);
+          var nm = escHtml(rawName.length > 56 ? rawName.slice(0, 53) + '…' : rawName);
+          var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(x.id);
+          return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+            '<a href="' + link + '" style="font-weight:600;color:var(--accent);text-decoration:none;max-width:240px">' + nm + '</a>' +
+            '<span style="font-size:9px;color:var(--text-muted)">' + st + '</span>' +
+            '<span style="font-size:9px">' + wr + (tc? ' · ' + tc : '') + '</span>' +
+            '<span style="font-size:9px;color:var(--text-muted)">' + escHtml(x.timeframe||'') + '</span></div>';
+        }).join('');
+        pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion (active pending OOS / candidates)</div>' + rows;
+      } else {
+        pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion</div><div style="font-size:9px;color:var(--text-muted)">No active pending_oos or candidate patterns right now.</div>';
+      }
+    }
+
+    var rkEl = document.getElementById('brain-research-kpi-benchmarks');
+    if (rkEl && d.research_kpi_benchmarks && d.research_kpi_benchmarks.sample_count > 0 && d.research_kpi_benchmarks.means) {
+      var m = d.research_kpi_benchmarks.means;
+      var parts = [];
+      function _rk(k, label) { if (m[k] != null) parts.push('<strong>' + label + '</strong> ' + m[k]); }
+      _rk('sharpe_ratio', 'Sharpe');
+      _rk('sortino_ratio', 'Sortino');
+      _rk('information_ratio', 'IR');
+      _rk('calmar_ratio', 'Calmar');
+      _rk('max_drawdown_pct', 'MaxDD%');
+      _rk('jensen_alpha_pct', 'Jensen α%');
+      _rk('win_loss_payoff_ratio', 'W/L payoff');
+      rkEl.innerHTML = parts.length
+        ? '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research KPIs (mean over recent pattern backtests, n=' + d.research_kpi_benchmarks.sample_count + ')</div><div>' + parts.join(' · ') + '</div><div style="font-size:9px;color:var(--text-muted);margin-top:4px">IR vs buy&amp;hold on same bars; α/β from backtesting.py CAPM-style vs B&amp;H. Compare to institutional benchmarks externally.</div>'
+        : '';
+    } else if (rkEl) { rkEl.innerHTML = ''; }
+
     function _accDisp(acc, count) { return count > 0 ? acc + '%' : '--'; }
     function _accCls(acc, count) { if (count === 0) return ''; return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger'; }
     function _accColor(acc, count) { if (count === 0) return 'var(--text-muted)'; return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444'; }
@@ -2259,6 +2322,7 @@ function loadBrainDashboard() {
   loadBrainActivity();
   loadLearnedPatterns();
   loadTradeablePatterns();
+  loadNearTradeableCandidates();
   loadBrainPredictions();
   loadCycleAiReportsPage(true);
   pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
@@ -2267,7 +2331,7 @@ function loadBrainDashboard() {
     pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
   }, 3000);
   if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
-  window._tradeablePatternsInterval = setInterval(loadTradeablePatterns, 120000);
+  window._tradeablePatternsInterval = setInterval(function() { loadTradeablePatterns(); loadNearTradeableCandidates(); }, 120000);
 }
 
 function showAccuracyDetail(type) {
@@ -2400,6 +2464,25 @@ function loadTradeablePatterns() {
       } else if (p.bench_passes_gate === false) {
         bench = '<span style="font-size:8px;color:var(--text-muted)">Bench: no</span>';
       }
+      if (p.bench_stress_passes_gate === true) {
+        bench += '<span style="font-size:8px;padding:2px 6px;border-radius:4px;background:rgba(6,182,212,.15);color:#06b6d4;margin-left:4px">Stress pass</span>';
+      } else if (p.bench_stress_passes_gate === false) {
+        bench += '<span style="font-size:8px;color:var(--text-muted);margin-left:4px">Stress: no</span>';
+      }
+      if (p.oos_validation && p.oos_validation.bootstrap_mean_oos_wr_ci) {
+        var ci = p.oos_validation.bootstrap_mean_oos_wr_ci;
+        bench += '<span style="font-size:8px;color:var(--text-muted);margin-left:4px" title="Bootstrap CI on mean OOS WR (tickers)">CI ' + ci[0] + '–' + ci[1] + '%</span>';
+      }
+      var rk = '';
+      if (p.research_kpi_summary && p.research_kpi_summary.means) {
+        var mm = p.research_kpi_summary.means;
+        var rkBits = [];
+        if (mm.sharpe_ratio != null) rkBits.push('Sh ' + mm.sharpe_ratio);
+        if (mm.sortino_ratio != null) rkBits.push('So ' + mm.sortino_ratio);
+        if (mm.information_ratio != null) rkBits.push('IR ' + mm.information_ratio);
+        if (mm.calmar_ratio != null) rkBits.push('Ca ' + mm.calmar_ratio);
+        if (rkBits.length) rk = '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.4" title="Mean KPIs across stored backtests for this pattern">' + rkBits.join(' · ') + '</div>';
+      }
       var rawName = (p.name || ('Pattern #' + p.id));
       var name = escHtml(rawName.length > 64 ? rawName.slice(0, 61) + '…' : rawName);
       var tf = escHtml(p.timeframe || '—');
@@ -2415,6 +2498,7 @@ function loadTradeablePatterns() {
           '<span style="font-size:8px;text-transform:uppercase;letter-spacing:.04em;color:var(--accent)">' + promo + '</span>' +
           bench +
         '</div>' +
+        rk +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading →</a>' +
       '</div>';
     });
@@ -2422,6 +2506,40 @@ function loadTradeablePatterns() {
     container.innerHTML = html;
   }).catch(function() {
     container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load.</div>';
+  });
+}
+
+function loadNearTradeableCandidates() {
+  var el = document.getElementById('brain-near-tradeable-candidates');
+  if (!el) return;
+  el.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
+  fetch('/api/trading/brain/tradeable-patterns?include_candidates=true&limit=12').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok || !d.patterns) {
+      el.innerHTML = '<span style="color:var(--text-muted)">Could not load candidates.</span>';
+      return;
+    }
+    var onlyCand = d.patterns.filter(function(p) { return (p.promotion_status || '') === 'candidate'; });
+    if (!onlyCand.length) {
+      el.innerHTML = '<span style="color:var(--text-muted)">No <code style="font-size:9px">candidate</code> patterns meet the same gates. Promoted patterns appear in the grid above.</span>';
+      return;
+    }
+    var html = '<div class="tp-tradeable-grid">';
+    onlyCand.forEach(function(p) {
+      var wr = p.display_win_rate_pct != null ? p.display_win_rate_pct + '%' : '--';
+      var trades = p.trade_count_for_gate != null ? p.trade_count_for_gate : '--';
+      var rawName = (p.name || ('Pattern #' + p.id));
+      var name = escHtml(rawName.length > 52 ? rawName.slice(0, 49) + '…' : rawName);
+      var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
+      html += '<div class="tp-tradeable-card" style="opacity:.95">' +
+        '<div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:4px">' + name + '</div>' +
+        '<div style="font-size:9px;color:var(--text-secondary)">' + wr + ' WR · ' + trades + ' trades · <span style="color:var(--accent)">candidate</span></div>' +
+        '<a href="' + link + '" style="display:inline-block;margin-top:6px;font-size:9px;font-weight:600;color:var(--accent);text-decoration:none">Open →</a>' +
+        '</div>';
+    });
+    html += '</div>';
+    el.innerHTML = html;
+  }).catch(function() {
+    el.innerHTML = '<span style="color:var(--text-muted)">Failed to load.</span>';
   });
 }
 

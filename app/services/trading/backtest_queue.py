@@ -64,6 +64,10 @@ def get_pending_patterns(
         ScanPattern.last_backtest_at < cutoff,
     )
 
+    tier_rank = case(
+        (ScanPattern.queue_tier == "prescreen", 0),
+        else_=1,
+    )
     q = (
         db.query(ScanPattern)
         .filter(
@@ -71,6 +75,7 @@ def get_pending_patterns(
             needs_backtest,
         )
         .order_by(
+            tier_rank.asc(),
             ScanPattern.backtest_priority.desc(),
             ScanPattern.last_backtest_at.asc().nullsfirst(),
             ScanPattern.created_at.asc(),

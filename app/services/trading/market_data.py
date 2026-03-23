@@ -1107,3 +1107,55 @@ def get_btc_state() -> dict[str, Any]:
     _btc_state_cache["data"] = result
     _btc_state_cache["ts"] = now
     return result
+
+
+def assess_ohlcv_bar_quality(
+    df: pd.DataFrame,
+    *,
+    max_gap_multiplier: float = 5.0,
+) -> dict[str, Any]:
+    """Heuristic bar continuity check for miners and backtests.
+
+    Flags large gaps between consecutive bar timestamps vs median delta.
+    Does not detect halts or corporate actions — see docs/DATA_SURVIVORSHIP_BIAS.md.
+    """
+    out: dict[str, Any] = {
+        "ok": True,
+        "bars": 0,
+        "median_delta_s": None,
+        "gap_events": 0,
+        "max_gap_bars_equiv": 0.0,
+        "issues": [],
+    }
+    if df is None or df.empty or len(df) < 3:
+        out["ok"] = False
+        out["issues"].append("too_few_bars")
+        return out
+    try:
+        idx = pd.to_datetime(df.index, utc=True, errors="coerce")
+        deltas = idx.to_series().diff().dt.total_seconds().dropna()
+        deltas = deltas[deltas > 0]
+        if deltas.empty:
+            out["issues"].append("no_positive_deltas")
+            return out
+        med = float(deltas.median())
+        out["bars"] = int(len(df))
+        out["median_delta_s"] = round(med, 3)
+        if med <= 0:
+            return out
+        for i, dt in enumerate(deltas):
+            if float(dt) > med * max_gap_multiplier:
+                out["gap_events"] += 1
+                equiv = float(dt) / med
+                out["max_gap_bars_equiv"] = max(out["max_gap_bars_equiv"], equiv)
+        if out["gap_events"] > 0:
+            out["issues"].append("large_timestamp_gaps")
+        from ...config import settings as _cfg
+
+        _max_ev = int(getattr(_cfg, "brain_bar_quality_max_gap_bars", 5))
+        if out["gap_events"] > _max_ev:
+            out["ok"] = False
+    except Exception as ex:
+        out["ok"] = False
+        out["issues"].append(f"error:{type(ex).__name__}")
+    return out

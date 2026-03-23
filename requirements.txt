@@ -28,6 +28,7 @@ ta>=0.11.0
 finvizfinance>=1.0.0
 backtesting>=0.3.3
 apscheduler>=3.10.0
+tzdata>=2024.1  # zoneinfo IANA data; required on slim Docker images (no bundled tz database)
 pyyaml>=6.0
 robin-stocks>=3.0.0
 pyotp>=2.9.0
