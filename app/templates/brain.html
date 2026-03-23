@@ -1441,7 +1441,7 @@ function _renderEvWrProgress(series) {
       layout: { background: { type: 'solid', color: bgColor }, textColor: isDark ? '#a0a0b0' : '#666', fontSize: 10 },
       grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
       rightPriceScale: { borderColor: gridColor },
-      timeScale: { borderColor: gridColor },
+      timeScale: { borderColor: gridColor, timeVisible: true, secondsVisible: false },
     });
     var line = _evWrProgressChart.addLineSeries({ color: '#22c55e', lineWidth: 2 });
     line.setData(chartData);
@@ -3198,7 +3198,9 @@ function _renderEvBacktests(bts) {
     var periodStr = '--';
     var strategyId = '';
     try {
-      if (b.params) {
+      if (b.period_display && b.period_display !== '--') {
+        periodStr = b.period_display;
+      } else if (b.params) {
         var p = typeof b.params === 'string' ? JSON.parse(b.params) : b.params;
         if (p && p.period) periodStr = p.period;
         if (p && p.strategy_id) strategyId = p.strategy_id;
@@ -3225,6 +3227,22 @@ function _renderEvBacktests(bts) {
 }
 
 var _btChartInstances = {};
+/** Evidence mini-chart + table: requested period/interval, actual bar count, OHLC date span (UTC). */
+function _fmtBtEvidenceWindow(d) {
+  if (!d) return '';
+  var parts = [];
+  if (d.period) parts.push(String(d.period));
+  if (d.interval) parts.push(String(d.interval));
+  if (d.ohlc_bars != null && d.ohlc_bars !== '') parts.push(d.ohlc_bars + ' bars');
+  if (d.chart_time_from && d.chart_time_to) {
+    var a = new Date(d.chart_time_from * 1000);
+    var b = new Date(d.chart_time_to * 1000);
+    var opt = { month: 'short', year: 'numeric' };
+    parts.push(a.toLocaleDateString(undefined, opt) + ' – ' + b.toLocaleDateString(undefined, opt));
+  }
+  return parts.length ? parts.join(' · ') : '';
+}
+
 function toggleBtChart(row, idx, ticker, strategy, period, btId) {
   var chartRow = document.getElementById('bt-chart-row-' + idx);
   if (!chartRow) return;
@@ -3242,6 +3260,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
     '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">' + loadMsg + '</span></div>' +
     '<div class="bt-chart-container" id="bt-chart-' + idx + '"></div>' +
     '<div class="bt-chart-toolbar">' +
+      '<div class="bt-chart-window" id="bt-chart-window-' + idx + '" style="font-size:10px;color:var(--text-muted);line-height:1.35;padding:0 0 4px"></div>' +
       '<div class="bt-chart-stats" id="bt-chart-stats-' + idx + '"></div>' +
       '<a class="bt-chart-link" href="' + deepLink + '" target="_blank">Open Full Chart &#x2197;</a>' +
     '</div></div>';
@@ -3261,6 +3280,16 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
     if (cells[4]) cells[4].textContent = noTrades ? '--' : (res.sharpe != null ? res.sharpe.toFixed(2) : '--');
     if (cells[5]) cells[5].textContent = noTrades ? '--' : (res.max_drawdown != null ? res.max_drawdown.toFixed(1) + '%' : '--');
     if (cells[6]) cells[6].textContent = tc;
+    if (cells[7]) {
+      if (res.period_display && res.period_display !== '--') {
+        cells[7].textContent = res.period_display;
+        cells[7].title = 'Backtest window: requested period, interval, bar count, OHLC date span (UTC).';
+      } else {
+        var pw = _fmtBtEvidenceWindow(res);
+        cells[7].textContent = pw || (res.period != null ? String(res.period) : '--');
+        cells[7].title = pw ? ('Backtest window (requested period + actual OHLC bars): ' + pw) : '';
+      }
+    }
     if (cells[8]) cells[8].textContent = res.ran_at ? new Date(res.ran_at).toLocaleDateString() : '--';
   }
 
@@ -3281,6 +3310,9 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
           return_pct: d.return_pct, win_rate: d.win_rate, sharpe: d.sharpe,
           max_drawdown: d.max_drawdown, trade_count: d.trade_count || 0,
           equity_curve: d.equity_curve || [],
+          period: d.period, interval: d.interval,
+          ohlc_bars: d.ohlc_bars, chart_time_from: d.chart_time_from, chart_time_to: d.chart_time_to,
+          strategy_id: d.strategy_id,
         }),
       }).then(parseFetchJson).then(function(refreshRes) {
         if (refreshRes.ok) patchBacktestEvidenceRow(chartRow.previousElementSibling, refreshRes);
@@ -3336,8 +3368,15 @@ function _drawBtMiniChart(idx, data) {
     grid: { vertLines: { color: gridColor }, horzLines: { color: gridColor } },
     crosshair: { mode: LightweightCharts.CrosshairMode.Normal },
     rightPriceScale: { borderColor: gridColor },
-    timeScale: { borderColor: gridColor, timeVisible: false },
+    timeScale: { borderColor: gridColor, timeVisible: true },
   });
+
+  var winEl = document.getElementById('bt-chart-window-' + idx);
+  if (winEl) {
+    var wtxt = _fmtBtEvidenceWindow(data);
+    winEl.textContent = wtxt ? ('Window: ' + wtxt) : '';
+    winEl.title = wtxt ? ('Matches candle data below. Requested period vs bars returned by market data.') : '';
+  }
 
   if (data.ohlc && data.ohlc.length) {
     var candleSeries = chart.addCandlestickSeries({

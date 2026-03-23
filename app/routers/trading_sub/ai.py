@@ -784,6 +784,45 @@ def _brain_bench_card_fields(bench_json: Any) -> dict[str, Any]:
     return out
 
 
+def _period_display_from_stored_params(params_raw: Any) -> str | None:
+    """Human-readable window line for evidence table: period, interval, bar count, date span."""
+    if not params_raw:
+        return None
+    try:
+        p = json.loads(params_raw) if isinstance(params_raw, str) else dict(params_raw)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    if not isinstance(p, dict):
+        return None
+    parts: list[str] = []
+    per = p.get("period")
+    iv = p.get("interval")
+    if per:
+        parts.append(str(per))
+    if iv:
+        parts.append(str(iv))
+    nb = p.get("ohlc_bars")
+    if nb is not None:
+        try:
+            parts.append(f"{int(nb)} bars")
+        except (TypeError, ValueError):
+            pass
+    cf, ct = p.get("chart_time_from"), p.get("chart_time_to")
+    if cf is not None and ct is not None:
+        try:
+            from datetime import datetime, timezone
+
+            a = datetime.fromtimestamp(int(cf), tz=timezone.utc)
+            b = datetime.fromtimestamp(int(ct), tz=timezone.utc)
+            if a.date() != b.date():
+                parts.append(f"{a.strftime('%b %Y')}–{b.strftime('%b %Y')}")
+            else:
+                parts.append(a.strftime("%Y-%m-%d"))
+        except (TypeError, ValueError, OSError):
+            pass
+    return " · ".join(parts) if parts else None
+
+
 def _compute_deduped_backtest_win_stats(
     db: Session,
     sibling_insight_ids: list[int],
@@ -817,6 +856,15 @@ def _compute_deduped_backtest_win_stats(
             if dedup_key in seen_bt_keys:
                 continue
             seen_bt_keys.add(dedup_key)
+            pdisp = _period_display_from_stored_params(bt.params)
+            if not pdisp:
+                try:
+                    raw = bt.params
+                    pr = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                    if isinstance(pr, dict) and pr.get("period"):
+                        pdisp = str(pr["period"])
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pdisp = None
             backtests_out.append({
                 "id": bt.id,
                 "ticker": bt.ticker,
@@ -828,6 +876,7 @@ def _compute_deduped_backtest_win_stats(
                 "trade_count": bt.trade_count,
                 "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
                 "params": bt.params,
+                "period_display": pdisp or "--",
                 "relevance": 100,
             })
         backtests_out.sort(
@@ -1568,9 +1617,43 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
     bt.trade_count = int(body.get("trade_count", bt.trade_count) or 0)
     if body.get("equity_curve") is not None:
         bt.equity_curve = json.dumps(body["equity_curve"]) if isinstance(body["equity_curve"], list) else body["equity_curve"]
+
+    # Merge chart window metadata from client (same run as stats) so stored params match the mini-chart.
+    try:
+        curp: dict[str, Any] = (
+            json.loads(bt.params) if isinstance(bt.params, str) else dict(bt.params or {})
+        ) if bt.params else {}
+    except (json.JSONDecodeError, TypeError, ValueError):
+        curp = {}
+    params_merged = False
+    if isinstance(body.get("params"), dict):
+        for k, v in body["params"].items():
+            if v is not None:
+                curp[k] = v
+                params_merged = True
+    else:
+        for k in (
+            "period", "interval", "ohlc_bars", "chart_time_from", "chart_time_to",
+            "strategy_id",
+        ):
+            if body.get(k) is not None:
+                curp[k] = body[k]
+                params_merged = True
+    if params_merged:
+        bt.params = json.dumps(curp)
+
     bt.ran_at = dt.utcnow()
     db.commit()
     db.refresh(bt)
+
+    pdisp = _period_display_from_stored_params(bt.params)
+    if not pdisp:
+        try:
+            pr = json.loads(bt.params) if isinstance(bt.params, str) else (bt.params or {})
+            if isinstance(pr, dict) and pr.get("period"):
+                pdisp = str(pr["period"])
+        except (json.JSONDecodeError, TypeError, ValueError):
+            pdisp = None
 
     return JSONResponse({
         "ok": True,
@@ -1581,6 +1664,8 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
         "max_drawdown": float(bt.max_drawdown),
         "trade_count": bt.trade_count,
         "ran_at": bt.ran_at.isoformat(),
+        "period_display": pdisp or "--",
+        "params": bt.params,
     })
 
 

@@ -527,6 +527,8 @@ def run_backtest(
         "strategy": strat_info["name"],
         "strategy_id": strategy_id,
         "period": period,
+        "interval": interval,
+        **_chart_window_meta(df),
         "return_pct": round(float(stats.get("Return [%]", 0)), 2),
         "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
         "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),
@@ -557,6 +559,18 @@ def _sanitize_float(v: Any, default: float = 0.0) -> float:
         return default
 
 
+def _chart_window_meta(df: pd.DataFrame) -> dict[str, Any]:
+    """Bar count and first/last chart timestamps (UTC unix seconds) for persisted params / UI."""
+    if df is None or df.empty:
+        return {"ohlc_bars": 0, "chart_time_from": None, "chart_time_to": None}
+    idx = df.index
+    return {
+        "ohlc_bars": int(len(df)),
+        "chart_time_from": int(pd.Timestamp(idx[0]).timestamp()),
+        "chart_time_to": int(pd.Timestamp(idx[-1]).timestamp()),
+    }
+
+
 def save_backtest(
     db: Session, user_id: int | None, result: dict[str, Any],
     *,
@@ -585,6 +599,9 @@ def save_backtest(
         "strategy_id": result.get("strategy_id"),
         "period": result.get("period"),
         "interval": result.get("interval"),
+        "ohlc_bars": result.get("ohlc_bars"),
+        "chart_time_from": result.get("chart_time_from"),
+        "chart_time_to": result.get("chart_time_to"),
         "spread_used": result.get("spread_used"),
         "commission_used": result.get("commission_used"),
         "oos_holdout_fraction": result.get("oos_holdout_fraction"),
@@ -1535,6 +1552,7 @@ def _run_dynamic_pattern_slice(
         "strategy_id": "dynamic_pattern",
         "period": period,
         "interval": interval,
+        **_chart_window_meta(work),
         "return_pct": round(float(stats.get("Return [%]", 0)), 2),
         "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
         "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),
