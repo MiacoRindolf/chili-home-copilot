@@ -64,18 +64,19 @@ def _parse_params(bt: BacktestResult) -> dict:
 
 
 def _params_json_brain_aligned(sp: ScanPattern, p: dict) -> str:
-    """Stored params JSON with period/interval matching ``smart_backtest_insight``."""
+    """Stored params JSON with period/interval matching ``smart_backtest_insight``.
+
+    Preserves ohlc_bars / chart_time_* / friction / OOS keys when present so
+    we do not strip chart metadata on --apply --brain.
+    """
     from app.services.backtest_service import get_brain_backtest_window
 
     tf = getattr(sp, "timeframe", "1d") or "1d"
     period, interval = get_brain_backtest_window(tf)
-    return json.dumps(
-        {
-            "strategy_id": p.get("strategy_id"),
-            "period": period,
-            "interval": interval,
-        }
-    )
+    merged = {**p, "period": period, "interval": interval}
+    if "strategy_id" not in merged and p.get("strategy_id") is not None:
+        merged["strategy_id"] = p.get("strategy_id")
+    return json.dumps(merged)
 
 
 def _params_need_brain_sync(bt: BacktestResult, sp: ScanPattern) -> bool:
@@ -117,13 +118,7 @@ def _merge_params_fill_missing(
         changed = True
     if not changed:
         return False, None
-    return True, json.dumps(
-        {
-            "strategy_id": p.get("strategy_id"),
-            "period": p.get("period"),
-            "interval": p.get("interval"),
-        }
-    )
+    return True, json.dumps(p)
 
 
 def _recompute_insight_win_loss(db: Session, insight_id: int) -> None:
