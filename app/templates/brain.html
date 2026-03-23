@@ -392,7 +392,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-modal-body .bm-hit { background: rgba(34,197,94,.12); color: #22c55e; }
 .brain-modal-body .bm-miss { background: rgba(239,68,68,.12); color: #ef4444; }
 .brain-modal-footer { flex-shrink: 0; padding: 10px 18px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; justify-content: flex-end; }
-.brain-modal-footer.bm-footer-pattern-evidence { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 10px; }
 .brain-modal-footer button { padding: 6px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; transition: opacity .15s; }
 .brain-modal-footer button:hover { opacity: .85; }
 
@@ -2887,6 +2886,16 @@ function showPatternDetail(patternId) {
 
   var patLine = p.pattern_display || p.pattern;
   var html = '<div id="ev-pattern-desc" style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(patLine) + '</div>';
+  html += '<div id="ev-pine-strategy-row" style="margin-bottom:10px;padding:10px 12px;border-radius:8px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.06);box-sizing:border-box">' +
+    '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:6px">TradingView Pine strategy</div>' +
+    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Exports this <strong>ScanPattern</strong> as a Pine <strong>strategy</strong> for Strategy Tester. Exits follow signal on/off only — CHILI may use ATR or time-based exits.</div>' +
+    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
+    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load Pine strategy</button>' +
+    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy to clipboard</button>' +
+    '</div>' +
+    '<div id="ev-pine-warnings" style="display:none;margin-top:8px;font-size:9px;color:#f59e0b;line-height:1.45"></div>' +
+    '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;min-height:100px;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
+    '</div>';
   html += '<div id="ev-stat-cards" style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px">' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700">' + p.evidence_count + '</div><div style="font-size:9px;color:var(--text-muted)">Evidence files</div></div>' +
     '<div style="padding:6px;background:rgba(139,92,246,.06);border-radius:6px;text-align:center"><div style="font-size:14px;font-weight:700" id="ev-wr-val">' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? '<span style="color:' + (p.win_rate >= 50 ? '#22c55e' : '#ef4444') + '">' + p.win_rate + '%</span>' : '<span style="color:var(--text-muted)">--</span>') + '</div><div style="font-size:9px;color:var(--text-muted)" id="ev-wr-label">Win Rate' + (p.win_rate != null && ((p.win_count||0)+(p.loss_count||0)) > 0 ? ' (' + p.win_count + 'W/' + (p.loss_count||0) + 'L)' : ' <span style="font-size:8px">(saved backtests)</span>') + '</div></div>' +
@@ -2924,25 +2933,14 @@ function showPatternDetail(patternId) {
   html += '<div class="ev-pane" id="ev-pane-backtests"></div>';
   html += '<div class="ev-pane" id="ev-pane-evolution"><div class="ev-empty" style="padding:16px">Click to load evolution tree.</div></div>';
 
-  var footer = '<div id="ev-pine-strategy-footer" style="width:100%;box-sizing:border-box;text-align:left;padding:10px 12px;border-radius:8px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.06)">' +
-    '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:6px">TradingView Pine strategy</div>' +
-    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Exports this <strong>ScanPattern</strong> as a Pine <strong>strategy</strong> for Strategy Tester. Exits follow signal on/off only — CHILI may use ATR or time-based exits.</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
-    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load Pine strategy</button>' +
-    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy to clipboard</button>' +
-    '</div>' +
-    '<div id="ev-pine-warnings" style="display:none;margin-top:8px;font-size:9px;color:#f59e0b;line-height:1.45"></div>' +
-    '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;min-height:100px;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
-    '</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:center;width:100%">';
+  var footer = '';
   if (p.scan_pattern_id) {
     footer += '<button onclick="boostPattern(' + p.scan_pattern_id + ',this)" style="background:linear-gradient(135deg,#f97316,#ea580c);color:#fff">&#x26A1; Boost to Queue</button>';
   }
   if (p.active) {
     footer += '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>';
   }
-  footer += '</div>';
-  openBrainModal('Pattern Evidence', html, footer, 'bm-footer-pattern-evidence');
+  openBrainModal('Pattern Evidence', html, footer);
   window._currentEvidencePatternId = p.id;
   /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
   window._currentBacktestPatternId = p.scan_pattern_id || null;
