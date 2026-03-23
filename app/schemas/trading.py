@@ -126,7 +126,10 @@ class PatternBacktestRequest(BaseModel):
     spread: Optional[float] = Field(None, ge=0, description="Bid/ask+slippage proxy (fraction of price); default from settings")
     oos_holdout_fraction: Optional[float] = Field(
         None, ge=0.05, le=0.45,
-        description="If set, last fraction of bars is out-of-sample; headline metrics are in-sample",
+        description=(
+            "If set, last fraction is evaluated as OOS; headline return/WR/OHLC use the full window, "
+            "in_sample holds prefix stats for research gates"
+        ),
     )
     # Full replacement for the pattern's stored rules_json (must be valid JSON string)
     rules_json_override: Optional[str] = None

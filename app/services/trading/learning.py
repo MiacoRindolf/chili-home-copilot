@@ -4536,7 +4536,12 @@ def test_pattern_hypothesis(
     tickers: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Backtest a ScanPattern on a sample of tickers and update its confidence."""
-    from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
+    from ..backtest_service import (
+        backtest_metrics_for_promotion_gate,
+        backtest_pattern,
+        get_backtest_params,
+        save_backtest,
+    )
     from .pattern_engine import update_pattern
     from .market_data import (
         ALL_SCAN_TICKERS,
@@ -4584,8 +4589,7 @@ def test_pattern_hypothesis(
             if not result.get("ok"):
                 continue
             total += 1
-            wr = float(result.get("win_rate") or 0)
-            ret = float(result.get("return_pct") or 0)
+            wr, ret = backtest_metrics_for_promotion_gate(result)
             is_wrs.append(wr)
             if wr > 50:
                 wins += 1

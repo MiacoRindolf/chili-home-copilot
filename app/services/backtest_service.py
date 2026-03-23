@@ -1569,6 +1569,24 @@ def _run_dynamic_pattern_slice(
     }
 
 
+def backtest_metrics_for_promotion_gate(result: dict[str, Any]) -> tuple[float, float]:
+    """Return (win_rate, return_pct) for IS vs OOS promotion logic.
+
+    When ``oos_holdout_fraction`` was used, headline metrics are full-window;
+    ``in_sample`` holds the prefix-window stats for gates.
+    """
+    isl = result.get("in_sample")
+    if isinstance(isl, dict) and isl.get("win_rate") is not None:
+        return (
+            float(isl.get("win_rate") or 0),
+            float(isl.get("return_pct") or 0),
+        )
+    return (
+        float(result.get("win_rate") or 0),
+        float(result.get("return_pct") or 0),
+    )
+
+
 def run_pattern_backtest(
     ticker: str,
     conditions: list[dict[str, Any]],
@@ -1596,9 +1614,11 @@ def run_pattern_backtest(
     *exit_max_bars* are used, falling back to ``_classify_exit_params``.
 
     *spread* defaults to ``settings.backtest_spread`` (bid/ask + slippage proxy).
-    When *oos_holdout_fraction* is set (e.g. 0.25), the last fraction of bars
-    is held out; returned ``win_rate`` / ``return_pct`` are **in-sample**;
-    ``oos_*`` fields summarize the hold-out window.
+    When *oos_holdout_fraction* is set (e.g. 0.25), headline ``win_rate`` /
+    ``return_pct`` / ``ohlc`` / ``trades`` use the **full** fetched window so UI
+    and saved backtests match the requested period.  The first ``(1 - fraction)``
+    bars are also re-run without charts to populate ``in_sample`` (for promotion
+    gates vs ``oos_*`` on the held-out tail).
 
     *df_override* supplies OHLCV instead of fetching (used for walk-forward windows).
     """
@@ -1671,13 +1691,18 @@ def run_pattern_backtest(
         split_i = int(len(df) * (1.0 - float(oos_frac)))
         oos_bars = len(df) - split_i
         if split_i >= 30 and oos_bars >= 12:
-            r_is = _run_slice(df.iloc[:split_i], True)
+            r_full = _run_slice(df, True)
+            r_is = _run_slice(df.iloc[:split_i], False)
             r_oos = _run_slice(df.iloc[split_i:], False)
+            if not r_full.get("ok"):
+                r_full["spread_used"] = spread
+                r_full["commission_used"] = commission
+                return r_full
             if not r_is.get("ok"):
-                r_is["spread_used"] = spread
-                r_is["commission_used"] = commission
-                return r_is
-            out = {**r_is}
+                r_full["spread_used"] = spread
+                r_full["commission_used"] = commission
+                return r_full
+            out = {**r_full}
             out["spread_used"] = spread
             out["commission_used"] = commission
             out["oos_holdout_fraction"] = float(oos_frac)
@@ -1704,7 +1729,6 @@ def run_pattern_backtest(
                 out["oos_trade_count"] = None
                 out["out_of_sample"] = None
             out["oos_ok"] = bool(r_oos.get("ok"))
-            # Headline metrics = in-sample (research gate); full charts = in-sample only
             return out
 
     out = _run_slice(df, True)

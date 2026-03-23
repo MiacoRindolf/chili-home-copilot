@@ -338,7 +338,12 @@ def _extract_patterns_from_content(
 
 def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     """Run a quick backtest on the newly discovered pattern and update confidence."""
-    from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
+    from ..backtest_service import (
+        backtest_metrics_for_promotion_gate,
+        backtest_pattern,
+        get_backtest_params,
+        save_backtest,
+    )
     from .pattern_engine import update_pattern
     from .learning import (
         _find_insight_for_pattern,
@@ -376,11 +381,11 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             if not result.get("ok"):
                 continue
             total += 1
-            wr = float(result.get("win_rate") or 0)
+            wr, ret_pct = backtest_metrics_for_promotion_gate(result)
             is_wrs.append(wr)
             if wr > 50:
                 wins += 1
-            returns.append(float(result.get("return_pct") or 0))
+            returns.append(ret_pct)
             if result.get("oos_ok") and result.get("oos_win_rate") is not None:
                 oos_ticker_hits += 1
                 oos_wrs.append(float(result["oos_win_rate"]))
