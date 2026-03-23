@@ -380,8 +380,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-modal-card { background: var(--bg-header); border: 1px solid var(--border); border-radius: 14px; width: 92vw; max-width: 720px; max-height: 80vh; display: flex; flex-direction: column; box-shadow: 0 12px 40px rgba(0,0,0,.2); animation: brainModalIn .2s ease; }
 @keyframes brainModalIn { from { opacity:0; transform: translateY(20px) scale(.97); } to { opacity:1; transform: none; } }
 @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
-.brain-modal-header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; }
-.brain-modal-header .bm-close { margin-left: auto; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 20px; line-height: 1; padding: 0 4px; }
+.brain-modal-header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; flex-wrap: wrap; }
+#brain-modal-title { flex: 1 1 auto; min-width: 0; }
+#brain-modal-header-tools { display: none; align-items: center; gap: 6px; flex-wrap: wrap; flex-shrink: 0; }
+#brain-modal-header-tools.bm-tools-visible { display: flex; }
+.brain-modal-header .bm-close { background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 20px; line-height: 1; padding: 0 4px; flex-shrink: 0; }
 .brain-modal-header .bm-close:hover { color: var(--text); }
 .brain-modal-body { flex: 1 1 auto; min-height: 0; padding: 16px 18px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
 .brain-modal-body h4 { font-size: 12px; font-weight: 700; margin: 10px 0 4px; color: var(--text); }
@@ -1327,6 +1330,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   <div class="brain-modal-card">
     <div class="brain-modal-header">
       <span id="brain-modal-title">Details</span>
+      <div id="brain-modal-header-tools"></div>
       <button class="bm-close" onclick="closeBrainModal()">&times;</button>
     </div>
     <div class="brain-modal-body" id="brain-modal-body"></div>
@@ -1347,9 +1351,19 @@ function escHtml(s) {
   var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
 
-function openBrainModal(title, bodyHtml, footerHtml, footerClass) {
+function openBrainModal(title, bodyHtml, footerHtml, footerClass, headerToolsHtml) {
   document.getElementById('brain-modal-title').textContent = title;
   document.getElementById('brain-modal-body').innerHTML = bodyHtml;
+  var tools = document.getElementById('brain-modal-header-tools');
+  if (tools) {
+    if (headerToolsHtml) {
+      tools.innerHTML = headerToolsHtml;
+      tools.className = 'bm-tools-visible';
+    } else {
+      tools.innerHTML = '';
+      tools.className = '';
+    }
+  }
   var footer = document.getElementById('brain-modal-footer');
   footer.className = 'brain-modal-footer' + (footerClass ? ' ' + footerClass : '');
   if (footerHtml) { footer.innerHTML = footerHtml; footer.style.display = ''; }
@@ -1439,6 +1453,8 @@ function _renderEvWrProgress(series) {
 }
 function closeBrainModal() {
   _disposeEvWrProgressChart();
+  var tools = document.getElementById('brain-modal-header-tools');
+  if (tools) { tools.innerHTML = ''; tools.className = ''; }
   document.getElementById('brain-modal-overlay').classList.remove('active');
 }
 document.addEventListener('keydown', function(e) {
@@ -2888,11 +2904,7 @@ function showPatternDetail(patternId) {
   var html = '<div id="ev-pattern-desc" style="padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:8px;margin-bottom:10px;font-size:12px;line-height:1.5">' + escHtml(patLine) + '</div>';
   html += '<div id="ev-pine-strategy-row" style="margin-bottom:10px;padding:10px 12px;border-radius:8px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.06);box-sizing:border-box">' +
     '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:6px">TradingView Pine strategy</div>' +
-    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Exports this <strong>ScanPattern</strong> as a Pine <strong>strategy</strong> for Strategy Tester. Exits follow signal on/off only — CHILI may use ATR or time-based exits.</div>' +
-    '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
-    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load Pine strategy</button>' +
-    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy to clipboard</button>' +
-    '</div>' +
+    '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Use <strong>Load</strong> / <strong>Copy</strong> in the <strong>modal title bar</strong> (top row, next to the close button). Exports <strong>ScanPattern</strong> as a Pine <strong>strategy</strong>. Exits are signal on/off only.</div>' +
     '<div id="ev-pine-warnings" style="display:none;margin-top:8px;font-size:9px;color:#f59e0b;line-height:1.45"></div>' +
     '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;min-height:100px;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
     '</div>';
@@ -2940,7 +2952,10 @@ function showPatternDetail(patternId) {
   if (p.active) {
     footer += '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>';
   }
-  openBrainModal('Pattern Evidence', html, footer);
+  var headerTools = '<span style="font-size:10px;font-weight:700;color:#8b5cf6;letter-spacing:.02em">Pine</span>' +
+    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load</button>' +
+    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy</button>';
+  openBrainModal('Pattern Evidence', html, footer, undefined, headerTools);
   window._currentEvidencePatternId = p.id;
   /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
   window._currentBacktestPatternId = p.scan_pattern_id || null;

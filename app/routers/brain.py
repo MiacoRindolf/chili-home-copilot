@@ -70,6 +70,8 @@ def brain_page(request: Request, db: Session = Depends(get_db)):
             "user_name": ctx["user_name"],
         },
     )
+    # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).
+    resp.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
     # region agent log
     _agent_log(
         "H3",
