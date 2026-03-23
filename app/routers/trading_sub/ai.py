@@ -1522,6 +1522,10 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
     Use this for the evidence mini-chart so it matches Chili brain batch backtests.
 
     Results can still differ from an older save if OHLCV, rules, or providers changed.
+
+    **404 "Backtest not found"**: no ``BacktestResult`` row for ``bt_id`` (deleted DB row,
+    different ``DATABASE_URL``, or Pattern Evidence UI holding a stale ``id`` after
+    migrations or dedupe — reopen the modal or hard-refresh the Brain page).
     """
     ctx = get_identity_ctx(request, db)
     if ctx.get("is_guest"):

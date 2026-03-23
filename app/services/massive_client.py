@@ -288,31 +288,90 @@ def get_aggregates(
         from_date, to_date = _period_to_dates(period)
         cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
 
+    mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
+    timespan, multiplier = mapping
+    if timespan in ("minute", "hour"):
+        cache_key = f"{cache_key}|ic"
+
     cached = _cache_get(cache_key)
     if cached is not None:
         return cached
 
-    mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
-    timespan, multiplier = mapping
+    def _bars_from_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+        if not data or data is _NOT_FOUND:
+            return []
+        out: list[dict[str, Any]] = []
+        for bar in data.get("results", []) or []:
+            out.append({
+                "time": int(bar["t"] / 1000),
+                "open": float(bar.get("o", 0)),
+                "high": float(bar.get("h", 0)),
+                "low": float(bar.get("l", 0)),
+                "close": float(bar.get("c", 0)),
+                "volume": int(bar.get("v", 0)),
+            })
+        return out
 
-    url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-    data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+    def _fetch_one_range(f_d: str, t_d: str) -> tuple[list[dict[str, Any]], bool]:
+        """Return (bars, ticker_dead)."""
+        url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{f_d}/{t_d}"
+        data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+        if data is _NOT_FOUND:
+            return [], True
+        acc = _bars_from_response(data)
+        # Some responses include next_url when a page hits the limit; follow it.
+        next_u = (data or {}).get("next_url")
+        pages = 0
+        while next_u and pages < 200:
+            pages += 1
+            nu = str(next_u).strip()
+            if not nu.startswith("http"):
+                nu = f"{_base()}{nu}" if nu.startswith("/") else f"{_base()}/{nu}"
+            _rate_limit_wait()
+            _bump("requests")
+            try:
+                r2 = _session.get(nu, timeout=30)
+                if r2.status_code != 200:
+                    break
+                d2 = r2.json()
+            except Exception:
+                break
+            acc.extend(_bars_from_response(d2))
+            next_u = (d2 or {}).get("next_url")
+        return acc, False
+
+    if timespan in ("minute", "hour"):
+        from .ohlcv_aggregate_fetch import iter_intraday_date_chunks
+
+        merged: list[dict[str, Any]] = []
+        seen_ts: set[int] = set()
+        for f_str, t_str in iter_intraday_date_chunks(from_date, to_date):
+            part, dead = _fetch_one_range(f_str, t_str)
+            if dead:
+                _mark_dead_ticker(m_ticker)
+                return []
+            for b in part:
+                t0 = b["time"]
+                if t0 in seen_ts:
+                    continue
+                seen_ts.add(t0)
+                merged.append(b)
+        merged.sort(key=lambda x: x["time"])
+        if not merged:
+            return []
+        _cache_set(cache_key, merged)
+        return merged
+
+    data = _get(
+        f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}",
+        {"adjusted": "true", "sort": "asc", "limit": "50000"},
+    )
     if data is _NOT_FOUND:
         _mark_dead_ticker(m_ticker)
         return []
-    if not data or data.get("resultsCount", 0) == 0:
+    bars = _bars_from_response(data)
+    if not bars:
         return []
-
-    bars: list[dict[str, Any]] = []
-    for bar in data.get("results", []):
-        bars.append({
-            "time": int(bar["t"] / 1000),
-            "open": float(bar.get("o", 0)),
-            "high": float(bar.get("h", 0)),
-            "low": float(bar.get("l", 0)),
-            "close": float(bar.get("c", 0)),
-            "volume": int(bar.get("v", 0)),
-        })
 
     _cache_set(cache_key, bars)
     return bars
@@ -494,11 +553,13 @@ def get_aggregates_batch(
 
     uncached: list[str] = []
     results: dict[str, list[dict[str, Any]]] = {}
+    _map_b = _TIMESPAN_MAP.get(interval, ("day", 1))
+    _ic_suffix = "|ic" if _map_b[0] in ("minute", "hour") else ""
     for t in tickers:
         m_ticker = to_massive_ticker(t)
         if _is_dead_ticker(m_ticker):
             continue
-        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
+        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}{_ic_suffix}"
         cached = _cache_get(cache_key)
         if cached is not None:
             results[t] = cached

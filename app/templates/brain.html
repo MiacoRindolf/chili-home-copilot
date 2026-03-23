@@ -3323,6 +3323,7 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
     cell.querySelector('.bt-chart-wrap').innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:11px">Error: ' + escHtml(e.message) + '</div>';
   }
 
+  /* 404 "Backtest not found": stale BacktestResult id in this table — reload Pattern Evidence or hard-refresh Brain. */
   if (btId) {
     fetch('/api/trading/learn/backtest/' + btId + '/rerun', { method: 'POST' })
       .then(parseFetchJson)
