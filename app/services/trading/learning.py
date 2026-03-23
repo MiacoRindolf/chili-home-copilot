@@ -50,6 +50,91 @@ def shutdown_requested() -> bool:
     return _shutting_down.is_set()
 
 
+# Origins that must pass OOS / spread-aware backtests before staying active (see config brain_oos_*).
+_BRAIN_OOS_GATED_ORIGINS = frozenset({"web_discovered", "brain_discovered"})
+
+
+def _trim_bench_walk_forward_for_db(bench: dict[str, Any]) -> dict[str, Any]:
+    """Drop per-window arrays from bench JSON to keep scan_patterns row small."""
+    out: dict[str, Any] = {k: v for k, v in bench.items() if k != "tickers"}
+    tickers: dict[str, Any] = {}
+    for sym, rec in (bench.get("tickers") or {}).items():
+        if not isinstance(rec, dict):
+            continue
+        tickers[sym] = {k: v for k, v in rec.items() if k != "windows"}
+    out["tickers"] = tickers
+    return out
+
+
+def brain_apply_bench_promotion_gate(
+    *,
+    origin: str,
+    bench_summary: dict[str, Any] | None,
+    current_promotion_status: str,
+) -> tuple[str | None, bool]:
+    """Optional stricter gate using benchmark walk-forward *passes_gate*.
+
+    Returns ``(promotion_status_override, allow_active)``.  ``None`` status means
+    keep *current_promotion_status*.
+    """
+    from ...config import settings
+
+    if not settings.brain_bench_walk_forward_gate_enabled:
+        return None, True
+    o = (origin or "").strip().lower()
+    if o not in _BRAIN_OOS_GATED_ORIGINS:
+        return None, True
+    cur = (current_promotion_status or "").strip().lower()
+    if not bench_summary or not bench_summary.get("ok"):
+        if cur == "promoted":
+            return None, True
+        return "pending_bench", True
+    if not bench_summary.get("passes_gate"):
+        return "rejected_bench", False
+    return None, True
+
+
+def brain_pattern_backtest_friction_kwargs() -> dict[str, Any]:
+    """Spread, commission, and OOS holdout for pattern hypothesis backtests."""
+    from ...config import settings
+
+    return {
+        "spread": float(settings.backtest_spread),
+        "commission": float(settings.backtest_commission),
+        "oos_holdout_fraction": float(settings.brain_oos_holdout_fraction),
+    }
+
+
+def brain_apply_oos_promotion_gate(
+    *,
+    origin: str,
+    mean_is_win_rate: float,
+    mean_oos_win_rate: float | None,
+    oos_tickers_with_result: int,
+) -> tuple[str, bool]:
+    """Return ``(promotion_status, allow_active)``.
+
+    ``allow_active`` False means the caller should set ``ScanPattern.active = False``.
+    """
+    from ...config import settings
+
+    if not settings.brain_oos_gate_enabled:
+        return "legacy", True
+    o = (origin or "").strip().lower()
+    if o not in _BRAIN_OOS_GATED_ORIGINS:
+        return "legacy", True
+    if oos_tickers_with_result < int(settings.brain_oos_min_evaluated_tickers):
+        return "pending_oos", True
+    if mean_oos_win_rate is None:
+        return "pending_oos", True
+    gap = float(mean_is_win_rate) - float(mean_oos_win_rate)
+    if float(mean_oos_win_rate) < float(settings.brain_oos_min_win_rate_pct):
+        return "rejected_oos", False
+    if gap > float(settings.brain_oos_max_is_oos_gap_pct):
+        return "rejected_oos", False
+    return "promoted", True
+
+
 # ── Learning Event Logger (extracted to learning_events.py) ───────────
 from .learning_events import log_learning_event, get_learning_events  # noqa: F401 — re-export for backward compat
 
@@ -4474,10 +4559,16 @@ def test_pattern_hypothesis(
 
     tf = getattr(pattern, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
+    bt_kw = brain_pattern_backtest_friction_kwargs()
 
     wins = 0
     total = 0
-    returns = []
+    returns: list[float] = []
+    is_wrs: list[float] = []
+    oos_wrs: list[float] = []
+    oos_rets: list[float] = []
+    oos_ticker_hits = 0
+    oos_trade_sum = 0
 
     for ticker in tickers[:5]:
         try:
@@ -4488,15 +4579,23 @@ def test_pattern_hypothesis(
                 interval=bt_params["interval"],
                 period=bt_params["period"],
                 exit_config=getattr(pattern, "exit_config", None),
+                **bt_kw,
             )
             if not result.get("ok"):
                 continue
             total += 1
-            wr = result.get("win_rate", 0)
-            ret = result.get("return_pct", 0)
+            wr = float(result.get("win_rate") or 0)
+            ret = float(result.get("return_pct") or 0)
+            is_wrs.append(wr)
             if wr > 50:
                 wins += 1
             returns.append(ret)
+            if result.get("oos_ok") and result.get("oos_win_rate") is not None:
+                oos_ticker_hits += 1
+                oos_wrs.append(float(result["oos_win_rate"]))
+                oos_trade_sum += int(result.get("oos_trade_count") or 0)
+                if result.get("oos_return_pct") is not None:
+                    oos_rets.append(float(result["oos_return_pct"]))
             if linked_insight:
                 try:
                     save_backtest(
@@ -4518,32 +4617,147 @@ def test_pattern_hypothesis(
         return None
 
     avg_return = sum(returns) / len(returns) if returns else 0
-    overall_wr = (wins / total) * 100 if total > 0 else 0
+    ticker_vote_wr = (wins / total) * 100 if total > 0 else 0
+    mean_is_wr = sum(is_wrs) / len(is_wrs) if is_wrs else 0.0
+    mean_oos_wr = sum(oos_wrs) / len(oos_wrs) if oos_wrs else None
+    mean_oos_ret = sum(oos_rets) / len(oos_rets) if oos_rets else None
 
     new_confidence = max(0.1, min(0.95,
-        pattern.confidence * 0.7 + (overall_wr / 100) * 0.3
+        pattern.confidence * 0.7 + (ticker_vote_wr / 100) * 0.3
     ))
 
-    update_pattern(db, pattern.id, {
+    prom_stat, allow_active = brain_apply_oos_promotion_gate(
+        origin=getattr(pattern, "origin", "") or "",
+        mean_is_win_rate=mean_is_wr,
+        mean_oos_win_rate=mean_oos_wr,
+        oos_tickers_with_result=oos_ticker_hits,
+    )
+
+    patch: dict[str, Any] = {
         "confidence": round(new_confidence, 3),
-        "win_rate": round(overall_wr, 1),
+        "win_rate": round(mean_is_wr, 1),
         "avg_return_pct": round(avg_return, 2),
         "backtest_count": (pattern.backtest_count or 0) + total,
         "evidence_count": (pattern.evidence_count or 0) + total,
-    })
+        "promotion_status": prom_stat,
+        "oos_win_rate": round(mean_oos_wr, 1) if mean_oos_wr is not None else None,
+        "oos_avg_return_pct": round(mean_oos_ret, 2) if mean_oos_ret is not None else None,
+        "oos_trade_count": oos_trade_sum if oos_trade_sum else None,
+        "backtest_spread_used": bt_kw.get("spread"),
+        "backtest_commission_used": bt_kw.get("commission"),
+        "oos_evaluated_at": datetime.utcnow(),
+    }
+    if not allow_active:
+        patch["active"] = False
 
+    from ...config import settings as _settings_bench
+    bench_passes: bool | None = None
+    if _settings_bench.brain_bench_walk_forward_enabled:
+        _bo = (getattr(pattern, "origin", "") or "").strip().lower()
+        if _bo in _BRAIN_OOS_GATED_ORIGINS:
+            try:
+                _rules = json.loads(pattern.rules_json or "{}")
+                _conds = _rules.get("conditions") or []
+                if isinstance(_conds, list) and _conds:
+                    _exit_cfg = None
+                    _ec = getattr(pattern, "exit_config", None)
+                    if _ec:
+                        try:
+                            _exit_cfg = json.loads(_ec) if isinstance(_ec, str) else _ec
+                            if not isinstance(_exit_cfg, dict):
+                                _exit_cfg = None
+                        except (json.JSONDecodeError, TypeError, ValueError):
+                            _exit_cfg = None
+                    _bt_tickers = [
+                        t.strip()
+                        for t in _settings_bench.brain_bench_tickers.split(",")
+                        if t.strip()
+                    ]
+                    from ..backtest_service import benchmark_walk_forward_evaluate
+
+                    _bench_raw = benchmark_walk_forward_evaluate(
+                        conditions=_conds,
+                        pattern_name=pattern.name,
+                        exit_config=_exit_cfg,
+                        tickers=_bt_tickers,
+                        period=_settings_bench.brain_bench_period,
+                        interval=_settings_bench.brain_bench_interval,
+                        n_windows=_settings_bench.brain_bench_n_windows,
+                        min_bars_per_window=_settings_bench.brain_bench_min_bars_per_window,
+                        min_positive_fold_ratio=_settings_bench.brain_bench_min_positive_fold_ratio,
+                    )
+                    bench_passes = bool(_bench_raw.get("passes_gate"))
+                    _bench_store = _trim_bench_walk_forward_for_db(_bench_raw)
+                    _bench_store["evaluated_at"] = datetime.utcnow().isoformat() + "Z"
+                    _s_spread = float(_settings_bench.brain_bench_cost_stress_spread_mult)
+                    _s_comm = float(_settings_bench.brain_bench_cost_stress_commission_mult)
+                    _req_stress = bool(_settings_bench.brain_bench_require_stress_pass)
+                    if _req_stress and _s_spread <= 1.0 and _s_comm <= 1.0:
+                        _s_spread, _s_comm = 2.0, 1.5
+                    if _s_spread > 1.0 or _s_comm > 1.0 or _req_stress:
+                        _base_sp = float(_settings_bench.backtest_spread)
+                        _base_c = float(_settings_bench.backtest_commission)
+                        _stress_raw = benchmark_walk_forward_evaluate(
+                            conditions=_conds,
+                            pattern_name=pattern.name,
+                            exit_config=_exit_cfg,
+                            tickers=_bt_tickers,
+                            period=_settings_bench.brain_bench_period,
+                            interval=_settings_bench.brain_bench_interval,
+                            n_windows=_settings_bench.brain_bench_n_windows,
+                            min_bars_per_window=_settings_bench.brain_bench_min_bars_per_window,
+                            min_positive_fold_ratio=_settings_bench.brain_bench_min_positive_fold_ratio,
+                            spread=_base_sp * _s_spread,
+                            commission=_base_c * _s_comm,
+                        )
+                        _bench_store["stress_passes_gate"] = bool(_stress_raw.get("passes_gate"))
+                        _bench_store["stress_spread_mult"] = _s_spread
+                        _bench_store["stress_commission_mult"] = _s_comm
+                    patch["bench_walk_forward_json"] = _bench_store
+                    _bstat, _ballow = brain_apply_bench_promotion_gate(
+                        origin=getattr(pattern, "origin", "") or "",
+                        bench_summary=_bench_raw,
+                        current_promotion_status=str(prom_stat),
+                    )
+                    if _bstat is not None:
+                        patch["promotion_status"] = _bstat
+                    if not _ballow:
+                        patch["active"] = False
+                    if _req_stress and _bench_store.get("stress_passes_gate") is False:
+                        patch["promotion_status"] = "rejected_bench_stress"
+                        patch["active"] = False
+            except Exception as e:
+                logger.warning(
+                    "[learning] benchmark walk-forward failed for %s: %s",
+                    pattern.name,
+                    e,
+                )
+
+    update_pattern(db, pattern.id, patch)
+
+    _oos_log = f"{mean_oos_wr:.0f}%" if mean_oos_wr is not None else "n/a"
+    _bench_log = (
+        f", bench_pass={bench_passes}"
+        if bench_passes is not None
+        else ""
+    )
     logger.info(
         f"[learning] Tested pattern '{pattern.name}': "
-        f"WR={overall_wr:.0f}%, avg_ret={avg_return:.1f}%, conf={new_confidence:.2f}"
+        f"IS_WR≈{mean_is_wr:.0f}%, OOS_WR≈{_oos_log}, "
+        f"promo={patch.get('promotion_status', prom_stat)}, conf={new_confidence:.2f}"
+        f"{_bench_log}"
     )
 
     return {
         "pattern_id": pattern.id,
         "name": pattern.name,
         "tickers_tested": total,
-        "win_rate": overall_wr,
+        "win_rate": mean_is_wr,
+        "oos_win_rate": mean_oos_wr,
+        "promotion_status": patch.get("promotion_status", prom_stat),
         "avg_return": avg_return,
         "new_confidence": new_confidence,
+        "bench_passes_gate": bench_passes,
     }
 
 
@@ -5965,6 +6179,8 @@ def run_learning_cycle(
             logger.warning("[learning] Step commit failed: %s", e)
 
     try:
+        from ...config import settings
+
         # Step 1: Pre-filter with Massive.com + yfinance screener
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
@@ -6065,15 +6281,21 @@ def run_learning_cycle(
                     f"{seek_result.get('sought', 0)} boosted")
         _commit_step()
 
-        # Step 6: Backtest TradingInsights (legacy)
+        # Step 6: Backtest TradingInsights (legacy; optional — ScanPattern queue is canonical)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
         _learning_status["current_step"] = "Backtesting insights"
         _learning_status["phase"] = "backtesting"
-        bt_count = _auto_backtest_patterns(db, user_id)
-        report["backtests_run"] = bt_count
-        _step_time("backtest_insights", step_start, f"{bt_count} insight backtests via {_provider}")
+        if getattr(settings, "brain_insight_backtest_on_cycle", False):
+            bt_count = _auto_backtest_patterns(db, user_id)
+            report["backtests_run"] = bt_count
+            report["insight_backtests_skipped"] = False
+            _step_time("backtest_insights", step_start, f"{bt_count} insight backtests via {_provider}")
+        else:
+            bt_count = 0
+            report["insight_backtests_skipped"] = True
+            _step_time("backtest_insights", step_start, "skipped (brain_insight_backtest_on_cycle=false)")
         _commit_step()
 
         # Step 6b: Backtest ScanPatterns from priority queue
@@ -6149,110 +6371,116 @@ def run_learning_cycle(
                     f"{bo_result.get('total_resolved', 0)} resolved alerts")
         _commit_step()
 
-        # Step 8c: Intraday breakout pattern mining (15m data)
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start_id = time.time()
-        _learning_status["current_step"] = "Mining intraday breakout patterns"
-        _learning_status["phase"] = "intraday_mining"
-        intra_result = mine_intraday_patterns(db, user_id)
-        report["intraday_discoveries"] = intra_result.get("discoveries", 0)
-        _learning_status["steps_completed"] = 12
-        _step_time("intraday_mining", step_start_id,
-                    f"{intra_result.get('discoveries', 0)} discoveries from "
-                    f"{intra_result.get('rows_mined', 0)} bars")
-        _commit_step()
+        # Steps 8c–8j: Secondary miners (optional — disable for faster cycles)
+        if getattr(settings, "brain_secondary_miners_on_cycle", True):
+            # Step 8c: Intraday breakout pattern mining (15m data)
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start_id = time.time()
+            _learning_status["current_step"] = "Mining intraday breakout patterns"
+            _learning_status["phase"] = "intraday_mining"
+            intra_result = mine_intraday_patterns(db, user_id)
+            report["intraday_discoveries"] = intra_result.get("discoveries", 0)
+            _learning_status["steps_completed"] = 12
+            _step_time("intraday_mining", step_start_id,
+                        f"{intra_result.get('discoveries', 0)} discoveries from "
+                        f"{intra_result.get('rows_mined', 0)} bars")
+            _commit_step()
 
-        # Step 8d: Refine patterns (parameter sweeping)
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Refining patterns"
-        _learning_status["phase"] = "refining"
-        refine_result = refine_patterns(db, user_id)
-        report["patterns_refined"] = refine_result.get("refined", 0)
-        _learning_status["steps_completed"] = 13
-        _step_time("refine", step_start,
-                    f"{refine_result.get('refined', 0)} patterns refined")
-        _commit_step()
+            # Step 8d: Refine patterns (parameter sweeping)
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Refining patterns"
+            _learning_status["phase"] = "refining"
+            refine_result = refine_patterns(db, user_id)
+            report["patterns_refined"] = refine_result.get("refined", 0)
+            _learning_status["steps_completed"] = 13
+            _step_time("refine", step_start,
+                        f"{refine_result.get('refined', 0)} patterns refined")
+            _commit_step()
 
-        # Step 8e: Exit optimization learning
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Learning exit optimization"
-        _learning_status["phase"] = "exit_optimization"
-        exit_result = learn_exit_optimization(db, user_id)
-        report["exit_adjustments"] = exit_result.get("adjustments", 0)
-        _learning_status["steps_completed"] = 14
-        _step_time("exit_optimization", step_start,
-                    f"{exit_result.get('adjustments', 0)} adjustments")
-        _commit_step()
+            # Step 8e: Exit optimization learning
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Learning exit optimization"
+            _learning_status["phase"] = "exit_optimization"
+            exit_result = learn_exit_optimization(db, user_id)
+            report["exit_adjustments"] = exit_result.get("adjustments", 0)
+            _learning_status["steps_completed"] = 14
+            _step_time("exit_optimization", step_start,
+                        f"{exit_result.get('adjustments', 0)} adjustments")
+            _commit_step()
 
-        # Step 8f: Fakeout pattern mining
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Mining fakeout patterns"
-        _learning_status["phase"] = "fakeout_mining"
-        fakeout_result = mine_fakeout_patterns(db, user_id)
-        report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
-        _learning_status["steps_completed"] = 15
-        _step_time("fakeout_mining", step_start,
-                    f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
-        _commit_step()
+            # Step 8f: Fakeout pattern mining
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Mining fakeout patterns"
+            _learning_status["phase"] = "fakeout_mining"
+            fakeout_result = mine_fakeout_patterns(db, user_id)
+            report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
+            _learning_status["steps_completed"] = 15
+            _step_time("fakeout_mining", step_start,
+                        f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
+            _commit_step()
 
-        # Step 8g: Position sizing feedback
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Tuning position sizing"
-        _learning_status["phase"] = "position_sizing"
-        sizing_result = tune_position_sizing(db, user_id)
-        report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
-        _learning_status["steps_completed"] = 16
-        _step_time("position_sizing", step_start,
-                    f"{sizing_result.get('adjustments', 0)} sizing adjustments")
-        _commit_step()
+            # Step 8g: Position sizing feedback
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Tuning position sizing"
+            _learning_status["phase"] = "position_sizing"
+            sizing_result = tune_position_sizing(db, user_id)
+            report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
+            _learning_status["steps_completed"] = 16
+            _step_time("position_sizing", step_start,
+                        f"{sizing_result.get('adjustments', 0)} sizing adjustments")
+            _commit_step()
 
-        # Step 8h: Inter-alert learning
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Learning inter-alert patterns"
-        _learning_status["phase"] = "inter_alert"
-        inter_result = learn_inter_alert_patterns(db, user_id)
-        report["inter_alert_insights"] = inter_result.get("insights", 0)
-        _learning_status["steps_completed"] = 17
-        _step_time("inter_alert", step_start,
-                    f"{inter_result.get('insights', 0)} inter-alert insights")
-        _commit_step()
+            # Step 8h: Inter-alert learning
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Learning inter-alert patterns"
+            _learning_status["phase"] = "inter_alert"
+            inter_result = learn_inter_alert_patterns(db, user_id)
+            report["inter_alert_insights"] = inter_result.get("insights", 0)
+            _learning_status["steps_completed"] = 17
+            _step_time("inter_alert", step_start,
+                        f"{inter_result.get('insights', 0)} inter-alert insights")
+            _commit_step()
 
-        # Step 8i: Timeframe performance learning
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Learning timeframe performance"
-        _learning_status["phase"] = "timeframe_learning"
-        tf_result = learn_timeframe_performance(db, user_id)
-        report["timeframe_insights"] = tf_result.get("insights", 0)
-        _learning_status["steps_completed"] = 18
-        _step_time("timeframe_learning", step_start,
-                    f"{tf_result.get('insights', 0)} timeframe insights")
-        _commit_step()
+            # Step 8i: Timeframe performance learning
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Learning timeframe performance"
+            _learning_status["phase"] = "timeframe_learning"
+            tf_result = learn_timeframe_performance(db, user_id)
+            report["timeframe_insights"] = tf_result.get("insights", 0)
+            _learning_status["steps_completed"] = 18
+            _step_time("timeframe_learning", step_start,
+                        f"{tf_result.get('insights', 0)} timeframe insights")
+            _commit_step()
 
-        # Step 8j: Signal synergy mining
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        _learning_status["current_step"] = "Mining signal synergies"
-        _learning_status["phase"] = "synergy_mining"
-        synergy_result = mine_signal_synergies(db, user_id)
-        report["synergies_found"] = synergy_result.get("synergies_found", 0)
-        _learning_status["steps_completed"] = 19
-        _step_time("synergy_mining", step_start,
-                    f"{synergy_result.get('synergies_found', 0)} synergies found")
-        _commit_step()
+            # Step 8j: Signal synergy mining
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            _learning_status["current_step"] = "Mining signal synergies"
+            _learning_status["phase"] = "synergy_mining"
+            synergy_result = mine_signal_synergies(db, user_id)
+            report["synergies_found"] = synergy_result.get("synergies_found", 0)
+            _learning_status["steps_completed"] = 19
+            _step_time("synergy_mining", step_start,
+                        f"{synergy_result.get('synergies_found', 0)} synergies found")
+            _commit_step()
+        else:
+            report["secondary_miners_skipped"] = True
+            _learning_status["steps_completed"] = 19
+            logger.info("[learning] Secondary miners skipped (brain_secondary_miners_on_cycle=false)")
 
         # Step 19: Market journal
         if _shutting_down.is_set():

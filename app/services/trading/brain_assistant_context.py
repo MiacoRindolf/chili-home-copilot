@@ -113,11 +113,9 @@ def _patterns_summary(
     ]
 
 
-def _insights_summary(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Light counts and last N insight titles."""
+def _insights_summary(db: Session, _user_id: int | None) -> dict[str, Any]:
+    """Light counts and last N insight titles (shared Brain pool — not filtered by owner)."""
     q = db.query(TradingInsight).filter(TradingInsight.active.is_(True))
-    if user_id is not None:
-        q = q.filter(TradingInsight.user_id == user_id)
     total = q.count()
     recent = (
         q.order_by(TradingInsight.created_at.desc())

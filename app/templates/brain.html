@@ -2823,21 +2823,22 @@ function renderPatterns() {
 }
 
 function _syncEvPineStrategyUi() {
-  var id = window._currentBacktestPatternId;
+  /* Pine export is keyed by TradingInsight id — server resolves ScanPattern (avoids wrong id=1). */
+  var insightId = window._currentEvidencePatternId;
   var fetchBtn = document.getElementById('ev-pine-fetch-btn');
-  if (fetchBtn) fetchBtn.disabled = !id;
+  if (fetchBtn) fetchBtn.disabled = !insightId;
 }
 
 function evPineStrategyFetch() {
-  var id = window._currentBacktestPatternId;
-  if (!id) return;
+  var insightId = window._currentEvidencePatternId;
+  if (!insightId) return;
   var ta = document.getElementById('ev-pine-text');
   var warnEl = document.getElementById('ev-pine-warnings');
   var copyBtn = document.getElementById('ev-pine-copy-btn');
   if (copyBtn) copyBtn.disabled = true;
   if (ta) { ta.style.display = 'block'; ta.value = 'Loading…'; }
   if (warnEl) { warnEl.style.display = 'none'; warnEl.textContent = ''; }
-  fetch('/api/trading/patterns/' + encodeURIComponent(id) + '/export/pine?kind=strategy').then(parseFetchJson).then(function(d) {
+  fetch('/api/trading/learn/patterns/' + encodeURIComponent(insightId) + '/export/pine?kind=strategy').then(parseFetchJson).then(function(d) {
     if (!d.ok) {
       if (ta) ta.value = '';
       if (warnEl) {

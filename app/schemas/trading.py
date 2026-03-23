@@ -35,6 +35,8 @@ class TradeClose(BaseModel):
     exit_price: float = Field(..., gt=0)
     exit_date: Optional[datetime] = None
     notes: Optional[str] = None
+    # Optional arrival/mid reference for exit TCA (defaults to live quote or fill)
+    reference_exit_price: Optional[float] = Field(None, gt=0)
 
 
 class TradeSell(BaseModel):
@@ -121,6 +123,11 @@ class PatternBacktestRequest(BaseModel):
     interval: Optional[str] = None
     cash: Optional[float] = Field(None, gt=0)
     commission: Optional[float] = Field(None, ge=0)
+    spread: Optional[float] = Field(None, ge=0, description="Bid/ask+slippage proxy (fraction of price); default from settings")
+    oos_holdout_fraction: Optional[float] = Field(
+        None, ge=0.05, le=0.45,
+        description="If set, last fraction of bars is out-of-sample; headline metrics are in-sample",
+    )
     # Full replacement for the pattern's stored rules_json (must be valid JSON string)
     rules_json_override: Optional[str] = None
     # Extra AND conditions appended after the pattern's conditions

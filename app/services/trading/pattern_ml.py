@@ -7,6 +7,11 @@ learns directly from discovered patterns.  Three main components:
 2. **Pattern feature engineering** -- rich feature vector per ticker
 3. **PatternMetaLearner** -- gradient-boosting model trained on pattern
    features extracted from historical ``MarketSnapshot`` outcomes
+
+**Validation**: Training uses chronological ``MarketSnapshot`` order and
+``TimeSeriesSplit`` cross-validation to reduce random-shuffle leakage vs
+IID ``KFold``. This does not implement full purged/embargoed CV (Lopez de
+Prado); labels still use overlapping forward-return windows — see train().
 """
 from __future__ import annotations
 
@@ -329,7 +334,7 @@ class PatternMetaLearner:
     def train(self, db) -> dict[str, Any]:
         """Train on ``MarketSnapshot`` rows using pattern features."""
         from sklearn.ensemble import GradientBoostingClassifier
-        from sklearn.model_selection import cross_val_score
+        from sklearn.model_selection import TimeSeriesSplit, cross_val_score
         from sklearn.metrics import accuracy_score, precision_score, recall_score
 
         from ...models.trading import MarketSnapshot
@@ -348,7 +353,7 @@ class PatternMetaLearner:
                 MarketSnapshot.future_return_5d.isnot(None),
                 MarketSnapshot.indicator_data.isnot(None),
             )
-            .order_by(MarketSnapshot.snapshot_date.desc())
+            .order_by(MarketSnapshot.snapshot_date.asc())
             .limit(5000)
             .all()
         )
@@ -398,10 +403,11 @@ class PatternMetaLearner:
         # Optional GPU path via LightGBM when BRAIN_USE_GPU_ML=true
         clf = self._make_meta_learner_clf()
 
-        cv_folds = min(5, max(2, len(X) // 20))
+        n_splits = min(5, max(2, len(X) // 200))
+        tscv = TimeSeriesSplit(n_splits=n_splits)
         n_jobs_cv = 1 if getattr(clf, "device", None) == "gpu" else -1
         cv_scores = cross_val_score(
-            clf, X, y, cv=cv_folds, scoring="accuracy", n_jobs=n_jobs_cv,
+            clf, X, y, cv=tscv, scoring="accuracy", n_jobs=n_jobs_cv,
         )
 
         clf.fit(X, y)
@@ -429,6 +435,8 @@ class PatternMetaLearner:
                 "positive_rate": round(float(y.mean()) * 100, 1),
                 "train_accuracy": train_acc,
                 "cv_accuracy": cv_acc,
+                "cv_method": "TimeSeriesSplit",
+                "cv_splits": n_splits,
                 "precision": precision,
                 "recall": recall,
                 "feature_importances": raw_importances,

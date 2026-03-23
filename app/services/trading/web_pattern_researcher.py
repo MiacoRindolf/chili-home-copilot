@@ -340,17 +340,27 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     """Run a quick backtest on the newly discovered pattern and update confidence."""
     from ..backtest_service import backtest_pattern, save_backtest, get_backtest_params
     from .pattern_engine import update_pattern
-    from .learning import _find_insight_for_pattern
+    from .learning import (
+        _find_insight_for_pattern,
+        brain_apply_oos_promotion_gate,
+        brain_pattern_backtest_friction_kwargs,
+    )
 
     linked_insight = _find_insight_for_pattern(db, pattern)
 
     tf = getattr(pattern, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
+    bt_kw = brain_pattern_backtest_friction_kwargs()
 
     test_tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "BTC-USD"]
     wins = 0
     total = 0
     returns: list[float] = []
+    is_wrs: list[float] = []
+    oos_wrs: list[float] = []
+    oos_rets: list[float] = []
+    oos_ticker_hits = 0
+    oos_trade_sum = 0
 
     for ticker in test_tickers:
         try:
@@ -361,13 +371,22 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                 interval=bt_params["interval"],
                 period=bt_params["period"],
                 exit_config=getattr(pattern, "exit_config", None),
+                **bt_kw,
             )
             if not result.get("ok"):
                 continue
             total += 1
-            if result.get("win_rate", 0) > 50:
+            wr = float(result.get("win_rate") or 0)
+            is_wrs.append(wr)
+            if wr > 50:
                 wins += 1
-            returns.append(result.get("return_pct", 0))
+            returns.append(float(result.get("return_pct") or 0))
+            if result.get("oos_ok") and result.get("oos_win_rate") is not None:
+                oos_ticker_hits += 1
+                oos_wrs.append(float(result["oos_win_rate"]))
+                oos_trade_sum += int(result.get("oos_trade_count") or 0)
+                if result.get("oos_return_pct") is not None:
+                    oos_rets.append(float(result["oos_return_pct"]))
             if linked_insight:
                 try:
                     save_backtest(
@@ -386,24 +405,47 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             continue
 
     if total > 0:
-        win_rate = (wins / total) * 100
+        ticker_vote_wr = (wins / total) * 100
+        mean_is_wr = sum(is_wrs) / len(is_wrs) if is_wrs else 0.0
+        mean_oos_wr = sum(oos_wrs) / len(oos_wrs) if oos_wrs else None
+        mean_oos_ret = sum(oos_rets) / len(oos_rets) if oos_rets else None
         avg_return = sum(returns) / len(returns) if returns else 0
-        confidence = max(0.1, min(0.8, win_rate / 100))
+        confidence = max(0.1, min(0.8, ticker_vote_wr / 100))
 
-        update_pattern(db, pattern.id, {
+        prom_stat, allow_active = brain_apply_oos_promotion_gate(
+            origin=getattr(pattern, "origin", "") or "",
+            mean_is_win_rate=mean_is_wr,
+            mean_oos_win_rate=mean_oos_wr,
+            oos_tickers_with_result=oos_ticker_hits,
+        )
+
+        patch: dict[str, Any] = {
             "confidence": round(confidence, 3),
-            "win_rate": round(win_rate, 1),
+            "win_rate": round(mean_is_wr, 1),
             "avg_return_pct": round(avg_return, 2),
             "backtest_count": total,
             "evidence_count": total,
-        })
-
+            "promotion_status": prom_stat,
+            "oos_win_rate": round(mean_oos_wr, 1) if mean_oos_wr is not None else None,
+            "oos_avg_return_pct": round(mean_oos_ret, 2) if mean_oos_ret is not None else None,
+            "oos_trade_count": oos_trade_sum if oos_trade_sum else None,
+            "backtest_spread_used": bt_kw.get("spread"),
+            "backtest_commission_used": bt_kw.get("commission"),
+            "oos_evaluated_at": datetime.utcnow(),
+        }
         if confidence < 0.25 and total >= 3:
-            update_pattern(db, pattern.id, {"active": False})
+            patch["active"] = False
             logger.info(
                 "[web_research] Deactivated low-confidence web pattern: %s (conf=%.2f)",
                 pattern.name, confidence,
             )
+        if not allow_active:
+            patch["active"] = False
+            logger.info(
+                "[web_research] OOS gate rejected web pattern: %s (status=%s)",
+                pattern.name, prom_stat,
+            )
+        update_pattern(db, pattern.id, patch)
 
 
 # ── Scheduler entry point ──────────────────────────────────────────────

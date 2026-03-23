@@ -67,6 +67,13 @@ _SPECULATIVE_KEYWORDS = [
     "high risk", "high volatility", "leveraged",
 ]
 
+# Align with ``scanner.py`` adaptive-weight defaults; used by proposal fallback math
+# and ``tests/test_position_sizing.py``.
+_MAX_RISK_PCT = 2.0
+_POS_PCT_HARD_CAP = 10.0
+_POS_PCT_RISK_OFF_CAP = 7.0
+_POS_PCT_SPECULATIVE_CAP = 5.0
+
 
 def _compute_position_size(
     price: float,
@@ -351,6 +358,9 @@ def generate_strategy_proposals(
 
         ticker = pick["ticker"]
 
+        if not _proposal_passes_sector_cap(db, user_id, ticker):
+            continue
+
         # Supersede any existing non-executed proposal for this ticker
         _supersede_proposals(db, user_id, ticker)
 
@@ -424,6 +434,7 @@ def generate_strategy_proposals(
         if not thesis:
             thesis = f"AI-identified bullish setup for {ticker} with score {combined:.1f}/10."
 
+        _spid = pick.get("scan_pattern_id")
         proposal = StrategyProposal(
             user_id=user_id,
             ticker=ticker,
@@ -445,6 +456,7 @@ def generate_strategy_proposals(
             brain_score=pick.get("brain_score"),
             ml_probability=pick.get("ml_probability"),
             scan_score=pick.get("score"),
+            scan_pattern_id=int(_spid) if _spid is not None else None,
             proposed_at=datetime.utcnow(),
             expires_at=datetime.utcnow() + timedelta(hours=_PROPOSAL_EXPIRE_HOURS),
         )
@@ -604,6 +616,7 @@ def create_proposal_from_pick(
     if not thesis:
         thesis = f"AI-identified bullish setup for {ticker} with score {combined:.1f}/10."
 
+    _spid_pick = pick.get("scan_pattern_id")
     proposal = StrategyProposal(
         user_id=user_id,
         ticker=ticker,
@@ -625,6 +638,7 @@ def create_proposal_from_pick(
         brain_score=pick.get("brain_score"),
         ml_probability=pick.get("ml_probability"),
         scan_score=pick.get("score"),
+        scan_pattern_id=int(_spid_pick) if _spid_pick is not None else None,
         proposed_at=datetime.utcnow(),
         expires_at=datetime.utcnow() + timedelta(hours=_PROPOSAL_EXPIRE_HOURS),
     )
@@ -1069,6 +1083,7 @@ def _execute_proposal(
             quantity=quantity,
             status="open",
             broker_source="manual",
+            tca_reference_entry_price=float(proposal.entry_price),
             indicator_snapshot=json.dumps({
                 "stop_loss": proposal.stop_loss,
                 "take_profit": proposal.take_profit,
@@ -1135,10 +1150,14 @@ def _execute_proposal(
                 last_broker_sync=datetime.utcnow(),
                 filled_at=datetime.utcnow() if is_already_filled else None,
                 avg_fill_price=avg_price if is_already_filled else None,
+                tca_reference_entry_price=float(proposal.entry_price),
+                strategy_proposal_id=proposal.id,
+                scan_pattern_id=_prop_spid,
                 indicator_snapshot=json.dumps({
                     "stop_loss": proposal.stop_loss,
                     "take_profit": proposal.take_profit,
                     "proposal_id": proposal.id,
+                    "scan_pattern_id": _prop_spid,
                 }),
                 tags="auto-trade,proposal",
                 pattern_tags=_ptags or None,
@@ -1146,6 +1165,13 @@ def _execute_proposal(
             )
             db.add(trade)
             db.flush()
+            if is_already_filled:
+                try:
+                    from .tca_service import apply_tca_on_trade_fill
+
+                    apply_tca_on_trade_fill(trade)
+                except Exception:
+                    pass
             proposal.trade_id = trade.id
             db.commit()
 
@@ -1197,6 +1223,37 @@ def _get_buying_power() -> float:
 
 
 _PRICE_DRIFT_EXPIRE_PCT = 30  # expire proposals when price drifts >30% from entry
+
+
+def _open_trades_per_sector(db: Session, user_id: int) -> dict[str, int]:
+    """Count open long trades by coarse sector (for concentration caps)."""
+    from ...models.trading import Trade
+    from .backtest_engine import TICKER_TO_SECTOR
+
+    out: dict[str, int] = {}
+    for t in (
+        db.query(Trade)
+        .filter(Trade.user_id == user_id, Trade.status == "open", Trade.direction == "long")
+        .all()
+    ):
+        sec = TICKER_TO_SECTOR.get(t.ticker, "unknown")
+        out[sec] = out.get(sec, 0) + 1
+    return out
+
+
+def _proposal_passes_sector_cap(db: Session, user_id: int | None, ticker: str) -> bool:
+    from ...config import settings
+
+    cap = int(getattr(settings, "brain_max_open_per_sector", 0) or 0)
+    if cap <= 0 or user_id is None:
+        return True
+    from .backtest_engine import TICKER_TO_SECTOR
+
+    sec = TICKER_TO_SECTOR.get(ticker, "unknown")
+    counts = _open_trades_per_sector(db, user_id)
+    if counts.get(sec, 0) >= cap:
+        return False
+    return True
 
 
 def _expire_proposals(db: Session) -> int:
@@ -1326,4 +1383,5 @@ def _proposal_to_dict(p) -> dict[str, Any]:
         "expiry_reason": expiry_reason,
         "broker_order_id": p.broker_order_id,
         "trade_id": p.trade_id,
+        "scan_pattern_id": getattr(p, "scan_pattern_id", None),
     }

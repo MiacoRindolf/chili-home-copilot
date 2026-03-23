@@ -32,29 +32,57 @@ if ($LASTEXITCODE -ne 0) {
     exit 1
 }
 
-$Cert = "localhost+2.pem"
-$Key = "localhost+2-key.pem"
-if (-not (Test-Path $Cert) -or -not (Test-Path $Key)) {
-    $Cert = "certs/localhost.pem"
-    $Key = "certs/localhost.key"
-}
-if (-not (Test-Path $Cert) -or -not (Test-Path $Key)) {
-    Write-Host "Certificates not found. Generating..." -ForegroundColor Yellow
+# Prefer stable paths under certs/ (matches docs). mkcert writes here with -cert-file/-key-file
+# so uvicorn always uses the files we just generated (older script left $Cert pointing at
+# localhost+2.pem while mkcert created differently named files).
+$Cert = "certs/localhost.pem"
+$Key = "certs/localhost.key"
+$LegacyCert = "localhost+2.pem"
+$LegacyKey = "localhost+2-key.pem"
 
-    if (-not (Test-Path "mkcert.exe")) {
-        Write-Host "Downloading mkcert..." -ForegroundColor Yellow
+if (-not ((Test-Path $Cert) -and (Test-Path $Key))) {
+    if ((Test-Path $LegacyCert) -and (Test-Path $LegacyKey)) {
+        $Cert = $LegacyCert
+        $Key = $LegacyKey
+        Write-Host "Using legacy cert files: $Cert (consider migrating to certs/localhost.pem)" -ForegroundColor DarkGray
+    }
+}
+
+if (-not ((Test-Path $Cert) -and (Test-Path $Key))) {
+    Write-Host "Certificates not found. Generating trusted dev certs (mkcert) -> certs\ ..." -ForegroundColor Yellow
+    New-Item -ItemType Directory -Force -Path "certs" | Out-Null
+
+    $mkcert = Join-Path $PSScriptRoot "tools\mkcert.exe"
+    if (-not (Test-Path $mkcert)) {
+        New-Item -ItemType Directory -Force -Path (Split-Path $mkcert) | Out-Null
+        Write-Host "Downloading mkcert to scripts\tools\ ..." -ForegroundColor Yellow
         $url = "https://github.com/FiloSottile/mkcert/releases/download/v1.4.4/mkcert-v1.4.4-windows-amd64.exe"
-        Invoke-WebRequest -Uri $url -OutFile "mkcert.exe"
+        Invoke-WebRequest -Uri $url -OutFile $mkcert
     }
 
-    .\mkcert.exe -install
+    Write-Host "Installing local CA (Administrator approval may be required once)..." -ForegroundColor Yellow
+    & $mkcert -install
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "mkcert -install failed. Open PowerShell as Administrator and run: `"$mkcert`" -install" -ForegroundColor Red
+        exit 1
+    }
 
     $LanIP = (Get-NetIPAddress -AddressFamily IPv4 |
         Where-Object { $_.IPAddress -notlike '127.*' -and $_.IPAddress -notlike '169.*' } |
         Select-Object -First 1).IPAddress
 
-    Write-Host "LAN IP: $LanIP" -ForegroundColor Cyan
-    .\mkcert.exe localhost 127.0.0.1 $LanIP
+    Write-Host "LAN IP (optional SAN): $LanIP" -ForegroundColor Cyan
+    $Cert = "certs/localhost.pem"
+    $Key = "certs/localhost.key"
+    if ($LanIP) {
+        & $mkcert -key-file $Key -cert-file $Cert localhost 127.0.0.1 ::1 $LanIP
+    } else {
+        & $mkcert -key-file $Key -cert-file $Cert localhost 127.0.0.1 ::1
+    }
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "mkcert failed to write $Cert" -ForegroundColor Red
+        exit 1
+    }
 }
 
 $LanIP = (Get-NetIPAddress -AddressFamily IPv4 |

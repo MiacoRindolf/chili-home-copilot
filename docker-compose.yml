@@ -88,7 +88,7 @@ services:
   # Continuous learning worker: in-process cycle by default. Set CHILI_USE_BRAIN_SERVICE=1 to delegate to `brain`.
   brain-worker:
     image: chili-app:local
-    command: ["python", "scripts/brain_worker.py", "--interval", "30"]
+    command: ["python", "scripts/brain_worker.py", "--interval", "5"]
     env_file:
       - path: .env
         required: false

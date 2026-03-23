@@ -28,7 +28,10 @@ def _run_learning_job():
     logger.info("[scheduler] Starting scheduled learning cycle")
     db = SessionLocal()
     try:
-        result = ts.run_learning_cycle(db, user_id=None, full_universe=True)
+        from ..config import settings as _settings
+
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        result = ts.run_learning_cycle(db, user_id=_uid, full_universe=True)
         logger.info(f"[scheduler] Learning cycle result: {result}")
     except Exception as e:
         logger.error(f"[scheduler] Learning cycle failed: {e}")
@@ -671,17 +674,6 @@ def _run_reasoning_learning_job():
         db.close()
 
 
-def _run_web_pattern_research_job():
-    """Executed by APScheduler: search the web for new trading patterns."""
-    logger.info("[scheduler] Starting web pattern research")
-    try:
-        from .trading.web_pattern_researcher import run_web_pattern_research
-        report = run_web_pattern_research()
-        logger.info("[scheduler] Web pattern research result: %s", report)
-    except Exception as e:
-        logger.error("[scheduler] Web pattern research failed: %s", e)
-
-
 def _run_project_brain_job():
     """Run all active Project Brain agent cycles."""
     from ..db import SessionLocal
@@ -818,23 +810,6 @@ def _run_pattern_backfill_job():
     except Exception as e:
         _backfill_state["running"] = False
         logger.warning(f"[scheduler] Pattern backfill failed: {e}")
-
-
-def _run_exit_evolution_job():
-    """Periodically fork, compare, and evolve pattern variants (entry+exit+combo)."""
-    logger.info("[scheduler] Starting full pattern evolution")
-    try:
-        from ..db import SessionLocal
-        from .trading.learning import evolve_pattern_strategies
-
-        db = SessionLocal()
-        try:
-            stats = evolve_pattern_strategies(db)
-            logger.info("[scheduler] Pattern evolution done: %s", stats)
-        finally:
-            db.close()
-    except Exception as e:
-        logger.warning("[scheduler] Pattern evolution failed: %s", e)
 
 
 def start_scheduler():
@@ -974,15 +949,7 @@ def start_scheduler():
                 max_instances=1,
             )
 
-        _scheduler.add_job(
-            _run_web_pattern_research_job,
-            trigger=IntervalTrigger(hours=12),
-            id="web_pattern_research",
-            name="Web pattern research (every 12h)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(minutes=30),
-        )
+        # Web pattern research runs inside run_learning_cycle (_run_pattern_engine_cycle), not on a separate schedule.
 
         # DISABLED: Brain Worker now handles pattern backtesting as part of the full learning cycle
         # _scheduler.add_job(
@@ -999,14 +966,15 @@ def start_scheduler():
 
         _scheduler.start()
         logger.info(
-            f"[scheduler] Trading scheduler started (learning every {_learning_hours}h, "
+            f"[scheduler] Trading scheduler started (legacy learning_interval_hours={_learning_hours}h unused for full cycle; "
+            f"brain worker runs run_learning_cycle; "
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
             f"project brain every {_pb_minutes}min, "
-            "weekly review Sun 6PM, broker sync every 15min, price monitor every 5min, "
+            "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
-            "stock breakout scanner market hours every 15min, web pattern research every 12h; "
-            "pattern variant evolution is owned by the learning cycle / brain worker)"
+            "stock breakout scanner market hours every 15min; "
+            "web pattern research + variant evolution run inside the brain worker learning cycle)"
         )
 
 

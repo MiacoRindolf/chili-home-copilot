@@ -8,7 +8,7 @@ from app.models import User, Device
 from app.models.trading import (
     WatchlistItem, Trade, JournalEntry, TradingInsight,
     ScanResult, BacktestResult, MarketSnapshot, LearningEvent,
-    ScanPattern,
+    ScanPattern, PatternTradeRow,
 )
 from app.services import trading_service as ts
 from app.pairing import DEVICE_COOKIE_NAME
@@ -70,8 +70,17 @@ class TestTradingModels:
         assert entry.created_at is not None
 
     def test_create_trading_insight(self, db):
+        sp = ScanPattern(
+            name="Test insight pattern",
+            rules_json="{}",
+            origin="test",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
         insight = TradingInsight(
             user_id=1,
+            scan_pattern_id=sp.id,
             pattern_description="RSI oversold bounce on AAPL",
             confidence=0.75,
             evidence_count=5,
@@ -466,8 +475,17 @@ class TestInsightsAPI:
     def test_get_insights_with_data(self, db, client):
         user, token = _make_paired(db)
         client.cookies.set(DEVICE_COOKIE_NAME, token)
+        sp = ScanPattern(
+            name="Insights API pat",
+            rules_json="{}",
+            origin="test",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
         db.add(TradingInsight(
             user_id=user.id,
+            scan_pattern_id=sp.id,
             pattern_description="RSI oversold bounce",
             confidence=0.8, evidence_count=3,
         ))
@@ -500,6 +518,16 @@ class TestBrainAPI:
         assert resp.status_code == 200
         assert "events" in resp.json()
 
+    def test_brain_worker_status_includes_insight_counts(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/brain/worker/status")
+        assert resp.status_code == 200
+        j = resp.json()
+        assert "trading_insights_null_user_count" in j
+        assert "trading_insights_total_count" in j
+        assert "brain_default_user_id" in j
+
     def test_learned_patterns(self, db, client):
         user, token = _make_paired(db)
         client.cookies.set(DEVICE_COOKIE_NAME, token)
@@ -508,6 +536,248 @@ class TestBrainAPI:
         data = resp.json()
         assert "active" in data
         assert "demoted" in data
+
+    def test_tradeable_patterns_empty(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/brain/tradeable-patterns")
+        assert resp.status_code == 200
+        j = resp.json()
+        assert j["ok"] is True
+        assert j["patterns"] == []
+        assert "filters" in j
+
+    def test_tradeable_patterns_respects_gates(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        p_ok = ScanPattern(
+            name="PromoOK",
+            rules_json='{"conditions":[]}',
+            origin="brain_discovered",
+            promotion_status="promoted",
+            active=True,
+            oos_win_rate=55.0,
+            oos_trade_count=10,
+            backtest_count=10,
+        )
+        p_low_wr = ScanPattern(
+            name="PromoWeakWR",
+            rules_json='{"conditions":[]}',
+            origin="brain_discovered",
+            promotion_status="promoted",
+            active=True,
+            oos_win_rate=40.0,
+            oos_trade_count=10,
+        )
+        p_legacy = ScanPattern(
+            name="LegacyHighStats",
+            rules_json='{"conditions":[]}',
+            origin="user",
+            promotion_status="legacy",
+            active=True,
+            oos_win_rate=99.0,
+            oos_trade_count=99,
+        )
+        db.add_all([p_ok, p_low_wr, p_legacy])
+        db.commit()
+        db.refresh(p_ok)
+        db.refresh(p_low_wr)
+        db.refresh(p_legacy)
+        resp = client.get("/api/trading/brain/tradeable-patterns?min_oos_wr=50&min_trades=5")
+        assert resp.status_code == 200
+        ids = [x["id"] for x in resp.json()["patterns"]]
+        assert p_ok.id in ids
+        assert p_low_wr.id not in ids
+        assert p_legacy.id not in ids
+
+    def test_learned_patterns_includes_global_null_user_insights(self, db, client):
+        """Worker/scheduler insights with user_id NULL appear for logged-in users."""
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="GlobalInsightPat",
+            description="test",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=None,
+            scan_pattern_id=sp.id,
+            pattern_description="GlobalInsightPat — from worker",
+            confidence=0.72,
+            evidence_count=1,
+            active=True,
+        )
+        db.add(ins)
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/learn/patterns")
+        assert resp.status_code == 200
+        row = next((p for p in resp.json()["active"] if p.get("id") == ins.id), None)
+        assert row is not None
+        assert row.get("insight_scope") == "global"
+
+    def test_learned_patterns_includes_bt_aggregate_metrics(self, db, client):
+        """Pattern list exposes summed simulated trades and worst drawdown across deduped backtests."""
+        from datetime import datetime
+
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="AggPatMetrics",
+            description="test",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="AggPatMetrics — bullish setup",
+            confidence=0.75,
+            evidence_count=2,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="SPY",
+                strategy_name="dynamic_pattern",
+                return_pct=2.0,
+                win_rate=60.0,
+                max_drawdown=-4.0,
+                trade_count=5,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="QQQ",
+                strategy_name="dynamic_pattern",
+                return_pct=1.0,
+                win_rate=55.0,
+                max_drawdown=-8.5,
+                trade_count=7,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/learn/patterns")
+        assert resp.status_code == 200
+        data = resp.json()
+        row = next((p for p in data["active"] if p.get("scan_pattern_id") == sp.id), None)
+        assert row is not None
+        assert row.get("bt_total_trades") == 12
+        assert row.get("bt_worst_max_drawdown") == -8.5
+        assert "oos_trade_count" in row
+
+    @patch("app.services.backtest_service._fetch_ohlcv_df")
+    def test_benchmark_walk_forward_evaluate_smoke(self, mock_fetch):
+        import numpy as np
+        import pandas as pd
+
+        n = 200
+        idx = pd.date_range("2020-01-01", periods=n, freq="D")
+        mock_fetch.return_value = pd.DataFrame({
+            "Open": np.full(n, 100.0),
+            "High": np.full(n, 101.0),
+            "Low": np.full(n, 99.0),
+            "Close": np.linspace(99.0, 110.0, n),
+            "Volume": np.full(n, 1e6),
+        }, index=idx)
+        from app.services.backtest_service import benchmark_walk_forward_evaluate
+
+        out = benchmark_walk_forward_evaluate(
+            conditions=[{"indicator": "price", "op": ">", "value": 0}],
+            pattern_name="wf_smoke",
+            exit_config=None,
+            tickers=["SPY"],
+            period="5y",
+            interval="1d",
+            n_windows=4,
+            min_bars_per_window=35,
+            min_positive_fold_ratio=0.01,
+        )
+        assert out.get("ok") is True
+        assert "SPY" in out.get("tickers", {})
+        assert "passes_gate" in out
+        assert out["tickers"]["SPY"].get("n_windows", 0) >= 2
+
+    def test_brain_apply_bench_promotion_gate(self, monkeypatch):
+        from app import config
+        from app.services.trading.learning import brain_apply_bench_promotion_gate
+
+        monkeypatch.setattr(config.settings, "brain_bench_walk_forward_gate_enabled", True)
+        s, ok = brain_apply_bench_promotion_gate(
+            origin="brain_discovered",
+            bench_summary={"ok": True, "passes_gate": False},
+            current_promotion_status="promoted",
+        )
+        assert s == "rejected_bench"
+        assert ok is False
+        s2, ok2 = brain_apply_bench_promotion_gate(
+            origin="brain_discovered",
+            bench_summary={"ok": True, "passes_gate": True},
+            current_promotion_status="promoted",
+        )
+        assert s2 is None
+        assert ok2 is True
+        s3, ok3 = brain_apply_bench_promotion_gate(
+            origin="user",
+            bench_summary={"ok": True, "passes_gate": False},
+            current_promotion_status="promoted",
+        )
+        assert s3 is None
+        assert ok3 is True
+
+    def test_learned_patterns_bench_fold_summary(self, db, client):
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="BenchPatCard",
+            description="test",
+            rules_json="{}",
+            origin="user",
+            bench_walk_forward_json={
+                "passes_gate": True,
+                "evaluated_at": "2025-01-01T00:00:00Z",
+                "tickers": {
+                    "SPY": {"positive_return_windows": 5, "n_windows": 8},
+                    "QQQ": {"positive_return_windows": 4, "n_windows": 8},
+                },
+            },
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="BenchPatCard — bullish",
+            confidence=0.8,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get("/api/trading/learn/patterns")
+        assert resp.status_code == 200
+        row = next((p for p in resp.json()["active"] if p.get("scan_pattern_id") == sp.id), None)
+        assert row is not None
+        assert row.get("bench_fold_summary")
+        assert "SPY" in row["bench_fold_summary"]
+        assert row.get("bench_passes_gate") is True
 
     @patch("app.services.backtest_service._fetch_ohlcv_df")
     def test_pattern_backtest_with_insight_id_not_404(self, mock_fetch, db, client):
@@ -553,6 +823,69 @@ class TestBrainAPI:
         assert "ok" in data
         if data.get("ok"):
             assert "ticker" in data and "strategy" in data
+
+    def test_stored_backtest_trades_get_and_post(self, db, client):
+        """Chill compat: /api/trading-brain/.../trades and learn alias return JSON trades."""
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="Stored BT pat",
+            rules_json="{}",
+            origin="test",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        insight = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="Test pattern",
+            confidence=0.7,
+            evidence_count=2,
+        )
+        db.add(insight)
+        db.commit()
+        db.refresh(insight)
+        bt = BacktestResult(
+            user_id=user.id,
+            ticker="NKT",
+            strategy_name="dynamic_pattern",
+            return_pct=5.0,
+            win_rate=62.5,
+            max_drawdown=-3.0,
+            trade_count=2,
+            related_insight_id=insight.id,
+        )
+        db.add(bt)
+        db.commit()
+        db.refresh(bt)
+        db.add(
+            PatternTradeRow(
+                user_id=user.id,
+                related_insight_id=insight.id,
+                backtest_result_id=bt.id,
+                ticker="NKT",
+                as_of_ts=datetime.utcnow(),
+                timeframe="1d",
+                features_json={"schema": "1", "entry_price": 10.0, "exit_price": 10.5},
+            )
+        )
+        db.commit()
+
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        for path in (
+            f"/api/trading-brain/brain/backtest/{bt.id}/trades",
+            f"/api/trading/learn/backtest/{bt.id}/trades",
+        ):
+            for method in ("get", "post"):
+                resp = getattr(client, method)(path)
+                assert resp.status_code == 200, f"{method.upper()} {path}: {resp.text}"
+                assert resp.headers.get("content-type", "").startswith("application/json")
+                data = resp.json()
+                assert data.get("ok") is True
+                assert data.get("backtest_id") == bt.id
+                assert len(data.get("trades", [])) == 1
+                assert data["trades"][0]["ticker"] == "NKT"
+                assert data["trades"][0]["features"].get("entry_price") == 10.0
 
 
 class TestTopPicksFreshness:
@@ -696,3 +1029,146 @@ class TestProposalFreshness:
         assert "live_price" in data
         assert "drift_pct" in data
         assert "status" in data
+
+
+# ── TCA (transaction cost / slippage) ───────────────────────────────────────
+
+
+class TestTcaService:
+    def test_entry_slippage_bps_long(self):
+        from app.services.trading.tca_service import entry_slippage_bps
+
+        assert entry_slippage_bps(100.0, 100.5, "long") == 50.0
+        assert entry_slippage_bps(100.0, 99.5, "long") == -50.0
+
+    def test_entry_slippage_bps_short(self):
+        from app.services.trading.tca_service import entry_slippage_bps
+
+        assert entry_slippage_bps(100.0, 99.5, "short") == 50.0
+        assert entry_slippage_bps(100.0, 100.5, "short") == -50.0
+
+    def test_apply_tca_prefers_avg_fill_price(self):
+        from app.services.trading.tca_service import apply_tca_on_trade_fill
+
+        t = MagicMock()
+        t.tca_reference_entry_price = 100.0
+        t.avg_fill_price = 100.1
+        t.entry_price = 999.0
+        t.direction = "long"
+        apply_tca_on_trade_fill(t)
+        assert t.tca_entry_slippage_bps == 10.0
+
+    def test_tca_summary_guest_returns_empty(self, db):
+        from app.services.trading.tca_service import tca_summary_by_ticker
+
+        r = tca_summary_by_ticker(db, None, days=30)
+        assert r["ok"] is True
+        assert r["overall_fills"] == 0
+        assert r["by_ticker"] == []
+        assert r["exit_overall_closes"] == 0
+        assert r["exit_by_ticker"] == []
+
+    def test_exit_slippage_bps_long(self):
+        from app.services.trading.tca_service import exit_slippage_bps
+
+        assert exit_slippage_bps(100.0, 99.5, "long") == 50.0
+        assert exit_slippage_bps(100.0, 100.5, "long") == -50.0
+
+    def test_tca_summary_aggregates(self, db):
+        from app.services.trading.tca_service import tca_summary_by_ticker
+
+        user, _ = _make_paired(db)
+        now = datetime.utcnow()
+        for bps in (10.0, 30.0):
+            tr = Trade(
+                user_id=user.id,
+                ticker="AAPL",
+                direction="long",
+                entry_price=150.0,
+                quantity=1.0,
+                entry_date=now,
+                filled_at=now,
+                tca_entry_slippage_bps=bps,
+            )
+            db.add(tr)
+        db.commit()
+        r = tca_summary_by_ticker(db, user.id, days=7)
+        assert r["overall_fills"] == 2
+        assert r["overall_avg_entry_slippage_bps"] == 20.0
+        assert len(r["by_ticker"]) == 1
+        assert r["by_ticker"][0]["ticker"] == "AAPL"
+
+
+class TestTcaAPI:
+    def test_tca_summary_endpoint(self, db, client):
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        now = datetime.utcnow()
+        db.add(
+            Trade(
+                user_id=user.id,
+                ticker="MSFT",
+                direction="long",
+                entry_price=400.0,
+                quantity=1.0,
+                entry_date=now,
+                filled_at=now,
+                tca_entry_slippage_bps=5.0,
+            )
+        )
+        db.commit()
+        resp = client.get("/api/trading/tca/summary?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert data["overall_fills"] == 1
+        assert data["by_ticker"][0]["ticker"] == "MSFT"
+        assert "exit_overall_closes" in data
+
+
+class TestAttributionAPI:
+    def test_live_vs_research_endpoint(self, db, client):
+        from app.models.trading import ScanPattern
+
+        user, token = _make_paired(db)
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        pat = ScanPattern(
+            name="Test pat",
+            rules_json="{}",
+            origin="user",
+            win_rate=55.0,
+            oos_win_rate=60.0,
+            promotion_status="promoted",
+        )
+        db.add(pat)
+        db.commit()
+        db.refresh(pat)
+        now = datetime.utcnow()
+        db.add(
+            Trade(
+                user_id=user.id,
+                ticker="XOM",
+                direction="long",
+                entry_price=50.0,
+                quantity=2.0,
+                entry_date=now,
+                exit_date=now,
+                exit_price=55.0,
+                status="closed",
+                pnl=10.0,
+                scan_pattern_id=pat.id,
+                tca_entry_slippage_bps=2.0,
+                tca_exit_slippage_bps=-1.0,
+            )
+        )
+        db.commit()
+        resp = client.get("/api/trading/attribution/live-vs-research?days=7")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["ok"] is True
+        assert len(data["patterns"]) == 1
+        row = data["patterns"][0]
+        assert row["scan_pattern_id"] == pat.id
+        assert row["live_closed_trades"] == 1
+        assert row["live_win_rate_pct"] == 100.0
+        assert row["research_oos_win_rate_pct"] == 60.0

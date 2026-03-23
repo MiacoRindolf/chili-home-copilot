@@ -3744,6 +3744,17 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
         from .learning import get_current_predictions
         return get_current_predictions(db, tickers=None)
 
+    def _scan_pattern_from_prediction(pred: dict) -> int | None:
+        mps = pred.get("matched_patterns") or []
+        if not mps:
+            return None
+        best = max(
+            mps,
+            key=lambda x: (float(x.get("avg_strength") or 0), float(x.get("match_quality") or 0)),
+        )
+        pid = best.get("pattern_id")
+        return int(pid) if pid is not None else None
+
     try:
         pool = ThreadPoolExecutor(max_workers=1)
         future = pool.submit(_get_brain_predictions)
@@ -3753,6 +3764,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             t = p["ticker"]
             if p.get("direction") != "bullish" or (p.get("confidence") or 0) < 50:
                 continue
+            _spid = _scan_pattern_from_prediction(p)
             if t in candidates:
                 candidates[t]["brain_score"] = p["score"]
                 candidates[t]["brain_confidence"] = p["confidence"]
@@ -3764,6 +3776,8 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                     candidates[t]["brain_target"] = p["suggested_target"]
                 if p.get("risk_reward"):
                     candidates[t]["risk_reward"] = p["risk_reward"]
+                if _spid is not None:
+                    candidates[t]["scan_pattern_id"] = _spid
             else:
                 _cr = t.endswith("-USD")
                 candidates[t] = {
@@ -3785,6 +3799,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                     "brain_direction": p["direction"],
                     "ml_probability": p.get("meta_ml_probability"),
                     "risk_reward": p.get("risk_reward"),
+                    **({"scan_pattern_id": _spid} if _spid is not None else {}),
                 }
     except Exception:
         logger.debug("Brain predictions skipped (timeout or error)")
@@ -3826,6 +3841,8 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             pick["best_strategy"] = best_bt.strategy_name
             pick["backtest_return"] = best_bt.return_pct
             pick["backtest_win_rate"] = best_bt.win_rate
+            if best_bt.scan_pattern_id and not pick.get("scan_pattern_id"):
+                pick["scan_pattern_id"] = int(best_bt.scan_pattern_id)
         else:
             pick["best_strategy"] = None
             pick["backtest_return"] = None

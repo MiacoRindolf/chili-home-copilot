@@ -11,12 +11,14 @@ Runs as a separate process, continuously executing the FULL learning cycle:
 - Backtest patterns
 - Validate hypotheses
 - Learn from breakout outcomes
-- Specialized mining (intraday, fakeout, synergy)
+- Specialized mining (intraday, fakeout, synergy) — optional via settings
 - Pattern evolution
 - Journal, signals, ML training
 
 Status is written to data/brain_worker_status.json for monitoring.
 Control via signal files in data/ directory (stop, pause, wake to skip idle sleep).
+
+Default --interval is 5 minutes when the backtest queue is empty (1 minute breather when queue has work).
 
 Usage:
     python scripts/brain_worker.py [--interval MINUTES] [--once]
@@ -58,7 +60,7 @@ PAUSE_SIGNAL = DATA_DIR / "brain_worker_pause"
 WAKE_SIGNAL = DATA_DIR / "brain_worker_wake"
 LOCK_FILE = DATA_DIR / "brain_worker.lock"
 
-DEFAULT_CYCLE_INTERVAL = 30  # minutes
+DEFAULT_CYCLE_INTERVAL = 5  # minutes between cycles when queue empty (override with --interval)
 
 # Global lock file handle (kept open while running)
 _lock_handle = None
@@ -342,6 +344,9 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
             cycle_stats["patterns_pruned"] += int(evo.get("deactivated", 0) or 0)
         cycle_stats["queue_empty"] = result.get("queue_empty", True)
         cycle_stats["queue_pending"] = result.get("queue_pending", 0)
+        cycle_stats["queue_exploration_added"] = int(
+            result.get("queue_exploration_added", 0) or 0
+        )
         cycle_stats["step_timings"] = result.get("step_timings", {})
         cycle_stats["elapsed_s"] = result.get("elapsed_s")
         logger.info(
@@ -444,7 +449,10 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
             # Do not skip here: run_learning_cycle() clears stale locks and returns
             # {"ok": False} if a non-stale cycle is already in progress.
 
-            result = full_learning_cycle(db, user_id=None, full_universe=True)
+            from app.config import settings as _settings
+
+            _uid = getattr(_settings, "brain_default_user_id", None)
+            result = full_learning_cycle(db, user_id=_uid, full_universe=True)
             if not result.get("ok", True):
                 logger.warning(
                     "[brain] Learning cycle did not run: %s",
@@ -628,27 +636,58 @@ def main():
                 logger.info("[brain] Wake after cycle — skipping idle sleep")
                 continue
             
-            # Determine sleep time based on queue status (re-check live so we don't sleep long if queue refilled)
-            queue_empty = cycle_stats.get("queue_empty", True)
+            # Sleep policy: DB "pending" ignores exploration-eligible patterns, so also treat
+            # productive backtests this cycle (and exploration fill) as "keep cycling soon".
             queue_pending = cycle_stats.get("queue_pending", 0)
+            patterns_tested = int(cycle_stats.get("patterns_tested", 0) or 0)
+            exploration_added = int(cycle_stats.get("queue_exploration_added", 0) or 0)
             try:
-                live_pending, live_empty = _get_live_queue_status()
+                live_pending, _ = _get_live_queue_status()
                 if live_pending > 0:
-                    queue_empty = False
                     queue_pending = live_pending
             except Exception as e:
                 logger.warning(f"[brain] Could not re-check queue before sleep: {e}")
-            
-            if queue_empty:
-                # Queue is empty - sleep for full interval
-                sleep_seconds = args.interval * 60
-                status.set_step("Idle", f"Queue empty. Next cycle in {args.interval} minutes")
-                logger.info(f"[brain] Queue empty. Sleeping for {args.interval} minutes")
-            else:
-                # Queue has work - short pause then continue
+
+            should_short_sleep = (
+                queue_pending > 0
+                or patterns_tested > 0
+                or exploration_added > 0
+            )
+
+            if should_short_sleep:
                 sleep_seconds = 60  # 1 minute breather
-                status.set_step("Idle", f"{queue_pending} patterns pending. Continuing in 1 minute...")
-                logger.info(f"[brain] Queue has {queue_pending} pending patterns. Continuing in 1 minute")
+                if queue_pending > 0:
+                    idle_msg = (
+                        f"{queue_pending} pattern(s) due for retest. Continuing in 1 minute."
+                    )
+                    log_msg = (
+                        f"[brain] Retest queue: {queue_pending} pending. Continuing in 1 minute"
+                    )
+                elif patterns_tested > 0:
+                    idle_msg = (
+                        f"Ran {patterns_tested} backtest(s) this cycle. Continuing in 1 minute."
+                    )
+                    log_msg = (
+                        f"[brain] Backtests ran ({patterns_tested}); short sleep before next cycle"
+                    )
+                else:
+                    idle_msg = (
+                        f"Exploration queued {exploration_added} pattern(s). Continuing in 1 minute."
+                    )
+                    log_msg = (
+                        f"[brain] Exploration fill ({exploration_added}); short sleep before next cycle"
+                    )
+                status.set_step("Idle", idle_msg)
+                logger.info(log_msg)
+            else:
+                sleep_seconds = args.interval * 60
+                status.set_step(
+                    "Idle",
+                    f"No retest due and no backtests this cycle. Next in {args.interval} min.",
+                )
+                logger.info(
+                    f"[brain] Retest queue clear and idle cycle. Sleeping {args.interval} minutes"
+                )
             
             status.save()
             

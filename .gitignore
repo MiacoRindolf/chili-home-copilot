@@ -23,6 +23,7 @@ certs/
 *.pem
 *.key
 mkcert.exe
+scripts/tools/mkcert.exe
 localhost+2.pem
 localhost+2-key.pem
 

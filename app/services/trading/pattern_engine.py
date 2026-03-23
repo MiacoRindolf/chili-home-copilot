@@ -98,6 +98,31 @@ _BUILTIN_PATTERNS: list[dict[str, Any]] = [
     },
 ]
 
+# Community / link-attributed seeds (insert once by name; not ``origin=builtin``).
+_COMMUNITY_SEED_PATTERNS: list[dict[str, Any]] = [
+    {
+        "name": "Reddit r/Daytrading — IBS mean reversion (vaanam-dev)",
+        "description": (
+            "Community seed from u/vaanam-dev (r/Daytrading). "
+            "**Entry (both):** (1) close < 10-day high minus 2.5×(25-day average high "
+            "minus 25-day average low). (2) IBS = (close−low)/(high−low) < 0.3. "
+            "CHILI backtests use the standard pattern engine exits (ATR trail, max hold, BOS), "
+            "not the author’s discretionary exit — treat as inspiration, not a replica."
+        ),
+        "origin": "user_seeded",
+        "asset_class": "stocks",
+        "timeframe": "1d",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "pullback_stretch_entry", "op": "==", "value": True},
+                {"indicator": "ibs", "op": "<", "value": 0.3},
+            ],
+        }),
+    },
+]
+
 
 def seed_builtin_patterns(db: Session) -> int:
     """Insert builtin patterns if they don't already exist. Returns count added."""
@@ -134,6 +159,46 @@ def seed_builtin_patterns(db: Session) -> int:
     if added:
         db.commit()
         logger.info("[pattern_engine] Seeded %d builtin patterns", added)
+    return added
+
+
+def seed_community_patterns(db: Session) -> int:
+    """Insert link-attributed community patterns if no row with the same name exists."""
+    existing = {p.name for p in db.query(ScanPattern).all()}
+    added = 0
+    from ...services.backtest_service import infer_pattern_timeframe
+    import json as _json2
+
+    for bp in _COMMUNITY_SEED_PATTERNS:
+        if bp["name"] in existing:
+            continue
+        conds = []
+        try:
+            conds = _json2.loads(bp["rules_json"]).get("conditions", [])
+        except Exception:
+            pass
+        tf = bp.get("timeframe") or infer_pattern_timeframe(
+            conds,
+            name=bp["name"],
+            asset_class=bp.get("asset_class", "all"),
+        )
+        p = ScanPattern(
+            name=bp["name"],
+            description=bp.get("description", ""),
+            rules_json=bp["rules_json"],
+            origin=bp.get("origin", "user_seeded"),
+            asset_class=bp.get("asset_class", "all"),
+            timeframe=tf,
+            score_boost=bp.get("score_boost", 0.0),
+            min_base_score=bp.get("min_base_score", 0.0),
+            confidence=0.5,
+            active=True,
+        )
+        db.add(p)
+        added += 1
+    if added:
+        db.commit()
+        logger.info("[pattern_engine] Seeded %d community-linked patterns", added)
     return added
 
 
@@ -457,7 +522,10 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
         return None
     for key in ("name", "description", "rules_json", "active", "score_boost",
                 "min_base_score", "confidence", "evidence_count", "win_rate",
-                "avg_return_pct", "backtest_count", "asset_class", "timeframe"):
+                "avg_return_pct", "backtest_count", "asset_class", "timeframe",
+                "promotion_status", "oos_win_rate", "oos_avg_return_pct", "oos_trade_count",
+                "backtest_spread_used", "backtest_commission_used", "oos_evaluated_at",
+                "bench_walk_forward_json"):
         if key in data:
             setattr(p, key, data[key])
     db.commit()
@@ -498,6 +566,14 @@ def _pattern_to_dict(p: ScanPattern) -> dict[str, Any]:
         "score_boost": p.score_boost,
         "min_base_score": p.min_base_score,
         "active": p.active,
+        "promotion_status": getattr(p, "promotion_status", None) or "legacy",
+        "oos_win_rate": getattr(p, "oos_win_rate", None),
+        "oos_avg_return_pct": getattr(p, "oos_avg_return_pct", None),
+        "oos_trade_count": getattr(p, "oos_trade_count", None),
+        "backtest_spread_used": getattr(p, "backtest_spread_used", None),
+        "backtest_commission_used": getattr(p, "backtest_commission_used", None),
+        "oos_evaluated_at": p.oos_evaluated_at.isoformat() if getattr(p, "oos_evaluated_at", None) else None,
+        "bench_walk_forward_json": getattr(p, "bench_walk_forward_json", None),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }

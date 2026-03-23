@@ -76,6 +76,7 @@ def create_trade(db: Session, user_id: int | None, **kwargs) -> Trade:
 def close_trade(
     db: Session, trade_id: int, user_id: int | None,
     exit_price: float, exit_date: datetime | None = None, notes: str | None = None,
+    reference_exit_price: float | None = None,
 ) -> Trade | None:
     trade = db.query(Trade).filter(
         Trade.id == trade_id, Trade.user_id == user_id,
@@ -89,6 +90,18 @@ def close_trade(
     trade.pnl = _calc_pnl(trade)
     if notes:
         trade.notes = (trade.notes or "") + f"\n{notes}"
+
+    try:
+        from .tca_service import apply_tca_on_trade_close, resolve_exit_reference_price
+
+        trade.tca_reference_exit_price = resolve_exit_reference_price(
+            trade.ticker,
+            explicit=reference_exit_price,
+            fill_fallback=float(exit_price),
+        )
+        apply_tca_on_trade_close(trade)
+    except Exception:
+        pass
 
     try:
         snap = get_indicator_snapshot(trade.ticker)
@@ -297,7 +310,11 @@ def save_insight(
     scan_pattern_id: int | None = None,
 ) -> TradingInsight:
     from .learning import log_learning_event
+    from .pattern_resolution import get_legacy_unlinked_scan_pattern_id
     from datetime import datetime
+
+    if scan_pattern_id is None:
+        scan_pattern_id = get_legacy_unlinked_scan_pattern_id(db)
 
     new_label = _pattern_label(pattern)
     new_kw = _pattern_keywords(new_label)

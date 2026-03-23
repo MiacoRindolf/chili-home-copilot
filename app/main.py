@@ -50,9 +50,13 @@ Base.metadata.create_all(bind=engine)
 run_migrations(engine)
 
 try:
-    from .services.trading.pattern_engine import seed_builtin_patterns as _seed_patterns
+    from .services.trading.pattern_engine import (
+        seed_builtin_patterns as _seed_builtin,
+        seed_community_patterns as _seed_community,
+    )
     _seed_db = SessionLocal()
-    _seed_patterns(_seed_db)
+    _seed_builtin(_seed_db)
+    _seed_community(_seed_db)
     _seed_db.close()
 except Exception:
     pass

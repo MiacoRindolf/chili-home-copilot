@@ -846,6 +846,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             f"({datetime.utcnow().strftime('%Y-%m-%d %H:%M')}). "
             f"Exit ~${exit_price:.2f} (market quote)."
         )
+        try:
+            from .trading.tca_service import apply_tca_on_trade_close
+
+            trade.tca_reference_exit_price = exit_price
+            apply_tca_on_trade_close(trade)
+        except Exception:
+            pass
         closed += 1
 
     db.commit()
@@ -894,6 +901,13 @@ def cleanup_manual_trades(
                 f"{datetime.utcnow().strftime('%Y-%m-%d %H:%M')}. "
                 f"Exit ~${exit_price:.2f} (market quote)."
             )
+            try:
+                from .trading.tca_service import apply_tca_on_trade_close
+
+                trade.tca_reference_exit_price = exit_price
+                apply_tca_on_trade_close(trade)
+            except Exception:
+                pass
             closed_manual += 1
 
     if closed_manual:
@@ -1232,6 +1246,12 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 if filled_qty:
                     trade.quantity = filled_qty
                 trade.filled_at = now
+                try:
+                    from .trading.tca_service import apply_tca_on_trade_fill
+
+                    apply_tca_on_trade_fill(trade)
+                except Exception:
+                    pass
                 filled += 1
                 logger.info(
                     f"[broker] Order {trade.broker_order_id} for {trade.ticker} FILLED "

@@ -13,6 +13,8 @@ Callers that do ``from app.services import trading_service as ts`` and use
 ``ts.fetch_ohlcv(...)`` etc. will continue to work unchanged.
 """
 
+from ...models.trading import Trade  # noqa: F401 — used by routers as ts.Trade
+
 # Market data
 from .market_data import (
     fetch_ohlcv,

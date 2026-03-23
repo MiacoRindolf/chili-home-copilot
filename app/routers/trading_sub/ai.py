@@ -4,10 +4,11 @@ from __future__ import annotations
 import json
 import logging
 import re
+from typing import Any, Literal, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import func as sa_func
+from sqlalchemy import and_, func as sa_func, or_
 from sqlalchemy.orm import Session
 
 from ...db import DATA_DIR
@@ -22,6 +23,9 @@ from ...services import ticker_universe
 
 router = APIRouter(tags=["trading-ai"])
 _log = logging.getLogger(__name__)
+
+# Sibling-linked BacktestResult rows only (no global keyword padding). Keep panel + chart pools aligned.
+_EVIDENCE_LINKED_BACKTEST_LIMIT = 4000
 
 _TRADING_PROMPT: str | None = None
 _TRADING_PROMPT_MTIME: float = 0.0
@@ -67,6 +71,143 @@ def api_brain_stats(request: Request, db: Session = Depends(get_db)):
         pass
     # endregion
     return JSONResponse({"ok": True, **stats})
+
+
+@router.get("/api/trading/brain/tradeable-patterns")
+def api_tradeable_patterns(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int | None = Query(None, ge=1, le=50),
+    min_oos_wr: float | None = Query(None, ge=0.0, le=100.0),
+    min_trades: int | None = Query(None, ge=0),
+    include_candidates: bool = Query(False),
+    require_bench_pass: bool = Query(False),
+):
+    """Active ScanPatterns that passed promotion (and optional OOS / trade-count gates).
+
+    Used by Brain UI for a short list of patterns you can open in Trading backtests.
+    """
+    from ...config import settings
+    from ...models.trading import ScanPattern, TradingInsight
+
+    get_identity_ctx(request, db)
+
+    lim = int(limit if limit is not None else settings.brain_tradeable_limit)
+    lim = max(1, min(lim, 50))
+    min_wr = float(
+        min_oos_wr
+        if min_oos_wr is not None
+        else settings.brain_tradeable_min_oos_wr
+    )
+    min_tc = int(
+        min_trades
+        if min_trades is not None
+        else settings.brain_tradeable_min_oos_trades
+    )
+
+    statuses = ["promoted"]
+    if include_candidates:
+        statuses.append("candidate")
+
+    trade_count_effective = sa_func.coalesce(
+        ScanPattern.oos_trade_count, ScanPattern.backtest_count, 0
+    )
+    wr_from_oos = and_(
+        ScanPattern.oos_win_rate.isnot(None),
+        ScanPattern.oos_win_rate >= min_wr,
+    )
+    wr_from_is = and_(
+        ScanPattern.oos_win_rate.is_(None),
+        ScanPattern.win_rate.isnot(None),
+        ScanPattern.win_rate * 100.0 >= min_wr,
+    )
+    wr_ok = or_(wr_from_oos, wr_from_is)
+
+    q = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.promotion_status.in_(statuses),
+            trade_count_effective >= min_tc,
+            wr_ok,
+        )
+        .order_by(
+            ScanPattern.oos_win_rate.desc().nullslast(),
+            (ScanPattern.win_rate * 100.0).desc().nullslast(),
+            ScanPattern.id.desc(),
+        )
+    )
+    if require_bench_pass:
+        q = q.filter(
+            ScanPattern.bench_walk_forward_json.isnot(None),
+            ScanPattern.bench_walk_forward_json["passes_gate"].astext == "true",
+        )
+
+    rows = q.limit(lim).all()
+    sp_ids = [p.id for p in rows]
+    insight_by_sp: dict[int, int] = {}
+    if sp_ids:
+        pairs = (
+            db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
+            .filter(TradingInsight.scan_pattern_id.in_(sp_ids))
+            .order_by(TradingInsight.id.desc())
+            .all()
+        )
+        for spid, iid in pairs:
+            if spid is not None and spid not in insight_by_sp:
+                insight_by_sp[int(spid)] = int(iid)
+
+    out = []
+    for p in rows:
+        bench = p.bench_walk_forward_json
+        bench_pass = None
+        if isinstance(bench, dict):
+            bench_pass = bench.get("passes_gate")
+
+        oos_wr = p.oos_win_rate
+        if oos_wr is None and p.win_rate is not None:
+            display_wr = round(float(p.win_rate) * 100.0, 1)
+            wr_source = "in_sample"
+        else:
+            display_wr = float(oos_wr) if oos_wr is not None else None
+            wr_source = "oos" if oos_wr is not None else None
+
+        tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
+
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "description": (p.description or "")[:500] or None,
+                "timeframe": p.timeframe,
+                "asset_class": p.asset_class,
+                "promotion_status": p.promotion_status,
+                "oos_win_rate": p.oos_win_rate,
+                "oos_avg_return_pct": p.oos_avg_return_pct,
+                "oos_trade_count": p.oos_trade_count,
+                "win_rate": p.win_rate,
+                "backtest_count": p.backtest_count,
+                "display_win_rate_pct": display_wr,
+                "display_wr_source": wr_source,
+                "trade_count_for_gate": int(tc or 0),
+                "bench_passes_gate": bench_pass,
+                "linked_insight_id": insight_by_sp.get(p.id),
+            }
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "patterns": out,
+            "filters": {
+                "limit": lim,
+                "min_oos_wr": min_wr,
+                "min_trades": min_tc,
+                "include_candidates": include_candidates,
+                "require_bench_pass": require_bench_pass,
+            },
+        }
+    )
 
 
 @router.get("/api/trading/brain/confidence-history")
@@ -391,11 +532,10 @@ def api_dedup_patterns(request: Request, db: Session = Depends(get_db)):
 @router.post("/api/trading/learn/patterns/{pattern_id}/demote")
 def api_demote_pattern(pattern_id: int, request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        return JSONResponse({"ok": False, "reason": "Sign in required"}, status_code=401)
     from ...models.trading import TradingInsight
-    ins = db.query(TradingInsight).filter(
-        TradingInsight.id == pattern_id,
-        TradingInsight.user_id == ctx["user_id"],
-    ).first()
+    ins = db.query(TradingInsight).filter(TradingInsight.id == pattern_id).first()
     if not ins:
         return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
     ins.active = False
@@ -421,11 +561,11 @@ def api_backfill_status():
 def compute_pattern_bt_stats(
     db: Session,
     scan_pattern_ids: list[int],
-    user_id: int,
 ) -> dict[int, dict]:
     """Return canonical backtest stats per scan_pattern_id.
 
     Single source of truth for win rate, used by every endpoint.
+    Aggregates across **all** TradingInsight rows linked to each scan pattern (shared Brain pool).
     Returns {sp_id: {"wins": int, "losses": int, "total": int,
                      "win_rate": float|None, "avg_return_pct": float|None,
                      "tickers": list[str]}}.
@@ -439,10 +579,7 @@ def compute_pattern_bt_stats(
     sp_to_insights: dict[int, list[int]] = {}
     for row in (
         db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
-        .filter(
-            TradingInsight.scan_pattern_id.in_(scan_pattern_ids),
-            TradingInsight.user_id == user_id,
-        )
+        .filter(TradingInsight.scan_pattern_id.in_(scan_pattern_ids))
         .all()
     ):
         sp_to_insights.setdefault(row[0], []).append(row[1])
@@ -604,20 +741,64 @@ def _evidence_backtest_asset_universe(
     return effective_backtest_asset_universe(ac, ctx)
 
 
+def _brain_bench_card_fields(bench_json: Any) -> dict[str, Any]:
+    """Compact fields for Brain pattern cards from ``ScanPattern.bench_walk_forward_json``."""
+    out: dict[str, Any] = {
+        "bench_fold_summary": None,
+        "bench_passes_gate": None,
+        "bench_evaluated_at": None,
+    }
+    if not bench_json or not isinstance(bench_json, dict):
+        return out
+    try:
+        pg = bench_json.get("passes_gate")
+        if pg is not None:
+            out["bench_passes_gate"] = bool(pg)
+        ev = bench_json.get("evaluated_at")
+        if ev is not None:
+            out["bench_evaluated_at"] = str(ev)
+        tickers = bench_json.get("tickers")
+        if not isinstance(tickers, dict):
+            return out
+        parts: list[str] = []
+        for sym in sorted(tickers.keys(), key=lambda x: str(x)):
+            r = tickers[sym]
+            if not isinstance(r, dict):
+                continue
+            pos = r.get("positive_return_windows")
+            nw = r.get("n_windows")
+            if pos is None or nw is None:
+                continue
+            try:
+                nw_i = int(nw)
+                pos_i = int(pos)
+            except (TypeError, ValueError):
+                continue
+            if nw_i <= 0:
+                continue
+            parts.append(f"{sym} {pos_i}/{nw_i}+")
+        if parts:
+            out["bench_fold_summary"] = " · ".join(parts)
+    except Exception:
+        pass
+    return out
+
+
 def _compute_deduped_backtest_win_stats(
     db: Session,
     sibling_insight_ids: list[int],
-    desc: str,
     *,
-    linked_limit: int = 500,
+    linked_limit: int = _EVIDENCE_LINKED_BACKTEST_LIMIT,
     asset_universe: str = "all",
 ) -> dict:
-    """Same backtest list + win stats as the pattern evidence modal (dedupe: latest per ticker/strategy)."""
+    """Backtest list + win stats for the pattern evidence modal.
+
+    Sibling-linked BacktestResult rows only (latest per ticker/strategy within the recent window).
+    """
     from ...models.trading import BacktestResult
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
 
     backtests_out: list[dict] = []
-    seen_bt_ids: set[int] = set()
     seen_bt_keys: set[tuple[str, str]] = set()
     try:
         linked_bts = (
@@ -636,7 +817,6 @@ def _compute_deduped_backtest_win_stats(
             if dedup_key in seen_bt_keys:
                 continue
             seen_bt_keys.add(dedup_key)
-            seen_bt_ids.add(bt.id)
             backtests_out.append({
                 "id": bt.id,
                 "ticker": bt.ticker,
@@ -650,39 +830,6 @@ def _compute_deduped_backtest_win_stats(
                 "params": bt.params,
                 "relevance": 100,
             })
-
-        # Keyword padding from global backtests muddles crypto vs stock evidence; skip when restricted.
-        if len(backtests_out) < 15 and asset_universe == "all":
-            bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
-            all_bts = (
-                db.query(BacktestResult)
-                .order_by(BacktestResult.ran_at.desc())
-                .limit(3000)
-                .all()
-            )
-            for bt in all_bts:
-                if bt.id in seen_bt_ids:
-                    continue
-                strat_lower = (bt.strategy_name or "").lower()
-                params_lower = (bt.params or "").lower()
-                combined = strat_lower + " " + params_lower
-                hits = sum(1 for kw in bt_keywords if kw in combined)
-                if hits >= 2:
-                    backtests_out.append({
-                        "id": bt.id,
-                        "ticker": bt.ticker,
-                        "strategy_name": bt.strategy_name,
-                        "return_pct": bt.return_pct,
-                        "win_rate": bt.win_rate,
-                        "sharpe": bt.sharpe,
-                        "max_drawdown": bt.max_drawdown,
-                        "trade_count": bt.trade_count,
-                        "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
-                        "params": bt.params,
-                        "relevance": hits,
-                    })
-                    if len(backtests_out) >= 15:
-                        break
         backtests_out.sort(
             key=lambda x: (
                 0 if (x.get("trade_count") or 0) > 0 else 1,
@@ -703,87 +850,68 @@ def _compute_deduped_backtest_win_stats(
         round(sum(b.get("return_pct") or 0 for b in bt_with_trades) / len(bt_with_trades), 1)
         if bt_with_trades else None
     )
+    bt_total_trades = int(sum(int(b.get("trade_count") or 0) for b in bt_with_trades))
+    dd_vals = [
+        float(b["max_drawdown"])
+        for b in bt_with_trades
+        if b.get("max_drawdown") is not None
+    ]
+    bt_worst_max_drawdown = round(min(dd_vals), 2) if dd_vals else None
     return {
         "backtests_out": backtests_out,
         "bt_wins": bt_wins,
         "bt_losses": bt_losses,
         "bt_win_rate": bt_win_rate,
         "bt_avg_return": bt_avg_return,
+        "bt_total_trades": bt_total_trades,
+        "bt_worst_max_drawdown": bt_worst_max_drawdown,
     }
 
 
 def _deduped_win_rate_progress_series(
     db: Session,
     sibling_insight_ids: list[int],
-    desc: str = "",
     *,
-    row_limit: int = 4000,
+    row_limit: int = _EVIDENCE_LINKED_BACKTEST_LIMIT,
     asset_universe: str = "all",
 ) -> list[dict]:
-    """Chronological series: after each qualifying backtest, deduped win rate (latest per ticker/strategy).
+    """Chronological win-rate series over sibling-linked backtests only (no global padding).
 
-    Includes sibling-linked runs plus the same keyword-matched global rows used to pad the
-    evidence backtest list, so the line chart aligns with what users see in the Backtests tab.
+    Uses the same recent row pool as the panel: newest ``row_limit`` runs, then replayed in time
+    order. State is updated for every run (including 0-trade); WR matches the panel (tickers with
+    trades only). Last point aligns with ``_compute_deduped_backtest_win_stats`` for that pool.
     """
     from ...models.trading import BacktestResult
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
 
-    seen_ids: set[int] = set()
-    rows: list = []
-    for bt in (
-        db.query(BacktestResult)
-        .filter(BacktestResult.related_insight_id.in_(sibling_insight_ids))
-        .order_by(BacktestResult.ran_at.asc())
-        .limit(row_limit)
-        .all()
-    ):
+    points: list[dict] = []
+    try:
+        raw = (
+            db.query(BacktestResult)
+            .filter(BacktestResult.related_insight_id.in_(sibling_insight_ids))
+            .order_by(BacktestResult.ran_at.desc())
+            .limit(row_limit)
+            .all()
+        )
+    except Exception:
+        return points
+
+    rows = list(reversed(raw))
+    state: dict[tuple[str, str], BacktestResult] = {}
+    last_ts: int | None = None
+    for bt in rows:
         if asset_universe == "crypto" and not _is_crypto_bt(bt.ticker or ""):
             continue
         if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
-            continue
-        rows.append(bt)
-        seen_ids.add(bt.id)
-
-    if (desc or "").strip() and asset_universe == "all":
-        bt_keywords = _extract_keywords_for_matching(desc, min_len=5)
-        if bt_keywords:
-            # Newest-first pool (matches evidence keyword padding), not oldest-N rows.
-            for bt in (
-                db.query(BacktestResult)
-                .order_by(BacktestResult.ran_at.desc())
-                .limit(3000)
-                .all()
-            ):
-                if bt.id in seen_ids:
-                    continue
-                strat_lower = (bt.strategy_name or "").lower()
-                params_lower = (bt.params or "").lower()
-                combined = strat_lower + " " + params_lower
-                hits = sum(1 for kw in bt_keywords if kw in combined)
-                if hits >= 2:
-                    rows.append(bt)
-                    seen_ids.add(bt.id)
-
-    rows.sort(
-        key=lambda b: (
-            b.ran_at.timestamp() if b.ran_at else 0.0,
-            b.id,
-        )
-    )
-
-    state: dict[tuple[str, str], BacktestResult] = {}
-    points: list[dict] = []
-    last_ts: int | None = None
-    for bt in rows:
-        if (bt.trade_count or 0) <= 0:
             continue
         ran_at = bt.ran_at
         if not ran_at:
             continue
         key = (bt.ticker or "", bt.strategy_name or "")
         state[key] = bt
-        wins = sum(1 for v in state.values() if (v.return_pct or 0) > 0)
-        total = len(state)
+        with_trades = [v for v in state.values() if (v.trade_count or 0) > 0]
+        wins = sum(1 for v in with_trades if (v.return_pct or 0) > 0)
+        total = len(with_trades)
         losses = total - wins
         wr = round(wins / max(1, total) * 100, 1)
         ts = int(ran_at.timestamp())
@@ -806,9 +934,13 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     from ...models.trading import TradingInsight, ScanPattern
 
-    all_insights = db.query(TradingInsight).filter(
-        TradingInsight.user_id == ctx["user_id"],
-    ).order_by(TradingInsight.confidence.desc()).limit(200).all()
+    # Shared Brain: all users who can open this page see the full insight pool (not scoped by owner).
+    all_insights = (
+        db.query(TradingInsight)
+        .order_by(TradingInsight.confidence.desc())
+        .limit(200)
+        .all()
+    )
     # region agent log
     try:
         from ...debug_agent_log import agent_log, safe_db_fingerprint
@@ -828,10 +960,8 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         pass
     # endregion
 
-    scan_patterns_by_name: dict[str, ScanPattern] = {}
     scan_patterns_by_id: dict[int, ScanPattern] = {}
     for sp in db.query(ScanPattern).all():
-        scan_patterns_by_name[sp.name.lower()] = sp
         scan_patterns_by_id[sp.id] = sp
 
     _SECTOR_TICKERS: dict[str, set[str]] = {
@@ -879,10 +1009,12 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             db, desc, sp_resolved, insight_id=ins.id,
         )
         panel = _compute_deduped_backtest_win_stats(
-            db, sibs, desc, asset_universe=_bt_univ,
+            db, sibs, asset_universe=_bt_univ,
         )
         wc = int(panel["bt_wins"])
         lc = int(panel["bt_losses"])
+        bt_total_trades = int(panel.get("bt_total_trades") or 0)
+        bt_worst_dd = panel.get("bt_worst_max_drawdown")
         real_wr = panel["bt_win_rate"]
         bt_tickers = list({
             b["ticker"] for b in panel["backtests_out"] if b.get("ticker")
@@ -900,30 +1032,31 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             else desc
         )
 
-        linked_sp = None
-        sp_id = getattr(ins, "scan_pattern_id", None)
-        if sp_id:
-            linked_sp = scan_patterns_by_id.get(sp_id)
-        if not linked_sp:
-            name_part = desc.split("\u2014")[0].split(" - ")[0].strip().lower()
-            linked_sp = scan_patterns_by_name.get(name_part)
+        # Card scan_pattern_id drives Pine export and /patterns/{id}/backtest — FK only.
+        effective_sp = scan_patterns_by_id.get(int(ins.scan_pattern_id))
         variant_info = None
-        if linked_sp and linked_sp.parent_id is not None:
-            parent_sp = scan_patterns_by_id.get(linked_sp.parent_id)
+        if effective_sp and effective_sp.parent_id is not None:
+            parent_sp = scan_patterns_by_id.get(effective_sp.parent_id)
             variant_info = {
-                "label": linked_sp.variant_label,
-                "parent_id": linked_sp.parent_id,
-                "generation": linked_sp.generation or 0,
-                "exit_config": linked_sp.exit_config,
-                "origin": linked_sp.origin,
+                "label": effective_sp.variant_label,
+                "parent_id": effective_sp.parent_id,
+                "generation": effective_sp.generation or 0,
+                "exit_config": effective_sp.exit_config,
+                "origin": effective_sp.origin,
                 "parent_name": parent_sp.name if parent_sp else None,
             }
         best_exit = None
-        if linked_sp and linked_sp.parent_id is None and linked_sp.exit_config:
-            best_exit = linked_sp.variant_label or "evolved"
+        if effective_sp and effective_sp.parent_id is None and effective_sp.exit_config:
+            best_exit = effective_sp.variant_label or "evolved"
+
+        _bench_fields = _brain_bench_card_fields(
+            getattr(effective_sp, "bench_walk_forward_json", None) if effective_sp else None
+        )
 
         entry = {
             "id": ins.id,
+            "insight_user_id": getattr(ins, "user_id", None),
+            "insight_scope": "global" if getattr(ins, "user_id", None) is None else "user",
             "pattern": desc,
             "pattern_display": pattern_display,
             "confidence": round(ins.confidence * 100, 1),
@@ -942,40 +1075,132 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "last_seen": ins.last_seen.isoformat() if ins.last_seen else None,
             "variant": variant_info,
             "best_exit": best_exit,
-            "scan_pattern_id": linked_sp.id if linked_sp else None,
-            "parent_scan_pattern_id": linked_sp.parent_id if linked_sp else None,
-            "ticker_scope": getattr(linked_sp, "ticker_scope", "universal") if linked_sp else "universal",
-            "scope_tickers": getattr(linked_sp, "scope_tickers", None) if linked_sp else None,
+            "scan_pattern_id": effective_sp.id if effective_sp else None,
+            "parent_scan_pattern_id": effective_sp.parent_id if effective_sp else None,
+            "ticker_scope": getattr(effective_sp, "ticker_scope", "universal") if effective_sp else "universal",
+            "scope_tickers": getattr(effective_sp, "scope_tickers", None) if effective_sp else None,
+            "promotion_status": getattr(effective_sp, "promotion_status", None) if effective_sp else None,
+            "oos_win_rate": getattr(effective_sp, "oos_win_rate", None) if effective_sp else None,
+            "oos_trade_count": getattr(effective_sp, "oos_trade_count", None) if effective_sp else None,
+            "oos_avg_return_pct": getattr(effective_sp, "oos_avg_return_pct", None) if effective_sp else None,
+            "scan_pattern_is_win_rate": getattr(effective_sp, "win_rate", None) if effective_sp else None,
+            "bt_total_trades": bt_total_trades,
+            "bt_worst_max_drawdown": bt_worst_dd,
+            "backtest_spread_used": getattr(effective_sp, "backtest_spread_used", None) if effective_sp else None,
+            "backtest_commission_used": getattr(effective_sp, "backtest_commission_used", None) if effective_sp else None,
+            **_bench_fields,
         }
         if ins.active:
             active.append(entry)
         else:
             demoted.append(entry)
 
-    return JSONResponse({
-        "ok": True,
-        "active": active,
-        "demoted": demoted,
-        "total_active": len(active),
-        "total_demoted": len(demoted),
-    })
+    return JSONResponse(
+        to_jsonable({
+            "ok": True,
+            "active": active,
+            "demoted": demoted,
+            "total_active": len(active),
+            "total_demoted": len(demoted),
+        })
+    )
 
 
-@router.get("/api/trading/learn/patterns/{pattern_id}/evidence")
+@router.get("/api/trading/learn/patterns/{insight_id}/export/pine")
+def api_export_insight_pine(
+    insight_id: int,
+    kind: str = "strategy",
+    db: Session = Depends(get_db),
+):
+    """Export Pine for the ``ScanPattern`` linked to this ``TradingInsight`` (server-resolved).
+
+    Brain must call this with **TradingInsight.id**, not ``ScanPattern.id``, so the export
+    always matches the open evidence card.
+    """
+    from ...models.trading import ScanPattern, TradingInsight
+    from ...services.trading.pine_export import scan_pattern_to_pine
+
+    insight = db.query(TradingInsight).filter(TradingInsight.id == insight_id).first()
+    if not insight:
+        return JSONResponse({"ok": False, "error": "Insight not found"}, status_code=404)
+
+    p = db.get(ScanPattern, int(insight.scan_pattern_id))
+    if not p:
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": "ScanPattern not found for this insight (broken FK).",
+            },
+            status_code=404,
+        )
+
+    k = (kind or "strategy").strip().lower()
+    if k not in ("strategy", "indicator"):
+        return JSONResponse(
+            {"ok": False, "error": "kind must be strategy or indicator"},
+            status_code=400,
+        )
+
+    pine, warnings = scan_pattern_to_pine(
+        p,
+        kind=cast(Literal["strategy", "indicator"], k),
+        trading_insight_id=insight_id,
+    )
+    return JSONResponse(
+        to_jsonable(
+            {
+                "ok": True,
+                "pine": pine,
+                "warnings": warnings,
+                "pattern_id": p.id,
+                "name": p.name,
+                "insight_id": insight_id,
+                "kind": k,
+            }
+        )
+    )
+
+
+@router.api_route(
+    "/api/trading/learn/patterns/{pattern_id}/evidence",
+    methods=["GET", "POST"],
+)
 def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depends(get_db)):
     """Assemble comprehensive evidence for a pattern from all available data sources."""
     ctx = get_identity_ctx(request, db)
-    from ...models.trading import (
-        TradingInsight, LearningEvent, TradingHypothesis,
-        Trade,
-    )
+    from ...models.trading import TradingInsight
 
-    insight = db.query(TradingInsight).filter(
-        TradingInsight.id == pattern_id,
-        TradingInsight.user_id == ctx["user_id"],
-    ).first()
+    insight = db.query(TradingInsight).filter(TradingInsight.id == pattern_id).first()
     if not insight:
         return JSONResponse({"ok": False, "reason": "Pattern not found"}, status_code=404)
+
+    try:
+        return _api_pattern_evidence_response(db, ctx, pattern_id, insight)
+    except Exception:
+        _log.exception(
+            "api_pattern_evidence failed pattern_id=%s user_id=%s",
+            pattern_id,
+            ctx.get("user_id"),
+        )
+        return JSONResponse(
+            to_jsonable(
+                {
+                    "ok": False,
+                    "error": "evidence_load_failed",
+                    "pattern_id": pattern_id,
+                }
+            ),
+            status_code=500,
+        )
+
+
+def _api_pattern_evidence_response(
+    db: Session,
+    ctx: dict,
+    pattern_id: int,
+    insight,
+) -> JSONResponse:
+    from ...models.trading import LearningEvent, TradingHypothesis, Trade
 
     desc = insight.pattern_description or ""
     sp_resolved_id = _resolve_scan_pattern_id_for_insight(db, insight)
@@ -1071,7 +1296,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         db, desc, sp_resolved_id, insight_id=pattern_id,
     )
     panel = _compute_deduped_backtest_win_stats(
-        db, sibling_ids, desc, asset_universe=_ev_univ,
+        db, sibling_ids, asset_universe=_ev_univ,
     )
     backtests_out = panel["backtests_out"]
     bt_wins = int(panel["bt_wins"])
@@ -1079,7 +1304,7 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
     bt_win_rate = panel["bt_win_rate"]
     bt_avg_return = panel["bt_avg_return"]
     win_rate_progress = _deduped_win_rate_progress_series(
-        db, sibling_ids, desc, asset_universe=_ev_univ,
+        db, sibling_ids, asset_universe=_ev_univ,
     )
 
     pattern_display = (
@@ -1094,32 +1319,55 @@ def api_pattern_evidence(pattern_id: int, request: Request, db: Session = Depend
         backtest_total_displayed=len(backtests_out),
     )
 
-    return JSONResponse({
-        "ok": True,
-        "resolved_scan_pattern_id": sp_resolved_id,
-        "pattern_display": pattern_display,
-        "win_rate_progress": win_rate_progress,
-        "insight": {
-            "id": insight.id,
-            "pattern": desc,
-            "pattern_display": pattern_display,
-            "confidence": round(insight.confidence * 100, 1),
-            "evidence_count": insight.evidence_count,
-            # Same source as "backtests" tab: deduped BacktestResult rows with trades only
-            "win_count": bt_wins,
-            "loss_count": bt_losses,
-            "win_rate": bt_win_rate,
-            "has_saved_backtest_stats": (bt_wins + bt_losses) > 0,
-            "active": insight.active,
-            "created_at": insight.created_at.isoformat(),
-            "last_seen": insight.last_seen.isoformat() if insight.last_seen else None,
-        },
-        "computed_stats": computed_stats,
-        "timeline": timeline,
-        "hypotheses": hypotheses,
-        "trades": trades_out,
-        "backtests": backtests_out,
-    })
+    return JSONResponse(
+        to_jsonable(
+            {
+                "ok": True,
+                "resolved_scan_pattern_id": sp_resolved_id,
+                "pattern_display": pattern_display,
+                "win_rate_progress": win_rate_progress,
+                "insight": {
+                    "id": insight.id,
+                    "pattern": desc,
+                    "pattern_display": pattern_display,
+                    "confidence": round(insight.confidence * 100, 1),
+                    "evidence_count": insight.evidence_count,
+                    # Same source as header WR: sibling-linked backtests with trades (deduped latest per ticker/strategy).
+                    "win_count": bt_wins,
+                    "loss_count": bt_losses,
+                    "win_rate": bt_win_rate,
+                    "has_saved_backtest_stats": (bt_wins + bt_losses) > 0,
+                    "active": insight.active,
+                    "created_at": insight.created_at.isoformat(),
+                    "last_seen": insight.last_seen.isoformat() if insight.last_seen else None,
+                },
+                "computed_stats": computed_stats,
+                "timeline": timeline,
+                "hypotheses": hypotheses,
+                "trades": trades_out,
+                "backtests": backtests_out,
+            }
+        )
+    )
+
+
+def _load_backtest_for_evidence_read(
+    ctx: dict,
+    db: Session,
+    bt_id: int,
+):
+    """Return ``(backtest_row, None)`` or ``(None, JSONResponse)`` on 404."""
+    from ...models.trading import BacktestResult
+
+    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
+    if not bt:
+        return None, JSONResponse(
+            to_jsonable({"ok": False, "error": "Backtest not found"}),
+            status_code=404,
+        )
+
+    # Shared Brain: any stored backtest row is readable if the row exists.
+    return bt, None
 
 
 @router.get("/api/trading/learn/backtest/{bt_id}")
@@ -1129,31 +1377,9 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
     Both header and chart come from the same DB row. Returns 404 if not found or not accessible.
     """
     ctx = get_identity_ctx(request, db)
-    from ...models.trading import BacktestResult, TradingInsight
-
-    bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
-    if not bt:
-        return JSONResponse({"ok": False, "error": "Backtest not found"}, status_code=404)
-
-    # Verify user can see this: either their insight, shared (user_id=None), or sibling pattern
-    ins = db.query(TradingInsight).filter(
-        TradingInsight.id == bt.related_insight_id,
-    ).first() if bt.related_insight_id else None
-    if ins:
-        if ins.user_id is None:
-            pass  # shared/orphan, allow
-        elif ins.user_id == ctx["user_id"]:
-            pass  # own insight, allow
-        else:
-            # Other user's insight: allow only if user has an insight for same pattern (sibling)
-            sp_id = getattr(ins, "scan_pattern_id", None)
-            if sp_id:
-                has_sibling = db.query(TradingInsight.id).filter(
-                    TradingInsight.scan_pattern_id == sp_id,
-                    TradingInsight.user_id == ctx["user_id"],
-                ).limit(1).first()
-                if not has_sibling:
-                    return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
+    bt, err = _load_backtest_for_evidence_read(ctx, db, bt_id)
+    if err:
+        return err
 
     eq = []
     try:
@@ -1177,27 +1403,66 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
     })
 
 
+@router.api_route(
+    "/api/trading-brain/brain/backtest/{bt_id}/trades",
+    methods=["GET", "POST"],
+)
+@router.api_route(
+    "/api/trading/learn/backtest/{bt_id}/trades",
+    methods=["GET", "POST"],
+)
+def api_stored_backtest_trades(bt_id: int, request: Request, db: Session = Depends(get_db)):
+    """Per-trade rows for a stored backtest (Chill / external UI compat).
+
+    Data comes from ``PatternTradeRow`` when trade analytics were persisted; otherwise ``trades`` is empty.
+    """
+    ctx = get_identity_ctx(request, db)
+    from ...models.trading import PatternTradeRow
+
+    _bt, err = _load_backtest_for_evidence_read(ctx, db, bt_id)
+    if err:
+        return err
+
+    rows = (
+        db.query(PatternTradeRow)
+        .filter(PatternTradeRow.backtest_result_id == bt_id)
+        .order_by(PatternTradeRow.as_of_ts.asc())
+        .all()
+    )
+    trades_out = []
+    for r in rows:
+        feats = r.features_json if isinstance(r.features_json, dict) else {}
+        trades_out.append(
+            {
+                "id": r.id,
+                "ticker": r.ticker,
+                "as_of_ts": r.as_of_ts.isoformat() if r.as_of_ts else None,
+                "timeframe": r.timeframe,
+                "outcome_return_pct": r.outcome_return_pct,
+                "label_win": r.label_win,
+                "features": feats,
+            }
+        )
+
+    return JSONResponse(
+        to_jsonable(
+            {
+                "ok": True,
+                "backtest_id": bt_id,
+                "trades": trades_out,
+            }
+        )
+    )
+
+
 def _access_backtest_row(
     ctx: dict,
     db: Session,
     bt,
     ins,
 ) -> bool:
-    """Return True if the user may read/update this BacktestResult row."""
-    if not ins:
-        return True
-    if ins.user_id is None:
-        return True
-    if ins.user_id == ctx.get("user_id"):
-        return True
-    sp_id = getattr(ins, "scan_pattern_id", None)
-    if sp_id:
-        has_sibling = db.query(TradingInsight.id).filter(
-            TradingInsight.scan_pattern_id == sp_id,
-            TradingInsight.user_id == ctx["user_id"],
-        ).limit(1).first()
-        return bool(has_sibling)
-    return False
+    """Return True if the user may read/update this BacktestResult row (shared Brain pool)."""
+    return True
 
 
 @router.post("/api/trading/learn/backtest/{bt_id}/rerun")
@@ -1241,6 +1506,8 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
     tf = getattr(p, "timeframe", "1d") or "1d"
     use_period, use_interval = get_brain_backtest_window(tf)
 
+    from ...config import settings
+
     result = backtest_pattern(
         ticker=bt.ticker,
         pattern_name=p.name,
@@ -1249,7 +1516,8 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
         period=use_period,
         exit_config=getattr(p, "exit_config", None),
         cash=100_000.0,
-        commission=0.001,
+        commission=float(settings.backtest_commission),
+        spread=float(settings.backtest_spread),
     )
     if not result.get("ok"):
         return JSONResponse(
@@ -1278,29 +1546,11 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
     """Update stored BacktestResult with fresh backtest results. Keeps header and chart in sync."""
     ctx = get_identity_ctx(request, db)
     from datetime import datetime as dt
-    from ...models.trading import BacktestResult, TradingInsight
+    from ...models.trading import BacktestResult
 
     bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
     if not bt:
         return JSONResponse({"ok": False, "error": "Backtest not found"}, status_code=404)
-
-    ins = db.query(TradingInsight).filter(
-        TradingInsight.id == bt.related_insight_id,
-    ).first() if bt.related_insight_id else None
-    if ins:
-        if ins.user_id is None:
-            pass
-        elif ins.user_id == ctx["user_id"]:
-            pass
-        else:
-            sp_id = getattr(ins, "scan_pattern_id", None)
-            if sp_id:
-                has_sibling = db.query(TradingInsight.id).filter(
-                    TradingInsight.scan_pattern_id == sp_id,
-                    TradingInsight.user_id == ctx["user_id"],
-                ).limit(1).first()
-                if not has_sibling:
-                    return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
 
     try:
         body = await request.json()
@@ -1342,10 +1592,7 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
         TradingInsight, ScanPattern, TradingHypothesis,
     )
 
-    insight = db.query(TradingInsight).filter(
-        TradingInsight.id == pattern_id,
-        TradingInsight.user_id == ctx["user_id"],
-    ).first()
+    insight = db.query(TradingInsight).filter(TradingInsight.id == pattern_id).first()
     if not insight:
         return JSONResponse({"ok": False, "reason": "not found"}, 404)
 
@@ -1379,7 +1626,7 @@ def api_pattern_evolution(pattern_id: int, request: Request, db: Session = Depen
         current_ids = [c.id for c in children]
 
     all_sp_ids = [p.id for p in all_patterns]
-    bt_stats = compute_pattern_bt_stats(db, all_sp_ids, ctx["user_id"])
+    bt_stats = compute_pattern_bt_stats(db, all_sp_ids)
 
     hyp_by_sp: dict[int, list] = {sp_id: [] for sp_id in all_sp_ids}
     for h in (
@@ -1574,6 +1821,8 @@ def _compute_evidence_stats(
     if bt_total > 0:
         stats["backtest_avg_win_rate"] = bt_win_rate
         stats["backtest_count"] = bt_total
+    if backtest_total_displayed is not None:
+        stats["backtest_total_displayed"] = backtest_total_displayed
     if bt_avg_return is not None:
         stats["backtest_avg_return"] = round(bt_avg_return, 1)
     elif backtests:
@@ -1732,6 +1981,25 @@ def _merge_brain_worker_db_fields(db: Session, payload: dict) -> None:
         pass
 
 
+def _merge_trading_insight_debug_counts(db: Session, payload: dict) -> None:
+    """Counts for verifying worker vs UI: global (NULL user_id) vs total insights."""
+    try:
+        from ...config import settings
+        from ...models.trading import TradingInsight
+
+        payload["brain_default_user_id"] = settings.brain_default_user_id
+        null_n = (
+            db.query(sa_func.count(TradingInsight.id))
+            .filter(TradingInsight.user_id.is_(None))
+            .scalar()
+        )
+        payload["trading_insights_null_user_count"] = int(null_n or 0)
+        total_n = db.query(sa_func.count(TradingInsight.id)).scalar()
+        payload["trading_insights_total_count"] = int(total_n or 0)
+    except Exception:
+        pass
+
+
 def _clear_stale_brain_worker_status_if_needed(db: Session, force: bool) -> dict:
     """Remove stale brain_worker_status.json when PID is dead, unknown+stale heartbeat, or force."""
     from ...services.brain_worker_signals import get_worker_control_snapshot, heartbeat_is_stale
@@ -1878,16 +2146,23 @@ def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
     if not _BRAIN_WORKER_STATUS_FILE.exists():
         out = {**default_stopped}
         _merge_brain_worker_db_fields(db, out)
+        _merge_trading_insight_debug_counts(db, out)
         return JSONResponse(out)
 
     try:
         with open(_BRAIN_WORKER_STATUS_FILE, "r") as f:
             data = json.load(f)
     except FileNotFoundError:
-        return JSONResponse(default_stopped)
+        out = {**default_stopped}
+        _merge_brain_worker_db_fields(db, out)
+        _merge_trading_insight_debug_counts(db, out)
+        return JSONResponse(out)
     except (json.JSONDecodeError, OSError) as e:
         # Corrupt or partial write (e.g. worker wrote mid-read) — return stopped so UI doesn't 500
-        return JSONResponse({**default_stopped, "error": str(e)})
+        out = {**default_stopped, "error": str(e)}
+        _merge_brain_worker_db_fields(db, out)
+        _merge_trading_insight_debug_counts(db, out)
+        return JSONResponse(out)
 
     pid = data.get("pid")
     liv = _worker_liveness(int(pid) if pid else None)
@@ -1911,6 +2186,7 @@ def api_brain_worker_status(request: Request, db: Session = Depends(get_db)):
         data["queue_empty_live"] = True
 
     _merge_brain_worker_db_fields(db, data)
+    _merge_trading_insight_debug_counts(db, data)
 
     return JSONResponse({"ok": True, **data})
 

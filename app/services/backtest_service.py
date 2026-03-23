@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from .trading.market_data import fetch_ohlcv_df as _fetch_ohlcv_df
 
+from ..config import settings
 from ..models.trading import BacktestResult
 
 logger = logging.getLogger(__name__)
@@ -584,6 +585,14 @@ def save_backtest(
         "strategy_id": result.get("strategy_id"),
         "period": result.get("period"),
         "interval": result.get("interval"),
+        "spread_used": result.get("spread_used"),
+        "commission_used": result.get("commission_used"),
+        "oos_holdout_fraction": result.get("oos_holdout_fraction"),
+        "oos_win_rate": result.get("oos_win_rate"),
+        "oos_return_pct": result.get("oos_return_pct"),
+        "oos_trade_count": result.get("oos_trade_count"),
+        "in_sample_bars": result.get("in_sample_bars"),
+        "out_of_sample_bars": result.get("out_of_sample_bars"),
     })
 
     if insight_id:
@@ -784,6 +793,28 @@ def _compute_series_for_conditions(
         vol_avg = volume.rolling(20).mean()
         rv = volume / vol_avg.replace(0, np.nan)
         result["rel_vol"] = _safe(rv)
+
+    # -- Internal Bar Strength: (close - low) / (high - low), 0..1 ----------
+    if "ibs" in needed:
+        rng = (high - low).replace(0, np.nan)
+        ibs_s = (close - low) / rng
+        result["ibs"] = [None if pd.isna(v) else float(v) for v in ibs_s]
+
+    # -- Pullback vs stretched high (reddit r/Daytrading vaanam-dev setup) ---
+    # close < (10-bar high - 2.5 * (mean(high,25) - mean(low,25)))
+    if "pullback_stretch_entry" in needed:
+        hh10 = high.rolling(10, min_periods=10).max()
+        ah25 = high.rolling(25, min_periods=25).mean()
+        al25 = low.rolling(25, min_periods=25).mean()
+        threshold = hh10 - 2.5 * (ah25 - al25)
+        stretch: list = [None] * n
+        for i in range(n):
+            th = threshold.iloc[i]
+            cl = close.iloc[i]
+            if pd.isna(th) or pd.isna(cl):
+                continue
+            stretch[i] = bool(float(cl) < float(th))
+        result["pullback_stretch_entry"] = stretch
 
     # -- Daily change % (bar-over-bar) -------------------------------------
     if "daily_change_pct" in needed:
@@ -1149,6 +1180,7 @@ def _extract_pattern_indicators(
     skip = {
         "price", "bb_squeeze", "bb_squeeze_firing", "vwap_reclaim",
         "narrow_range", "retest_range_tightening",
+        "pullback_stretch_entry",
     }
     result: dict[str, list[dict]] = {}
     timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
@@ -1361,7 +1393,11 @@ def _classify_exit_params(
         "narrow_range", "vcp_count", "dist_to_resistance_pct",
         "retest_range_tightening", "resistance",
     }
-    _MEAN_REV_INDICATORS = {"vwap_reclaim"}
+    _MEAN_REV_INDICATORS = {
+        "vwap_reclaim",
+        "ibs",
+        "pullback_stretch_entry",
+    }
 
     breakout_score = 0
     mean_rev_score = 0
@@ -1397,6 +1433,124 @@ def _classify_exit_params(
     return tf_params["default"]
 
 
+def _run_dynamic_pattern_slice(
+    df: pd.DataFrame,
+    *,
+    ticker: str,
+    pattern_name: str,
+    period: str,
+    interval: str,
+    cash: float,
+    commission: float,
+    spread: float,
+    conditions: list[dict[str, Any]],
+    exit_atr_mult: float,
+    exit_max_bars: int,
+    use_bos: bool,
+    explicit_bos_buffer: float | None,
+    explicit_bos_grace: int | None,
+    include_charts: bool,
+) -> dict[str, Any]:
+    """Execute DynamicPatternStrategy on a prepared OHLCV dataframe."""
+    if df.empty or len(df) < 15:
+        return {"ok": False, "error": f"Not enough bars for {ticker}"}
+
+    work = df.copy()
+    work.index = pd.to_datetime(work.index)
+    if work.index.tz is not None:
+        work.index = work.index.tz_localize(None)
+
+    indicator_arrays = _compute_series_for_conditions(work, conditions)
+    atr = _compute_atr_series(work)
+    swing_lows = _compute_swing_lows(work) if use_bos else []
+
+    strat_cls = type("_DynPat", (DynamicPatternStrategy,), {
+        "_conditions": conditions,
+        "_indicator_arrays": indicator_arrays,
+        "_exit_atr_mult": exit_atr_mult,
+        "_exit_max_bars": exit_max_bars,
+        "_atr_array": atr,
+        "_swing_low_array": swing_lows,
+        "_explicit_bos_buffer": explicit_bos_buffer,
+        "_explicit_bos_grace": explicit_bos_grace,
+    })
+
+    bt = FractionalBacktest(
+        work,
+        strat_cls,
+        cash=cash,
+        commission=commission,
+        spread=float(spread or 0.0),
+        exclusive_orders=True,
+        finalize_trades=True,
+    )
+    stats = bt.run()
+
+    equity_data: list[dict[str, Any]] = []
+    if include_charts:
+        equity = stats.get("_equity_curve")
+        if equity is not None and not equity.empty:
+            for ts, row in equity.iterrows():
+                equity_data.append({
+                    "time": int(pd.Timestamp(ts).timestamp()),
+                    "value": round(float(row["Equity"]), 2),
+                })
+
+    ohlc_data: list[dict[str, Any]] = []
+    if include_charts:
+        for ts, row in work.iterrows():
+            ohlc_data.append({
+                "time": int(pd.Timestamp(ts).timestamp()),
+                "open": round(float(row["Open"]), 4),
+                "high": round(float(row["High"]), 4),
+                "low": round(float(row["Low"]), 4),
+                "close": round(float(row["Close"]), 4),
+            })
+
+    trades_list: list[dict[str, Any]] = []
+    raw_trades = stats.get("_trades")
+    if raw_trades is not None and not raw_trades.empty:
+        idx_timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in work.index]
+        for _, t in raw_trades.iterrows():
+            entry_bar = int(t.get("EntryBar", 0))
+            exit_bar = int(t.get("ExitBar", 0))
+            entry_ts = idx_timestamps[entry_bar] if entry_bar < len(idx_timestamps) else None
+            exit_ts = idx_timestamps[exit_bar] if exit_bar < len(idx_timestamps) else None
+            trades_list.append({
+                "entry_time": entry_ts,
+                "exit_time": exit_ts,
+                "entry_price": round(float(t.get("EntryPrice", 0)), 4),
+                "exit_price": round(float(t.get("ExitPrice", 0)), 4),
+                "pnl": round(float(t.get("PnL", 0)), 2),
+                "return_pct": round(float(t.get("ReturnPct", 0)) * 100, 2),
+                "size": int(t.get("Size", 0)),
+            })
+
+    indicators = _extract_pattern_indicators(indicator_arrays, work)
+
+    return {
+        "ok": True,
+        "ticker": ticker.upper(),
+        "strategy": pattern_name,
+        "strategy_id": "dynamic_pattern",
+        "period": period,
+        "interval": interval,
+        "return_pct": round(float(stats.get("Return [%]", 0)), 2),
+        "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
+        "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),
+        "sharpe": round(float(stats.get("Sharpe Ratio", 0)), 2) if stats.get("Sharpe Ratio") else None,
+        "max_drawdown": round(float(stats.get("Max. Drawdown [%]", 0)), 2),
+        "trade_count": int(stats.get("# Trades", 0)),
+        "avg_trade_pct": round(float(stats.get("Avg. Trade [%]", 0)), 2),
+        "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
+        "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
+        "equity_curve": equity_data,
+        "ohlc": ohlc_data,
+        "trades": trades_list,
+        "indicators": indicators,
+    }
+
+
 def run_pattern_backtest(
     ticker: str,
     conditions: list[dict[str, Any]],
@@ -1404,10 +1558,14 @@ def run_pattern_backtest(
     period: str = "1y",
     interval: str = "1d",
     cash: float = 100_000,
-    commission: float = 0.001,
+    commission: float | None = None,
     exit_atr_mult: float | None = None,
     exit_max_bars: int | None = None,
     exit_config: dict[str, Any] | None = None,
+    *,
+    spread: float | None = None,
+    oos_holdout_fraction: float | None = None,
+    df_override: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Run a backtest using actual pattern conditions as entry signals.
 
@@ -1418,7 +1576,19 @@ def run_pattern_backtest(
     When *exit_config* is provided (from a ScanPattern's evolved exit
     strategy), those values take priority.  Otherwise *exit_atr_mult* /
     *exit_max_bars* are used, falling back to ``_classify_exit_params``.
+
+    *spread* defaults to ``settings.backtest_spread`` (bid/ask + slippage proxy).
+    When *oos_holdout_fraction* is set (e.g. 0.25), the last fraction of bars
+    is held out; returned ``win_rate`` / ``return_pct`` are **in-sample**;
+    ``oos_*`` fields summarize the hold-out window.
+
+    *df_override* supplies OHLCV instead of fetching (used for walk-forward windows).
     """
+    if commission is None:
+        commission = float(settings.backtest_commission)
+    if spread is None:
+        spread = float(settings.backtest_spread)
+
     if not pattern_name:
         pattern_name = generate_strategy_name(conditions)
     use_bos = True
@@ -1443,7 +1613,12 @@ def run_pattern_backtest(
         if not exit_config:
             use_bos = auto_bos
 
-    df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
+    assert exit_atr_mult is not None and exit_max_bars is not None
+
+    if df_override is not None:
+        df = df_override.copy()
+    else:
+        df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 
@@ -1451,91 +1626,226 @@ def run_pattern_backtest(
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)
 
-    indicator_arrays = _compute_series_for_conditions(df, conditions)
-    atr = _compute_atr_series(df)
-    swing_lows = _compute_swing_lows(df) if use_bos else []
+    def _run_slice(sub: pd.DataFrame, charts: bool) -> dict[str, Any]:
+        return _run_dynamic_pattern_slice(
+            sub,
+            ticker=ticker,
+            pattern_name=pattern_name,
+            period=period,
+            interval=interval,
+            cash=cash,
+            commission=commission,
+            spread=spread,
+            conditions=conditions,
+            exit_atr_mult=float(exit_atr_mult),
+            exit_max_bars=int(exit_max_bars),
+            use_bos=use_bos,
+            explicit_bos_buffer=explicit_bos_buffer,
+            explicit_bos_grace=explicit_bos_grace,
+            include_charts=charts,
+        )
 
-    strat_cls = type("_DynPat", (DynamicPatternStrategy,), {
-        "_conditions": conditions,
-        "_indicator_arrays": indicator_arrays,
-        "_exit_atr_mult": exit_atr_mult,
-        "_exit_max_bars": exit_max_bars,
-        "_atr_array": atr,
-        "_swing_low_array": swing_lows,
-        "_explicit_bos_buffer": explicit_bos_buffer,
-        "_explicit_bos_grace": explicit_bos_grace,
-    })
+    oos_frac = oos_holdout_fraction
+    if (
+        oos_frac is not None
+        and 0.05 < float(oos_frac) < 0.45
+    ):
+        split_i = int(len(df) * (1.0 - float(oos_frac)))
+        oos_bars = len(df) - split_i
+        if split_i >= 30 and oos_bars >= 12:
+            r_is = _run_slice(df.iloc[:split_i], True)
+            r_oos = _run_slice(df.iloc[split_i:], False)
+            if not r_is.get("ok"):
+                r_is["spread_used"] = spread
+                r_is["commission_used"] = commission
+                return r_is
+            out = {**r_is}
+            out["spread_used"] = spread
+            out["commission_used"] = commission
+            out["oos_holdout_fraction"] = float(oos_frac)
+            out["in_sample_bars"] = split_i
+            out["out_of_sample_bars"] = oos_bars
+            out["in_sample"] = {
+                k: r_is[k] for k in (
+                    "win_rate", "return_pct", "trade_count", "sharpe",
+                    "max_drawdown", "profit_factor",
+                ) if k in r_is
+            }
+            if r_oos.get("ok"):
+                out["oos_win_rate"] = r_oos.get("win_rate")
+                out["oos_return_pct"] = r_oos.get("return_pct")
+                out["oos_trade_count"] = r_oos.get("trade_count")
+                out["out_of_sample"] = {
+                    "win_rate": r_oos.get("win_rate"),
+                    "return_pct": r_oos.get("return_pct"),
+                    "trade_count": r_oos.get("trade_count"),
+                }
+            else:
+                out["oos_win_rate"] = None
+                out["oos_return_pct"] = None
+                out["oos_trade_count"] = None
+                out["out_of_sample"] = None
+            out["oos_ok"] = bool(r_oos.get("ok"))
+            # Headline metrics = in-sample (research gate); full charts = in-sample only
+            return out
 
-    bt = FractionalBacktest(
-        df,
-        strat_cls,
-        cash=cash,
-        commission=commission,
-        exclusive_orders=True,
-        finalize_trades=True,
-    )
-    stats = bt.run()
+    out = _run_slice(df, True)
+    out["spread_used"] = spread
+    out["commission_used"] = commission
+    return out
 
-    equity = stats.get("_equity_curve")
-    equity_data = []
-    if equity is not None and not equity.empty:
-        for ts, row in equity.iterrows():
-            equity_data.append({
-                "time": int(pd.Timestamp(ts).timestamp()),
-                "value": round(float(row["Equity"]), 2),
+
+def benchmark_walk_forward_evaluate(
+    *,
+    conditions: list[dict[str, Any]],
+    pattern_name: str,
+    exit_config: dict[str, Any] | None,
+    tickers: list[str],
+    period: str,
+    interval: str,
+    n_windows: int = 8,
+    min_bars_per_window: int = 35,
+    min_positive_fold_ratio: float = 0.375,
+    cash: float = 100_000,
+    commission: float | None = None,
+    spread: float | None = None,
+) -> dict[str, Any]:
+    """Contiguous-window backtests on a fixed ticker set (benchmark robustness).
+
+    Fetches full history per ticker once, splits into windows, runs
+    ``run_pattern_backtest`` with *df_override* per slice (no nested OOS split).
+    Sets *passes_gate* when every ticker meets *min_positive_fold_ratio* for
+    folds with positive return_pct.
+    """
+    if commission is None:
+        commission = float(settings.backtest_commission)
+    if spread is None:
+        spread = float(settings.backtest_spread)
+
+    n_win = max(2, int(n_windows))
+    min_chunk = max(30, int(min_bars_per_window))
+    tks = [str(t).strip().upper() for t in tickers if t and str(t).strip()]
+    if not tks:
+        return {"ok": False, "error": "no tickers", "passes_gate": False, "tickers": {}}
+
+    out_tickers: dict[str, Any] = {}
+    for ticker in tks:
+        df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
+        if df.empty or len(df) < min_chunk * 2:
+            out_tickers[ticker] = {
+                "ok": False,
+                "error": "not enough history",
+                "windows": [],
+            }
+            continue
+        df.index = pd.to_datetime(df.index)
+        if df.index.tz is not None:
+            df.index = df.index.tz_localize(None)
+
+        max_windows = max(2, len(df) // min_chunk)
+        use_n = min(n_win, max_windows)
+        chunk = len(df) // use_n
+        if chunk < min_chunk:
+            out_tickers[ticker] = {
+                "ok": False,
+                "error": "windows too short",
+                "windows": [],
+            }
+            continue
+
+        windows: list[dict[str, Any]] = []
+        for k in range(use_n):
+            start = k * chunk
+            end = (k + 1) * chunk if k < use_n - 1 else len(df)
+            sub = df.iloc[start:end]
+            if len(sub) < min_chunk:
+                continue
+            wres = run_pattern_backtest(
+                ticker=ticker,
+                conditions=conditions,
+                pattern_name=pattern_name,
+                period=period,
+                interval=interval,
+                cash=cash,
+                commission=commission,
+                spread=spread,
+                exit_config=exit_config,
+                df_override=sub,
+                oos_holdout_fraction=None,
+            )
+            ts0 = int(pd.Timestamp(sub.index[0]).timestamp())
+            ts1 = int(pd.Timestamp(sub.index[-1]).timestamp())
+            rp = wres.get("return_pct")
+            windows.append({
+                "index": k,
+                "start_time": ts0,
+                "end_time": ts1,
+                "bars": len(sub),
+                "ok": bool(wres.get("ok")),
+                "return_pct": rp,
+                "win_rate": wres.get("win_rate"),
+                "trade_count": wres.get("trade_count"),
+                "error": wres.get("error"),
             })
 
-    ohlc_data = []
-    for ts, row in df.iterrows():
-        ohlc_data.append({
-            "time": int(pd.Timestamp(ts).timestamp()),
-            "open": round(float(row["Open"]), 4),
-            "high": round(float(row["High"]), 4),
-            "low": round(float(row["Low"]), 4),
-            "close": round(float(row["Close"]), 4),
-        })
+        returns = [
+            float(w["return_pct"])
+            for w in windows
+            if w.get("ok") and w.get("return_pct") is not None
+        ]
+        win_rates = [
+            float(w["win_rate"])
+            for w in windows
+            if w.get("ok") and w.get("win_rate") is not None
+        ]
+        trades = sum(int(w.get("trade_count") or 0) for w in windows if w.get("ok"))
+        pos_ret = sum(
+            1 for w in windows
+            if w.get("ok") and w.get("return_pct") is not None and float(w["return_pct"]) > 0
+        )
+        n_w = len(windows)
 
-    trades_list = []
-    raw_trades = stats.get("_trades")
-    if raw_trades is not None and not raw_trades.empty:
-        idx_timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
-        for _, t in raw_trades.iterrows():
-            entry_bar = int(t.get("EntryBar", 0))
-            exit_bar = int(t.get("ExitBar", 0))
-            entry_ts = idx_timestamps[entry_bar] if entry_bar < len(idx_timestamps) else None
-            exit_ts = idx_timestamps[exit_bar] if exit_bar < len(idx_timestamps) else None
-            trades_list.append({
-                "entry_time": entry_ts,
-                "exit_time": exit_ts,
-                "entry_price": round(float(t.get("EntryPrice", 0)), 4),
-                "exit_price": round(float(t.get("ExitPrice", 0)), 4),
-                "pnl": round(float(t.get("PnL", 0)), 2),
-                "return_pct": round(float(t.get("ReturnPct", 0)) * 100, 2),
-                "size": int(t.get("Size", 0)),
-            })
+        def _median(xs: list[float]) -> float | None:
+            if not xs:
+                return None
+            s = sorted(xs)
+            m = len(s) // 2
+            return float(s[m]) if len(s) % 2 else float((s[m - 1] + s[m]) / 2)
 
-    indicators = _extract_pattern_indicators(indicator_arrays, df)
+        ticker_ok = n_w > 0 and all(w.get("ok") for w in windows)
+        ratio = (pos_ret / n_w) if n_w else 0.0
+        ticker_passes = ticker_ok and ratio >= float(min_positive_fold_ratio)
+
+        out_tickers[ticker] = {
+            "ok": ticker_ok,
+            "windows": windows,
+            "n_windows": n_w,
+            "positive_return_windows": pos_ret,
+            "positive_fold_ratio": round(ratio, 4),
+            "passes_ratio_gate": ticker_passes,
+            "median_return_pct": round(_median(returns), 2) if returns else None,
+            "median_win_rate": round(_median(win_rates), 2) if win_rates else None,
+            "total_trades": trades,
+        }
+
+    passes_gate = True
+    for sym, rec in out_tickers.items():
+        if not rec.get("ok"):
+            passes_gate = False
+            continue
+        if not rec.get("passes_ratio_gate"):
+            passes_gate = False
 
     return {
         "ok": True,
-        "ticker": ticker.upper(),
-        "strategy": pattern_name,
-        "strategy_id": "dynamic_pattern",
+        "pattern_name": pattern_name,
         "period": period,
         "interval": interval,
-        "return_pct": round(float(stats.get("Return [%]", 0)), 2),
-        "buy_hold_pct": round(float(stats.get("Buy & Hold Return [%]", 0)), 2),
-        "win_rate": round(float(stats.get("Win Rate [%]", 0)), 1),
-        "sharpe": round(float(stats.get("Sharpe Ratio", 0)), 2) if stats.get("Sharpe Ratio") else None,
-        "max_drawdown": round(float(stats.get("Max. Drawdown [%]", 0)), 2),
-        "trade_count": int(stats.get("# Trades", 0)),
-        "avg_trade_pct": round(float(stats.get("Avg. Trade [%]", 0)), 2),
-        "profit_factor": round(float(stats.get("Profit Factor", 0)), 2) if stats.get("Profit Factor") else None,
-        "final_equity": round(float(stats.get("Equity Final [$]", cash)), 2),
-        "equity_curve": equity_data,
-        "ohlc": ohlc_data,
-        "trades": trades_list,
-        "indicators": indicators,
+        "n_windows_requested": n_win,
+        "min_bars_per_window": min_chunk,
+        "min_positive_fold_ratio": float(min_positive_fold_ratio),
+        "tickers": out_tickers,
+        "passes_gate": passes_gate,
     }
 
 
@@ -1564,7 +1874,9 @@ def backtest_pattern(
     exit_config: str | dict[str, Any] | None = None,
     *,
     cash: float = 100_000,
-    commission: float = 0.001,
+    commission: float | None = None,
+    spread: float | None = None,
+    oos_holdout_fraction: float | None = None,
     rules_json_override: str | None = None,
     append_conditions: list[dict[str, Any]] | None = None,
     exit_config_overlay: dict[str, Any] | None = None,
@@ -1613,6 +1925,8 @@ def backtest_pattern(
             cash=cash,
             commission=commission,
             exit_config=exit_cfg,
+            spread=spread,
+            oos_holdout_fraction=oos_holdout_fraction,
         )
         result["pattern_name"] = pattern_name
         result["mapped_strategy"] = "dynamic_pattern"
@@ -1626,13 +1940,14 @@ def backtest_pattern(
             strategy_id = sid
             break
 
+    _comm = commission if commission is not None else float(settings.backtest_commission)
     result = run_backtest(
         ticker=ticker,
         strategy_id=strategy_id,
         period=period,
         interval=interval,
         cash=cash,
-        commission=commission,
+        commission=_comm,
     )
     result["pattern_name"] = pattern_name
     result["mapped_strategy"] = strategy_id

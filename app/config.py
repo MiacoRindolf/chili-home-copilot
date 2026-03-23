@@ -1,10 +1,17 @@
 """Centralized configuration for CHILI. Loads from .env with type safety."""
-from pydantic import Field, field_validator
+from typing import Optional
+
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        populate_by_name=True,
+    )
 
     # Ollama (local planner, wellness, RAG, vision)
     ollama_host: str = "http://127.0.0.1:11434"
@@ -108,11 +115,20 @@ class Settings(BaseSettings):
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
     brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) — ML train step only, not queue BT
 
+    # Full learning cycle (run_learning_cycle): optional slim mode
+    brain_insight_backtest_on_cycle: bool = False  # legacy TradingInsight smart backtests (ScanPattern queue is canonical)
+    brain_secondary_miners_on_cycle: bool = True   # intraday/refine/exit/fakeout/sizing/inter-alert/timeframe/synergy steps
+
     # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
     brain_retest_interval_days: int = 7
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40
+
+    # Brain UI: "tradeable patterns" list (OOS % and trade count gates; promoted-only by default).
+    brain_tradeable_min_oos_wr: float = 50.0
+    brain_tradeable_min_oos_trades: int = 5
+    brain_tradeable_limit: int = 20
 
     # Evolution: variant ranking = weight_sharpe * adj_sharpe + weight_wr * wr + weight_return * avg_return_pct
     brain_evolution_weight_sharpe: float = 1.0
@@ -159,10 +175,50 @@ class Settings(BaseSettings):
     brain_service_url: str = ""  # e.g. http://brain:8090 (Compose) or http://127.0.0.1:8090
     brain_internal_secret: str = ""  # Bearer token for POST /v1/run-learning-cycle (match CHILI_BRAIN_INTERNAL_SECRET on brain)
 
+    # Standalone brain worker + APScheduler: attribute mined TradingInsights to this user so they
+    # appear under GET /api/trading/learn/patterns for that login. When unset, insights use user_id NULL
+    # (see api_learned_patterns: global rows are merged for logged-in users).
+    brain_default_user_id: Optional[int] = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "CHILI_BRAIN_DEFAULT_USER_ID",
+            "BRAIN_DEFAULT_USER_ID",
+        ),
+    )
+
     # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).
     brain_worker_compose_service: str = "brain-worker"
     # Optional: restrict to one compose project label (empty = match any project with that service name)
     brain_worker_compose_project: str = ""
+
+    # Pattern backtests (backtesting.py): spread = constant bid/ask friction as fraction of price.
+    # Combined proxy for half-spread + slippage (e.g. 0.0002 ≈ 2 bps per side order of magnitude).
+    backtest_spread: float = 0.0002
+    backtest_commission: float = 0.001
+    # Hold out the last fraction of bars for out-of-sample metrics when training/evaluating patterns.
+    brain_oos_holdout_fraction: float = 0.25
+    brain_oos_gate_enabled: bool = True
+    brain_oos_min_win_rate_pct: float = 42.0
+    brain_oos_max_is_oos_gap_pct: float = 38.0
+    brain_oos_min_evaluated_tickers: int = 2
+
+    # Benchmark walk-forward (SPY/QQQ-style) after hypothesis test; optional extra promotion gate.
+    brain_bench_walk_forward_enabled: bool = True
+    brain_bench_walk_forward_gate_enabled: bool = False
+    brain_bench_tickers: str = "SPY,QQQ"
+    brain_bench_period: str = "10y"
+    brain_bench_interval: str = "1d"
+    brain_bench_n_windows: int = 8
+    brain_bench_min_bars_per_window: int = 35
+    brain_bench_min_positive_fold_ratio: float = 0.375
+    # Cost-stress benchmark: multiply spread/commission for a second walk-forward eval (stored on bench JSON).
+    brain_bench_cost_stress_spread_mult: float = 1.0
+    brain_bench_cost_stress_commission_mult: float = 1.0
+    # When True, stress eval must also pass passes_gate (defaults stress mults to 2.0/1.5 if both 1.0).
+    brain_bench_require_stress_pass: bool = False
+
+    # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
+    brain_max_open_per_sector: int = 0
 
     @field_validator("database_url")
     @classmethod

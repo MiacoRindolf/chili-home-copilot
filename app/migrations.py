@@ -774,9 +774,10 @@ def _migration_028_seed_rsi_ema_breakout_pattern(conn) -> None:
                 "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
                 " evidence_count, backtest_count, score_boost, min_base_score, "
                 " active, generation, ticker_scope, trade_count, backtest_priority, "
-                " created_at, updated_at) "
+                " promotion_status, created_at, updated_at) "
                 "VALUES (:name, :desc, :rules, :origin, :ac, '1d', 0.0, 0, 0, 1.5, 4.0, "
-                " TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                " TRUE, 0, 'universal', 0, 0, "
+                " 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
             ), {
                 "name": pat_name,
                 "desc": (
@@ -996,9 +997,10 @@ def _migration_031_seed_ross_cameron_patterns(conn) -> None:
             "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
-            " created_at, updated_at) "
+            " promotion_status, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'stocks', '1d', 0.5, "
-            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
+            " 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1121,9 +1123,10 @@ def _migration_032_seed_candlestick_patterns(conn) -> None:
             "(name, description, rules_json, origin, asset_class, timeframe, confidence, "
             " evidence_count, backtest_count, score_boost, min_base_score, "
             " active, generation, ticker_scope, trade_count, backtest_priority, "
-            " created_at, updated_at) "
+            " promotion_status, created_at, updated_at) "
             "VALUES (:name, :desc, :rules, 'user_seeded', 'all', '1d', 0.5, "
-            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            " 0, 0, 1.5, 4.0, TRUE, 0, 'universal', 0, 0, "
+            " 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
         ), {
             "name": pat["name"],
             "desc": pat["desc"],
@@ -1393,6 +1396,355 @@ def _migration_038_brain_worker_control_stop_heartbeat(conn) -> None:
         conn.commit()
 
 
+def _migration_039_scan_pattern_oos_promotion(conn) -> None:
+    """OOS metrics, promotion status, and backtest friction snapshot for ScanPattern."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "promotion_status" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns ADD COLUMN promotion_status VARCHAR(32) NOT NULL DEFAULT 'legacy'"
+            )
+        )
+        conn.commit()
+    for col, typ in (
+        ("oos_win_rate", "DOUBLE PRECISION"),
+        ("oos_avg_return_pct", "DOUBLE PRECISION"),
+        ("oos_trade_count", "INTEGER"),
+        ("backtest_spread_used", "DOUBLE PRECISION"),
+        ("backtest_commission_used", "DOUBLE PRECISION"),
+    ):
+        if col not in _columns(conn, "scan_patterns"):
+            conn.execute(text(f"ALTER TABLE scan_patterns ADD COLUMN {col} {typ}"))
+            conn.commit()
+    if "oos_evaluated_at" not in _columns(conn, "scan_patterns"):
+        conn.execute(text("ALTER TABLE scan_patterns ADD COLUMN oos_evaluated_at TIMESTAMP"))
+        conn.commit()
+
+
+def _migration_040_scan_pattern_bench_walk_forward(conn) -> None:
+    """JSON summary of benchmark walk-forward evaluation on scan_patterns."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    if "bench_walk_forward_json" not in _columns(conn, "scan_patterns"):
+        conn.execute(
+            text("ALTER TABLE scan_patterns ADD COLUMN bench_walk_forward_json JSONB")
+        )
+        conn.commit()
+
+
+def _migration_041_trade_tca_columns(conn) -> None:
+    """TCA: reference entry price and computed slippage (bps) on trading_trades."""
+    if "trading_trades" not in _tables(conn):
+        return
+    tt = _columns(conn, "trading_trades")
+    if "tca_reference_entry_price" not in tt:
+        conn.execute(
+            text("ALTER TABLE trading_trades ADD COLUMN tca_reference_entry_price DOUBLE PRECISION")
+        )
+        conn.commit()
+    if "tca_entry_slippage_bps" not in tt:
+        conn.execute(
+            text("ALTER TABLE trading_trades ADD COLUMN tca_entry_slippage_bps DOUBLE PRECISION")
+        )
+        conn.commit()
+
+
+def _migration_042_trade_attribution_exit_tca(conn) -> None:
+    """Trade proposal/pattern attribution + exit TCA columns; proposal.scan_pattern_id."""
+    if "trading_trades" in _tables(conn):
+        tt = _columns(conn, "trading_trades")
+        for col, typ in (
+            ("tca_reference_exit_price", "DOUBLE PRECISION"),
+            ("tca_exit_slippage_bps", "DOUBLE PRECISION"),
+            ("strategy_proposal_id", "INTEGER"),
+            ("scan_pattern_id", "INTEGER"),
+        ):
+            if col not in tt:
+                conn.execute(text(f"ALTER TABLE trading_trades ADD COLUMN {col} {typ}"))
+                conn.commit()
+        # Indexes (idempotent names)
+        for idx_sql in (
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_strategy_proposal_id ON trading_trades (strategy_proposal_id)",
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_scan_pattern_id ON trading_trades (scan_pattern_id)",
+        ):
+            try:
+                conn.execute(text(idx_sql))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+    if "trading_proposals" in _tables(conn):
+        tp = _columns(conn, "trading_proposals")
+        if "scan_pattern_id" not in tp:
+            conn.execute(text("ALTER TABLE trading_proposals ADD COLUMN scan_pattern_id INTEGER"))
+            conn.commit()
+        try:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_trading_proposals_scan_pattern_id "
+                    "ON trading_proposals (scan_pattern_id)"
+                )
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+
+
+def _migration_043_insight_scan_pattern_required(conn) -> None:
+    """Backfill trading_insights.scan_pattern_id, sentinel for orphans, NOT NULL + FK.
+
+    ID-first model: linkage is only by integer FK; name-parsing is used once here for backfill.
+    """
+    if "trading_insights" not in _tables(conn) or "scan_patterns" not in _tables(conn):
+        return
+    ti_cols = _columns(conn, "trading_insights")
+    if "scan_pattern_id" not in ti_cols:
+        conn.execute(text("ALTER TABLE trading_insights ADD COLUMN scan_pattern_id INTEGER"))
+        conn.commit()
+
+    sent_name = "[Unlinked legacy insight]"
+    row = conn.execute(
+        text(
+            "SELECT id FROM scan_patterns WHERE name = :n AND origin = 'legacy_unlinked' LIMIT 1"
+        ),
+        {"n": sent_name},
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                "INSERT INTO scan_patterns (name, description, rules_json, origin, asset_class, "
+                "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
+                "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
+                "created_at, updated_at) "
+                "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
+                "FALSE, 0, 'universal', 0, 0, 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "name": sent_name,
+                "desc": "Placeholder for insights that could not be linked to a real ScanPattern.",
+            },
+        )
+        conn.commit()
+        row = conn.execute(
+            text(
+                "SELECT id FROM scan_patterns WHERE name = :n AND origin = 'legacy_unlinked' LIMIT 1"
+            ),
+            {"n": sent_name},
+        ).fetchone()
+    sentinel_id = int(row[0])
+
+    # Orphan FKs → sentinel
+    conn.execute(
+        text(
+            "UPDATE trading_insights ti SET scan_pattern_id = :sid "
+            "WHERE ti.scan_pattern_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM scan_patterns sp WHERE sp.id = ti.scan_pattern_id)"
+        ),
+        {"sid": sentinel_id},
+    )
+    conn.commit()
+
+    # A) Majority scan_pattern_id from backtests (tie-break higher backtest id)
+    if "trading_backtests" in _tables(conn):
+        null_rows = conn.execute(
+            text("SELECT id FROM trading_insights WHERE scan_pattern_id IS NULL")
+        ).fetchall()
+        for (ins_id,) in null_rows:
+            bt_row = conn.execute(
+                text(
+                    "SELECT scan_pattern_id, COUNT(*) AS c FROM trading_backtests "
+                    "WHERE related_insight_id = :iid AND scan_pattern_id IS NOT NULL "
+                    "GROUP BY scan_pattern_id "
+                    "ORDER BY c DESC, MAX(id) DESC LIMIT 1"
+                ),
+                {"iid": ins_id},
+            ).fetchone()
+            if bt_row and bt_row[0]:
+                spid = int(bt_row[0])
+                exists = conn.execute(
+                    text("SELECT 1 FROM scan_patterns WHERE id = :id LIMIT 1"),
+                    {"id": spid},
+                ).fetchone()
+                if exists:
+                    conn.execute(
+                        text("UPDATE trading_insights SET scan_pattern_id = :p WHERE id = :i"),
+                        {"p": spid, "i": ins_id},
+                    )
+        conn.commit()
+
+    # B) Exact name prefix match, C) fuzzy name-in-desc (same as legacy 033)
+    patterns = conn.execute(
+        text("SELECT id, name FROM scan_patterns WHERE name IS NOT NULL ORDER BY id")
+    ).fetchall()
+    null_rows = conn.execute(
+        text("SELECT id, pattern_description FROM trading_insights WHERE scan_pattern_id IS NULL")
+    ).fetchall()
+    for ins_id, desc in null_rows:
+        if not desc:
+            continue
+        name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
+        matched_id = None
+        for pid, pname in patterns:
+            if pname == name_part:
+                matched_id = int(pid)
+                break
+        if not matched_id:
+            desc_lower = desc.lower()
+            for pid, pname in patterns:
+                if pname and pname.lower() in desc_lower:
+                    matched_id = int(pid)
+                    break
+        if matched_id:
+            conn.execute(
+                text("UPDATE trading_insights SET scan_pattern_id = :p WHERE id = :i"),
+                {"p": matched_id, "i": ins_id},
+            )
+    conn.commit()
+
+    conn.execute(
+        text(
+            "UPDATE trading_insights SET scan_pattern_id = :sid WHERE scan_pattern_id IS NULL"
+        ),
+        {"sid": sentinel_id},
+    )
+    conn.commit()
+
+    # NOT NULL
+    conn.execute(
+        text("ALTER TABLE trading_insights ALTER COLUMN scan_pattern_id SET NOT NULL")
+    )
+    conn.commit()
+
+    # FK (idempotent)
+    exists_fk = conn.execute(
+        text(
+            "SELECT 1 FROM information_schema.table_constraints "
+            "WHERE table_name = 'trading_insights' "
+            "AND constraint_type = 'FOREIGN KEY' "
+            "AND constraint_name = 'fk_trading_insights_scan_pattern_id'"
+        )
+    ).fetchone()
+    if not exists_fk:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_insights "
+                "ADD CONSTRAINT fk_trading_insights_scan_pattern_id "
+                "FOREIGN KEY (scan_pattern_id) REFERENCES scan_patterns (id)"
+            )
+        )
+        conn.commit()
+
+
+def _migration_044_trading_insight_scan_pattern_constraints(conn) -> None:
+    """Idempotent repair: NOT NULL + FK + index on trading_insights.scan_pattern_id.
+
+    Catches databases where 043 did not run, failed partway, or were created from
+    SQLAlchemy ``create_all`` without PostgreSQL constraints.
+    """
+    if "trading_insights" not in _tables(conn) or "scan_patterns" not in _tables(conn):
+        return
+
+    ti_cols = _columns(conn, "trading_insights")
+    if "scan_pattern_id" not in ti_cols:
+        conn.execute(text("ALTER TABLE trading_insights ADD COLUMN scan_pattern_id INTEGER"))
+        conn.commit()
+        ti_cols = _columns(conn, "trading_insights")
+
+    sent_name = "[Unlinked legacy insight]"
+    row = conn.execute(
+        text(
+            "SELECT id FROM scan_patterns WHERE name = :n AND origin = 'legacy_unlinked' LIMIT 1"
+        ),
+        {"n": sent_name},
+    ).fetchone()
+    if not row:
+        conn.execute(
+            text(
+                "INSERT INTO scan_patterns (name, description, rules_json, origin, asset_class, "
+                "timeframe, confidence, evidence_count, backtest_count, score_boost, min_base_score, "
+                "active, generation, ticker_scope, trade_count, backtest_priority, promotion_status, "
+                "created_at, updated_at) "
+                "VALUES (:name, :desc, '{}', 'legacy_unlinked', 'all', '1d', 0.0, 0, 0, 0.0, 0.0, "
+                "FALSE, 0, 'universal', 0, 0, 'legacy', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+            ),
+            {
+                "name": sent_name,
+                "desc": "Placeholder for insights that could not be linked to a real ScanPattern.",
+            },
+        )
+        conn.commit()
+        row = conn.execute(
+            text(
+                "SELECT id FROM scan_patterns WHERE name = :n AND origin = 'legacy_unlinked' LIMIT 1"
+            ),
+            {"n": sent_name},
+        ).fetchone()
+    sentinel_id = int(row[0])
+
+    conn.execute(
+        text(
+            "UPDATE trading_insights ti SET scan_pattern_id = :sid "
+            "WHERE ti.scan_pattern_id IS NULL"
+        ),
+        {"sid": sentinel_id},
+    )
+    conn.execute(
+        text(
+            "UPDATE trading_insights ti SET scan_pattern_id = :sid "
+            "WHERE ti.scan_pattern_id IS NOT NULL "
+            "AND NOT EXISTS (SELECT 1 FROM scan_patterns sp WHERE sp.id = ti.scan_pattern_id)"
+        ),
+        {"sid": sentinel_id},
+    )
+    conn.commit()
+
+    null_row = conn.execute(
+        text(
+            "SELECT is_nullable FROM information_schema.columns "
+            "WHERE table_schema = current_schema() AND table_name = 'trading_insights' "
+            "AND column_name = 'scan_pattern_id'"
+        )
+    ).fetchone()
+    if null_row and str(null_row[0]).upper() == "YES":
+        conn.execute(
+            text("ALTER TABLE trading_insights ALTER COLUMN scan_pattern_id SET NOT NULL")
+        )
+        conn.commit()
+
+    fk_row = conn.execute(
+        text(
+            "SELECT tc.constraint_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "ON tc.constraint_schema = kcu.constraint_schema "
+            "AND tc.constraint_name = kcu.constraint_name "
+            "AND tc.table_schema = kcu.table_schema "
+            "WHERE tc.table_schema = current_schema() "
+            "AND tc.table_name = 'trading_insights' "
+            "AND tc.constraint_type = 'FOREIGN KEY' "
+            "AND kcu.column_name = 'scan_pattern_id'"
+        )
+    ).fetchone()
+    if not fk_row:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_insights "
+                "ADD CONSTRAINT fk_trading_insights_scan_pattern_id "
+                "FOREIGN KEY (scan_pattern_id) REFERENCES scan_patterns (id) "
+                "ON DELETE RESTRICT"
+            )
+        )
+        conn.commit()
+
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_insights_scan_pattern_id "
+            "ON trading_insights (scan_pattern_id)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1433,6 +1785,12 @@ MIGRATIONS = [
     ("036_pattern_trade_analytics", _migration_036_pattern_trade_analytics),
     ("037_learning_cycle_ai_reports", _migration_037_learning_cycle_ai_reports),
     ("038_brain_worker_control_stop_heartbeat", _migration_038_brain_worker_control_stop_heartbeat),
+    ("039_scan_pattern_oos_promotion", _migration_039_scan_pattern_oos_promotion),
+    ("040_scan_pattern_bench_walk_forward", _migration_040_scan_pattern_bench_walk_forward),
+    ("041_trade_tca_columns", _migration_041_trade_tca_columns),
+    ("042_trade_attribution_exit_tca", _migration_042_trade_attribution_exit_tca),
+    ("043_insight_scan_pattern_required", _migration_043_insight_scan_pattern_required),
+    ("044_trading_insight_scan_pattern_constraints", _migration_044_trading_insight_scan_pattern_constraints),
 ]
 
 

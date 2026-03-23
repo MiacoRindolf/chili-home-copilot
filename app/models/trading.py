@@ -3,8 +3,9 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import relationship
 
 from ..db import Base
 
@@ -41,6 +42,15 @@ class Trade(Base):
     last_broker_sync: Optional[datetime] = Column(DateTime, nullable=True)
     filled_at: Optional[datetime] = Column(DateTime, nullable=True)
     avg_fill_price: Optional[float] = Column(Float, nullable=True)
+    # TCA: reference = signal/proposal limit at submit; slippage set when fill is known
+    tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
+    tca_entry_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    # Exit TCA: reference = mid/quote (or explicit) at close decision; fill = exit_price
+    tca_reference_exit_price: Optional[float] = Column(Float, nullable=True)
+    tca_exit_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    # Attribution: link live trades to proposal + promoted scan pattern
+    strategy_proposal_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
 
 
@@ -61,7 +71,10 @@ class TradingInsight(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: int = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    scan_pattern = relationship("ScanPattern", back_populates="trading_insights")
     pattern_description: str = Column(Text, nullable=False)
     confidence: float = Column(Float, nullable=False, default=0.5)
     evidence_count: int = Column(Integer, nullable=False, default=1)
@@ -237,6 +250,7 @@ class StrategyProposal(Base):
 
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
     trade_id: Optional[int] = Column(Integer, nullable=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
 
 
 class ScanPattern(Base):
@@ -269,6 +283,18 @@ class ScanPattern(Base):
     last_backtest_at: Optional[datetime] = Column(DateTime, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+    # Out-of-sample / promotion (see brain_oos_* settings and learning.py gates)
+    promotion_status: str = Column(String(32), nullable=False, default="legacy")
+    oos_win_rate: Optional[float] = Column(Float, nullable=True)
+    oos_avg_return_pct: Optional[float] = Column(Float, nullable=True)
+    oos_trade_count: Optional[int] = Column(Integer, nullable=True)
+    backtest_spread_used: Optional[float] = Column(Float, nullable=True)
+    backtest_commission_used: Optional[float] = Column(Float, nullable=True)
+    oos_evaluated_at: Optional[datetime] = Column(DateTime, nullable=True)
+    bench_walk_forward_json: Optional[dict] = Column(JSONB, nullable=True)
+
+    trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
 
 class PatternTradeRow(Base):

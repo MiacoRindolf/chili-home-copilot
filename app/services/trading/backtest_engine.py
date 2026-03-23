@@ -554,13 +554,9 @@ def _rules_tuple_from_scan_pattern(
 def _find_linked_pattern(
     db: Session, insight,
 ) -> tuple[list[dict[str, Any]], str, dict[str, Any] | None, int] | None:
-    """Find ScanPattern conditions for a TradingInsight.
+    """Find ScanPattern conditions for a TradingInsight via ``scan_pattern_id`` only.
 
     Returns ``(conditions, pattern_name, exit_config, scan_pattern_id)`` or ``None``.
-
-    When insight.scan_pattern_id is set, uses a direct lookup (one query). Otherwise
-    uses resolve_to_scan_pattern (FK + backtests) and falls back to description-based
-    matching for legacy rows.
     """
     try:
         from ...models.trading import ScanPattern
@@ -568,79 +564,29 @@ def _find_linked_pattern(
         return None
 
     sp_id = getattr(insight, "scan_pattern_id", None)
-    if sp_id is not None:
-        pattern = db.get(ScanPattern, int(sp_id))
-        if pattern:
-            tup = _rules_tuple_from_scan_pattern(pattern)
-            if tup:
-                return tup
-
-    from .pattern_resolution import resolve_to_scan_pattern
-
-    pattern = resolve_to_scan_pattern(db, int(insight.id))
-    if pattern:
-        tup = _rules_tuple_from_scan_pattern(pattern)
-        if tup:
-            return tup
-
-    desc = (insight.pattern_description or "").strip()
-    if not desc:
+    if sp_id is None:
+        logger.warning(
+            "_find_linked_pattern: insight id=%s has no scan_pattern_id",
+            getattr(insight, "id", None),
+        )
         return None
 
-    name_part = desc.split("\u2014")[0].split(" - ")[0].strip()
-    pattern = db.query(ScanPattern).filter(ScanPattern.name == name_part).first()
-
+    pattern = db.get(ScanPattern, int(sp_id))
     if not pattern:
-        all_patterns = (
-            db.query(ScanPattern)
-            .filter(ScanPattern.active.is_(True), ScanPattern.rules_json.isnot(None))
-            .all()
+        logger.warning(
+            "_find_linked_pattern: ScanPattern id=%s missing for insight id=%s",
+            sp_id,
+            getattr(insight, "id", None),
         )
-        desc_lower = desc.lower()
-        for p in all_patterns:
-            if p.name and p.name.lower() in desc_lower:
-                pattern = p
-                break
+        return None
 
-        if not pattern and all_patterns:
-            _stop = {
-                "the", "and", "for", "from", "with", "avg", "win",
-                "sell", "buy", "signal", "refined", "chili", "sam",
-                "refinement", "pattern", "above", "below",
-            }
-            desc_words = {
-                w for w in desc_lower.replace("(", " ").replace(")", " ")
-                .replace(",", " ").replace(":", " ").split()
-                if len(w) >= 3 and w not in _stop
-            }
-            best, best_score = None, 0
-            for p in all_patterns:
-                pname_lower = (p.name or "").lower()
-                p_words = {
-                    w for w in pname_lower.replace("+", " ").split()
-                    if len(w) >= 3 and w not in _stop
-                }
-                if not p_words:
-                    continue
-                overlap = len(desc_words & p_words)
-                score = overlap / len(p_words)
-                if score > best_score and overlap >= 2:
-                    best_score = score
-                    best = p
-            if best and best_score >= 0.4:
-                pattern = best
-
-    if pattern and hasattr(insight, "scan_pattern_id"):
-        try:
-            insight.scan_pattern_id = pattern.id
-            db.commit()
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
-    return _rules_tuple_from_scan_pattern(pattern)
+    tup = _rules_tuple_from_scan_pattern(pattern)
+    if not tup:
+        logger.warning(
+            "_find_linked_pattern: ScanPattern id=%s has no usable rules_json conditions",
+            sp_id,
+        )
+    return tup
 
 
 # ---------------------------------------------------------------------------
