@@ -25,11 +25,13 @@ POSITION_OPENED = "position_opened"
 POSITION_CLOSED = "position_closed"
 STRATEGY_PROPOSED = "strategy_proposed"
 WEEKLY_REVIEW = "weekly_review"
+PATTERN_BREAKOUT_IMMINENT = "pattern_breakout_imminent"
 
 ALL_ALERT_TYPES = [
     BREAKOUT_TRIGGERED, CRYPTO_BREAKOUT, CRYPTO_SQUEEZE_FIRING,
     TARGET_HIT, STOP_HIT, NEW_TOP_PICK,
     POSITION_OPENED, POSITION_CLOSED, STRATEGY_PROPOSED, WEEKLY_REVIEW,
+    PATTERN_BREAKOUT_IMMINENT,
 ]
 
 _PATTERN_KW = [
@@ -203,6 +205,7 @@ def dispatch_alert(
     price: float | None = None,
     trade_type: str | None = None,
     duration_estimate: str | None = None,
+    scan_pattern_id: int | None = None,
 ) -> bool:
     """Log an alert to the DB and optionally send via SMS.
 
@@ -241,6 +244,7 @@ def dispatch_alert(
             message=message,
             trade_type=trade_type,
             duration_estimate=duration_estimate,
+            scan_pattern_id=scan_pattern_id,
             sent_via=sent_via,
             success=sent,
         )
@@ -293,6 +297,7 @@ def get_alert_history(
             "message": r.message,
             "trade_type": r.trade_type,
             "duration_estimate": r.duration_estimate,
+            "scan_pattern_id": getattr(r, "scan_pattern_id", None),
             "sent_via": r.sent_via,
             "success": r.success,
             "created_at": r.created_at.isoformat() if r.created_at else None,

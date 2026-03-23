@@ -303,11 +303,22 @@ def _pattern_keywords(desc: str) -> set[str]:
     return words - stop
 
 
+def _insight_text_with_family(description: str, family: str | None) -> str:
+    if not family:
+        return description
+    prefix = f"[family:{family}] "
+    s = (description or "").strip()
+    if s.startswith("[family:"):
+        return description
+    return prefix + description
+
+
 def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
     wins: int = 0, losses: int = 0,
     scan_pattern_id: int | None = None,
+    hypothesis_family: str | None = None,
 ) -> TradingInsight:
     from .learning import log_learning_event
     from .pattern_resolution import get_legacy_unlinked_scan_pattern_id
@@ -315,6 +326,8 @@ def save_insight(
 
     if scan_pattern_id is None:
         scan_pattern_id = get_legacy_unlinked_scan_pattern_id(db)
+
+    pattern = _insight_text_with_family(pattern, hypothesis_family)
 
     new_label = _pattern_label(pattern)
     new_kw = _pattern_keywords(new_label)
@@ -336,6 +349,8 @@ def save_insight(
             ins.loss_count = (ins.loss_count or 0) + losses
             ins.last_seen = datetime.utcnow()
             ins.pattern_description = pattern
+            if hypothesis_family:
+                ins.hypothesis_family = hypothesis_family
             db.commit()
             if abs(ins.confidence - old_conf) > 0.005:
                 log_learning_event(
@@ -351,6 +366,7 @@ def save_insight(
         user_id=user_id,
         scan_pattern_id=scan_pattern_id,
         pattern_description=pattern,
+        hypothesis_family=hypothesis_family,
         confidence=confidence,
         win_count=wins,
         loss_count=losses,

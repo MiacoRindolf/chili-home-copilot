@@ -20,6 +20,7 @@ from typing import Any
 import requests
 
 from ..config import settings
+from .massive_client import crypto_aggregate_symbol_candidates, is_crypto, to_massive_ticker
 
 logger = logging.getLogger(__name__)
 
@@ -184,25 +185,16 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
 
 
 # ---------------------------------------------------------------------------
-# Symbol helpers
+# Symbol helpers (``is_crypto`` / ``to_massive_ticker`` shared with Massive)
 # ---------------------------------------------------------------------------
-
-def is_crypto(ticker: str) -> bool:
-    """Detect crypto tickers by convention (``BTC-USD``, ``ETH-USD``, etc.)."""
-    t = ticker.upper()
-    return t.endswith("-USD") and not t.startswith("X:")
-
 
 def to_polygon_ticker(ticker: str) -> str:
     """Convert app-internal ticker to Polygon symbol format.
 
     Polygon crypto format uses ``X:BTCUSD`` (no hyphen), while the app uses
-    ``BTC-USD`` (yfinance style).
+    ``BTC-USD`` (yfinance style). Bare ``ZKUSD`` is normalized like Massive.
     """
-    t = ticker.upper()
-    if is_crypto(t):
-        return f"X:{t.replace('-', '')}"
-    return t
+    return to_massive_ticker(ticker)
 
 
 # ---------------------------------------------------------------------------
@@ -261,94 +253,104 @@ def get_aggregates(
 
     Either *period* **or** explicit *start*/*end* (YYYY-MM-DD) can be used.
     When *start* is given it takes precedence over *period*.
-    """
-    poly_ticker = to_polygon_ticker(ticker)
 
+    Crypto: tries the same ``X:BASEUSD`` / ``X:BASEUSDT`` / … variants as Massive.
+    """
     if start:
         from_date = start if isinstance(start, str) else str(start)
         to_date = end or date.today().strftime("%Y-%m-%d")
-        cache_key = f"poly:agg:{poly_ticker}:{interval}:{from_date}:{to_date}"
     else:
         from_date, to_date = _period_to_dates(period)
-        cache_key = f"poly:agg:{poly_ticker}:{interval}:{period}"
 
     mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
     timespan, multiplier = mapping
-    if timespan in ("minute", "hour"):
-        cache_key = f"{cache_key}|ic"
 
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    def _try_symbol(poly_ticker: str) -> list[dict[str, Any]]:
+        if start:
+            cache_key = f"poly:agg:{poly_ticker}:{interval}:{from_date}:{to_date}"
+        else:
+            cache_key = f"poly:agg:{poly_ticker}:{interval}:{period}"
+        if timespan in ("minute", "hour"):
+            cache_key = f"{cache_key}|ic"
 
-    def _bars_from_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
-        if not data:
-            return []
-        out: list[dict[str, Any]] = []
-        for bar in data.get("results", []) or []:
-            out.append({
-                "time": int(bar["t"] / 1000),
-                "open": float(bar.get("o", 0)),
-                "high": float(bar.get("h", 0)),
-                "low": float(bar.get("l", 0)),
-                "close": float(bar.get("c", 0)),
-                "volume": int(bar.get("v", 0)),
-            })
-        return out
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    def _fetch_one_range(f_d: str, t_d: str) -> list[dict[str, Any]]:
-        url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{f_d}/{t_d}"
-        data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
-        acc = _bars_from_response(data)
-        next_u = (data or {}).get("next_url")
-        pages = 0
-        while next_u and pages < 200:
-            pages += 1
-            nu = str(next_u).strip()
-            if not nu.startswith("http"):
-                nu = f"{_base()}{nu}" if nu.startswith("/") else f"{_base()}/{nu}"
-            _rate_limit_wait()
-            _bump("requests")
-            try:
-                r2 = _session.get(nu, timeout=30)
-                if r2.status_code != 200:
+        def _bars_from_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+            if not data:
+                return []
+            out: list[dict[str, Any]] = []
+            for bar in data.get("results", []) or []:
+                out.append({
+                    "time": int(bar["t"] / 1000),
+                    "open": float(bar.get("o", 0)),
+                    "high": float(bar.get("h", 0)),
+                    "low": float(bar.get("l", 0)),
+                    "close": float(bar.get("c", 0)),
+                    "volume": int(bar.get("v", 0)),
+                })
+            return out
+
+        def _fetch_one_range(f_d: str, t_d: str) -> list[dict[str, Any]]:
+            url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{f_d}/{t_d}"
+            data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+            acc = _bars_from_response(data)
+            next_u = (data or {}).get("next_url")
+            pages = 0
+            while next_u and pages < 200:
+                pages += 1
+                nu = str(next_u).strip()
+                if not nu.startswith("http"):
+                    nu = f"{_base()}{nu}" if nu.startswith("/") else f"{_base()}/{nu}"
+                _rate_limit_wait()
+                _bump("requests")
+                try:
+                    r2 = _session.get(nu, timeout=30)
+                    if r2.status_code != 200:
+                        break
+                    d2 = r2.json()
+                except Exception:
                     break
-                d2 = r2.json()
-            except Exception:
-                break
-            acc.extend(_bars_from_response(d2))
-            next_u = (d2 or {}).get("next_url")
-        return acc
+                acc.extend(_bars_from_response(d2))
+                next_u = (d2 or {}).get("next_url")
+            return acc
 
-    if timespan in ("minute", "hour"):
-        from .ohlcv_aggregate_fetch import iter_intraday_date_chunks
+        if timespan in ("minute", "hour"):
+            from .trading.ohlcv_aggregate_fetch import iter_intraday_date_chunks
 
-        merged: list[dict[str, Any]] = []
-        seen_ts: set[int] = set()
-        for f_str, t_str in iter_intraday_date_chunks(from_date, to_date):
-            for b in _fetch_one_range(f_str, t_str):
-                t0 = b["time"]
-                if t0 in seen_ts:
-                    continue
-                seen_ts.add(t0)
-                merged.append(b)
-        merged.sort(key=lambda x: x["time"])
-        if not merged:
+            merged: list[dict[str, Any]] = []
+            seen_ts: set[int] = set()
+            for f_str, t_str in iter_intraday_date_chunks(from_date, to_date):
+                for b in _fetch_one_range(f_str, t_str):
+                    t0 = b["time"]
+                    if t0 in seen_ts:
+                        continue
+                    seen_ts.add(t0)
+                    merged.append(b)
+            merged.sort(key=lambda x: x["time"])
+            if not merged:
+                return []
+            _cache_set(cache_key, merged)
+            return merged
+
+        url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
+        data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+        if not data or data.get("resultsCount", 0) == 0:
             return []
-        _cache_set(cache_key, merged)
-        return merged
 
-    url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-    data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
-    if not data or data.get("resultsCount", 0) == 0:
-        return []
+        bars = _bars_from_response(data)
+        if not bars:
+            return []
 
-    bars = _bars_from_response(data)
-    if not bars:
-        return []
+        _cache_set(cache_key, bars)
+        return bars
 
-    _cache_set(cache_key, bars)
-    return bars
+    for sym in crypto_aggregate_symbol_candidates(ticker):
+        got = _try_symbol(sym)
+        if got:
+            return got
+    return []
 
 
 def get_aggregates_df(

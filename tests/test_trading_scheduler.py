@@ -15,6 +15,7 @@ def test_scheduler_excludes_web_pattern_research_job():
     # Regression anchors: operational jobs we still expect
     assert "broker_sync" in job_ids
     assert "price_monitor" in job_ids
+    assert "pattern_imminent_scanner" in job_ids
 
 
 def test_brain_learning_cycle_config_defaults():

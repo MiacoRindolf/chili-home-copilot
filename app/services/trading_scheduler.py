@@ -91,6 +91,31 @@ def _run_price_monitor_job():
         db.close()
 
 
+def _run_pattern_imminent_job():
+    """Scan active ScanPatterns for near-complete setups; alert within configured ETA window.
+
+    Crypto-friendly patterns run 24/7; stock patterns only during US equity session
+    (handled inside ``run_pattern_imminent_scan``).
+    """
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+    if not getattr(_settings, "pattern_imminent_alert_enabled", True):
+        return
+
+    logger.info("[scheduler] Pattern imminent breakout scan starting")
+    db = SessionLocal()
+    try:
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        result = run_pattern_imminent_scan(db, user_id=_uid)
+        logger.info("[scheduler] Pattern imminent result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Pattern imminent scan failed: %s", e)
+    finally:
+        db.close()
+
+
 _crypto_alert_cooldown: dict[str, float] = {}
 _stock_alert_cooldown: dict[str, float] = {}
 
@@ -910,6 +935,16 @@ def start_scheduler():
         )
 
         _scheduler.add_job(
+            _run_pattern_imminent_job,
+            trigger=IntervalTrigger(minutes=15),
+            id="pattern_imminent_scanner",
+            name="ScanPattern imminent breakout alerts (every 15min; stocks US hours only)",
+            replace_existing=True,
+            max_instances=1,
+            next_run_time=datetime.now() + timedelta(seconds=20),
+        )
+
+        _scheduler.add_job(
             _check_breakout_outcomes,
             trigger=IntervalTrigger(hours=1),
             id="breakout_outcome_checker",
@@ -973,7 +1008,8 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
-            "stock breakout scanner market hours every 15min; "
+            "stock breakout scanner market hours every 15min, "
+            "pattern imminent scanner every 15min; "
             "web pattern research + variant evolution run inside the brain worker learning cycle)"
         )
 

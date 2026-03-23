@@ -233,6 +233,31 @@ def check_any_wake() -> bool:
     return got
 
 
+def _check_db_stop_idle() -> bool:
+    """True if PostgreSQL control row requested stop (used between cycles / during idle sleep)."""
+    from app.services.brain_worker_signals import clear_stop_requested, is_stop_requested
+    from app.services.trading.learning import signal_shutdown
+
+    db = SessionLocal()
+    try:
+        if is_stop_requested(db):
+            logger.info("[brain] DB stop requested (idle check), shutting down")
+            signal_shutdown()
+            clear_stop_requested(db)
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.warning("[brain] DB stop check (idle) failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        db.close()
+
+
 def _consume_wake_queued_during_cycle(status: BrainWorkerStatus) -> bool:
     """If DB wake was peeked during a long cycle, consume it now and skip idle."""
     if not status.wake_skip_idle.is_set():

@@ -525,7 +525,7 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
                 "avg_return_pct", "backtest_count", "asset_class", "timeframe",
                 "promotion_status", "oos_win_rate", "oos_avg_return_pct", "oos_trade_count",
                 "backtest_spread_used", "backtest_commission_used", "oos_evaluated_at",
-                "bench_walk_forward_json"):
+                "bench_walk_forward_json", "hypothesis_family"):
         if key in data:
             setattr(p, key, data[key])
     db.commit()
@@ -574,6 +574,7 @@ def _pattern_to_dict(p: ScanPattern) -> dict[str, Any]:
         "backtest_commission_used": getattr(p, "backtest_commission_used", None),
         "oos_evaluated_at": p.oos_evaluated_at.isoformat() if getattr(p, "oos_evaluated_at", None) else None,
         "bench_walk_forward_json": getattr(p, "bench_walk_forward_json", None),
+        "hypothesis_family": getattr(p, "hypothesis_family", None),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
     }

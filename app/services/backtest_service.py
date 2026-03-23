@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from datetime import datetime
 from typing import Any
 
@@ -1601,6 +1602,8 @@ def run_pattern_backtest(
     *,
     spread: float | None = None,
     oos_holdout_fraction: float | None = None,
+    ohlc_start: str | None = None,
+    ohlc_end: str | None = None,
     df_override: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Run a backtest using actual pattern conditions as entry signals.
@@ -1621,6 +1624,9 @@ def run_pattern_backtest(
     gates vs ``oos_*`` on the held-out tail).
 
     *df_override* supplies OHLCV instead of fetching (used for walk-forward windows).
+
+    *ohlc_start* / *ohlc_end* (``YYYY-MM-DD``) are passed to the market-data layer so
+    reruns can match a stored chart window; ignored when *df_override* is set.
     """
     if commission is None:
         commission = float(settings.backtest_commission)
@@ -1656,7 +1662,21 @@ def run_pattern_backtest(
     if df_override is not None:
         df = df_override.copy()
     else:
-        df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
+        df = pd.DataFrame()
+        for attempt in range(2):
+            df = _fetch_ohlcv_df(
+                ticker,
+                period=period,
+                interval=interval,
+                start=ohlc_start,
+                end=ohlc_end,
+            )
+            if not df.empty and len(df) >= 30:
+                break
+            if attempt == 0:
+                time.sleep(0.4)
+        if (df.empty or len(df) < 30) and (ohlc_start or ohlc_end):
+            df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 
@@ -1919,6 +1939,8 @@ def backtest_pattern(
     commission: float | None = None,
     spread: float | None = None,
     oos_holdout_fraction: float | None = None,
+    ohlc_start: str | None = None,
+    ohlc_end: str | None = None,
     rules_json_override: str | None = None,
     append_conditions: list[dict[str, Any]] | None = None,
     exit_config_overlay: dict[str, Any] | None = None,
@@ -1969,6 +1991,8 @@ def backtest_pattern(
             exit_config=exit_cfg,
             spread=spread,
             oos_holdout_fraction=oos_holdout_fraction,
+            ohlc_start=ohlc_start,
+            ohlc_end=ohlc_end,
         )
         result["pattern_name"] = pattern_name
         result["mapped_strategy"] = "dynamic_pattern"

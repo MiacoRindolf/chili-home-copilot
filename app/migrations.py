@@ -1745,6 +1745,39 @@ def _migration_044_trading_insight_scan_pattern_constraints(conn) -> None:
     conn.commit()
 
 
+def _migration_045_trading_alert_scan_pattern_id(conn) -> None:
+    """Optional FK context on trading_alerts for pattern-tied messages (dedupe/UI)."""
+    if "trading_alerts" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_alerts")
+    if "scan_pattern_id" not in cols:
+        conn.execute(text("ALTER TABLE trading_alerts ADD COLUMN scan_pattern_id INTEGER"))
+        conn.commit()
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_alerts_scan_pattern_id "
+            "ON trading_alerts (scan_pattern_id)"
+        )
+    )
+    conn.commit()
+
+
+def _migration_046_hypothesis_family_columns(conn) -> None:
+    """ScanPattern + TradingInsight hypothesis_family for miner/evolution taxonomy (OOS gates, UI)."""
+    if "scan_patterns" in _tables(conn):
+        if "hypothesis_family" not in _columns(conn, "scan_patterns"):
+            conn.execute(
+                text("ALTER TABLE scan_patterns ADD COLUMN hypothesis_family VARCHAR(32)")
+            )
+            conn.commit()
+    if "trading_insights" in _tables(conn):
+        if "hypothesis_family" not in _columns(conn, "trading_insights"):
+            conn.execute(
+                text("ALTER TABLE trading_insights ADD COLUMN hypothesis_family VARCHAR(32)")
+            )
+            conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1791,6 +1824,8 @@ MIGRATIONS = [
     ("042_trade_attribution_exit_tca", _migration_042_trade_attribution_exit_tca),
     ("043_insight_scan_pattern_required", _migration_043_insight_scan_pattern_required),
     ("044_trading_insight_scan_pattern_constraints", _migration_044_trading_insight_scan_pattern_constraints),
+    ("045_trading_alert_scan_pattern_id", _migration_045_trading_alert_scan_pattern_id),
+    ("046_hypothesis_family_columns", _migration_046_hypothesis_family_columns),
 ]
 
 

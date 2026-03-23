@@ -204,22 +204,79 @@ def _get(url: str, params: dict[str, Any] | None = None) -> dict[str, Any] | Non
 # ---------------------------------------------------------------------------
 
 def is_crypto(ticker: str) -> bool:
-    t = ticker.upper()
-    return t.endswith("-USD") and not t.startswith("X:")
+    """True for ``BASE-USD``, bare ``BASEUSD`` (Massive/Polygon style), not ``X:`` tickers."""
+    t = ticker.upper().strip()
+    if t.startswith("X:"):
+        return False
+    if t.endswith("-USD"):
+        return True
+    return _bare_concat_crypto_usd(t)
+
+
+def _bare_concat_crypto_usd(ticker: str) -> bool:
+    """True for symbols like ``ZKUSD`` (5+ chars) / ``BTCUSD`` (no hyphen before USD)."""
+    t = ticker.upper().strip()
+    if "-" in t or not t.endswith("USD"):
+        return False
+    base = t[:-3]
+    return base.isalnum() and 2 <= len(base) <= 15
 
 
 def to_massive_ticker(ticker: str) -> str:
     """Convert app-internal ticker to Massive/Polygon-compatible symbol format.
 
     Polygon crypto format uses ``X:BTCUSD`` (no hyphen), while the app uses
-    ``BTC-USD`` (yfinance style).  Stocks pass through unchanged.
+    ``BTC-USD`` (yfinance style). Bare ``ZKUSD`` is also accepted. Stocks pass through unchanged.
     """
-    t = ticker.upper()
+    t = ticker.upper().strip()
     if is_crypto(t):
         return f"X:{t.replace('-', '')}"
+    if _bare_concat_crypto_usd(t):
+        return f"X:{t}"
     if t.startswith("X:") and "-" in t:
         return t.replace("-", "")
     return t
+
+
+def _crypto_base_for_quote_variants(ticker: str) -> str | None:
+    """Asset base (e.g. ``ZK``) for building ``X:ZKUSD`` / ``X:ZKUSDT`` Massive symbols."""
+    t = ticker.upper().strip()
+    if is_crypto(t):
+        return t.replace("-", "")[:-3]
+    if _bare_concat_crypto_usd(t):
+        return t[:-3]
+    if t.startswith("X:"):
+        sym = t[2:]
+        for suf in ("USDT", "USDC", "USD"):
+            if sym.endswith(suf) and len(sym) > len(suf):
+                return sym[: -len(suf)]
+    return None
+
+
+def crypto_aggregate_symbol_candidates(ticker: str) -> list[str]:
+    """Massive/Polygon aggregate tickers to try for one logical crypto pair.
+
+    Providers list the same asset under ``X:BASEUSD``, ``X:BASEUSDT``, etc.
+    Stocks return a single candidate.
+    """
+    primary = to_massive_ticker(ticker)
+    out: list[str] = [primary]
+    base = _crypto_base_for_quote_variants(ticker)
+    if not base:
+        return out
+    for quote in ("USD", "USDT", "USDC"):
+        sym = f"X:{base}{quote}"
+        if sym not in out:
+            out.append(sym)
+    return out
+
+
+def massive_aggregate_variants_all_dead(ticker: str) -> bool:
+    """True when every Massive symbol variant for *ticker* is in the dead cache."""
+    for sym in crypto_aggregate_symbol_candidates(ticker):
+        if not _is_dead_ticker(sym):
+            return False
+    return True
 
 
 def from_massive_ticker(m_ticker: str) -> str:
@@ -227,6 +284,10 @@ def from_massive_ticker(m_ticker: str) -> str:
     t = m_ticker.upper()
     if t.startswith("X:"):
         sym = t[2:]
+        if sym.endswith("USDT") and len(sym) > 4:
+            return f"{sym[:-4]}-USD"
+        if sym.endswith("USDC") and len(sym) > 4:
+            return f"{sym[:-4]}-USD"
         if sym.endswith("USD") and len(sym) > 3:
             return f"{sym[:-3]}-USD"
         return sym
@@ -274,107 +335,116 @@ def get_aggregates(
 
     Either *period* **or** explicit *start*/*end* (YYYY-MM-DD) can be used.
     When *start* is given it takes precedence over *period*.
+
+    Crypto: Massive may list the same asset as ``X:BASEUSD``, ``X:BASEUSDT``, etc.
+    We try those variants (and accept bare ``ZKUSD`` as well as ``ZK-USD``).
     """
-    m_ticker = to_massive_ticker(ticker)
-
-    if _is_dead_ticker(m_ticker):
-        return []
-
     if start:
         from_date = start if isinstance(start, str) else str(start)
         to_date = end or date.today().strftime("%Y-%m-%d")
-        cache_key = f"massive:agg:{m_ticker}:{interval}:{from_date}:{to_date}"
     else:
         from_date, to_date = _period_to_dates(period)
-        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
 
     mapping = _TIMESPAN_MAP.get(interval, ("day", 1))
     timespan, multiplier = mapping
-    if timespan in ("minute", "hour"):
-        cache_key = f"{cache_key}|ic"
 
-    cached = _cache_get(cache_key)
-    if cached is not None:
-        return cached
+    def _try_symbol(m_ticker: str) -> list[dict[str, Any]]:
+        if start:
+            cache_key = f"massive:agg:{m_ticker}:{interval}:{from_date}:{to_date}"
+        else:
+            cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
+        if timespan in ("minute", "hour"):
+            cache_key = f"{cache_key}|ic"
 
-    def _bars_from_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
-        if not data or data is _NOT_FOUND:
+        if _is_dead_ticker(m_ticker):
             return []
-        out: list[dict[str, Any]] = []
-        for bar in data.get("results", []) or []:
-            out.append({
-                "time": int(bar["t"] / 1000),
-                "open": float(bar.get("o", 0)),
-                "high": float(bar.get("h", 0)),
-                "low": float(bar.get("l", 0)),
-                "close": float(bar.get("c", 0)),
-                "volume": int(bar.get("v", 0)),
-            })
-        return out
 
-    def _fetch_one_range(f_d: str, t_d: str) -> tuple[list[dict[str, Any]], bool]:
-        """Return (bars, ticker_dead)."""
-        url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{f_d}/{t_d}"
-        data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
-        if data is _NOT_FOUND:
-            return [], True
-        acc = _bars_from_response(data)
-        # Some responses include next_url when a page hits the limit; follow it.
-        next_u = (data or {}).get("next_url")
-        pages = 0
-        while next_u and pages < 200:
-            pages += 1
-            nu = str(next_u).strip()
-            if not nu.startswith("http"):
-                nu = f"{_base()}{nu}" if nu.startswith("/") else f"{_base()}/{nu}"
-            _rate_limit_wait()
-            _bump("requests")
-            try:
-                r2 = _session.get(nu, timeout=30)
-                if r2.status_code != 200:
-                    break
-                d2 = r2.json()
-            except Exception:
-                break
-            acc.extend(_bars_from_response(d2))
-            next_u = (d2 or {}).get("next_url")
-        return acc, False
+        cached = _cache_get(cache_key)
+        if cached is not None:
+            return cached
 
-    if timespan in ("minute", "hour"):
-        from .ohlcv_aggregate_fetch import iter_intraday_date_chunks
-
-        merged: list[dict[str, Any]] = []
-        seen_ts: set[int] = set()
-        for f_str, t_str in iter_intraday_date_chunks(from_date, to_date):
-            part, dead = _fetch_one_range(f_str, t_str)
-            if dead:
-                _mark_dead_ticker(m_ticker)
+        def _bars_from_response(data: dict[str, Any] | None) -> list[dict[str, Any]]:
+            if not data or data is _NOT_FOUND:
                 return []
-            for b in part:
-                t0 = b["time"]
-                if t0 in seen_ts:
+            out: list[dict[str, Any]] = []
+            for bar in data.get("results", []) or []:
+                out.append({
+                    "time": int(bar["t"] / 1000),
+                    "open": float(bar.get("o", 0)),
+                    "high": float(bar.get("h", 0)),
+                    "low": float(bar.get("l", 0)),
+                    "close": float(bar.get("c", 0)),
+                    "volume": int(bar.get("v", 0)),
+                })
+            return out
+
+        def _fetch_one_range(f_d: str, t_d: str) -> tuple[list[dict[str, Any]], bool]:
+            """Return (bars, ticker_dead)."""
+            url = f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{f_d}/{t_d}"
+            data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
+            if data is _NOT_FOUND:
+                return [], True
+            acc = _bars_from_response(data)
+            next_u = (data or {}).get("next_url")
+            pages = 0
+            while next_u and pages < 200:
+                pages += 1
+                nu = str(next_u).strip()
+                if not nu.startswith("http"):
+                    nu = f"{_base()}{nu}" if nu.startswith("/") else f"{_base()}/{nu}"
+                _rate_limit_wait()
+                _bump("requests")
+                try:
+                    r2 = _session.get(nu, timeout=30)
+                    if r2.status_code != 200:
+                        break
+                    d2 = r2.json()
+                except Exception:
+                    break
+                acc.extend(_bars_from_response(d2))
+                next_u = (d2 or {}).get("next_url")
+            return acc, False
+
+        if timespan in ("minute", "hour"):
+            from .trading.ohlcv_aggregate_fetch import iter_intraday_date_chunks
+
+            merged: list[dict[str, Any]] = []
+            seen_ts: set[int] = set()
+            for f_str, t_str in iter_intraday_date_chunks(from_date, to_date):
+                part, dead = _fetch_one_range(f_str, t_str)
+                if dead:
                     continue
-                seen_ts.add(t0)
-                merged.append(b)
-        merged.sort(key=lambda x: x["time"])
-        if not merged:
+                for b in part:
+                    t0 = b["time"]
+                    if t0 in seen_ts:
+                        continue
+                    seen_ts.add(t0)
+                    merged.append(b)
+            merged.sort(key=lambda x: x["time"])
+            if not merged:
+                return []
+            _cache_set(cache_key, merged)
+            return merged
+
+        data = _get(
+            f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}",
+            {"adjusted": "true", "sort": "asc", "limit": "50000"},
+        )
+        if data is _NOT_FOUND:
+            _mark_dead_ticker(m_ticker)
             return []
-        _cache_set(cache_key, merged)
-        return merged
+        bars = _bars_from_response(data)
+        if not bars:
+            return []
 
-    data = _get(
-        f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}",
-        {"adjusted": "true", "sort": "asc", "limit": "50000"},
-    )
-    if data is _NOT_FOUND:
-        _mark_dead_ticker(m_ticker)
-        return []
-    bars = _bars_from_response(data)
-    if not bars:
-        return []
+        _cache_set(cache_key, bars)
+        return bars
 
-    _cache_set(cache_key, bars)
-    return bars
+    for sym in crypto_aggregate_symbol_candidates(ticker):
+        got = _try_symbol(sym)
+        if got:
+            return got
+    return []
 
 
 def get_aggregates_df(
@@ -556,9 +626,9 @@ def get_aggregates_batch(
     _map_b = _TIMESPAN_MAP.get(interval, ("day", 1))
     _ic_suffix = "|ic" if _map_b[0] in ("minute", "hour") else ""
     for t in tickers:
-        m_ticker = to_massive_ticker(t)
-        if _is_dead_ticker(m_ticker):
+        if massive_aggregate_variants_all_dead(t):
             continue
+        m_ticker = to_massive_ticker(t)
         cache_key = f"massive:agg:{m_ticker}:{interval}:{period}{_ic_suffix}"
         cached = _cache_get(cache_key)
         if cached is not None:

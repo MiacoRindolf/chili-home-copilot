@@ -348,6 +348,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     from .learning import (
         _find_insight_for_pattern,
         brain_apply_oos_promotion_gate,
+        brain_oos_gate_kwargs_for_pattern,
         brain_pattern_backtest_friction_kwargs,
     )
 
@@ -417,11 +418,13 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
         avg_return = sum(returns) / len(returns) if returns else 0
         confidence = max(0.1, min(0.8, ticker_vote_wr / 100))
 
+        _oos_kw = brain_oos_gate_kwargs_for_pattern(pattern, oos_trade_sum)
         prom_stat, allow_active = brain_apply_oos_promotion_gate(
             origin=getattr(pattern, "origin", "") or "",
             mean_is_win_rate=mean_is_wr,
             mean_oos_win_rate=mean_oos_wr,
             oos_tickers_with_result=oos_ticker_hits,
+            **_oos_kw,
         )
 
         patch: dict[str, Any] = {

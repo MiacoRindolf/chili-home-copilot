@@ -196,17 +196,19 @@ def api_tradeable_patterns(
         )
 
     return JSONResponse(
-        {
-            "ok": True,
-            "patterns": out,
-            "filters": {
-                "limit": lim,
-                "min_oos_wr": min_wr,
-                "min_trades": min_tc,
-                "include_candidates": include_candidates,
-                "require_bench_pass": require_bench_pass,
-            },
-        }
+        to_jsonable(
+            {
+                "ok": True,
+                "patterns": out,
+                "filters": {
+                    "limit": lim,
+                    "min_oos_wr": min_wr,
+                    "min_trades": min_tc,
+                    "include_candidates": include_candidates,
+                    "require_bench_pass": require_bench_pass,
+                },
+            }
+        )
     )
 
 
@@ -336,11 +338,15 @@ def api_brain_cycle_reports(
         preview = preview_src[:200] + ("…" if len(preview_src) > 200 else "")
         if not preview and preview_src:
             preview = preview_src[:200]
+        raw_metrics = r.metrics_json
+        metrics_payload = (
+            to_jsonable(raw_metrics) if isinstance(raw_metrics, dict) else {}
+        )
         items.append({
             "id": r.id,
             "created_at": r.created_at.isoformat(),
             "preview": preview,
-            "metrics": r.metrics_json if isinstance(r.metrics_json, dict) else {},
+            "metrics": metrics_payload,
         })
     return JSONResponse({"ok": True, "items": items, "total": total, "offset": offset, "limit": limit})
 
@@ -361,7 +367,8 @@ def api_brain_cycle_report_detail(
             raise HTTPException(status_code=403, detail="Forbidden")
     elif row.user_id != uid:
         raise HTTPException(status_code=403, detail="Forbidden")
-    metrics = row.metrics_json if isinstance(row.metrics_json, dict) else {}
+    raw_metrics = row.metrics_json
+    metrics = to_jsonable(raw_metrics) if isinstance(raw_metrics, dict) else {}
     return JSONResponse({
         "ok": True,
         "id": row.id,
@@ -1106,6 +1113,8 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "id": ins.id,
             "insight_user_id": getattr(ins, "user_id", None),
             "insight_scope": "global" if getattr(ins, "user_id", None) is None else "user",
+            "hypothesis_family": getattr(ins, "hypothesis_family", None)
+            or (getattr(effective_sp, "hypothesis_family", None) if effective_sp else None),
             "pattern": desc,
             "pattern_display": pattern_display,
             "confidence": round(ins.confidence * 100, 1),
@@ -1516,10 +1525,12 @@ def _access_backtest_row(
 
 @router.post("/api/trading/learn/backtest/{bt_id}/rerun")
 def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depends(get_db)):
-    """Re-run using **brain** ``period``/``interval`` for ``ScanPattern.timeframe``
-    (``get_brain_backtest_window`` — same as ``smart_backtest_insight``) and current rules.
+    """Re-run using stored ``BacktestResult.params`` when present (``period``,
+    ``interval``, and ``chart_time_from`` / ``chart_time_to`` for OHLC fetch), else
+    **brain** ``get_brain_backtest_window(ScanPattern.timeframe)`` and current rules.
 
-    Use this for the evidence mini-chart so it matches Chili brain batch backtests.
+    Aligning the OHLC window with the saved row reduces ``Not enough data`` errors
+    when expanding the evidence mini-chart after a successful batch run.
 
     Results can still differ from an older save if OHLCV, rules, or providers changed.
 
@@ -1558,6 +1569,30 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
 
     tf = getattr(p, "timeframe", "1d") or "1d"
     use_period, use_interval = get_brain_backtest_window(tf)
+    ohlc_start: str | None = None
+    ohlc_end: str | None = None
+    try:
+        pr = json.loads(bt.params) if isinstance(bt.params, str) else dict(bt.params or {})
+    except (json.JSONDecodeError, TypeError, ValueError):
+        pr = {}
+    if isinstance(pr, dict):
+        if pr.get("interval"):
+            use_interval = str(pr["interval"]).strip()
+        if pr.get("period"):
+            use_period = str(pr["period"]).strip()
+        ctf, ctt = pr.get("chart_time_from"), pr.get("chart_time_to")
+        if ctf is not None and ctt is not None:
+            try:
+                from datetime import datetime, timezone
+
+                ohlc_start = datetime.fromtimestamp(
+                    int(float(ctf)), tz=timezone.utc,
+                ).strftime("%Y-%m-%d")
+                ohlc_end = datetime.fromtimestamp(
+                    int(float(ctt)), tz=timezone.utc,
+                ).strftime("%Y-%m-%d")
+            except (TypeError, ValueError, OSError):
+                ohlc_start, ohlc_end = None, None
 
     from ...config import settings
 
@@ -1571,6 +1606,8 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
         cash=100_000.0,
         commission=float(settings.backtest_commission),
         spread=float(settings.backtest_spread),
+        ohlc_start=ohlc_start,
+        ohlc_end=ohlc_end,
     )
     if not result.get("ok"):
         return JSONResponse(

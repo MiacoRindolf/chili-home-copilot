@@ -3186,6 +3186,26 @@ function _renderEvTrades(trades) {
   el.innerHTML = html;
 }
 
+/** Period + interval for /patterns/{id}/backtest (never pass full period_display as period). */
+function _btPeriodIntervalForApi(b) {
+  var period = '1y', interval = '1d';
+  var hasP = false, hasI = false;
+  try {
+    var p = b.params ? (typeof b.params === 'string' ? JSON.parse(b.params) : b.params) : {};
+    if (p && p.period) { period = String(p.period); hasP = true; }
+    if (p && p.interval) { interval = String(p.interval); hasI = true; }
+  } catch (e) {}
+  var disp = (b.period_display && b.period_display !== '--') ? String(b.period_display) : '';
+  if (disp && disp.indexOf(' · ') >= 0 && (!hasP || !hasI)) {
+    var parts = disp.split(' · ');
+    var seg0 = parts[0] ? parts[0].trim() : '';
+    var seg1 = parts[1] ? parts[1].trim() : '';
+    if (!hasP && seg0 && !/bar/i.test(seg0) && seg0.length <= 12) period = seg0;
+    if (!hasI && seg1 && !/bar/i.test(seg1) && !/[–-].*[–-]/.test(seg1) && seg1.length <= 8) interval = seg1;
+  }
+  return { period: period, interval: interval };
+}
+
 function _renderEvBacktests(bts) {
   var el = document.getElementById('ev-pane-backtests');
   if (!bts.length) { el.innerHTML = '<div class="ev-empty">No backtest results found for this pattern.</div>'; return; }
@@ -3206,9 +3226,10 @@ function _renderEvBacktests(bts) {
         if (p && p.strategy_id) strategyId = p.strategy_id;
       }
     } catch(e) {}
+    var win = _btPeriodIntervalForApi(b);
     var btIdVal = (b.id != null && b.id !== '') ? b.id : null;
     var btIdArg = btIdVal != null ? btIdVal : 'null';
-    var clickAttr = noTrades ? rowStyle : ' class="bt-clickable" onclick="toggleBtChart(this,' + idx + ',\'' + escHtml(b.ticker) + '\',\'' + escHtml(strategyId || b.strategy_name || '') + '\',\'' + escHtml(periodStr) + '\',' + btIdArg + ')" title="Click to view chart"';
+    var clickAttr = noTrades ? rowStyle : ' class="bt-clickable" onclick="toggleBtChart(this,' + idx + ',\'' + escHtml(b.ticker) + '\',\'' + escHtml(strategyId || b.strategy_name || '') + '\',\'' + escHtml(win.period) + '\',\'' + escHtml(win.interval) + '\',' + btIdArg + ')" title="Click to view chart"';
     html += '<tr' + (noTrades ? rowStyle : '') + (noTrades ? '' : clickAttr) + '>' +
       '<td><b>' + escHtml(b.ticker) + '</b></td>' +
       '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
@@ -3243,7 +3264,7 @@ function _fmtBtEvidenceWindow(d) {
   return parts.length ? parts.join(' · ') : '';
 }
 
-function toggleBtChart(row, idx, ticker, strategy, period, btId) {
+function toggleBtChart(row, idx, ticker, strategy, btPeriod, btInterval, btId) {
   var chartRow = document.getElementById('bt-chart-row-' + idx);
   if (!chartRow) return;
   var isOpen = chartRow.style.display !== 'none';
@@ -3253,8 +3274,8 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
   if (cell.querySelector('.bt-chart-wrap')) return;
 
   var deepLink = (strategy === 'dynamic_pattern' && window._currentBacktestPatternId)
-    ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentBacktestPatternId + '&period=' + encodeURIComponent(period)
-    : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(period);
+    ? '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&pattern_id=' + window._currentBacktestPatternId + '&period=' + encodeURIComponent(btPeriod || '1y') + '&interval=' + encodeURIComponent(btInterval || '1d')
+    : '/trading?tab=backtest&ticker=' + encodeURIComponent(ticker) + '&strategy=' + encodeURIComponent(strategy) + '&period=' + encodeURIComponent(btPeriod || '1y');
   var loadMsg = btId ? 'Re-running backtest (aligned period/interval)…' : 'Running backtest for ' + ticker + '...';
   cell.innerHTML = '<div class="bt-chart-wrap">' +
     '<div style="display:flex;align-items:center;gap:8px;padding:4px 0 6px"><div class="brain-pulse"></div><span style="font-size:10px;color:var(--text-muted)">' + loadMsg + '</span></div>' +
@@ -3340,12 +3361,16 @@ function toggleBtChart(row, idx, ticker, strategy, period, btId) {
     }
     var fetchPromise;
     if (window._currentBacktestPatternId) {
-      fetchPromise = fetch('/api/trading/patterns/' + window._currentBacktestPatternId + '/backtest?ticker=' + encodeURIComponent(ticker) + '&period=' + encodeURIComponent(period || '1y'), {method: 'POST'});
+      fetchPromise = fetch(
+        '/api/trading/patterns/' + window._currentBacktestPatternId + '/backtest?ticker=' + encodeURIComponent(ticker)
+        + '&period=' + encodeURIComponent(btPeriod || '1y') + '&interval=' + encodeURIComponent(btInterval || '1d'),
+        { method: 'POST' }
+      );
     } else {
       fetchPromise = fetch('/api/trading/backtest', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: period || '1y', cash: 10000})
+        body: JSON.stringify({ticker: ticker, strategy: strategy || 'sma_cross', period: btPeriod || '1y', interval: btInterval || '1d', cash: 10000})
       });
     }
     fetchPromise.then(parseFetchJson).then(function(d){ onChartData(d, {}); }).catch(onChartError);

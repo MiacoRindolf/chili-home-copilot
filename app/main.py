@@ -19,6 +19,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
+from starlette.responses import JSONResponse as StarletteJSONResponse
+from sqlalchemy.exc import OperationalError
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from jinja2 import ChoiceLoader
@@ -610,6 +612,34 @@ def _prewarm_market_context():
 
 
 app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)
+
+_db_exc_log = logging.getLogger("chili.db")
+
+
+@app.exception_handler(OperationalError)
+async def _sqlalchemy_operational_error_handler(request: Request, exc: OperationalError):
+    """Map DB saturation / transient errors to 503 JSON instead of opaque 500 text."""
+    orig = getattr(exc, "orig", None)
+    msg = str(orig) if orig is not None else str(exc)
+    low = msg.lower()
+    if "too many clients" in low:
+        _db_exc_log.warning("postgres too_many_clients path=%s", request.url.path)
+        return StarletteJSONResponse(
+            status_code=503,
+            content={
+                "ok": False,
+                "error": "postgres_too_many_clients",
+                "detail": (
+                    "PostgreSQL rejected a new connection. Close idle clients, "
+                    "restart PostgreSQL, or raise max_connections."
+                ),
+            },
+        )
+    _db_exc_log.warning("database operational error path=%s msg=%s", request.url.path, msg[:400])
+    return StarletteJSONResponse(
+        status_code=503,
+        content={"ok": False, "error": "database_unavailable", "detail": msg[:500]},
+    )
 
 
 class _DebugRequestMiddleware(BaseHTTPMiddleware):

@@ -76,6 +76,7 @@ class TradingInsight(Base):
     )
     scan_pattern = relationship("ScanPattern", back_populates="trading_insights")
     pattern_description: str = Column(Text, nullable=False)
+    hypothesis_family: Optional[str] = Column(String(32), nullable=True)
     confidence: float = Column(Float, nullable=False, default=0.5)
     evidence_count: int = Column(Integer, nullable=False, default=1)
     win_count: int = Column(Integer, nullable=False, default=0)
@@ -169,6 +170,7 @@ class AlertHistory(Base):
     message: str = Column(Text, nullable=False)
     trade_type: Optional[str] = Column(String(30), nullable=True)
     duration_estimate: Optional[str] = Column(String(60), nullable=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -293,6 +295,8 @@ class ScanPattern(Base):
     backtest_commission_used: Optional[float] = Column(Float, nullable=True)
     oos_evaluated_at: Optional[datetime] = Column(DateTime, nullable=True)
     bench_walk_forward_json: Optional[dict] = Column(JSONB, nullable=True)
+    # Miner / evolution taxonomy: compression_expansion vs high_vol_regime (separate OOS gates).
+    hypothesis_family: Optional[str] = Column(String(32), nullable=True)
 
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 

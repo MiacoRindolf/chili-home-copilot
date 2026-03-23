@@ -1,7 +1,18 @@
 """
-Wipe old backtests for active patterns and re-run fresh.
-Run from project root: python scripts/refresh_all_backtests.py
+Re-run ``smart_backtest_insight`` for active trading insights (refreshes stored
+``BacktestResult`` rows with current pattern engine + market data).
+
+Run from project root (``conda activate chili-env``):
+
+  python scripts/refresh_all_backtests.py
+  python scripts/refresh_all_backtests.py --force          # ignore 2h skip
+  python scripts/refresh_all_backtests.py --force --limit 5
+
+Pair with param alignment (usually a no-op if already synced):
+
+  python scripts/backfill_backtest_metadata.py --apply --brain
 """
+import argparse
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -24,28 +35,35 @@ from app.models.trading import TradingInsight, BacktestResult
 from app.services.trading.backtest_engine import smart_backtest_insight
 
 
-def main():
+def main(*, force: bool = False, limit: int | None = None) -> None:
     db = SessionLocal()
     
     try:
-        # 1. Get all active insights that need refresh
-        # Skip insights that already have recent backtests (created in last 2 hours)
-        cutoff = dt.utcnow() - timedelta(hours=2)
-        
-        # Get insight IDs that already have recent backtests
-        recent_insight_ids = {
-            r[0] for r in db.query(BacktestResult.related_insight_id).filter(
-                BacktestResult.ran_at >= cutoff,
-                BacktestResult.related_insight_id.isnot(None)
-            ).distinct().all()
-        }
+        # Skip insights that already have a backtest row touched in the last 2 hours
+        # unless --force (e.g. after market-data or engine fixes).
+        recent_insight_ids: set[int | None] = set()
+        if not force:
+            cutoff = dt.utcnow() - timedelta(hours=2)
+            recent_insight_ids = {
+                r[0] for r in db.query(BacktestResult.related_insight_id).filter(
+                    BacktestResult.ran_at >= cutoff,
+                    BacktestResult.related_insight_id.isnot(None)
+                ).distinct().all()
+            }
         
         active_insights = db.query(TradingInsight).filter(
             TradingInsight.active == True,
             ~TradingInsight.id.in_(recent_insight_ids) if recent_insight_ids else True
         ).all()
+        if limit is not None and limit > 0:
+            active_insights = active_insights[:limit]
         
-        logger.info(f"Found {len(active_insights)} active insights to process (skipping {len(recent_insight_ids)} already refreshed)")
+        logger.info(
+            "Found %s active insights to process (force=%s, skipping %s recently refreshed)",
+            len(active_insights),
+            force,
+            len(recent_insight_ids),
+        )
         
         # 3. Re-run backtests for each insight
         total_wins = 0
@@ -88,8 +106,22 @@ def main():
 
 
 if __name__ == "__main__":
+    ap = argparse.ArgumentParser(description="Refresh smart backtests for active insights")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="Process all active insights (do not skip those with backtests in the last 2 hours)",
+    )
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Process at most N insights (after filters)",
+    )
+    args = ap.parse_args()
     start = dt.now()
     logger.info(f"Starting backtest refresh at {start}")
-    main()
+    main(force=args.force, limit=args.limit)
     end = dt.now()
     logger.info(f"Finished at {end} (duration: {end - start})")

@@ -39,6 +39,8 @@ _WHITELIST_KEYS: frozenset[str] = frozenset(
         "hypothesis_patterns_spawned",
         "breakout_patterns_learned",
         "intraday_discoveries",
+        "high_vol_discoveries",
+        "brain_resource_budget",
         "patterns_refined",
         "exit_adjustments",
         "fakeout_patterns",

@@ -23,6 +23,7 @@ from .market_data import (
     _use_massive, _use_polygon,
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
+from .brain_resource_budget import BrainResourceBudget
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,10 @@ def shutdown_requested() -> bool:
 
 # Origins that must pass OOS / spread-aware backtests before staying active (see config brain_oos_*).
 _BRAIN_OOS_GATED_ORIGINS = frozenset({"web_discovered", "brain_discovered"})
+
+# Miner / evolution taxonomy — keep compression (pre-expansion) vs high-vol regime separate.
+BRAIN_HYPOTHESIS_FAMILY_COMPRESSION = "compression_expansion"
+BRAIN_HYPOTHESIS_FAMILY_HIGH_VOL = "high_vol_regime"
 
 
 def _trim_bench_walk_forward_for_db(bench: dict[str, Any]) -> dict[str, Any]:
@@ -105,16 +110,63 @@ def brain_pattern_backtest_friction_kwargs() -> dict[str, Any]:
     }
 
 
+def brain_oos_gate_kwargs_for_pattern(pattern: Any | None, oos_trade_sum: int) -> dict[str, Any]:
+    """Resolved thresholds for ``brain_apply_oos_promotion_gate`` (stricter short-TF / crypto / family)."""
+    from ...config import settings
+
+    min_wr = float(settings.brain_oos_min_win_rate_pct)
+    max_gap = float(settings.brain_oos_max_is_oos_gap_pct)
+    min_agg: int | None = None
+    if pattern is not None:
+        tf = (getattr(pattern, "timeframe", None) or "1d").strip().lower()
+        ac = (getattr(pattern, "asset_class", None) or "all").strip().lower()
+        fam = (getattr(pattern, "hypothesis_family", None) or "").strip().lower()
+        if tf in ("1m", "5m", "15m", "1h"):
+            v = settings.brain_oos_min_win_rate_pct_short_tf
+            if v is not None:
+                min_wr = max(min_wr, float(v))
+            t = settings.brain_oos_min_oos_trades_short_tf
+            if t is not None:
+                min_agg = max(min_agg or 0, int(t))
+        if ac == "crypto":
+            v = settings.brain_oos_min_win_rate_pct_crypto
+            if v is not None:
+                min_wr = max(min_wr, float(v))
+            t = settings.brain_oos_min_oos_trades_crypto
+            if t is not None:
+                min_agg = max(min_agg or 0, int(t))
+        if fam == BRAIN_HYPOTHESIS_FAMILY_HIGH_VOL:
+            v = settings.brain_oos_min_win_rate_pct_high_vol_family
+            if v is not None:
+                min_wr = max(min_wr, float(v))
+            t = settings.brain_oos_min_oos_trades_high_vol_family
+            if t is not None:
+                min_agg = max(min_agg or 0, int(t))
+    return {
+        "min_win_rate_pct": min_wr,
+        "max_is_oos_gap_pct": max_gap,
+        "min_oos_aggregate_trades": min_agg,
+        "oos_aggregate_trade_count": oos_trade_sum,
+    }
+
+
 def brain_apply_oos_promotion_gate(
     *,
     origin: str,
     mean_is_win_rate: float,
     mean_oos_win_rate: float | None,
     oos_tickers_with_result: int,
+    min_win_rate_pct: float | None = None,
+    max_is_oos_gap_pct: float | None = None,
+    min_oos_aggregate_trades: int | None = None,
+    oos_aggregate_trade_count: int | None = None,
 ) -> tuple[str, bool]:
     """Return ``(promotion_status, allow_active)``.
 
     ``allow_active`` False means the caller should set ``ScanPattern.active = False``.
+
+    Discovery-phase miners never call this — only backtest evidence paths. Optional aggregate
+    OOS trade floor (``min_oos_aggregate_trades``) reduces promotion on thin short-horizon samples.
     """
     from ...config import settings
 
@@ -123,14 +175,27 @@ def brain_apply_oos_promotion_gate(
     o = (origin or "").strip().lower()
     if o not in _BRAIN_OOS_GATED_ORIGINS:
         return "legacy", True
+    min_wr = (
+        float(min_win_rate_pct)
+        if min_win_rate_pct is not None
+        else float(settings.brain_oos_min_win_rate_pct)
+    )
+    max_gap = (
+        float(max_is_oos_gap_pct)
+        if max_is_oos_gap_pct is not None
+        else float(settings.brain_oos_max_is_oos_gap_pct)
+    )
     if oos_tickers_with_result < int(settings.brain_oos_min_evaluated_tickers):
         return "pending_oos", True
     if mean_oos_win_rate is None:
         return "pending_oos", True
+    if min_oos_aggregate_trades is not None and int(min_oos_aggregate_trades) > 0:
+        if int(oos_aggregate_trade_count or 0) < int(min_oos_aggregate_trades):
+            return "pending_oos", True
     gap = float(mean_is_win_rate) - float(mean_oos_win_rate)
-    if float(mean_oos_win_rate) < float(settings.brain_oos_min_win_rate_pct):
+    if float(mean_oos_win_rate) < min_wr:
         return "rejected_oos", False
-    if gap > float(settings.brain_oos_max_is_oos_gap_pct):
+    if gap > max_gap:
         return "rejected_oos", False
     return "promoted", True
 
@@ -2181,8 +2246,27 @@ def _mine_intraday_breakout_patterns(ticker: str) -> list[dict]:
     return rows
 
 
-def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Run intraday pattern mining on 15m data for breakout-specific learning."""
+def _mine_intraday_one_ticker(ticker: str, budget: BrainResourceBudget | None) -> list[dict]:
+    if budget is not None and not budget.try_ohlcv("intraday_compression", 1):
+        return []
+    try:
+        return _mine_intraday_breakout_patterns(ticker)
+    except Exception:
+        if budget is not None:
+            budget.record_miner_error("intraday_compression")
+        return []
+
+
+def mine_intraday_patterns(
+    db: Session,
+    user_id: int | None,
+    budget: BrainResourceBudget | None = None,
+) -> dict[str, Any]:
+    """Phase-A discovery on 15m data: compression / pre-expansion hypotheses only.
+
+    Tags ``hypothesis_family=compression_expansion``. Does not promote ScanPatterns;
+    OOS promotion remains on backtest paths only. Optional ``budget`` caps OHLCV and row volume.
+    """
     from .market_data import DEFAULT_CRYPTO_TICKERS, DEFAULT_SCAN_TICKERS
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -2191,17 +2275,28 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
     rows: list[dict] = []
     _workers = _IO_WORKERS_LOW
     with ThreadPoolExecutor(max_workers=_workers) as pool:
-        futs = {pool.submit(_mine_intraday_breakout_patterns, t): t for t in tickers}
+        futs = {pool.submit(_mine_intraday_one_ticker, t, budget): t for t in tickers}
         for f in as_completed(futs):
             try:
                 rows.extend(f.result())
             except Exception:
-                pass
+                if budget is not None:
+                    budget.record_miner_error("intraday_compression")
+
+    if budget is not None:
+        take = budget.add_miner_rows(len(rows))
+        if take < len(rows):
+            rows = rows[:take]
 
     if len(rows) < 30:
-        return {"tested": 0, "note": "insufficient intraday data"}
+        return {
+            "tested": 0,
+            "note": "insufficient intraday data",
+            "hypothesis_family": BRAIN_HYPOTHESIS_FAMILY_COMPRESSION,
+        }
 
     discoveries = 0
+    _fam = BRAIN_HYPOTHESIS_FAMILY_COMPRESSION
 
     # Hypothesis: BB squeeze -> 4h positive returns
     sq = [r for r in rows if r["bb_squeeze"]]
@@ -2218,6 +2313,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"{wr_sq:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
                 confidence=min(0.80, wr_sq / 100),
                 wins=w, losses=len(sq) - w,
+                hypothesis_family=_fam,
             )
             discoveries += 1
 
@@ -2235,6 +2331,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             f"(n={len(sq_vol_low)}+{len(sq_vol_high)})",
             confidence=0.5,
             wins=w_low, losses=len(sq_vol_low) - w_low,
+            hypothesis_family=_fam,
         )
         discoveries += 1
 
@@ -2250,6 +2347,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             f"{wr_nr7:.0f}%wr (n={len(nr7s)})",
             confidence=min(0.75, wr_nr7 / 100),
             wins=w_nr7, losses=len(nr7s) - w_nr7,
+            hypothesis_family=_fam,
         )
         discoveries += 1
 
@@ -2265,6 +2363,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             f"{avg_coil:+.2f}%/4h, {wr_coil:.0f}%wr (n={len(coiled)})",
             confidence=min(0.80, wr_coil / 100),
             wins=w_coil, losses=len(coiled) - w_coil,
+            hypothesis_family=_fam,
         )
         discoveries += 1
 
@@ -2281,6 +2380,7 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             f"squeeze + extreme RSI {avg_ext:+.2f}%/4h",
             confidence=0.55,
             wins=w_mid, losses=len(sq_rsi_mid) - w_mid,
+            hypothesis_family=_fam,
         )
         discoveries += 1
 
@@ -2295,19 +2395,192 @@ def mine_intraday_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             f"Intraday squeeze: crypto {avg_crypto:+.2f}%/4h vs "
             f"stocks {avg_stock:+.2f}%/4h (n={len(crypto_rows)}+{len(stock_rows)})",
             confidence=0.5,
+            hypothesis_family=_fam,
         )
         discoveries += 1
 
     log_learning_event(
         db, user_id, "intraday_pattern_mining",
         f"Mined {len(rows)} intraday bars from {len(tickers)} tickers, "
-        f"{discoveries} breakout pattern discoveries",
+        f"{discoveries} breakout pattern discoveries [{_fam}]",
     )
 
     return {
         "rows_mined": len(rows),
         "tickers": len(tickers),
         "discoveries": discoveries,
+        "hypothesis_family": _fam,
+    }
+
+
+def _mine_high_vol_one_ticker(ticker: str, budget: BrainResourceBudget | None) -> list[dict]:
+    """15m rows where volatility is already expanded (ATR or BB width in top quartile vs 50-bar window)."""
+    from ta.momentum import RSIIndicator
+    from ta.trend import MACD, EMAIndicator, ADXIndicator
+    from ta.volatility import BollingerBands, AverageTrueRange
+
+    if budget is not None and not budget.try_ohlcv("high_vol_regime", 1):
+        return []
+    try:
+        df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
+        if df.empty or len(df) < 80:
+            return []
+    except Exception:
+        if budget is not None:
+            budget.record_miner_error("high_vol_regime")
+        return []
+
+    close = df["Close"]
+    high = df["High"]
+    low = df["Low"]
+    volume = df["Volume"]
+
+    rsi = RSIIndicator(close=close, window=14).rsi()
+    macd_obj = MACD(close=close)
+    macd_hist = macd_obj.macd_diff()
+    ema9 = EMAIndicator(close=close, window=9).ema_indicator()
+    ema21 = EMAIndicator(close=close, window=21).ema_indicator()
+    bb = BollingerBands(close=close, window=20, window_dev=2)
+    bb_width = bb.bollinger_wband()
+    adx = ADXIndicator(high=high, low=low, close=close).adx()
+    atr = AverageTrueRange(high=high, low=low, close=close).average_true_range()
+    vol_sma = volume.rolling(20).mean()
+
+    rows = []
+    bars_4h = 16
+    bars_8h = 32
+
+    for i in range(50, len(df) - bars_8h):
+        price = float(close.iloc[i])
+        if price <= 0:
+            continue
+
+        ret_4h = (float(close.iloc[i + bars_4h]) - price) / price * 100
+        ret_8h = (float(close.iloc[i + bars_8h]) - price) / price * 100
+
+        bw = float(bb_width.iloc[i]) if pd.notna(bb_width.iloc[i]) else 0
+        atr_val = float(atr.iloc[i]) if pd.notna(atr.iloc[i]) else 0
+
+        atr_high = False
+        bb_high = False
+        if i >= 50 and atr_val > 0:
+            atr_window = atr.iloc[i - 49:i + 1].dropna()
+            if len(atr_window) > 10:
+                atr_high = atr_val >= float(atr_window.quantile(0.75))
+        if i >= 50 and bw > 0:
+            bw_window = bb_width.iloc[i - 49:i + 1].dropna()
+            if len(bw_window) > 10:
+                bb_high = bw >= float(bw_window.quantile(0.75))
+
+        high_vol_regime = atr_high or bb_high
+
+        vol_ratio = 1.0
+        if pd.notna(vol_sma.iloc[i]) and float(vol_sma.iloc[i]) > 0:
+            vol_ratio = float(volume.iloc[i]) / float(vol_sma.iloc[i])
+
+        e9 = float(ema9.iloc[i]) if pd.notna(ema9.iloc[i]) else None
+        e21 = float(ema21.iloc[i]) if pd.notna(ema21.iloc[i]) else None
+        ema_bullish = e9 is not None and e21 is not None and price > e9 > e21
+
+        rows.append({
+            "ticker": ticker,
+            "price": price,
+            "ret_4h": round(ret_4h, 3),
+            "ret_8h": round(ret_8h, 3),
+            "rsi": float(rsi.iloc[i]) if pd.notna(rsi.iloc[i]) else 50,
+            "macd_hist": float(macd_hist.iloc[i]) if pd.notna(macd_hist.iloc[i]) else 0,
+            "adx": float(adx.iloc[i]) if pd.notna(adx.iloc[i]) else 0,
+            "high_vol_regime": high_vol_regime,
+            "vol_ratio": round(vol_ratio, 2),
+            "ema_bullish": ema_bullish,
+            "is_crypto": True,
+        })
+    return rows
+
+
+def mine_high_vol_regime_patterns(
+    db: Session,
+    user_id: int | None,
+    budget: BrainResourceBudget | None = None,
+) -> dict[str, Any]:
+    """Phase-A discovery: crypto 15m bars in *expanded* vol (distinct from compression miner)."""
+    from ...config import settings
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    if not getattr(settings, "brain_high_vol_miner_enabled", True):
+        return {"discoveries": 0, "rows_mined": 0, "tickers": 0, "skipped": True}
+
+    tickers = [t for t in DEFAULT_CRYPTO_TICKERS if str(t).endswith("-USD")][:30]
+    rows: list[dict] = []
+    with ThreadPoolExecutor(max_workers=_IO_WORKERS_LOW) as pool:
+        futs = {pool.submit(_mine_high_vol_one_ticker, t, budget): t for t in tickers}
+        for f in as_completed(futs):
+            try:
+                rows.extend(f.result())
+            except Exception:
+                if budget is not None:
+                    budget.record_miner_error("high_vol_regime")
+
+    if budget is not None:
+        take = budget.add_miner_rows(len(rows))
+        if take < len(rows):
+            rows = rows[:take]
+
+    if len(rows) < 30:
+        return {
+            "tested": 0,
+            "note": "insufficient high-vol miner data",
+            "hypothesis_family": BRAIN_HYPOTHESIS_FAMILY_HIGH_VOL,
+        }
+
+    discoveries = 0
+    _fam = BRAIN_HYPOTHESIS_FAMILY_HIGH_VOL
+
+    hv = [r for r in rows if r["high_vol_regime"]]
+    lv = [r for r in rows if not r["high_vol_regime"]]
+    if len(hv) >= 10 and len(lv) >= 10:
+        avg_h = sum(r["ret_4h"] for r in hv) / len(hv)
+        avg_l = sum(r["ret_4h"] for r in lv) / len(lv)
+        wr_h = sum(1 for r in hv if r["ret_4h"] > 0) / len(hv) * 100
+        w_h = sum(1 for r in hv if r["ret_4h"] > 0)
+        if abs(avg_h - avg_l) > 0.05:
+            save_insight(
+                db, user_id,
+                f"Crypto high-vol regime (15m): expanded ATR/BB vs calm — "
+                f"{avg_h:+.2f}%/4h ({wr_h:.0f}%wr, n={len(hv)}) vs {avg_l:+.2f}%/4h (n={len(lv)})",
+                confidence=min(0.72, max(0.35, wr_h / 100)),
+                wins=w_h, losses=len(hv) - w_h,
+                hypothesis_family=_fam,
+            )
+            discoveries += 1
+
+    hv_bull = [r for r in hv if r["ema_bullish"]]
+    hv_bear = [r for r in hv if not r["ema_bullish"]]
+    if len(hv_bull) >= 8 and len(hv_bear) >= 8:
+        ab = sum(r["ret_4h"] for r in hv_bull) / len(hv_bull)
+        ae = sum(r["ret_4h"] for r in hv_bear) / len(hv_bear)
+        w_b = sum(1 for r in hv_bull if r["ret_4h"] > 0)
+        if abs(ab - ae) > 0.05:
+            save_insight(
+                db, user_id,
+                f"Crypto high-vol 15m: EMA bullish stack {ab:+.2f}%/4h vs not "
+                f"{ae:+.2f}%/4h (n={len(hv_bull)}+{len(hv_bear)})",
+                confidence=0.55,
+                wins=w_b, losses=len(hv_bull) - w_b,
+                hypothesis_family=_fam,
+            )
+            discoveries += 1
+
+    log_learning_event(
+        db, user_id, "high_vol_pattern_mining",
+        f"Mined {len(rows)} crypto 15m bars, {discoveries} high-vol regime insights [{_fam}]",
+    )
+
+    return {
+        "rows_mined": len(rows),
+        "tickers": len(tickers),
+        "discoveries": discoveries,
+        "hypothesis_family": _fam,
     }
 
 
@@ -4630,11 +4903,13 @@ def test_pattern_hypothesis(
         pattern.confidence * 0.7 + (ticker_vote_wr / 100) * 0.3
     ))
 
+    _oos_kw = brain_oos_gate_kwargs_for_pattern(pattern, oos_trade_sum)
     prom_stat, allow_active = brain_apply_oos_promotion_gate(
         origin=getattr(pattern, "origin", "") or "",
         mean_is_win_rate=mean_is_wr,
         mean_oos_win_rate=mean_oos_wr,
         oos_tickers_with_result=oos_ticker_hits,
+        **_oos_kw,
     )
 
     patch: dict[str, Any] = {
@@ -5205,6 +5480,7 @@ def _create_variant_child(
         generation=(parent.generation or 0) + 1,
         ticker_scope=ticker_scope or getattr(parent, "ticker_scope", "universal") or "universal",
         scope_tickers=scope_tickers_json if scope_tickers_json is not None else getattr(parent, "scope_tickers", None),
+        hypothesis_family=getattr(parent, "hypothesis_family", None),
     )
     db.add(child)
     db.flush()
@@ -5225,6 +5501,7 @@ def _create_variant_child(
             user_id=uid,
             scan_pattern_id=child.id,
             pattern_description=f"{child_name} — {parent.description or ''}",
+            hypothesis_family=getattr(parent, "hypothesis_family", None),
             confidence=parent.confidence,
             evidence_count=0,
             win_count=0,
@@ -6161,6 +6438,7 @@ def run_learning_cycle(
     _learning_status["step_timings"] = {}
     start = time.time()
     report: dict[str, Any] = {}
+    cycle_budget = BrainResourceBudget.from_settings()
 
     _provider = (
         "Massive" if _use_massive() else
@@ -6383,12 +6661,17 @@ def run_learning_cycle(
             step_start_id = time.time()
             _learning_status["current_step"] = "Mining intraday breakout patterns"
             _learning_status["phase"] = "intraday_mining"
-            intra_result = mine_intraday_patterns(db, user_id)
+            intra_result = mine_intraday_patterns(db, user_id, cycle_budget)
+            hv_result = mine_high_vol_regime_patterns(db, user_id, cycle_budget)
             report["intraday_discoveries"] = intra_result.get("discoveries", 0)
+            report["high_vol_discoveries"] = hv_result.get("discoveries", 0)
             _learning_status["steps_completed"] = 12
-            _step_time("intraday_mining", step_start_id,
-                        f"{intra_result.get('discoveries', 0)} discoveries from "
-                        f"{intra_result.get('rows_mined', 0)} bars")
+            _step_time(
+                "intraday_mining",
+                step_start_id,
+                f"compression {intra_result.get('discoveries', 0)} / high_vol {hv_result.get('discoveries', 0)} "
+                f"from {intra_result.get('rows_mined', 0)} + {hv_result.get('rows_mined', 0)} bars",
+            )
             _commit_step()
 
             # Step 8d: Refine patterns (parameter sweeping)
@@ -6485,6 +6768,8 @@ def run_learning_cycle(
             report["secondary_miners_skipped"] = True
             _learning_status["steps_completed"] = 19
             logger.info("[learning] Secondary miners skipped (brain_secondary_miners_on_cycle=false)")
+
+        report["brain_resource_budget"] = cycle_budget.to_report_dict()
 
         # Step 19: Market journal
         if _shutting_down.is_set():

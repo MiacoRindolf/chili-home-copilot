@@ -4,6 +4,8 @@ services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
     image: postgres:16-alpine
+    # Default 100 is tight with chili + brain + brain-worker pools and parallel queue backtests.
+    command: ["postgres", "-c", "max_connections=200"]
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili
@@ -98,6 +100,9 @@ services:
       - CHILI_USE_BRAIN_SERVICE=${CHILI_USE_BRAIN_SERVICE:-0}
       - BRAIN_SERVICE_URL=${BRAIN_SERVICE_URL:-http://brain:8090}
       - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
+      # Smaller pool than the web app — worker + parallel backtests still share one Postgres.
+      - DATABASE_POOL_SIZE=8
+      - DATABASE_MAX_OVERFLOW=12
     volumes:
       - chili_data:/app/data
     depends_on:

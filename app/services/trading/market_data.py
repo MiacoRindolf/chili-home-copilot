@@ -160,9 +160,7 @@ def fetch_ohlcv(
 
     # --- Massive path (primary) ---
     _massive_dead = False
-    _massive_tried = False
     if _use_massive():
-        _massive_tried = True
         try:
             bars = _massive.get_aggregates(
                 ticker, interval=interval, period=period,
@@ -170,7 +168,7 @@ def fetch_ohlcv(
             )
             if bars:
                 return bars
-            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+            if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
             if not _massive_dead:
                 logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
@@ -180,14 +178,7 @@ def fetch_ohlcv(
     if _massive_dead:
         return []
 
-    # For crypto: if Massive was tried and returned empty, don't fall back to yfinance
-    # Many crypto tickers don't exist on yfinance or use different formats
-    _is_crypto = ticker.upper().endswith("-USD")
-    if _is_crypto and _massive_tried:
-        logger.debug(f"[market_data] Skipping yfinance fallback for crypto {ticker} (Massive already tried)")
-        return []
-
-    # --- Polygon path (secondary) ---
+    # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
     if _use_polygon():
         try:
             bars = _poly.get_aggregates(
@@ -200,7 +191,11 @@ def fetch_ohlcv(
         except Exception as e:
             logger.warning(f"[market_data] Polygon OHLCV failed for {ticker}: {e}")
 
-    # --- yfinance fallback ---
+    # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
+    _is_crypto = ticker.upper().endswith("-USD")
+    if _is_crypto:
+        return []
+
     if _start_str:
         df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
     else:
@@ -250,9 +245,7 @@ def fetch_ohlcv_df(
 
     # --- Massive path (primary) ---
     _massive_dead = False
-    _massive_tried = False
     if _use_massive():
-        _massive_tried = True
         try:
             df = _massive.get_aggregates_df(
                 ticker, interval=interval, period=period,
@@ -260,7 +253,7 @@ def fetch_ohlcv_df(
             )
             if not df.empty:
                 return df
-            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+            if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
         except Exception as e:
             logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
@@ -268,13 +261,7 @@ def fetch_ohlcv_df(
     if _massive_dead:
         return pd.DataFrame()
 
-    # For crypto: if Massive was tried and returned empty, don't fall back to yfinance
-    _is_crypto = ticker.upper().endswith("-USD")
-    if _is_crypto and _massive_tried:
-        logger.debug(f"[market_data] Skipping yfinance fallback for crypto {ticker} (Massive already tried)")
-        return pd.DataFrame()
-
-    # --- Polygon path (secondary) ---
+    # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
     if _use_polygon():
         try:
             df = _poly.get_aggregates_df(
@@ -286,7 +273,11 @@ def fetch_ohlcv_df(
         except Exception as e:
             logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
 
-    # --- yfinance fallback ---
+    # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
+    _is_crypto = ticker.upper().endswith("-USD")
+    if _is_crypto:
+        return pd.DataFrame()
+
     if _start_str:
         df = _yf_history(ticker, start=_start_str, period="15d", interval=interval)
     else:
@@ -319,7 +310,7 @@ def fetch_ohlcv_batch(
         missing = [
             t for t in tickers
             if t not in results
-            and not _massive._is_dead_ticker(_massive.to_massive_ticker(t))
+            and not _massive.massive_aggregate_variants_all_dead(t)
         ]
         if not missing:
             return results
@@ -383,7 +374,7 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
             fi = _massive.get_last_quote(ticker)
             if fi and fi.get("last_price") is not None:
                 return _build_quote_result(ticker, fi)
-            if _massive._is_dead_ticker(_massive.to_massive_ticker(ticker)):
+            if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
             if not _massive_dead:
                 logger.debug(f"[market_data] Massive quote empty for {ticker}, falling back")

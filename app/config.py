@@ -201,6 +201,25 @@ class Settings(BaseSettings):
     brain_oos_min_win_rate_pct: float = 42.0
     brain_oos_max_is_oos_gap_pct: float = 38.0
     brain_oos_min_evaluated_tickers: int = 2
+    # Optional stricter OOS gates (None = use brain_oos_min_win_rate_pct / gap only). Applied in
+    # brain_oos_gate_kwargs_for_pattern when timeframe, asset_class, or hypothesis_family matches.
+    brain_oos_min_win_rate_pct_short_tf: Optional[float] = None
+    brain_oos_min_win_rate_pct_crypto: Optional[float] = None
+    brain_oos_min_win_rate_pct_high_vol_family: Optional[float] = None
+    brain_oos_min_oos_trades_short_tf: Optional[int] = None
+    brain_oos_min_oos_trades_crypto: Optional[int] = None
+    brain_oos_min_oos_trades_high_vol_family: Optional[int] = None
+
+    # Per learning-cycle resource caps (miners). Zero cap = unlimited for that dimension.
+    brain_budget_ohlcv_per_cycle: int = 200
+    brain_budget_miner_rows_per_cycle: int = 80000
+    brain_budget_pattern_injects_per_cycle: int = 24
+    brain_budget_miner_error_trip: int = 5
+
+    # Secondary miners: high-vol regime hypothesis (crypto 15m) — additive to compression intraday miner.
+    brain_high_vol_miner_enabled: bool = True
+    # Future: spawn ScanPattern from miner stats; must still pass normal backtest/OOS (default off).
+    brain_miner_scanpattern_bridge_enabled: bool = False
 
     # Benchmark walk-forward (SPY/QQQ-style) after hypothesis test; optional extra promotion gate.
     brain_bench_walk_forward_enabled: bool = True
@@ -219,6 +238,20 @@ class Settings(BaseSettings):
 
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0
+
+    # Imminent ScanPattern breakout alerts (scheduler + pattern_imminent_alerts).
+    pattern_imminent_alert_enabled: bool = True
+    pattern_imminent_max_eta_hours: float = 4.0
+    # Loosened defaults: many ScanPatterns reference indicators absent from the swing snapshot;
+    # with only 1–2 evaluable conditions, a high ratio floor produced zero candidates forever.
+    pattern_imminent_min_readiness: float = 0.58
+    pattern_imminent_readiness_cap: float = 0.995
+    pattern_imminent_max_per_run: int = 8
+    pattern_imminent_cooldown_hours: float = 4.0
+    pattern_imminent_max_tickers_per_run: int = 120
+    pattern_imminent_scope_tickers_cap: int = 25
+    pattern_imminent_evaluable_ratio_floor: float = 0.35
+    pattern_imminent_eta_scale_k: float = 1.5
 
     @field_validator("database_url")
     @classmethod

@@ -1384,6 +1384,20 @@ def api_alert_settings():
     return JSONResponse({"ok": True, **get_sms_status()})
 
 
+@router.post("/api/trading/alerts/run-pattern-imminent")
+def api_run_pattern_imminent_scan(request: Request, db: Session = Depends(get_db)):
+    """Run the ScanPattern imminent-breakout scan once; returns diagnostics (candidates, skip counts).
+
+    Use this to verify the job is working without waiting for the 15-minute scheduler.
+    Alerts are still written via ``dispatch_alert`` (DB + SMS/Telegram when configured).
+    """
+    ctx = get_identity_ctx(request, db)
+    from ..services.trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+    result = run_pattern_imminent_scan(db, ctx["user_id"])
+    return JSONResponse(result)
+
+
 # ── Background Learning ───────────────────────────────────────────────
 
 @router.post("/api/trading/learn/snapshot")
@@ -1734,6 +1748,8 @@ def api_backtest_pattern(
         append_conditions=req.append_conditions,
         exit_config_overlay=req.exit_config,
     )
+    if not result.get("ok"):
+        return JSONResponse(_json_safe(result), status_code=400)
     return JSONResponse(_json_safe(result))
 
 
