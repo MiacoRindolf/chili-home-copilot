@@ -383,7 +383,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-modal-header { display: flex; align-items: center; gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--border); font-size: 14px; font-weight: 700; }
 .brain-modal-header .bm-close { margin-left: auto; background: none; border: none; cursor: pointer; color: var(--text-muted); font-size: 20px; line-height: 1; padding: 0 4px; }
 .brain-modal-header .bm-close:hover { color: var(--text); }
-.brain-modal-body { padding: 16px 18px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
+.brain-modal-body { flex: 1 1 auto; min-height: 0; padding: 16px 18px; overflow-y: auto; font-size: 12px; line-height: 1.6; }
 .brain-modal-body h4 { font-size: 12px; font-weight: 700; margin: 10px 0 4px; color: var(--text); }
 .brain-modal-body table { width: 100%; border-collapse: collapse; font-size: 11px; margin: 6px 0; }
 .brain-modal-body th { text-align: left; font-weight: 600; padding: 4px 6px; border-bottom: 1px solid var(--border); color: var(--text-muted); font-size: 10px; text-transform: uppercase; letter-spacing: .3px; }
@@ -391,8 +391,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .brain-modal-body .bm-tag { display: inline-block; padding: 1px 7px; border-radius: 8px; font-size: 9px; font-weight: 600; }
 .brain-modal-body .bm-hit { background: rgba(34,197,94,.12); color: #22c55e; }
 .brain-modal-body .bm-miss { background: rgba(239,68,68,.12); color: #ef4444; }
-.brain-modal-footer { padding: 10px 18px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; justify-content: flex-end; }
-.brain-modal-footer.bm-footer-pattern-evidence { justify-content: stretch; }
+.brain-modal-footer { flex-shrink: 0; padding: 10px 18px; border-top: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: 8px; align-items: flex-end; justify-content: flex-end; }
+.brain-modal-footer.bm-footer-pattern-evidence { flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 10px; }
 .brain-modal-footer button { padding: 6px 16px; border: none; border-radius: 6px; cursor: pointer; font-size: 11px; font-weight: 600; transition: opacity .15s; }
 .brain-modal-footer button:hover { opacity: .85; }
 
@@ -2924,25 +2924,24 @@ function showPatternDetail(patternId) {
   html += '<div class="ev-pane" id="ev-pane-backtests"></div>';
   html += '<div class="ev-pane" id="ev-pane-evolution"><div class="ev-empty" style="padding:16px">Click to load evolution tree.</div></div>';
 
-  var footer = '<div style="display:flex;flex-wrap:wrap;width:100%;align-items:flex-end;justify-content:space-between;gap:12px;box-sizing:border-box">' +
-    '<div id="ev-pine-strategy-footer" style="flex:1;min-width:min(100%,280px);text-align:left">' +
-    '<div style="font-size:10px;font-weight:600;color:var(--text-muted);margin-bottom:4px">TradingView Pine strategy</div>' +
+  var footer = '<div id="ev-pine-strategy-footer" style="width:100%;box-sizing:border-box;text-align:left;padding:10px 12px;border-radius:8px;border:1px solid rgba(139,92,246,.35);background:rgba(139,92,246,.06)">' +
+    '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:6px">TradingView Pine strategy</div>' +
     '<div style="font-size:9px;color:var(--text-muted);margin-bottom:8px;line-height:1.35">Exports this <strong>ScanPattern</strong> as a Pine <strong>strategy</strong> for Strategy Tester. Exits follow signal on/off only — CHILI may use ATR or time-based exits.</div>' +
     '<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center">' +
     '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load Pine strategy</button>' +
     '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy to clipboard</button>' +
     '</div>' +
     '<div id="ev-pine-warnings" style="display:none;margin-top:8px;font-size:9px;color:#f59e0b;line-height:1.45"></div>' +
-    '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;max-width:560px;box-sizing:border-box;min-height:100px;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
+    '<textarea id="ev-pine-text" readonly spellcheck="false" style="display:none;margin-top:8px;width:100%;box-sizing:border-box;min-height:100px;font-family:ui-monospace,Consolas,monospace;font-size:10px;line-height:1.35;padding:8px;background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);resize:vertical"></textarea>' +
     '</div>' +
-    '<div style="display:flex;gap:8px;flex-shrink:0;align-items:center">';
+    '<div style="display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end;align-items:center;width:100%">';
   if (p.scan_pattern_id) {
     footer += '<button onclick="boostPattern(' + p.scan_pattern_id + ',this)" style="background:linear-gradient(135deg,#f97316,#ea580c);color:#fff">&#x26A1; Boost to Queue</button>';
   }
   if (p.active) {
     footer += '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>';
   }
-  footer += '</div></div>';
+  footer += '</div>';
   openBrainModal('Pattern Evidence', html, footer, 'bm-footer-pattern-evidence');
   window._currentEvidencePatternId = p.id;
   /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
