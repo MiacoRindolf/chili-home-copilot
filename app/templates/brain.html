@@ -1330,7 +1330,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   <div class="brain-modal-card">
     <div class="brain-modal-header">
       <span id="brain-modal-title">Details</span>
-      <div id="brain-modal-header-tools"></div>
+      <!-- Pine controls must live in static HTML so they survive cached JS / are always in the page source. Visibility toggled via .bm-tools-visible in openBrainModal. -->
+      <div id="brain-modal-header-tools" aria-label="TradingView Pine strategy actions">
+        <span style="font-size:10px;font-weight:700;color:#8b5cf6;letter-spacing:.02em">Pine</span>
+        <button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load</button>
+        <button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy</button>
+      </div>
       <button class="bm-close" onclick="closeBrainModal()">&times;</button>
     </div>
     <div class="brain-modal-body" id="brain-modal-body"></div>
@@ -1351,17 +1356,15 @@ function escHtml(s) {
   var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
 
-function openBrainModal(title, bodyHtml, footerHtml, footerClass, headerToolsHtml) {
+function openBrainModal(title, bodyHtml, footerHtml, footerClass, showPineHeaderTools) {
   document.getElementById('brain-modal-title').textContent = title;
   document.getElementById('brain-modal-body').innerHTML = bodyHtml;
   var tools = document.getElementById('brain-modal-header-tools');
   if (tools) {
-    if (headerToolsHtml) {
-      tools.innerHTML = headerToolsHtml;
-      tools.className = 'bm-tools-visible';
+    if (showPineHeaderTools) {
+      tools.classList.add('bm-tools-visible');
     } else {
-      tools.innerHTML = '';
-      tools.className = '';
+      tools.classList.remove('bm-tools-visible');
     }
   }
   var footer = document.getElementById('brain-modal-footer');
@@ -1454,7 +1457,7 @@ function _renderEvWrProgress(series) {
 function closeBrainModal() {
   _disposeEvWrProgressChart();
   var tools = document.getElementById('brain-modal-header-tools');
-  if (tools) { tools.innerHTML = ''; tools.className = ''; }
+  if (tools) { tools.classList.remove('bm-tools-visible'); }
   document.getElementById('brain-modal-overlay').classList.remove('active');
 }
 document.addEventListener('keydown', function(e) {
@@ -2952,10 +2955,7 @@ function showPatternDetail(patternId) {
   if (p.active) {
     footer += '<button onclick="demotePattern(' + p.id + ')" style="background:#ef4444;color:#fff">Demote</button>';
   }
-  var headerTools = '<span style="font-size:10px;font-weight:700;color:#8b5cf6;letter-spacing:.02em">Pine</span>' +
-    '<button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load</button>' +
-    '<button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy</button>';
-  openBrainModal('Pattern Evidence', html, footer, undefined, headerTools);
+  openBrainModal('Pattern Evidence', html, footer, undefined, true);
   window._currentEvidencePatternId = p.id;
   /* ScanPattern id for /api/trading/brain/pattern/{id}/* and backtest deep links — never use TradingInsight id here */
   window._currentBacktestPatternId = p.scan_pattern_id || null;
