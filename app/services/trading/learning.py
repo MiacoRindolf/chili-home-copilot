@@ -1691,15 +1691,28 @@ def _backtest_one_pattern_from_queue(pattern_id: int, user_id: int | None) -> tu
             TradingInsight.scan_pattern_id == pattern.id
         ).first()
         if not insight:
+            _parts: list[str] = []
+            if getattr(pattern, "name", None) and str(pattern.name).strip():
+                _parts.append(str(pattern.name).strip())
+            _pd = (getattr(pattern, "description", None) or "").strip()
+            if _pd and _pd not in _parts:
+                _parts.append(_pd)
+            _pdesc = " | ".join(_parts) if _parts else (
+                f"{pattern.name or 'Pattern'} — Composable pattern backtest"
+            )
             insight = TradingInsight(
                 user_id=user_id,
-                pattern_description=f"{pattern.name} — Composable pattern backtest",
+                pattern_description=_pdesc,
                 confidence=pattern.confidence or 0.5,
                 evidence_count=0,
                 scan_pattern_id=pattern.id,
             )
             db.add(insight)
             db.commit()
+        from .backtest_engine import hydrate_scan_pattern_rules_json
+
+        hydrate_scan_pattern_rules_json(db, pattern, insight)
+        db.refresh(pattern)
         _tier = (getattr(pattern, "queue_tier", None) or "full").strip().lower()
         _prescreen = bool(getattr(settings, "brain_queue_prescreen_enabled", False))
         if _prescreen and _tier == "prescreen":
@@ -4478,11 +4491,18 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
     When *tickers* is None (the common case from Top Picks), results are
     cached with stale-while-revalidate: 3 min fresh, 10 min stale.
     Explicit ticker lists bypass the cache.
+
+    Phase 7: candidate-authoritative mirror reads require a **non-empty** explicit
+    ticker list. ``None``, empty list, cache/SWR refresh, and inferred universes
+    stay ``explicit_api_tickers=False`` (legacy-authoritative for mirror).
     """
     global _pred_cache, _pred_refreshing
 
     if tickers is not None:
-        return _get_current_predictions_impl(db, tickers)
+        explicit_for_mirror = bool(tickers)
+        return _get_current_predictions_impl(
+            db, tickers, explicit_api_tickers=explicit_for_mirror
+        )
 
     now = time.time()
     age = now - _pred_cache["ts"]
@@ -4501,7 +4521,7 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
                         from ...db import SessionLocal
                         s = SessionLocal()
                         try:
-                            fresh = _get_current_predictions_impl(s, None)
+                            fresh = _get_current_predictions_impl(s, None, explicit_api_tickers=False)
                             _pred_cache = {"results": fresh, "ts": time.time()}
                         finally:
                             s.close()
@@ -4513,15 +4533,24 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
                 threading.Thread(target=_bg_refresh, daemon=True).start()
         return _pred_cache["results"]
 
-    results = _get_current_predictions_impl(db, None)
+    results = _get_current_predictions_impl(db, None, explicit_api_tickers=False)
     _pred_cache = {"results": results, "ts": time.time()}
     return results
 
 
-def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> list[dict]:
+def _get_current_predictions_impl(
+    db: Session,
+    tickers: list[str] | None,
+    *,
+    explicit_api_tickers: bool = False,
+) -> list[dict]:
     """Core prediction logic (no cache).  Pattern-driven ML pipeline."""
     from .pattern_engine import get_active_patterns
     from .pattern_ml import get_meta_learner
+
+    # Phase 7 choke-point: never mark implicit/inferred universes as API-explicit.
+    if tickers is None or not tickers:
+        explicit_api_tickers = False
 
     tickers = _build_prediction_tickers(db, tickers)
     ticker_batch = tickers[:400]
@@ -4560,6 +4589,76 @@ def _get_current_predictions_impl(db: Session, tickers: list[str] | None) -> lis
                 results.append(entry)
 
     results.sort(key=lambda x: abs(x["score"]), reverse=True)
+
+    from ...config import settings as _pred_mirror_settings
+    from ...trading_brain.infrastructure.prediction_ops_log import (
+        DUAL_WRITE_FAIL,
+        DUAL_WRITE_NA,
+        DUAL_WRITE_OK,
+        DUAL_WRITE_SKIP_EMPTY,
+        READ_ERROR,
+        READ_NA,
+        format_chili_prediction_ops_line,
+        universe_fingerprint_fp16,
+    )
+
+    dual_write_outcome = DUAL_WRITE_NA
+    dw_enabled = False
+    try:
+        dw_enabled = bool(getattr(_pred_mirror_settings, "brain_prediction_dual_write_enabled", False))
+        if not dw_enabled:
+            pass
+        elif not results:
+            dual_write_outcome = DUAL_WRITE_SKIP_EMPTY
+        else:
+            from ...trading_brain.infrastructure.prediction_line_mapper import (
+                prediction_universe_fingerprint,
+            )
+            from ...trading_brain.infrastructure.prediction_mirror_session import (
+                brain_prediction_mirror_write_dedicated,
+            )
+
+            _fp = prediction_universe_fingerprint(ticker_batch)
+            brain_prediction_mirror_write_dedicated(
+                legacy_rows=results,
+                universe_fingerprint=_fp,
+                ticker_count=len(ticker_batch),
+            )
+            dual_write_outcome = DUAL_WRITE_OK
+    except Exception:
+        logger.warning("[brain_prediction_dual_write] hook failed (legacy return preserved)", exc_info=True)
+        if dw_enabled and results:
+            dual_write_outcome = DUAL_WRITE_FAIL
+
+    _fp16 = universe_fingerprint_fp16(ticker_batch)
+    from ...trading_brain.infrastructure.prediction_read_phase5 import (
+        PredictionReadOpsMeta,
+        phase5_apply_prediction_read,
+    )
+
+    read_meta = PredictionReadOpsMeta(read=READ_NA, fp16=_fp16)
+    try:
+        results, read_meta = phase5_apply_prediction_read(
+            results=results,
+            ticker_batch=ticker_batch,
+            explicit_api_tickers=explicit_api_tickers,
+        )
+    except Exception:
+        logger.warning("[brain_prediction_read] hook_failed legacy preserved", exc_info=True)
+        read_meta = PredictionReadOpsMeta(read=READ_ERROR, fp16=_fp16)
+
+    if getattr(_pred_mirror_settings, "brain_prediction_ops_log_enabled", False):
+        logger.info(
+            format_chili_prediction_ops_line(
+                dual_write=dual_write_outcome,
+                read=read_meta.read,
+                explicit_api_tickers=explicit_api_tickers,
+                fp16=read_meta.fp16,
+                snapshot_id=read_meta.snapshot_id,
+                line_count=read_meta.line_count,
+            )
+        )
+
     return results
 
 
@@ -5018,6 +5117,12 @@ _learning_status: dict[str, Any] = {
     "last_cycle_budget": None,
 }
 
+# Phase 2: per-process context for brain DB shadow writes (cleared in shadow finally).
+_brain_shadow_ctx: dict[str, Any] = {}
+
+# Phase 3: global cycle lease enforcement (dedicated sessions; cleared in run_learning_cycle finally).
+_brain_lease_enforcement_ctx: dict[str, Any] = {}
+
 
 def get_learning_status() -> dict[str, Any]:
     status = dict(_learning_status)
@@ -5027,6 +5132,21 @@ def get_learning_status() -> dict[str, Any]:
             status["elapsed_s"] = round((datetime.utcnow() - started).total_seconds(), 1)
         except Exception:
             pass
+    try:
+        from ...config import settings as _st
+
+        if not getattr(_st, "brain_status_dual_read_enabled", False):
+            return status
+        from ...db import SessionLocal
+        from ...trading_brain.wiring import dual_read_compare_status
+
+        _sdb = SessionLocal()
+        try:
+            dual_read_compare_status(status, _sdb)
+        finally:
+            _sdb.close()
+    except Exception as e:
+        logger.warning("[brain_status_dual_read] skipped: %s", e)
     return status
 
 
@@ -5242,6 +5362,10 @@ def test_pattern_hypothesis(
             tickers = list(ALL_SCAN_TICKERS[:12])
 
     linked_insight = _find_insight_for_pattern(db, pattern)
+    from .backtest_engine import hydrate_scan_pattern_rules_json
+
+    hydrate_scan_pattern_rules_json(db, pattern, linked_insight)
+    db.refresh(pattern)
 
     tf = getattr(pattern, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
@@ -6914,6 +7038,37 @@ def run_learning_cycle(
     if _shutting_down.is_set():
         return {"ok": False, "reason": "Server is shutting down"}
 
+    _brain_lease_enforcement_ctx.clear()
+    from ...config import settings as _lease_settings
+    if getattr(_lease_settings, "brain_cycle_lease_enforcement_enabled", False):
+        from ...trading_brain.infrastructure.lease_dedicated_session import (
+            brain_lease_enforcement_log_peer_on_denial,
+            brain_lease_enforcement_try_acquire_dedicated,
+            brain_lease_holder_id,
+        )
+
+        _lease_ttl = max(
+            60, int(getattr(_lease_settings, "learning_cycle_stale_seconds", 10800))
+        )
+        _hid = brain_lease_holder_id()
+        try:
+            _acquired_lease = brain_lease_enforcement_try_acquire_dedicated(
+                holder_id=_hid,
+                lease_seconds=_lease_ttl,
+            )
+        except Exception as e:
+            logger.error(
+                "[brain_lease_enforcement] lease_acquire_error scope=global: %s",
+                e,
+                exc_info=True,
+            )
+            return {"ok": False, "reason": "Learning cycle lease unavailable"}
+        if not _acquired_lease:
+            brain_lease_enforcement_log_peer_on_denial()
+            return {"ok": False, "reason": "Learning cycle lease already held"}
+        _brain_lease_enforcement_ctx["acquired"] = True
+        _brain_lease_enforcement_ctx["holder_id"] = _hid
+
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
@@ -6942,12 +7097,44 @@ def run_learning_cycle(
 
     def _commit_step() -> None:
         try:
+            from ...trading_brain.wiring import brain_shadow_before_commit
+
+            brain_shadow_before_commit(
+                db,
+                ctx=_brain_shadow_ctx,
+                learning_status=_learning_status,
+            )
+            if _brain_lease_enforcement_ctx.get("acquired"):
+                from ...config import settings as _ls
+                from ...trading_brain.infrastructure.lease_dedicated_session import (
+                    brain_lease_enforcement_refresh_soft_dedicated,
+                )
+
+                brain_lease_enforcement_refresh_soft_dedicated(
+                    holder_id=str(_brain_lease_enforcement_ctx["holder_id"]),
+                    lease_seconds=max(
+                        60,
+                        int(getattr(_ls, "learning_cycle_stale_seconds", 10800)),
+                    ),
+                )
             db.commit()
         except Exception as e:
             logger.warning("[learning] Step commit failed: %s", e)
 
+    interrupted = False
+    report_error: str | None = None
+
     try:
         from ...config import settings
+        from ...trading_brain.wiring import brain_shadow_begin_cycle
+
+        brain_shadow_begin_cycle(
+            db,
+            ctx=_brain_shadow_ctx,
+            full_universe=full_universe,
+            data_provider=_provider,
+            learning_status=_learning_status,
+        )
 
         # Step 1: Pre-filter with Massive.com + yfinance screener
         if _shutting_down.is_set():
@@ -7398,11 +7585,14 @@ def run_learning_cycle(
         )
         _commit_step()
         _learning_status["steps_completed"] = 25
+        _commit_step()
 
     except InterruptedError:
+        interrupted = True
         logger.info("[trading] Learning cycle interrupted by shutdown")
         report["interrupted"] = True
     except Exception as e:
+        report_error = str(e)
         logger.error(f"[trading] Learning cycle error: {e}")
         report["error"] = str(e)
         try:
@@ -7411,6 +7601,9 @@ def run_learning_cycle(
             pass
     finally:
         elapsed = time.time() - start
+        _lease_release_holder = _brain_lease_enforcement_ctx.get("holder_id")
+        _lease_release_acquired = bool(_brain_lease_enforcement_ctx.get("acquired"))
+        _brain_lease_enforcement_ctx.clear()
         _learning_status["running"] = False
         _learning_status["phase"] = "idle"
         _learning_status["current_step"] = ""
@@ -7440,6 +7633,28 @@ def run_learning_cycle(
             _learning_status["last_cycle_budget"] = report.get("brain_resource_budget")
         except Exception:
             pass
+
+        try:
+            from ...trading_brain.wiring import brain_shadow_finally
+
+            brain_shadow_finally(
+                db,
+                ctx=_brain_shadow_ctx,
+                learning_status=_learning_status,
+                interrupted=interrupted,
+                report_error=report_error,
+            )
+        except Exception as e:
+            logger.warning("[brain_shadow] finally hook failed (ignored): %s", e)
+
+        if _lease_release_acquired and _lease_release_holder:
+            from ...trading_brain.infrastructure.lease_dedicated_session import (
+                brain_lease_enforcement_release_dedicated,
+            )
+
+            brain_lease_enforcement_release_dedicated(
+                holder_id=str(_lease_release_holder)
+            )
 
     logger.info(
         f"[learning] Learning cycle finished in {elapsed:.0f}s "

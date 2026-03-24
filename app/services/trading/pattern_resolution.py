@@ -12,6 +12,16 @@ from ...models.trading import ScanPattern, TradingInsight
 _LEGACY_UNLINKED_NAME = "[Unlinked legacy insight]"
 
 
+def is_legacy_unlinked_scan_pattern(pattern: ScanPattern | None) -> bool:
+    """True for the shared sentinel row — never overwrite ``rules_json`` (many insights share it)."""
+    if pattern is None:
+        return False
+    return (
+        (getattr(pattern, "origin", "") or "").strip() == "legacy_unlinked"
+        and (getattr(pattern, "name", "") or "").strip() == _LEGACY_UNLINKED_NAME
+    )
+
+
 def get_legacy_unlinked_scan_pattern_id(db: Session) -> int:
     """PK of the sentinel row (migration 043); creates it if missing (e.g. tests after TRUNCATE)."""
     sp = (

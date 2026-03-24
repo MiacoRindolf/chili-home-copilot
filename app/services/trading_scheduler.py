@@ -338,6 +338,7 @@ def _run_crypto_breakout_job():
                 f"Target ${setup.get('take_profit')}\n"
                 + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
+                + "\nSource: crypto breakout scan (heuristic; not a Brain ScanPattern)."
             )
 
             dispatch_alert(
@@ -457,6 +458,7 @@ def _run_stock_breakout_job():
                 f"Target ${setup.get('take_profit')}\n"
                 + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
+                + "\nSource: stock breakout scan (heuristic; not a Brain ScanPattern)."
             )
 
             dispatch_alert(

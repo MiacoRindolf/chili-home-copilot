@@ -111,6 +111,21 @@ class Settings(BaseSettings):
     # forever; clear the lock after this many seconds (default 3h).
     learning_cycle_stale_seconds: int = 10800
 
+    # Trading-brain Phase 2: mirror cycle/stage rows + optional lease telemetry + status dual-read (legacy authoritative).
+    brain_cycle_shadow_write_enabled: bool = False
+    brain_status_dual_read_enabled: bool = False
+    brain_lease_shadow_write_enabled: bool = False
+    # Phase 3: single-flight via `brain_cycle_lease` using dedicated DB sessions (admission only; legacy status authoritative for UI).
+    brain_cycle_lease_enforcement_enabled: bool = False
+    # Phase 4: append-only mirror of legacy `get_current_predictions` (dedicated session; routers unchanged; not read-authoritative).
+    brain_prediction_dual_write_enabled: bool = False
+    # Phase 5: mirror read compare + optional candidate-authoritative (explicit API tickers only; no router/API shape change).
+    brain_prediction_read_compare_enabled: bool = False
+    brain_prediction_read_authoritative_enabled: bool = False
+    brain_prediction_read_max_age_seconds: int = 900
+    # Phase 6: one bounded INFO line per _get_current_predictions_impl (chili_prediction_ops); WARNING paths unchanged when off.
+    brain_prediction_ops_log_enabled: bool = False
+
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
     brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps

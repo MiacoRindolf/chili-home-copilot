@@ -42,3 +42,4 @@ Use `scripts/start-https.ps1` and run `python scripts/brain_worker.py` on the ho
 
 - [chili-brain/README.md](../chili-brain/README.md)
 - [MIGRATION_BRAIN_SERVICE.md](MIGRATION_BRAIN_SERVICE.md)
+- [TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md](TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md) — prediction mirror flags, soak, and release-blocking log check (Phase 8 ops)

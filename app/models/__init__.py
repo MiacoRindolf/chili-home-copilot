@@ -63,6 +63,14 @@ from .project_brain import (
     PORequirement,
     ProjectAgentState,
 )
+from .trading_brain_phase1 import (
+    BrainCycleLease,
+    BrainIntegrationEvent,
+    BrainLearningCycleRun,
+    BrainPredictionLine,
+    BrainPredictionSnapshot,
+    BrainStageJob,
+)
 
 __all__ = [
     "User",
@@ -130,5 +138,11 @@ __all__ = [
     "AgentMessage",
     "POQuestion",
     "PORequirement",
+    "BrainLearningCycleRun",
+    "BrainStageJob",
+    "BrainCycleLease",
+    "BrainIntegrationEvent",
+    "BrainPredictionSnapshot",
+    "BrainPredictionLine",
 ]
 

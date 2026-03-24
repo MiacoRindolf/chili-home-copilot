@@ -533,7 +533,8 @@ def _rules_tuple_from_scan_pattern(
     """Parse ``ScanPattern`` into (conditions, name, exit_config, pattern.id) or None."""
     import json as _json
 
-    if not pattern or not pattern.rules_json:
+    raw = getattr(pattern, "rules_json", None) if pattern else None
+    if not pattern or not (isinstance(raw, str) and raw.strip()):
         return None
     exit_cfg = None
     if pattern.exit_config:
@@ -542,13 +543,114 @@ def _rules_tuple_from_scan_pattern(
         except (_json.JSONDecodeError, TypeError):
             pass
     try:
-        rules = _json.loads(pattern.rules_json)
+        rules = _json.loads(raw)
+        if not isinstance(rules, dict):
+            return None
         conditions = rules.get("conditions", [])
+        if isinstance(conditions, dict):
+            conditions = [conditions]
+        if not isinstance(conditions, list):
+            return None
+        conditions = [c for c in conditions if isinstance(c, dict) and c]
         if conditions:
             return conditions, pattern.name, exit_cfg, int(pattern.id)
     except (_json.JSONDecodeError, TypeError):
         pass
     return None
+
+
+def _text_sources_for_rule_hydration(pattern, insight) -> list[str]:
+    """Ordered sources to parse into ``rules_json`` (pattern fields first, then insight)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for t in (
+        getattr(pattern, "description", None),
+        getattr(pattern, "name", None),
+    ):
+        if not t:
+            continue
+        s = str(t).strip()
+        if len(s) < 2 or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    if insight is not None:
+        pd = getattr(insight, "pattern_description", None)
+        if pd:
+            s = str(pd).strip()
+            if len(s) >= 2 and s not in seen:
+                seen.add(s)
+                out.append(s)
+    return out
+
+
+def hydrate_scan_pattern_rules_json(
+    db: Session,
+    pattern,
+    insight=None,
+) -> bool:
+    """Persist ``rules_json.conditions`` by parsing NL from pattern/insight when missing.
+
+    Skips the shared legacy-unlinked sentinel (many insights reference one row).
+    Returns True if the pattern now has usable conditions (including already-valid JSON).
+    """
+    import json as _json
+
+    from .pattern_resolution import is_legacy_unlinked_scan_pattern
+
+    if not pattern:
+        return False
+    if _rules_tuple_from_scan_pattern(pattern):
+        return True
+    if is_legacy_unlinked_scan_pattern(pattern):
+        return False
+
+    from ...models.trading import TradingInsight
+
+    texts = _text_sources_for_rule_hydration(pattern, insight)
+    seen_txt = set(texts)
+    for (_pd,) in (
+        db.query(TradingInsight.pattern_description)
+        .filter(TradingInsight.scan_pattern_id == int(pattern.id))
+        .order_by(
+            TradingInsight.evidence_count.desc().nullslast(),
+            TradingInsight.id.desc(),
+        )
+        .limit(5)
+        .all()
+    ):
+        s = (_pd or "").strip()
+        if len(s) >= 8 and s not in seen_txt:
+            seen_txt.add(s)
+            texts.append(s)
+
+    for txt in texts:
+        conds = _parse_conditions_from_description(txt)
+        if not conds:
+            continue
+        try:
+            pattern.rules_json = _json.dumps({"conditions": conds})
+            db.add(pattern)
+            db.commit()
+            db.refresh(pattern)
+            logger.info(
+                "[backtest_engine] Hydrated ScanPattern id=%s rules_json (%d conditions) from parsed text",
+                pattern.id,
+                len(conds),
+            )
+            return _rules_tuple_from_scan_pattern(pattern) is not None
+        except Exception as exc:
+            logger.warning(
+                "[backtest_engine] Failed to persist rules_json for ScanPattern id=%s: %s",
+                getattr(pattern, "id", None),
+                exc,
+            )
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            return False
+    return False
 
 
 def _find_linked_pattern(
@@ -581,12 +683,22 @@ def _find_linked_pattern(
         return None
 
     tup = _rules_tuple_from_scan_pattern(pattern)
-    if not tup:
-        logger.warning(
-            "_find_linked_pattern: ScanPattern id=%s has no usable rules_json conditions",
-            sp_id,
-        )
-    return tup
+    if tup:
+        return tup
+
+    if hydrate_scan_pattern_rules_json(db, pattern, insight):
+        tup = _rules_tuple_from_scan_pattern(pattern)
+        if tup:
+            return tup
+
+    logger.warning(
+        "_find_linked_pattern: ScanPattern id=%s (%r) has no usable rules_json and NL hydration "
+        "found no extractable conditions (insight id=%s)",
+        sp_id,
+        (getattr(pattern, "name", None) or "")[:100],
+        getattr(insight, "id", None),
+    )
+    return None
 
 
 # ---------------------------------------------------------------------------

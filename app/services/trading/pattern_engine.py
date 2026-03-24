@@ -487,9 +487,21 @@ def create_pattern(db: Session, data: dict[str, Any]) -> ScanPattern:
     conditions: list[dict] = []
     try:
         rules = _json.loads(rules_json) if rules_json else {}
-        conditions = rules.get("conditions", [])
+        raw_c = rules.get("conditions", [])
+        if isinstance(raw_c, dict):
+            raw_c = [raw_c]
+        if isinstance(raw_c, list):
+            conditions = [c for c in raw_c if isinstance(c, dict) and c]
     except Exception:
-        pass
+        conditions = []
+    if not conditions and (data.get("description") or data.get("name")):
+        from ...services.trading.backtest_engine import _parse_conditions_from_description
+
+        blob = f"{data.get('name') or ''} | {data.get('description') or ''}"
+        parsed = _parse_conditions_from_description(blob)
+        if parsed:
+            conditions = parsed
+            rules_json = _json.dumps({"conditions": conditions})
 
     tf = data.get("timeframe") or infer_pattern_timeframe(
         conditions,

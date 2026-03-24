@@ -1806,6 +1806,180 @@ def _migration_047_scan_pattern_research_quant_columns(conn) -> None:
         conn.commit()
 
 
+def _migration_048_brain_learning_cycle_tables(conn) -> None:
+    """Trading-brain Phase 1: learning cycle run + stage job tables."""
+    tables = _tables(conn)
+    if "brain_learning_cycle_run" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_learning_cycle_run (
+                    id SERIAL PRIMARY KEY,
+                    correlation_id VARCHAR(64) NOT NULL,
+                    universe_id VARCHAR(64),
+                    status VARCHAR(24) NOT NULL,
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_lcr_correlation_id ON brain_learning_cycle_run (correlation_id)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_lcr_universe_id ON brain_learning_cycle_run (universe_id)"
+            )
+        )
+        conn.commit()
+    if "brain_stage_job" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_stage_job (
+                    id SERIAL PRIMARY KEY,
+                    cycle_run_id INTEGER NOT NULL
+                        REFERENCES brain_learning_cycle_run(id) ON DELETE CASCADE,
+                    stage_key VARCHAR(64) NOT NULL,
+                    ordinal INTEGER NOT NULL,
+                    status VARCHAR(24) NOT NULL,
+                    attempt INTEGER NOT NULL DEFAULT 0,
+                    lease_until TIMESTAMP,
+                    worker_id VARCHAR(128),
+                    input_artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    output_artifact_refs JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    error_detail TEXT,
+                    skip_reason VARCHAR(255),
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    CONSTRAINT uq_brain_stage_job_cycle_ordinal UNIQUE (cycle_run_id, ordinal)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_stage_job_cycle_run_id ON brain_stage_job (cycle_run_id)"
+            )
+        )
+        conn.commit()
+
+
+def _migration_049_brain_cycle_lease(conn) -> None:
+    """Single-flight lease row (seed scope_key=global)."""
+    tables = _tables(conn)
+    if "brain_cycle_lease" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_cycle_lease (
+                    scope_key VARCHAR(64) PRIMARY KEY,
+                    cycle_run_id INTEGER REFERENCES brain_learning_cycle_run(id) ON DELETE SET NULL,
+                    holder_id VARCHAR(128) NOT NULL,
+                    acquired_at TIMESTAMP,
+                    expires_at TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.commit()
+    conn.execute(
+        text(
+            """
+            INSERT INTO brain_cycle_lease (scope_key, holder_id)
+            VALUES ('global', '')
+            ON CONFLICT (scope_key) DO NOTHING
+            """
+        )
+    )
+    conn.commit()
+
+
+def _migration_050_brain_integration_event(conn) -> None:
+    """Inbound integration event idempotency store (Phase 1: table only)."""
+    tables = _tables(conn)
+    if "brain_integration_event" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_integration_event (
+                    idempotency_key VARCHAR(256) PRIMARY KEY,
+                    event_id VARCHAR(64) NOT NULL,
+                    event_type VARCHAR(64) NOT NULL,
+                    payload_hash VARCHAR(128) NOT NULL,
+                    payload_json JSONB NOT NULL,
+                    received_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    processed_at TIMESTAMP,
+                    status VARCHAR(24) NOT NULL
+                )
+                """
+            )
+        )
+        conn.commit()
+
+
+def _migration_051_brain_prediction_snapshot(conn) -> None:
+    """Phase 4: append-only mirror of legacy get_current_predictions (dual-write; not read-authoritative)."""
+    tables = _tables(conn)
+    if "brain_prediction_snapshot" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_prediction_snapshot (
+                    id BIGSERIAL PRIMARY KEY,
+                    as_of_ts TIMESTAMP NOT NULL,
+                    universe_fingerprint VARCHAR(64) NOT NULL,
+                    ticker_count INTEGER NOT NULL,
+                    source_tag VARCHAR(64) NOT NULL DEFAULT 'legacy_get_current_predictions',
+                    correlation_id VARCHAR(40) NOT NULL
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_prediction_snapshot_universe_fp ON brain_prediction_snapshot (universe_fingerprint)"
+            )
+        )
+        conn.commit()
+    if "brain_prediction_line" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_prediction_line (
+                    id BIGSERIAL PRIMARY KEY,
+                    snapshot_id BIGINT NOT NULL REFERENCES brain_prediction_snapshot(id) ON DELETE CASCADE,
+                    sort_rank INTEGER NOT NULL,
+                    ticker VARCHAR(32) NOT NULL,
+                    score DOUBLE PRECISION NOT NULL,
+                    confidence INTEGER,
+                    direction VARCHAR(32),
+                    price DOUBLE PRECISION,
+                    meta_ml_probability DOUBLE PRECISION,
+                    vix_regime VARCHAR(32),
+                    signals_json JSONB NOT NULL DEFAULT '[]',
+                    matched_patterns_json JSONB NOT NULL DEFAULT '[]',
+                    suggested_stop DOUBLE PRECISION,
+                    suggested_target DOUBLE PRECISION,
+                    risk_reward DOUBLE PRECISION,
+                    position_size_pct DOUBLE PRECISION
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_prediction_line_snapshot_id ON brain_prediction_line (snapshot_id)"
+            )
+        )
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -1855,6 +2029,10 @@ MIGRATIONS = [
     ("045_trading_alert_scan_pattern_id", _migration_045_trading_alert_scan_pattern_id),
     ("046_hypothesis_family_columns", _migration_046_hypothesis_family_columns),
     ("047_scan_pattern_research_quant_columns", _migration_047_scan_pattern_research_quant_columns),
+    ("048_brain_learning_cycle_tables", _migration_048_brain_learning_cycle_tables),
+    ("049_brain_cycle_lease", _migration_049_brain_cycle_lease),
+    ("050_brain_integration_event", _migration_050_brain_integration_event),
+    ("051_brain_prediction_snapshot", _migration_051_brain_prediction_snapshot),
 ]
 
 
