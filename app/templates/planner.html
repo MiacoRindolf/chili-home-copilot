@@ -732,6 +732,32 @@
       <h2 contenteditable="true" id="detail-title" spellcheck="false"></h2>
       <textarea class="detail-desc" id="detail-desc" placeholder="Add a description..."></textarea>
 
+      <!-- Planner Parity v1: compact coding cockpit (read-only; visible whenever task detail is open) -->
+      <div id="planner-coding-cockpit" style="margin:12px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface-alt, rgba(0,0,0,0.03));">
+        <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-bottom:6px;">
+          <span style="font-size:12px;font-weight:700;color:var(--text);">Coding cockpit</span>
+          <span style="font-size:10px;color:var(--text-muted);">(read-only)</span>
+          <button type="button" class="watch-toggle" id="planner-cockpit-refresh-btn" onclick="refreshPlannerCodingCockpit()" title="Explicit refresh only; no auto-polling">Refresh cockpit</button>
+          <button type="button" class="watch-toggle" onclick="openBrainWithPlannerTask()">Open in Brain</button>
+        </div>
+        <div id="planner-cockpit-summary-line" style="font-size:11px;color:var(--text-secondary);line-height:1.4;"></div>
+        <div id="planner-cockpit-validation-line" style="font-size:11px;color:var(--text-secondary);line-height:1.4;margin-top:4px;"></div>
+        <div id="planner-cockpit-snapshot-line" style="font-size:11px;color:var(--text-secondary);line-height:1.4;margin-top:4px;"></div>
+        <div id="planner-cockpit-apply-line" style="font-size:11px;color:var(--text-secondary);line-height:1.4;margin-top:4px;"></div>
+        <div id="planner-cockpit-next-steps" style="font-size:10px;color:var(--text-muted);margin-top:8px;line-height:1.45;">
+          <strong>Writes</strong> (suggest, save snapshot, dry-run, apply, run validation) stay in <strong>Brain</strong> for this milestone. Use <strong>Open in Brain</strong> or the launch buttons below. Optional: expand &quot;Show coding workflow&quot; below for profile, brief, or validation from Planner.
+        </div>
+        <div id="planner-cockpit-launch-rail" style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--border);">
+          <div style="font-size:10px;font-weight:700;color:var(--text);margin-bottom:4px;">Launch in Brain (opens new tab; read-only from Planner)</div>
+          <div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">
+            <button type="button" class="watch-toggle" onclick="openBrainHandoffLaunch('suggest')" title="Opens Brain with planner context; scrolls to Suggest">Suggest</button>
+            <button type="button" class="watch-toggle" onclick="openBrainHandoffLaunch('implement')" title="Opens Brain; scrolls to snapshot save / dry-run / apply">Implement</button>
+            <button type="button" class="watch-toggle" onclick="openBrainHandoffLaunch('validate')" title="Opens Brain; scrolls to workspace validation">Validate</button>
+          </div>
+          <div id="planner-cockpit-launch-hint" style="font-size:10px;color:var(--text-muted);margin-top:6px;line-height:1.4;">Advisory only — not an automated workflow.</div>
+        </div>
+      </div>
+
       <div class="subtask-section">
         <h4>Subtasks</h4>
         <div id="detail-subtasks"></div>
@@ -797,6 +823,75 @@
         <div class="detail-field-label">Watchers</div>
         <div class="detail-watchers" id="detail-watchers"></div>
         <button class="watch-toggle" id="detail-watch-btn" onclick="toggleWatch()">Watch</button>
+      </div>
+      <div class="detail-field" style="border-top:1px solid var(--border);padding-top:12px;margin-top:8px;">
+        <label style="display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;color:var(--text-secondary);">
+          <input type="checkbox" id="coding-panel-toggle" />
+          Show coding workflow (off by default)
+        </label>
+      </div>
+      <div id="coding-panel-body" style="display:none;">
+        <div class="detail-field">
+          <div class="detail-field-label">Coding workflow mode</div>
+          <select id="coding-workflow-mode" onchange="saveCodingWorkflowMode(this.value)">
+            <option value="tracked">tracked</option>
+            <option value="planned">planned</option>
+            <option value="assisted">assisted</option>
+            <option value="executing">executing</option>
+          </select>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Readiness</div>
+          <div id="coding-readiness-badge" style="font-size:12px;font-weight:600;color:var(--accent);"></div>
+          <button type="button" id="coding-reopen-from-blocked-btn" class="watch-toggle" style="display:none;margin-top:6px;" onclick="reopenCodingFromBlocked()">Reopen for PO edits (from blocked)</button>
+          <div id="coding-open-clar-hint" style="font-size:11px;color:#f59e0b;margin-top:4px;display:none;"></div>
+          <div id="coding-ops-hints" style="font-size:10px;color:var(--text-muted);margin-top:4px;"></div>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Repo index (code_brain_repos)</div>
+          <input type="number" id="coding-repo-index" min="0" value="0" style="width:100%;" />
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Sub-path (under repo)</div>
+          <input type="text" id="coding-sub-path" placeholder="e.g. app" style="width:100%;" />
+        </div>
+        <button type="button" class="watch-toggle" style="margin-bottom:10px;" onclick="saveCodingProfile()">Save repo profile</button>
+        <div class="detail-field">
+          <div class="detail-field-label">Clarifications</div>
+          <div id="coding-clarifications" style="font-size:12px;margin-bottom:8px;"></div>
+          <input type="text" id="coding-new-question" placeholder="New question..." style="width:100%;margin-bottom:4px;" />
+          <button type="button" class="watch-toggle" onclick="addCodingClarification()">Add question</button>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Implementation brief</div>
+          <textarea id="coding-brief-body" rows="5" style="width:100%;font-size:12px;" placeholder="What to build, constraints, acceptance..."></textarea>
+          <button type="button" class="watch-toggle" style="margin-top:6px;" onclick="saveCodingBrief()">Save brief</button>
+          <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="approveCodingBrief()">Approve brief</button>
+        </div>
+        <div class="detail-field">
+          <button type="button" class="add-task-btn" style="padding:6px 14px;font-size:12px;" onclick="runCodingValidation()">Run validation (read-only tools)</button>
+          <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="viewCodingHandoff()">View handoff</button>
+          <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="copyCodingHandoffJson()">Copy handoff (JSON)</button>
+          <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="copyCodingHandoffMarkdown()">Copy handoff (Markdown)</button>
+          <button type="button" class="watch-toggle" style="margin-top:6px;margin-left:4px;" onclick="openBrainWithPlannerTask()">Open in Brain</button>
+          <div id="coding-handoff-preview-wrap" style="display:none;margin-top:8px;">
+            <div style="font-size:10px;color:var(--text-muted);margin-bottom:4px;">Handoff preview (read-only; from explicit View only; not auto-refreshed)</div>
+            <pre id="coding-handoff-preview" style="font-size:10px;background:var(--code-bg);padding:8px;border-radius:6px;max-height:220px;overflow:auto;white-space:pre-wrap;word-break:break-word;margin:0;"></pre>
+          </div>
+          <div id="coding-validation-status" style="font-size:11px;color:var(--text-muted);margin-top:6px;"></div>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Validation runs (metadata)</div>
+          <div id="coding-validation-runs-list" style="font-size:11px;color:var(--text-secondary);max-height:200px;overflow-y:auto;"></div>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Blockers</div>
+          <div id="coding-blockers" style="font-size:11px;color:var(--text-secondary);max-height:120px;overflow-y:auto;"></div>
+        </div>
+        <div class="detail-field">
+          <div class="detail-field-label">Last run artifacts</div>
+          <pre id="coding-artifacts" style="font-size:10px;background:var(--code-bg);padding:8px;border-radius:6px;max-height:160px;overflow:auto;white-space:pre-wrap;"></pre>
+        </div>
       </div>
       <div class="activity-section">
         <h4>Activity</h4>
@@ -961,6 +1056,7 @@ function loadProject(id) {
       if (d.project) {
         activeProject = d.project;
         renderProjectView();
+        finishPlannerDeepLinkIfMatching();
       }
     });
 }
@@ -1057,6 +1153,49 @@ function getAllTasks(p) {
   function collect(list) { list.forEach(function(t) { all.push(t); if (t.subtasks) collect(t.subtasks); }); }
   collect(tasks);
   return all;
+}
+
+/* Phase 12: one-shot deep link ?project_id=&task_id= — data-bound only; no lookup fetch; no retry */
+var PLANNER_DEEP_LINK = (function parsePlannerDeepLinkOnce() {
+  try {
+    var q = new URLSearchParams(window.location.search || '');
+    var pr = q.get('project_id');
+    var tr = q.get('task_id');
+    if (pr == null || tr == null || pr === '' || tr === '') return null;
+    var pid = parseInt(pr, 10);
+    var tid = parseInt(tr, 10);
+    if (isNaN(pid) || isNaN(tid) || pid < 1 || tid < 1) return null;
+    return { pid: pid, tid: tid };
+  } catch (e) { return null; }
+})();
+var _plannerDeepLinkDone = false;
+
+function plannerDeepLinkProjectInSidebar(pid) {
+  return projects.some(function(p) { return p.id === pid; });
+}
+
+function plannerDeepLinkTaskInActiveProject(tid) {
+  if (!activeProject) return false;
+  return getAllTasks(activeProject).some(function(t) { return t.id === tid; });
+}
+
+function finishPlannerDeepLinkIfMatching() {
+  if (!PLANNER_DEEP_LINK || _plannerDeepLinkDone) return;
+  if (!activeProject) return;
+  var dl = PLANNER_DEEP_LINK;
+  if (activeProject.id !== dl.pid) {
+    _plannerDeepLinkDone = true;
+    return;
+  }
+  if (!plannerDeepLinkTaskInActiveProject(dl.tid)) {
+    _plannerDeepLinkDone = true;
+    return;
+  }
+  _plannerDeepLinkDone = true;
+  openDetailPanel(dl.tid);
+  try {
+    history.replaceState({}, '', window.location.pathname + (window.location.hash || ''));
+  } catch (e) {}
 }
 
 function getFilteredTasks() {
@@ -1534,19 +1673,25 @@ function closeDetailPanel() {
   saveDetailFields();
   document.getElementById('detail-overlay').classList.remove('open');
   document.getElementById('detail-panel').classList.remove('open');
+  clearCodingHandoffPreview();
+  clearPlannerCodingCockpit();
   detailTaskId = null;
   detailTask = null;
   if (activeProjectId) loadProject(activeProjectId);
 }
 
 function loadDetailTask(taskId) {
-  fetch('/api/planner/tasks/' + taskId).then(function(r) { return r.json(); }).then(function(d) {
+  if (window._codingHandoffPreviewTaskId != null && taskId !== window._codingHandoffPreviewTaskId) {
+    clearCodingHandoffPreview();
+  }
+  return fetch('/api/planner/tasks/' + taskId).then(function(r) { return r.json(); }).then(function(d) {
     if (d.task) {
       detailTask = d.task;
       renderDetailPanel();
       loadComments(taskId);
       loadActivity(taskId);
     }
+    return d;
   });
 }
 
@@ -1572,6 +1717,123 @@ function renderDetailPanel() {
   renderDetailLabels();
   renderDetailWatchers();
   renderDetailSubtasks();
+  refreshCodingPanelChrome();
+  refreshPlannerCodingCockpit();
+}
+
+function clearPlannerCodingCockpit() {
+  var ids = ['planner-cockpit-summary-line', 'planner-cockpit-validation-line', 'planner-cockpit-snapshot-line', 'planner-cockpit-apply-line'];
+  ids.forEach(function(id) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = '';
+  });
+}
+
+function refreshPlannerCodingCockpit() {
+  if (!detailTaskId) return;
+  var reqTid = detailTaskId;
+  var sumEl = document.getElementById('planner-cockpit-summary-line');
+  var valEl = document.getElementById('planner-cockpit-validation-line');
+  var snapEl = document.getElementById('planner-cockpit-snapshot-line');
+  var appEl = document.getElementById('planner-cockpit-apply-line');
+  if (sumEl) sumEl.textContent = 'Loading coding cockpit…';
+  if (valEl) valEl.textContent = '';
+  if (snapEl) snapEl.textContent = '';
+  if (appEl) appEl.textContent = '';
+
+  fetch('/api/planner/tasks/' + reqTid + '/coding/summary', { credentials: 'same-origin' })
+    .then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); })
+    .then(function(x) {
+      if (reqTid !== detailTaskId) return;
+      if (!x.ok || !x.d || !x.d.ok || !x.d.summary) {
+        if (sumEl) sumEl.textContent = 'Coding summary unavailable (sign in or open a task you can access).';
+        if (valEl) valEl.textContent = '';
+        if (snapEl) snapEl.textContent = '';
+        if (appEl) appEl.textContent = '';
+        plannerCockpitSetLaunchHint({ summaryOk: false });
+        return;
+      }
+      var s = x.d.summary;
+      var occ = s.open_clarification_count || 0;
+      var parts = [];
+      parts.push('Readiness: ' + (s.coding_readiness_state || '—'));
+      if (occ > 0) parts.push(occ + ' open clarification(s)');
+      var oh = s.ops_hints || {};
+      if (oh.code_repos_configured_count != null) parts.push('code_brain_repos count: ' + oh.code_repos_configured_count);
+      if (oh.cwd_resolvable === false) parts.push('cwd not resolvable');
+      if (sumEl) sumEl.textContent = parts.join(' · ');
+      var runs = s.validation_runs || [];
+      if (runs.length === 0) {
+        if (valEl) valEl.textContent = 'Latest validation: none in summary window.';
+      } else {
+        var vr = runs[0];
+        var em = vr.error_message ? String(vr.error_message).slice(0, 100) : '';
+        if (valEl) {
+          valEl.textContent = 'Latest validation: #' + vr.id + ' · ' + (vr.trigger_source != null ? String(vr.trigger_source) : '') + ' · ' + (vr.status != null ? String(vr.status) : '') + ' · exit ' + (vr.exit_code != null ? String(vr.exit_code) : '—') + (em ? ' · ' + em : '');
+        }
+      }
+      fetch('/api/planner/tasks/' + reqTid + '/coding/agent-suggestions?limit=1', { credentials: 'same-origin' })
+        .then(function(r2) { return r2.json().then(function(d2) { return { ok: r2.ok, d: d2 }; }); })
+        .then(function(y) {
+          if (reqTid !== detailTaskId) return;
+          if (!y.ok || !y.d || !y.d.ok || !Array.isArray(y.d.suggestions)) {
+            if (snapEl) snapEl.textContent = 'Latest snapshot: list unavailable.';
+            if (appEl) appEl.textContent = '';
+            plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: false, hasApply: false });
+            return;
+          }
+          var sugg = y.d.suggestions;
+          if (sugg.length === 0) {
+            if (snapEl) snapEl.textContent = 'Latest snapshot: none.';
+            if (appEl) appEl.textContent = 'Latest apply attempt: —';
+            plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: false, hasApply: false });
+            return;
+          }
+          var sn = sugg[0];
+          var sid = sn.id;
+          if (snapEl) {
+            snapEl.textContent = 'Latest snapshot: #' + sn.id + ' · ' + (sn.created_at != null ? String(sn.created_at) : '') + ' · diffs:' + (sn.diffs_count != null ? sn.diffs_count : '—') + ' · files:' + (sn.files_changed_count != null ? sn.files_changed_count : '—');
+          }
+          fetch('/api/planner/tasks/' + reqTid + '/coding/agent-suggestions/' + sid + '/apply-attempts', { credentials: 'same-origin' })
+            .then(function(r3) { return r3.json().then(function(d3) { return { ok: r3.ok, d: d3 }; }); })
+            .then(function(z) {
+              if (reqTid !== detailTaskId) return;
+              if (!z.ok || !z.d || !z.d.ok || !Array.isArray(z.d.apply_attempts)) {
+                if (appEl) appEl.textContent = 'Latest apply attempt: unavailable.';
+                plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: true, hasApply: false });
+                return;
+              }
+              var aa = z.d.apply_attempts;
+              if (aa.length === 0) {
+                if (appEl) appEl.textContent = 'Latest apply attempt: none for latest snapshot.';
+                plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: true, hasApply: false });
+              } else {
+                var a = aa[0];
+                var prev = a.message_preview ? String(a.message_preview).slice(0, 80) : '';
+                if (appEl) {
+                  appEl.textContent = 'Latest apply (first row of list): #' + a.id + ' · dry_run:' + a.dry_run + ' · ' + (a.status != null ? String(a.status) : '') + (prev ? ' · ' + prev : '');
+                }
+                plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: true, hasApply: true });
+              }
+            })
+            .catch(function() {
+              if (reqTid !== detailTaskId) return;
+              if (appEl) appEl.textContent = 'Latest apply attempt: request failed.';
+              plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: true, hasApply: false });
+            });
+        })
+        .catch(function() {
+          if (reqTid !== detailTaskId) return;
+          if (snapEl) snapEl.textContent = 'Latest snapshot: request failed.';
+          if (appEl) appEl.textContent = '';
+          plannerCockpitSetLaunchHint({ summaryOk: true, occ: occ, hasSnap: false, hasApply: false });
+        });
+    })
+    .catch(function() {
+      if (reqTid !== detailTaskId) return;
+      if (sumEl) sumEl.textContent = 'Coding cockpit request failed.';
+      plannerCockpitSetLaunchHint({ summaryOk: false });
+    });
 }
 
 function renderDetailLabels() {
@@ -1874,13 +2136,515 @@ document.getElementById('planner-chat-input').addEventListener('keydown', functi
   if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); plannerChatSend(); }
 });
 
+/* ── Coding workflow panel (Phase 1, opt-in) ──────────────── */
+function wireCodingPanelOnce() {
+  if (window._codingPanelWired) return;
+  window._codingPanelWired = true;
+  var c = document.getElementById('coding-panel-toggle');
+  if (!c) return;
+  if (localStorage.getItem('plannerCodingPanel') === '1') c.checked = true;
+  c.onchange = function() {
+    localStorage.setItem('plannerCodingPanel', c.checked ? '1' : '0');
+    toggleCodingPanelBody();
+  };
+}
+function toggleCodingPanelBody() {
+  var cb = document.getElementById('coding-panel-toggle');
+  var body = document.getElementById('coding-panel-body');
+  if (!cb || !body) return;
+  body.style.display = cb.checked ? 'block' : 'none';
+  if (cb.checked && detailTaskId) {
+    loadCodingSummary();
+    loadCodingValidationRunsList();
+  }
+}
+function refreshCodingPanelChrome() {
+  wireCodingPanelOnce();
+  var cwm = document.getElementById('coding-workflow-mode');
+  if (cwm && detailTask) cwm.value = detailTask.coding_workflow_mode || 'tracked';
+  toggleCodingPanelBody();
+}
+/* Phase 9: read-only list from GET .../coding/validation/runs (default limit only; no polling). */
+function loadCodingValidationRunsList() {
+  if (!detailTaskId) return;
+  var tid = detailTaskId;
+  var el = document.getElementById('coding-validation-runs-list');
+  if (!el) return;
+  var reqTid = tid;
+  fetch('/api/planner/tasks/' + tid + '/coding/validation/runs', { credentials: 'same-origin' })
+    .then(function(r) {
+      return r.json().then(function(d) { return { httpOk: r.ok, d: d }; });
+    })
+    .then(function(x) {
+      if (reqTid !== detailTaskId) return;
+      if (!x.httpOk || !x.d || x.d.ok !== true || !Array.isArray(x.d.runs)) {
+        var err = (x.d && x.d.error) ? x.d.error : 'unavailable';
+        el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">Runs list: ' + esc(String(err)) + '</div>';
+        return;
+      }
+      var runs = x.d.runs;
+      if (!runs.length) {
+        el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">No validation runs in the default window.</div>';
+        return;
+      }
+      var h = '<table style="width:100%;font-size:11px;border-collapse:collapse;"><thead><tr>' +
+        '<th style="text-align:left;padding:2px 4px;">ID</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Status</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Trigger</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Started</th>' +
+        '<th style="text-align:left;padding:2px 4px;">Finished</th>' +
+        '<th style="text-align:right;padding:2px 4px;">Exit</th>' +
+        '<th style="text-align:center;padding:2px 4px;">Timeout</th>' +
+        '</tr></thead><tbody>';
+      runs.forEach(function(run) {
+        var em = run.error_message != null ? String(run.error_message) : '';
+        h += '<tr style="vertical-align:top;">' +
+          '<td style="padding:2px 4px;">' + esc(String(run.id)) + '</td>' +
+          '<td style="padding:2px 4px;">' + esc(run.status != null ? String(run.status) : '') + '</td>' +
+          '<td style="padding:2px 4px;">' + esc(run.trigger_source != null ? String(run.trigger_source) : '') + '</td>' +
+          '<td style="padding:2px 4px;">' + esc(run.started_at != null ? String(run.started_at) : '') + '</td>' +
+          '<td style="padding:2px 4px;">' + esc(run.finished_at != null ? String(run.finished_at) : '') + '</td>' +
+          '<td style="padding:2px 4px;text-align:right;">' + (run.exit_code != null ? esc(String(run.exit_code)) : '') + '</td>' +
+          '<td style="padding:2px 4px;text-align:center;">' + (run.timed_out ? 'Y' : '') + '</td>' +
+          '</tr>';
+        if (em) {
+          h += '<tr><td colspan="7" style="padding:0 4px 4px 8px;font-size:10px;color:var(--text-muted);word-break:break-word;">' + esc(em) + '</td></tr>';
+        }
+      });
+      h += '</tbody></table>';
+      el.innerHTML = h;
+    })
+    .catch(function() {
+      if (reqTid !== detailTaskId) return;
+      el.innerHTML = '<div style="font-size:11px;color:var(--text-muted);">Runs list request failed.</div>';
+    });
+}
+function reopenCodingFromBlocked() {
+  if (!detailTaskId || !detailTask || detailTask.coding_readiness_state !== 'blocked') return;
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/readiness/reopen-from-blocked', { method: 'POST' })
+    .then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+    })
+    .then(function(x) {
+      if (!x.ok) {
+        alert((x.d && x.d.error) ? x.d.error : 'Reopen failed');
+        return;
+      }
+      loadDetailTask(detailTaskId).then(function() {
+        if (detailTaskId) loadCodingSummary();
+      });
+    });
+}
+function loadCodingSummary(preferredRunId) {
+  if (!detailTaskId) return;
+  var tid = detailTaskId;
+  fetch('/api/planner/tasks/' + tid + '/coding/summary')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d.ok || !d.summary) return;
+      var s = d.summary;
+      var rb = document.getElementById('coding-readiness-badge');
+      if (rb) rb.textContent = s.coding_readiness_state || '';
+      var occ = s.open_clarification_count || 0;
+      var och = document.getElementById('coding-open-clar-hint');
+      if (och) {
+        och.style.display = occ > 0 ? 'block' : 'none';
+        och.textContent = occ > 0 ? (occ + ' open clarification(s): resolve before Approve or validation.') : '';
+      }
+      var oh = document.getElementById('coding-ops-hints');
+      if (oh && s.ops_hints) {
+        var h = s.ops_hints;
+        oh.textContent = 'Repos configured: ' + (h.code_repos_configured_count != null ? h.code_repos_configured_count : 0) +
+          ' | repo index ok: ' + h.repo_index_valid + ' | cwd resolvable: ' + h.cwd_resolvable;
+      }
+      var pr = s.profile || {};
+      var ri = document.getElementById('coding-repo-index');
+      var sp = document.getElementById('coding-sub-path');
+      if (ri) ri.value = pr.repo_index != null ? pr.repo_index : 0;
+      if (sp) sp.value = pr.sub_path || '';
+      var bf = document.getElementById('coding-brief-body');
+      if (bf && s.brief && s.brief.body) bf.value = s.brief.body;
+      var clarEl = document.getElementById('coding-clarifications');
+      if (clarEl) {
+        clarEl.innerHTML = '';
+        (s.clarifications || []).forEach(function(c) {
+          var div = document.createElement('div');
+          div.style.marginBottom = '6px';
+          div.innerHTML = '<div><strong>Q:</strong> ' + esc(c.question) + '</div>';
+          if (c.status === 'open') {
+            div.innerHTML += '<input type="text" class="coding-answer-input" data-id="' + c.id + '" placeholder="Answer..." style="width:100%;font-size:11px;margin-top:4px;" />' +
+              '<button type="button" class="watch-toggle" onclick="answerCodingClarification(' + c.id + ')">Submit answer</button>';
+          } else {
+            div.innerHTML += '<div><strong>A:</strong> ' + esc(c.answer || '') + '</div>';
+          }
+          clarEl.appendChild(div);
+        });
+      }
+      var runs = s.validation_runs || [];
+      var runId = preferredRunId != null && preferredRunId !== '' ? Number(preferredRunId) : null;
+      if (!runId && runs.length && runs[0].id) runId = runs[0].id;
+      fetch('/api/planner/tasks/' + tid + '/coding/blockers')
+        .then(function(r) { return r.json(); })
+        .then(function(b) {
+          var bel = document.getElementById('coding-blockers');
+          if (!bel) return;
+          bel.innerHTML = '';
+          if (!b.ok) {
+            bel.textContent = '(blockers unavailable)';
+            return;
+          }
+          var list = (b.blockers || []).slice(0, 12);
+          if (!list.length) {
+            bel.textContent = '(no blockers recorded)';
+            return;
+          }
+          list.forEach(function(x) {
+            bel.innerHTML += '<div style="margin-bottom:4px;">' + esc(x.summary) + '</div>';
+          });
+        })
+        .catch(function() {
+          var bel = document.getElementById('coding-blockers');
+          if (bel) bel.textContent = '(blockers request failed)';
+        });
+      var artEl = document.getElementById('coding-artifacts');
+      if (runId) {
+        fetch('/api/planner/tasks/' + tid + '/coding/validation/runs/' + runId)
+          .then(function(r) { return r.json(); })
+          .then(function(rr) {
+            if (!artEl) return;
+            if (!rr.ok || !rr.run) {
+              artEl.textContent = '(run detail unavailable)';
+              return;
+            }
+            var text = '';
+            (rr.run.artifacts || []).forEach(function(a) {
+              text += '--- ' + a.step_key + ' (' + a.kind + ') ---\n' + (a.content || '') + '\n\n';
+            });
+            artEl.textContent = text || '(no artifacts)';
+          })
+          .catch(function() {
+            if (artEl) artEl.textContent = '(artifacts request failed)';
+          });
+      } else if (artEl) {
+        artEl.textContent = '(no runs yet)';
+      }
+    });
+}
+function saveCodingWorkflowMode(v) {
+  if (!detailTask || !detailTaskId) return;
+  fetch('/api/planner/tasks/' + detailTaskId, {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ title: detailTask.title, coding_workflow_mode: v })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.ok && d.task) detailTask = d.task;
+  });
+}
+function saveCodingProfile() {
+  if (!detailTaskId) return;
+  var riEl = document.getElementById('coding-repo-index');
+  var spEl = document.getElementById('coding-sub-path');
+  var ri = riEl ? parseInt(riEl.value, 10) || 0 : 0;
+  var sp = spEl ? spEl.value || '' : '';
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/profile', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ repo_index: ri, sub_path: sp })
+  }).then(function(r) { return r.json(); }).then(function(d) {
+    if (d.error) alert(d.error);
+    else loadCodingSummary();
+  });
+}
+function addCodingClarification() {
+  var inp = document.getElementById('coding-new-question');
+  if (!inp || !detailTaskId) return;
+  var q = inp.value.trim();
+  if (!q) return;
+  inp.value = '';
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/clarifications', {
+    method: 'POST',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ question: q })
+  }).then(function(r) { return r.json(); }).then(function() { loadCodingSummary(); });
+}
+function answerCodingClarification(cid) {
+  var el = document.querySelector('.coding-answer-input[data-id="' + cid + '"]');
+  if (!el || !detailTaskId) return;
+  var a = el.value.trim();
+  if (!a) return;
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/clarifications/' + cid, {
+    method: 'PATCH',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ answer: a })
+  }).then(function(r) { return r.json(); }).then(function() { loadCodingSummary(); });
+}
+function saveCodingBrief() {
+  if (!detailTaskId) return;
+  var bf = document.getElementById('coding-brief-body');
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/brief', {
+    method: 'PUT',
+    headers: {'Content-Type':'application/json'},
+    body: JSON.stringify({ body: bf ? bf.value : '' })
+  }).then(function(r) { return r.json(); }).then(function() { loadCodingSummary(); });
+}
+function approveCodingBrief() {
+  if (!detailTaskId) return;
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/brief/approve', { method: 'POST' })
+    .then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, status: r.status, d: d }; });
+    })
+    .then(function(x) {
+      if (!x.ok && x.d && x.d.error) {
+        var msg = x.d.error;
+        if (x.d.open_clarification_count) msg += ' (ids: ' + (x.d.open_clarification_ids || []).join(', ') + ')';
+        alert(msg);
+      }
+      loadCodingSummary();
+    });
+}
+/* Phase 10: handoff GET only on explicit View / Copy actions; preview is session-local and not tied to summary/validation. */
+function clearCodingHandoffPreview() {
+  window._codingHandoffPreviewTaskId = null;
+  var pre = document.getElementById('coding-handoff-preview');
+  var wrap = document.getElementById('coding-handoff-preview-wrap');
+  if (pre) pre.textContent = '';
+  if (wrap) wrap.style.display = 'none';
+}
+function brainPlannerTaskBaseQuery() {
+  if (!detailTaskId) return '';
+  var qs = 'planner_task_id=' + encodeURIComponent(String(detailTaskId));
+  if (activeProjectId != null) {
+    qs += '&planner_project_id=' + encodeURIComponent(String(activeProjectId));
+  }
+  return qs;
+}
+
+function openBrainWithPlannerTask() {
+  var q = brainPlannerTaskBaseQuery();
+  if (!q) return;
+  window.open('/brain?' + q, '_blank', 'noopener,noreferrer');
+}
+
+/* Planner Parity v2: closed set suggest | implement | validate */
+function openBrainHandoffLaunch(step) {
+  if (!detailTaskId) return;
+  var allowed = { suggest: 1, implement: 1, validate: 1 };
+  if (!allowed[step]) return;
+  var q = brainPlannerTaskBaseQuery();
+  if (!q) return;
+  window.open('/brain?' + q + '&chili_handoff_launch=' + encodeURIComponent(step), '_blank', 'noopener,noreferrer');
+}
+
+function plannerCockpitSetLaunchHint(ctx) {
+  var el = document.getElementById('planner-cockpit-launch-hint');
+  if (!el) return;
+  var base = 'Advisory only — not an automated workflow.';
+  if (!ctx || !ctx.summaryOk) {
+    el.textContent = base + ' Refresh cockpit when signed in.';
+    return;
+  }
+  var parts = [base];
+  if (ctx.occ > 0) {
+    parts.push('Open clarifications before brief approval / validation.');
+  } else if (!ctx.hasSnap) {
+    parts.push('No snapshot yet: often start with Suggest, then save in Brain.');
+  } else if (!ctx.hasApply) {
+    parts.push('Snapshot exists: dry-run / apply live under Implement in Brain.');
+  } else {
+    parts.push('After workspace changes, consider Validate in Brain.');
+  }
+  el.textContent = parts.join(' ');
+}
+function viewCodingHandoff() {
+  if (!detailTaskId) return;
+  var tid = detailTaskId;
+  var pre = document.getElementById('coding-handoff-preview');
+  var wrap = document.getElementById('coding-handoff-preview-wrap');
+  var st = document.getElementById('coding-validation-status');
+  fetch('/api/planner/tasks/' + tid + '/coding/handoff', { credentials: 'same-origin' })
+    .then(function(r) { return r.json().then(function(d) { return { httpOk: r.ok, d: d }; }); })
+    .then(function(x) {
+      if (tid !== detailTaskId) return;
+      if (!x.httpOk || !x.d || !x.d.ok || !x.d.handoff) {
+        if (st) st.textContent = 'Handoff view failed.';
+        alert((x.d && x.d.error) ? x.d.error : 'Handoff unavailable');
+        return;
+      }
+      if (pre) pre.textContent = JSON.stringify(x.d.handoff, null, 2);
+      if (wrap) wrap.style.display = 'block';
+      window._codingHandoffPreviewTaskId = tid;
+      if (st) st.textContent = 'Handoff preview loaded (read-only; not auto-updated).';
+    })
+    .catch(function() {
+      if (tid !== detailTaskId) return;
+      if (st) st.textContent = 'Handoff view request failed.';
+    });
+}
+function handoffJsonToMarkdown(h) {
+  if (!h) return '';
+  var lines = [];
+  lines.push('# Implementation handoff');
+  lines.push('');
+  if (h.task) {
+    lines.push('## Task');
+    lines.push('- id: ' + h.task.id);
+    lines.push('- project_id: ' + (h.task.project_id != null ? h.task.project_id : ''));
+    lines.push('- title: ' + (h.task.title || ''));
+    lines.push('- readiness: ' + (h.task.coding_readiness_state || ''));
+    lines.push('- workflow: ' + (h.task.coding_workflow_mode || ''));
+    lines.push('');
+  }
+  if (h.readiness_context) {
+    var rc = h.readiness_context;
+    lines.push('## Readiness context (stored)');
+    lines.push('- coding_readiness_state: ' + (rc.coding_readiness_state || ''));
+    lines.push('- open_clarification_count: ' + (rc.open_clarification_count != null ? rc.open_clarification_count : ''));
+    lines.push('- brief_approved_at: ' + (rc.brief_approved_at != null ? rc.brief_approved_at : '(null)'));
+    lines.push('');
+  }
+  if (h.brief) {
+    lines.push('## Brief (v' + h.brief.version + ')');
+    lines.push(h.brief.body || '');
+    lines.push('');
+  }
+  if (h.profile) {
+    lines.push('## Repo profile');
+    lines.push('- repo_index: ' + h.profile.repo_index);
+    lines.push('- sub_path: ' + (h.profile.sub_path || ''));
+    lines.push('');
+  }
+  if (h.ops_hints) {
+    lines.push('## Ops hints');
+    lines.push('- repos configured: ' + h.ops_hints.code_repos_configured_count);
+    lines.push('- repo index ok: ' + h.ops_hints.repo_index_valid);
+    lines.push('- cwd resolvable: ' + h.ops_hints.cwd_resolvable);
+    lines.push('');
+  }
+  if (h.validation_latest) {
+    var v = h.validation_latest;
+    lines.push('## Latest validation run');
+    lines.push('- id: ' + v.id + ' | status: ' + v.status + ' | exit: ' + v.exit_code + ' | timed_out: ' + v.timed_out);
+    if (v.error_message) lines.push('- error: ' + v.error_message);
+    lines.push('');
+  }
+  if (h.blockers && h.blockers.length) {
+    lines.push('## Blockers');
+    h.blockers.forEach(function(b) {
+      lines.push('- [' + b.severity + '/' + b.category + '] ' + (b.summary || ''));
+    });
+    lines.push('');
+  }
+  if (h.clarifications && h.clarifications.length) {
+    lines.push('## Clarifications');
+    h.clarifications.forEach(function(c) {
+      lines.push('### #' + c.id + ' (' + (c.status || '') + ', sort ' + (c.sort_order != null ? c.sort_order : '') + ')');
+      lines.push('- Q: ' + (c.question || ''));
+      lines.push('- A: ' + (c.answer != null ? c.answer : ''));
+    });
+    lines.push('');
+  }
+  if (h.artifact_previews && h.artifact_previews.length) {
+    lines.push('## Artifact previews (latest run only)');
+    h.artifact_previews.forEach(function(a) {
+      lines.push('### ' + a.step_key + ' (' + a.kind + ')');
+      lines.push('```');
+      lines.push(a.content_preview || '');
+      lines.push('```');
+      lines.push('');
+    });
+  }
+  return lines.join('\n');
+}
+function copyCodingHandoffJson() {
+  if (!detailTaskId) return;
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/handoff', { credentials: 'same-origin' })
+    .then(function(r) { return r.json().then(function(d) { return { httpOk: r.ok, d: d }; }); })
+    .then(function(x) {
+      var d = x.d;
+      if (!x.httpOk || !d || !d.ok || !d.handoff) { alert((d && d.error) ? d.error : 'Handoff failed'); return; }
+      var text = JSON.stringify(d.handoff, null, 2);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          var st = document.getElementById('coding-validation-status');
+          if (st) st.textContent = 'Handoff JSON copied.';
+        }).catch(function() { alert('Clipboard failed'); });
+      } else {
+        alert('Clipboard not available');
+      }
+    });
+}
+function copyCodingHandoffMarkdown() {
+  if (!detailTaskId) return;
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/handoff', { credentials: 'same-origin' })
+    .then(function(r) { return r.json().then(function(d) { return { httpOk: r.ok, d: d }; }); })
+    .then(function(x) {
+      var d = x.d;
+      if (!x.httpOk || !d || !d.ok || !d.handoff) { alert((d && d.error) ? d.error : 'Handoff failed'); return; }
+      var text = handoffJsonToMarkdown(d.handoff);
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(function() {
+          var st = document.getElementById('coding-validation-status');
+          if (st) st.textContent = 'Handoff Markdown copied (from JSON).';
+        }).catch(function() { alert('Clipboard failed'); });
+      } else {
+        alert('Clipboard not available');
+      }
+    });
+}
+function runCodingValidation() {
+  if (!detailTaskId) return;
+  var st = document.getElementById('coding-validation-status');
+  if (st) st.textContent = 'Running…';
+  fetch('/api/planner/tasks/' + detailTaskId + '/coding/validation/run', { method: 'POST' })
+    .then(function(r) {
+      return r.json().then(function(d) { return { ok: r.ok, d: d }; });
+    })
+    .then(function(x) {
+      var d = x.d;
+      if (!x.ok && d && d.error) {
+        var msg = d.error;
+        if (d.open_clarification_count) msg += ' (ids: ' + (d.open_clarification_ids || []).join(', ') + ')';
+        if (st) st.textContent = msg;
+        loadCodingSummary();
+        return;
+      }
+      if (d.error) {
+        if (st) st.textContent = d.error;
+        loadCodingSummary();
+        return;
+      }
+      var run = d.run || {};
+      var rs = d.coding_readiness_state || '';
+      var line = 'Done. exit=' + run.exit_code + (run.timed_out ? ' timed_out' : '') +
+        (rs ? (' | readiness=' + rs) : '');
+      if (run.status) line += ' | status=' + run.status;
+      if (st) st.textContent = line;
+      var rid = run.id != null ? run.id : null;
+      loadDetailTask(detailTaskId).then(function() {
+        loadCodingSummary(rid);
+        loadCodingValidationRunsList();
+      });
+    })
+    .catch(function() {
+      if (st) st.textContent = 'Request failed';
+      loadCodingSummary();
+    });
+}
+
 /* ── Init ─────────────────────────────────────────────────── */
+wireCodingPanelOnce();
 renderSidebar();
 renderUserSummaries();
 if (projects.length > 0) {
-  selectProject(projects[0].id);
+  if (PLANNER_DEEP_LINK && plannerDeepLinkProjectInSidebar(PLANNER_DEEP_LINK.pid)) {
+    selectProject(PLANNER_DEEP_LINK.pid);
+  } else {
+    if (PLANNER_DEEP_LINK) _plannerDeepLinkDone = true;
+    selectProject(projects[0].id);
+  }
 } else {
   document.getElementById('empty-state').style.display = '';
+  if (PLANNER_DEEP_LINK) _plannerDeepLinkDone = true;
 }
 </script>
 {% endblock %}
