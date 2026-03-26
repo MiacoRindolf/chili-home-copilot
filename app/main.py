@@ -36,6 +36,7 @@ from .models import (  # noqa: F401 — register ORM tables
     PatternEvidenceHypothesis,
     PatternTradeRow,
 )
+from .models.coding_task import PlanTaskCodingProfile  # noqa: F401
 from .services.trading_scheduler import start_scheduler, stop_scheduler
 
 # Suppress noisy WinError 10054 tracebacks from asyncio on Windows

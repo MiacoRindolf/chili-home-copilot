@@ -52,7 +52,12 @@ def legacy_api_v1_brain_users():
 # ── Page ────────────────────────────────────────────────────────────────
 
 @router.get("/brain", response_class=HTMLResponse)
-def brain_page(request: Request, db: Session = Depends(get_db)):
+def brain_page(
+    request: Request,
+    db: Session = Depends(get_db),
+    planner_task_id: int | None = Query(default=None, ge=1),
+    planner_project_id: int | None = Query(default=None, ge=1),
+):
     # region agent log
     import time as _time
 
@@ -68,6 +73,8 @@ def brain_page(request: Request, db: Session = Depends(get_db)):
             "title": "Chili Brain",
             "is_guest": ctx["is_guest"],
             "user_name": ctx["user_name"],
+            "planner_task_id": planner_task_id,
+            "planner_project_id": planner_project_id,
         },
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).

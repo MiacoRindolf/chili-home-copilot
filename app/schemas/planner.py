@@ -263,6 +263,7 @@ class TaskBody(BaseModel):
     progress: Optional[int] = None
     sort_order: Optional[int] = None
     parent_id: Optional[int] = None
+    coding_workflow_mode: Optional[str] = None
 
 
 class CommentBody(BaseModel):

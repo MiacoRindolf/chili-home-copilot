@@ -59,6 +59,8 @@ class PlanTask(Base):
     sort_order = Column(Integer, default=0)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    coding_workflow_mode = Column(String(32), default="tracked", nullable=False)
+    coding_readiness_state = Column(String(40), default="not_started", nullable=False)
 
     project = relationship("PlanProject", back_populates="tasks")
     assignee = relationship("User", foreign_keys=[assigned_to])
@@ -69,6 +71,24 @@ class PlanTask(Base):
     activities = relationship("TaskActivity", back_populates="task", cascade="all, delete-orphan")
     watchers = relationship("TaskWatcher", back_populates="task", cascade="all, delete-orphan")
     task_labels = relationship("TaskLabel", back_populates="task", cascade="all, delete-orphan")
+    coding_profile = relationship(
+        "PlanTaskCodingProfile", back_populates="task", uselist=False, cascade="all, delete-orphan"
+    )
+    clarifications = relationship(
+        "TaskClarification", back_populates="task", cascade="all, delete-orphan"
+    )
+    coding_briefs = relationship(
+        "CodingTaskBrief", back_populates="task", cascade="all, delete-orphan"
+    )
+    validation_runs = relationship(
+        "CodingTaskValidationRun", back_populates="task", cascade="all, delete-orphan"
+    )
+    blocker_reports = relationship(
+        "CodingBlockerReport", back_populates="task", cascade="all, delete-orphan"
+    )
+    agent_suggestions = relationship(
+        "CodingAgentSuggestion", back_populates="task", cascade="all, delete-orphan"
+    )
 
 
 class TaskComment(Base):

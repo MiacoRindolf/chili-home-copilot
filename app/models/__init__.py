@@ -15,6 +15,16 @@ from .planner import (
     TaskLabel,
     TaskWatcher,
 )
+from .coding_task import (
+    CodingAgentSuggestion,
+    CodingAgentSuggestionApply,
+    CodingBlockerReport,
+    CodingTaskBrief,
+    CodingTaskValidationRun,
+    CodingValidationArtifact,
+    PlanTaskCodingProfile,
+    TaskClarification,
+)
 from .marketplace import MarketplaceModule
 from .trading import (
     BacktestResult,
@@ -99,6 +109,14 @@ __all__ = [
     "PlanLabel",
     "TaskLabel",
     "TaskWatcher",
+    "PlanTaskCodingProfile",
+    "TaskClarification",
+    "CodingTaskBrief",
+    "CodingTaskValidationRun",
+    "CodingValidationArtifact",
+    "CodingAgentSuggestion",
+    "CodingAgentSuggestionApply",
+    "CodingBlockerReport",
     "MarketplaceModule",
     "WatchlistItem",
     "Trade",

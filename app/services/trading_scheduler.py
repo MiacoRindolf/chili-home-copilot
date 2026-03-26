@@ -976,7 +976,9 @@ def start_scheduler():
         )
 
         _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
-        if getattr(settings, "project_brain_enabled", True):
+        if getattr(settings, "project_brain_enabled", True) and getattr(
+            settings, "project_brain_scheduler_enabled", False
+        ):
             _scheduler.add_job(
                 _run_project_brain_job,
                 trigger=IntervalTrigger(minutes=_pb_minutes),

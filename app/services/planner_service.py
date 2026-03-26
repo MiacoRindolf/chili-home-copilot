@@ -83,6 +83,12 @@ def _activity_dict(a: TaskActivity) -> dict:
     }
 
 
+def _plan_task_sort_key(t: PlanTask) -> tuple[int, int]:
+    """Stable in-memory sort: NULL sort_order sorts as 0; tie-break by task id."""
+    order = 0 if t.sort_order is None else int(t.sort_order)
+    return (order, t.id)
+
+
 def _project_dict(p: PlanProject, include_tasks: bool = False) -> dict:
     d = {
         "id": p.id,
@@ -103,14 +109,14 @@ def _project_dict(p: PlanProject, include_tasks: bool = False) -> dict:
     }
     if include_tasks:
         top_tasks = [t for t in p.tasks if not t.parent_id]
-        d["tasks"] = [_task_dict(t) for t in sorted(top_tasks, key=lambda t: t.sort_order)]
+        d["tasks"] = [_task_dict(t) for t in sorted(top_tasks, key=_plan_task_sort_key)]
     return d
 
 
 def _task_dict(t: PlanTask) -> dict:
     labels = [_label_dict(tl.label) for tl in (t.task_labels or []) if tl.label]
     watcher_ids = [w.user_id for w in (t.watchers or [])]
-    subtask_list = sorted((t.subtasks or []), key=lambda s: s.sort_order)
+    subtask_list = sorted((t.subtasks or []), key=_plan_task_sort_key)
     return {
         "id": t.id,
         "project_id": t.project_id,
@@ -134,6 +140,8 @@ def _task_dict(t: PlanTask) -> dict:
         "watcher_ids": watcher_ids,
         "subtask_count": len(subtask_list),
         "subtasks": [_task_dict(s) for s in subtask_list],
+        "coding_workflow_mode": getattr(t, "coding_workflow_mode", None) or "tracked",
+        "coding_readiness_state": getattr(t, "coding_readiness_state", None) or "not_started",
     }
 
 
@@ -443,6 +451,14 @@ def update_task(db: Session, task_id: int, user_id: int, **kwargs) -> dict | Non
                 changes.append(f"{int_field}: {old_val} → {new_val}")
             setattr(t, int_field, new_val)
 
+    if "coding_workflow_mode" in kwargs and kwargs["coding_workflow_mode"] is not None:
+        from .coding_task import po_v2
+        new_mode = po_v2.validate_workflow_mode(str(kwargs["coding_workflow_mode"]))
+        old_val = getattr(t, "coding_workflow_mode", None)
+        if old_val != new_mode:
+            changes.append(f"coding_workflow_mode: {old_val} → {new_mode}")
+        t.coding_workflow_mode = new_mode
+
     if changes:
         _log_activity(db, task_id, user_id, "updated", "; ".join(changes))
 
@@ -663,7 +679,7 @@ def get_user_project_summary(db: Session, user_id: int) -> str:
 
     lines = []
     for p in projects:
-        tasks = sorted(p.tasks, key=lambda t: t.sort_order)
+        tasks = sorted(p.tasks, key=_plan_task_sort_key)
         total = len(tasks)
         done = sum(1 for t in tasks if t.status == "done")
         in_prog = sum(1 for t in tasks if t.status == "in_progress")

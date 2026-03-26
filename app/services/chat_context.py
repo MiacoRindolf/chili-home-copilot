@@ -135,6 +135,8 @@ def get_project_brain_context_for_chat(db: Session, user_id: int | None) -> str:
         from ..config import settings
         if not getattr(settings, "project_brain_enabled", True):
             return ""
+        if not getattr(settings, "project_brain_chat_context_enabled", False):
+            return ""
         from .project_brain.registry import AGENT_REGISTRY
         parts = []
         for name, agent in AGENT_REGISTRY.items():

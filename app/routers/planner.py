@@ -10,8 +10,10 @@ from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..schemas import ProjectBody, MemberBody, RoleBody, TaskBody, CommentBody, LabelBody
 from ..services import planner_service
 from ..models import User
+from . import planner_coding
 
 router = APIRouter()
+router.include_router(planner_coding.router)
 
 
 def _require_user(request: Request, db: Session) -> dict | None:

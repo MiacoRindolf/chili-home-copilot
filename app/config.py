@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     project_brain_enabled: bool = True
     project_brain_auto_cycle_minutes: int = 60
     project_brain_max_web_searches: int = 5
+    # Phase 0: harmful defaults frozen — scheduler cycle and chat injection off unless enabled.
+    project_brain_scheduler_enabled: bool = False
+    project_brain_chat_context_enabled: bool = False
+
+    # Phase 1: coding-task validation runner (allowlist is hard-coded in code; not configurable).
+    coding_validation_step_timeout_seconds: int = 120
 
     # Trading freshness / staleness guardrails
     top_picks_warn_age_min: int = 15   # warn when picks batch is older than N minutes

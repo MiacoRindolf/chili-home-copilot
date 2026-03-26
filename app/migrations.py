@@ -1980,6 +1980,216 @@ def _migration_051_brain_prediction_snapshot(conn) -> None:
         conn.commit()
 
 
+def _migration_052_planner_coding_task_layer(conn) -> None:
+    """Phase 1: minimal plan_tasks coding columns + adjacent coding/PO-v2/validation tables."""
+    if "plan_tasks" not in _tables(conn):
+        return
+    pt_cols = _columns(conn, "plan_tasks")
+    if "coding_workflow_mode" not in pt_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE plan_tasks ADD COLUMN coding_workflow_mode VARCHAR(32) "
+                "NOT NULL DEFAULT 'tracked'"
+            )
+        )
+        conn.commit()
+        pt_cols = _columns(conn, "plan_tasks")
+    if "coding_readiness_state" not in pt_cols:
+        conn.execute(
+            text(
+                "ALTER TABLE plan_tasks ADD COLUMN coding_readiness_state VARCHAR(40) "
+                "NOT NULL DEFAULT 'not_started'"
+            )
+        )
+        conn.commit()
+
+    tables = _tables(conn)
+
+    if "plan_task_coding_profile" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE plan_task_coding_profile (
+                    task_id INTEGER PRIMARY KEY REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                    repo_index INTEGER NOT NULL DEFAULT 0,
+                    sub_path TEXT NOT NULL DEFAULT '',
+                    brief_approved_at TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.commit()
+
+    if "task_clarification" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE task_clarification (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                    question TEXT NOT NULL,
+                    answer TEXT,
+                    status VARCHAR(20) NOT NULL DEFAULT 'open',
+                    sort_order INTEGER NOT NULL DEFAULT 0,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_task_clarification_task_id ON task_clarification(task_id)"))
+        conn.commit()
+
+    if "coding_task_brief" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE coding_task_brief (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                    body TEXT NOT NULL DEFAULT '',
+                    version INTEGER NOT NULL DEFAULT 1,
+                    created_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_coding_task_brief_task_id ON coding_task_brief(task_id)"))
+        conn.commit()
+
+    if "coding_task_validation_run" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE coding_task_validation_run (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                    trigger_source VARCHAR(24) NOT NULL DEFAULT 'manual',
+                    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    started_at TIMESTAMP,
+                    finished_at TIMESTAMP,
+                    exit_code INTEGER,
+                    timed_out BOOLEAN NOT NULL DEFAULT FALSE,
+                    error_message TEXT
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_ctvr_task_id ON coding_task_validation_run(task_id)"))
+        conn.commit()
+
+    if "coding_validation_artifact" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE coding_validation_artifact (
+                    id SERIAL PRIMARY KEY,
+                    run_id INTEGER NOT NULL REFERENCES coding_task_validation_run(id) ON DELETE CASCADE,
+                    step_key VARCHAR(64) NOT NULL,
+                    kind VARCHAR(32) NOT NULL,
+                    content TEXT,
+                    byte_length INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_cva_run_id ON coding_validation_artifact(run_id)"))
+        conn.commit()
+
+    if "coding_blocker_report" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE coding_blocker_report (
+                    id SERIAL PRIMARY KEY,
+                    task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                    run_id INTEGER REFERENCES coding_task_validation_run(id) ON DELETE SET NULL,
+                    category VARCHAR(64) NOT NULL DEFAULT 'validation',
+                    severity VARCHAR(24) NOT NULL DEFAULT 'error',
+                    summary TEXT NOT NULL,
+                    detail_json TEXT
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_cbr_task_id ON coding_blocker_report(task_id)"))
+        conn.commit()
+
+    try:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_tasks_project_coding_mode "
+                "ON plan_tasks (project_id, coding_workflow_mode)"
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
+def _migration_053_coding_agent_suggestion(conn) -> None:
+    """Phase 16: durable bounded snapshots of Phase 15 agent-suggest success (append-only)."""
+    tables = _tables(conn)
+    if "coding_agent_suggestion" in tables:
+        return
+    if "plan_tasks" not in tables:
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE coding_agent_suggestion (
+                id SERIAL PRIMARY KEY,
+                task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                model VARCHAR(200) NOT NULL DEFAULT '',
+                response_text TEXT NOT NULL DEFAULT '',
+                diffs_json TEXT NOT NULL DEFAULT '[]',
+                files_changed_json TEXT NOT NULL DEFAULT '[]',
+                validation_json TEXT NOT NULL DEFAULT '[]',
+                context_used_json TEXT NOT NULL DEFAULT '{}',
+                truncation_flags_json TEXT
+            )
+            """
+        )
+    )
+    conn.execute(text("CREATE INDEX ix_cas_task_id ON coding_agent_suggestion(task_id)"))
+    conn.execute(text("CREATE INDEX ix_cas_user_id ON coding_agent_suggestion(user_id)"))
+    conn.commit()
+
+
+def _migration_054_coding_agent_suggestion_apply(conn) -> None:
+    """Phase 17: append-only apply audit rows (references snapshot RESTRICT)."""
+    tables = _tables(conn)
+    if "coding_agent_suggestion_apply" in tables:
+        return
+    if "coding_agent_suggestion" not in tables:
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE coding_agent_suggestion_apply (
+                id SERIAL PRIMARY KEY,
+                suggestion_id INTEGER NOT NULL REFERENCES coding_agent_suggestion(id) ON DELETE RESTRICT,
+                task_id INTEGER NOT NULL REFERENCES plan_tasks(id) ON DELETE CASCADE,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+                status VARCHAR(24) NOT NULL,
+                message TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+    )
+    conn.execute(text("CREATE INDEX ix_casa_suggestion_id ON coding_agent_suggestion_apply(suggestion_id)"))
+    conn.execute(text("CREATE INDEX ix_casa_task_id ON coding_agent_suggestion_apply(task_id)"))
+    conn.execute(text("CREATE INDEX ix_casa_user_id ON coding_agent_suggestion_apply(user_id)"))
+    conn.commit()
+
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2033,6 +2243,9 @@ MIGRATIONS = [
     ("049_brain_cycle_lease", _migration_049_brain_cycle_lease),
     ("050_brain_integration_event", _migration_050_brain_integration_event),
     ("051_brain_prediction_snapshot", _migration_051_brain_prediction_snapshot),
+    ("052_planner_coding_task_layer", _migration_052_planner_coding_task_layer),
+    ("053_coding_agent_suggestion", _migration_053_coding_agent_suggestion),
+    ("054_coding_agent_suggestion_apply", _migration_054_coding_agent_suggestion_apply),
 ]
 
 
