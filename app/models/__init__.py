@@ -39,6 +39,7 @@ from .trading import (
     ScanPattern,
     Trade,
     TradingInsight,
+    TradingInsightEvidence,
     WatchlistItem,
 )
 from .code_brain import (
@@ -122,6 +123,7 @@ __all__ = [
     "Trade",
     "JournalEntry",
     "TradingInsight",
+    "TradingInsightEvidence",
     "ScanPattern",
     "PatternTradeRow",
     "PatternEvidenceHypothesis",

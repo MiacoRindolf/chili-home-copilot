@@ -24,6 +24,12 @@ from .market_data import (
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
 from .brain_resource_budget import BrainResourceBudget
+from .snapshot_bar_ops import (
+    dedupe_sample_rows,
+    normalize_bar_start_utc,
+    try_insert_insight_evidence,
+    upsert_market_snapshot,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -543,20 +549,26 @@ def _fetch_fundamentals(ticker: str) -> tuple[float | None, float | None]:
         return None, None
 
 
-def take_market_snapshot(db: Session, ticker: str) -> None:
+def take_market_snapshot(db: Session, ticker: str, bar_interval: str = "1d") -> None:
+    """Upsert one snapshot row for the latest *closed* bar in ``bar_interval`` (UTC bar open key)."""
     try:
-        snap = get_indicator_snapshot(ticker, "1d")
-        quote = fetch_quote(ticker)
-        price = quote.get("price", 0) if quote else 0
+        snap = get_indicator_snapshot(ticker, bar_interval)
+        period = "3mo" if bar_interval == "1d" else "60d"
+        df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
+        if df is None or df.empty:
+            return
+        price = float(df.iloc[-1]["Close"])
+        bar_start = normalize_bar_start_utc(df.index[-1])
         ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
         pred_score = compute_prediction(ind_data) if ind_data else None
         vix = get_vix()
         sent_score, sent_count = _fetch_news_sentiment(ticker)
         pe_ratio, mcap_b = _fetch_fundamentals(ticker)
-
-        record = MarketSnapshot(
-            ticker=ticker.upper(),
-            snapshot_date=datetime.utcnow(),
+        upsert_market_snapshot(
+            db,
+            ticker=ticker,
+            bar_interval=bar_interval,
+            bar_start_at=bar_start,
             close_price=price,
             indicator_data=json.dumps(snap),
             predicted_score=pred_score,
@@ -566,36 +578,48 @@ def take_market_snapshot(db: Session, ticker: str) -> None:
             pe_ratio=pe_ratio,
             market_cap_b=mcap_b,
         )
-        db.add(record)
         db.commit()
     except Exception:
         pass
 
 
-def _snapshot_data(ticker: str) -> tuple[str, dict | None, dict | None, float | None, int | None, float | None, float | None]:
+def _snapshot_data(ticker: str, bar_interval: str = "1d") -> tuple[
+    str,
+    dict | None,
+    dict | None,
+    float | None,
+    int | None,
+    float | None,
+    float | None,
+    str,
+    datetime | None,
+]:
     """Fetch snapshot data in a thread (no DB access).
 
-    Uses the prewarmed OHLCV cache for the price instead of calling
-    fetch_quote (which hits get_fast_info with a 30s TTL and triggers
-    individual API requests when the TTL expires during a long batch).
-    Returns (ticker, snap, quote, news_sentiment, news_count, pe_ratio, market_cap_b).
+    Returns bar_interval and bar_start_at (UTC-naive) for the OHLC row used as close price.
     """
     try:
-        snap = get_indicator_snapshot(ticker, "1d")
-        df = fetch_ohlcv_df(ticker, period="3mo", interval="1d")
-        price = float(df.iloc[-1]["Close"]) if df is not None and not df.empty else 0
+        snap = get_indicator_snapshot(ticker, bar_interval)
+        period = "3mo" if bar_interval == "1d" else "60d"
+        df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
+        if df is None or df.empty:
+            return ticker, None, None, None, None, None, None, bar_interval, None
+        price = float(df.iloc[-1]["Close"])
+        bar_start = normalize_bar_start_utc(df.index[-1])
         quote = {"price": price}
         sent_score, sent_count = _fetch_news_sentiment(ticker)
         pe, mcap = _fetch_fundamentals(ticker)
-        return ticker, snap, quote, sent_score, sent_count, pe, mcap
+        return ticker, snap, quote, sent_score, sent_count, pe, mcap, bar_interval, bar_start
     except Exception:
-        return ticker, None, None, None, None, None, None
+        return ticker, None, None, None, None, None, None, bar_interval, None
 
 
 def take_snapshots_parallel(
     db: Session,
     tickers: list[str],
     max_workers: int = _IO_WORKERS_HIGH,
+    *,
+    bar_interval: str = "1d",
 ) -> int:
     """Take snapshots for many tickers using a thread pool.
 
@@ -610,17 +634,18 @@ def take_snapshots_parallel(
     if not (_use_massive() or _use_polygon()):
         from ..yf_session import batch_download
         BATCH = 100
+        period = "3mo" if bar_interval == "1d" else "60d"
         for i in range(0, len(tickers), BATCH):
             try:
-                batch_download(tickers[i:i + BATCH], period="3mo", interval="1d")
+                batch_download(tickers[i:i + BATCH], period=period, interval=bar_interval)
             except Exception:
                 pass
 
     _t0 = time.time()
-    fetched: list[tuple[str, dict | None, dict | None]] = []
+    fetched: list[tuple] = []
     total = len(tickers)
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {executor.submit(_snapshot_data, t): t for t in tickers}
+        futures = {executor.submit(_snapshot_data, t, bar_interval): t for t in tickers}
         for future in as_completed(futures):
             if _shutting_down.is_set():
                 executor.shutdown(wait=False, cancel_futures=True)
@@ -639,7 +664,7 @@ def take_snapshots_parallel(
     _fetch_elapsed = round(time.time() - _t0, 1)
     logger.info(
         f"[learning] Snapshot data fetch: {len(fetched)}/{len(tickers)} tickers "
-        f"in {_fetch_elapsed}s ({max_workers} workers)"
+        f"in {_fetch_elapsed}s ({max_workers} workers) interval={bar_interval}"
     )
     vix = get_vix()
     count = 0
@@ -649,15 +674,19 @@ def take_snapshots_parallel(
         sent_count = row[4] if len(row) > 4 else None
         pe = row[5] if len(row) > 5 else None
         mcap = row[6] if len(row) > 6 else None
-        if snap is None:
+        biv = row[7] if len(row) > 7 else bar_interval
+        bst = row[8] if len(row) > 8 else None
+        if snap is None or bst is None:
             continue
         try:
             price = quote.get("price", 0) if quote else 0
             ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
             pred_score = compute_prediction(ind_data) if ind_data else None
-            record = MarketSnapshot(
-                ticker=ticker.upper(),
-                snapshot_date=datetime.utcnow(),
+            upsert_market_snapshot(
+                db,
+                ticker=ticker,
+                bar_interval=biv,
+                bar_start_at=bst,
                 close_price=price,
                 indicator_data=json.dumps(snap),
                 predicted_score=pred_score,
@@ -667,7 +696,6 @@ def take_snapshots_parallel(
                 pe_ratio=pe,
                 market_cap_b=mcap,
             )
-            db.add(record)
             count += 1
         except Exception:
             pass
@@ -729,7 +757,7 @@ def backfill_future_returns(db: Session) -> int:
     _bf_lock = threading.Lock()
 
     def _snap_utc_date(snap) -> date | None:
-        raw = snap.snapshot_date
+        raw = getattr(snap, "bar_start_at", None) or snap.snapshot_date
         if raw is None:
             return None
         ts = pd.Timestamp(raw)
@@ -752,10 +780,12 @@ def backfill_future_returns(db: Session) -> int:
                 return None
 
             start_cal = snap_d - timedelta(days=14)
+            iv = (getattr(snap, "bar_interval", None) or "1d").strip() or "1d"
+            per = "60d" if iv == "1d" else "30d"
             df = fetch_ohlcv_df(
                 snap.ticker,
-                interval="1d",
-                period="60d",
+                interval=iv,
+                period=per,
                 start=start_cal.isoformat(),
             )
             if df.empty or len(df) < 2:
@@ -898,15 +928,17 @@ def _get_historical_regime_map() -> dict[str, dict]:
     return regime_map
 
 
-def _mine_from_history(ticker: str) -> list[dict]:
+def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
     from ta.momentum import RSIIndicator, StochasticOscillator
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
     from .scanner import _detect_resistance_retests, _detect_narrow_range, _detect_vcp
 
+    period = "6mo" if bar_interval == "1d" else "90d"
+    min_len = 60 if bar_interval == "1d" else 120
     try:
-        df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
-        if df.empty or len(df) < 60:
+        df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
+        if df.empty or len(df) < min_len:
             return []
     except Exception:
         return []
@@ -999,8 +1031,11 @@ def _mine_from_history(ticker: str) -> list[dict]:
         dt_str = str(df.index[i].date()) if hasattr(df.index[i], "date") else str(df.index[i])[:10]
         regime_info = regime_map.get(dt_str, {})
 
+        bar_start_utc = normalize_bar_start_utc(df.index[i])
         rows.append({
             "ticker": ticker,
+            "bar_interval": bar_interval,
+            "bar_start_utc": bar_start_utc,
             "price": price,
             "ret_5d": round(ret_5d, 2),
             "ret_10d": round(ret_10d, 2) if ret_10d is not None else None,
@@ -1034,6 +1069,27 @@ def _mine_from_history(ticker: str) -> list[dict]:
     return rows
 
 
+def mine_row_to_indicator_payload(row: dict) -> dict:
+    """Indicator dict shape compatible with :func:`compute_prediction` (backfill / scripts)."""
+    return {
+        "rsi": {"value": row.get("rsi")},
+        "macd": {
+            "macd": row.get("macd"),
+            "signal": row.get("macd_sig"),
+            "histogram": row.get("macd_hist"),
+        },
+        "stoch": {"k": row.get("stoch_k")},
+        "adx": {"adx": row.get("adx")},
+        "atr": {"value": row.get("atr")},
+        "ema_20": {"value": row.get("ema_20")},
+        "ema_50": {"value": row.get("ema_50")},
+        "ema_100": {"value": row.get("ema_100")},
+        "sma_20": {"value": None},
+        "bbands": {},
+        "obv": {},
+    }
+
+
 def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     """Discover patterns from historical price data + existing snapshots."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -1056,27 +1112,42 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     mine_tickers = mine_tickers[:1000]
 
+    interval_jobs: list[tuple[str, list[str]]] = [("1d", mine_tickers)]
+    try:
+        from ...config import settings
+        if settings.brain_intraday_snapshots_enabled:
+            cap = max(1, int(settings.brain_intraday_max_tickers))
+            crypto_only = [t for t in mine_tickers if t.endswith("-USD")][:cap]
+            for raw_iv in settings.brain_intraday_intervals.split(","):
+                iv = raw_iv.strip()
+                if iv and iv != "1d":
+                    interval_jobs.append((iv, crypto_only))
+    except Exception:
+        pass
+
     _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     _t0 = time.time()
     all_rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=_workers) as executor:
-        futures = {}
-        for ticker in mine_tickers:
-            if _shutting_down.is_set():
-                break
-            futures[executor.submit(_mine_from_history, ticker)] = ticker
+    for bar_iv, tick_chunk in interval_jobs:
+        if _shutting_down.is_set():
+            break
+        with ThreadPoolExecutor(max_workers=_workers) as executor:
+            futures = {
+                executor.submit(_mine_from_history, t, bar_iv): t
+                for t in tick_chunk
+            }
 
-        for future in as_completed(futures):
-            if _shutting_down.is_set():
-                break
-            try:
-                rows = future.result()
-                all_rows.extend(rows)
-            except Exception:
-                continue
+            for future in as_completed(futures):
+                if _shutting_down.is_set():
+                    break
+                try:
+                    rows = future.result()
+                    all_rows.extend(rows)
+                except Exception:
+                    continue
 
     logger.info(
-        f"[learning] Pattern mining OHLCV fetch: {len(mine_tickers)} tickers → "
+        f"[learning] Pattern mining OHLCV fetch: {len(mine_tickers)} tickers / {len(interval_jobs)} intervals → "
         f"{len(all_rows)} data rows in {time.time() - _t0:.1f}s ({_workers} workers)"
     )
 
@@ -1108,8 +1179,16 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
             ema_stack = (e20 is not None and e50 is not None and e100 is not None
                          and price > e20 > e50 > e100)
 
+            biv = (s.bar_interval or "").strip() or "legacy_ingest"
+            if s.bar_start_at is not None:
+                bst = normalize_bar_start_utc(s.bar_start_at)
+            else:
+                bst = datetime.combine(s.snapshot_date.date(), datetime.min.time())
+
             all_rows.append({
                 "ticker": s.ticker,
+                "bar_interval": biv,
+                "bar_start_utc": bst,
                 "price": price,
                 "ret_5d": s.future_return_5d or 0,
                 "ret_10d": s.future_return_10d,
@@ -1132,6 +1211,8 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
             })
         except Exception:
             continue
+
+    all_rows = dedupe_sample_rows(all_rows)
 
     if len(all_rows) < 10:
         return []
@@ -1566,6 +1647,8 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
             except Exception:
                 pass
 
+    extra_rows = dedupe_sample_rows(extra_rows)
+
     if len(extra_rows) < 10:
         return {"sought": 0, "rows_mined": len(extra_rows)}
 
@@ -1586,15 +1669,34 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         if len(matching) < 3:
             continue
 
-        avg_5d = sum(r["ret_5d"] for r in matching) / len(matching)
-        wins = sum(1 for r in matching if r["ret_5d"] > 0)
-        wr = wins / len(matching) * 100
+        new_rows: list[dict] = []
+        for r in matching:
+            biv = r.get("bar_interval") or "1d"
+            bst = r.get("bar_start_utc")
+            if bst is None:
+                continue
+            if try_insert_insight_evidence(
+                db,
+                insight_id=ins.id,
+                ticker=r["ticker"],
+                bar_interval=str(biv),
+                bar_start_utc=bst,
+                source="seek",
+            ):
+                new_rows.append(r)
+
+        if not new_rows:
+            continue
+
+        avg_5d = sum(r["ret_5d"] for r in new_rows) / len(new_rows)
+        wins = sum(1 for r in new_rows if r["ret_5d"] > 0)
+        wr = wins / len(new_rows) * 100
 
         old_evidence = ins.evidence_count
         old_conf = ins.confidence
-        ins.evidence_count = min(old_evidence + len(matching), 200)
+        ins.evidence_count = min(ins.evidence_count + len(new_rows), 200)
         ins.win_count = (ins.win_count or 0) + wins
-        ins.loss_count = (ins.loss_count or 0) + (len(matching) - wins)
+        ins.loss_count = (ins.loss_count or 0) + (len(new_rows) - wins)
 
         if avg_5d > 0 and wr > 50:
             ins.confidence = round(min(0.95, old_conf * 0.7 + (wr / 100) * 0.3), 3)
@@ -1607,7 +1709,7 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
 
         log_learning_event(
             db, user_id, "active_seeking",
-            f"Boosted '{ins.pattern_description[:60]}' with {len(matching)} new samples "
+            f"Boosted '{ins.pattern_description[:60]}' with {len(new_rows)} new bar-credits "
             f"(evidence {old_evidence}->{ins.evidence_count}, "
             f"conf {old_conf:.0%}->{ins.confidence:.0%}, "
             f"avg {avg_5d:+.2f}%/5d, {wr:.0f}%wr)",
@@ -7301,7 +7403,21 @@ def run_learning_cycle(
         for w in watchlist:
             if w.ticker not in top_tickers:
                 top_tickers.append(w.ticker)
-        snap_count = take_snapshots_parallel(db, top_tickers)
+        snap_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
+        try:
+            from ...config import settings as _snap_settings
+            if _snap_settings.brain_intraday_snapshots_enabled:
+                crypto_sn = [
+                    t for t in top_tickers if t.endswith("-USD")
+                ][: max(1, int(_snap_settings.brain_intraday_max_tickers))]
+                for raw_iv in _snap_settings.brain_intraday_intervals.split(","):
+                    iv = raw_iv.strip()
+                    if iv and iv != "1d" and crypto_sn:
+                        snap_count += take_snapshots_parallel(
+                            db, crypto_sn, bar_interval=iv,
+                        )
+        except Exception:
+            pass
         report["snapshots_taken"] = snap_count
         _learning_status["steps_completed"] = 3
         _step_time("snapshots", step_start,

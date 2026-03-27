@@ -2201,6 +2201,59 @@ def _migration_055_brain_worker_ui_digest_json(conn) -> None:
     conn.commit()
 
 
+def _migration_056_snapshot_bar_key(conn) -> None:
+    """Canonical bar identity for snapshots: interval + bar open UTC; legacy flag for pre-migration rows."""
+    if "trading_snapshots" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_snapshots")
+    if "bar_interval" not in cols:
+        conn.execute(text("ALTER TABLE trading_snapshots ADD COLUMN bar_interval VARCHAR(16)"))
+    if "bar_start_at" not in cols:
+        conn.execute(text("ALTER TABLE trading_snapshots ADD COLUMN bar_start_at TIMESTAMP"))
+    if "snapshot_legacy" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_snapshots ADD COLUMN snapshot_legacy BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+    conn.commit()
+    conn.execute(text(
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_trading_snapshots_bar_key "
+        "ON trading_snapshots (ticker, bar_interval, bar_start_at) "
+        "WHERE bar_start_at IS NOT NULL AND bar_interval IS NOT NULL"
+    ))
+    conn.commit()
+
+
+def _migration_057_trading_insight_evidence(conn) -> None:
+    """One row per (insight, ticker, interval, bar) for auditable reinforcement credits."""
+    if "trading_insight_evidence" in _tables(conn):
+        return
+    if "trading_insights" not in _tables(conn):
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE trading_insight_evidence (
+                id SERIAL PRIMARY KEY,
+                insight_id INTEGER NOT NULL REFERENCES trading_insights(id) ON DELETE CASCADE,
+                ticker VARCHAR(20) NOT NULL,
+                bar_interval VARCHAR(16) NOT NULL,
+                bar_start_utc TIMESTAMP NOT NULL,
+                source VARCHAR(24) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS ix_tie_insight_bar "
+            "ON trading_insight_evidence (insight_id, ticker, bar_interval, bar_start_utc)"
+        )
+    )
+    conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tie_insight_id ON trading_insight_evidence (insight_id)"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2258,6 +2311,8 @@ MIGRATIONS = [
     ("053_coding_agent_suggestion", _migration_053_coding_agent_suggestion),
     ("054_coding_agent_suggestion_apply", _migration_054_coding_agent_suggestion_apply),
     ("055_brain_worker_ui_digest_json", _migration_055_brain_worker_ui_digest_json),
+    ("056_snapshot_bar_key", _migration_056_snapshot_bar_key),
+    ("057_trading_insight_evidence", _migration_057_trading_insight_evidence),
 ]
 
 

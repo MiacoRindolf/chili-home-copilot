@@ -125,7 +125,7 @@ class BacktestResult(Base):
 
 
 class MarketSnapshot(Base):
-    """Daily indicator snapshot for continuous pattern mining."""
+    """Indicator snapshot keyed by completed OHLCV bar (ticker, bar_interval, bar_start_at)."""
     __tablename__ = "trading_snapshots"
 
     id: int = Column(Integer, primary_key=True, index=True)
@@ -143,6 +143,25 @@ class MarketSnapshot(Base):
     news_count: Optional[int] = Column(Integer, nullable=True)
     pe_ratio: Optional[float] = Column(Float, nullable=True)
     market_cap_b: Optional[float] = Column(Float, nullable=True)  # billions
+    # Canonical bar identity (UTC). When set, upserts dedupe on (ticker, bar_interval, bar_start_at).
+    bar_interval: Optional[str] = Column(String(16), nullable=True, index=True)
+    bar_start_at: Optional[datetime] = Column(DateTime, nullable=True, index=True)
+    snapshot_legacy: bool = Column(Boolean, nullable=False, default=True)
+
+
+class TradingInsightEvidence(Base):
+    """Credits one independent sample (bar) toward a TradingInsight — prevents double-counting."""
+    __tablename__ = "trading_insight_evidence"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    insight_id: int = Column(
+        Integer, ForeignKey("trading_insights.id", ondelete="CASCADE"), nullable=False, index=True,
+    )
+    ticker: str = Column(String(20), nullable=False)
+    bar_interval: str = Column(String(16), nullable=False)
+    bar_start_utc: datetime = Column(DateTime, nullable=False)
+    source: str = Column(String(24), nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class LearningEvent(Base):

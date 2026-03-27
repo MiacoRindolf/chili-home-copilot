@@ -1,4 +1,4 @@
-﻿"""Centralized configuration for CHILI. Loads from .env with type safety."""
+"""Centralized configuration for CHILI. Loads from .env with type safety."""
 from typing import Optional
 
 from pydantic import AliasChoices, Field, field_validator
@@ -151,6 +151,12 @@ class Settings(BaseSettings):
     brain_fast_eval_scheduler_enabled: bool = False
     brain_fast_eval_interval_minutes: int = 10
     brain_fast_eval_max_tickers: int = 400
+
+    # Snapshots + mining: canonical bar key (ticker, interval, bar_start_utc). Intraday is crypto-focused.
+    brain_intraday_snapshots_enabled: bool = False
+    brain_intraday_intervals: str = "15m"
+    brain_intraday_max_tickers: int = 40
+    brain_snapshot_backfill_years: int = 10
 
     # Brain UI: "tradeable patterns" list (OOS % and trade count gates; promoted-only by default).
     brain_tradeable_min_oos_wr: float = 50.0
