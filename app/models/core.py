@@ -62,3 +62,5 @@ class BrainWorkerControl(Base):
     stop_requested = Column(Boolean, nullable=False, default=False)
     last_heartbeat_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, nullable=True)
+    last_cycle_digest_json = Column(Text, nullable=True)
+    last_proposal_skips_json = Column(Text, nullable=True)

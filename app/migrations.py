@@ -2189,6 +2189,17 @@ def _migration_054_coding_agent_suggestion_apply(conn) -> None:
     conn.commit()
 
 
+def _migration_055_brain_worker_ui_digest_json(conn) -> None:
+    """Cross-process JSON blobs for Brain UI: last cycle digest + proposal skip rollup."""
+    if "brain_worker_control" not in _tables(conn):
+        return
+    cols = _columns(conn, "brain_worker_control")
+    if "last_cycle_digest_json" not in cols:
+        conn.execute(text("ALTER TABLE brain_worker_control ADD COLUMN last_cycle_digest_json TEXT"))
+    if "last_proposal_skips_json" not in cols:
+        conn.execute(text("ALTER TABLE brain_worker_control ADD COLUMN last_proposal_skips_json TEXT"))
+    conn.commit()
+
 
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
@@ -2246,6 +2257,7 @@ MIGRATIONS = [
     ("052_planner_coding_task_layer", _migration_052_planner_coding_task_layer),
     ("053_coding_agent_suggestion", _migration_053_coding_agent_suggestion),
     ("054_coding_agent_suggestion_apply", _migration_054_coding_agent_suggestion_apply),
+    ("055_brain_worker_ui_digest_json", _migration_055_brain_worker_ui_digest_json),
 ]
 
 

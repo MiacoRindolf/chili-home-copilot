@@ -345,20 +345,26 @@ def generate_strategy_proposals(
     Called after each learning cycle and by the price monitor when
     high-confidence opportunities emerge.
     """
+    from collections import Counter
+
     from ...models.trading import ScanPattern, StrategyProposal, ScanResult
     from .scanner import generate_top_picks
     from .market_data import fetch_quote
 
     picks = generate_top_picks(db, user_id)
-    created = []
+    created: list[dict[str, Any]] = []
+    skips: Counter[str] = Counter()
+    picks_total = len(picks)
 
     buying_power = _get_buying_power()
 
     for pick in picks:
         combined = pick.get("combined_score", 0)
         if combined < _get_brain_weight("alert_min_score_proposal"):
+            skips["below_combined_threshold"] += 1
             continue
         if pick.get("signal") != "buy":
+            skips["not_buy_signal"] += 1
             continue
 
         ticker = pick["ticker"]
@@ -366,6 +372,7 @@ def generate_strategy_proposals(
         spid = pick.get("scan_pattern_id")
         if spid is None:
             logger.info("[proposals] skip %s: no_scan_pattern_id", ticker)
+            skips["no_scan_pattern_id"] += 1
             continue
         pat = db.query(ScanPattern).filter(ScanPattern.id == int(spid)).first()
         if pat is None or not pat.active:
@@ -374,6 +381,7 @@ def generate_strategy_proposals(
                 ticker,
                 spid,
             )
+            skips["pattern_missing_or_inactive"] += 1
             continue
         if (pat.promotion_status or "").strip().lower() != "promoted":
             logger.info(
@@ -382,9 +390,12 @@ def generate_strategy_proposals(
                 spid,
                 getattr(pat, "promotion_status", None),
             )
+            skips["pattern_not_promoted"] += 1
             continue
 
         if not _proposal_passes_sector_cap(db, user_id, ticker):
+            logger.info("[proposals] skip %s: sector_cap", ticker)
+            skips["sector_cap"] += 1
             continue
 
         # Supersede any existing non-executed proposal for this ticker
@@ -397,19 +408,23 @@ def generate_strategy_proposals(
         target = pick.get("take_profit") or pick.get("brain_target") or 0
 
         if not price or price <= 0 or not stop or not target:
+            skips["quote_missing_levels"] += 1
             continue
 
         risk_per_share = abs(price - stop)
         reward_per_share = abs(target - price)
 
         if risk_per_share <= 0:
+            skips["risk_per_share_nonpositive"] += 1
             continue
 
         rr_ratio = round(reward_per_share / risk_per_share, 2)
 
         if rr_ratio < _get_brain_weight("alert_min_rr_proposal"):
+            skips["risk_reward_below_min"] += 1
             continue
         if price < _get_brain_weight("alert_min_price"):
+            skips["price_below_min"] += 1
             continue
 
         projected_profit_pct = round((target - price) / price * 100, 2)
@@ -519,7 +534,27 @@ def generate_strategy_proposals(
     except Exception:
         db.rollback()
 
-    logger.info(f"[alerts] Generated {len(created)} strategy proposals")
+    try:
+        from ..brain_worker_signals import persist_last_proposal_skips_json
+
+        persist_last_proposal_skips_json(
+            db,
+            {
+                "updated_at": datetime.utcnow().isoformat() + "Z",
+                "user_id": user_id,
+                "picks_total": picks_total,
+                "created": len(created),
+                "skips": dict(skips),
+            },
+        )
+    except Exception as _pse:
+        logger.warning("[proposals] persist skip stats failed: %s", _pse)
+
+    logger.info(
+        "[alerts] Generated %s strategy proposals (skips=%s)",
+        len(created),
+        dict(skips),
+    )
     return created
 
 

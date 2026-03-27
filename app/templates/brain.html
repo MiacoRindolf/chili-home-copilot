@@ -896,6 +896,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Performance</div>
         <div class="brain-pipeline" id="brain-pipeline"></div>
         <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
+        <div id="brain-cycle-digest" style="font-size:10px;color:var(--text-secondary);margin:0 0 8px;line-height:1.5"></div>
+        <div id="brain-proposal-skips" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
         <div id="brain-research-kpi-benchmarks" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5"></div>
         <div id="brain-pipeline-near" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
         <div class="brain-kpis" id="brain-kpis">
@@ -2234,6 +2236,57 @@ function loadBrainDashboard() {
         (bud.ohlcv_used!=null ? '<div>Last cycle budget: OHLCV ' + bud.ohlcv_used + '/' + (bud.ohlcv_cap||'∞') + ', miner rows ' + (bud.miner_rows_used||0) + '/' + (bud.miner_rows_cap||'∞') + '</div>' : '') +
         '<div style="font-size:9px;color:var(--text-muted);margin-top:6px;max-width:52rem">Per-ticker rows in pattern evidence can show few trades; promotion uses <strong>aggregate</strong> OOS stats across many tickers.</div>';
     } else if (rfEl) { rfEl.innerHTML = ''; }
+
+    var cdEl = document.getElementById('brain-cycle-digest');
+    if (cdEl) {
+      var lcd = d.last_cycle_digest;
+      if (lcd && typeof lcd === 'object') {
+        var cdparts = [];
+        cdparts.push('<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Last learning cycle</div>');
+        if (lcd.updated_at) cdparts.push('<div style="font-size:9px;color:var(--text-muted)">Updated ' + escHtml(String(lcd.updated_at)) + '</div>');
+        var cdline = [];
+        if (lcd.elapsed_s != null) cdline.push(lcd.elapsed_s + 's');
+        if (lcd.data_provider) cdline.push(escHtml(String(lcd.data_provider)));
+        if (lcd.interrupted) cdline.push('<span style="color:#f59e0b">interrupted</span>');
+        if (lcd.error) cdline.push('<span style="color:#ef4444">error</span>');
+        if (cdline.length) cdparts.push('<div>' + cdline.join(' · ') + '</div>');
+        var ccounts = [];
+        function _cdn(k, lab) { if (lcd[k] != null) ccounts.push(lab + ' <strong>' + lcd[k] + '</strong>'); }
+        _cdn('prescreen_candidates', 'pre-screen');
+        _cdn('tickers_scored', 'scored');
+        _cdn('snapshots_taken', 'snapshots');
+        _cdn('patterns_discovered', 'patterns');
+        _cdn('backtests_run', 'backtests');
+        _cdn('proposals_generated', 'proposals');
+        _cdn('signal_events', 'signals');
+        if (ccounts.length) cdparts.push('<div>' + ccounts.join(' · ') + '</div>');
+        if (lcd.promoted_fast_eval && typeof lcd.promoted_fast_eval === 'object') {
+          var pfe = lcd.promoted_fast_eval;
+          var pfeOk = pfe.ok === true || (pfe.ok === undefined && !pfe.error);
+          cdparts.push('<div style="font-size:9px;margin-top:4px">Promoted fast-eval: ' + (pfeOk ? '<span style="color:#22c55e">ok</span>' : escHtml(String(pfe.error || 'failed'))) + '</div>');
+        }
+        cdEl.innerHTML = cdparts.join('');
+      } else {
+        cdEl.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Last learning cycle</div><div style="font-size:9px;color:var(--text-muted)">No digest yet — run a learning cycle (Learn / worker).</div>';
+      }
+    }
+    var psEl = document.getElementById('brain-proposal-skips');
+    if (psEl) {
+      var lps = d.last_proposal_skips;
+      if (lps && typeof lps === 'object' && (lps.picks_total != null || lps.skips)) {
+        var sk = lps.skips || {};
+        var skeys = Object.keys(sk).filter(function(k){ return sk[k] > 0; }).sort();
+        var skipRows = skeys.map(function(k){
+          return '<div style="display:flex;justify-content:space-between;max-width:28rem;border-bottom:1px solid var(--border);padding:2px 0"><span style="font-size:9px">' + escHtml(k) + '</span><strong style="font-size:9px">' + sk[k] + '</strong></div>';
+        }).join('');
+        psEl.innerHTML =
+          '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation (last run)</div>' +
+          '<div style="font-size:9px;color:var(--text-muted)">Picks ' + (lps.picks_total != null ? lps.picks_total : '—') + ' · created <strong>' + (lps.created != null ? lps.created : 0) + '</strong>' + (lps.updated_at ? ' · ' + escHtml(String(lps.updated_at)) : '') + '</div>' +
+          (skipRows ? '<div style="margin-top:6px">' + skipRows + '</div>' : '<div style="font-size:9px;color:var(--text-muted);margin-top:4px">No skips recorded.</div>');
+      } else {
+        psEl.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation</div><div style="font-size:9px;color:var(--text-muted)">No skip rollup yet — proposals run after a cycle or price monitor.</div>';
+      }
+    }
 
     var pipeNear = document.getElementById('brain-pipeline-near');
     if (pipeNear) {

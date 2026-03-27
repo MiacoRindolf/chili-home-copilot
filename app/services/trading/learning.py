@@ -4998,6 +4998,30 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception:
         pass
 
+    last_cycle_digest = None
+    last_proposal_skips = None
+    try:
+        import json as _json
+
+        from ..brain_worker_signals import get_worker_control_snapshot
+
+        _bwc = get_worker_control_snapshot(db)
+        if _bwc is not None:
+            raw_d = getattr(_bwc, "last_cycle_digest_json", None)
+            if raw_d:
+                try:
+                    last_cycle_digest = _json.loads(raw_d)
+                except Exception:
+                    last_cycle_digest = None
+            raw_p = getattr(_bwc, "last_proposal_skips_json", None)
+            if raw_p:
+                try:
+                    last_proposal_skips = _json.loads(raw_p)
+                except Exception:
+                    last_proposal_skips = None
+    except Exception:
+        pass
+
     return {
         "total_patterns": total_patterns,
         "avg_confidence": avg_confidence,
@@ -5042,6 +5066,8 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
         "last_cycle_budget": get_learning_status().get("last_cycle_budget"),
         "research_kpi_benchmarks": research_kpi_benchmarks,
         "pattern_pipeline_near": get_pattern_pipeline_near(db, limit=14),
+        "last_cycle_digest": last_cycle_digest,
+        "last_proposal_skips": last_proposal_skips,
     }
 
 
@@ -7078,6 +7104,27 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
     return stats
 
 
+_CYCLE_UI_DIGEST_KEYS = frozenset({
+    "prescreen_candidates", "tickers_scored", "snapshots_taken",
+    "patterns_discovered", "patterns_boosted", "returns_backfilled",
+    "queue_backtests_run", "backtests_run", "hypotheses_tested",
+    "hypotheses_challenged", "proposals_generated", "signal_events", "ml_trained",
+    "promoted_fast_eval", "data_provider", "elapsed_s", "interrupted", "error",
+    "funnel_snapshot", "brain_resource_budget", "live_depromotion",
+    "patterns_refined", "weights_evolved", "real_trade_adjustments",
+    "queue_pending", "queue_empty",
+})
+
+
+def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
+    """Subset of learning report for cross-process Brain UI (JSON-serializable)."""
+    out: dict[str, Any] = {"updated_at": datetime.utcnow().isoformat() + "Z"}
+    for k in _CYCLE_UI_DIGEST_KEYS:
+        if k in report and report[k] is not None:
+            out[k] = report[k]
+    return out
+
+
 def run_learning_cycle(
     db: Session,
     user_id: int | None,
@@ -7739,6 +7786,13 @@ def run_learning_cycle(
         except Exception as _pfe:
             logger.warning("[learning] Promoted prediction cache at cycle end failed: %s", _pfe)
             report["promoted_fast_eval"] = {"ok": False, "error": str(_pfe)}
+
+    try:
+        from ..brain_worker_signals import persist_last_cycle_digest_json
+
+        persist_last_cycle_digest_json(db, build_cycle_ui_digest(report))
+    except Exception as _ui_d:
+        logger.warning("[learning] persist cycle UI digest failed: %s", _ui_d)
 
     logger.info(
         f"[learning] Learning cycle finished in {elapsed:.0f}s "
