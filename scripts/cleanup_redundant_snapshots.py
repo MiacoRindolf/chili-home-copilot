@@ -15,11 +15,32 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from pathlib import Path
 
 from sqlalchemy import create_engine, text
 
-# Repo root on path
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+# Repo root on path (for optional app.config fallback)
+sys.path.insert(0, str(_REPO_ROOT))
+
+
+def _resolve_database_url() -> str:
+    """Load .env from repo root, then env var or app settings (same as other scripts)."""
+    try:
+        from dotenv import load_dotenv
+
+        load_dotenv(_REPO_ROOT / ".env")
+    except ImportError:
+        pass
+    url = (os.environ.get("DATABASE_URL") or "").strip()
+    if url:
+        return url
+    try:
+        from app.config import settings
+
+        return (settings.database_url or "").strip()
+    except Exception:
+        return ""
 
 
 def main() -> int:
@@ -27,9 +48,14 @@ def main() -> int:
     ap.add_argument("--execute", action="store_true", help="Actually delete (default dry-run)")
     args = ap.parse_args()
 
-    url = (os.environ.get("DATABASE_URL") or "").strip()
+    url = _resolve_database_url()
     if not url:
-        print("DATABASE_URL required", file=sys.stderr)
+        print(
+            "DATABASE_URL not set. Add it to .env in the repo root "
+            f"({_REPO_ROOT / '.env'}) or export DATABASE_URL (PostgreSQL URL). "
+            "See .env.example.",
+            file=sys.stderr,
+        )
         return 1
 
     engine = create_engine(url)
