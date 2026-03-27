@@ -660,6 +660,26 @@ def _check_breakout_outcomes():
         db.close()
 
 
+def _run_promoted_fast_eval_job():
+    """Refresh prediction cache using promoted ScanPatterns only (no full learning cycle)."""
+    from ..config import settings
+    from ..db import SessionLocal
+    from .trading.learning import run_promoted_pattern_fast_eval
+
+    if not getattr(settings, "brain_fast_eval_enabled", True):
+        return
+    logger.info("[scheduler] Promoted-pattern fast eval starting")
+    db = SessionLocal()
+    try:
+        result = run_promoted_pattern_fast_eval(db)
+        logger.info("[scheduler] Promoted fast eval result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Promoted fast eval failed: %s", e, exc_info=True)
+    finally:
+        db.close()
+
+
+
 def _run_code_learning_job():
     """Executed by APScheduler: Code Brain learning cycle."""
     from ..db import SessionLocal
@@ -954,6 +974,20 @@ def start_scheduler():
             replace_existing=True,
             max_instances=1,
         )
+
+        _fe_m = max(1, int(getattr(settings, "brain_fast_eval_interval_minutes", 10)))
+        if getattr(settings, "brain_fast_eval_enabled", True) and getattr(
+            settings, "brain_fast_eval_scheduler_enabled", False
+        ):
+            _scheduler.add_job(
+                _run_promoted_fast_eval_job,
+                trigger=IntervalTrigger(minutes=_fe_m),
+                id="promoted_pattern_fast_eval",
+                name=f"Promoted pattern prediction refresh (every {_fe_m}m)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=45),
+            )
 
         _code_hours = max(1, settings.code_brain_interval_hours)
         _scheduler.add_job(

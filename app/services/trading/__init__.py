@@ -120,6 +120,7 @@ from .learning import (
     get_learning_status,
     get_current_predictions,
     run_learning_cycle,
+    run_promoted_pattern_fast_eval,
     should_run_learning,
     dedup_existing_patterns,
     get_accuracy_detail,

@@ -4543,8 +4543,14 @@ def _get_current_predictions_impl(
     tickers: list[str] | None,
     *,
     explicit_api_tickers: bool = False,
+    active_patterns_override: list | None = None,
+    max_ticker_batch: int = 400,
 ) -> list[dict]:
-    """Core prediction logic (no cache).  Pattern-driven ML pipeline."""
+    """Core prediction logic (no cache).  Pattern-driven ML pipeline.
+
+    ``active_patterns_override``: when set, use instead of ``get_active_patterns(db)``.
+    ``max_ticker_batch``: cap after universe build (fast eval may use a lower cap).
+    """
     from .pattern_engine import get_active_patterns
     from .pattern_ml import get_meta_learner
 
@@ -4553,7 +4559,8 @@ def _get_current_predictions_impl(
         explicit_api_tickers = False
 
     tickers = _build_prediction_tickers(db, tickers)
-    ticker_batch = tickers[:400]
+    _cap = max(1, min(int(max_ticker_batch), 800))
+    ticker_batch = tickers[:_cap]
 
     vix = get_vix()
     vol_regime = get_volatility_regime(vix)
@@ -4561,10 +4568,13 @@ def _get_current_predictions_impl(
     meta = get_meta_learner()
     meta_ready = meta.is_ready()
 
-    try:
-        _active_patterns = get_active_patterns(db)
-    except Exception:
-        _active_patterns = []
+    if active_patterns_override is not None:
+        _active_patterns = list(active_patterns_override)
+    else:
+        try:
+            _active_patterns = get_active_patterns(db)
+        except Exception:
+            _active_patterns = []
 
     if not _active_patterns:
         return []
@@ -4660,6 +4670,73 @@ def _get_current_predictions_impl(
         )
 
     return results
+
+
+def refresh_promoted_prediction_cache(db: Session) -> dict[str, Any]:
+    """Recompute ``get_current_predictions`` SWR cache using promoted ScanPatterns only.
+
+    No mining or backtests. Called at end of ``run_learning_cycle`` and optionally from
+    APScheduler when learning is idle.
+    """
+    from ...config import settings
+    from ...models.trading import ScanPattern
+
+    if not getattr(settings, "brain_fast_eval_enabled", True):
+        return {"ok": True, "skipped": True, "reason": "disabled"}
+
+    promoted = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.promotion_status == "promoted",
+        )
+        .all()
+    )
+    if not promoted:
+        return {"ok": True, "skipped": True, "reason": "no_promoted_patterns"}
+
+    tickers = _build_prediction_tickers(db, None)
+    max_n = max(1, int(getattr(settings, "brain_fast_eval_max_tickers", 400)))
+    ticker_batch = tickers[:max_n]
+
+    results = _get_current_predictions_impl(
+        db,
+        ticker_batch,
+        explicit_api_tickers=False,
+        active_patterns_override=promoted,
+        max_ticker_batch=max_n,
+    )
+
+    global _pred_cache, _pred_refreshing
+    with _pred_refresh_lock:
+        _pred_cache = {"results": results, "ts": time.time()}
+        _pred_refreshing = False
+
+    logger.info(
+        "[learning] Promoted prediction cache: tickers=%s patterns=%s predictions=%s",
+        len(ticker_batch),
+        len(promoted),
+        len(results),
+    )
+    return {
+        "ok": True,
+        "tickers": len(ticker_batch),
+        "promoted_patterns": len(promoted),
+        "predictions": len(results),
+    }
+
+
+def run_promoted_pattern_fast_eval(db: Session) -> dict[str, Any]:
+    """Scheduler entrypoint: refresh promoted-only cache when a full cycle is not running."""
+    from ...config import settings
+
+    if not getattr(settings, "brain_fast_eval_enabled", True):
+        return {"ok": True, "skipped": True, "reason": "disabled"}
+
+    if get_learning_status().get("running"):
+        return {"ok": True, "skipped": True, "reason": "learning_cycle_active"}
+
+    return refresh_promoted_prediction_cache(db)
 
 
 def _explain_prediction(
@@ -7655,6 +7732,13 @@ def run_learning_cycle(
             brain_lease_enforcement_release_dedicated(
                 holder_id=str(_lease_release_holder)
             )
+
+    if not interrupted:
+        try:
+            report["promoted_fast_eval"] = refresh_promoted_prediction_cache(db)
+        except Exception as _pfe:
+            logger.warning("[learning] Promoted prediction cache at cycle end failed: %s", _pfe)
+            report["promoted_fast_eval"] = {"ok": False, "error": str(_pfe)}
 
     logger.info(
         f"[learning] Learning cycle finished in {elapsed:.0f}s "

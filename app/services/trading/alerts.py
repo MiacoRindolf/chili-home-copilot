@@ -345,7 +345,7 @@ def generate_strategy_proposals(
     Called after each learning cycle and by the price monitor when
     high-confidence opportunities emerge.
     """
-    from ...models.trading import StrategyProposal, ScanResult
+    from ...models.trading import ScanPattern, StrategyProposal, ScanResult
     from .scanner import generate_top_picks
     from .market_data import fetch_quote
 
@@ -362,6 +362,27 @@ def generate_strategy_proposals(
             continue
 
         ticker = pick["ticker"]
+
+        spid = pick.get("scan_pattern_id")
+        if spid is None:
+            logger.info("[proposals] skip %s: no_scan_pattern_id", ticker)
+            continue
+        pat = db.query(ScanPattern).filter(ScanPattern.id == int(spid)).first()
+        if pat is None or not pat.active:
+            logger.info(
+                "[proposals] skip %s: pattern_missing_or_inactive id=%s",
+                ticker,
+                spid,
+            )
+            continue
+        if (pat.promotion_status or "").strip().lower() != "promoted":
+            logger.info(
+                "[proposals] skip %s: pattern_not_promoted id=%s status=%s",
+                ticker,
+                spid,
+                getattr(pat, "promotion_status", None),
+            )
+            continue
 
         if not _proposal_passes_sector_cap(db, user_id, ticker):
             continue
@@ -552,6 +573,16 @@ def create_proposal_from_pick(
             }
     if not pick:
         return None, f"{ticker} is not in current top picks. Run a Full Scan or refresh, or the pick may have expired."
+
+    spid_gate = pick.get("scan_pattern_id")
+    if spid_gate is None:
+        return None, "Proposal requires a linked promoted ScanPattern (scan_pattern_id missing)."
+    from ...models.trading import ScanPattern as _SPGate
+    _pat_gate = db.query(_SPGate).filter(_SPGate.id == int(spid_gate)).first()
+    if _pat_gate is None or not _pat_gate.active:
+        return None, "Linked ScanPattern is missing or inactive."
+    if (_pat_gate.promotion_status or "").strip().lower() != "promoted":
+        return None, "Linked ScanPattern must be promotion_status=promoted."
 
     combined = pick.get("combined_score", 0)
 

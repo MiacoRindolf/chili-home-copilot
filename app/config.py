@@ -1,4 +1,4 @@
-"""Centralized configuration for CHILI. Loads from .env with type safety."""
+﻿"""Centralized configuration for CHILI. Loads from .env with type safety."""
 from typing import Optional
 
 from pydantic import AliasChoices, Field, field_validator
@@ -19,14 +19,14 @@ class Settings(BaseSettings):
     wellness_model: str = "phi4-mini"
     ollama_vision_model: str = "llama3.2-vision"
 
-    # Primary LLM — defaults to Groq free tier (Llama 3.3 70B, ~800 tok/s).
+    # Primary LLM â€” defaults to Groq free tier (Llama 3.3 70B, ~800 tok/s).
     # Override with Ollama or other OpenAI-compatible provider.
     llm_api_key: str = ""
     openai_api_key: str = ""  # backward compat; used as primary if llm_api_key empty
     llm_model: str = "llama-3.3-70b-versatile"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
-    # Fallback LLM — defaults to Google Gemini free tier (OpenAI-compatible endpoint).
+    # Fallback LLM â€” defaults to Google Gemini free tier (OpenAI-compatible endpoint).
     # Get a free key at https://aistudio.google.com/apikey
     premium_api_key: str = ""
     premium_model: str = "gemini-2.0-flash"
@@ -66,12 +66,12 @@ class Settings(BaseSettings):
     sms_carrier: str = "verizon"     # verizon, att, tmobile, sprint, uscellular, boost, cricket, metro, mint, visible, google_fi
     alerts_enabled: bool = True
 
-    # Twilio (optional SMS upgrade — if empty, email-to-SMS gateway is used)
+    # Twilio (optional SMS upgrade â€” if empty, email-to-SMS gateway is used)
     twilio_account_sid: str = ""
     twilio_auth_token: str = ""
     twilio_phone_number: str = ""    # Twilio phone number with country code, e.g. "+18001234567"
 
-    # Telegram Bot (free, no quota — preferred for trading alerts)
+    # Telegram Bot (free, no quota â€” preferred for trading alerts)
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
@@ -80,7 +80,7 @@ class Settings(BaseSettings):
     google_client_secret: str = ""
     session_secret: str = "chili-session-change-me"  # sign session cookies
 
-    # Broker credentials — DEPRECATED: use the in-app setup dialogs instead.
+    # Broker credentials â€” DEPRECATED: use the in-app setup dialogs instead.
     # These .env values serve as a fallback when no per-user DB credentials exist.
     robinhood_username: str = ""
     robinhood_password: str = ""
@@ -88,7 +88,7 @@ class Settings(BaseSettings):
     coinbase_api_key: str = ""
     coinbase_api_secret: str = ""
 
-    # Massive.com market data (primary — real-time quotes & aggregates)
+    # Massive.com market data (primary â€” real-time quotes & aggregates)
     massive_api_key: str = ""
     massive_base_url: str = "https://api.massive.com"
     massive_ws_url: str = "wss://socket.massive.com"
@@ -99,7 +99,7 @@ class Settings(BaseSettings):
     massive_http_pool_connections: int = 128
     massive_http_pool_maxsize: int = 512
 
-    # Polygon.io market data (secondary fallback — replaces yfinance for speed)
+    # Polygon.io market data (secondary fallback â€” replaces yfinance for speed)
     polygon_api_key: str = ""
     polygon_base_url: str = "https://api.polygon.io"
     use_polygon: bool = False  # feature flag: set USE_POLYGON=true in .env to enable
@@ -132,7 +132,7 @@ class Settings(BaseSettings):
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
-    brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) — ML train step only, not queue BT
+    brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) â€” ML train step only, not queue BT
 
     # Full learning cycle (run_learning_cycle): optional slim mode
     brain_insight_backtest_on_cycle: bool = False  # legacy TradingInsight smart backtests (ScanPattern queue is canonical)
@@ -143,6 +143,14 @@ class Settings(BaseSettings):
     # When the retest queue is thin, add oldest-tested active patterns up to this many per cycle.
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40
+
+    # Lightweight prediction refresh: promoted ScanPatterns only (no full learning cycle).
+    brain_fast_eval_enabled: bool = True
+    # When True, APScheduler also runs fast eval on an interval. Default False: full
+    # ``run_learning_cycle`` (worker or Learn) already refreshes the promoted cache.
+    brain_fast_eval_scheduler_enabled: bool = False
+    brain_fast_eval_interval_minutes: int = 10
+    brain_fast_eval_max_tickers: int = 400
 
     # Brain UI: "tradeable patterns" list (OOS % and trade count gates; promoted-only by default).
     brain_tradeable_min_oos_wr: float = 50.0
@@ -172,7 +180,7 @@ class Settings(BaseSettings):
     project_brain_enabled: bool = True
     project_brain_auto_cycle_minutes: int = 60
     project_brain_max_web_searches: int = 5
-    # Phase 0: harmful defaults frozen — scheduler cycle and chat injection off unless enabled.
+    # Phase 0: harmful defaults frozen â€” scheduler cycle and chat injection off unless enabled.
     project_brain_scheduler_enabled: bool = False
     project_brain_chat_context_enabled: bool = False
 
@@ -184,8 +192,8 @@ class Settings(BaseSettings):
     proposal_warn_age_min: int = 60    # warn when proposal is older than N minutes
     pick_warn_drift_pct: float = 10.0  # warn when price has drifted >N% from entry
 
-    # Database — PostgreSQL only (required). See .env.example and docs/DATABASE_POSTGRES.md.
-    # Example (host → Docker Compose postgres): postgresql://chili:chili@localhost:5433/chili
+    # Database â€” PostgreSQL only (required). See .env.example and docs/DATABASE_POSTGRES.md.
+    # Example (host â†’ Docker Compose postgres): postgresql://chili:chili@localhost:5433/chili
     database_url: str = Field(..., description="PostgreSQL connection URL")
     # Pool: brain worker + parallel queue backtests can hold many connections; default 30 is too small.
     database_pool_size: int = 25
@@ -196,7 +204,7 @@ class Settings(BaseSettings):
     # Send header: X-Chili-Brain-Wake-Secret: <same value>. Use a long random string; never commit it.
     brain_v1_wake_secret: str = ""
 
-    # Brain HTTP service (chili-brain/) — when set, workers or scripts can delegate via brain_client
+    # Brain HTTP service (chili-brain/) â€” when set, workers or scripts can delegate via brain_client
     brain_service_url: str = ""  # e.g. http://brain:8090 (Compose) or http://127.0.0.1:8090
     brain_internal_secret: str = ""  # Bearer token for POST /v1/run-learning-cycle (match CHILI_BRAIN_INTERNAL_SECRET on brain)
 
@@ -217,7 +225,7 @@ class Settings(BaseSettings):
     brain_worker_compose_project: str = ""
 
     # Pattern backtests (backtesting.py): spread = constant bid/ask friction as fraction of price.
-    # Combined proxy for half-spread + slippage (e.g. 0.0002 ≈ 2 bps per side order of magnitude).
+    # Combined proxy for half-spread + slippage (e.g. 0.0002 â‰ˆ 2 bps per side order of magnitude).
     backtest_spread: float = 0.0002
     backtest_commission: float = 0.001
     # Hold out the last fraction of bars for out-of-sample metrics when training/evaluating patterns.
@@ -241,7 +249,7 @@ class Settings(BaseSettings):
     brain_budget_pattern_injects_per_cycle: int = 32
     brain_budget_miner_error_trip: int = 5
 
-    # Secondary miners: high-vol regime hypothesis (crypto 15m) — additive to compression intraday miner.
+    # Secondary miners: high-vol regime hypothesis (crypto 15m) â€” additive to compression intraday miner.
     brain_high_vol_miner_enabled: bool = True
     # Future: spawn ScanPattern from miner stats; must still pass normal backtest/OOS (default off).
     brain_miner_scanpattern_bridge_enabled: bool = False
@@ -298,7 +306,7 @@ class Settings(BaseSettings):
     pattern_imminent_alert_enabled: bool = True
     pattern_imminent_max_eta_hours: float = 4.0
     # Loosened defaults: many ScanPatterns reference indicators absent from the swing snapshot;
-    # with only 1–2 evaluable conditions, a high ratio floor produced zero candidates forever.
+    # with only 1â€“2 evaluable conditions, a high ratio floor produced zero candidates forever.
     pattern_imminent_min_readiness: float = 0.58
     pattern_imminent_readiness_cap: float = 0.995
     pattern_imminent_max_per_run: int = 12
