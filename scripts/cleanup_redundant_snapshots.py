@@ -6,6 +6,9 @@
 
 Default is dry-run. Pass --execute to delete.
 
+Dry-run counts **rows** that would be removed (not pair-counts: k duplicate rows
+share k(k-1)/2 ordered pairs but only k-1 rows are deleted).
+
 Usage (conda env chili-env):
   python scripts/cleanup_redundant_snapshots.py
   python scripts/cleanup_redundant_snapshots.py --execute
@@ -63,27 +66,32 @@ def main() -> int:
 
     stmts_count = [
         (
-            "bar_key_duplicates",
+            "bar_key_rows_to_delete",
             """
             SELECT COUNT(*) FROM trading_snapshots a
-            INNER JOIN trading_snapshots b
-              ON a.ticker = b.ticker
-             AND a.bar_interval = b.bar_interval
-             AND a.bar_start_at = b.bar_start_at
-             AND a.bar_start_at IS NOT NULL
-             AND b.bar_start_at IS NOT NULL
-             AND a.id < b.id
+            WHERE a.bar_start_at IS NOT NULL
+              AND EXISTS (
+                SELECT 1 FROM trading_snapshots b
+                WHERE b.bar_start_at IS NOT NULL
+                  AND a.ticker = b.ticker
+                  AND a.bar_interval = b.bar_interval
+                  AND a.bar_start_at = b.bar_start_at
+                  AND b.id > a.id
+              )
             """,
         ),
         (
-            "legacy_day_duplicates",
+            "legacy_same_day_rows_to_delete",
             """
             SELECT COUNT(*) FROM trading_snapshots a
-            INNER JOIN trading_snapshots b
-              ON a.ticker = b.ticker
-             AND a.bar_start_at IS NULL AND b.bar_start_at IS NULL
-             AND (a.snapshot_date::date) = (b.snapshot_date::date)
-             AND a.id < b.id
+            WHERE a.bar_start_at IS NULL
+              AND EXISTS (
+                SELECT 1 FROM trading_snapshots b
+                WHERE b.bar_start_at IS NULL
+                  AND a.ticker = b.ticker
+                  AND (a.snapshot_date::date) = (b.snapshot_date::date)
+                  AND b.id > a.id
+              )
             """,
         ),
     ]
@@ -91,7 +99,7 @@ def main() -> int:
     with engine.connect() as conn:
         for label, sql in stmts_count:
             n = conn.execute(text(sql)).scalar() or 0
-            print(f"{label}: rows that would lose (lower id): {n}")
+            print(f"{label}: {n}")
 
         if dry:
             print("Dry-run only. Use --execute to delete.")
