@@ -75,8 +75,29 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 /* Main content */
 .b-main { flex: 1; padding: 20px 24px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-#domain-trading { display: none; flex: 1; min-height: 0; min-width: 0; align-self: stretch; }
-.trading-main-content { flex: 1; min-width: 0; overflow-y: auto; padding-right: 0; }
+#domain-trading {
+  display: none; flex: 1; min-height: 0; min-width: 0; align-self: stretch;
+  flex-direction: column;
+}
+.trading-brain-body-row {
+  flex: 1; min-height: 0; min-width: 0; display: flex; flex-direction: row; align-self: stretch;
+}
+.trading-brain-pane {
+  flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
+}
+.trading-brain-pane-network { overflow: auto; }
+.trading-brain-network-placeholder { flex: 1; min-height: 160px; }
+.tb-tabstrip {
+  flex-shrink: 0; display: flex; justify-content: center; align-items: center; gap: 6px;
+  padding: 6px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px;
+}
+.tb-tab {
+  padding: 6px 20px; font-size: 11px; font-weight: 600; border: 1px solid var(--border); border-radius: 8px;
+  background: transparent; color: var(--text-muted); cursor: pointer; transition: color .15s, background .15s, border-color .15s;
+}
+.tb-tab:hover { color: var(--text); background: rgba(99,102,241,.06); }
+.tb-tab.active { color: var(--accent); background: rgba(99,102,241,.1); border-color: rgba(99,102,241,.28); }
+.trading-main-content { flex: 1; min-width: 0; min-height: 0; overflow-y: auto; padding-right: 0; }
 .tba-panel {
   width: 380px; min-width: 320px; flex-shrink: 0;
   display: flex; flex-direction: column; align-self: stretch;
@@ -746,6 +767,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
     <!-- ═══ Trading Domain ═══ -->
     <div id="domain-trading" style="display:none">
+      <div class="tb-tabstrip" role="tablist" aria-label="Trading brain view">
+        <button type="button" class="tb-tab" role="tab" aria-selected="false" data-tb-tab="network" id="tb-tab-network" onclick="setTradingBrainSubtab('network')">Network</button>
+        <button type="button" class="tb-tab active" role="tab" aria-selected="true" data-tb-tab="output" id="tb-tab-output" onclick="setTradingBrainSubtab('output')">Output</button>
+      </div>
+      <div class="trading-brain-body-row">
+      <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
+        <div class="trading-brain-network-placeholder" aria-hidden="true"></div>
+      </div>
+      <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-hidden="false">
       <div class="trading-main-content">
       <div class="b-main-header">
         <h2>Trading Brain</h2>
@@ -988,6 +1018,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div id="brain-chart" style="width:100%;height:180px"></div>
       </div>
       </div><!-- .trading-main-content -->
+      </div><!-- #trading-brain-pane-output -->
 
       <aside class="tba-panel" id="trading-brain-assistant-section">
         <div class="tba-panel-header">&#x1F916; Trading Brain Assistant</div>
@@ -1012,6 +1043,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
         </div>
       </aside>
+      </div><!-- .trading-brain-body-row -->
     </div>
 
     <!-- ═══ Project Domain ═══ -->
@@ -1911,6 +1943,28 @@ function _tbaClear() {
   if (container) container.innerHTML = '';
   var input = document.getElementById('tba-input');
   if (input) input.value = '';
+}
+
+function setTradingBrainSubtab(which) {
+  if (which !== 'output' && which !== 'network') return;
+  document.querySelectorAll('.tb-tabstrip .tb-tab').forEach(function(btn) {
+    var on = btn.getAttribute('data-tb-tab') === which;
+    btn.classList.toggle('active', on);
+    btn.setAttribute('aria-selected', on ? 'true' : 'false');
+  });
+  var out = document.getElementById('trading-brain-pane-output');
+  var net = document.getElementById('trading-brain-pane-network');
+  var asst = document.getElementById('trading-brain-assistant-section');
+  var isOut = which === 'output';
+  if (out) {
+    out.style.display = isOut ? 'flex' : 'none';
+    out.setAttribute('aria-hidden', isOut ? 'false' : 'true');
+  }
+  if (net) {
+    net.style.display = isOut ? 'none' : 'flex';
+    net.setAttribute('aria-hidden', isOut ? 'true' : 'false');
+  }
+  if (asst) asst.style.display = isOut ? '' : 'none';
 }
 
 function initTradingBrainAssistant() {
