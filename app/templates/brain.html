@@ -25,32 +25,57 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 .b-body { display: flex; height: calc(100vh - 45px); min-height: 0; overflow: hidden; }
 
-/* Domain sidebar */
-.b-sidebar {
-  width: 200px; min-width: 160px; background: var(--bg-header); border-right: 1px solid var(--border);
-  padding: 12px 0; flex-shrink: 0;
-}
-.b-sidebar h3 { font-size: 10px; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); padding: 0 14px 8px; }
-.b-domain {
-  display: flex; align-items: center; gap: 8px; padding: 8px 14px; cursor: pointer;
-  font-size: 12px; font-weight: 600; color: var(--text-secondary); transition: all .15s;
-  border-left: 3px solid transparent;
-}
-.b-domain:hover { background: rgba(99,102,241,.04); color: var(--text); }
-.b-domain.active { border-left-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.06); }
-.b-domain-icon { font-size: 16px; }
-.b-domain-dot { width: 6px; height: 6px; border-radius: 50%; margin-left: auto; flex-shrink: 0; }
+/* Domain hub (replaces sidebar) */
+.b-domain-dot { width: 6px; height: 6px; border-radius: 50%; margin-left: 8px; flex-shrink: 0; display: inline-block; vertical-align: middle; }
 .b-domain-dot.idle { background: #6b7280; }
 .b-domain-dot.learning { background: #22c55e; animation: bpulse 1.2s infinite ease-in-out; }
 
-.b-status-banner {
-  padding: 8px 14px; font-size: 10px; color: var(--text-muted); border-top: 1px solid var(--border);
-  margin-top: auto;
+#domain-hub {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  padding: 4px 0 8px; overflow-y: auto; min-height: 0; min-width: 0;
+}
+.b-hub-intro { text-align: center; margin-bottom: 20px; max-width: 520px; }
+.b-hub-intro h2 { font-size: 18px; font-weight: 700; margin-bottom: 6px; }
+.b-hub-intro p { font-size: 12px; color: var(--text-muted); line-height: 1.5; }
+.b-hub-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px; width: 100%; max-width: 920px;
+}
+.b-hub-card {
+  border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px;
+  cursor: pointer; background: var(--bg-header); transition: border-color .15s, box-shadow .15s;
+  text-align: left;
+}
+.b-hub-card:hover {
+  border-color: rgba(99,102,241,.35);
+  box-shadow: 0 4px 20px rgba(0,0,0,.06);
+}
+.b-hub-card:focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.b-hub-card-inner { display: flex; gap: 14px; align-items: flex-start; }
+.b-hub-card-icon { font-size: 28px; line-height: 1; flex-shrink: 0; }
+.b-hub-card-body { min-width: 0; flex: 1; }
+.b-hub-card-title {
+  font-size: 14px; font-weight: 700; color: var(--text);
+  display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+}
+.b-hub-card-desc { font-size: 11px; color: var(--text-muted); line-height: 1.45; margin-top: 6px; }
+
+.b-hub-status-banner {
+  margin-top: 24px; padding: 10px 16px; font-size: 10px; color: var(--text-muted);
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-header);
+  max-width: 920px; width: 100%; text-align: center;
 }
 
+.b-back-domains-btn {
+  margin-right: 4px; padding: 5px 12px; font-size: 11px; font-weight: 600;
+  border: 1px solid var(--border); border-radius: 6px; background: var(--bg);
+  color: var(--accent); cursor: pointer; transition: background .15s, border-color .15s;
+}
+.b-back-domains-btn:hover { background: rgba(99,102,241,.06); border-color: rgba(99,102,241,.25); }
+
 /* Main content */
-.b-main { flex: 1; padding: 20px 24px; overflow-y: auto; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
-#domain-trading { display: flex; flex: 1; min-height: 0; min-width: 0; align-self: stretch; }
+.b-main { flex: 1; padding: 20px 24px; overflow: hidden; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+#domain-trading { display: none; flex: 1; min-height: 0; min-width: 0; align-self: stretch; }
 .trading-main-content { flex: 1; min-width: 0; overflow-y: auto; padding-right: 0; }
 .tba-panel {
   width: 380px; min-width: 320px; flex-shrink: 0;
@@ -680,7 +705,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 /* Responsive */
 @media (max-width: 768px) {
-  .b-sidebar { display: none; }
   .b-main { padding: 12px 14px; }
   .brain-kpis { grid-template-columns: repeat(2, 1fr); }
   .pred-grid { grid-template-columns: 1fr; }
@@ -692,6 +716,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 {% block content %}
 <div class="b-header">
   <div style="display:flex;align-items:center;gap:8px">
+    <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:none" title="Back to domain hub">&#8592; All domains</button>
     <h1>&#x1F9E0; Chili Brain</h1>
   </div>
   <nav>
@@ -707,32 +732,20 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 </div>
 
 <div class="b-body">
-  <!-- Domain sidebar -->
-  <div class="b-sidebar">
-    <h3>Domains</h3>
-    <div class="b-domain active" data-domain="trading" onclick="switchDomain('trading')">
-      <span class="b-domain-icon">&#x1F4C8;</span>
-      Trading
-      <span class="b-domain-dot idle" id="trading-status-dot"></span>
-    </div>
-    <div class="b-domain" data-domain="project" onclick="switchDomain('project')">
-      <span class="b-domain-icon">&#x1F3D7;</span>
-      Project
-      <span class="b-domain-dot idle" id="project-status-dot"></span>
-    </div>
-    <div class="b-domain" data-domain="reasoning" onclick="switchDomain('reasoning')">
-      <span class="b-domain-icon">&#x1F9E0;</span>
-      Reasoning
-      <span class="b-domain-dot idle" id="reasoning-status-dot"></span>
-    </div>
-    <div class="b-status-banner" id="sidebar-status">Checking status...</div>
-  </div>
-
-  <!-- Main -->
   <div class="b-main">
 
+    <!-- Domain hub (default entry) -->
+    <div id="domain-hub">
+      <div class="b-hub-intro">
+        <h2>Brain domains</h2>
+        <p>Pick a domain to open its desk. Status dots show when a learning cycle is running.</p>
+      </div>
+      <div class="b-hub-grid" id="domain-hub-grid"></div>
+      <div class="b-hub-status-banner" id="hub-status-banner">Checking status...</div>
+    </div>
+
     <!-- ═══ Trading Domain ═══ -->
-    <div id="domain-trading">
+    <div id="domain-trading" style="display:none">
       <div class="trading-main-content">
       <div class="b-main-header">
         <h2>Trading Brain</h2>
@@ -1543,12 +1556,12 @@ function _makeRingSvg(pct, color) {
 
 /* ── Sidebar status polling ───────────────────── */
 function setSidebarBannerFallback() {
-  var banner = document.getElementById('sidebar-status');
+  var banner = document.getElementById('hub-status-banner');
   if (banner) banner.textContent = 'Trading: --';
 }
 
 function updateSidebarStatus() {
-  var banner = document.getElementById('sidebar-status');
+  var banner = document.getElementById('hub-status-banner');
   return fetch('/api/brain/status').then(function(r) {
     if (!r.ok) { setSidebarBannerFallback(); return null; }
     return r.json();
@@ -1558,10 +1571,10 @@ function updateSidebarStatus() {
     var t = d.trading || {};
     var dot = document.getElementById('trading-status-dot');
     if (t.running) {
-      dot.className = 'b-domain-dot learning';
+      if (dot) dot.className = 'b-domain-dot learning';
       banner.textContent = 'Trading: ' + (t.phase || 'learning') + '...';
     } else {
-      dot.className = 'b-domain-dot idle';
+      if (dot) dot.className = 'b-domain-dot idle';
       var lastRun = t.last_run ? timeSince(new Date(t.last_run)) + ' ago' : 'never';
       banner.textContent = 'Trading: ' + lastRun;
     }
@@ -4091,21 +4104,126 @@ function triggerDeepStudy() {
 /* ══════════════════════════════════════════════════
    Code Brain JavaScript
    ══════════════════════════════════════════════════ */
-var _activeDomain = 'trading';
+var _activeDomain = null;
 var _projectDashboardLoaded = false;
 var _reasoningDashboardLoaded = false;
 var _activeProjectLens = 'architect'; /* kept for compat */
 
-function switchDomain(domain) {
+function brainSetUrlDomain(which) {
+  try {
+    var u = new URL(window.location.href);
+    if (which === 'hub' || which == null) {
+      u.searchParams.delete('domain');
+    } else {
+      u.searchParams.set('domain', which);
+    }
+    var q = u.searchParams.toString();
+    history.replaceState({}, '', u.pathname + (q ? '?' + q : '') + (u.hash || ''));
+  } catch (e) {}
+}
+
+function brainReadUrlDomainString() {
+  try {
+    var rawParam = new URLSearchParams(window.location.search || '').get('domain');
+    if (rawParam == null || rawParam === '') return null;
+    var v = String(rawParam).toLowerCase();
+    if (v === 'hub') return 'hub';
+    if (v === 'code') return 'project';
+    if (v === 'trading' || v === 'project' || v === 'reasoning') return v;
+    return '__invalid__';
+  } catch (e) {
+    return null;
+  }
+}
+
+function showBrainHub(opts) {
+  opts = opts || {};
+  _activeDomain = 'hub';
+  var hub = document.getElementById('domain-hub');
+  if (hub) hub.style.display = 'flex';
+  var tr = document.getElementById('domain-trading');
+  if (tr) tr.style.display = 'none';
+  var pr = document.getElementById('domain-project');
+  if (pr) pr.style.display = 'none';
+  var rd = document.getElementById('domain-reasoning');
+  if (rd) rd.style.display = 'none';
+  var back = document.getElementById('brain-nav-all-domains');
+  if (back) back.style.display = 'none';
+  if (!opts.skipUrl) brainSetUrlDomain('hub');
+}
+
+function renderBrainHubCards() {
+  return fetch('/api/brain/domains').then(function(r) { return r.json(); }).then(function(d) {
+    var grid = document.getElementById('domain-hub-grid');
+    if (!grid) return;
+    if (!d || !d.ok || !d.domains || !d.domains.length) {
+      grid.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">Domains unavailable. Try again later.</div>';
+      return;
+    }
+    grid.innerHTML = '';
+    d.domains.forEach(function(dom) {
+      var id = dom.id;
+      var card = document.createElement('div');
+      card.className = 'b-hub-card';
+      card.setAttribute('role', 'button');
+      card.tabIndex = 0;
+      var icon = dom.icon || '\u2728';
+      var label = dom.label || id;
+      var desc = dom.description || '';
+      var title = document.createElement('div');
+      title.className = 'b-hub-card-title';
+      title.appendChild(document.createTextNode(label));
+      var dot = document.createElement('span');
+      dot.className = 'b-domain-dot idle';
+      dot.id = id + '-status-dot';
+      title.appendChild(dot);
+      var p = document.createElement('p');
+      p.className = 'b-hub-card-desc';
+      p.textContent = desc;
+      var body = document.createElement('div');
+      body.className = 'b-hub-card-body';
+      body.appendChild(title);
+      body.appendChild(p);
+      var ic = document.createElement('span');
+      ic.className = 'b-hub-card-icon';
+      ic.textContent = icon;
+      var inner = document.createElement('div');
+      inner.className = 'b-hub-card-inner';
+      inner.appendChild(ic);
+      inner.appendChild(body);
+      card.appendChild(inner);
+      function go() { switchDomain(id); }
+      card.onclick = go;
+      card.onkeydown = function(e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          go();
+        }
+      };
+      grid.appendChild(card);
+    });
+  }).catch(function() {
+    var grid = document.getElementById('domain-hub-grid');
+    if (grid) grid.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">Could not load domains.</div>';
+  });
+}
+
+function switchDomain(domain, opts) {
+  opts = opts || {};
   if (domain === 'code') domain = 'project';
   _activeDomain = domain;
-  document.querySelectorAll('.b-domain').forEach(function(el) {
-    el.classList.toggle('active', el.dataset.domain === domain);
-  });
-  document.getElementById('domain-trading').style.display = domain === 'trading' ? '' : 'none';
-  document.getElementById('domain-project').style.display = domain === 'project' ? '' : 'none';
+  var hub = document.getElementById('domain-hub');
+  if (hub) hub.style.display = 'none';
+  var tr = document.getElementById('domain-trading');
+  if (tr) tr.style.display = domain === 'trading' ? 'flex' : 'none';
+  var pr = document.getElementById('domain-project');
+  if (pr) pr.style.display = domain === 'project' ? '' : 'none';
   var rd = document.getElementById('domain-reasoning');
   if (rd) rd.style.display = domain === 'reasoning' ? '' : 'none';
+  var back = document.getElementById('brain-nav-all-domains');
+  if (back) back.style.display = 'inline-block';
+
+  if (!opts.skipUrl) brainSetUrlDomain(domain);
 
   if (domain === 'project' && !_projectDashboardLoaded) {
     _projectDashboardLoaded = true;
@@ -4118,6 +4236,26 @@ function switchDomain(domain) {
     _reasoningDashboardLoaded = true;
     loadReasoningDashboard();
   }
+}
+
+function brainApplyInitialView() {
+  var plannerSkipHub = brainHandoffPlannerTaskId() != null || brainHandoffPlannerProjectId() != null;
+  if (plannerSkipHub) {
+    switchDomain('project', { skipUrl: true });
+    brainSetUrlDomain('project');
+    return;
+  }
+  var raw = brainReadUrlDomainString();
+  if (raw === 'hub' || raw === '__invalid__') {
+    showBrainHub({ skipUrl: true });
+    brainSetUrlDomain('hub');
+    return;
+  }
+  if (raw === 'trading' || raw === 'project' || raw === 'reasoning') {
+    switchDomain(raw, { skipUrl: true });
+    return;
+  }
+  showBrainHub({ skipUrl: true });
 }
 
 function loadCodeDashboard() {
@@ -6764,16 +6902,15 @@ function brainApplyHandoffLaunchParamOnce() {
 
 /* ── Init ─────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function() {
-  /* Planner deep link: show handoff strip on Project surface (bridge lives under #domain-project) */
-  if (brainHandoffPlannerTaskId() != null || brainHandoffPlannerProjectId() != null) {
-    switchDomain('project');
-  }
-  initBrainPlannerHandoffBridge();
-  brainApplyHandoffLaunchParamOnce();
-  loadBrainDashboard();
-  updateSidebarStatus();
-  startBwPolling();
-  initTradingBrainAssistant();
+  renderBrainHubCards().finally(function() {
+    brainApplyInitialView();
+    initBrainPlannerHandoffBridge();
+    brainApplyHandoffLaunchParamOnce();
+    loadBrainDashboard();
+    updateSidebarStatus();
+    startBwPolling();
+    initTradingBrainAssistant();
+  });
 });
 </script>
 {% endblock %}

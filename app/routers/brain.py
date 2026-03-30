@@ -104,6 +104,8 @@ def api_brain_domains():
             {
                 "id": "trading",
                 "label": "Trading",
+                "icon": "\U0001f4c8",
+                "description": "Patterns, backtests, learning cycles, and desk metrics for your watchlists.",
                 "status": "learning" if trading_st.get("running") else "idle",
                 "last_run": trading_st.get("last_run"),
                 "phase": trading_st.get("phase", "idle"),
@@ -111,6 +113,8 @@ def api_brain_domains():
             {
                 "id": "project",
                 "label": "Project",
+                "icon": "\U0001f3d7",
+                "description": "Code brain, autonomous agents, and planner implementation handoff in one surface.",
                 "status": "learning" if code_st.get("running") else "idle",
                 "last_run": code_st.get("last_run"),
                 "phase": code_st.get("phase", "idle"),
@@ -120,6 +124,8 @@ def api_brain_domains():
             {
                 "id": "reasoning",
                 "label": "Reasoning",
+                "icon": "\U0001f9e0",
+                "description": "User model, interests, research threads, and proactive insight chat.",
                 "status": "learning" if reasoning_st.get("running") else "idle",
                 "last_run": reasoning_st.get("last_run"),
                 "phase": reasoning_st.get("phase", "idle"),
