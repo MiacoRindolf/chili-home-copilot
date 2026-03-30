@@ -144,6 +144,11 @@ class Settings(BaseSettings):
     brain_queue_exploration_enabled: bool = True
     brain_queue_exploration_max: int = 40
 
+    # Research integrity: causality checks + provenance on pattern backtests (Freqtrade-style hygiene, CHILI-native).
+    brain_research_integrity_enabled: bool = True
+    brain_research_integrity_strict: bool = False  # True = block promotion to promoted when causality fails
+    brain_research_integrity_max_check_bars: int = 48
+
     # Lightweight prediction refresh: promoted ScanPatterns only (no full learning cycle).
     brain_fast_eval_enabled: bool = True
     # When True, APScheduler also runs fast eval on an interval. Default False: full
@@ -157,6 +162,22 @@ class Settings(BaseSettings):
     brain_intraday_intervals: str = "15m"
     brain_intraday_max_tickers: int = 40
     brain_snapshot_backfill_years: int = 10
+
+    # Crypto universe for prescreen / ticker_universe: 0 = fetch all pages from provider (CoinGecko, capped by safety limit); N>0 = top N by market cap.
+    brain_crypto_universe_max: int = 200
+    # Drop cryptos below this 24h USD volume when building universe (0 = off). Reduces illiquid tail when universe is large.
+    brain_crypto_universe_min_volume_usd: float = 0.0
+    # When False, prescreen uses a smaller crypto list (150) for faster cycles; True = merge full configured crypto universe into prescreen.
+    brain_scan_include_full_crypto_universe: bool = True
+
+    # Pattern mining: max tickers to pull OHLCV for per cycle (0 = no cap; use full merged mining list).
+    brain_mine_patterns_max_tickers: int = 1000
+    # Require stability across chronological segments before save_insight from mine_patterns.
+    brain_mining_purged_cpcv_enabled: bool = True
+    # Extra SPY-regime × motif checks at end of mine_patterns.
+    brain_regime_mining_enabled: bool = True
+    # OHLC-derived ``learned_v1`` block on get_indicator_snapshot JSON.
+    brain_snapshot_learned_v1_enabled: bool = True
 
     # Brain UI: "tradeable patterns" list (OOS % and trade count gates; promoted-only by default).
     brain_tradeable_min_oos_wr: float = 50.0

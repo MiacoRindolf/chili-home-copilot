@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import func
@@ -345,10 +346,15 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     from ...config import settings
 
     if not getattr(settings, "brain_live_depromotion_enabled", False):
-        return {"ok": True, "skipped": True}
+        return {"ok": True, "skipped": True, "decay_monitor_updated": 0}
     uid = getattr(settings, "brain_default_user_id", None)
     if uid is None:
-        return {"ok": True, "skipped": True, "reason": "no_brain_default_user_id"}
+        return {
+            "ok": True,
+            "skipped": True,
+            "reason": "no_brain_default_user_id",
+            "decay_monitor_updated": 0,
+        }
 
     from ...models.trading import ScanPattern
     from .attribution_service import live_vs_research_by_pattern
@@ -375,7 +381,32 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
                 demoted += 1
     if demoted:
         db.commit()
-    return {"ok": True, "demoted": demoted}
+
+    touched = 0
+    for row in patterns:
+        pid = row.get("scan_pattern_id")
+        oos_wr = row.get("research_oos_win_rate_pct")
+        live_wr = row.get("live_win_rate_pct")
+        n_live = int(row.get("live_closed_trades") or 0)
+        if pid is None or oos_wr is None or live_wr is None:
+            continue
+        p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
+        if not p:
+            continue
+        ov = dict(p.oos_validation_json or {}) if isinstance(p.oos_validation_json, dict) else {}
+        dm = dict(ov.get("decay_monitor") or {})
+        dm["live_vs_oos_gap_pct"] = round(float(oos_wr) - float(live_wr), 2)
+        dm["live_wr_pct"] = float(live_wr)
+        dm["oos_wr_pct_ref"] = float(oos_wr)
+        dm["live_n_closed"] = n_live
+        dm["updated_at"] = datetime.utcnow().isoformat() + "Z"
+        ov["decay_monitor"] = dm
+        p.oos_validation_json = ov
+        touched += 1
+    if touched:
+        db.commit()
+
+    return {"ok": True, "demoted": demoted, "decay_monitor_updated": touched}
 
 
 # ── Learning Event Logger (extracted to learning_events.py) ───────────
@@ -932,6 +963,7 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
     from ta.momentum import RSIIndicator, StochasticOscillator
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
+    from ta.volume import OnBalanceVolumeIndicator
     from .scanner import _detect_resistance_retests, _detect_narrow_range, _detect_vcp
 
     period = "6mo" if bar_interval == "1d" else "90d"
@@ -966,6 +998,9 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
     stoch = StochasticOscillator(high=high, low=low, close=close)
     stoch_k = stoch.stoch()
     vol_sma = volume.rolling(20).mean()
+    vol_roll_std = volume.rolling(20).std()
+    obv_series = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+    log_ret = np.log(close.astype(float) / close.astype(float).shift(1))
 
     regime_map = _get_historical_regime_map()
 
@@ -986,6 +1021,14 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
 
         vol_ratio = (float(volume.iloc[i]) / float(vol_sma.iloc[i])
                      if pd.notna(vol_sma.iloc[i]) and float(vol_sma.iloc[i]) > 0 else 1.0)
+        vm_i, vs_i = vol_sma.iloc[i], vol_roll_std.iloc[i]
+        vol_z_20 = None
+        if pd.notna(vm_i) and pd.notna(vs_i) and float(vs_i) > 0:
+            vol_z_20 = round((float(volume.iloc[i]) - float(vm_i)) / float(vs_i), 4)
+        rv_slice = log_ret.iloc[max(0, i - 19):i + 1].dropna()
+        realized_vol_20 = None
+        if len(rv_slice) >= 10:
+            realized_vol_20 = round(float(rv_slice.std() * np.sqrt(252)), 6)
 
         prev_close = float(close.iloc[i - 1]) if i > 0 else price
         gap_pct = (price - prev_close) / prev_close * 100 if prev_close > 0 else 0
@@ -1051,6 +1094,10 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
             "stoch_bull_div": stoch_bull_div,
             "stoch_bear_div": stoch_bear_div,
             "above_sma20": price > float(sma20.iloc[i]) if pd.notna(sma20.iloc[i]) else False,
+            "sma_20": float(sma20.iloc[i]) if pd.notna(sma20.iloc[i]) else None,
+            "obv": float(obv_series.iloc[i]) if pd.notna(obv_series.iloc[i]) else None,
+            "vol_z_20": vol_z_20,
+            "realized_vol_20": realized_vol_20,
             "ema_20": e20,
             "ema_50": e50,
             "ema_100": e100,
@@ -1071,6 +1118,8 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
 
 def mine_row_to_indicator_payload(row: dict) -> dict:
     """Indicator dict shape compatible with :func:`compute_prediction` (backfill / scripts)."""
+    sma_v = row.get("sma_20")
+    obv_v = row.get("obv")
     return {
         "rsi": {"value": row.get("rsi")},
         "macd": {
@@ -1084,15 +1133,18 @@ def mine_row_to_indicator_payload(row: dict) -> dict:
         "ema_20": {"value": row.get("ema_20")},
         "ema_50": {"value": row.get("ema_50")},
         "ema_100": {"value": row.get("ema_100")},
-        "sma_20": {"value": None},
+        "sma_20": {"value": sma_v},
         "bbands": {},
-        "obv": {},
+        "obv": {"value": obv_v} if obv_v is not None else {},
+        "volume_z_20": {"value": row.get("vol_z_20")},
+        "realized_vol_20": {"value": row.get("realized_vol_20")},
     }
 
 
 def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     """Discover patterns from historical price data + existing snapshots."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from ...config import settings
     from .market_data import ALL_SCAN_TICKERS as _ALL_TICKERS
 
     mine_tickers = list(_ALL_TICKERS)
@@ -1110,11 +1162,12 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
     except Exception:
         pass
 
-    mine_tickers = mine_tickers[:1000]
+    max_mine = int(getattr(settings, "brain_mine_patterns_max_tickers", 1000))
+    if max_mine > 0:
+        mine_tickers = mine_tickers[:max_mine]
 
     interval_jobs: list[tuple[str, list[str]]] = [("1d", mine_tickers)]
     try:
-        from ...config import settings
         if settings.brain_intraday_snapshots_enabled:
             cap = max(1, int(settings.brain_intraday_max_tickers))
             crypto_only = [t for t in mine_tickers if t.endswith("-USD")][:cap]
@@ -1171,6 +1224,26 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
             bb_range = ((bb_data.get("upper", 0) or 0) - (bb_data.get("lower", 0) or 0))
             bb_pct = ((s.close_price - (bb_data.get("lower", 0) or 0)) / bb_range
                       if bb_range > 0 and s.close_price else 0.5)
+            bpb_direct = (data.get("bb_pct_b") or {}).get("value")
+            if bpb_direct is not None:
+                try:
+                    bb_pct = float(bpb_direct)
+                except (TypeError, ValueError):
+                    pass
+
+            dt_str = (
+                str(s.snapshot_date.date())
+                if getattr(s, "snapshot_date", None)
+                else ""
+            )
+            eq = data.get("equity_regime")
+            spy_regime = None
+            if isinstance(eq, dict):
+                spy_regime = eq.get("regime")
+            if not spy_regime and dt_str:
+                spy_regime = _get_historical_regime_map().get(dt_str, {}).get("regime", "unknown")
+            else:
+                spy_regime = spy_regime or "unknown"
 
             e20 = ema20_data.get("value") if ema20_data else None
             e50 = ema50_data.get("value") if ema50_data else None
@@ -1185,6 +1258,10 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
             else:
                 bst = datetime.combine(s.snapshot_date.date(), datetime.min.time())
 
+            rsi7_data = data.get("rsi_7") or {}
+            vz_data = data.get("volume_z_20") or {}
+            rv_data = data.get("realized_vol_20") or {}
+
             all_rows.append({
                 "ticker": s.ticker,
                 "bar_interval": biv,
@@ -1193,6 +1270,7 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                 "ret_5d": s.future_return_5d or 0,
                 "ret_10d": s.future_return_10d,
                 "rsi": rsi_data.get("value", 50) or 50,
+                "rsi_7": rsi7_data.get("value"),
                 "macd": macd_data.get("macd", 0) or 0,
                 "macd_sig": macd_data.get("signal", 0) or 0,
                 "macd_hist": macd_data.get("histogram", 0) or 0,
@@ -1203,6 +1281,9 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
                 "above_sma20": (price > (sma20_data.get("value", 0) or 0)
                                 if sma20_data and price else False),
                 "ema_stack": ema_stack,
+                "regime": spy_regime,
+                "vol_z_20": vz_data.get("value"),
+                "realized_vol_20": rv_data.get("value"),
                 "is_crypto": s.ticker.endswith("-USD"),
                 "news_sentiment": getattr(s, "news_sentiment", None),
                 "news_count": getattr(s, "news_count", None) or 0,
@@ -1222,10 +1303,16 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
 
     discoveries: list[str] = []
     MIN_SAMPLES = 3
+    _cpcv_on = getattr(settings, "brain_mining_purged_cpcv_enabled", True)
 
     def _check(filtered, label):
         if len(filtered) < MIN_SAMPLES:
             return
+        if _cpcv_on:
+            from .mining_validation import mined_candidate_passes_purged_segments
+            ok, _ = mined_candidate_passes_purged_segments(filtered)
+            if not ok:
+                return
         avg_5d = sum(r["ret_5d"] for r in filtered) / len(filtered)
         avg_10d_vals = [r["ret_10d"] for r in filtered if r.get("ret_10d") is not None]
         avg_10d = (sum(avg_10d_vals) / len(avg_10d_vals)) if avg_10d_vals else None
@@ -1414,6 +1501,14 @@ def mine_patterns(db: Session, user_id: int | None) -> list[str]:
         _check([r for r in sent_rows if abs(r["news_sentiment"]) < 0.05
                 and r["adx"] > 30 and r["rsi"] < 40],
                "Neutral news + strong trend (ADX>30) + RSI<40 — trend pullback, no catalyst fear")
+
+    try:
+        if getattr(settings, "brain_regime_mining_enabled", True):
+            from .regime_mining import run_regime_gated_mining_checks
+
+            run_regime_gated_mining_checks(all_rows, _check)
+    except Exception:
+        pass
 
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
@@ -4356,7 +4451,7 @@ def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[s
 
     try:
         from ..ticker_universe import get_all_crypto_tickers
-        for t in get_all_crypto_tickers(n=100)[:40]:
+        for t in get_all_crypto_tickers(n=120)[:40]:
             _add(t)
     except Exception:
         for t in DEFAULT_CRYPTO_TICKERS[:20]:
@@ -4425,6 +4520,39 @@ def _indicator_data_to_flat_snapshot(
     stoch_k = (ind_data.get("stoch") or {}).get("k")
     if stoch_k is not None:
         snap["stoch_k"] = stoch_k
+
+    rsi7 = (ind_data.get("rsi_7") or {}).get("value")
+    if rsi7 is not None:
+        snap["rsi_7"] = rsi7
+
+    vz = (ind_data.get("volume_z_20") or {}).get("value")
+    if vz is not None:
+        snap["vol_z_20"] = vz
+
+    rv = (ind_data.get("realized_vol_20") or {}).get("value")
+    if rv is not None:
+        snap["realized_vol_20"] = rv
+
+    roc10 = (ind_data.get("roc_10") or {}).get("value")
+    if roc10 is not None:
+        snap["roc_10"] = roc10
+
+    bb_pb = (ind_data.get("bb_pct_b") or {}).get("value")
+    if bb_pb is not None:
+        snap["bb_pct_b"] = bb_pb
+
+    atrp = (ind_data.get("atr_percentile_60") or {}).get("value")
+    if atrp is not None:
+        snap["atr_percentile_60"] = atrp
+
+    eq = ind_data.get("equity_regime")
+    if isinstance(eq, dict) and eq.get("regime"):
+        snap["regime"] = eq.get("regime")
+
+    lv1 = ind_data.get("learned_v1")
+    if isinstance(lv1, dict) and lv1.get("schema_version") == 1:
+        snap["learned_v1_skew"] = lv1.get("return_skew_20")
+        snap["learned_v1_range_pct"] = lv1.get("range_pct_20d")
 
     return snap
 
@@ -5587,6 +5715,7 @@ def test_pattern_hypothesis(
     oos_avg_trade_pcts: list[float] = []
     oos_profit_factors: list[float] = []
     oos_robust_mins: list[float] = []
+    integrity_rows: list[dict[str, Any]] = []
 
     for ticker in tickers[:5]:
         try:
@@ -5597,6 +5726,7 @@ def test_pattern_hypothesis(
                 interval=bt_params["interval"],
                 period=bt_params["period"],
                 exit_config=getattr(pattern, "exit_config", None),
+                scan_pattern_id=pattern.id,
                 **bt_kw,
             )
             if not result.get("ok"):
@@ -5647,6 +5777,9 @@ def test_pattern_hypothesis(
                         db.rollback()
                     except Exception:
                         pass
+            ri = result.get("research_integrity")
+            if isinstance(ri, dict):
+                integrity_rows.append({"ticker": ticker, **ri})
         except Exception:
             continue
 
@@ -5708,6 +5841,11 @@ def test_pattern_hypothesis(
     prev_ov = getattr(pattern, "oos_validation_json", None) or {}
     if not isinstance(prev_ov, dict):
         prev_ov = {}
+    from .research_integrity import (
+        aggregate_promotion_integrity,
+        promotion_blocked_by_integrity,
+    )
+
     oos_validation_merged: dict[str, Any] = {
         **prev_ov,
         "evaluated_at": datetime.utcnow().isoformat() + "Z",
@@ -5719,6 +5857,7 @@ def test_pattern_hypothesis(
             if ci_low is not None and ci_high is not None
             else None
         ),
+        "research_integrity": aggregate_promotion_integrity(integrity_rows),
     }
 
     patch: dict[str, Any] = {
@@ -5808,6 +5947,18 @@ def test_pattern_hypothesis(
                         _bench_store["stress_spread_mult"] = _s_spread
                         _bench_store["stress_commission_mult"] = _s_comm
                     patch["bench_walk_forward_json"] = _bench_store
+                    try:
+                        from .mining_validation import decay_signals_from_walk_forward_windows
+
+                        _dm_sig = decay_signals_from_walk_forward_windows(
+                            _bench_store.get("windows") or []
+                        )
+                        if _dm_sig:
+                            ov2 = dict(patch.get("oos_validation_json") or {})
+                            ov2["decay_monitor"] = {**(ov2.get("decay_monitor") or {}), **_dm_sig}
+                            patch["oos_validation_json"] = ov2
+                    except Exception:
+                        pass
                     _bstat, _ballow = brain_apply_bench_promotion_gate(
                         origin=getattr(pattern, "origin", "") or "",
                         bench_summary=_bench_raw,
@@ -5826,6 +5977,17 @@ def test_pattern_hypothesis(
                     pattern.name,
                     e,
                 )
+
+    _final_promo = str(patch.get("promotion_status", prom_stat))
+    if promotion_blocked_by_integrity(
+        oos_validation_merged.get("research_integrity") or {},
+        target_status=_final_promo,
+    ):
+        patch["promotion_status"] = "rejected_research_integrity"
+        patch["active"] = False
+        oos_validation_merged = dict(oos_validation_merged)
+        oos_validation_merged["research_integrity_blocked_promotion"] = True
+        patch["oos_validation_json"] = oos_validation_merged
 
     update_pattern(db, pattern.id, patch)
 

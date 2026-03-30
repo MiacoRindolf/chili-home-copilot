@@ -14,6 +14,10 @@ from backtesting.lib import FractionalBacktest, crossover
 from sqlalchemy.orm import Session
 
 from .trading.market_data import fetch_ohlcv_df as _fetch_ohlcv_df
+from .trading.research_integrity import (
+    enrich_generic_backtest_result as _enrich_generic_bt_result,
+    enrich_pattern_backtest_result as _enrich_pattern_bt_result,
+)
 
 from ..config import settings
 from ..models.trading import BacktestResult
@@ -533,7 +537,7 @@ def run_backtest(
         raw_trades=_raw_tr if _raw_tr is not None and not _raw_tr.empty else None,
     )
 
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "ticker": ticker.upper(),
         "strategy": strat_info["name"],
@@ -556,6 +560,15 @@ def run_backtest(
         "indicators": indicators,
         "kpis": _kpis,
     }
+    _enrich_generic_bt_result(
+        payload,
+        df,
+        ticker=ticker.upper(),
+        period=period,
+        interval=interval,
+        strategy_id=strategy_id,
+    )
+    return payload
 
 
 def _sanitize_float(v: Any, default: float = 0.0) -> float:
@@ -608,7 +621,7 @@ def save_backtest(
     eq = result.get("equity_curve", [])
     if tc == 0:
         eq = []
-    params_json = json.dumps({
+    params_obj: dict[str, Any] = {
         "strategy_id": result.get("strategy_id"),
         "period": result.get("period"),
         "interval": result.get("interval"),
@@ -624,7 +637,14 @@ def save_backtest(
         "in_sample_bars": result.get("in_sample_bars"),
         "out_of_sample_bars": result.get("out_of_sample_bars"),
         "kpis": result.get("kpis"),
-    })
+    }
+    if result.get("data_provenance") is not None:
+        params_obj["data_provenance"] = dict(result["data_provenance"])
+    if result.get("research_integrity") is not None:
+        params_obj["research_integrity"] = result.get("research_integrity")
+    if resolved_sp_id is not None and isinstance(params_obj.get("data_provenance"), dict):
+        params_obj["data_provenance"]["scan_pattern_id"] = int(resolved_sp_id)
+    params_json = json.dumps(params_obj)
 
     if insight_id:
         existing = (
@@ -1481,6 +1501,9 @@ def _run_dynamic_pattern_slice(
     explicit_bos_buffer: float | None,
     explicit_bos_grace: int | None,
     include_charts: bool,
+    ohlc_start: str | None = None,
+    ohlc_end: str | None = None,
+    scan_pattern_id: int | None = None,
 ) -> dict[str, Any]:
     """Execute DynamicPatternStrategy on a prepared OHLCV dataframe."""
     if df.empty or len(df) < 15:
@@ -1569,7 +1592,7 @@ def _run_dynamic_pattern_slice(
         raw_trades=_raw_tr if _raw_tr is not None and not _raw_tr.empty else None,
     )
 
-    return {
+    payload: dict[str, Any] = {
         "ok": True,
         "ticker": ticker.upper(),
         "strategy": pattern_name,
@@ -1592,6 +1615,19 @@ def _run_dynamic_pattern_slice(
         "indicators": indicators,
         "kpis": _kpis,
     }
+    _enrich_pattern_bt_result(
+        payload,
+        work,
+        conditions,
+        ticker=ticker.upper(),
+        period=period,
+        interval=interval,
+        ohlc_start=ohlc_start,
+        ohlc_end=ohlc_end,
+        scan_pattern_id=scan_pattern_id,
+        indicator_arrays=indicator_arrays,
+    )
+    return payload
 
 
 def backtest_metrics_for_promotion_gate(result: dict[str, Any]) -> tuple[float, float]:
@@ -1629,6 +1665,7 @@ def run_pattern_backtest(
     ohlc_start: str | None = None,
     ohlc_end: str | None = None,
     df_override: pd.DataFrame | None = None,
+    scan_pattern_id: int | None = None,
 ) -> dict[str, Any]:
     """Run a backtest using actual pattern conditions as entry signals.
 
@@ -1725,6 +1762,9 @@ def run_pattern_backtest(
             explicit_bos_buffer=explicit_bos_buffer,
             explicit_bos_grace=explicit_bos_grace,
             include_charts=charts,
+            ohlc_start=ohlc_start,
+            ohlc_end=ohlc_end,
+            scan_pattern_id=scan_pattern_id,
         )
 
     oos_frac = oos_holdout_fraction
@@ -2009,6 +2049,7 @@ def backtest_pattern(
     rules_json_override: str | None = None,
     append_conditions: list[dict[str, Any]] | None = None,
     exit_config_overlay: dict[str, Any] | None = None,
+    scan_pattern_id: int | None = None,
 ) -> dict[str, Any]:
     """Run a backtest for a ScanPattern.
 
@@ -2058,6 +2099,7 @@ def backtest_pattern(
             oos_holdout_fraction=oos_holdout_fraction,
             ohlc_start=ohlc_start,
             ohlc_end=ohlc_end,
+            scan_pattern_id=scan_pattern_id,
         )
         result["pattern_name"] = pattern_name
         result["mapped_strategy"] = "dynamic_pattern"

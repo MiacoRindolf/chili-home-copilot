@@ -12,6 +12,7 @@ import threading
 import time as _time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 from ...config import settings
 from ..yf_session import (
@@ -585,7 +586,13 @@ def _compute_single_indicator(
     df: pd.DataFrame, timestamps: list[int], name: str,
 ) -> list[dict] | None:
     """Compute one indicator using the ``ta`` library."""
-    from ta.momentum import RSIIndicator, StochRSIIndicator, StochasticOscillator, WilliamsRIndicator
+    from ta.momentum import (
+        RSIIndicator,
+        ROCIndicator,
+        StochRSIIndicator,
+        StochasticOscillator,
+        WilliamsRIndicator,
+    )
     from ta.trend import MACD, SMAIndicator, EMAIndicator, ADXIndicator, PSARIndicator, CCIIndicator, IchimokuIndicator
     from ta.volatility import BollingerBands, AverageTrueRange
     from ta.volume import OnBalanceVolumeIndicator, MFIIndicator, VolumeWeightedAveragePrice
@@ -846,6 +853,64 @@ def _compute_single_indicator(
             out.append({"price": round(lvl, 4), "volume": round(bins[b], 2), "pct": round(bins[b] / max_vol, 4) if max_vol > 0 else 0})
         return out
 
+    if name == "roc_10":
+        s = ROCIndicator(close=close, window=10).roc()
+        return _series_to_records(timestamps, s, "value")
+
+    if name == "realized_vol_20":
+        lr = np.log(close.astype(float) / close.astype(float).shift(1))
+        ann = lr.rolling(20).std() * np.sqrt(252)
+        return _series_to_records(timestamps, ann, "value")
+
+    if name == "volume_z_20":
+        vm = volume.rolling(20).mean()
+        vs = volume.rolling(20).std()
+        z = (volume.astype(float) - vm) / vs.replace(0, np.nan)
+        return _series_to_records(timestamps, z, "value")
+
+    if name == "volume_z_60":
+        if len(volume) < 61:
+            return None
+        vm = volume.rolling(60).mean()
+        vs = volume.rolling(60).std()
+        z = (volume.astype(float) - vm) / vs.replace(0, np.nan)
+        return _series_to_records(timestamps, z, "value")
+
+    if name == "obv_slope_5":
+        obv_ser = OnBalanceVolumeIndicator(close=close, volume=volume).on_balance_volume()
+        slope = obv_ser.diff(5) / 5.0
+        return _series_to_records(timestamps, slope, "value")
+
+    if name == "atr_percentile_60":
+        atr_ser = AverageTrueRange(high=high, low=low, close=close).average_true_range()
+        out = []
+        for i, ts in enumerate(timestamps):
+            if i < 60:
+                continue
+            w = atr_ser.iloc[i - 59:i + 1].dropna()
+            if len(w) < 30:
+                continue
+            last = atr_ser.iloc[i]
+            if pd.isna(last):
+                continue
+            pct = float((w < last).sum()) / float(len(w))
+            out.append({"time": ts, "value": round(pct, 4)})
+        return out or None
+
+    if name == "macd_hist_slope_3":
+        m = MACD(close=close)
+        hist = m.macd_diff()
+        slope = (hist - hist.shift(3)) / 3.0
+        return _series_to_records(timestamps, slope, "value")
+
+    if name in ("bb_pct_b", "bb_percent_b"):
+        bb = BollingerBands(close=close, window=20, window_dev=2)
+        u = bb.bollinger_hband()
+        l_ = bb.bollinger_lband()
+        denom = (u - l_).replace(0, np.nan)
+        pctb = (close.astype(float) - l_) / denom
+        return _series_to_records(timestamps, pctb, "value")
+
     return None
 
 
@@ -857,21 +922,75 @@ def _series_to_records(timestamps: list[int], s: pd.Series, key: str) -> list[di
     return out
 
 
+def _snapshot_learned_v1_block(df: pd.DataFrame) -> dict[str, Any]:
+    """Versioned OHLC-derived features for mining / meta-learning (no DB)."""
+    out: dict[str, Any] = {"schema_version": 1}
+    try:
+        close = df["Close"].astype(float)
+        if len(close) < 25:
+            return out
+        rets = np.log(close / close.shift(1)).dropna()
+        tail = rets.iloc[-20:]
+        if len(tail) > 5:
+            out["return_skew_20"] = round(float(tail.skew()), 4)
+            out["return_kurt_20"] = round(float(tail.kurt()), 4)
+            vov = tail.abs().rolling(5).std().iloc[-1]
+            if pd.notna(vov):
+                out["vol_of_abs_ret_20"] = round(float(vov), 6)
+        hi = df["High"].astype(float).iloc[-20:]
+        lo = df["Low"].astype(float).iloc[-20:]
+        last = float(close.iloc[-1])
+        if last > 0:
+            out["range_pct_20d"] = round(float((hi.max() - lo.min()) / last * 100.0), 4)
+    except Exception:
+        return {"schema_version": 1}
+    return out
+
+
 def get_indicator_snapshot(ticker: str, interval: str = "1d") -> dict[str, Any]:
     """Get latest indicator values (used for journal snapshots and AI context).
 
-    Includes stochastic, EMA 20/50/100 for pattern mining compatibility.
+    Includes stochastic, EMA 20/50/100, extended vol/volume/momentum fields,
+    optional ``equity_regime`` (SPY-based), and ``learned_v1`` OHLC stats.
     """
     result = compute_indicators(
         ticker, interval=interval, period="3mo",
-        indicators=["rsi", "macd", "sma_20", "ema_20", "ema_50", "ema_100",
-                     "bbands", "stoch", "adx", "atr", "obv"],
+        indicators=[
+            "rsi", "rsi_7", "macd", "sma_20", "ema_20", "ema_50", "ema_100",
+            "bbands", "bb_pct_b", "stoch", "adx", "atr", "obv",
+            "roc_10", "realized_vol_20", "volume_z_20", "volume_z_60",
+            "obv_slope_5", "atr_percentile_60", "macd_hist_slope_3",
+        ],
     )
     snapshot: dict[str, Any] = {"ticker": ticker, "interval": interval}
     for ind_name, records in result.items():
         if records:
             latest = records[-1]
             snapshot[ind_name] = {k: v for k, v in latest.items() if k != "time"}
+
+    try:
+        from .learning import _get_historical_regime_map
+
+        today = str(pd.Timestamp.utcnow().date())
+        rm = _get_historical_regime_map()
+        info = rm.get(today) or {}
+        if info:
+            snapshot["equity_regime"] = {
+                "regime": info.get("regime", "unknown"),
+                "spy_mom_5d": info.get("spy_mom_5d"),
+                "as_of": today,
+            }
+    except Exception:
+        pass
+
+    if getattr(settings, "brain_snapshot_learned_v1_enabled", True):
+        try:
+            ldf = fetch_ohlcv_df(ticker, interval=interval, period="3mo")
+            if ldf is not None and not ldf.empty:
+                snapshot["learned_v1"] = _snapshot_learned_v1_block(ldf)
+        except Exception:
+            pass
+
     return snapshot
 
 

@@ -2224,7 +2224,7 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
         # Pull the full crypto universe the brain knows about
         try:
             from ..ticker_universe import get_all_crypto_tickers
-            tickers.update(get_all_crypto_tickers(n=200))
+            tickers.update(get_all_crypto_tickers())
         except Exception:
             pass
 

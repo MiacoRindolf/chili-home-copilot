@@ -235,10 +235,14 @@ def _yf_small_cap_gainers() -> list[str]:
 
 def _crypto_candidates() -> list[str]:
     """Top crypto tickers by market cap, excluding stablecoins and junk."""
+    from app.config import settings
     from .market_data import DEFAULT_CRYPTO_TICKERS
     from ..ticker_universe import get_all_crypto_tickers
     try:
-        raw = get_all_crypto_tickers(n=200)
+        if getattr(settings, "brain_scan_include_full_crypto_universe", True):
+            raw = get_all_crypto_tickers()
+        else:
+            raw = get_all_crypto_tickers(n=150)
     except Exception:
         raw = list(DEFAULT_CRYPTO_TICKERS)
     return [t for t in raw if t.split("-")[0].lower() not in _CRYPTO_EXCLUDE]

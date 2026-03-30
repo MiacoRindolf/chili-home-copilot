@@ -202,40 +202,101 @@ _CRYPTO_BLACKLIST = {
 }
 
 
-def _fetch_crypto_tickers(n: int = 100) -> list[dict[str, str]]:
-    """Fetch top N crypto tickers by market cap from CoinGecko."""
+_COINGECKO_PER_PAGE = 250
+# Safety cap when brain_crypto_universe_max=0 (unbounded): ~15k coins max.
+_CRYPTO_FETCH_MAX_PAGES = 80
+
+
+def _fetch_crypto_tickers(
+    target_count: int | None,
+    min_volume_usd: float = 0.0,
+    max_pages: int = _CRYPTO_FETCH_MAX_PAGES,
+) -> list[dict[str, Any]]:
+    """Fetch crypto tickers by market cap from CoinGecko (paginated).
+
+    ``target_count`` None = fetch until a short page or ``max_pages``.
+    """
+    out: list[dict[str, Any]] = []
+    seen_symbols: set[str] = set()
+    page = 1
     try:
-        resp = requests.get(
-            _COINGECKO_URL,
-            params={
-                "vs_currency": "usd",
-                "order": "market_cap_desc",
-                "per_page": n,
-                "page": 1,
-                "sparkline": "false",
-            },
-            timeout=20,
-        )
-        if resp.status_code == 200:
+        while page <= max_pages:
+            resp = requests.get(
+                _COINGECKO_URL,
+                params={
+                    "vs_currency": "usd",
+                    "order": "market_cap_desc",
+                    "per_page": _COINGECKO_PER_PAGE,
+                    "page": page,
+                    "sparkline": "false",
+                },
+                timeout=25,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "[ticker_universe] CoinGecko page %s HTTP %s", page, resp.status_code
+                )
+                break
             coins = resp.json()
-            tickers = []
+            if not coins:
+                break
             for coin in coins:
                 symbol = coin.get("symbol", "").upper()
-                if symbol and symbol not in _CRYPTO_BLACKLIST and len(symbol) <= 6:
-                    tickers.append({
-                        "ticker": f"{symbol}-USD",
-                        "name": coin.get("name", ""),
-                        "type": "crypto",
-                    })
-            logger.info(f"[ticker_universe] Fetched {len(tickers)} crypto tickers from CoinGecko (filtered)")
-            return tickers
+                if not symbol or symbol in _CRYPTO_BLACKLIST or len(symbol) > 6:
+                    continue
+                if symbol in seen_symbols:
+                    continue
+                vol = float(coin.get("total_volume") or 0.0)
+                if min_volume_usd > 0 and vol < min_volume_usd:
+                    continue
+                seen_symbols.add(symbol)
+                out.append({
+                    "ticker": f"{symbol}-USD",
+                    "name": coin.get("name", ""),
+                    "type": "crypto",
+                    "volume_usd": vol,
+                })
+                if target_count is not None and len(out) >= target_count:
+                    logger.info(
+                        "[ticker_universe] Fetched %s crypto tickers from CoinGecko (filtered)",
+                        len(out),
+                    )
+                    return out
+            if len(coins) < _COINGECKO_PER_PAGE:
+                break
+            page += 1
+            time.sleep(0.35)
+        if out:
+            logger.info(
+                "[ticker_universe] Fetched %s crypto tickers from CoinGecko (filtered)",
+                len(out),
+            )
+            return out
     except Exception as e:
-        logger.warning(f"[ticker_universe] CoinGecko failed: {e}, using static list")
+        logger.warning("[ticker_universe] CoinGecko failed: %s, using static list", e)
 
+    lim = len(_STATIC_CRYPTO_TOP100) if target_count is None else min(target_count, len(_STATIC_CRYPTO_TOP100))
     return [
-        {"ticker": f"{s}-USD", "name": s, "type": "crypto"}
-        for s in _STATIC_CRYPTO_TOP100[:n]
+        {"ticker": f"{s}-USD", "name": s, "type": "crypto", "volume_usd": 0.0}
+        for s in _STATIC_CRYPTO_TOP100[: max(lim, 1)]
     ]
+
+
+def _crypto_entries_volume_ok(entries: list[dict] | None, min_volume_usd: float) -> bool:
+    if not entries or min_volume_usd <= 0:
+        return True
+    return all("volume_usd" in e for e in entries)
+
+
+def _entries_to_crypto_tickers(entries: list[dict], min_volume_usd: float) -> list[str]:
+    tickers: list[str] = []
+    for e in entries:
+        if min_volume_usd > 0 and float(e.get("volume_usd") or 0.0) < min_volume_usd:
+            continue
+        t = e.get("ticker")
+        if t:
+            tickers.append(str(t))
+    return tickers
 
 
 # ── Cache Management ───────────────────────────────────────────────────
@@ -287,36 +348,67 @@ def get_all_us_stock_tickers(force_refresh: bool = False) -> list[str]:
     return list(_BUILTIN_US_TICKERS)
 
 
-def get_all_crypto_tickers(n: int = 100, force_refresh: bool = False) -> list[str]:
-    """Return list of top N crypto tickers (with -USD suffix). Cached for 7 days."""
-    cache_key = "crypto"
+def get_all_crypto_tickers(n: int | None = None, force_refresh: bool = False) -> list[str]:
+    """Return crypto tickers (``BASE-USD``). Cached 7 days.
+
+    ``n`` overrides ``settings.brain_crypto_universe_max`` when set.
+    ``brain_crypto_universe_max`` 0 = fetch up to internal page cap (full list).
+    """
+    from app.config import settings
+
+    min_vol = float(getattr(settings, "brain_crypto_universe_min_volume_usd", 0.0))
+    if n is None:
+        eff_cap = int(getattr(settings, "brain_crypto_universe_max", 0))
+    else:
+        eff_cap = int(n)
+    unlimited = eff_cap == 0
+    fetch_target = None if unlimited else eff_cap
+
+    cache_key = "crypto_entries"
+
+    def _materialize(entries: list[dict]) -> list[str]:
+        tickers = _entries_to_crypto_tickers(entries, min_vol)
+        if unlimited:
+            return tickers
+        return tickers[:eff_cap]
+
     if not force_refresh and cache_key in _memory_cache:
-        return _memory_cache[cache_key][:n]
+        mem = _memory_cache[cache_key]
+        if isinstance(mem, list) and _crypto_entries_volume_ok(mem, min_vol):
+            cand = _materialize(mem)
+            if unlimited or len(cand) >= eff_cap:
+                logger.info("[ticker_universe] Loaded %s crypto from memory cache", len(cand))
+                return cand
 
     if not force_refresh:
         cached = _load_cache(_CRYPTO_CACHE)
-        if cached:
-            tickers = [t["ticker"] for t in cached][:n]
-            _memory_cache[cache_key] = tickers
-            logger.info(f"[ticker_universe] Loaded {len(tickers)} crypto from cache")
-            return tickers
+        if cached and _crypto_entries_volume_ok(cached, min_vol):
+            cand = _materialize(cached)
+            if unlimited or len(cand) >= eff_cap:
+                _memory_cache[cache_key] = cached
+                logger.info("[ticker_universe] Loaded %s crypto from file cache", len(cand))
+                return cand
 
-    entries = _fetch_crypto_tickers(n)
+    entries = _fetch_crypto_tickers(fetch_target, min_volume_usd=min_vol)
     if entries:
         _save_cache(_CRYPTO_CACHE, entries)
-        tickers = [t["ticker"] for t in entries]
-        _memory_cache[cache_key] = tickers
-        return tickers[:n]
+        _memory_cache[cache_key] = entries
+        return _materialize(entries)
 
-    return [f"{s}-USD" for s in _STATIC_CRYPTO_TOP100[:n]]
+    return [f"{s}-USD" for s in _STATIC_CRYPTO_TOP100[: max(1, eff_cap if not unlimited else 100)]]
 
 
 def get_full_ticker_universe(force_refresh: bool = False) -> list[str]:
-    """Return the full scanning universe: all US stocks + top 200 crypto."""
+    """Return the full scanning universe: all US stocks + configured crypto universe."""
     stocks = get_all_us_stock_tickers(force_refresh=force_refresh)
-    crypto = get_all_crypto_tickers(n=200, force_refresh=force_refresh)
+    crypto = get_all_crypto_tickers(n=None, force_refresh=force_refresh)
     combined = list(dict.fromkeys(stocks + crypto))
-    logger.info(f"[ticker_universe] Full universe: {len(stocks)} stocks + {len(crypto)} crypto = {len(combined)} total")
+    logger.info(
+        "[ticker_universe] Full universe: %s stocks + %s crypto = %s total",
+        len(stocks),
+        len(crypto),
+        len(combined),
+    )
     return combined
 
 

@@ -367,6 +367,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     oos_rets: list[float] = []
     oos_ticker_hits = 0
     oos_trade_sum = 0
+    integrity_rows: list[dict[str, Any]] = []
 
     for ticker in test_tickers:
         try:
@@ -377,6 +378,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                 interval=bt_params["interval"],
                 period=bt_params["period"],
                 exit_config=getattr(pattern, "exit_config", None),
+                scan_pattern_id=pattern.id,
                 **bt_kw,
             )
             if not result.get("ok"):
@@ -407,6 +409,9 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                         db.rollback()
                     except Exception:
                         pass
+            ri = result.get("research_integrity")
+            if isinstance(ri, dict):
+                integrity_rows.append({"ticker": ticker, **ri})
         except Exception:
             continue
 
@@ -427,6 +432,21 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             **_oos_kw,
         )
 
+        from .research_integrity import (
+            aggregate_promotion_integrity,
+            promotion_blocked_by_integrity,
+        )
+
+        prev_ov = getattr(pattern, "oos_validation_json", None) or {}
+        if not isinstance(prev_ov, dict):
+            prev_ov = {}
+        ri_agg = aggregate_promotion_integrity(integrity_rows)
+        oos_merged = {
+            **prev_ov,
+            "evaluated_at": datetime.utcnow().isoformat() + "Z",
+            "research_integrity": ri_agg,
+        }
+
         patch: dict[str, Any] = {
             "confidence": round(confidence, 3),
             "win_rate": round(mean_is_wr, 1),
@@ -440,7 +460,14 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             "backtest_spread_used": bt_kw.get("spread"),
             "backtest_commission_used": bt_kw.get("commission"),
             "oos_evaluated_at": datetime.utcnow(),
+            "oos_validation_json": oos_merged,
         }
+        if promotion_blocked_by_integrity(ri_agg, target_status=str(prom_stat)):
+            patch["promotion_status"] = "rejected_research_integrity"
+            patch["active"] = False
+            oos_merged = dict(oos_merged)
+            oos_merged["research_integrity_blocked_promotion"] = True
+            patch["oos_validation_json"] = oos_merged
         if confidence < 0.25 and total >= 3:
             patch["active"] = False
             logger.info(
