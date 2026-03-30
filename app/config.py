@@ -129,8 +129,24 @@ class Settings(BaseSettings):
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
     brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps
+    # Queue step executor: threads (default, GIL-limited) or process (true multi-core; see docs/BRAIN_BACKTEST_QUEUE_MULTIPROCESS_PLAN.md)
+    brain_queue_backtest_executor: str = "threads"  # threads | process
+    brain_queue_process_cap: int | None = None  # max process pool workers (None = use brain_backtest_parallel)
+    brain_mp_child_database_pool_size: int = 1   # SQLAlchemy pool per child process (avoid P * parent pool connections)
+    brain_mp_child_database_max_overflow: int = 2
+    brain_smart_bt_max_workers_in_process: int = 8  # cap ticker-thread pool inside each process worker
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
+
+    @field_validator("brain_queue_backtest_executor", mode="before")
+    @classmethod
+    def _normalize_queue_backtest_executor(cls, v: object) -> str:
+        if v is None or v == "":
+            return "threads"
+        s = str(v).strip().lower()
+        if s in ("process", "processes", "mp", "multiprocessing"):
+            return "process"
+        return "threads"
     brain_queue_target_tickers: int = 60  # tickers per pattern in queue backtest (more = heavier per pattern)
     brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) â€” ML train step only, not queue BT
 

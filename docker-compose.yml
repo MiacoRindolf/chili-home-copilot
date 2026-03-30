@@ -4,8 +4,8 @@ services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
     image: postgres:16-alpine
-    # Default 100 is tight with chili + brain + brain-worker pools and parallel queue backtests.
-    command: ["postgres", "-c", "max_connections=200"]
+    # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
+    command: ["postgres", "-c", "max_connections=350"]
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili
@@ -114,9 +114,11 @@ services:
       - CHILI_USE_BRAIN_SERVICE=${CHILI_USE_BRAIN_SERVICE:-0}
       - BRAIN_SERVICE_URL=${BRAIN_SERVICE_URL:-http://brain:8090}
       - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
-      # Smaller pool than the web app — worker + parallel backtests still share one Postgres.
+      # Parent process pool; process-executor children use brain_mp_child_* (see .env.example).
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
+      # Optional: BRAIN_QUEUE_BACKTEST_EXECUTOR=process for multi-core queue backtests
+      # Optional: BRAIN_QUEUE_PROCESS_CAP=16 to cap workers vs Postgres
     volumes:
       - chili_data:/app/data
     depends_on:

@@ -1873,129 +1873,9 @@ auto_backtest_active_insights = _auto_backtest_patterns
 
 def _backtest_one_pattern_from_queue(pattern_id: int, user_id: int | None) -> tuple[int, int]:
     """Run backtest for one pattern in a worker thread (own DB session). Returns (backtests_run, 1)."""
-    from ...config import settings
-    from ...db import SessionLocal
-    from .backtest_queue import mark_pattern_tested
-    from .backtest_engine import smart_backtest_insight
-    from ...models.trading import TradingInsight, ScanPattern
+    from .backtest_queue_worker import execute_queue_backtest_for_pattern
 
-    db = SessionLocal()
-    try:
-        pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
-        if not pattern:
-            return (0, 0)
-        insight = db.query(TradingInsight).filter(
-            TradingInsight.scan_pattern_id == pattern.id
-        ).first()
-        if not insight:
-            _parts: list[str] = []
-            if getattr(pattern, "name", None) and str(pattern.name).strip():
-                _parts.append(str(pattern.name).strip())
-            _pd = (getattr(pattern, "description", None) or "").strip()
-            if _pd and _pd not in _parts:
-                _parts.append(_pd)
-            _pdesc = " | ".join(_parts) if _parts else (
-                f"{pattern.name or 'Pattern'} — Composable pattern backtest"
-            )
-            insight = TradingInsight(
-                user_id=user_id,
-                pattern_description=_pdesc,
-                confidence=pattern.confidence or 0.5,
-                evidence_count=0,
-                scan_pattern_id=pattern.id,
-            )
-            db.add(insight)
-            db.commit()
-        from .backtest_engine import hydrate_scan_pattern_rules_json
-
-        hydrate_scan_pattern_rules_json(db, pattern, insight)
-        db.refresh(pattern)
-        _tier = (getattr(pattern, "queue_tier", None) or "full").strip().lower()
-        _prescreen = bool(getattr(settings, "brain_queue_prescreen_enabled", False))
-        if _prescreen and _tier == "prescreen":
-            result = smart_backtest_insight(
-                db,
-                insight,
-                target_tickers=max(
-                    2, int(getattr(settings, "brain_queue_prescreen_tickers", 4))
-                ),
-                update_confidence=True,
-                period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
-            )
-            total = result.get("total", 0)
-            wins = result.get("wins", 0)
-            backtests_run = result.get("backtests_run", 0)
-            wr_pct = (wins / total * 100.0) if total > 0 else 0.0
-            min_pre = float(
-                getattr(settings, "brain_queue_prescreen_min_win_rate_pct", 45.0)
-            )
-            win_rate = wins / total if total >= 3 else None
-            avg_return = result.get("avg_return")
-            mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
-            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
-            if pattern and total >= 2 and wr_pct >= min_pre:
-                pattern.queue_tier = "full"
-                pattern.backtest_priority = max(int(pattern.backtest_priority or 0), 50)
-                db.commit()
-                from .backtest_queue import invalidate_queue_status_cache
-
-                invalidate_queue_status_cache()
-                log_learning_event(
-                    db,
-                    user_id,
-                    "pattern_backtest_queue",
-                    f"Prescreen pass: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr) → full tier",
-                    related_insight_id=insight.id,
-                )
-            elif pattern and total >= 2:
-                pattern.active = False
-                pattern.promotion_status = "rejected_prescreen"
-                db.commit()
-                from .backtest_queue import invalidate_queue_status_cache
-
-                invalidate_queue_status_cache()
-                log_learning_event(
-                    db,
-                    user_id,
-                    "pattern_backtest_queue",
-                    f"Prescreen reject: '{pattern.name}' ({wins}/{total}, {wr_pct:.0f}% wr)",
-                    related_insight_id=insight.id,
-                )
-            else:
-                mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
-            return (backtests_run, 1)
-
-        result = smart_backtest_insight(
-            db, insight,
-            target_tickers=max(20, getattr(settings, "brain_queue_target_tickers", 50)),
-            update_confidence=True,
-        )
-        total = result.get("total", 0)
-        wins = result.get("wins", 0)
-        backtests_run = result.get("backtests_run", 0)
-        win_rate = wins / total if total >= 3 else None
-        avg_return = result.get("avg_return")
-        mark_pattern_tested(db, pattern, win_rate=win_rate, avg_return=avg_return)
-        if total >= 3:
-            log_learning_event(
-                db, user_id, "pattern_backtest_queue",
-                f"Queue backtest: '{pattern.name}' ({wins}/{total} profitable, "
-                f"{win_rate * 100:.0f}%wr) — priority was {pattern.backtest_priority}",
-                related_insight_id=insight.id,
-            )
-        return (backtests_run, 1)
-    except Exception as e:
-        logger.warning("[backtest_queue] Failed to backtest pattern %s: %s", pattern_id, e)
-        try:
-            # Re-query so we have an attached instance; session may be in a bad state after exception.
-            pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
-            if pattern:
-                mark_pattern_tested(db, pattern)
-        except Exception:
-            pass
-        return (0, 1)
-    finally:
-        db.close()
+    return execute_queue_backtest_for_pattern(pattern_id, user_id)
 
 
 def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int | None = None) -> dict[str, Any]:
@@ -2060,6 +1940,22 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         cap = max(1, int(_CPU_COUNT * settings.brain_max_cpu_pct / 100))
         max_workers = min(max_workers, cap)
     max_workers = min(max_workers, len(pattern_ids))
+    proc_cap = getattr(settings, "brain_queue_process_cap", None)
+    if proc_cap is not None:
+        max_workers = min(max_workers, max(1, int(proc_cap)))
+
+    exec_mode = (getattr(settings, "brain_queue_backtest_executor", "threads") or "threads").strip().lower()
+    use_process = exec_mode == "process" and max_workers > 1
+
+    logger.info(
+        "[learning] Queue backtest: executor=%s max_workers=%s patterns=%s child_pool=%s+%s",
+        "process" if use_process else "threads",
+        max_workers,
+        len(pattern_ids),
+        settings.brain_mp_child_database_pool_size,
+        settings.brain_mp_child_database_max_overflow,
+    )
+
     backtests_run = 0
     patterns_processed = 0
 
@@ -2070,6 +1966,42 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
             bt, proc = _backtest_one_pattern_from_queue(pid, user_id)
             backtests_run += bt
             patterns_processed += proc
+    elif use_process:
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+
+        from .backtest_queue_worker import (
+            configure_multiprocess_child_db_env,
+            run_one_pattern_job,
+        )
+
+        ps = int(settings.brain_mp_child_database_pool_size)
+        mo = int(settings.brain_mp_child_database_max_overflow)
+        ctx = get_context("spawn")
+        with ProcessPoolExecutor(
+            max_workers=max_workers,
+            mp_context=ctx,
+            initializer=configure_multiprocess_child_db_env,
+            initargs=(ps, mo),
+        ) as executor:
+            futures = {
+                executor.submit(run_one_pattern_job, pid, user_id): pid
+                for pid in pattern_ids
+            }
+            for fut in as_completed(futures):
+                if _shutting_down.is_set():
+                    try:
+                        executor.shutdown(wait=False, cancel_futures=True)
+                    except TypeError:
+                        executor.shutdown(wait=False)
+                    break
+                try:
+                    bt, proc = fut.result()
+                    backtests_run += bt
+                    patterns_processed += proc
+                except Exception as e:
+                    logger.warning("[backtest_queue] Process worker error: %s", e)
+                    patterns_processed += 1
     else:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = {
@@ -2104,6 +2036,7 @@ def _auto_backtest_from_queue(db: Session, user_id: int | None, batch_size: int 
         "patterns_processed": patterns_processed,
         "queue_empty": status["queue_empty"],
         "queue_exploration_added": exploration_added,
+        "queue_executor": "process" if use_process else "threads",
         **status,
     }
 

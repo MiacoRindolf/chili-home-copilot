@@ -267,6 +267,13 @@ _TICKER_STOPWORDS = {
 # Max workers for parallel backtest execution
 def _bt_workers() -> int:
     """Threads per insight for parallel ticker backtests (bounded when many patterns run in parallel)."""
+    if os.environ.get("CHILI_MP_BACKTEST_CHILD", "").strip().lower() in ("1", "true", "yes"):
+        try:
+            from ...config import settings
+            cap = int(getattr(settings, "brain_smart_bt_max_workers_in_process", 8))
+            return max(2, cap)
+        except Exception:
+            return 8
     base = max(8, (os.cpu_count() or 4) * 2)
     try:
         from ...config import settings
