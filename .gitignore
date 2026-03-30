@@ -3,9 +3,12 @@ __pycache__/
 .venv/
 .env
 
-# local database files
+# local database files (CHILI relational DB is PostgreSQL only; no runtime SQLite)
 data/*.db
 data/*.sqlite
+data/chili.db.archived*
+data/chili.db-wal.archived*
+data/chili.db-shm.archived*
 
 # ChromaDB vector store
 data/chroma/

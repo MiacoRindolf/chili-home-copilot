@@ -1,6 +1,6 @@
 # PostgreSQL database
 
-CHILI uses **PostgreSQL only** for the relational database. Set `DATABASE_URL` in `.env` for local runs (see `.env.example`).
+CHILI uses **PostgreSQL only** for the relational database. Set `DATABASE_URL` in `.env` for local runs (see `.env.example`). The application **never** opens `data/chili.db` or any SQLite file at runtime—only optional one-off migration scripts do.
 
 **Default for local development:** point at the **Docker Compose** Postgres instance (host port **5433**):
 
@@ -31,11 +31,21 @@ Use **`bash scripts/docker-setup.sh`** to start Postgres + Ollama, wait for heal
    - or `postgresql+psycopg2://chili:chili@localhost:5433/chili`
 3. **Start the app once** (or run a process that imports `app.main`). The app runs SQLAlchemy `create_all` plus versioned migrations in `app/migrations.py` on startup.
 4. **Optional — legacy SQLite (`data/chili.db`)**  
-   If you have an old SQLite file and want to move data into Postgres:
-   - Use a **dedicated** Postgres database or **backup** the target first.
-   - Run: `python scripts/migrate_legacy_sqlite_to_postgres.py`  
-     This **truncates** all application tables in the target DB, then copies rows from `data/chili.db`.
-   - Verify row counts / spot-check important tables, then archive or remove the local `chili.db` if you no longer need it.
+   Runtime always uses Postgres (`app/config.py` rejects non-PostgreSQL URLs). SQLite is **only** for one-time import.
+   - **Preferred (keeps existing Postgres rows):** back up Postgres, then run  
+     `python scripts/merge_sqlite_into_postgres.py --dry-run`  
+     `python scripts/merge_sqlite_into_postgres.py`  
+     Optional: `--archive-sqlite-after` renames `chili.db` (and `-wal`/`-shm` if present) after a clean run.
+   - **Full replace (wipes target Postgres):** `python scripts/migrate_legacy_sqlite_to_postgres.py` — truncates all app tables, then copies from SQLite. Use only on an empty or disposable database.
+   - **Docker:** from the host, mount the repo and use the Compose network, e.g.  
+     `docker run --rm --entrypoint python -e DATABASE_URL=postgresql://chili:chili@postgres:5432/chili -v <repo>:/src -w /src --network <project>_default chili-app:local scripts/merge_sqlite_into_postgres.py`
+
+### Merge behavior and “redundant” rows
+
+- The merge script inserts with **`ON CONFLICT (primary key) DO NOTHING`**. Re-running it does not create **duplicate primary keys**; existing Postgres rows win for that `id`.
+- Two different numeric ids can still represent the **same** pattern text/rules if historical data diverged; that is rare. To **list** them: `python scripts/audit_postgres_merge_redundancy.py`
+- To **collapse** those groups (keep the **newest** row by `updated_at`, then `created_at`, then `id`; repoint FK-like columns; delete losers):  
+  `python scripts/dedupe_scan_patterns_by_rules.py` then `python scripts/dedupe_scan_patterns_by_rules.py --apply`
 
 ## Running tests (`pytest`)
 
@@ -68,3 +78,4 @@ If you are not using Compose, you can run a standalone Postgres and set `DATABAS
 
 - **`DATABASE_URL is required`** — Add a non-empty PostgreSQL URL to `.env`.
 - **`DATABASE_URL must be a PostgreSQL URL`** — Use `postgresql://` or `postgresql+psycopg2://`, not SQLite or other drivers unless you extend validation in `app/config.py`.
+- **Windows: `No buffer space available` / Winsock `10055` when connecting to `localhost:5433`** — OS socket pool exhaustion (often with Docker/Git heavy use). Try: set `DATABASE_URL` to use **`127.0.0.1`** instead of **`localhost`**, restart Docker or reboot, or run maintenance scripts via Docker on the Compose network (see merge section above). CLI scripts `merge_sqlite_into_postgres.py`, `dedupe_scan_patterns_by_rules.py`, and `audit_postgres_merge_redundancy.py` retry once with IPv4 automatically when this error appears on `localhost`.

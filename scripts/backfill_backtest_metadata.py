@@ -17,8 +17,8 @@ Usage (from project root):
   python scripts/backfill_backtest_metadata.py --rerun --workers 8 --limit 2000
   python scripts/backfill_backtest_metadata.py --rerun --workers 8 --offset 5000 --limit 2000  # resume next slice
 
-Parallel reruns use a thread pool; each worker opens its own DB session. Prefer PostgreSQL;
-SQLite will serialize writes and may not speed up much. Recompute insight win/loss once at the end.
+Parallel reruns use a thread pool; each worker opens its own DB session (PostgreSQL via ``DATABASE_URL``).
+Recompute insight win/loss once at the end.
 """
 from __future__ import annotations
 

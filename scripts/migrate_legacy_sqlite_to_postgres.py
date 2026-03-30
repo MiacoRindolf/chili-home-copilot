@@ -1,10 +1,14 @@
 """One-time legacy import: copy rows from SQLite ``data/chili.db`` into PostgreSQL.
 
-This is the **only** supported use of SQLite in the project: migrating an old
-local database into Postgres. Runtime always uses ``DATABASE_URL`` (PostgreSQL).
+**Not used at runtime.** CHILI never opens SQLite during normal operation—only this script
+and ``merge_sqlite_into_postgres.py`` touch legacy ``chili.db``. The app always uses
+``DATABASE_URL`` (PostgreSQL); see ``app/config.py``.
 
 **Warning:** The script truncates all application tables in the target Postgres
 database before loading. Use a dedicated database or backup first.
+
+To **merge** SQLite into Postgres without wiping existing rows (``ON CONFLICT DO NOTHING``),
+use ``scripts/merge_sqlite_into_postgres.py`` instead.
 
 Run from project root::
 

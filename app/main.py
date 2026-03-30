@@ -614,7 +614,7 @@ def _prewarm_market_context():
 
 app = FastAPI(title="CHILI Home Copilot", lifespan=lifespan)
 
-_db_exc_log = logging.getLogger("chili.db")
+_db_exc_log = logging.getLogger("chili.database")
 
 
 @app.exception_handler(OperationalError)

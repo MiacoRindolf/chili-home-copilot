@@ -287,7 +287,7 @@ app/
 │   ├── home.html        # Home page (chores + birthdays)
 │   ├── admin.html       # Admin dashboard
 │   └── ...              # profile, pair, admin_users, marketplace
-├── migrations.py        # Lightweight SQLite migrations
+├── migrations.py        # Versioned PostgreSQL schema migrations
 ├── openai_client.py     # Tiered LLM cascade (Groq → Gemini → OpenAI)
 ├── llm_planner.py       # Ollama planner (accepts RAG + personality context)
 ├── rag.py               # RAG module: chunking, embedding, ChromaDB search
@@ -306,7 +306,7 @@ docs/
 ├── house-info.txt       # Example: WiFi, landlord, trash, parking
 ├── house-rules.txt      # Example: quiet hours, kitchen, guests
 ├── recipes.txt          # Example: household favorite recipes
-data/                    # ChromaDB, uploads, ticker cache, optional legacy .db (gitignored)
+data/                    # ChromaDB, uploads, ticker cache (relational data is PostgreSQL only)
 tests/                   # pytest (PostgreSQL; see docs/DATABASE_POSTGRES.md)
 chili_mobile/            # Flutter mobile app (Android/iOS)
 Dockerfile               # Container image for CHILI app
@@ -329,7 +329,7 @@ requirements.txt         # Pinned Python dependencies
 | **`convo_key` scoping** | Paired users get `user:<id>` so conversations follow the person across devices. Guests get `guest:<token>` for isolated threads. |
 | **Rule-based fallback** | If Ollama is down, CHILI still works via regex parsing. Graceful degradation over hard failure. |
 | **Temperature 0** | Tool-calling needs deterministic output. Creative variation in action planning causes schema validation failures. |
-| **PostgreSQL** | Required relational store (concurrent web + worker). `DATABASE_URL` in `.env`; migrations in `app/migrations.py`. Legacy `chili.db` import: `scripts/migrate_legacy_sqlite_to_postgres.py`. |
+| **PostgreSQL** | Required relational store (concurrent web + worker). `DATABASE_URL` in `.env`; migrations in `app/migrations.py`. Legacy SQLite `data/chili.db` → merge without wipe: `scripts/merge_sqlite_into_postgres.py` (see `docs/DATABASE_POSTGRES.md`). |
 | **RAG with local embeddings** | Ollama `nomic-embed-text` keeps embeddings local (no cloud API keys). ChromaDB provides persistent vector storage with zero infrastructure. |
 | **RAG is additive** | Document search enhances the planner without replacing tool-calling. Existing chore/birthday actions work identically whether RAG context is present or not. |
 | **Simple paragraph chunking** | Household docs are short and structured. Splitting by paragraph with a 500-char cap is sufficient without complex chunking libraries. |

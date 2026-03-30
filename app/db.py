@@ -34,3 +34,15 @@ engine = create_engine(
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
+
+if _mp_child:
+    import atexit
+
+    def _dispose_mp_child_engine() -> None:
+        # Return pooled connections to Postgres when a queue worker process exits (spawn child).
+        try:
+            engine.dispose()
+        except Exception:
+            pass
+
+    atexit.register(_dispose_mp_child_engine)
