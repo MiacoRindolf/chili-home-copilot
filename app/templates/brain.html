@@ -117,8 +117,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   font-size: 8px; font-weight: 600; fill: var(--text-muted);
 }
 .tbn-node-detail {
-  display: none; position: absolute; right: 10px; bottom: 10px; left: 10px; max-width: 420px; margin-left: auto;
-  z-index: 20; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-header);
+  display: none; position: fixed; max-width: 420px; width: min(420px, calc(100vw - 24px));
+  z-index: 120; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-header);
   box-shadow: 0 8px 28px rgba(0,0,0,.25); max-height: 42vh; overflow: auto;
 }
 .tbn-node-detail.tbn-node-detail-open { display: block; }
@@ -2093,6 +2093,7 @@ function initTradingBrainNetworkGraph() {
   vp.addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
     if (e.target && e.target.closest && e.target.closest('.tbn-node')) return;
+    tbnCloseNodeDetail();
     dragging = true;
     px = e.clientX;
     py = e.clientY;
@@ -2114,6 +2115,7 @@ function initTradingBrainNetworkGraph() {
   });
 
   vp.addEventListener('wheel', function(e) {
+    tbnCloseNodeDetail();
     e.preventDefault();
     var rect = vp.getBoundingClientRect();
     var mx = e.clientX - rect.left;
@@ -2146,9 +2148,31 @@ function initTradingBrainNetworkGraph() {
     if (!p) return;
     p.classList.remove('tbn-node-detail-open');
     p.setAttribute('aria-hidden', 'true');
+    p.style.left = '';
+    p.style.top = '';
   }
 
-  function tbnOpenNodeDetail(n) {
+  function tbnPositionNodeDetailPanel(p, anchorEl) {
+    if (!p || !anchorEl) return;
+    var gap = 10;
+    var pad = 8;
+    var r = anchorEl.getBoundingClientRect();
+    var pr = p.getBoundingClientRect();
+    var pw = pr.width || p.offsetWidth || 320;
+    var ph = pr.height || p.offsetHeight || 120;
+    var left = r.right + gap;
+    var top = r.top + (r.height / 2) - (ph / 2);
+    if (left + pw > window.innerWidth - pad) {
+      left = r.left - pw - gap;
+    }
+    if (left < pad) left = pad;
+    if (top + ph > window.innerHeight - pad) top = window.innerHeight - ph - pad;
+    if (top < pad) top = pad;
+    p.style.left = left + 'px';
+    p.style.top = top + 'px';
+  }
+
+  function tbnOpenNodeDetail(n, anchorEl) {
     var p = document.getElementById('tbn-node-detail');
     var titleEl = document.getElementById('tbn-node-detail-title');
     var body = document.getElementById('tbn-node-detail-body');
@@ -2170,6 +2194,11 @@ function initTradingBrainNetworkGraph() {
     addRow('Phase', n.phase);
     p.classList.add('tbn-node-detail-open');
     p.setAttribute('aria-hidden', 'false');
+    requestAnimationFrame(function() {
+      requestAnimationFrame(function() {
+        tbnPositionNodeDetailPanel(p, anchorEl);
+      });
+    });
   }
 
   var tbnCloseBtn = document.getElementById('tbn-node-detail-close');
@@ -2267,7 +2296,7 @@ function initTradingBrainNetworkGraph() {
       g.addEventListener('mousedown', function(e) { e.stopPropagation(); });
       g.addEventListener('click', function(e) {
         e.stopPropagation();
-        tbnOpenNodeDetail(n);
+        tbnOpenNodeDetail(n, g);
       });
       gNodes.appendChild(g);
     });

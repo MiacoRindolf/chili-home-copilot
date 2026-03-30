@@ -279,8 +279,12 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
 
         n_st = len(cdef["steps"])
         sr = 92.0 + min(n_st, 8) * 5.0
+        # Fan steps on an arc centered on the outward radial (root → cluster), not fixed +x.
+        spread = 2.3
+        half = spread / 2.0
+        theta0 = math.atan2(cy - root_y, cx - root_x)
         for si, st in enumerate(cdef["steps"]):
-            angle = -1.15 + (2.3 * (si + 0.5) / max(n_st, 1))
+            angle = theta0 - half + spread * (si + 0.5) / max(n_st, 1)
             sx = cx + sr * math.cos(angle)
             sy = cy + sr * math.sin(angle)
             sid = f"s_{cid}_{st['sid']}"
@@ -303,7 +307,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
     meta = {
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
-        "graph_version": 3,
+        "graph_version": 4,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "
