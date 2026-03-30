@@ -303,7 +303,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
     meta = {
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
-        "graph_version": 2,
+        "graph_version": 3,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

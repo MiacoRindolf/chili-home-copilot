@@ -86,6 +86,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
 }
 .trading-brain-pane-network {
+  position: relative;
   flex: 1; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
   background:
     radial-gradient(ellipse 85% 75% at 50% 40%, rgba(99,102,241,.09), transparent 58%),
@@ -111,7 +112,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-edge-pipeline {
   stroke-opacity: 0.18; stroke-width: 1.8; stroke-dasharray: 6 5;
 }
-.tbn-node { cursor: default; }
+.tbn-node { cursor: pointer; }
+.tbn-tier-step .tbn-node-label {
+  font-size: 8px; font-weight: 600; fill: var(--text-muted);
+}
+.tbn-node-detail {
+  display: none; position: absolute; right: 10px; bottom: 10px; left: 10px; max-width: 420px; margin-left: auto;
+  z-index: 20; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-header);
+  box-shadow: 0 8px 28px rgba(0,0,0,.25); max-height: 42vh; overflow: auto;
+}
+.tbn-node-detail.tbn-node-detail-open { display: block; }
+.tbn-node-detail-inner { padding: 12px 14px; }
+.tbn-node-detail-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
+.tbn-node-detail-header h4 { font-size: 13px; font-weight: 700; color: var(--text); margin: 0; line-height: 1.3; }
+.tbn-node-detail-close {
+  flex-shrink: 0; border: none; background: transparent; color: var(--text-muted); cursor: pointer;
+  font-size: 20px; line-height: 1; padding: 0 4px; border-radius: 4px;
+}
+.tbn-node-detail-close:hover { color: var(--text); background: rgba(99,102,241,.08); }
+.tbn-node-detail-body { font-size: 11px; color: var(--text-secondary); line-height: 1.5; }
+.tbn-node-detail-body dt { font-weight: 700; color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; margin-top: 8px; }
+.tbn-node-detail-body dt:first-child { margin-top: 0; }
+.tbn-node-detail-body dd { margin: 2px 0 0 0; font-family: ui-monospace, monospace; font-size: 10px; word-break: break-word; }
 .tbn-node-circle {
   stroke: var(--border); stroke-width: 1.5;
   filter: drop-shadow(0 0 5px rgba(139,92,246,.28));
@@ -842,6 +864,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
               <g id="tbn-edges"></g>
               <g id="tbn-nodes"></g>
             </svg>
+          </div>
+        </div>
+        <div id="tbn-node-detail" class="tbn-node-detail" role="dialog" aria-labelledby="tbn-node-detail-title" aria-hidden="true">
+          <div class="tbn-node-detail-inner">
+            <div class="tbn-node-detail-header">
+              <h4 id="tbn-node-detail-title">Node</h4>
+              <button type="button" id="tbn-node-detail-close" class="tbn-node-detail-close" title="Close" aria-label="Close">&times;</button>
+            </div>
+            <dl id="tbn-node-detail-body" class="tbn-node-detail-body"></dl>
           </div>
         </div>
       </div>
@@ -2061,6 +2092,7 @@ function initTradingBrainNetworkGraph() {
 
   vp.addEventListener('mousedown', function(e) {
     if (e.button !== 0) return;
+    if (e.target && e.target.closest && e.target.closest('.tbn-node')) return;
     dragging = true;
     px = e.clientX;
     py = e.clientY;
@@ -2109,6 +2141,52 @@ function initTradingBrainNetworkGraph() {
     gNodes.appendChild(err);
   }
 
+  function tbnCloseNodeDetail() {
+    var p = document.getElementById('tbn-node-detail');
+    if (!p) return;
+    p.classList.remove('tbn-node-detail-open');
+    p.setAttribute('aria-hidden', 'true');
+  }
+
+  function tbnOpenNodeDetail(n) {
+    var p = document.getElementById('tbn-node-detail');
+    var titleEl = document.getElementById('tbn-node-detail-title');
+    var body = document.getElementById('tbn-node-detail-body');
+    if (!p || !titleEl || !body) return;
+    titleEl.textContent = n.label || n.id || 'Node';
+    body.innerHTML = '';
+    function addRow(lbl, val) {
+      if (val == null || val === '') return;
+      var dt = document.createElement('dt');
+      dt.textContent = lbl;
+      var dd = document.createElement('dd');
+      dd.textContent = String(val);
+      body.appendChild(dt);
+      body.appendChild(dd);
+    }
+    addRow('Tier', n.tier);
+    addRow('Id', n.id);
+    addRow('Code reference', n.code_ref);
+    addRow('Phase', n.phase);
+    p.classList.add('tbn-node-detail-open');
+    p.setAttribute('aria-hidden', 'false');
+  }
+
+  var tbnCloseBtn = document.getElementById('tbn-node-detail-close');
+  if (tbnCloseBtn) tbnCloseBtn.onclick = function() { tbnCloseNodeDetail(); };
+
+  function tbnStepLabelLines(s, firstMax, secondMax) {
+    if (!s) return [''];
+    if (s.length <= firstMax) return [s];
+    var sp = s.lastIndexOf(' ', firstMax + 8);
+    if (sp < 8) sp = s.indexOf(' ');
+    if (sp < 1) return [s.slice(0, firstMax - 1) + '\u2026'];
+    var a = s.slice(0, sp);
+    var b = s.slice(sp + 1).trim();
+    if (b.length > secondMax) b = b.slice(0, secondMax - 1) + '\u2026';
+    return [a, b];
+  }
+
   function tbnRenderGraphData(data) {
     gEdges.innerHTML = '';
     gNodes.innerHTML = '';
@@ -2128,22 +2206,16 @@ function initTradingBrainNetworkGraph() {
       var a = nodeMap[edge.from];
       var b = nodeMap[edge.to];
       if (!a || !b) return;
-      var midx = (a.x + b.x) / 2;
-      var midy = (a.y + b.y) / 2;
-      var dx = b.x - a.x;
-      var dy = b.y - a.y;
-      var len = Math.sqrt(dx * dx + dy * dy) || 1;
-      var ox = (-dy / len) * 48;
-      var oy = (dx / len) * 48;
-      var cxb = midx + ox;
-      var cyb = midy + oy;
-      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
-      path.setAttribute('d', 'M ' + a.x + ' ' + a.y + ' Q ' + cxb + ' ' + cyb + ' ' + b.x + ' ' + b.y);
+      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', String(a.x));
+      line.setAttribute('y1', String(a.y));
+      line.setAttribute('x2', String(b.x));
+      line.setAttribute('y2', String(b.y));
       var ec = 'tbn-edge';
       if (edge.kind === 'pipeline') ec += ' tbn-edge-pipeline';
       else if (b.tier === 'step') ec += ' tbn-edge-step';
-      path.setAttribute('class', ec);
-      gEdges.appendChild(path);
+      line.setAttribute('class', ec);
+      gEdges.appendChild(line);
     });
 
     var hintEl = document.getElementById('tbn-hint-text');
@@ -2155,8 +2227,9 @@ function initTradingBrainNetworkGraph() {
     data.nodes.forEach(function(n) {
       var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       g.setAttribute('class', 'tbn-node tbn-tier-' + n.tier);
+      g.setAttribute('data-node-id', n.id);
       g.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
-      var r = n.tier === 'root' ? 30 : (n.tier === 'cluster' ? 19 : 7);
+      var r = n.tier === 'root' ? 30 : (n.tier === 'cluster' ? 19 : 8);
       var circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
       circ.setAttribute('r', r);
       circ.setAttribute('class', 'tbn-node-circle');
@@ -2167,7 +2240,21 @@ function initTradingBrainNetworkGraph() {
       t.textContent = tip;
       g.appendChild(t);
       g.appendChild(circ);
-      if (n.tier !== 'step') {
+      if (n.tier === 'step') {
+        var lines = tbnStepLabelLines(n.label, 22, 26);
+        var stext = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        stext.setAttribute('class', 'tbn-node-label');
+        stext.setAttribute('text-anchor', 'middle');
+        stext.setAttribute('y', r + 8);
+        lines.forEach(function(line, li) {
+          var tsp = document.createElementNS('http://www.w3.org/2000/svg', 'tspan');
+          tsp.setAttribute('x', '0');
+          if (li > 0) tsp.setAttribute('dy', '1.08em');
+          tsp.textContent = line;
+          stext.appendChild(tsp);
+        });
+        g.appendChild(stext);
+      } else {
         var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
         text.setAttribute('class', 'tbn-node-label');
         text.setAttribute('y', r + 15);
@@ -2177,6 +2264,11 @@ function initTradingBrainNetworkGraph() {
         text.textContent = lab;
         g.appendChild(text);
       }
+      g.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+      g.addEventListener('click', function(e) {
+        e.stopPropagation();
+        tbnOpenNodeDetail(n);
+      });
       gNodes.appendChild(g);
     });
 

@@ -7322,6 +7322,12 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+# Maintainer: the Trading Brain Network tab graph is driven by
+# app.services.trading.brain_network_graph (get_trading_brain_network_graph).
+# When you add, remove, or reorder major cycle phases in this function, update
+# brain_network_graph._CLUSTERS (and meta if needed) and bump meta.graph_version.
+
+
 def run_learning_cycle(
     db: Session,
     user_id: int | None,
