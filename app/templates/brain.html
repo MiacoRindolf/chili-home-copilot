@@ -85,8 +85,56 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .trading-brain-pane {
   flex: 1; min-width: 0; min-height: 0; display: flex; flex-direction: column;
 }
-.trading-brain-pane-network { overflow: auto; }
-.trading-brain-network-placeholder { flex: 1; min-height: 160px; }
+.trading-brain-pane-network {
+  flex: 1; min-width: 0; min-height: 0; overflow: hidden; display: flex; flex-direction: column;
+  background:
+    radial-gradient(ellipse 85% 75% at 50% 40%, rgba(99,102,241,.09), transparent 58%),
+    radial-gradient(ellipse 50% 40% at 20% 80%, rgba(139,92,246,.06), transparent 50%),
+    var(--bg);
+  border: 1px solid var(--border); border-radius: 10px;
+}
+.tbn-hint {
+  flex-shrink: 0; font-size: 10px; color: var(--text-muted); text-align: center; padding: 4px 8px 0;
+}
+.tbn-viewport {
+  flex: 1; min-height: 220px; position: relative; overflow: hidden; cursor: grab; touch-action: none;
+}
+.tbn-viewport.tbn-dragging { cursor: grabbing; }
+.tbn-stage {
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; will-change: transform;
+}
+#trading-brain-network-svg { display: block; }
+.tbn-edge {
+  fill: none; stroke: var(--accent); stroke-width: 1.35; stroke-opacity: 0.38; pointer-events: none;
+}
+.tbn-edge-step { stroke-opacity: 0.22; stroke-width: 1; }
+.tbn-edge-pipeline {
+  stroke-opacity: 0.18; stroke-width: 1.8; stroke-dasharray: 6 5;
+}
+.tbn-node { cursor: default; }
+.tbn-node-circle {
+  stroke: var(--border); stroke-width: 1.5;
+  filter: drop-shadow(0 0 5px rgba(139,92,246,.28));
+}
+.tbn-tier-root .tbn-node-circle {
+  fill: url(#tbn-jewel-root); stroke: rgba(167,139,250,.65); stroke-width: 2.2;
+}
+.tbn-tier-cluster .tbn-node-circle { fill: url(#tbn-jewel-cluster); stroke: rgba(99,102,241,.45); }
+.tbn-tier-step .tbn-node-circle {
+  fill: var(--bg-header); stroke: var(--accent); stroke-opacity: 0.55; stroke-width: 1.2; filter: none;
+}
+.tbn-node-label {
+  font-size: 10px; font-weight: 600; fill: var(--text-secondary); pointer-events: none;
+  text-shadow: 0 1px 3px var(--bg);
+}
+.tbn-tier-root .tbn-node-label { font-size: 12px; font-weight: 700; fill: var(--text); }
+.tbn-graph-error {
+  fill: var(--text-secondary); font-size: 13px; font-weight: 600;
+}
+.tbn-sky {
+  fill: transparent;
+  pointer-events: all;
+}
 .tb-tabstrip {
   flex-shrink: 0; display: flex; justify-content: center; align-items: center; gap: 6px;
   padding: 6px 0 12px; border-bottom: 1px solid var(--border); margin-bottom: 12px;
@@ -735,6 +783,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 {% endblock %}
 
 {% block content %}
+<script type="application/json" id="trading-brain-network-data">{{ trading_brain_network_graph | default({"ok": false, "nodes": [], "edges": []}, true) | tojson }}</script>
 <div class="b-header">
   <div style="display:flex;align-items:center;gap:8px">
     <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:none" title="Back to domain hub">&#8592; All domains</button>
@@ -773,7 +822,28 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
       <div class="trading-brain-body-row">
       <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
-        <div class="trading-brain-network-placeholder" aria-hidden="true"></div>
+        <p class="tbn-hint" id="tbn-hint-text">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+        <div id="trading-brain-network-viewport" class="tbn-viewport" aria-label="Trading brain architecture graph">
+          <div id="trading-brain-network-stage" class="tbn-stage">
+            <svg id="trading-brain-network-svg" viewBox="0 0 1600 950" width="1600" height="950" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+              <defs>
+                <radialGradient id="tbn-jewel-root" cx="32%" cy="28%" r="70%">
+                  <stop offset="0%" stop-color="rgba(255,255,255,.35)"/>
+                  <stop offset="40%" stop-color="rgba(167,139,250,.55)"/>
+                  <stop offset="100%" stop-color="rgba(91,33,182,.95)"/>
+                </radialGradient>
+                <radialGradient id="tbn-jewel-cluster" cx="35%" cy="30%" r="68%">
+                  <stop offset="0%" stop-color="rgba(255,255,255,.2)"/>
+                  <stop offset="50%" stop-color="rgba(99,102,241,.4)"/>
+                  <stop offset="100%" stop-color="rgba(49,46,129,.92)"/>
+                </radialGradient>
+              </defs>
+              <rect class="tbn-sky" x="0" y="0" width="1600" height="950"/>
+              <g id="tbn-edges"></g>
+              <g id="tbn-nodes"></g>
+            </svg>
+          </div>
+        </div>
       </div>
       <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-hidden="false">
       <div class="trading-main-content">
@@ -1965,6 +2035,193 @@ function setTradingBrainSubtab(which) {
     net.setAttribute('aria-hidden', isOut ? 'true' : 'false');
   }
   if (asst) asst.style.display = isOut ? '' : 'none';
+  if (!isOut) initTradingBrainNetworkGraph();
+}
+
+var _tradingBrainNetworkInited = false;
+var _tbnState = { tx: 0, ty: 0, scale: 0.52 };
+
+function _tbnApplyStage() {
+  var st = document.getElementById('trading-brain-network-stage');
+  if (!st) return;
+  st.style.transform = 'translate(' + _tbnState.tx + 'px,' + _tbnState.ty + 'px) scale(' + _tbnState.scale + ')';
+}
+
+function initTradingBrainNetworkGraph() {
+  if (_tradingBrainNetworkInited) return;
+  var vp = document.getElementById('trading-brain-network-viewport');
+  var gEdges = document.getElementById('tbn-edges');
+  var gNodes = document.getElementById('tbn-nodes');
+  if (!vp || !gEdges || !gNodes) return;
+  _tradingBrainNetworkInited = true;
+
+  var dragging = false;
+  var px = 0;
+  var py = 0;
+
+  vp.addEventListener('mousedown', function(e) {
+    if (e.button !== 0) return;
+    dragging = true;
+    px = e.clientX;
+    py = e.clientY;
+    vp.classList.add('tbn-dragging');
+  });
+  window.addEventListener('mouseup', function() {
+    dragging = false;
+    vp.classList.remove('tbn-dragging');
+  });
+  window.addEventListener('mousemove', function(e) {
+    if (!dragging) return;
+    var dx = e.clientX - px;
+    var dy = e.clientY - py;
+    px = e.clientX;
+    py = e.clientY;
+    _tbnState.tx += dx;
+    _tbnState.ty += dy;
+    _tbnApplyStage();
+  });
+
+  vp.addEventListener('wheel', function(e) {
+    e.preventDefault();
+    var rect = vp.getBoundingClientRect();
+    var mx = e.clientX - rect.left;
+    var my = e.clientY - rect.top;
+    var s = _tbnState.scale;
+    var delta = e.deltaY > 0 ? 0.9 : 1.11;
+    var ns = Math.max(0.32, Math.min(2.6, s * delta));
+    var wx = (mx - _tbnState.tx) / s;
+    var wy = (my - _tbnState.ty) / s;
+    _tbnState.tx = mx - wx * ns;
+    _tbnState.ty = my - wy * ns;
+    _tbnState.scale = ns;
+    _tbnApplyStage();
+  }, { passive: false });
+
+  function tbnShowGraphError() {
+    gEdges.innerHTML = '';
+    gNodes.innerHTML = '';
+    var err = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+    err.setAttribute('x', '800');
+    err.setAttribute('y', '475');
+    err.setAttribute('text-anchor', 'middle');
+    err.setAttribute('class', 'tbn-graph-error');
+    err.textContent = 'Could not load architecture graph. Reload the page or check the server log.';
+    gNodes.appendChild(err);
+  }
+
+  function tbnRenderGraphData(data) {
+    gEdges.innerHTML = '';
+    gNodes.innerHTML = '';
+    if (!data || !data.ok || !data.nodes || !data.edges) {
+      tbnShowGraphError();
+      return;
+    }
+    var nodeMap = {};
+    data.nodes.forEach(function(n) { nodeMap[n.id] = n; });
+
+    var edgeList = data.edges.slice().sort(function(ea, eb) {
+      var pa = (ea.kind === 'pipeline') ? 0 : 1;
+      var pb = (eb.kind === 'pipeline') ? 0 : 1;
+      return pa - pb;
+    });
+    edgeList.forEach(function(edge) {
+      var a = nodeMap[edge.from];
+      var b = nodeMap[edge.to];
+      if (!a || !b) return;
+      var midx = (a.x + b.x) / 2;
+      var midy = (a.y + b.y) / 2;
+      var dx = b.x - a.x;
+      var dy = b.y - a.y;
+      var len = Math.sqrt(dx * dx + dy * dy) || 1;
+      var ox = (-dy / len) * 48;
+      var oy = (dx / len) * 48;
+      var cxb = midx + ox;
+      var cyb = midy + oy;
+      var path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+      path.setAttribute('d', 'M ' + a.x + ' ' + a.y + ' Q ' + cxb + ' ' + cyb + ' ' + b.x + ' ' + b.y);
+      var ec = 'tbn-edge';
+      if (edge.kind === 'pipeline') ec += ' tbn-edge-pipeline';
+      else if (b.tier === 'step') ec += ' tbn-edge-step';
+      path.setAttribute('class', ec);
+      gEdges.appendChild(path);
+    });
+
+    var hintEl = document.getElementById('tbn-hint-text');
+    if (hintEl && data.meta && data.meta.description) {
+      hintEl.innerHTML = 'Pan by dragging; scroll to zoom. <span style="opacity:.85">' +
+        escHtml(data.meta.description).slice(0, 220) + (data.meta.description.length > 220 ? '\u2026' : '') + '</span>';
+    }
+
+    data.nodes.forEach(function(n) {
+      var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      g.setAttribute('class', 'tbn-node tbn-tier-' + n.tier);
+      g.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
+      var r = n.tier === 'root' ? 30 : (n.tier === 'cluster' ? 19 : 7);
+      var circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circ.setAttribute('r', r);
+      circ.setAttribute('class', 'tbn-node-circle');
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      var tip = n.label;
+      if (n.code_ref) tip += '\n' + n.code_ref;
+      if (n.phase) tip += '\nPhase: ' + n.phase;
+      t.textContent = tip;
+      g.appendChild(t);
+      g.appendChild(circ);
+      if (n.tier !== 'step') {
+        var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        text.setAttribute('class', 'tbn-node-label');
+        text.setAttribute('y', r + 15);
+        text.setAttribute('text-anchor', 'middle');
+        var lab = n.label;
+        if (lab.length > 30) lab = lab.slice(0, 28) + '\u2026';
+        text.textContent = lab;
+        g.appendChild(text);
+      }
+      gNodes.appendChild(g);
+    });
+
+    var vw = vp.clientWidth || 800;
+    var vh = vp.clientHeight || 480;
+    var sc = _tbnState.scale;
+    _tbnState.tx = (vw - 1600 * sc) / 2;
+    _tbnState.ty = (vh - 950 * sc) / 2;
+    _tbnApplyStage();
+  }
+
+  function tbnParseEmbeddedGraph() {
+    var el = document.getElementById('trading-brain-network-data');
+    if (!el || !el.textContent) return null;
+    try {
+      return JSON.parse(el.textContent);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  var embedded = tbnParseEmbeddedGraph();
+  if (embedded && embedded.ok && embedded.nodes && embedded.edges) {
+    tbnRenderGraphData(embedded);
+  } else {
+    fetch('/api/brain/trading/network-graph', { credentials: 'same-origin' })
+      .then(function(r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function(d) {
+        if (d && d.ok && d.nodes && d.edges) {
+          tbnRenderGraphData(d);
+        } else {
+          var again = tbnParseEmbeddedGraph();
+          if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
+          else tbnShowGraphError();
+        }
+      })
+      .catch(function() {
+        var again = tbnParseEmbeddedGraph();
+        if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
+        else tbnShowGraphError();
+      });
+  }
 }
 
 function initTradingBrainAssistant() {

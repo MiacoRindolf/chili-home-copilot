@@ -27,6 +27,7 @@ from ..services.reasoning_brain import learning as rb_learning
 from ..services.project_brain import registry as pb_registry
 from ..services.project_brain import learning as pb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
+from ..services.trading.brain_network_graph import get_trading_brain_network_graph
 from ..models import (
     ReasoningAnticipation,
     ReasoningConfidenceSnapshot,
@@ -75,6 +76,7 @@ def brain_page(
             "user_name": ctx["user_name"],
             "planner_task_id": planner_task_id,
             "planner_project_id": planner_project_id,
+            "trading_brain_network_graph": get_trading_brain_network_graph(),
         },
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).
@@ -168,6 +170,18 @@ def api_brain_trading_metrics(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     stats = ts.get_brain_stats(db, ctx["user_id"])
     return JSONResponse({"ok": True, **stats})
+
+
+@router.get("/api/brain/trading/network-graph")
+def api_brain_trading_network_graph():
+    """Static governance graph for Trading Brain Network (skill-tree UI)."""
+    return JSONResponse(get_trading_brain_network_graph())
+
+
+@router.get("/api/brain/network-graph")
+def api_brain_network_graph_compat():
+    """Same payload as ``/api/brain/trading/network-graph`` for external SPAs (e.g. dev on :3000)."""
+    return JSONResponse(get_trading_brain_network_graph())
 
 
 # ── Trading domain: controls ───────────────────────────────────────────

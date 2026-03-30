@@ -23,6 +23,7 @@ CHILI serves:
 | `GET` `/api/v1/brain-worker-stats` | Worker JSON + queue counts |
 | `GET` `/api/v1/brain-logs` | Recent learning events (needs auth like other trading APIs) |
 | `GET` `/api/v1/brain-pending-items` | Pending scan-pattern queue |
+| `GET` `/api/brain/network-graph` | Trading brain architecture graph (alias of `/api/brain/trading/network-graph`) |
 | `WS` `/ws` | Minimal WebSocket (accept + ack) |
 
 ## How to point Chill at CHILI
