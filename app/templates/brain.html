@@ -144,6 +144,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-node-detail-body dt { font-weight: 700; color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; margin-top: 8px; }
 .tbn-node-detail-body dt:first-child { margin-top: 0; }
 .tbn-node-detail-body dd { margin: 2px 0 0 0; font-family: ui-monospace, monospace; font-size: 10px; word-break: break-word; }
+.tbn-node-detail-body dd.tbn-node-detail-desc { font-family: inherit; white-space: pre-wrap; }
+.tbn-node-detail-body dd.tbn-node-detail-io ul {
+  margin: 4px 0 0 0; padding-left: 18px; font-family: inherit; font-size: 10px; line-height: 1.45;
+}
+.tbn-node-detail-body dd.tbn-node-detail-io li { margin: 2px 0; }
 .tbn-node-circle {
   stroke: var(--border); stroke-width: 1.5;
   filter: drop-shadow(0 0 5px rgba(139,92,246,.28));
@@ -2201,6 +2206,44 @@ function initTradingBrainNetworkGraph() {
       body.appendChild(dt);
       body.appendChild(dd);
     }
+    function addDescRow(lbl, text) {
+      if (text == null || String(text).trim() === '') return;
+      var dt = document.createElement('dt');
+      dt.textContent = lbl;
+      var dd = document.createElement('dd');
+      dd.className = 'tbn-node-detail-desc';
+      dd.textContent = String(text);
+      body.appendChild(dt);
+      body.appendChild(dd);
+    }
+    function addBulletSection(lbl, items) {
+      if (!items || !items.length) {
+        var dt0 = document.createElement('dt');
+        dt0.textContent = lbl;
+        var dd0 = document.createElement('dd');
+        dd0.className = 'tbn-node-detail-io';
+        dd0.textContent = '\u2014';
+        body.appendChild(dt0);
+        body.appendChild(dd0);
+        return;
+      }
+      var dt = document.createElement('dt');
+      dt.textContent = lbl;
+      var dd = document.createElement('dd');
+      dd.className = 'tbn-node-detail-io';
+      var ul = document.createElement('ul');
+      for (var bi = 0; bi < items.length; bi++) {
+        var li = document.createElement('li');
+        li.textContent = String(items[bi]);
+        ul.appendChild(li);
+      }
+      dd.appendChild(ul);
+      body.appendChild(dt);
+      body.appendChild(dd);
+    }
+    addDescRow('Description', n.description);
+    addBulletSection('Inputs', n.inputs);
+    addBulletSection('Outputs', n.outputs);
     addRow('Tier', n.tier);
     addRow('Id', n.id);
     addRow('Code reference', n.code_ref);

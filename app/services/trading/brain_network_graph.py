@@ -11,7 +11,10 @@ from __future__ import annotations
 import math
 from typing import Any
 
-from .learning_cycle_architecture import TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+from .learning_cycle_architecture import (
+    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+    TRADING_BRAIN_ROOT_METADATA,
+)
 
 _ROOT_ID = "tb_root"
 
@@ -32,6 +35,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
     root_x, root_y = 800.0, 475.0
     positions = _cluster_positions(n_cl, root_x, root_y, 300.0)
 
+    root_meta = TRADING_BRAIN_ROOT_METADATA
     nodes: list[dict[str, Any]] = [
         {
             "id": _ROOT_ID,
@@ -40,6 +44,9 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
             "x": root_x,
             "y": root_y,
             "code_ref": "app.services.trading.learning.run_learning_cycle",
+            "description": root_meta.description,
+            "inputs": list(root_meta.inputs),
+            "outputs": list(root_meta.outputs),
         }
     ]
     edges: list[dict[str, str]] = []
@@ -56,6 +63,9 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                 "y": cy,
                 "phase": cdef.phase_summary,
                 "code_ref": "run_learning_cycle → " + cid,
+                "description": cdef.description,
+                "inputs": list(cdef.inputs),
+                "outputs": list(cdef.outputs),
             }
         )
         edges.append({"from": _ROOT_ID, "to": cid, "kind": "governance"})
@@ -78,6 +88,9 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                     "x": sx,
                     "y": sy,
                     "code_ref": st.code_ref,
+                    "description": st.description,
+                    "inputs": list(st.inputs),
+                    "outputs": list(st.outputs),
                 }
             )
             edges.append({"from": cid, "to": sid, "kind": "governance"})
@@ -90,7 +103,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 5,
+        "graph_version": 6,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

@@ -8,17 +8,33 @@ from pathlib import Path
 from app.services.trading.brain_network_graph import get_trading_brain_network_graph
 from app.services.trading.learning_cycle_architecture import (
     TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+    TRADING_BRAIN_ROOT_METADATA,
     get_cycle_step,
 )
 
 
+def _assert_io_tuple(t: tuple[str, ...]) -> None:
+    assert isinstance(t, tuple)
+    for x in t:
+        assert isinstance(x, str)
+
+
 def test_cycle_cluster_and_step_ids_unique() -> None:
     seen: set[tuple[str, str]] = set()
+    assert TRADING_BRAIN_ROOT_METADATA.description.strip()
+    _assert_io_tuple(TRADING_BRAIN_ROOT_METADATA.inputs)
+    _assert_io_tuple(TRADING_BRAIN_ROOT_METADATA.outputs)
     for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
+        assert c.description.strip()
+        _assert_io_tuple(c.inputs)
+        _assert_io_tuple(c.outputs)
         for s in c.steps:
             key = (c.id, s.sid)
             assert key not in seen, f"duplicate step key: {key}"
             seen.add(key)
+            assert s.description.strip()
+            _assert_io_tuple(s.inputs)
+            _assert_io_tuple(s.outputs)
         assert get_cycle_step(c.id, c.steps[0].sid).label
 
 
