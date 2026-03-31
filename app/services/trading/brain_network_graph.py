@@ -27,11 +27,12 @@ _MAX_LINES_PER_CALLABLE = 20_000
 _MAX_SNIPPET_CHARS = 2_000_000
 
 # Bump when snippet rules change so in-process cache does not serve stale truncated text.
-_SNIPPET_CACHE_VERSION = 2
+_SNIPPET_CACHE_VERSION = 3
 
 _SHORT_MODULE_PREFIX: dict[str, str] = {
     "learning": "app.services.trading.learning",
     "prescreener": "app.services.trading.prescreener",
+    "prescreen_job": "app.services.trading.prescreen_job",
     "scanner": "app.services.trading.scanner",
     "journal": "app.services.trading.journal",
     "pattern_ml": "app.services.trading.pattern_ml",
@@ -261,15 +262,15 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 9,
+        "graph_version": 10,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "
             "run_learning_cycle current_step strings where applicable. Pipeline edges show "
             "sequential phase flow; governance edges show orchestration (root→subsystem, "
             "cluster→callable step). Node payloads include description, remarks (what/where/why), "
-            "concrete inputs/outputs from learning_cycle_architecture, and code_snippet "
-            "(resolved Python source excerpts per code_ref)."
+            "concrete inputs/outputs; prescreen persists to DB (daily job); scan reads "
+            "active candidates; code_snippet per code_ref."
         ),
     }
 

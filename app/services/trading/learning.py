@@ -1720,7 +1720,7 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
     match those pattern conditions to boost evidence counts.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    from .prescreener import get_prescreened_candidates
+    from .prescreen_job import prescreen_candidates_for_universe
 
     insights = get_insights(db, user_id, limit=50)
     under_sampled = [
@@ -1731,7 +1731,9 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         return {"sought": 0, "note": "no under-sampled patterns"}
 
     try:
-        seek_tickers = get_prescreened_candidates(include_crypto=True, max_total=600)
+        seek_tickers = prescreen_candidates_for_universe(
+            db, max_total=600, include_crypto=True,
+        )
     except Exception:
         from .market_data import ALL_SCAN_TICKERS
         seek_tickers = list(ALL_SCAN_TICKERS)
@@ -7471,20 +7473,43 @@ def run_learning_cycle(
             learning_status=_learning_status,
         )
 
-        # Step 1: Pre-filter with Massive.com + yfinance screener
+        # Step 1: Prescreen funnel (DB artifact from daily job; inline fallback if empty)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
         # graph-node: c_universe/prefilter
         apply_learning_cycle_step_status(_learning_status, "c_universe", "prefilter")
-        from .prescreener import get_prescreened_candidates, get_prescreen_status
-        candidates = get_prescreened_candidates()
-        ps = get_prescreen_status()
-        report["prescreen_candidates"] = len(candidates)
-        report["prescreen_sources"] = ps.get("sources", {})
-        _learning_status["tickers_processed"] = len(candidates)
+        from .prescreen_job import (
+            count_active_global_candidates,
+            get_latest_prescreen_summary,
+            prescreen_candidates_for_universe,
+        )
+        from .prescreener import get_prescreen_status
+
+        summary = get_latest_prescreen_summary(db)
+        n_active = count_active_global_candidates(db)
+        if n_active > 0:
+            report["prescreen_candidates"] = n_active
+            report["prescreen_sources"] = summary.get("source_map") or {}
+            report["prescreen_snapshot_id"] = summary.get("snapshot_id")
+            report["prescreen_fallback_inline"] = False
+            _learning_status["tickers_processed"] = n_active
+        else:
+            candidates = prescreen_candidates_for_universe(
+                db, max_total=3000, include_crypto=True,
+            )
+            ps = get_prescreen_status()
+            report["prescreen_candidates"] = len(candidates)
+            report["prescreen_sources"] = ps.get("sources", {})
+            report["prescreen_fallback_inline"] = True
+            _learning_status["tickers_processed"] = len(candidates)
         _learning_status["steps_completed"] = 1
-        _step_time("pre-filter", step_start, f"{len(candidates)} candidates")
+        _step_time(
+            "pre-filter",
+            step_start,
+            f"{report['prescreen_candidates']} candidates"
+            + (" (DB)" if not report.get("prescreen_fallback_inline") else " (inline fallback)"),
+        )
         _commit_step()
 
         # Step 2: Deep-score candidates

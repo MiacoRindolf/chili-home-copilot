@@ -514,8 +514,10 @@ def _select_tickers(
             pass
 
     try:
-        from .prescreener import get_prescreened_candidates
-        hot = get_prescreened_candidates(
+        from .prescreen_job import prescreen_candidates_for_universe
+
+        hot = prescreen_candidates_for_universe(
+            db,
             include_crypto=(universe != "stocks"),
             max_total=800,
         )

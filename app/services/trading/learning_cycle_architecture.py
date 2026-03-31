@@ -117,28 +117,37 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             CycleStepDef(
                 sid="prefilter",
                 label="Pre-filtering market",
-                code_ref="prescreener.get_prescreened_candidates",
+                code_ref=(
+                    "prescreen_job.run_daily_prescreen_job + prescreener.collect_prescreen_with_provenance"
+                ),
                 runner_phase="pre-filtering",
                 description=(
-                    "Applies fast screens (liquidity, price, lists) to shrink the raw universe "
-                    "before expensive scoring."
+                    "Builds the daily candidate universe via provider screens plus capped internal "
+                    "brain signals; persists to PostgreSQL for the scan step."
                 ),
                 remarks=(
-                    "What: Synchronous prescreen that returns a candidate ticker list using "
-                    "rules and cached provider data.\n\n"
-                    "Where: ``app.services.trading.prescreener.get_prescreened_candidates`` "
-                    "and ``get_prescreen_status``; invoked at the beginning of the cycle.\n\n"
-                    "Why: Avoids calling deep scan and OHLCV fetch for illiquid or excluded "
-                    "symbols, which would dominate cycle time."
+                    "What: Scheduled job (default 2:00 America/Los_Angeles) writes "
+                    "``trading_prescreen_snapshots`` and upserts global rows in "
+                    "``trading_prescreen_candidates`` (active flag, entry_reasons, sources). "
+                    "The learning cycle step only **reports** funnel metrics from the DB (or "
+                    "falls back to live provider screeners via "
+                    "``prescreener._fetch_prescreen_universe_from_providers`` when the table is empty).\n\n"
+                    "Where: ``app.services.trading.prescreen_job`` (writer + "
+                    "``prescreen_candidates_for_universe`` for readers), "
+                    "``prescreener.collect_prescreen_with_provenance`` (external screens), "
+                    "``prescreen_internal_signals`` (brain-memory tickers), "
+                    "``run_full_market_scan`` reads active candidates from the DB.\n\n"
+                    "Why: Durable, analyzable funnel (per-ticker reasons) and one authoritative "
+                    "universe per day instead of cache-only coupling between steps."
                 ),
                 inputs=(
                     "Universe configuration from settings / defaults",
-                    "Provider APIs used inside prescreener",
+                    "Provider APIs inside prescreener; optional brain_prediction / insights / patterns",
                 ),
                 outputs=(
-                    "``candidates: list[str]``",
-                    "``report['prescreen_candidates']`` (len)",
-                    "``ps: dict`` from ``get_prescreen_status()`` (sources breakdown)",
+                    "``report['prescreen_candidates']`` — count of active global rows (or inline fallback)",
+                    "``report['prescreen_sources']`` — latest snapshot source_map or inline prescreen status",
+                    "``report['prescreen_snapshot_id']`` when DB path is used",
                 ),
             ),
             CycleStepDef(
@@ -160,7 +169,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 ),
                 inputs=(
                     "``db``, ``user_id``, ``use_full_universe=full_universe``",
-                    "``candidates`` from prescreen (implicit via internal scan inputs)",
+                    "Active rows from ``trading_prescreen_candidates`` (global) or inline prescreen fallback",
                     "OHLCV/quote data via configured provider",
                 ),
                 outputs=(

@@ -2254,6 +2254,71 @@ def _migration_057_trading_insight_evidence(conn) -> None:
     conn.commit()
 
 
+def _migration_058_trading_prescreen_artifacts(conn) -> None:
+    """Daily prescreen snapshots + durable candidate rows (global + optional per-user)."""
+    if "trading_prescreen_snapshots" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_prescreen_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    run_id VARCHAR(64) NOT NULL UNIQUE,
+                    run_started_at TIMESTAMP NOT NULL,
+                    run_finished_at TIMESTAMP,
+                    timezone_label VARCHAR(64) NOT NULL DEFAULT 'America/Los_Angeles',
+                    settings_json JSONB,
+                    status_json JSONB,
+                    source_map_json JSONB,
+                    inclusion_summary_json JSONB,
+                    candidate_count INTEGER NOT NULL DEFAULT 0
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_tps_run_started ON trading_prescreen_snapshots (run_started_at DESC)"))
+        conn.commit()
+
+    if "trading_prescreen_candidates" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_prescreen_candidates (
+                    id BIGSERIAL PRIMARY KEY,
+                    snapshot_id BIGINT REFERENCES trading_prescreen_snapshots(id) ON DELETE SET NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE CASCADE,
+                    ticker VARCHAR(32) NOT NULL,
+                    ticker_norm VARCHAR(36) NOT NULL,
+                    active BOOLEAN NOT NULL DEFAULT TRUE,
+                    first_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    modified_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    entry_reasons JSONB NOT NULL DEFAULT '[]'::jsonb,
+                    sources_json JSONB
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_trading_prescreen_candidate_global "
+                "ON trading_prescreen_candidates (ticker_norm) WHERE user_id IS NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uq_trading_prescreen_candidate_user "
+                "ON trading_prescreen_candidates (user_id, ticker_norm) WHERE user_id IS NOT NULL"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tpc_active_global_norm ON trading_prescreen_candidates (active, ticker_norm) "
+                "WHERE user_id IS NULL"
+            )
+        )
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2313,6 +2378,7 @@ MIGRATIONS = [
     ("055_brain_worker_ui_digest_json", _migration_055_brain_worker_ui_digest_json),
     ("056_snapshot_bar_key", _migration_056_snapshot_bar_key),
     ("057_trading_insight_evidence", _migration_057_trading_insight_evidence),
+    ("058_trading_prescreen_artifacts", _migration_058_trading_prescreen_artifacts),
 ]
 
 

@@ -410,3 +410,40 @@ class TradingHypothesis(Base):
     related_pattern_id: Optional[int] = Column(Integer, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_tested_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+
+class PrescreenSnapshot(Base):
+    """One row per scheduled prescreen run (external screens + internal brain signals)."""
+
+    __tablename__ = "trading_prescreen_snapshots"
+
+    id: int = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    run_id: str = Column(String(64), nullable=False, unique=True, index=True)
+    run_started_at: datetime = Column(DateTime, nullable=False)
+    run_finished_at: Optional[datetime] = Column(DateTime, nullable=True)
+    timezone_label: str = Column(String(64), nullable=False, default="America/Los_Angeles")
+    settings_json: Optional[dict] = Column(JSONB, nullable=True)
+    status_json: Optional[dict] = Column(JSONB, nullable=True)
+    source_map_json: Optional[dict] = Column(JSONB, nullable=True)
+    inclusion_summary_json: Optional[dict] = Column(JSONB, nullable=True)
+    candidate_count: int = Column(Integer, nullable=False, default=0)
+
+
+class PrescreenCandidate(Base):
+    """Durable prescreen universe: global (user_id NULL) or per-user extensions."""
+
+    __tablename__ = "trading_prescreen_candidates"
+
+    id: int = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    snapshot_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_prescreen_snapshots.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
+    ticker: str = Column(String(32), nullable=False)
+    ticker_norm: str = Column(String(36), nullable=False, index=True)
+    active: bool = Column(Boolean, nullable=False, default=True)
+    first_seen_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    last_seen_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    modified_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    entry_reasons: list = Column(JSONB, nullable=False, default=lambda: [])
+    sources_json: Optional[dict] = Column(JSONB, nullable=True)

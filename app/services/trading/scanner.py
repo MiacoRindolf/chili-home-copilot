@@ -3368,7 +3368,7 @@ def run_custom_screen(
     we evaluate conditions against those cached scores instead of re-scoring
     the entire universe from scratch.
     """
-    from .prescreener import get_prescreened_candidates
+    from .prescreen_job import prescreen_candidates_for_universe
 
     if screen_id and screen_id in PRESET_SCREENS:
         preset = PRESET_SCREENS[screen_id]
@@ -3384,7 +3384,7 @@ def run_custom_screen(
 
     scored_all = _try_load_cached_scores(db)
     if not scored_all:
-        scan_list = tickers or get_prescreened_candidates()
+        scan_list = tickers or prescreen_candidates_for_universe(db, max_total=3000)
         _prewarm_cache(scan_list)
         scored_all = batch_score_tickers(
             scan_list, max_workers=_MAX_SCAN_WORKERS, skip_fundamentals=True,
@@ -3436,12 +3436,12 @@ def run_scan(
     of the raw 5000+ ticker universe for dramatically faster scans.
     """
     from ...models.trading import ScanResult
-    from .prescreener import get_prescreened_candidates
+    from .prescreen_job import prescreen_candidates_for_universe
 
     if tickers:
         scan_list = tickers
     elif use_full_universe:
-        scan_list = get_prescreened_candidates()
+        scan_list = prescreen_candidates_for_universe(db, max_total=3000)
     else:
         scan_list = list(ALL_SCAN_TICKERS)
 
@@ -3991,18 +3991,18 @@ def run_full_market_scan(
 ) -> list[dict[str, Any]]:
     """Scan the market using pre-screened candidates, store results, return sorted.
 
-    Uses the prescreener (Massive.com snapshot + yfinance screens) to narrow
-    the universe to ~800-1500 interesting candidates before deep-scoring.
+    Uses ``trading_prescreen_candidates`` when populated (daily job), else live
+    screeners, to narrow the universe before deep-scoring.
     """
     from ...models.trading import ScanResult
-    from .prescreener import get_prescreened_candidates
+    from .prescreen_job import prescreen_candidates_for_universe
 
     _scan_status["running"] = True
     _scan_status["phase"] = "pre-filtering"
     _scan_status["errors"] = 0
 
     if use_full_universe:
-        scan_list = get_prescreened_candidates()
+        scan_list = prescreen_candidates_for_universe(db, max_total=3000, include_crypto=True)
     else:
         scan_list = list(ALL_SCAN_TICKERS)
 

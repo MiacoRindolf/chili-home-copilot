@@ -39,6 +39,27 @@ def _run_learning_job():
         db.close()
 
 
+def _run_daily_prescreen_job():
+    """Persist global prescreen candidates (~2 AM America/Los_Angeles)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_prescreen_scheduler_enabled", True):
+        return
+
+    from ..db import SessionLocal
+    from .trading.prescreen_job import run_daily_prescreen_job as _prescreen_run
+
+    logger.info("[scheduler] Daily prescreen job starting")
+    db = SessionLocal()
+    try:
+        result = _prescreen_run(db)
+        logger.info("[scheduler] Daily prescreen result: %s", result)
+    except Exception as e:
+        logger.error("[scheduler] Daily prescreen failed: %s", e)
+    finally:
+        db.close()
+
+
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
@@ -882,6 +903,17 @@ def start_scheduler():
         #     next_run_time=datetime.now() + timedelta(minutes=3),
         # )
 
+        if getattr(settings, "brain_prescreen_scheduler_enabled", True):
+            _scheduler.add_job(
+                _run_daily_prescreen_job,
+                trigger=CronTrigger(hour=2, minute=0, timezone="America/Los_Angeles"),
+                id="daily_prescreen",
+                name="Daily prescreen (2:00 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+
         _scheduler.add_job(
             _run_weekly_review_job,
             trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
@@ -1038,9 +1070,14 @@ def start_scheduler():
         # (brain worker / full cycle), not as a separate scheduler job — avoids double runs.
 
         _scheduler.start()
+        _ps_note = (
+            "daily prescreen 2AM America/Los_Angeles; "
+            if getattr(settings, "brain_prescreen_scheduler_enabled", True)
+            else ""
+        )
         logger.info(
             f"[scheduler] Trading scheduler started (legacy learning_interval_hours={_learning_hours}h unused for full cycle; "
-            f"brain worker runs run_learning_cycle; "
+            f"brain worker runs run_learning_cycle; {_ps_note}"
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
             f"project brain every {_pb_minutes}min, "

@@ -1,14 +1,10 @@
-"""Pre-screener: fast server-side filtering via Massive.com + yfinance screener.
+"""Live prescreen sources (Massive + yfinance + crypto helpers) for the daily DB job.
 
-Instead of fetching OHLCV and computing indicators for 5000+ tickers,
-this module uses the paid Massive.com API (full-market snapshot in one
-call, technical indicators, Benzinga partner data) and Yahoo Finance's
-server-side screener API to narrow the universe to ~200-300 interesting
-candidates in seconds.  The scanner then only deep-scores this short list.
+Merged ticker lists are written to PostgreSQL by ``prescreen_job.run_daily_prescreen_job``.
+Runtime scans read ``trading_prescreen_candidates`` via ``prescreen_candidates_for_universe``;
+this module only supplies the provider merge (and a cold-start fallback when the table is empty).
 
-FinViz web-scraping is retained ONLY as a silent fallback for chart-pattern
-screens (Double Bottom, Multiple Tops, Wedge, Channel Up) that have no
-Massive equivalent.
+FinViz is retained ONLY as a silent fallback for chart-pattern screens that have no Massive equivalent.
 """
 from __future__ import annotations
 
@@ -16,6 +12,7 @@ import logging
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections import defaultdict
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -42,7 +39,7 @@ _CRYPTO_EXCLUDE: set[str] = {
 
 _cache: dict[str, Any] = {}
 _cache_lock = threading.Lock()
-_CACHE_TTL = 3600  # 1 hour — keep prescreener results longer (64 GB RAM)
+_CACHE_TTL = 3600  # 1 hour — auxiliary lists only (main universe is DB-backed)
 _finviz_sem = threading.Semaphore(2)  # only used for chart-pattern fallback
 
 _prescreen_status: dict[str, Any] = {
@@ -300,30 +297,8 @@ def _core_tickers() -> list[str]:
 
 # ── Main entry point ──────────────────────────────────────────────────
 
-def get_prescreened_candidates(
-    include_crypto: bool = True,
-    max_total: int = 3000,  # Premium: increased from 1500
-) -> list[str]:
-    """Return a de-duplicated list of pre-screened candidate tickers.
-
-    Combines Massive.com snapshot filters + yfinance screens + crypto in
-    parallel.  Results are cached for 1 hour.
-
-    With premium Massive API: 1500-3000 unique tickers, gathered in 2-5 seconds.
-    """
-    cached = _cache_get("prescreened_candidates")
-    if cached is not None:
-        result = cached[:max_total] if max_total < len(cached) else cached
-        logger.info(f"[prescreener] Returning {len(result)} cached candidates (of {len(cached)} total)")
-        _prescreen_status["candidates"] = len(result)
-        return result
-
-    _prescreen_status["running"] = True
-    _prescreen_status["sources"] = {}
-    start = time.time()
-
-    sources: dict[str, Any] = {
-        # Massive.com (primary — one cached snapshot, many filters)
+def _prescreen_source_callables() -> dict[str, Any]:
+    return {
         "massive_most_active": _massive_most_active,
         "massive_top_gainers": _massive_top_gainers,
         "massive_new_high": _massive_new_high,
@@ -333,10 +308,8 @@ def get_prescreened_candidates(
         "massive_high_rel_volume": _massive_high_rel_volume,
         "massive_upgrades": _massive_upgrades,
         "massive_earnings": _massive_earnings,
-        # FinViz (fallback — chart-pattern screens only)
         "finviz_double_bottom": _finviz_double_bottom,
         "finviz_multiple_tops": _finviz_multiple_tops,
-        # yfinance server-side screeners (supplementary)
         "yf_most_actives": _yf_most_actives,
         "yf_day_gainers": _yf_day_gainers,
         "yf_undervalued_growth": _yf_undervalued_growth,
@@ -346,31 +319,47 @@ def get_prescreened_candidates(
         "yf_small_cap_gainers": _yf_small_cap_gainers,
     }
 
+
+def _collect_prescreen_uncached(
+    include_crypto: bool = True,
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], float]:
+    """Build combined list, per-ticker source tags, per-source counts, elapsed seconds."""
+    from .prescreen_normalize import normalize_prescreen_ticker
+
+    _prescreen_status["running"] = True
+    _prescreen_status["sources"] = {}
+    start = time.time()
+    sources = _prescreen_source_callables()
     results_by_source: dict[str, list[str]] = {}
+    ticker_src: dict[str, set[str]] = defaultdict(set)
     seen: set[str] = set()
     combined: list[str] = []
 
-    # Always include core tickers
     core = _core_tickers()
+    results_by_source["core_default"] = list(core)
     for t in core:
-        if t not in seen:
-            seen.add(t)
-            combined.append(t)
+        tn = normalize_prescreen_ticker(t)
+        if not tn or tn in seen:
+            continue
+        seen.add(tn)
+        combined.append(tn)
+        ticker_src[tn].add("core_default")
 
     with ThreadPoolExecutor(max_workers=20) as executor:
-        future_map = {
-            executor.submit(fn): name for name, fn in sources.items()
-        }
+        future_map = {executor.submit(fn): name for name, fn in sources.items()}
         for future in as_completed(future_map):
             name = future_map[future]
             try:
                 tickers = future.result()
                 results_by_source[name] = tickers
                 for t in tickers:
-                    t_upper = t.upper().strip()
-                    if t_upper and t_upper not in seen:
-                        seen.add(t_upper)
-                        combined.append(t_upper)
+                    tn = normalize_prescreen_ticker(t)
+                    if not tn:
+                        continue
+                    ticker_src[tn].add(name)
+                    if tn not in seen:
+                        seen.add(tn)
+                        combined.append(tn)
             except Exception as e:
                 logger.warning(f"[prescreener] Source '{name}' failed: {e}")
                 results_by_source[name] = []
@@ -379,40 +368,69 @@ def get_prescreened_candidates(
         crypto = _crypto_candidates()
         results_by_source["crypto"] = crypto
         for t in crypto:
-            t_upper = t.upper().strip()
-            if t_upper and t_upper not in seen:
-                seen.add(t_upper)
-                combined.append(t_upper)
+            tn = normalize_prescreen_ticker(t)
+            if not tn:
+                continue
+            ticker_src[tn].add("crypto")
+            if tn not in seen:
+                seen.add(tn)
+                combined.append(tn)
 
-    if len(combined) < 1000:  # Premium: increased threshold from 600
+    if len(combined) < 1000:
         fallback = _static_active_stocks()
         results_by_source["static_fallback"] = fallback
         for t in fallback:
-            if t not in seen:
-                seen.add(t)
-                combined.append(t)
+            tn = normalize_prescreen_ticker(t)
+            if not tn:
+                continue
+            ticker_src[tn].add("static_fallback")
+            if tn not in seen:
+                seen.add(tn)
+                combined.append(tn)
 
     elapsed = time.time() - start
     source_counts = {k: len(v) for k, v in results_by_source.items()}
+    ticker_sources_list = {k: sorted(v) for k, v in ticker_src.items()}
     logger.info(
         f"[prescreener] Pre-screened {len(combined)} unique candidates "
-        f"from {len(sources) + 1} sources in {elapsed:.1f}s: {source_counts}"
+        f"in {elapsed:.1f}s: {source_counts}"
     )
-
     _prescreen_status["running"] = False
     _prescreen_status["candidates"] = len(combined)
     _prescreen_status["sources"] = source_counts
     _prescreen_status["last_run"] = time.time()
     _prescreen_status["last_duration_s"] = round(elapsed, 1)
+    return combined, ticker_sources_list, source_counts, elapsed
 
-    _cache_set("prescreened_candidates", combined)
+
+def collect_prescreen_with_provenance(
+    include_crypto: bool = True,
+    max_total: int = 3000,
+) -> tuple[list[str], dict[str, list[str]], dict[str, int], float]:
+    """Build candidate list + per-ticker source tags for ``run_daily_prescreen_job``.
+
+    Canonical scan universe is ``trading_prescreen_candidates`` (PostgreSQL), filled
+    by the daily job from this payload. No in-process candidate list cache.
+    """
+    combined, ticker_sources, source_counts, elapsed = _collect_prescreen_uncached(include_crypto=include_crypto)
+    if max_total < len(combined):
+        combined = combined[:max_total]
+        ticker_sources = {t: ticker_sources[t] for t in combined if t in ticker_sources}
+    return combined, ticker_sources, source_counts, elapsed
+
+
+def _fetch_prescreen_universe_from_providers(
+    include_crypto: bool = True,
+    max_total: int = 3000,
+) -> list[str]:
+    """Live Massive/yfinance/crypto screen merge — used only when DB has no active global rows."""
+    combined, _, _, _ = _collect_prescreen_uncached(include_crypto=include_crypto)
     return combined[:max_total] if max_total < len(combined) else combined
 
 
 def invalidate_cache() -> None:
-    """Force the next call to re-fetch from sources."""
+    """Clear auxiliary prescreener caches (daytrade / breakout lists only)."""
     with _cache_lock:
-        _cache.pop("prescreened_candidates", None)
         _cache.pop("daytrade_candidates", None)
         _cache.pop("breakout_candidates", None)
 

@@ -17,7 +17,7 @@ def test_trading_brain_network_graph_structure() -> None:
         assert e.get("from") in ids, f"missing from-node: {e!r}"
         assert e.get("to") in ids, f"missing to-node: {e!r}"
     meta = data.get("meta") or {}
-    assert int(meta.get("graph_version", 0)) >= 9
+    assert int(meta.get("graph_version", 0)) >= 10
     assert meta.get("architecture_source") == "learning_cycle_architecture"
     for n in nodes:
         if not isinstance(n, dict):

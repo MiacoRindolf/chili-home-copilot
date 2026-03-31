@@ -144,13 +144,13 @@ from .pattern_ml import (
     apply_ml_feedback,
 )
 
-# Pre-screener (fast server-side filtering)
+# Pre-screener: DB-backed universe via prescreen_job; live providers only as cold-start fallback
+from .prescreen_job import prescreen_candidates_for_universe, run_daily_prescreen_job
 from .prescreener import (
-    get_prescreened_candidates,
     get_daytrade_candidates,
     get_breakout_candidates,
     get_prescreen_status,
-    invalidate_cache as invalidate_prescreen_cache,
+    invalidate_cache as invalidate_auxiliary_prescreen_caches,
     get_trending_crypto,
 )
 

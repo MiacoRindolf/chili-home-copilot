@@ -9,7 +9,7 @@ This note summarizes what changes when the crypto universe grows (`brain_crypto_
 
 ## Wall-clock: learning and scans
 
-- **Prescreener** (`get_prescreened_candidates`) merges many sources but applies `max_total` (default 3000). That cap is the main brake on per-cycle breadth.
+- **Prescreen universe** is stored in PostgreSQL (`trading_prescreen_candidates`, filled by the daily job from live screeners + internal signals). Scans use `prescreen_candidates_for_universe(db)`; if the table has no active rows, a one-off live merge runs (same cap via `brain_prescreen_max_total`, default 3000). That cap is the main brake on breadth.
 - **Learning snapshots** still target the top of scan results (not every listed symbol). Expanding the crypto list increases *candidate pressure* into that funnel unless you keep tiering or lower caps elsewhere.
 - **Pattern mining** uses `brain_mine_patterns_max_tickers` (0 = no cap on the merged mining list).
 
