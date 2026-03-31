@@ -22,10 +22,12 @@ def _assert_io_tuple(t: tuple[str, ...]) -> None:
 def test_cycle_cluster_and_step_ids_unique() -> None:
     seen: set[tuple[str, str]] = set()
     assert TRADING_BRAIN_ROOT_METADATA.description.strip()
+    assert TRADING_BRAIN_ROOT_METADATA.remarks.strip()
     _assert_io_tuple(TRADING_BRAIN_ROOT_METADATA.inputs)
     _assert_io_tuple(TRADING_BRAIN_ROOT_METADATA.outputs)
     for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
         assert c.description.strip()
+        assert c.remarks.strip()
         _assert_io_tuple(c.inputs)
         _assert_io_tuple(c.outputs)
         for s in c.steps:
@@ -33,6 +35,7 @@ def test_cycle_cluster_and_step_ids_unique() -> None:
             assert key not in seen, f"duplicate step key: {key}"
             seen.add(key)
             assert s.description.strip()
+            assert s.remarks.strip()
             _assert_io_tuple(s.inputs)
             _assert_io_tuple(s.outputs)
         assert get_cycle_step(c.id, c.steps[0].sid).label
@@ -44,6 +47,27 @@ def test_graph_node_count_matches_architecture() -> None:
     n_steps = sum(len(c.steps) for c in clusters)
     expected_nodes = 1 + len(clusters) + n_steps
     assert len(data["nodes"]) == expected_nodes
+
+
+def test_apply_learning_cycle_step_status_preceded_by_graph_node_comment() -> None:
+    """Each apply_learning_cycle_step_status in learning.py must be preceded by # graph-node: cid/sid."""
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "learning.py"
+    lines = path.read_text(encoding="utf-8").splitlines()
+    apply_re = re.compile(
+        r"apply_learning_cycle_step_status\s*\(\s*_learning_status\s*,\s*\"([^\"]+)\"\s*,\s*\"([^\"]+)\"\s*\)"
+    )
+    graph_re = re.compile(r"^\s*#\s*graph-node:\s*([\w_]+)/([\w_]+)")
+    for i, line in enumerate(lines):
+        m = apply_re.search(line)
+        if not m:
+            continue
+        prev = lines[i - 1] if i > 0 else ""
+        gm = graph_re.match(prev)
+        assert gm is not None, f"line {i + 1}: expected # graph-node: cluster/step above apply call"
+        assert gm.group(1) == m.group(1) and gm.group(2) == m.group(2), (
+            f"line {i + 1}: graph-node {gm.group(1)}/{gm.group(2)} does not match "
+            f"apply_learning_cycle_step_status({m.group(1)}, {m.group(2)})"
+        )
 
 
 def test_run_learning_cycle_no_literal_current_step_assignments() -> None:

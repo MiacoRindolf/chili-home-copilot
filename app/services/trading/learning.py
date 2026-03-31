@@ -694,6 +694,7 @@ def take_snapshots_parallel(
             if done % 100 == 0 or done == total:
                 elapsed = round(time.time() - _t0, 1)
                 logger.info(f"[learning] Snapshot progress: {done}/{total} ({elapsed}s)")
+                # graph-node: c_state/snapshots (progress text; metadata in learning_cycle_architecture)
                 apply_learning_cycle_step_status_progress(
                     _learning_status, "c_state", "snapshots", done, total,
                 )
@@ -7330,7 +7331,8 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
 
 # Maintainer: Trading Brain Network tab + live status strings come from
 # app.services.trading.learning_cycle_architecture (single source of truth).
-# Use apply_learning_cycle_step_status(...); bump brain_network_graph meta.graph_version
+# Use apply_learning_cycle_step_status(...); bump brain_network_graph meta.graph_version.
+# Each call must be preceded by: # graph-node: cluster_id/step_sid (see learning_cycle_architecture).
 # when changing public graph shape.
 
 
@@ -7473,6 +7475,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_universe/prefilter
         apply_learning_cycle_step_status(_learning_status, "c_universe", "prefilter")
         from .prescreener import get_prescreened_candidates, get_prescreen_status
         candidates = get_prescreened_candidates()
@@ -7488,6 +7491,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_universe/scan
         apply_learning_cycle_step_status(_learning_status, "c_universe", "scan")
         scan_results = run_full_market_scan(db, user_id, use_full_universe=full_universe)
         report["tickers_scanned"] = _scan_status["tickers_total"]
@@ -7501,6 +7505,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_state/snapshots
         apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots")
         top_tickers = [r["ticker"] for r in scan_results[:800]]
         watchlist = get_watchlist(db, user_id)
@@ -7530,6 +7535,7 @@ def run_learning_cycle(
 
         # Step 4: Backfill future returns + predicted scores
         step_start = time.time()
+        # graph-node: c_state/backfill
         apply_learning_cycle_step_status(_learning_status, "c_state", "backfill")
         filled = backfill_future_returns(db)
         scores_filled = backfill_predicted_scores(db, limit=1000)
@@ -7544,6 +7550,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_state/decay
         apply_learning_cycle_step_status(_learning_status, "c_state", "decay")
         decay_result = decay_stale_insights(db, user_id)
         report["insights_decayed"] = decay_result.get("decayed", 0)
@@ -7554,6 +7561,7 @@ def run_learning_cycle(
         _commit_step()
 
         # Step 6: Mine patterns
+        # graph-node: c_discovery/mine
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "mine")
         step_start = time.time()
         discoveries = mine_patterns(db, user_id)
@@ -7568,6 +7576,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_discovery/seek
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "seek")
         seek_result = seek_pattern_data(db, user_id)
         report["patterns_boosted"] = seek_result.get("sought", 0)
@@ -7580,6 +7589,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_validation/bt_insights
         apply_learning_cycle_step_status(_learning_status, "c_validation", "bt_insights")
         if getattr(settings, "brain_insight_backtest_on_cycle", False):
             bt_count = _auto_backtest_patterns(db, user_id)
@@ -7596,6 +7606,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_validation/bt_queue
         apply_learning_cycle_step_status(_learning_status, "c_validation", "bt_queue")
         queue_result = _auto_backtest_from_queue(db, user_id)
         report["queue_backtests_run"] = queue_result.get("backtests_run", 0)
@@ -7614,6 +7625,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_evolution/variants
         apply_learning_cycle_step_status(_learning_status, "c_evolution", "variants")
         try:
             evo_stats = evolve_pattern_strategies(db)
@@ -7633,6 +7645,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_evolution/hypotheses
         apply_learning_cycle_step_status(_learning_status, "c_evolution", "hypotheses")
         evolve_result = validate_and_evolve(db, user_id)
         report["hypotheses_tested"] = evolve_result.get("hypotheses_tested", 0)
@@ -7652,6 +7665,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start_bo = time.time()
+        # graph-node: c_evolution/breakout
         apply_learning_cycle_step_status(_learning_status, "c_evolution", "breakout")
         bo_result = learn_from_breakout_outcomes(db, user_id)
         report["breakout_patterns_learned"] = bo_result.get("patterns_learned", 0)
@@ -7667,6 +7681,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start_id = time.time()
+            # graph-node: c_secondary/intraday_hv
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "intraday_hv")
             intra_result = mine_intraday_patterns(db, user_id, cycle_budget)
             hv_result = mine_high_vol_regime_patterns(db, user_id, cycle_budget)
@@ -7685,6 +7700,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/refine
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "refine")
             refine_result = refine_patterns(db, user_id)
             report["patterns_refined"] = refine_result.get("refined", 0)
@@ -7697,6 +7713,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/exit
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "exit")
             exit_result = learn_exit_optimization(db, user_id)
             report["exit_adjustments"] = exit_result.get("adjustments", 0)
@@ -7709,6 +7726,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/fakeout
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "fakeout")
             fakeout_result = mine_fakeout_patterns(db, user_id)
             report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
@@ -7721,6 +7739,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/sizing
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "sizing")
             sizing_result = tune_position_sizing(db, user_id)
             report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
@@ -7733,6 +7752,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/inter_alert
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "inter_alert")
             inter_result = learn_inter_alert_patterns(db, user_id)
             report["inter_alert_insights"] = inter_result.get("insights", 0)
@@ -7745,6 +7765,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/timeframe
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "timeframe")
             tf_result = learn_timeframe_performance(db, user_id)
             report["timeframe_insights"] = tf_result.get("insights", 0)
@@ -7757,6 +7778,7 @@ def run_learning_cycle(
             if _shutting_down.is_set():
                 raise InterruptedError("shutdown")
             step_start = time.time()
+            # graph-node: c_secondary/synergy
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "synergy")
             synergy_result = mine_signal_synergies(db, user_id)
             report["synergies_found"] = synergy_result.get("synergies_found", 0)
@@ -7775,6 +7797,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_journal/journal
         apply_learning_cycle_step_status(_learning_status, "c_journal", "journal")
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
@@ -7786,6 +7809,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_journal/signals
         apply_learning_cycle_step_status(_learning_status, "c_journal", "signals")
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
@@ -7797,6 +7821,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_meta/ml
         apply_learning_cycle_step_status(_learning_status, "c_meta", "ml")
         from .pattern_ml import get_meta_learner, apply_ml_feedback
         _meta = get_meta_learner()
@@ -7823,6 +7848,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_meta/proposals
         apply_learning_cycle_step_status(_learning_status, "c_meta", "proposals")
         try:
             from .alerts import generate_strategy_proposals
@@ -7840,6 +7866,7 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
+        # graph-node: c_meta/pattern_engine
         apply_learning_cycle_step_status(_learning_status, "c_meta", "pattern_engine")
         try:
             pe_result = _run_pattern_engine_cycle(db, user_id)
@@ -7855,6 +7882,7 @@ def run_learning_cycle(
         report["cycle_ai_report_id"] = None
         if not _shutting_down.is_set():
             step_start = time.time()
+            # graph-node: c_meta/cycle_report
             apply_learning_cycle_step_status(_learning_status, "c_meta", "cycle_report")
             report["elapsed_s_pre_report"] = round(time.time() - start, 1)
             try:
@@ -7876,6 +7904,7 @@ def run_learning_cycle(
 
         # Step 13d: Live vs research depromotion (optional)
         if not _shutting_down.is_set():
+            # graph-node: c_meta/depromote
             apply_learning_cycle_step_status(_learning_status, "c_meta", "depromote")
             try:
                 report["live_depromotion"] = run_live_pattern_depromotion(db)
@@ -7884,6 +7913,7 @@ def run_learning_cycle(
                 report["live_depromotion"] = {"ok": False, "error": str(e)}
 
         # Step 14: Finalize + log
+        # graph-node: c_meta/finalize
         apply_learning_cycle_step_status(_learning_status, "c_meta", "finalize")
         elapsed = time.time() - start
         report["data_provider"] = _provider

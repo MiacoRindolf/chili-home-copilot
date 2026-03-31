@@ -145,6 +145,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-node-detail-body dt:first-child { margin-top: 0; }
 .tbn-node-detail-body dd { margin: 2px 0 0 0; font-family: ui-monospace, monospace; font-size: 10px; word-break: break-word; }
 .tbn-node-detail-body dd.tbn-node-detail-desc { font-family: inherit; white-space: pre-wrap; }
+.tbn-node-detail-body dd.tbn-node-detail-remarks {
+  font-family: inherit; white-space: pre-wrap; font-size: 10px; line-height: 1.5; color: var(--text-secondary);
+}
 .tbn-node-detail-body dd.tbn-node-detail-io ul {
   margin: 4px 0 0 0; padding-left: 18px; font-family: inherit; font-size: 10px; line-height: 1.45;
 }
@@ -2242,6 +2245,15 @@ function initTradingBrainNetworkGraph() {
       body.appendChild(dd);
     }
     addDescRow('Description', n.description);
+    if (n.remarks != null && String(n.remarks).trim() !== '') {
+      var dtr = document.createElement('dt');
+      dtr.textContent = 'Remarks';
+      var ddr = document.createElement('dd');
+      ddr.className = 'tbn-node-detail-remarks';
+      ddr.textContent = String(n.remarks);
+      body.appendChild(dtr);
+      body.appendChild(ddr);
+    }
     addBulletSection('Inputs', n.inputs);
     addBulletSection('Outputs', n.outputs);
     addRow('Tier', n.tier);

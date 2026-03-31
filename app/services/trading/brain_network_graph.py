@@ -45,6 +45,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
             "y": root_y,
             "code_ref": "app.services.trading.learning.run_learning_cycle",
             "description": root_meta.description,
+            "remarks": root_meta.remarks,
             "inputs": list(root_meta.inputs),
             "outputs": list(root_meta.outputs),
         }
@@ -64,6 +65,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                 "phase": cdef.phase_summary,
                 "code_ref": "run_learning_cycle → " + cid,
                 "description": cdef.description,
+                "remarks": cdef.remarks,
                 "inputs": list(cdef.inputs),
                 "outputs": list(cdef.outputs),
             }
@@ -89,6 +91,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                     "y": sy,
                     "code_ref": st.code_ref,
                     "description": st.description,
+                    "remarks": st.remarks,
                     "inputs": list(st.inputs),
                     "outputs": list(st.outputs),
                 }
@@ -103,13 +106,14 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 6,
+        "graph_version": 7,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "
             "run_learning_cycle current_step strings where applicable. Pipeline edges show "
             "sequential phase flow; governance edges show orchestration (root→subsystem, "
-            "cluster→callable step). Node data is generated from learning_cycle_architecture."
+            "cluster→callable step). Node payloads include description, remarks (what/where/why), "
+            "and concrete inputs/outputs from learning_cycle_architecture."
         ),
     }
 
