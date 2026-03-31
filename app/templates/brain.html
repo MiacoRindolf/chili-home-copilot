@@ -94,9 +94,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     var(--bg);
   border: 1px solid var(--border); border-radius: 10px;
 }
-.tbn-hint {
-  flex-shrink: 0; font-size: 10px; color: var(--text-muted); text-align: center; padding: 4px 8px 0;
+.tbn-hint-row {
+  flex-shrink: 0; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px;
+  padding: 6px 8px 4px;
 }
+.tbn-hint {
+  flex: 1 1 220px; font-size: 10px; color: var(--text-muted); text-align: center; margin: 0; min-width: 0;
+}
+.tbn-refresh-graph {
+  flex-shrink: 0; font-size: 10px; font-weight: 600; padding: 5px 12px; border-radius: 8px;
+  border: 1px solid var(--border); background: rgba(99,102,241,.12); color: var(--accent); cursor: pointer;
+}
+.tbn-refresh-graph:hover:not(:disabled) { background: rgba(99,102,241,.2); }
+.tbn-refresh-graph:disabled { opacity: 0.5; cursor: not-allowed; }
 .tbn-viewport {
   flex: 1; min-height: 220px; position: relative; overflow: hidden; cursor: grab; touch-action: none;
 }
@@ -844,7 +854,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
       <div class="trading-brain-body-row">
       <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
-        <p class="tbn-hint" id="tbn-hint-text">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+        <div class="tbn-hint-row">
+          <p class="tbn-hint" id="tbn-hint-text">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+          <button type="button" class="tbn-refresh-graph" id="tbn-refresh-graph" title="Reload graph from server">Refresh graph</button>
+        </div>
         <div id="trading-brain-network-viewport" class="tbn-viewport" aria-label="Trading brain architecture graph">
           <div id="trading-brain-network-stage" class="tbn-stage">
             <svg id="trading-brain-network-svg" viewBox="0 0 1600 950" width="1600" height="950" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
@@ -2318,6 +2331,37 @@ function initTradingBrainNetworkGraph() {
       return null;
     }
   }
+
+  function tbnRefreshTradingBrainNetworkGraph() {
+    tbnCloseNodeDetail();
+    var btn = document.getElementById('tbn-refresh-graph');
+    if (btn) btn.disabled = true;
+    fetch('/api/brain/trading/network-graph', { credentials: 'same-origin' })
+      .then(function(r) {
+        if (!r.ok) throw new Error('http ' + r.status);
+        return r.json();
+      })
+      .then(function(d) {
+        if (d && d.ok && d.nodes && d.edges) {
+          tbnRenderGraphData(d);
+        } else {
+          var again = tbnParseEmbeddedGraph();
+          if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
+          else tbnShowGraphError();
+        }
+      })
+      .catch(function() {
+        var again = tbnParseEmbeddedGraph();
+        if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
+        else tbnShowGraphError();
+      })
+      .finally(function() {
+        if (btn) btn.disabled = false;
+      });
+  }
+  window.chiliRefreshTradingBrainNetworkGraph = tbnRefreshTradingBrainNetworkGraph;
+  var tbnRefreshBtn = document.getElementById('tbn-refresh-graph');
+  if (tbnRefreshBtn) tbnRefreshBtn.onclick = function() { tbnRefreshTradingBrainNetworkGraph(); };
 
   var embedded = tbnParseEmbeddedGraph();
   if (embedded && embedded.ok && embedded.nodes && embedded.edges) {
