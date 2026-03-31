@@ -2319,6 +2319,56 @@ def _migration_058_trading_prescreen_artifacts(conn) -> None:
         conn.commit()
 
 
+def _migration_059_prescreen_asset_universe(conn) -> None:
+    """Prescreen candidate row: crypto vs stock universe (analytics, filtering)."""
+    if "trading_prescreen_candidates" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_prescreen_candidates")
+    if "asset_universe" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_prescreen_candidates "
+                "ADD COLUMN asset_universe VARCHAR(16) NOT NULL DEFAULT 'stock'"
+            )
+        )
+        conn.commit()
+    conn.execute(
+        text(
+            "UPDATE trading_prescreen_candidates SET asset_universe = 'crypto' "
+            "WHERE ticker_norm LIKE '%-USD'"
+        )
+    )
+    conn.commit()
+
+
+def _migration_060_brain_batch_jobs(conn) -> None:
+    """Audit log for scheduled / batch brain jobs (prescreen, market scan, …)."""
+    if "brain_batch_jobs" in _tables(conn):
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE brain_batch_jobs (
+                id VARCHAR(36) PRIMARY KEY,
+                job_type VARCHAR(64) NOT NULL,
+                status VARCHAR(24) NOT NULL DEFAULT 'running',
+                started_at TIMESTAMP NOT NULL,
+                ended_at TIMESTAMP,
+                error_message TEXT,
+                meta_json JSONB,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX ix_brain_batch_jobs_type_started ON brain_batch_jobs (job_type, started_at DESC)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2379,6 +2429,8 @@ MIGRATIONS = [
     ("056_snapshot_bar_key", _migration_056_snapshot_bar_key),
     ("057_trading_insight_evidence", _migration_057_trading_insight_evidence),
     ("058_trading_prescreen_artifacts", _migration_058_trading_prescreen_artifacts),
+    ("059_prescreen_asset_universe", _migration_059_prescreen_asset_universe),
+    ("060_brain_batch_jobs", _migration_060_brain_batch_jobs),
 ]
 
 

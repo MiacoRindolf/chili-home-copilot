@@ -58,30 +58,31 @@ class TradingBrainRootMetadata:
 
 TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
     description=(
-        "Top-level orchestrator for one full learning cycle: narrows the universe, "
-        "refreshes market memory, mines and validates patterns, evolves hypotheses, "
-        "runs optional secondary miners, journals results, trains meta-models, "
-        "generates proposals and reports, then finalizes state."
+        "Top-level orchestrator for one full learning cycle: refreshes market memory, "
+        "mines and validates patterns, evolves hypotheses, runs optional secondary miners, "
+        "journals results, trains meta-models, generates proposals and reports, then "
+        "finalizes state. Universe prescreen and full market scan run as separate cron jobs."
     ),
     remarks=(
-        "What: ``run_learning_cycle`` is the single entry point that runs the entire "
-        "trading-brain learning pipeline in order, mutating PostgreSQL and producing "
-        "the in-memory ``report`` dict consumed by the Brain UI and cycle reports.\n\n"
+        "What: ``run_learning_cycle`` is the single entry point that runs the trading-brain "
+        "learning pipeline in order (after batch jobs have populated prescreen + scan tables), "
+        "mutating PostgreSQL and producing the in-memory ``report`` dict.\n\n"
         "Where: ``app.services.trading.learning.run_learning_cycle`` (orchestrator), "
-        "invoked by the scheduler / worker and status APIs.\n\n"
-        "Why: Without a coherent cycle boundary, snapshots, mining, backtests, and "
-        "meta-learning would race or see inconsistent DB state; this function defines "
-        "the authoritative phase order and progress the Network graph mirrors."
+        "invoked by the brain worker and status APIs.\n\n"
+        "Why: A coherent cycle boundary keeps snapshots, mining, backtests, and meta-learning "
+        "consistent; prescreen (2:00) and market scan (2:30 America/Los_Angeles) are scheduled "
+        "separately in ``trading_scheduler``."
     ),
     inputs=(
         "``db: Session`` — SQLAlchemy DB session for the worker",
         "``user_id: int | None`` — scope for watchlists and user-specific rows",
-        "``full_universe: bool`` — whether the scan uses the full ticker universe",
+        "``full_universe: bool`` — retained for shadow/API compatibility",
         "``settings`` — CHILI config (providers, ``brain_secondary_miners_on_cycle``, flags)",
+        "Prior rows in ``trading_prescreen_candidates`` and ``trading_scans`` from batch jobs",
         "External OHLCV/quote providers (Massive, Polygon, or yfinance) via market modules",
     ),
     outputs=(
-        "``report: dict[str, Any]`` — prescreen counts, scan sizes, snapshots, patterns, "
+        "``report: dict[str, Any]`` — prescreen/scan counts (DB read), snapshots, patterns, "
         "backtests, ML metrics, ``elapsed_s``, ``step_timings``, funnel snapshot",
         "Rows written/updated: ``market_snapshots``, ``scan_patterns``, insights, "
         "backtests, ``learning_events``, journal, proposals (per sub-phase)",
@@ -93,90 +94,44 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
 TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
     CycleClusterDef(
         id="c_universe",
-        label="Universe & scoring",
-        phase_summary="pre-filtering → scanning",
+        label="Scheduled universe & scan",
+        phase_summary="batch jobs (not in run_learning_cycle)",
         description=(
-            "Reduces thousands of symbols to a tractable set, then deep-scores candidates "
-            "so later phases work on the most relevant tickers."
+            "Daily prescreen and full market scan populate PostgreSQL before the learning "
+            "cycle runs; this cluster documents those jobs for the Network graph."
         ),
         remarks=(
-            "What: First macro block in the cycle — cheap filters and then a full scoring "
-            "pass so downstream steps never touch the entire raw universe.\n\n"
-            "Where: ``prescreener`` and ``scanner`` packages; called from the start of "
-            "``run_learning_cycle`` after lease/shadow setup.\n\n"
-            "Why: Prescreening and scan are the main latency and cost levers; doing them "
-            "first keeps snapshots and mining bounded to hundreds of names instead of "
-            "thousands."
+            "What: **Not** executed inside ``run_learning_cycle``. APScheduler runs "
+            "``run_daily_prescreen_job`` at **2:00** and ``run_full_market_scan`` at **2:30** "
+            "(America/Los_Angeles) so ``trading_prescreen_candidates`` and ``trading_scans`` "
+            "are fresh for snapshot selection.\n\n"
+            "Where: ``app.services.trading_scheduler`` (``_run_daily_prescreen_job``, "
+            "``_run_daily_market_scan_job``), ``prescreen_job``, ``scanner.run_full_market_scan``.\n\n"
+            "Why: Decouples heavy universe I/O from the interactive learning cycle and keeps "
+            "one authoritative prescreen + scan pass per day."
         ),
-        inputs=("Configured ticker lists and provider connectivity", "Prior DB state (optional)"),
+        inputs=("Cron triggers", "Provider APIs for prescreen and OHLCV for scoring"),
         outputs=(
-            "``report['prescreen_candidates']``, ``report['prescreen_sources']``",
-            "``report['tickers_scored']``, ``scan_results`` list passed to snapshots",
+            "``trading_prescreen_snapshots`` / ``trading_prescreen_candidates`` rows",
+            "``trading_scans`` (``ScanResult``) ranked scores per ticker",
+            "``brain_batch_jobs`` audit rows per run",
         ),
         steps=(
             CycleStepDef(
-                sid="prefilter",
-                label="Pre-filtering market",
-                code_ref=(
-                    "prescreen_job.run_daily_prescreen_job + prescreener.collect_prescreen_with_provenance"
-                ),
-                runner_phase="pre-filtering",
+                sid="batch_prescreen_scan",
+                label="Daily prescreen + market scan (cron)",
+                code_ref="trading_scheduler._run_daily_prescreen_job + _run_daily_market_scan_job",
+                runner_phase="scheduled",
                 description=(
-                    "Builds the daily candidate universe via provider screens plus capped internal "
-                    "brain signals; persists to PostgreSQL for the scan step."
+                    "2:00 prescreen job, then 2:30 full scan over active prescreen tickers "
+                    "(``brain_default_user_id`` for scan rows)."
                 ),
                 remarks=(
-                    "What: Scheduled job (default 2:00 America/Los_Angeles) writes "
-                    "``trading_prescreen_snapshots`` and upserts global rows in "
-                    "``trading_prescreen_candidates`` (active flag, entry_reasons, sources). "
-                    "The learning cycle step only **reports** funnel metrics from the DB (or "
-                    "falls back to live provider screeners via "
-                    "``prescreener._fetch_prescreen_universe_from_providers`` when the table is empty).\n\n"
-                    "Where: ``app.services.trading.prescreen_job`` (writer + "
-                    "``prescreen_candidates_for_universe`` for readers), "
-                    "``prescreener.collect_prescreen_with_provenance`` (external screens), "
-                    "``prescreen_internal_signals`` (brain-memory tickers), "
-                    "``run_full_market_scan`` reads active candidates from the DB.\n\n"
-                    "Why: Durable, analyzable funnel (per-ticker reasons) and one authoritative "
-                    "universe per day instead of cache-only coupling between steps."
+                    "See cluster remarks. Each run is logged to ``brain_batch_jobs`` with "
+                    "start/end timestamps."
                 ),
-                inputs=(
-                    "Universe configuration from settings / defaults",
-                    "Provider APIs inside prescreener; optional brain_prediction / insights / patterns",
-                ),
-                outputs=(
-                    "``report['prescreen_candidates']`` — count of active global rows (or inline fallback)",
-                    "``report['prescreen_sources']`` — latest snapshot source_map or inline prescreen status",
-                    "``report['prescreen_snapshot_id']`` when DB path is used",
-                ),
-            ),
-            CycleStepDef(
-                sid="scan",
-                label="Scanning market",
-                code_ref="scanner.run_full_market_scan",
-                runner_phase="scanning",
-                description=(
-                    "Runs the main market scan over prescreened names to produce scores and "
-                    "metadata used by snapshots and mining."
-                ),
-                remarks=(
-                    "What: Deep scoring pass that produces ranked scan rows used as the driver "
-                    "for snapshot ticker selection and mining context.\n\n"
-                    "Where: ``app.services.trading.scanner.run_full_market_scan``; "
-                    "``_scan_status`` exposes aggregate counts.\n\n"
-                    "Why: This is the canonical \"who matters this cycle\" signal; snapshots "
-                    "and pattern work consume ``scan_results`` immediately after."
-                ),
-                inputs=(
-                    "``db``, ``user_id``, ``use_full_universe=full_universe``",
-                    "Active rows from ``trading_prescreen_candidates`` (global) or inline prescreen fallback",
-                    "OHLCV/quote data via configured provider",
-                ),
-                outputs=(
-                    "``scan_results`` — per-ticker score structures",
-                    "``report['tickers_scanned']``, ``report['tickers_scored']``",
-                    "``_learning_status['tickers_processed']`` updated to len(scan_results)",
-                ),
+                inputs=("``SessionLocal``", "``settings.brain_prescreen_scheduler_enabled``", "scan scheduler flag"),
+                outputs=("Prescreen + scan DB rows", "batch job audit ids"),
             ),
         ),
     ),
@@ -198,7 +153,8 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             "old insights from skewing promotion and alerts."
         ),
         inputs=(
-            "``scan_results`` / watchlist-derived ticker lists",
+            "``load_top_scan_tickers_for_snapshots`` (``trading_scans`` + prescreen fallback) "
+            "+ watchlist",
             "Historical bars and quotes from market_data stack",
         ),
         outputs=(

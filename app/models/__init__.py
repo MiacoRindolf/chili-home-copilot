@@ -28,6 +28,7 @@ from .coding_task import (
 from .marketplace import MarketplaceModule
 from .trading import (
     BacktestResult,
+    BrainBatchJob,
     BreakoutAlert,
     JournalEntry,
     LearningCycleAiReport,
@@ -138,6 +139,7 @@ __all__ = [
     "TradingHypothesis",
     "PrescreenSnapshot",
     "PrescreenCandidate",
+    "BrainBatchJob",
     "CodeRepo",
     "CodeInsight",
     "CodeSnapshot",

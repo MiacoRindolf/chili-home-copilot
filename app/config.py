@@ -329,6 +329,8 @@ class Settings(BaseSettings):
     brain_queue_prescreen_tickers: int = 6
     # Daily prescreen job (America/Los_Angeles); persists candidates for scan step.
     brain_prescreen_scheduler_enabled: bool = True
+    # Full market scan after prescreen (America/Los_Angeles); populates trading_scans.
+    brain_daily_market_scan_scheduler_enabled: bool = True
     brain_prescreen_internal_max_per_kind: int = 40
     brain_prescreen_max_total: int = 3000
     brain_queue_prescreen_period: str = "3mo"

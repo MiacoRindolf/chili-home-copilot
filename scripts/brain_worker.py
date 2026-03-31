@@ -395,7 +395,7 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
 
 
 def run_learning_cycle(status: BrainWorkerStatus) -> dict:
-    """Execute the FULL learning cycle (all 23 steps).
+    """Execute the FULL learning cycle (23 in-cycle steps; prescreen/scan are cron jobs).
     
     This replaces the old 4-step minimal cycle with the complete
     run_learning_cycle from app.services.trading.learning.
@@ -470,7 +470,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
         db = SessionLocal()
         try:
             status.set_step("Running full learning cycle", "Starting...")
-            logger.info("[brain] Starting FULL learning cycle (24 steps)")
+            logger.info("[brain] Starting FULL learning cycle (23 steps)")
             # Do not skip here: run_learning_cycle() clears stale locks and returns
             # {"ok": False} if a non-stale cycle is already in progress.
 

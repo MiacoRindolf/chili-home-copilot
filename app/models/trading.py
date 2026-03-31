@@ -441,9 +441,26 @@ class PrescreenCandidate(Base):
     user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True)
     ticker: str = Column(String(32), nullable=False)
     ticker_norm: str = Column(String(36), nullable=False, index=True)
+    # crypto | stock — set on upsert from ticker convention (see massive_client.is_crypto)
+    asset_universe: str = Column(String(16), nullable=False, default="stock")
     active: bool = Column(Boolean, nullable=False, default=True)
     first_seen_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     last_seen_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     modified_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     entry_reasons: list = Column(JSONB, nullable=False, default=lambda: [])
     sources_json: Optional[dict] = Column(JSONB, nullable=True)
+
+
+class BrainBatchJob(Base):
+    """Audit row for a batch / scheduled brain job run (start/end, type, outcome)."""
+
+    __tablename__ = "brain_batch_jobs"
+
+    id: str = Column(String(36), primary_key=True)
+    job_type: str = Column(String(64), nullable=False, index=True)
+    status: str = Column(String(24), nullable=False, default="running")
+    started_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ended_at: Optional[datetime] = Column(DateTime, nullable=True)
+    error_message: Optional[str] = Column(Text, nullable=True)
+    meta_json: Optional[dict] = Column(JSONB, nullable=True)
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

@@ -3936,6 +3936,49 @@ def get_scan_status() -> dict[str, Any]:
     return dict(_scan_status)
 
 
+def load_top_scan_tickers_for_snapshots(
+    db: Session,
+    user_id: int | None,
+    *,
+    limit: int = 800,
+    max_age_hours: float = 48.0,
+) -> tuple[list[str], dict[str, Any]]:
+    """Ranked tickers from latest ``trading_scans`` for snapshot driver; prescreen fallback if empty."""
+    from ...config import settings as _snap_settings
+    from ...models.trading import ScanResult
+    from .prescreen_job import load_active_global_candidate_tickers
+
+    cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
+    rows = (
+        db.query(ScanResult.ticker)
+        .filter(ScanResult.user_id == user_id)
+        .filter(ScanResult.scanned_at >= cutoff)
+        .order_by(ScanResult.score.desc())
+        .limit(limit)
+        .all()
+    )
+    tickers = [r[0] for r in rows if r[0]]
+    meta: dict[str, Any] = {
+        "snapshot_driver": "trading_scans",
+        "row_count": len(tickers),
+    }
+    if not tickers:
+        _max_pre = int(getattr(_snap_settings, "brain_prescreen_max_total", 3000))
+        pres = load_active_global_candidate_tickers(db)
+        tickers = pres[: min(limit, _max_pre)]
+        meta["snapshot_driver"] = "prescreen_only"
+        meta["fallback"] = "no_recent_scan_rows"
+        if not tickers:
+            tickers = list(ALL_SCAN_TICKERS[:limit])
+            meta["snapshot_driver"] = "static_universe_slice"
+            meta["fallback"] = "no_scan_no_prescreen"
+            logger.warning(
+                "[scanner] load_top_scan_tickers_for_snapshots: empty scan + prescreen; "
+                "using static list slice",
+            )
+    return tickers, meta
+
+
 def batch_score_tickers(
     tickers: list[str],
     max_workers: int = _MAX_SCAN_WORKERS,
@@ -3991,18 +4034,27 @@ def run_full_market_scan(
 ) -> list[dict[str, Any]]:
     """Scan the market using pre-screened candidates, store results, return sorted.
 
-    Uses ``trading_prescreen_candidates`` when populated (daily job), else live
-    screeners, to narrow the universe before deep-scoring.
+    Full universe uses **only** active global rows in ``trading_prescreen_candidates``
+    (capped by ``brain_prescreen_max_total``). Run ``run_daily_prescreen_job`` first
+    if the table is empty. Non-full universe uses the static ``ALL_SCAN_TICKERS`` list.
     """
+    from ...config import settings as _scan_settings
     from ...models.trading import ScanResult
-    from .prescreen_job import prescreen_candidates_for_universe
+    from .prescreen_job import load_active_global_candidate_tickers
 
     _scan_status["running"] = True
     _scan_status["phase"] = "pre-filtering"
     _scan_status["errors"] = 0
 
     if use_full_universe:
-        scan_list = prescreen_candidates_for_universe(db, max_total=3000, include_crypto=True)
+        _max_pre = int(getattr(_scan_settings, "brain_prescreen_max_total", 3000))
+        scan_list = load_active_global_candidate_tickers(db)
+        if len(scan_list) > _max_pre:
+            scan_list = scan_list[:_max_pre]
+        if not scan_list:
+            logger.warning(
+                "[trading] Full market scan: no active prescreen rows — scan list empty",
+            )
     else:
         scan_list = list(ALL_SCAN_TICKERS)
 

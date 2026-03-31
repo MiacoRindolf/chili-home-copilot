@@ -34,6 +34,7 @@ _SHORT_MODULE_PREFIX: dict[str, str] = {
     "prescreener": "app.services.trading.prescreener",
     "prescreen_job": "app.services.trading.prescreen_job",
     "scanner": "app.services.trading.scanner",
+    "trading_scheduler": "app.services.trading_scheduler",
     "journal": "app.services.trading.journal",
     "pattern_ml": "app.services.trading.pattern_ml",
     "alerts": "app.services.trading.alerts",
@@ -262,7 +263,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 10,
+        "graph_version": 11,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

@@ -60,6 +60,46 @@ def _run_daily_prescreen_job():
         db.close()
 
 
+def _run_daily_market_scan_job():
+    """Full market scan over prescreen DB rows (~2:30 AM America/Los_Angeles)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_daily_market_scan_scheduler_enabled", True):
+        return
+
+    from ..db import SessionLocal
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import run_full_market_scan
+
+    logger.info("[scheduler] Daily market scan job starting")
+    db = SessionLocal()
+    _uid = getattr(_settings, "brain_default_user_id", None)
+    job_id = brain_batch_job_begin(db, "daily_market_scan", user_id=_uid)
+    db.commit()
+    try:
+        results = run_full_market_scan(db, _uid, use_full_universe=True)
+        brain_batch_job_finish(
+            db,
+            job_id,
+            ok=True,
+            meta={
+                "tickers_scored": len(results),
+                "user_id": _uid,
+            },
+        )
+        db.commit()
+        logger.info("[scheduler] Daily market scan done: %s scored", len(results))
+    except Exception as e:
+        logger.error("[scheduler] Daily market scan failed: %s", e)
+        try:
+            brain_batch_job_finish(db, job_id, ok=False, error=str(e))
+            db.commit()
+        except Exception:
+            logger.exception("[scheduler] Failed to record daily_market_scan batch job failure")
+    finally:
+        db.close()
+
+
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
@@ -912,6 +952,17 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+
+        if getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
+            _scheduler.add_job(
+                _run_daily_market_scan_job,
+                trigger=CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"),
+                id="daily_market_scan",
+                name="Daily market scan (2:30 America/Los_Angeles)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=35),
             )
 
         _scheduler.add_job(

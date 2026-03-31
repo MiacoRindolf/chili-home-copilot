@@ -10,7 +10,9 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ...config import settings
+from ..massive_client import is_crypto
 from ...models.trading import PrescreenCandidate, PrescreenSnapshot
+from .brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
 from .prescreen_internal_signals import collect_internal_prescreen_tickers
 from .prescreen_normalize import normalize_prescreen_ticker
 from .prescreener import collect_prescreen_with_provenance
@@ -29,6 +31,8 @@ def _settings_subset() -> dict[str, Any]:
 
 def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
     """Collect external + internal tickers, write snapshot row, upsert global candidates."""
+    job_id = brain_batch_job_begin(db, "daily_prescreen")
+    db.flush()
     run_id = str(uuid.uuid4())
     tz_label = "America/Los_Angeles"
     started = datetime.utcnow()
@@ -92,6 +96,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
             todays_norms.add(tn)
             reasons = ticker_reasons.get(tn) or ticker_reasons.get(t) or [{"kind": "unknown"}]
             sources_payload = {"tags": ticker_sources.get(tn, ticker_sources.get(t, []))}
+            asset_u = "crypto" if is_crypto(tn) else "stock"
 
             row = (
                 db.query(PrescreenCandidate)
@@ -106,6 +111,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
                         user_id=None,
                         ticker=tn,
                         ticker_norm=tn,
+                        asset_universe=asset_u,
                         active=True,
                         first_seen_at=now,
                         last_seen_at=now,
@@ -117,6 +123,7 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
             else:
                 row.snapshot_id = snap.id
                 row.ticker = tn
+                row.asset_universe = asset_u
                 row.active = True
                 row.last_seen_at = now
                 row.modified_at = now
@@ -133,17 +140,35 @@ def run_daily_prescreen_job(db: Session) -> dict[str, Any]:
                 synchronize_session=False,
             )
 
-        db.commit()
-        return {
+        out = {
             "ok": True,
             "run_id": run_id,
             "snapshot_id": snap.id,
             "candidate_count": len(all_tickers),
         }
+        brain_batch_job_finish(
+            db,
+            job_id,
+            ok=True,
+            meta={
+                "run_id": run_id,
+                "snapshot_id": snap.id,
+                "candidate_count": len(all_tickers),
+            },
+        )
+        db.commit()
+        return out
     except Exception as e:
         logger.exception("[prescreen_job] failed: %s", e)
         snap.run_finished_at = datetime.utcnow()
         snap.status_json = {"phase": "error", "error": str(e)[:500]}
+        brain_batch_job_finish(
+            db,
+            job_id,
+            ok=False,
+            error=str(e),
+            meta={"run_id": run_id, "snapshot_id": snap.id},
+        )
         db.commit()
         return {"ok": False, "run_id": run_id, "error": str(e)}
 

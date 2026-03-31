@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from unittest.mock import patch
 
-from app.models.trading import PrescreenCandidate, PrescreenSnapshot
+from app.models.trading import BrainBatchJob, PrescreenCandidate, PrescreenSnapshot
 from app.services.trading.prescreen_job import (
     load_active_global_candidate_tickers,
     run_daily_prescreen_job,
@@ -33,6 +33,12 @@ def test_run_daily_prescreen_upsert_and_deactivate(
     assert r1.get("ok") is True
     active = load_active_global_candidate_tickers(db)
     assert active == ["AAA", "MSFT", "ZZZ"]
+    _aa = db.query(PrescreenCandidate).filter(PrescreenCandidate.ticker_norm == "AAA").first()
+    assert _aa is not None and _aa.asset_universe == "stock"
+    _jobs = db.query(BrainBatchJob).filter(BrainBatchJob.job_type == "daily_prescreen").all()
+    assert len(_jobs) >= 1
+    assert _jobs[-1].status == "ok"
+    assert _jobs[-1].ended_at is not None
 
     mock_collect.return_value = (
         ["AAA"],
