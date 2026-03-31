@@ -144,14 +144,46 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-node-detail-body dt { font-weight: 700; color: var(--text-muted); font-size: 9px; text-transform: uppercase; letter-spacing: .04em; margin-top: 8px; }
 .tbn-node-detail-body dt:first-child { margin-top: 0; }
 .tbn-node-detail-body dd { margin: 2px 0 0 0; font-family: ui-monospace, monospace; font-size: 10px; word-break: break-word; }
-.tbn-node-detail-body dd.tbn-node-detail-desc { font-family: inherit; white-space: pre-wrap; }
-.tbn-node-detail-body dd.tbn-node-detail-remarks {
-  font-family: inherit; white-space: pre-wrap; font-size: 10px; line-height: 1.5; color: var(--text-secondary);
+.tbn-node-detail-body dd.tbn-node-detail-section-dd {
+  margin-top: 0; font-family: inherit;
 }
-.tbn-node-detail-body dd.tbn-node-detail-io ul {
+.tbn-node-detail-sr-only {
+  position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+  overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0;
+}
+.tbn-node-detail-collapsible { margin: 0 0 4px 0; }
+.tbn-node-detail-collapsible > summary {
+  cursor: pointer; font-weight: 700; color: var(--text-muted);
+  font-size: 9px; text-transform: uppercase; letter-spacing: .04em;
+  list-style: none; user-select: none; padding: 2px 0 6px;
+}
+.tbn-node-detail-collapsible > summary::-webkit-details-marker { display: none; }
+.tbn-node-detail-collapsible > summary::before {
+  content: '\25B6'; display: inline-block; margin-right: 6px; font-size: 7px; opacity: 0.85;
+  transition: transform 0.15s ease;
+}
+.tbn-node-detail-collapsible[open] > summary::before { transform: rotate(90deg); }
+.tbn-node-detail-collapsible-inner {
+  font-family: inherit; font-size: 10px; line-height: 1.5; color: var(--text-secondary);
+  border-left: 2px solid rgba(99,102,241,.28);
+  padding: 4px 8px 8px 12px;
+  margin: 0 0 2px 0;
+}
+.tbn-node-detail-collapsible-inner--prose {
+  white-space: pre-wrap;
+}
+.tbn-node-detail-code-block {
+  margin: 0; padding: 8px 10px; background: var(--bg); border: 1px solid var(--border);
+  border-radius: 8px; overflow: auto; max-height: min(72vh, 640px); font-size: 10px; line-height: 1.45;
+}
+.tbn-node-detail-code-block code {
+  display: block; font-family: ui-monospace, Consolas, monospace; color: var(--text);
+  white-space: pre-wrap; word-break: break-word;
+}
+.tbn-node-detail-body .tbn-node-detail-io ul {
   margin: 4px 0 0 0; padding-left: 18px; font-family: inherit; font-size: 10px; line-height: 1.45;
 }
-.tbn-node-detail-body dd.tbn-node-detail-io li { margin: 2px 0; }
+.tbn-node-detail-body .tbn-node-detail-io li { margin: 2px 0; }
 .tbn-node-circle {
   stroke: var(--border); stroke-width: 1.5;
   filter: drop-shadow(0 0 5px rgba(139,92,246,.28));
@@ -2200,66 +2232,89 @@ function initTradingBrainNetworkGraph() {
     if (!p || !titleEl || !body) return;
     titleEl.textContent = n.label || n.id || 'Node';
     body.innerHTML = '';
-    function addRow(lbl, val) {
-      if (val == null || val === '') return;
+    var sectionUid = 0;
+    function addCollapsibleSection(title, innerExtraClass, fillInner) {
+      var sid = 'tbn-sec-' + (++sectionUid);
       var dt = document.createElement('dt');
-      dt.textContent = lbl;
+      dt.className = 'tbn-node-detail-sr-only';
+      dt.id = sid;
+      dt.textContent = title;
       var dd = document.createElement('dd');
-      dd.textContent = String(val);
+      dd.className = 'tbn-node-detail-section-dd';
+      var det = document.createElement('details');
+      det.className = 'tbn-node-detail-collapsible';
+      det.setAttribute('open', '');
+      det.setAttribute('aria-labelledby', sid);
+      var sum = document.createElement('summary');
+      sum.textContent = title;
+      var inner = document.createElement('div');
+      inner.className = 'tbn-node-detail-collapsible-inner' + (innerExtraClass ? ' ' + innerExtraClass : '');
+      fillInner(inner);
+      det.appendChild(sum);
+      det.appendChild(inner);
+      dd.appendChild(det);
       body.appendChild(dt);
       body.appendChild(dd);
     }
-    function addDescRow(lbl, text) {
-      if (text == null || String(text).trim() === '') return;
-      var dt = document.createElement('dt');
-      dt.textContent = lbl;
-      var dd = document.createElement('dd');
-      dd.className = 'tbn-node-detail-desc';
-      dd.textContent = String(text);
-      body.appendChild(dt);
-      body.appendChild(dd);
-    }
-    function addBulletSection(lbl, items) {
+    function fillBulletList(container, items) {
       if (!items || !items.length) {
-        var dt0 = document.createElement('dt');
-        dt0.textContent = lbl;
-        var dd0 = document.createElement('dd');
-        dd0.className = 'tbn-node-detail-io';
-        dd0.textContent = '\u2014';
-        body.appendChild(dt0);
-        body.appendChild(dd0);
+        container.textContent = '\u2014';
         return;
       }
-      var dt = document.createElement('dt');
-      dt.textContent = lbl;
-      var dd = document.createElement('dd');
-      dd.className = 'tbn-node-detail-io';
       var ul = document.createElement('ul');
+      ul.className = 'tbn-node-detail-io';
       for (var bi = 0; bi < items.length; bi++) {
         var li = document.createElement('li');
         li.textContent = String(items[bi]);
         ul.appendChild(li);
       }
-      dd.appendChild(ul);
-      body.appendChild(dt);
-      body.appendChild(dd);
+      container.appendChild(ul);
     }
-    addDescRow('Description', n.description);
-    if (n.remarks != null && String(n.remarks).trim() !== '') {
-      var dtr = document.createElement('dt');
-      dtr.textContent = 'Remarks';
-      var ddr = document.createElement('dd');
-      ddr.className = 'tbn-node-detail-remarks';
-      ddr.textContent = String(n.remarks);
-      body.appendChild(dtr);
-      body.appendChild(ddr);
+    var descParts = [];
+    if (n.description != null && String(n.description).trim() !== '') descParts.push(String(n.description).trim());
+    if (n.remarks != null && String(n.remarks).trim() !== '') descParts.push(String(n.remarks).trim());
+    var mergedDesc = descParts.join('\n\n').trim();
+    if (mergedDesc) {
+      addCollapsibleSection('Description', 'tbn-node-detail-collapsible-inner--prose', function(inner) {
+        inner.textContent = mergedDesc;
+      });
     }
-    addBulletSection('Inputs', n.inputs);
-    addBulletSection('Outputs', n.outputs);
-    addRow('Tier', n.tier);
-    addRow('Id', n.id);
-    addRow('Code reference', n.code_ref);
-    addRow('Phase', n.phase);
+    addCollapsibleSection('Inputs', '', function(inner) {
+      fillBulletList(inner, n.inputs);
+    });
+    addCollapsibleSection('Outputs', '', function(inner) {
+      fillBulletList(inner, n.outputs);
+    });
+    if (n.tier != null && n.tier !== '') {
+      addCollapsibleSection('Tier', '', function(inner) {
+        inner.textContent = String(n.tier);
+      });
+    }
+    if (n.id != null && n.id !== '') {
+      addCollapsibleSection('Id', '', function(inner) {
+        inner.textContent = String(n.id);
+      });
+    }
+    addCollapsibleSection('Code', '', function(inner) {
+      var raw = (n.code_snippet != null && String(n.code_snippet).trim() !== '')
+        ? String(n.code_snippet)
+        : (n.code_ref != null && String(n.code_ref).trim() !== '' ? String(n.code_ref) : '');
+      if (!raw.trim()) {
+        inner.textContent = '\u2014';
+        return;
+      }
+      var pre = document.createElement('pre');
+      pre.className = 'tbn-node-detail-code-block';
+      var codeEl = document.createElement('code');
+      codeEl.textContent = raw;
+      pre.appendChild(codeEl);
+      inner.appendChild(pre);
+    });
+    if (n.phase != null && n.phase !== '') {
+      addCollapsibleSection('Phase', '', function(inner) {
+        inner.textContent = String(n.phase);
+      });
+    }
     p.classList.add('tbn-node-detail-open');
     p.setAttribute('aria-hidden', 'false');
     requestAnimationFrame(function() {
