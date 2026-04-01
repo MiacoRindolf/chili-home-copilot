@@ -1177,8 +1177,184 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   font-size: 20px; line-height: 1; padding: 0 4px; flex-shrink: 0;
 }
 .news-reader-header .nr-close:hover { color: var(--text); }
-.news-reader-body { flex: 1; overflow: hidden; }
-.news-reader-body iframe { width: 100%; height: 100%; border: none; border-radius: 0 0 14px 14px; }
+.news-reader-body {
+  flex: 1; overflow: auto; min-height: 0;
+  border-radius: 0 0 14px 14px;
+}
+.nr-preview {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 28px 22px; text-align: center; min-height: 200px;
+}
+.nr-preview-note {
+  font-size: 12px; color: var(--text-muted); max-width: 440px; line-height: 1.55; margin: 0;
+}
+.nr-preview-title {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  max-width: 100%; line-height: 1.4; white-space: normal; margin: 0;
+}
+.nr-preview-meta { font-size: 11px; color: var(--text-muted); margin: 0; }
+.nr-primary-open {
+  display: inline-block; margin-top: 4px; padding: 12px 26px; border-radius: 10px;
+  background: var(--accent, #6366f1); color: #fff !important; font-size: 13px; font-weight: 600;
+  text-decoration: none; transition: opacity .15s, transform .1s;
+}
+.nr-primary-open:hover { opacity: .92; transform: translateY(-1px); }
+
+/* Chart context menu (Lightweight Charts — custom UI) */
+.chart-ctx-menu {
+  position: fixed; z-index: 10050; min-width: 260px; max-width: 320px;
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  padding: 4px 0; font-size: 12px; color: var(--text);
+}
+.chart-ctx-menu.hidden { display: none !important; }
+.chart-ctx-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; padding: 8px 14px; border: none; background: none; cursor: pointer;
+  color: inherit; font-size: 12px; text-align: left; font-family: inherit;
+}
+.chart-ctx-item:hover:not(:disabled) { background: rgba(99,102,241,.12); }
+.chart-ctx-item:disabled { opacity: .45; cursor: not-allowed; }
+.chart-ctx-item .ctx-label { flex: 1; min-width: 0; }
+.chart-ctx-kbd { font-size: 10px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.chart-ctx-sep { height: 1px; margin: 4px 10px; background: var(--border); border: none; }
+.chart-ctx-row-sub { position: relative; }
+.chart-ctx-item.caret::after { content: '\203A'; color: var(--text-muted); font-size: 14px; margin-left: 6px; }
+.chart-ctx-flyout {
+  position: absolute; left: 100%; top: 0; margin-left: 2px; min-width: 160px;
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3); padding: 4px 0; z-index: 1;
+}
+.chart-ctx-flyout.hidden { display: none !important; }
+
+.chart-ctx-modal-overlay {
+  display: none; position: fixed; inset: 0; z-index: 10051;
+  background: rgba(0,0,0,.45); align-items: center; justify-content: center; backdrop-filter: blur(2px);
+}
+.chart-ctx-modal-overlay.active { display: flex; }
+.chart-ctx-modal {
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border); border-radius: 12px;
+  width: min(92vw, 720px); max-height: 85vh; display: flex; flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0,0,0,.35);
+}
+.chart-ctx-modal.wide { width: min(96vw, 900px); }
+.chart-ctx-modal-hd {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
+}
+.chart-ctx-modal-bd { padding: 12px 16px; overflow: auto; flex: 1; min-height: 0; }
+.chart-ctx-modal-close {
+  background: none; border: none; color: var(--text-muted); font-size: 22px; line-height: 1;
+  cursor: pointer; padding: 0 4px;
+}
+.chart-ctx-modal-close:hover { color: var(--text); }
+.chart-ctx-table-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--border); border-radius: 8px; }
+.chart-ctx-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; font-family: ui-monospace, monospace; }
+.chart-ctx-table-wrap th, .chart-ctx-table-wrap td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+.chart-ctx-table-wrap th { position: sticky; top: 0; background: var(--bg-header); text-align: right; font-weight: 600; }
+.chart-ctx-table-wrap td:first-child, .chart-ctx-table-wrap th:first-child { text-align: left; }
+.chart-ctx-obj-list { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin: 0 0 12px; }
+.chart-ctx-obj-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.chart-ctx-obj-actions button {
+  padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-header); color: var(--text); font-size: 11px; cursor: pointer;
+}
+.chart-ctx-obj-actions button:hover { border-color: var(--accent); }
+.chart-ctx-settings-shortcuts { font-size: 11px; color: var(--text-muted); line-height: 1.65; white-space: pre-wrap; }
+
+/* Draggable on-chart alert handles (TradingView-style) */
+.user-alert-handles-layer {
+  position: absolute; z-index: 7; overflow: visible; pointer-events: none;
+}
+.user-alert-handle {
+  position: absolute; left: 10px; transform: translateY(-50%);
+  display: flex; align-items: center; gap: 6px; max-width: calc(100% - 72px);
+  padding: 5px 8px 5px 10px; border-radius: 6px; border: 1px solid var(--border);
+  font-size: 11px; font-weight: 600; color: var(--text);
+  background: var(--card-bg, var(--bg)); box-shadow: 0 2px 10px rgba(0,0,0,.22);
+  cursor: grab; pointer-events: auto; user-select: none; -webkit-user-select: none;
+  transition: box-shadow .12s, border-color .12s;
+}
+.user-alert-handle:hover { box-shadow: 0 4px 14px rgba(0,0,0,.28); }
+.user-alert-handle.dragging { cursor: grabbing; z-index: 25; box-shadow: 0 6px 20px rgba(0,0,0,.35); }
+.user-alert-handle.paused { opacity: .52; }
+.user-alert-handle .uah-text {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.user-alert-handle .uah-del {
+  flex-shrink: 0; border: none; background: transparent; cursor: pointer;
+  padding: 2px 4px; font-size: 13px; line-height: 1; opacity: .65; color: var(--text-muted);
+}
+.user-alert-handle .uah-del:hover { opacity: 1; color: #ef4444; }
+.chart-alert-ctx-menu { z-index: 10055; }
+.chart-alert-ctx-menu .ctx-check { font-size: 12px; color: var(--accent, #6366f1); }
+.chart-alert-ctx-menu .ctx-check.hidden { visibility: hidden; }
+.chart-ctx-color-swatch {
+  display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 14px;
+  border: none; background: none; cursor: pointer; color: inherit; font-size: 12px; text-align: left;
+  font-family: inherit;
+}
+.chart-ctx-color-swatch:hover { background: rgba(99,102,241,.12); }
+.chart-ctx-color-swatch .sw { width: 14px; height: 14px; border-radius: 3px; border: 1px solid rgba(0,0,0,.2); flex-shrink: 0; }
+
+/* Create price alert modal (TradingView-inspired) */
+.chart-alert-overlay {
+  display: none; position: fixed; inset: 0; z-index: 10052;
+  background: rgba(0,0,0,.55); align-items: center; justify-content: center;
+  backdrop-filter: blur(3px); padding: 16px;
+}
+.chart-alert-overlay.active { display: flex; }
+.chart-alert-dialog {
+  width: min(100%, 420px); max-height: 90vh; overflow: hidden;
+  display: flex; flex-direction: column;
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: 14px; box-shadow: 0 20px 50px rgba(0,0,0,.45);
+}
+.chart-alert-hd { padding: 16px 18px 10px; border-bottom: 1px solid var(--border); }
+.chart-alert-title-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.chart-alert-title { margin: 0; font-size: 16px; font-weight: 700; color: var(--text); line-height: 1.35; }
+.cam-ticker-pill {
+  display: inline-block; padding: 2px 10px; border-radius: 8px;
+  background: rgba(99,102,241,.2); color: var(--accent, #6366f1); font-weight: 800; font-size: 14px;
+}
+.chart-alert-icon-btn {
+  background: none; border: none; color: var(--text-muted); font-size: 24px; line-height: 1;
+  cursor: pointer; padding: 0 4px; flex-shrink: 0;
+}
+.chart-alert-icon-btn:hover { color: var(--text); }
+.chart-alert-bd { padding: 14px 18px; overflow-y: auto; flex: 1; min-height: 0; }
+.chart-alert-ft {
+  display: flex; justify-content: flex-end; gap: 10px; padding: 12px 18px 16px;
+  border-top: 1px solid var(--border); flex-shrink: 0;
+}
+.cam-field { margin-bottom: 14px; }
+.cam-field > label, .cam-field-row > label {
+  display: block; font-size: 11px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em;
+}
+.cam-field-row { display: grid; grid-template-columns: 100px 1fr; align-items: center; gap: 12px; }
+.cam-field-row > label { margin-bottom: 0; }
+.cam-condition-stack { display: flex; flex-direction: column; gap: 8px; }
+.cam-pill {
+  display: inline-block; align-self: flex-start; padding: 6px 12px; border-radius: 8px;
+  font-size: 12px; font-weight: 600; background: var(--bg-header); border: 1px solid var(--border); color: var(--text);
+}
+.cam-select, .cam-input {
+  width: 100%; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--input-bg, var(--bg-header)); color: var(--text); font-size: 13px; font-family: inherit;
+  box-sizing: border-box;
+}
+.cam-select:focus, .cam-input:focus {
+  outline: none; border-color: var(--accent, #6366f1); box-shadow: 0 0 0 2px rgba(99,102,241,.2);
+}
+.cam-notify-row .cam-checks { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 4px; }
+.cam-check { font-size: 12px; color: var(--text); cursor: pointer; display: flex; align-items: center; gap: 6px; }
+.cam-check input { accent-color: var(--accent, #6366f1); }
+.cam-btn { padding: 9px 18px; border-radius: 9px; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit; border: none; }
+.cam-btn-secondary { background: transparent; border: 1px solid var(--border); color: var(--text); }
+.cam-btn-secondary:hover { background: var(--bg-header); }
+.cam-btn-primary { background: var(--accent, #6366f1); color: #fff; }
+.cam-btn-primary:hover { filter: brightness(1.08); }
+.cam-hint { font-size: 10px; color: var(--text-muted); margin-top: 6px; line-height: 1.4; }
 
 /* Sentiment badge */
 .news-card { position: relative; }
@@ -2146,6 +2322,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <canvas id="draw-canvas"></canvas>
       <div id="ind-panes-top" class="ind-panes-slot"></div>
       <div id="main-chart"></div>
+      <div id="user-alert-handles-layer" class="user-alert-handles-layer" aria-hidden="true"></div>
       <div id="ind-panes-bottom" class="ind-panes-slot"></div>
       <div class="ind-sub-pane" id="rsi-pane" style="display:none" data-pane-id="rsi" data-pane-default="top">
         <div class="ind-sub-label" id="rsi-pane-label"><span class="ind-sub-grip" title="Drag to reorder">&#x2630;</span> RSI <span class="ind-sub-val" id="rsi-pane-val"></span></div>
@@ -2534,7 +2711,166 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <button class="nr-close" onclick="closeNewsReader()">&times;</button>
       </div>
       <div class="news-reader-body">
-        <iframe id="nr-iframe" sandbox="allow-scripts allow-same-origin allow-popups" referrerpolicy="no-referrer"></iframe>
+        <div class="nr-preview" id="nr-preview">
+          <p class="nr-preview-note">Most publishers block embedded article previews. Open the story in a new tab to read it.</p>
+          <h2 class="nr-preview-title" id="nr-preview-title"></h2>
+          <p class="nr-preview-meta" id="nr-preview-meta"></p>
+          <a class="nr-primary-open" id="nr-primary-open" href="#" target="_blank" rel="noopener noreferrer">Read full article</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main chart context menu (custom; not from Lightweight Charts) -->
+  <div id="chart-context-menu" class="chart-ctx-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="chart-ctx-item" id="ctx-reset-view" role="menuitem">
+      <span class="ctx-label">Reset chart view</span><span class="chart-ctx-kbd">Alt+R</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-copy-price" role="menuitem">
+      <span class="ctx-label" id="ctx-copy-label">Copy price</span>
+    </button>
+    <button type="button" class="chart-ctx-item" id="ctx-paste-price" role="menuitem">
+      <span class="ctx-label">Paste</span><span class="chart-ctx-kbd">Ctrl+V</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-add-alert" role="menuitem">
+      <span class="ctx-label" id="ctx-alert-label">Add alert at price</span><span class="chart-ctx-kbd">Alt+A</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-table-view" role="menuitem"><span class="ctx-label">Table view</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-object-tree" role="menuitem"><span class="ctx-label">Object tree</span></button>
+    <div class="chart-ctx-row-sub">
+      <button type="button" class="chart-ctx-item caret" id="ctx-template-toggle" aria-expanded="false" aria-haspopup="true">
+        <span class="ctx-label">Chart template</span>
+      </button>
+      <div id="ctx-template-flyout" class="chart-ctx-flyout hidden" role="menu">
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-save" role="menuitem"><span class="ctx-label">Save template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-load" role="menuitem"><span class="ctx-label">Load template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-reset" role="menuitem"><span class="ctx-label">Reset to default</span></button>
+      </div>
+    </div>
+    <button type="button" class="chart-ctx-item" id="ctx-remove-indicators" role="menuitem">
+      <span class="ctx-label" id="ctx-remove-ind-label">Remove indicators</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-chart-settings" role="menuitem"><span class="ctx-label">Settings…</span></button>
+  </div>
+
+  <!-- Right-click menu for an on-chart price alert -->
+  <div id="chart-alert-ctx-menu" class="chart-ctx-menu chart-alert-ctx-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="chart-ctx-item" id="ctx-uap-pause" role="menuitem"><span class="ctx-label" id="ctx-uap-pause-label">Pause</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-uap-edit" role="menuitem"><span class="ctx-label">Edit…</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-uap-delete" role="menuitem"><span class="ctx-label">Delete</span></button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-uap-lines-toggle" role="menuitem">
+      <span class="ctx-label">Alert lines</span><span class="ctx-check" id="ctx-uap-lines-check">&#x2713;</span>
+    </button>
+    <div class="chart-ctx-row-sub">
+      <button type="button" class="chart-ctx-item caret" id="ctx-uap-color-toggle" aria-expanded="false" aria-haspopup="true">
+        <span class="ctx-label">Change alert color…</span>
+      </button>
+      <div id="ctx-uap-color-flyout" class="chart-ctx-flyout hidden" role="menu">
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#f97316" role="menuitem"><span class="sw" style="background:#f97316"></span> Orange</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#3b82f6" role="menuitem"><span class="sw" style="background:#3b82f6"></span> Blue</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#22c55e" role="menuitem"><span class="sw" style="background:#22c55e"></span> Green</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#ef4444" role="menuitem"><span class="sw" style="background:#ef4444"></span> Red</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#a855f7" role="menuitem"><span class="sw" style="background:#a855f7"></span> Violet</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-table-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal wide">
+      <div class="chart-ctx-modal-hd">
+        <span>OHLC table — <span id="chart-table-ticker"></span></span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartTableModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <div class="chart-ctx-table-wrap" id="chart-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-obj-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Object tree</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartObjModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd" id="chart-obj-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="chart-settings-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Chart settings</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartSettingsModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Indicator toggles live in the bar above the chart. Drawing shortcuts:</p>
+        <div class="chart-ctx-settings-shortcuts" id="chart-settings-shortcuts"></div>
+        <button type="button" class="chart-ctx-item" style="margin-top:12px;border:1px solid var(--border);border-radius:8px;width:auto" onclick="_scrollToIndPanel()">Scroll to indicators</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create price alert (modal) -->
+  <div id="chart-alert-modal" class="chart-alert-overlay" aria-hidden="true" onclick="if(event.target===this)_closeChartAlertModal()">
+    <div class="chart-alert-dialog" role="dialog" aria-modal="true" aria-labelledby="chart-alert-title" onclick="event.stopPropagation()">
+      <div class="chart-alert-hd">
+        <div class="chart-alert-title-row">
+          <h2 id="chart-alert-title" class="chart-alert-title">Create alert on <span id="cam-ticker" class="cam-ticker-pill"></span></h2>
+          <button type="button" class="chart-alert-icon-btn" onclick="_closeChartAlertModal()" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="chart-alert-bd">
+        <div class="cam-field">
+          <label>Condition</label>
+          <div class="cam-condition-stack">
+            <span class="cam-pill">Price</span>
+            <select id="cam-condition" class="cam-select" onchange="_onCamConditionChange()">
+              <option value="crossing">Crossing</option>
+              <option value="crossing_up">Crossing up</option>
+              <option value="crossing_down">Crossing down</option>
+              <option value="gte">At or above</option>
+              <option value="lte">At or below</option>
+            </select>
+          </div>
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-value">Value</label>
+          <input type="number" id="cam-value" class="cam-input" step="any" />
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-trigger">Trigger</label>
+          <select id="cam-trigger" class="cam-select">
+            <option value="once">Once only</option>
+            <option value="repeat">Each crossing</option>
+          </select>
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-expires">Expiration</label>
+          <input type="datetime-local" id="cam-expires" class="cam-input" />
+        </div>
+        <p class="cam-hint" id="cam-expires-hint">Leave empty for no expiration.</p>
+        <div class="cam-field">
+          <label for="cam-message">Message</label>
+          <input type="text" id="cam-message" class="cam-input cam-input-full" maxlength="220" placeholder="Toast and chart label" />
+        </div>
+        <div class="cam-field cam-notify-row">
+          <label>Notifications</label>
+          <div class="cam-checks">
+            <label class="cam-check"><input type="checkbox" id="cam-toast" checked /> In-app toast</label>
+            <label class="cam-check"><input type="checkbox" id="cam-sound" checked /> Sound</label>
+          </div>
+        </div>
+        <input type="hidden" id="cam-edit-id" value="" />
+      </div>
+      <div class="chart-alert-ft">
+        <button type="button" class="cam-btn cam-btn-secondary" onclick="_closeChartAlertModal()">Cancel</button>
+        <button type="button" class="cam-btn cam-btn-primary" id="cam-submit-btn" onclick="_submitChartAlertModal()">Create alert</button>
       </div>
     </div>
   </div>
@@ -2947,6 +3283,16 @@ var _lastBreakoutData = null;
 var _magnetEnabled = false;
 var _drawUndoStack = [];
 var _rawOhlcData = null;
+var _lastCrosshairPrice = null;
+var _ctxMenuPrice = null;
+var CHART_TEMPLATE_STORAGE_KEY = 'chili_chart_template_v1';
+var USER_PRICE_ALERTS_KEY = 'chili_user_price_alerts_v2';
+var USER_ALERT_LINES_VISIBLE_KEY = 'chili_user_alert_lines_visible_v1';
+var _userPriceAlerts = [];
+var _userAlertLayoutRAF = null;
+var _userAlertDragState = null;
+var _chartAlertCtxTargetId = '';
+var _chartAlertCtxDocBound = false;
 var _compareSeries = {};  // ticker -> {series, data}
 var _lastDaytradeData = null;
 var _cachedScanTickers = [];
@@ -2974,6 +3320,9 @@ document.addEventListener('DOMContentLoaded', function() {
   initTabOrder();
   initChart();
   _initDrawingListeners();
+  _initChartContextMenu();
+  _initChartAlertModal();
+  _initChartAlertCtxMenu();
   _initPaneDrag();
   buildIndicatorPanel();
   loadStrategies().then(function() {
@@ -3163,7 +3512,11 @@ function initChart() {
 
   new ResizeObserver(function() {
     chart.applyOptions({ width: el.clientWidth, height: el.clientHeight });
+    _scheduleUserAlertHandleLayout();
   }).observe(el);
+  chart.timeScale().subscribeVisibleLogicalRangeChange(function() {
+    _scheduleUserAlertHandleLayout();
+  });
 }
 
 /* ── Indicator Sub-Pane Charts (RSI, MACD) ───────── */
@@ -3619,22 +3972,736 @@ function removeCompareSymbol(ticker) {
   delete _compareSeries[ticker];
 }
 
-/* ── On-Chart Price Alert ────────────────────────── */
-function addChartAlert(price) {
-  if (!candleSeries || !price) return;
-  candleSeries.createPriceLine({
-    price: price,
-    color: '#f97316',
+/* ── On-Chart Price Alert (modal + live tick evaluation) ─ */
+function _getUserAlertsStore() {
+  try { return JSON.parse(sessionStorage.getItem(USER_PRICE_ALERTS_KEY) || '{}'); } catch (e) { return {}; }
+}
+function _setUserAlertsStore(obj) {
+  try { sessionStorage.setItem(USER_PRICE_ALERTS_KEY, JSON.stringify(obj)); } catch (e) {}
+}
+function _userAlertSpecsForTicker(t) {
+  var m = _getUserAlertsStore();
+  return Array.isArray(m[t]) ? m[t] : [];
+}
+function _saveSpecsForTicker(t, specs) {
+  var m = _getUserAlertsStore();
+  m[t] = specs;
+  _setUserAlertsStore(m);
+}
+function _serializeUserAlertsForTicker(t) {
+  return _userPriceAlerts.filter(function(a) { return a.ticker === t; }).map(function(a) {
+    return {
+      id: a.id, price: a.price, condition: a.condition, triggerOnce: a.triggerOnce,
+      expireAt: a.expireAt, message: a.message, toast: a.toast, sound: a.sound,
+      paused: !!a.paused, color: a.color || '#f97316',
+    };
+  });
+}
+function _persistUserAlertsForTicker(t) {
+  _saveSpecsForTicker(t, _serializeUserAlertsForTicker(t));
+}
+
+function _detachUserPriceAlertLines() {
+  _userPriceAlerts.forEach(function(a) {
+    if (a.lineHandle) {
+      try { a.lineHandle.remove(); } catch (e) {}
+      a.lineHandle = null;
+    }
+    if (a.handleEl) {
+      try { a.handleEl.remove(); } catch (e2) {}
+      a.handleEl = null;
+    }
+  });
+  _userPriceAlerts = [];
+  var layer = document.getElementById('user-alert-handles-layer');
+  if (layer) layer.innerHTML = '';
+}
+
+function _chartAlertLineTitle(message, price) {
+  var t = (message || '').trim();
+  if (t.length > 36) t = t.slice(0, 34) + '…';
+  if (!t) t = 'Alert ' + smartPrice(price, (currentTicker || '').indexOf('-USD') !== -1);
+  return t;
+}
+
+function _createUserAlertLine(spec) {
+  if (!candleSeries || spec.price == null || !isFinite(spec.price)) return null;
+  var col = spec.color || '#f97316';
+  return candleSeries.createPriceLine({
+    price: spec.price,
+    color: col,
     lineWidth: 2,
     lineStyle: LightweightCharts.LineStyle.Dashed,
     axisLabelVisible: true,
-    title: 'Alert $' + smartPrice(price),
+    title: _chartAlertLineTitle(spec.message, spec.price),
   });
 }
 
+function _userAlertLinesGloballyVisible() {
+  try { return sessionStorage.getItem(USER_ALERT_LINES_VISIBLE_KEY) !== '0'; } catch (e) { return true; }
+}
+
+function _setUserAlertLinesGloballyVisible(show) {
+  try { sessionStorage.setItem(USER_ALERT_LINES_VISIBLE_KEY, show ? '1' : '0'); } catch (e2) {}
+  _applyGlobalUserAlertLinesVisibility();
+}
+
+function _applyGlobalUserAlertLinesVisibility() {
+  var show = _userAlertLinesGloballyVisible();
+  if (!candleSeries) {
+    _syncUserAlertHandlesDOM();
+    return;
+  }
+  _userPriceAlerts.forEach(function(a) {
+    if (a.ticker !== currentTicker) return;
+    if (show) {
+      if (!a.lineHandle && a.price != null && isFinite(a.price)) {
+        a.lineHandle = _createUserAlertLine({
+          price: a.price, message: a.message, color: a.color || '#f97316',
+        });
+      } else if (a.lineHandle) {
+        try {
+          a.lineHandle.applyOptions({
+            price: a.price,
+            color: a.color || '#f97316',
+            title: _chartAlertLineTitle(a.message, a.price),
+          });
+        } catch (e) {}
+      }
+    } else if (a.lineHandle) {
+      try { a.lineHandle.remove(); } catch (e2) {}
+      a.lineHandle = null;
+    }
+  });
+  _syncUserAlertHandlesDOM();
+}
+
+function _scheduleUserAlertHandleLayout() {
+  if (_userAlertLayoutRAF) return;
+  _userAlertLayoutRAF = requestAnimationFrame(function() {
+    _userAlertLayoutRAF = null;
+    _layoutUserAlertHandlesLayerBox();
+    _syncUserAlertHandlesDOM();
+  });
+}
+
+function _layoutUserAlertHandlesLayerBox() {
+  var layer = document.getElementById('user-alert-handles-layer');
+  var mc = document.getElementById('main-chart');
+  var area = document.getElementById('chart-area');
+  if (!layer || !mc || !area) return;
+  var ar = area.getBoundingClientRect();
+  var mr = mc.getBoundingClientRect();
+  layer.style.left = (mr.left - ar.left + area.scrollLeft) + 'px';
+  layer.style.top = (mr.top - ar.top + area.scrollTop) + 'px';
+  layer.style.width = mr.width + 'px';
+  layer.style.height = mr.height + 'px';
+}
+
+function _shortUserAlertHandleLabel(a) {
+  var t = (a.message || '').trim();
+  if (!t) t = _chartAlertLineTitle('', a.price);
+  if (t.length > 42) return t.slice(0, 40) + '\u2026';
+  return t;
+}
+
+function _syncUserAlertHandlesDOM() {
+  var layer = document.getElementById('user-alert-handles-layer');
+  if (!layer || !candleSeries) return;
+  _layoutUserAlertHandlesLayerBox();
+  if (!_userAlertLinesGloballyVisible()) {
+    Array.prototype.slice.call(layer.querySelectorAll('.user-alert-handle')).forEach(function(n) { n.remove(); });
+    _userPriceAlerts.forEach(function(a) { a.handleEl = null; });
+    return;
+  }
+  var seen = {};
+  _userPriceAlerts.forEach(function(a) {
+    if (a.ticker !== currentTicker) return;
+    seen[a.id] = true;
+    var el = a.handleEl;
+    if (!el || !el.parentNode) {
+      el = document.createElement('div');
+      el.className = 'user-alert-handle';
+      el.dataset.alertId = a.id;
+      el.innerHTML =
+        '<span class="uah-text"></span>' +
+        '<button type="button" class="uah-del" title="Delete alert" aria-label="Delete">&times;</button>';
+      el.querySelector('.uah-del').addEventListener('click', function(ev) {
+        ev.stopPropagation(); ev.preventDefault();
+        _deleteUserPriceAlertById(a.id);
+      });
+      el.addEventListener('mousedown', _onUserAlertHandlePointerDown);
+      el.addEventListener('contextmenu', _onUserAlertHandleContextMenu);
+      layer.appendChild(el);
+      a.handleEl = el;
+    }
+    var y = candleSeries.priceToCoordinate(a.price);
+    if (y == null || !isFinite(y)) {
+      el.style.display = 'none';
+    } else {
+      el.style.display = '';
+      el.style.top = y + 'px';
+      el.style.borderColor = a.color || '#f97316';
+    }
+    el.classList.toggle('paused', !!a.paused);
+    var tx = el.querySelector('.uah-text');
+    if (tx) tx.textContent = _shortUserAlertHandleLabel(a);
+  });
+  Array.prototype.slice.call(layer.children).forEach(function(ch) {
+    var id = ch.dataset.alertId;
+    if (!id || !seen[id]) {
+      ch.remove();
+      _userPriceAlerts.forEach(function(a) { if (a.handleEl === ch) a.handleEl = null; });
+    }
+  });
+}
+
+function _userPriceAlertIndexById(id) {
+  for (var i = 0; i < _userPriceAlerts.length; i++) {
+    if (_userPriceAlerts[i].id === id) return i;
+  }
+  return -1;
+}
+
+function _deleteUserPriceAlertById(id) {
+  var i = _userPriceAlertIndexById(id);
+  if (i >= 0) _removeUserPriceAlertAt(i, true);
+  _closeChartAlertCtxMenu();
+}
+
+function _userPriceAlertHitTestPixel(py) {
+  if (!candleSeries || !_userPriceAlerts.length) return -1;
+  var tol = 10;
+  for (var i = 0; i < _userPriceAlerts.length; i++) {
+    var a = _userPriceAlerts[i];
+    if (a.ticker !== currentTicker) continue;
+    var y = candleSeries.priceToCoordinate(a.price);
+    if (y == null || !isFinite(y)) continue;
+    if (Math.abs(y - py) <= tol) return i;
+  }
+  return -1;
+}
+
+function _closeChartAlertCtxMenu() {
+  var m = document.getElementById('chart-alert-ctx-menu');
+  var fly = document.getElementById('ctx-uap-color-flyout');
+  var tog = document.getElementById('ctx-uap-color-toggle');
+  if (m) { m.classList.add('hidden'); m.setAttribute('aria-hidden', 'true'); }
+  if (fly) fly.classList.add('hidden');
+  if (tog) tog.setAttribute('aria-expanded', 'false');
+  _chartAlertCtxTargetId = '';
+  if (_chartAlertCtxDocBound) {
+    document.removeEventListener('mousedown', _chartAlertCtxDocMouse, true);
+    _chartAlertCtxDocBound = false;
+  }
+}
+
+function _chartAlertCtxDocMouse(ev) {
+  var m = document.getElementById('chart-alert-ctx-menu');
+  if (!m || m.classList.contains('hidden')) return;
+  if (m.contains(ev.target)) return;
+  _closeChartAlertCtxMenu();
+}
+
+function _openChartAlertCtxMenuAtEvent(ev, alertId) {
+  _closeChartCtxMenu();
+  var m = document.getElementById('chart-alert-ctx-menu');
+  if (!m) return;
+  _chartAlertCtxTargetId = alertId;
+  var idx = _userPriceAlertIndexById(alertId);
+  var a = idx >= 0 ? _userPriceAlerts[idx] : null;
+  var pauseLab = document.getElementById('ctx-uap-pause-label');
+  if (pauseLab) pauseLab.textContent = (a && a.paused) ? 'Resume' : 'Pause';
+  var chk = document.getElementById('ctx-uap-lines-check');
+  if (chk) chk.classList.toggle('hidden', !_userAlertLinesGloballyVisible());
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+  var w = m.offsetWidth || 220;
+  var h = m.offsetHeight || 200;
+  var x = ev.clientX;
+  var y = ev.clientY;
+  if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
+  if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+  if (!_chartAlertCtxDocBound) {
+    document.addEventListener('mousedown', _chartAlertCtxDocMouse, true);
+    _chartAlertCtxDocBound = true;
+  }
+}
+
+function _onUserAlertHandleContextMenu(ev) {
+  ev.preventDefault();
+  ev.stopPropagation();
+  var id = ev.currentTarget && ev.currentTarget.dataset ? ev.currentTarget.dataset.alertId : '';
+  if (!id) return;
+  _openChartAlertCtxMenuAtEvent(ev, id);
+}
+
+function _onUserAlertHandlePointerDown(ev) {
+  if (ev.button !== 0) return;
+  if (ev.target.closest && ev.target.closest('.uah-del')) return;
+  var id = ev.currentTarget && ev.currentTarget.dataset ? ev.currentTarget.dataset.alertId : '';
+  if (!id) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  var idx = _userPriceAlertIndexById(id);
+  if (idx < 0) return;
+  var el = ev.currentTarget;
+  el.classList.add('dragging');
+  _userAlertDragState = { id: id, startY: ev.clientY };
+  document.addEventListener('mousemove', _onUserAlertDragMove, true);
+  document.addEventListener('mouseup', _onUserAlertDragUp, true);
+}
+
+function _onUserAlertDragMove(ev) {
+  if (!_userAlertDragState || !candleSeries) return;
+  var mc = document.getElementById('main-chart');
+  if (!mc) return;
+  var r = mc.getBoundingClientRect();
+  var py = ev.clientY - r.top;
+  var price = candleSeries.coordinateToPrice(py);
+  if (price == null || !isFinite(price)) return;
+  var mm = smartMinMove(price);
+  if (mm && mm > 0) price = Math.round(price / mm) * mm;
+  var idx = _userPriceAlertIndexById(_userAlertDragState.id);
+  if (idx < 0) return;
+  var a = _userPriceAlerts[idx];
+  a.price = price;
+  if (a.lineHandle) {
+    try {
+      a.lineHandle.applyOptions({
+        price: price,
+        title: _chartAlertLineTitle(a.message, price),
+        color: a.color || '#f97316',
+      });
+    } catch (e) {}
+  }
+  if (a.handleEl) {
+    var y = candleSeries.priceToCoordinate(price);
+    if (y != null && isFinite(y)) a.handleEl.style.top = y + 'px';
+  }
+}
+
+function _onUserAlertDragUp() {
+  document.removeEventListener('mousemove', _onUserAlertDragMove, true);
+  document.removeEventListener('mouseup', _onUserAlertDragUp, true);
+  if (_userAlertDragState) {
+    var idx = _userPriceAlertIndexById(_userAlertDragState.id);
+    if (idx >= 0) _persistUserAlertsForTicker(currentTicker);
+    var a = idx >= 0 ? _userPriceAlerts[idx] : null;
+    if (a && a.handleEl) a.handleEl.classList.remove('dragging');
+  }
+  _userAlertDragState = null;
+  _scheduleUserAlertHandleLayout();
+}
+
+function _initChartAlertCtxMenu() {
+  var m = document.getElementById('chart-alert-ctx-menu');
+  if (!m) return;
+  m.addEventListener('click', function(ev) { ev.stopPropagation(); });
+  var p = document.getElementById('ctx-uap-pause');
+  if (p) p.onclick = function() {
+    var idx = _userPriceAlertIndexById(_chartAlertCtxTargetId);
+    if (idx >= 0) {
+      _userPriceAlerts[idx].paused = !_userPriceAlerts[idx].paused;
+      _persistUserAlertsForTicker(currentTicker);
+      _syncUserAlertHandlesDOM();
+    }
+    _closeChartAlertCtxMenu();
+  };
+  var ed = document.getElementById('ctx-uap-edit');
+  if (ed) ed.onclick = function() {
+    var idx = _userPriceAlertIndexById(_chartAlertCtxTargetId);
+    if (idx >= 0) _openChartAlertModalForEdit(_userPriceAlerts[idx]);
+    _closeChartAlertCtxMenu();
+  };
+  var del = document.getElementById('ctx-uap-delete');
+  if (del) del.onclick = function() {
+    _deleteUserPriceAlertById(_chartAlertCtxTargetId);
+  };
+  var lines = document.getElementById('ctx-uap-lines-toggle');
+  if (lines) lines.onclick = function() {
+    _setUserAlertLinesGloballyVisible(!_userAlertLinesGloballyVisible());
+    _closeChartAlertCtxMenu();
+  };
+  var ct = document.getElementById('ctx-uap-color-toggle');
+  var cf = document.getElementById('ctx-uap-color-flyout');
+  if (ct && cf) {
+    ct.onclick = function(e) {
+      e.stopPropagation();
+      var was = cf.classList.contains('hidden');
+      cf.classList.toggle('hidden', !was);
+      ct.setAttribute('aria-expanded', was ? 'true' : 'false');
+    };
+    var swatches = cf.querySelectorAll('[data-uap-color]');
+    for (var si = 0; si < swatches.length; si++) {
+      (function(btn) {
+        btn.onclick = function(e) {
+          e.stopPropagation();
+          var col = btn.getAttribute('data-uap-color');
+          var idx = _userPriceAlertIndexById(_chartAlertCtxTargetId);
+          if (idx >= 0 && col) {
+            _userPriceAlerts[idx].color = col;
+            var aa = _userPriceAlerts[idx];
+            if (aa.lineHandle) {
+              try {
+                aa.lineHandle.applyOptions({
+                  color: col,
+                  title: _chartAlertLineTitle(aa.message, aa.price),
+                });
+              } catch (e2) {}
+            }
+            _persistUserAlertsForTicker(currentTicker);
+            _syncUserAlertHandlesDOM();
+          }
+          cf.classList.add('hidden');
+          ct.setAttribute('aria-expanded', 'false');
+          _closeChartAlertCtxMenu();
+        };
+      })(swatches[si]);
+    }
+  }
+}
+
+function _hydrateUserPriceAlertsAfterLoad() {
+  _detachUserPriceAlertLines();
+  if (!candleSeries || !currentTicker) return;
+  var specs = _userAlertSpecsForTicker(currentTicker);
+  var lastClose = null;
+  if (_rawOhlcData && _rawOhlcData.length) {
+    lastClose = _rawOhlcData[_rawOhlcData.length - 1].close;
+  }
+  var now = Date.now();
+  var keep = [];
+  specs.forEach(function(s) {
+    if (!s || s.price == null || !isFinite(s.price)) return;
+    if (s.expireAt && now > s.expireAt) return;
+    var specForLine = {
+      price: Number(s.price), message: s.message || '', color: s.color || '#f97316',
+    };
+    var line = _userAlertLinesGloballyVisible() ? _createUserAlertLine(specForLine) : null;
+    keep.push({
+      id: s.id || String(Date.now()) + '_' + Math.random().toString(36).slice(2, 7),
+      ticker: currentTicker,
+      price: Number(s.price),
+      condition: s.condition || 'crossing',
+      triggerOnce: s.triggerOnce !== false,
+      expireAt: s.expireAt || null,
+      message: s.message || '',
+      toast: s.toast !== false,
+      sound: s.sound !== false,
+      paused: !!s.paused,
+      color: s.color || '#f97316',
+      lineHandle: line,
+      handleEl: null,
+      prevRefPrice: lastClose != null && isFinite(lastClose) ? lastClose : null,
+      fired: false,
+    });
+  });
+  _userPriceAlerts = keep;
+  _scheduleUserAlertHandleLayout();
+}
+
+function _removeUserPriceAlertAt(i, persist) {
+  var a = _userPriceAlerts[i];
+  if (!a) return;
+  if (a.lineHandle) {
+    try { a.lineHandle.remove(); } catch (e) {}
+  }
+  if (a.handleEl) {
+    try { a.handleEl.remove(); } catch (e2) {}
+    a.handleEl = null;
+  }
+  _userPriceAlerts.splice(i, 1);
+  if (persist) _persistUserAlertsForTicker(currentTicker);
+}
+
+function _fireUserPriceAlert(a, price) {
+  if (a.toast) {
+    _showAlertToast({
+      type: 'alert',
+      ticker: a.ticker || currentTicker,
+      alert_type: 'Price alert',
+      price: price,
+      message: a.message || (a.ticker + ' @ ' + smartPrice(a.price, (a.ticker || '').indexOf('-USD') !== -1)),
+    }, !a.sound);
+  }
+  if (!a.toast && a.sound && _alertSoundEnabled) {
+    try {
+      var ac = new (window.AudioContext || window.webkitAudioContext)();
+      var osc = ac.createOscillator();
+      var gain = ac.createGain();
+      osc.connect(gain); gain.connect(ac.destination);
+      osc.type = 'sine'; osc.frequency.value = 880;
+      gain.gain.value = 0.1;
+      osc.start(); osc.stop(ac.currentTime + 0.12);
+    } catch (e) {}
+  }
+}
+
+function _evaluateUserPriceAlertsOnTick(price) {
+  if (!price || !isFinite(price) || !_userPriceAlerts.length) return;
+  var now = Date.now();
+  for (var i = _userPriceAlerts.length - 1; i >= 0; i--) {
+    var a = _userPriceAlerts[i];
+    if (a.ticker !== currentTicker) continue;
+    if (a.paused) continue;
+    if (a.expireAt && now > a.expireAt) {
+      _removeUserPriceAlertAt(i, true);
+      continue;
+    }
+    var L = a.price;
+    var prev = a.prevRefPrice;
+    if (prev == null || !isFinite(prev)) {
+      a.prevRefPrice = price;
+      continue;
+    }
+    var isCross = a.condition === 'crossing' || a.condition === 'crossing_up' || a.condition === 'crossing_down';
+    var fire = false;
+    if (a.condition === 'crossing') fire = (prev < L && price >= L) || (prev > L && price <= L);
+    else if (a.condition === 'crossing_up') fire = prev < L && price >= L;
+    else if (a.condition === 'crossing_down') fire = prev > L && price <= L;
+    else if (a.condition === 'gte') fire = price >= L;
+    else if (a.condition === 'lte') fire = price <= L;
+
+    if (!fire) {
+      a.prevRefPrice = price;
+      continue;
+    }
+
+    if (isCross && !a.triggerOnce) {
+      _fireUserPriceAlert(a, price);
+      a.prevRefPrice = price;
+      continue;
+    }
+
+    if (isCross && a.triggerOnce) {
+      _fireUserPriceAlert(a, price);
+      _removeUserPriceAlertAt(i, true);
+      continue;
+    }
+
+    if (!isCross) {
+      if (a.fired && a.triggerOnce) {
+        a.prevRefPrice = price;
+        continue;
+      }
+      _fireUserPriceAlert(a, price);
+      if (a.triggerOnce) _removeUserPriceAlertAt(i, true);
+      else a.prevRefPrice = price;
+    }
+  }
+}
+
+function _defaultCamMessage(ticker, condition, priceNum) {
+  var t = ticker || '';
+  var isCr = t.indexOf('-USD') !== -1;
+  var p = smartPrice(priceNum, isCr);
+  var map = { crossing: 'Crossing', crossing_up: 'Crossing up', crossing_down: 'Crossing down', gte: 'At or above', lte: 'At or below' };
+  var lab = map[condition] || 'Crossing';
+  return t + ' ' + lab + ' ' + p;
+}
+
+function _syncCamMessageFromForm() {
+  var msg = document.getElementById('cam-message');
+  var cond = document.getElementById('cam-condition');
+  var val = document.getElementById('cam-value');
+  if (!msg || !cond || !val) return;
+  var p = parseFloat(val.value);
+  if (isNaN(p) || !isFinite(p)) return;
+  if (msg.dataset.userEdited === '1') return;
+  msg.value = _defaultCamMessage(currentTicker, cond.value, p);
+}
+
+function _onCamConditionChange() {
+  var cond = document.getElementById('cam-condition');
+  var trig = document.getElementById('cam-trigger');
+  if (!cond || !trig) return;
+  var isCross = cond.value.indexOf('crossing') === 0;
+  trig.querySelector('option[value="repeat"]').disabled = !isCross;
+  if (!isCross && trig.value === 'repeat') trig.value = 'once';
+  _syncCamMessageFromForm();
+}
+
+function _openChartAlertModal(prefillPrice) {
+  var eid = document.getElementById('cam-edit-id');
+  if (eid) eid.value = '';
+  var sub = document.getElementById('cam-submit-btn');
+  if (sub) sub.textContent = 'Create alert';
+  var ov = document.getElementById('chart-alert-modal');
+  if (!ov) return;
+  var tickEl = document.getElementById('cam-ticker');
+  if (tickEl) tickEl.textContent = currentTicker || '—';
+  var valIn = document.getElementById('cam-value');
+  var cond = document.getElementById('cam-condition');
+  var trig = document.getElementById('cam-trigger');
+  var exp = document.getElementById('cam-expires');
+  var msg = document.getElementById('cam-message');
+  if (valIn) {
+    if (prefillPrice != null && isFinite(prefillPrice)) valIn.value = String(prefillPrice);
+    else if (_lastCrosshairPrice != null && isFinite(_lastCrosshairPrice)) valIn.value = String(_lastCrosshairPrice);
+    else valIn.value = '';
+  }
+  if (cond) cond.value = 'crossing';
+  if (trig) { trig.value = 'once'; _onCamConditionChange(); }
+  if (exp) {
+    var d = new Date();
+    d.setDate(d.getDate() + 30);
+    exp.value = d.toISOString().slice(0, 16);
+  }
+  if (msg) {
+    msg.dataset.userEdited = '0';
+    msg.value = '';
+    var p = parseFloat(valIn && valIn.value);
+    if (!isNaN(p) && isFinite(p)) msg.value = _defaultCamMessage(currentTicker, cond ? cond.value : 'crossing', p);
+  }
+  ov.classList.add('active');
+  ov.setAttribute('aria-hidden', 'false');
+  if (valIn) setTimeout(function() { valIn.focus(); valIn.select && valIn.select(); }, 50);
+}
+
+function _openChartAlertModalForEdit(a) {
+  if (!a) return;
+  var eid = document.getElementById('cam-edit-id');
+  if (eid) eid.value = a.id;
+  var sub = document.getElementById('cam-submit-btn');
+  if (sub) sub.textContent = 'Save changes';
+  var ov = document.getElementById('chart-alert-modal');
+  if (!ov) return;
+  var tickEl = document.getElementById('cam-ticker');
+  if (tickEl) tickEl.textContent = a.ticker || currentTicker || '—';
+  var valIn = document.getElementById('cam-value');
+  var cond = document.getElementById('cam-condition');
+  var trig = document.getElementById('cam-trigger');
+  var exp = document.getElementById('cam-expires');
+  var msg = document.getElementById('cam-message');
+  var toastCb = document.getElementById('cam-toast');
+  var soundCb = document.getElementById('cam-sound');
+  if (valIn) valIn.value = String(a.price);
+  if (cond) cond.value = a.condition || 'crossing';
+  if (trig) {
+    trig.value = a.triggerOnce === false ? 'repeat' : 'once';
+    _onCamConditionChange();
+  }
+  if (exp) {
+    if (a.expireAt) {
+      exp.value = new Date(a.expireAt).toISOString().slice(0, 16);
+    } else {
+      exp.value = '';
+    }
+  }
+  if (msg) {
+    msg.dataset.userEdited = '1';
+    msg.value = a.message || '';
+  }
+  if (toastCb) toastCb.checked = a.toast !== false;
+  if (soundCb) soundCb.checked = a.sound !== false;
+  ov.classList.add('active');
+  ov.setAttribute('aria-hidden', 'false');
+  if (valIn) setTimeout(function() { valIn.focus(); valIn.select && valIn.select(); }, 50);
+}
+
+function _closeChartAlertModal() {
+  var ov = document.getElementById('chart-alert-modal');
+  if (ov) { ov.classList.remove('active'); ov.setAttribute('aria-hidden', 'true'); }
+  var eid = document.getElementById('cam-edit-id');
+  if (eid) eid.value = '';
+  var sub = document.getElementById('cam-submit-btn');
+  if (sub) sub.textContent = 'Create alert';
+}
+
+function _submitChartAlertModal() {
+  var valIn = document.getElementById('cam-value');
+  var cond = document.getElementById('cam-condition');
+  var trig = document.getElementById('cam-trigger');
+  var exp = document.getElementById('cam-expires');
+  var msg = document.getElementById('cam-message');
+  var toastCb = document.getElementById('cam-toast');
+  var soundCb = document.getElementById('cam-sound');
+  var editEl = document.getElementById('cam-edit-id');
+  var editId = editEl && editEl.value ? editEl.value : '';
+  if (!candleSeries || !currentTicker) { _closeChartAlertModal(); return; }
+  var price = valIn ? parseFloat(valIn.value) : NaN;
+  if (isNaN(price) || !isFinite(price)) {
+    alert('Enter a valid price.');
+    return;
+  }
+  var condition = cond ? cond.value : 'crossing';
+  var triggerOnce = !trig || trig.value !== 'repeat';
+  var expireAt = null;
+  if (exp && exp.value) {
+    var ts = new Date(exp.value).getTime();
+    if (!isNaN(ts)) expireAt = ts;
+  }
+  var message = msg ? msg.value.trim() : '';
+  if (!message) message = _defaultCamMessage(currentTicker, condition, price);
+  var toastOk = toastCb ? toastCb.checked : true;
+  var soundOk = soundCb ? soundCb.checked : true;
+
+  if (editId) {
+    var ei = _userPriceAlertIndexById(editId);
+    if (ei < 0) { _closeChartAlertModal(); return; }
+    var a = _userPriceAlerts[ei];
+    a.price = price;
+    a.condition = condition;
+    a.triggerOnce = triggerOnce;
+    a.expireAt = expireAt;
+    a.message = message;
+    a.toast = toastOk;
+    a.sound = soundOk;
+    if (a.lineHandle) {
+      try {
+        a.lineHandle.applyOptions({
+          price: price,
+          title: _chartAlertLineTitle(message, price),
+          color: a.color || '#f97316',
+        });
+      } catch (e) {}
+    }
+    _persistUserAlertsForTicker(currentTicker);
+    _closeChartAlertModal();
+    _syncUserAlertHandlesDOM();
+    _scheduleUserAlertHandleLayout();
+    return;
+  }
+
+  var id = String(Date.now()) + '_' + Math.random().toString(36).slice(2, 9);
+  var spec = {
+    id: id, ticker: currentTicker, price: price, condition: condition, triggerOnce: triggerOnce,
+    expireAt: expireAt, message: message, toast: toastOk, sound: soundOk, color: '#f97316',
+  };
+  var line = _userAlertLinesGloballyVisible() ? _createUserAlertLine(spec) : null;
+  var lastClose = null;
+  if (_rawOhlcData && _rawOhlcData.length) lastClose = _rawOhlcData[_rawOhlcData.length - 1].close;
+  _userPriceAlerts.push({
+    id: id, ticker: currentTicker, price: price, condition: condition, triggerOnce: triggerOnce,
+    expireAt: expireAt, message: message, toast: toastOk, sound: soundOk,
+    paused: false, color: '#f97316',
+    lineHandle: line, handleEl: null,
+    prevRefPrice: lastClose != null && isFinite(lastClose) ? lastClose : null, fired: false,
+  });
+  _persistUserAlertsForTicker(currentTicker);
+  _closeChartAlertModal();
+  _syncUserAlertHandlesDOM();
+  _scheduleUserAlertHandleLayout();
+}
+
+function addChartAlert(price) {
+  _openChartAlertModal(price);
+}
+
 function _promptChartAlert() {
-  var val = prompt('Enter price level for alert line:');
-  if (val) { var p = parseFloat(val); if (!isNaN(p)) addChartAlert(p); }
+  _openChartAlertModal(null);
+}
+
+function _initChartAlertModal() {
+  var msg = document.getElementById('cam-message');
+  var valIn = document.getElementById('cam-value');
+  if (msg) {
+    msg.addEventListener('input', function() { msg.dataset.userEdited = '1'; });
+  }
+  if (valIn) valIn.addEventListener('input', function() { _syncCamMessageFromForm(); });
 }
 
 function toggleComparePanel() {
@@ -3723,6 +4790,7 @@ function _initOhlcTooltip(chartEl) {
     var _isCr = (currentTicker||'').indexOf('-USD') !== -1;
     tip.style.opacity = '1';
     if (d.open != null && d.close != null) {
+    _lastCrosshairPrice = d.close;
     var chg = d.close - d.open;
     var pct = d.open !== 0 ? ((chg / d.open) * 100).toFixed(2) : '0.00';
     var clr = chg >= 0 ? '#22c55e' : '#ef4444';
@@ -3734,6 +4802,7 @@ function _initOhlcTooltip(chartEl) {
       '<span>C <b style="color:' + clr + '">' + smartPrice(d.close, _isCr) + '</b></span>' +
       '<span style="color:' + clr + '">' + sign + smartPrice(chg, _isCr) + ' (' + sign + pct + '%)</span>';
     } else if (d.value != null) {
+      _lastCrosshairPrice = d.value;
       tip.innerHTML = '<span>Price <b>' + smartPrice(d.value, _isCr) + '</b></span>';
     }
   });
@@ -3764,6 +4833,8 @@ function loadChart() {
         document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">No data for ' + currentTicker + '</em>';
         candleSeries.setData([]);
         volumeSeries.setData([]);
+        _rawOhlcData = [];
+        _hydrateUserPriceAlertsAfterLoad();
         _pendingAnnotationFn = null;
         return;
       }
@@ -3784,9 +4855,11 @@ function loadChart() {
         try { _pendingAnnotationFn(d.data); } catch(e) { console.error('[loadChart] annotation callback error:', e); }
         _pendingAnnotationFn = null;
       }
+      _hydrateUserPriceAlertsAfterLoad();
     }).catch(function() {
       _hideChartOverlay();
       _pendingAnnotationFn = null;
+      _detachUserPriceAlertLines();
       document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">Error loading chart</em>';
     });
 }
@@ -3952,6 +5025,7 @@ function _handleLiveTick(msg) {
       lbl.innerHTML = '<strong>$' + price.toFixed(2) + '</strong>';
     }
   }
+  _evaluateUserPriceAlertsOnTick(price);
 }
 
 function _disconnectLiveWS() {
@@ -3971,7 +5045,7 @@ function _reconnectLiveForTicker() {
 var _alertSoundEnabled = true;
 var _toastAutoDismissMs = 10000;
 
-function _showAlertToast(msg) {
+function _showAlertToast(msg, skipSound) {
   var container = document.getElementById('alert-toast-container');
   if (!container) return;
 
@@ -4000,7 +5074,7 @@ function _showAlertToast(msg) {
 
   container.appendChild(toast);
 
-  if (_alertSoundEnabled) {
+  if (_alertSoundEnabled && !skipSound) {
     try {
       var ac = new (window.AudioContext || window.webkitAudioContext)();
       var osc = ac.createOscillator();
@@ -4058,6 +5132,7 @@ function changeInterval(v) {
 
 var _selectDebounce = null;
 function selectTicker(t) {
+  _detachUserPriceAlertLines();
   currentTicker = t.toUpperCase();
   clearAnnotations();
   _loadDrawings();
@@ -4112,6 +5187,36 @@ function loadTickerDetail(ticker) {
     });
 }
 
+function openNewsReader(url, title, source, pubDate) {
+  if (!url || url === '#') return;
+  var overlay = document.getElementById('news-reader-overlay');
+  var titleEl = document.getElementById('nr-title');
+  var sourceEl = document.getElementById('nr-source');
+  var openEl = document.getElementById('nr-open');
+  var primaryOpen = document.getElementById('nr-primary-open');
+  var previewTitle = document.getElementById('nr-preview-title');
+  var previewMeta = document.getElementById('nr-preview-meta');
+  if (!overlay) return;
+  if (titleEl) titleEl.textContent = title || '';
+  if (sourceEl) sourceEl.textContent = source || '';
+  if (openEl) openEl.href = url;
+  if (primaryOpen) primaryOpen.href = url;
+  if (previewTitle) previewTitle.textContent = title || '';
+  if (previewMeta) {
+    var metaParts = [];
+    if (source) metaParts.push(source);
+    if (pubDate) metaParts.push(pubDate);
+    previewMeta.textContent = metaParts.join(' · ');
+  }
+  overlay.classList.add('active');
+}
+
+function closeNewsReader() {
+  var overlay = document.getElementById('news-reader-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('active');
+}
+
 function loadTickerNews(ticker) {
   var container = document.getElementById('ticker-news-cards');
   if (!container) return;
@@ -4124,15 +5229,24 @@ function loadTickerNews(ticker) {
       if (!d.ok || !d.news || !d.news.length) { container.innerHTML = ''; return; }
       var html = '';
       d.news.forEach(function(n) {
-        var url = (n.url || '#').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;');
+        var rawUrl = (n.url || '').trim();
+        var escJsAttr = function(s) {
+          return String(s || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/\r?\n/g, ' ')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '&quot;');
+        };
+        var url = rawUrl ? escJsAttr(rawUrl) : '#';
         var rawTitle = (n.title || '').substring(0, 100);
         var title = escHtml(rawTitle);
         var src = n.publisher ? escHtml(n.publisher) : '';
-        var safeTitle = rawTitle.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-        var safeSrc = (n.publisher || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        var safeTitle = escJsAttr(rawTitle);
+        var safeSrc = escJsAttr(n.publisher || '');
+        var safeDate = escJsAttr(n.date || '');
         var sent = n.sentiment || 'neutral';
         var badge = sent !== 'neutral' ? '<span class="nc-badge ' + sent + '">' + sent + '</span>' : '';
-        html += '<div class="news-card" onclick="openNewsReader(\'' + url + '\',\'' + safeTitle + '\',\'' + safeSrc + '\')" style="cursor:pointer">';
+        html += '<div class="news-card" onclick="openNewsReader(\'' + url + '\',\'' + safeTitle + '\',\'' + safeSrc + '\',\'' + safeDate + '\')" style="cursor:pointer">';
         html += badge;
         html += '<div class="nc-title">' + title + '</div>';
         if (src) html += '<div class="nc-meta">' + src + '</div>';
@@ -4170,6 +5284,364 @@ function prefetchWatchlistPrices() {
         }
       });
     }).catch(function() {});
+}
+
+function clearAllActiveIndicators() {
+  var ids = Array.from(activeIndicators);
+  ids.forEach(function(id) {
+    activeIndicators.delete(id);
+    removeIndicatorSeries(id);
+  });
+  buildIndicatorPanel();
+}
+
+function _chartCtxResetView() {
+  if (chart) chart.timeScale().fitContent();
+}
+
+function _closeChartCtxMenu() {
+  var m = document.getElementById('chart-context-menu');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.setAttribute('aria-hidden', 'true');
+  var fly = document.getElementById('ctx-template-flyout');
+  var tog = document.getElementById('ctx-template-toggle');
+  if (fly) fly.classList.add('hidden');
+  if (tog) tog.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('mousedown', _chartCtxDocMouse, true);
+  document.removeEventListener('keydown', _chartCtxEsc, true);
+}
+
+function _chartCtxDocMouse(ev) {
+  var m = document.getElementById('chart-context-menu');
+  if (!m || m.classList.contains('hidden')) return;
+  if (m.contains(ev.target)) return;
+  _closeChartCtxMenu();
+}
+
+function _chartCtxEsc(ev) {
+  if (ev.key !== 'Escape') return;
+  _closeChartCtxMenu();
+  _closeChartAlertCtxMenu();
+  _closeChartTableModal();
+  _closeChartObjModal();
+  _closeChartSettingsModal();
+  _closeChartAlertModal();
+}
+
+function _positionChartCtxMenu(clientX, clientY) {
+  var m = document.getElementById('chart-context-menu');
+  if (!m) return;
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+  var w = m.offsetWidth || 260;
+  var h = m.offsetHeight || 200;
+  var x = clientX;
+  var y = clientY;
+  if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
+  if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
+  if (x < 8) x = 8;
+  if (y < 8) y = 8;
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+  document.removeEventListener('mousedown', _chartCtxDocMouse, true);
+  document.addEventListener('mousedown', _chartCtxDocMouse, true);
+  document.removeEventListener('keydown', _chartCtxEsc, true);
+  document.addEventListener('keydown', _chartCtxEsc, true);
+}
+
+function _openChartCtxMenuAtEvent(e, numericPrice, priceDisplay) {
+  _closeChartAlertCtxMenu();
+  _ctxMenuPrice = numericPrice;
+  var t = currentTicker || '';
+  var copyLab = document.getElementById('ctx-copy-label');
+  var alertLab = document.getElementById('ctx-alert-label');
+  var remLab = document.getElementById('ctx-remove-ind-label');
+  var _isCr = t.indexOf('-USD') !== -1;
+  if (priceDisplay && copyLab) copyLab.textContent = 'Copy price ' + priceDisplay;
+  else if (copyLab) copyLab.textContent = 'Copy price';
+  if (alertLab) {
+    alertLab.textContent = (numericPrice != null && isFinite(numericPrice))
+      ? ('Add alert on ' + t + ' at ' + (priceDisplay || smartPrice(numericPrice, _isCr)))
+      : ('Add alert on ' + t + '…');
+  }
+  var n = activeIndicators.size;
+  if (remLab) remLab.textContent = n ? ('Remove ' + n + ' indicator' + (n !== 1 ? 's' : '')) : 'Remove indicators';
+  var btnCopy = document.getElementById('ctx-copy-price');
+  var btnAlert = document.getElementById('ctx-add-alert');
+  if (btnCopy) btnCopy.disabled = !(numericPrice != null && isFinite(numericPrice));
+  if (btnAlert) btnAlert.disabled = !(numericPrice != null && isFinite(numericPrice));
+  var btnRem = document.getElementById('ctx-remove-indicators');
+  if (btnRem) btnRem.disabled = n === 0;
+  _positionChartCtxMenu(e.clientX, e.clientY);
+}
+
+function _chartCtxCopyPrice() {
+  if (_ctxMenuPrice == null || !isFinite(_ctxMenuPrice)) return;
+  var t = (currentTicker || '').indexOf('-USD') !== -1;
+  var s = String(smartPrice(_ctxMenuPrice, t));
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(s).catch(function() { window.prompt('Copy:', s); });
+  } else {
+    window.prompt('Copy:', s);
+  }
+  _closeChartCtxMenu();
+}
+
+function _chartCtxPastePrice() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    var v = window.prompt('Paste price value:');
+    if (v) _applyPastedPriceAlert(v);
+    _closeChartCtxMenu();
+    return;
+  }
+  navigator.clipboard.readText().then(function(txt) {
+    _applyPastedPriceAlert(txt);
+    _closeChartCtxMenu();
+  }).catch(function() { _closeChartCtxMenu(); });
+}
+
+function _applyPastedPriceAlert(txt) {
+  if (!txt) return;
+  var cleaned = String(txt).replace(/[$\s,]/g, '').replace(/,/g, '');
+  var p = parseFloat(cleaned);
+  if (!isNaN(p) && isFinite(p)) addChartAlert(p);
+}
+
+function _chartCtxAddAlertFromMenu() {
+  if (_ctxMenuPrice != null && isFinite(_ctxMenuPrice)) addChartAlert(_ctxMenuPrice);
+  _closeChartCtxMenu();
+}
+
+function _chartCtxAddAlertShortcut() {
+  if (_lastCrosshairPrice != null && isFinite(_lastCrosshairPrice)) addChartAlert(_lastCrosshairPrice);
+  else _promptChartAlert();
+}
+
+function _saveChartTemplate() {
+  try {
+    localStorage.setItem(CHART_TEMPLATE_STORAGE_KEY, JSON.stringify({
+      interval: currentInterval,
+      period: currentPeriod,
+      indicators: Array.from(activeIndicators),
+      theme: document.documentElement.getAttribute('data-theme') || 'dark',
+    }));
+  } catch (err) {}
+  _closeChartCtxMenu();
+}
+
+function _loadChartTemplate() {
+  try {
+    var s = localStorage.getItem(CHART_TEMPLATE_STORAGE_KEY);
+    if (!s) return;
+    var p = JSON.parse(s);
+    activeIndicators.clear();
+    (p.indicators || []).forEach(function(id) { if (typeof id === 'string') activeIndicators.add(id); });
+    buildIndicatorPanel();
+    var legacyInt = document.getElementById('interval-select');
+    if (legacyInt && typeof changeInterval === 'function' && p.interval) {
+      changeInterval(p.interval);
+      if (p.period && typeof changePeriod === 'function') changePeriod(p.period);
+    } else {
+      if (p.interval) {
+        currentInterval = p.interval;
+        if (typeof _syncIntervalUi === 'function') _syncIntervalUi(currentInterval);
+      }
+      if (p.period) currentPeriod = p.period;
+      loadChart();
+    }
+    if (p.theme) document.documentElement.setAttribute('data-theme', p.theme);
+    if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
+  } catch (err) {}
+  _closeChartCtxMenu();
+}
+
+function _resetChartTemplateDefault() {
+  try { localStorage.removeItem(CHART_TEMPLATE_STORAGE_KEY); } catch (e) {}
+  activeIndicators.clear();
+  buildIndicatorPanel();
+  currentInterval = '1d';
+  currentPeriod = '1y';
+  var legacyInt = document.getElementById('interval-select');
+  if (legacyInt && typeof changeInterval === 'function') {
+    changeInterval('1d');
+    if (typeof changePeriod === 'function') changePeriod('1y');
+  } else {
+    if (typeof _syncIntervalUi === 'function') _syncIntervalUi('1d');
+    loadChart();
+  }
+  if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
+  _closeChartCtxMenu();
+}
+
+function _openChartTableModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-table-modal');
+  var wrap = document.getElementById('chart-table-wrap');
+  var lab = document.getElementById('chart-table-ticker');
+  if (!overlay || !wrap) return;
+  if (lab) lab.textContent = currentTicker || '—';
+  if (!_rawOhlcData || !_rawOhlcData.length) {
+    wrap.innerHTML = '<p style="font-size:12px;color:var(--text-muted)">No chart data loaded.</p>';
+  } else {
+    var _isCr = (currentTicker || '').indexOf('-USD') !== -1;
+    var rows = _rawOhlcData.map(function(c) {
+      var ts = typeof c.time === 'number' ? c.time : parseInt(c.time, 10);
+      var d = new Date(ts * 1000);
+      var ds = isNaN(d.getTime()) ? String(c.time) : d.toLocaleString();
+      return '<tr><td>' + escHtml(ds) + '</td><td>' + escHtml(String(smartPrice(c.open, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.high, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.low, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.close, _isCr))) + '</td><td>' + escHtml(String(c.volume != null ? c.volume : '')) + '</td></tr>';
+    }).join('');
+    wrap.innerHTML = '<table><thead><tr><th>Time</th><th>O</th><th>H</th><th>L</th><th>C</th><th>Vol</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function _closeChartTableModal() {
+  var overlay = document.getElementById('chart-table-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _openChartObjModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-obj-modal');
+  var body = document.getElementById('chart-obj-modal-body');
+  if (!overlay || !body) return;
+  var indLines = [];
+  activeIndicators.forEach(function(id) {
+    var meta = INDICATORS.find(function(i) { return i.id === id; });
+    indLines.push(meta ? meta.label : id);
+  });
+  var indHtml = indLines.length ? indLines.map(function(l) { return '• ' + escHtml(l); }).join('<br/>') : 'No indicators active.';
+  var dCount = (_userDrawings && _userDrawings.length) ? _userDrawings.length : 0;
+  body.innerHTML =
+    '<div class="chart-ctx-obj-list"><strong>Indicators</strong><br/>' + indHtml +
+    '<br/><br/><strong>Drawings</strong><br/>' + dCount + ' object(s) on chart (session)</div>' +
+    '<div class="chart-ctx-obj-actions">' +
+    '<button type="button" onclick="clearAllActiveIndicators();_refreshObjModalIfOpen()">Remove all indicators</button>' +
+    '<button type="button" onclick="_clearAllDrawings();_refreshObjModalIfOpen()">Clear drawings</button>' +
+    '</div>';
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function _refreshObjModalIfOpen() {
+  var o = document.getElementById('chart-obj-modal');
+  if (o && o.classList.contains('active')) _openChartObjModal();
+}
+
+function _closeChartObjModal() {
+  var overlay = document.getElementById('chart-obj-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _openChartSettingsModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-settings-modal');
+  var el = document.getElementById('chart-settings-shortcuts');
+  if (el) {
+    el.textContent = 'L Trend line | Y Ray | H H-line | V V-line | C Channel | R Rectangle | F Fib | A Arrow | N Callout | G Measure | T Text | S Magnet | E Eraser | X Clear drawings | Ctrl+Z Undo';
+  }
+  if (overlay) { overlay.classList.add('active'); overlay.setAttribute('aria-hidden', 'false'); }
+}
+
+function _closeChartSettingsModal() {
+  var overlay = document.getElementById('chart-settings-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _scrollToIndPanel() {
+  var p = document.getElementById('ind-panel');
+  if (p) p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  _closeChartSettingsModal();
+}
+
+function _initChartContextMenu() {
+  var area = document.getElementById('chart-area');
+  if (!area) return;
+  area.addEventListener('contextmenu', function(ev) {
+    var grid = document.getElementById('multi-chart-grid');
+    if (grid && !grid.classList.contains('hidden')) return;
+    var dc = document.getElementById('draw-canvas');
+    if (dc && ev.target === dc && dc.classList.contains('drawing') && _drawTool) return;
+    var mc = document.getElementById('main-chart');
+    if (!mc || !chart || !candleSeries) return;
+    var r = mc.getBoundingClientRect();
+    if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) return;
+    var py = ev.clientY - r.top;
+    var hitAlert = _userPriceAlertHitTestPixel(py);
+    if (hitAlert >= 0) {
+      ev.preventDefault();
+      ev.stopPropagation();
+      _openChartAlertCtxMenuAtEvent(ev, _userPriceAlerts[hitAlert].id);
+      return;
+    }
+    ev.preventDefault();
+    ev.stopPropagation();
+    var price = candleSeries.coordinateToPrice(py);
+    var t = (currentTicker || '').indexOf('-USD') !== -1;
+    var priceStr = null;
+    var num = null;
+    if (price != null && isFinite(price)) {
+      num = price;
+      priceStr = smartPrice(price, t);
+    }
+    if (num == null && _lastCrosshairPrice != null && isFinite(_lastCrosshairPrice)) {
+      num = _lastCrosshairPrice;
+      priceStr = smartPrice(num, t);
+    }
+    _openChartCtxMenuAtEvent(ev, num, priceStr);
+  }, true);
+
+  var menu = document.getElementById('chart-context-menu');
+  if (!menu) return;
+  menu.addEventListener('click', function(ev) { ev.stopPropagation(); });
+  var elReset = document.getElementById('ctx-reset-view');
+  if (elReset) elReset.onclick = function() { _chartCtxResetView(); _closeChartCtxMenu(); };
+  var elCopy = document.getElementById('ctx-copy-price');
+  if (elCopy) elCopy.onclick = function() { _chartCtxCopyPrice(); };
+  var elPaste = document.getElementById('ctx-paste-price');
+  if (elPaste) elPaste.onclick = function() { _chartCtxPastePrice(); };
+  var elAlert = document.getElementById('ctx-add-alert');
+  if (elAlert) elAlert.onclick = function() { _chartCtxAddAlertFromMenu(); };
+  var elTbl = document.getElementById('ctx-table-view');
+  if (elTbl) elTbl.onclick = function() { _openChartTableModal(); };
+  var elObj = document.getElementById('ctx-object-tree');
+  if (elObj) elObj.onclick = function() { _openChartObjModal(); };
+  var elRem = document.getElementById('ctx-remove-indicators');
+  if (elRem) elRem.onclick = function() {
+    if (activeIndicators.size) clearAllActiveIndicators();
+    _closeChartCtxMenu();
+  };
+  var elSet = document.getElementById('ctx-chart-settings');
+  if (elSet) elSet.onclick = function() { _openChartSettingsModal(); };
+  var tplTog = document.getElementById('ctx-template-toggle');
+  var tplFly = document.getElementById('ctx-template-flyout');
+  if (tplTog && tplFly) {
+    tplTog.onclick = function(e) {
+      e.stopPropagation();
+      var wasHidden = tplFly.classList.contains('hidden');
+      tplFly.classList.toggle('hidden', !wasHidden);
+      tplTog.setAttribute('aria-expanded', wasHidden ? 'true' : 'false');
+    };
+    var ts = document.getElementById('ctx-tpl-save');
+    var tl = document.getElementById('ctx-tpl-load');
+    var tr = document.getElementById('ctx-tpl-reset');
+    if (ts) ts.onclick = function(e) { e.stopPropagation(); _saveChartTemplate(); };
+    if (tl) tl.onclick = function(e) { e.stopPropagation(); _loadChartTemplate(); };
+    if (tr) tr.onclick = function(e) { e.stopPropagation(); _resetChartTemplateDefault(); };
+  }
+  window.addEventListener('scroll', function() { _closeChartCtxMenu(); _closeChartAlertCtxMenu(); }, true);
+  ['chart-table-modal', 'chart-obj-modal', 'chart-settings-modal'].forEach(function(id) {
+    var o = document.getElementById(id);
+    if (!o) return;
+    o.addEventListener('click', function(ev) {
+      if (ev.target !== o) return;
+      if (id === 'chart-table-modal') _closeChartTableModal();
+      else if (id === 'chart-obj-modal') _closeChartObjModal();
+      else _closeChartSettingsModal();
+    });
+  });
 }
 
 /* ── Indicators ─────────────────────────────────── */
@@ -10259,21 +11731,29 @@ function _loadDrawings() {
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
   var k = e.key.toUpperCase();
+  if (k === 'R' && e.altKey && !e.ctrlKey && !e.metaKey) { _chartCtxResetView(); e.preventDefault(); return; }
+  if (k === 'A' && e.altKey && !e.ctrlKey && !e.metaKey) { _chartCtxAddAlertShortcut(); e.preventDefault(); return; }
   if (k === 'L') { _setDrawTool('trendline'); e.preventDefault(); }
-  else if (k === 'Y' && !e.ctrlKey && !e.metaKey) { _setDrawTool('ray'); e.preventDefault(); }
-  else if (k === 'H' && !e.ctrlKey && !e.metaKey) { _setDrawTool('hline'); e.preventDefault(); }
-  else if (k === 'V' && !e.ctrlKey && !e.metaKey) { _setDrawTool('vline'); e.preventDefault(); }
-  else if (k === 'C' && !e.ctrlKey && !e.metaKey) { _setDrawTool('channel'); e.preventDefault(); }
-  else if (k === 'R' && !e.ctrlKey && !e.metaKey) { _setDrawTool('rect'); e.preventDefault(); }
-  else if (k === 'F' && !e.ctrlKey && !e.metaKey) { _setDrawTool('fib'); e.preventDefault(); }
-  else if (k === 'A' && !e.ctrlKey && !e.metaKey) { _setDrawTool('arrow'); e.preventDefault(); }
-  else if (k === 'N' && !e.ctrlKey && !e.metaKey) { _setDrawTool('callout'); e.preventDefault(); }
-  else if (k === 'G' && !e.ctrlKey && !e.metaKey) { _setDrawTool('measure'); e.preventDefault(); }
-  else if (k === 'T' && !e.ctrlKey && !e.metaKey) { _setDrawTool('text'); e.preventDefault(); }
-  else if (k === 'S' && !e.ctrlKey && !e.metaKey) { _toggleMagnet(); e.preventDefault(); }
+  else if (k === 'Y' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('ray'); e.preventDefault(); }
+  else if (k === 'H' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('hline'); e.preventDefault(); }
+  else if (k === 'V' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('vline'); e.preventDefault(); }
+  else if (k === 'C' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('channel'); e.preventDefault(); }
+  else if (k === 'R' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('rect'); e.preventDefault(); }
+  else if (k === 'F' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('fib'); e.preventDefault(); }
+  else if (k === 'A' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('arrow'); e.preventDefault(); }
+  else if (k === 'N' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('callout'); e.preventDefault(); }
+  else if (k === 'G' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('measure'); e.preventDefault(); }
+  else if (k === 'T' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('text'); e.preventDefault(); }
+  else if (k === 'S' && !e.ctrlKey && !e.metaKey && !e.altKey) { _toggleMagnet(); e.preventDefault(); }
   else if (k === 'E') { _setDrawTool('eraser'); e.preventDefault(); }
   else if (k === 'X') { _clearAllDrawings(); e.preventDefault(); }
-  else if (k === 'ESCAPE') { _setDrawTool(null); }
+  else if (k === 'ESCAPE') {
+    _setDrawTool(null);
+    _closeChartCtxMenu();
+    _closeChartTableModal();
+    _closeChartObjModal();
+    _closeChartSettingsModal();
+  }
   else if (k === 'Z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) { _undoDraw(); e.preventDefault(); }
   else if ((k === 'Y' && (e.ctrlKey || e.metaKey)) || (k === 'Z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) { _redoDraw(); e.preventDefault(); }
   else if (k === 'DELETE' || k === 'BACKSPACE') { if (_drawTool === 'eraser') e.preventDefault(); }
@@ -10538,6 +12018,20 @@ function chartScreenshot() {
 
 /* ── Keyboard Shortcuts ────────────────────────── */
 document.addEventListener('keydown', function(e) {
+  if (e.key === 'Escape') {
+    var _camOv = document.getElementById('chart-alert-modal');
+    if (_camOv && _camOv.classList.contains('active')) {
+      _closeChartAlertModal();
+      e.preventDefault();
+      return;
+    }
+    var _uapCtx = document.getElementById('chart-alert-ctx-menu');
+    if (_uapCtx && !_uapCtx.classList.contains('hidden')) {
+      _closeChartAlertCtxMenu();
+      e.preventDefault();
+      return;
+    }
+  }
   var tag = (e.target.tagName || '').toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
 

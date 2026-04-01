@@ -1142,8 +1142,90 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   font-size: 20px; line-height: 1; padding: 0 4px; flex-shrink: 0;
 }
 .news-reader-header .nr-close:hover { color: var(--text); }
-.news-reader-body { flex: 1; overflow: hidden; }
-.news-reader-body iframe { width: 100%; height: 100%; border: none; border-radius: 0 0 14px 14px; }
+.news-reader-body {
+  flex: 1; overflow: auto; min-height: 0;
+  border-radius: 0 0 14px 14px;
+}
+.nr-preview {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 14px; padding: 28px 22px; text-align: center; min-height: 200px;
+}
+.nr-preview-note {
+  font-size: 12px; color: var(--text-muted); max-width: 440px; line-height: 1.55; margin: 0;
+}
+.nr-preview-title {
+  font-size: 15px; font-weight: 600; color: var(--text);
+  max-width: 100%; line-height: 1.4; white-space: normal; margin: 0;
+}
+.nr-preview-meta { font-size: 11px; color: var(--text-muted); margin: 0; }
+.nr-primary-open {
+  display: inline-block; margin-top: 4px; padding: 12px 26px; border-radius: 10px;
+  background: var(--accent, #6366f1); color: #fff !important; font-size: 13px; font-weight: 600;
+  text-decoration: none; transition: opacity .15s, transform .1s;
+}
+.nr-primary-open:hover { opacity: .92; transform: translateY(-1px); }
+
+/* Chart context menu (Lightweight Charts — custom UI) */
+.chart-ctx-menu {
+  position: fixed; z-index: 10050; min-width: 260px; max-width: 320px;
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border);
+  border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35);
+  padding: 4px 0; font-size: 12px; color: var(--text);
+}
+.chart-ctx-menu.hidden { display: none !important; }
+.chart-ctx-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  width: 100%; padding: 8px 14px; border: none; background: none; cursor: pointer;
+  color: inherit; font-size: 12px; text-align: left; font-family: inherit;
+}
+.chart-ctx-item:hover:not(:disabled) { background: rgba(99,102,241,.12); }
+.chart-ctx-item:disabled { opacity: .45; cursor: not-allowed; }
+.chart-ctx-item .ctx-label { flex: 1; min-width: 0; }
+.chart-ctx-kbd { font-size: 10px; color: var(--text-muted); white-space: nowrap; flex-shrink: 0; }
+.chart-ctx-sep { height: 1px; margin: 4px 10px; background: var(--border); border: none; }
+.chart-ctx-row-sub { position: relative; }
+.chart-ctx-item.caret::after { content: '\203A'; color: var(--text-muted); font-size: 14px; margin-left: 6px; }
+.chart-ctx-flyout {
+  position: absolute; left: 100%; top: 0; margin-left: 2px; min-width: 160px;
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border); border-radius: 8px;
+  box-shadow: 0 8px 24px rgba(0,0,0,.3); padding: 4px 0; z-index: 1;
+}
+.chart-ctx-flyout.hidden { display: none !important; }
+
+.chart-ctx-modal-overlay {
+  display: none; position: fixed; inset: 0; z-index: 10051;
+  background: rgba(0,0,0,.45); align-items: center; justify-content: center; backdrop-filter: blur(2px);
+}
+.chart-ctx-modal-overlay.active { display: flex; }
+.chart-ctx-modal {
+  background: var(--card-bg, var(--bg)); border: 1px solid var(--border); border-radius: 12px;
+  width: min(92vw, 720px); max-height: 85vh; display: flex; flex-direction: column;
+  box-shadow: 0 16px 48px rgba(0,0,0,.35);
+}
+.chart-ctx-modal.wide { width: min(96vw, 900px); }
+.chart-ctx-modal-hd {
+  display: flex; align-items: center; justify-content: space-between; padding: 12px 16px;
+  border-bottom: 1px solid var(--border); font-weight: 600; font-size: 14px;
+}
+.chart-ctx-modal-bd { padding: 12px 16px; overflow: auto; flex: 1; min-height: 0; }
+.chart-ctx-modal-close {
+  background: none; border: none; color: var(--text-muted); font-size: 22px; line-height: 1;
+  cursor: pointer; padding: 0 4px;
+}
+.chart-ctx-modal-close:hover { color: var(--text); }
+.chart-ctx-table-wrap { overflow: auto; max-height: 60vh; border: 1px solid var(--border); border-radius: 8px; }
+.chart-ctx-table-wrap table { width: 100%; border-collapse: collapse; font-size: 11px; font-family: ui-monospace, monospace; }
+.chart-ctx-table-wrap th, .chart-ctx-table-wrap td { padding: 6px 8px; text-align: right; border-bottom: 1px solid var(--border); }
+.chart-ctx-table-wrap th { position: sticky; top: 0; background: var(--bg-header); text-align: right; font-weight: 600; }
+.chart-ctx-table-wrap td:first-child, .chart-ctx-table-wrap th:first-child { text-align: left; }
+.chart-ctx-obj-list { font-size: 12px; color: var(--text-muted); line-height: 1.6; margin: 0 0 12px; }
+.chart-ctx-obj-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.chart-ctx-obj-actions button {
+  padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-header); color: var(--text); font-size: 11px; cursor: pointer;
+}
+.chart-ctx-obj-actions button:hover { border-color: var(--accent); }
+.chart-ctx-settings-shortcuts { font-size: 11px; color: var(--text-muted); line-height: 1.65; white-space: pre-wrap; }
 
 /* Sentiment badge */
 .news-card { position: relative; }
@@ -2539,7 +2621,84 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <button class="nr-close" onclick="closeNewsReader()">&times;</button>
       </div>
       <div class="news-reader-body">
-        <iframe id="nr-iframe" sandbox="allow-scripts allow-same-origin allow-popups" referrerpolicy="no-referrer"></iframe>
+        <div class="nr-preview" id="nr-preview">
+          <p class="nr-preview-note">Most publishers block embedded article previews. Open the story in a new tab to read it.</p>
+          <h2 class="nr-preview-title" id="nr-preview-title"></h2>
+          <p class="nr-preview-meta" id="nr-preview-meta"></p>
+          <a class="nr-primary-open" id="nr-primary-open" href="#" target="_blank" rel="noopener noreferrer">Read full article</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main chart context menu (custom; not from Lightweight Charts) -->
+  <div id="chart-context-menu" class="chart-ctx-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="chart-ctx-item" id="ctx-reset-view" role="menuitem">
+      <span class="ctx-label">Reset chart view</span><span class="chart-ctx-kbd">Alt+R</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-copy-price" role="menuitem">
+      <span class="ctx-label" id="ctx-copy-label">Copy price</span>
+    </button>
+    <button type="button" class="chart-ctx-item" id="ctx-paste-price" role="menuitem">
+      <span class="ctx-label">Paste</span><span class="chart-ctx-kbd">Ctrl+V</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-add-alert" role="menuitem">
+      <span class="ctx-label" id="ctx-alert-label">Add alert at price</span><span class="chart-ctx-kbd">Alt+A</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-table-view" role="menuitem"><span class="ctx-label">Table view</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-object-tree" role="menuitem"><span class="ctx-label">Object tree</span></button>
+    <div class="chart-ctx-row-sub">
+      <button type="button" class="chart-ctx-item caret" id="ctx-template-toggle" aria-expanded="false" aria-haspopup="true">
+        <span class="ctx-label">Chart template</span>
+      </button>
+      <div id="ctx-template-flyout" class="chart-ctx-flyout hidden" role="menu">
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-save" role="menuitem"><span class="ctx-label">Save template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-load" role="menuitem"><span class="ctx-label">Load template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-reset" role="menuitem"><span class="ctx-label">Reset to default</span></button>
+      </div>
+    </div>
+    <button type="button" class="chart-ctx-item" id="ctx-remove-indicators" role="menuitem">
+      <span class="ctx-label" id="ctx-remove-ind-label">Remove indicators</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-chart-settings" role="menuitem"><span class="ctx-label">Settings…</span></button>
+  </div>
+
+  <div id="chart-table-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal wide">
+      <div class="chart-ctx-modal-hd">
+        <span>OHLC table — <span id="chart-table-ticker"></span></span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartTableModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <div class="chart-ctx-table-wrap" id="chart-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-obj-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Object tree</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartObjModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd" id="chart-obj-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="chart-settings-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Chart settings</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartSettingsModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Indicator toggles live in the bar above the chart. Drawing shortcuts:</p>
+        <div class="chart-ctx-settings-shortcuts" id="chart-settings-shortcuts"></div>
+        <button type="button" class="chart-ctx-item" style="margin-top:12px;border:1px solid var(--border);border-radius:8px;width:auto" onclick="_scrollToIndPanel()">Scroll to indicators</button>
       </div>
     </div>
   </div>
@@ -2951,6 +3110,9 @@ var _lastBreakoutData = null;
 var _magnetEnabled = false;
 var _drawUndoStack = [];
 var _rawOhlcData = null;
+var _lastCrosshairPrice = null;
+var _ctxMenuPrice = null;
+var CHART_TEMPLATE_STORAGE_KEY = 'chili_chart_template_v1';
 var _compareSeries = {};  // ticker -> {series, data}
 var _lastDaytradeData = null;
 var _cachedScanTickers = [];
@@ -2993,6 +3155,7 @@ document.addEventListener('DOMContentLoaded', function() {
   initTabOrder();
   initChart();
   _initDrawingListeners();
+  _initChartContextMenu();
   _initPaneDrag();
   buildIndicatorPanel();
   loadStrategies().then(function() {
@@ -3747,6 +3910,7 @@ function _initOhlcTooltip(chartEl) {
     var _isCr = (currentTicker||'').indexOf('-USD') !== -1;
     tip.style.opacity = '1';
     if (d.open != null && d.close != null) {
+    _lastCrosshairPrice = d.close;
     var chg = d.close - d.open;
     var pct = d.open !== 0 ? ((chg / d.open) * 100).toFixed(2) : '0.00';
     var clr = chg >= 0 ? '#22c55e' : '#ef4444';
@@ -3758,6 +3922,7 @@ function _initOhlcTooltip(chartEl) {
       '<span>C <b style="color:' + clr + '">' + smartPrice(d.close, _isCr) + '</b></span>' +
       '<span style="color:' + clr + '">' + sign + smartPrice(chg, _isCr) + ' (' + sign + pct + '%)</span>';
     } else if (d.value != null) {
+      _lastCrosshairPrice = d.value;
       tip.innerHTML = '<span>Price <b>' + smartPrice(d.value, _isCr) + '</b></span>';
     }
   });
@@ -4134,6 +4299,36 @@ function loadTickerDetail(ticker) {
     });
 }
 
+function openNewsReader(url, title, source, pubDate) {
+  if (!url || url === '#') return;
+  var overlay = document.getElementById('news-reader-overlay');
+  var titleEl = document.getElementById('nr-title');
+  var sourceEl = document.getElementById('nr-source');
+  var openEl = document.getElementById('nr-open');
+  var primaryOpen = document.getElementById('nr-primary-open');
+  var previewTitle = document.getElementById('nr-preview-title');
+  var previewMeta = document.getElementById('nr-preview-meta');
+  if (!overlay) return;
+  if (titleEl) titleEl.textContent = title || '';
+  if (sourceEl) sourceEl.textContent = source || '';
+  if (openEl) openEl.href = url;
+  if (primaryOpen) primaryOpen.href = url;
+  if (previewTitle) previewTitle.textContent = title || '';
+  if (previewMeta) {
+    var metaParts = [];
+    if (source) metaParts.push(source);
+    if (pubDate) metaParts.push(pubDate);
+    previewMeta.textContent = metaParts.join(' · ');
+  }
+  overlay.classList.add('active');
+}
+
+function closeNewsReader() {
+  var overlay = document.getElementById('news-reader-overlay');
+  if (!overlay) return;
+  overlay.classList.remove('active');
+}
+
 function loadTickerNews(ticker) {
   var container = document.getElementById('ticker-news-cards');
   if (!container) return;
@@ -4146,15 +4341,24 @@ function loadTickerNews(ticker) {
       if (!d.ok || !d.news || !d.news.length) { container.innerHTML = ''; return; }
       var html = '';
       d.news.forEach(function(n) {
-        var url = (n.url || '#').replace(/'/g, "\\'").replace(/"/g, '&quot;').replace(/</g, '&lt;');
+        var rawUrl = (n.url || '').trim();
+        var escJsAttr = function(s) {
+          return String(s || '')
+            .replace(/\\/g, '\\\\')
+            .replace(/\r?\n/g, ' ')
+            .replace(/'/g, "\\'")
+            .replace(/"/g, '&quot;');
+        };
+        var url = rawUrl ? escJsAttr(rawUrl) : '#';
         var rawTitle = (n.title || '').substring(0, 100);
         var title = escHtml(rawTitle);
         var src = n.publisher ? escHtml(n.publisher) : '';
-        var safeTitle = rawTitle.replace(/'/g, "\\'").replace(/"/g, '&quot;');
-        var safeSrc = (n.publisher || '').replace(/'/g, "\\'").replace(/"/g, '&quot;');
+        var safeTitle = escJsAttr(rawTitle);
+        var safeSrc = escJsAttr(n.publisher || '');
+        var safeDate = escJsAttr(n.date || '');
         var sent = n.sentiment || 'neutral';
         var badge = sent !== 'neutral' ? '<span class="nc-badge ' + sent + '">' + sent + '</span>' : '';
-        html += '<div class="news-card" onclick="openNewsReader(\'' + url + '\',\'' + safeTitle + '\',\'' + safeSrc + '\')" style="cursor:pointer">';
+        html += '<div class="news-card" onclick="openNewsReader(\'' + url + '\',\'' + safeTitle + '\',\'' + safeSrc + '\',\'' + safeDate + '\')" style="cursor:pointer">';
         html += badge;
         html += '<div class="nc-title">' + title + '</div>';
         if (src) html += '<div class="nc-meta">' + src + '</div>';
@@ -4192,6 +4396,354 @@ function prefetchWatchlistPrices() {
         }
       });
     }).catch(function() {});
+}
+
+function clearAllActiveIndicators() {
+  var ids = Array.from(activeIndicators);
+  ids.forEach(function(id) {
+    activeIndicators.delete(id);
+    removeIndicatorSeries(id);
+  });
+  buildIndicatorPanel();
+}
+
+function _chartCtxResetView() {
+  if (chart) chart.timeScale().fitContent();
+}
+
+function _closeChartCtxMenu() {
+  var m = document.getElementById('chart-context-menu');
+  if (!m) return;
+  m.classList.add('hidden');
+  m.setAttribute('aria-hidden', 'true');
+  var fly = document.getElementById('ctx-template-flyout');
+  var tog = document.getElementById('ctx-template-toggle');
+  if (fly) fly.classList.add('hidden');
+  if (tog) tog.setAttribute('aria-expanded', 'false');
+  document.removeEventListener('mousedown', _chartCtxDocMouse, true);
+  document.removeEventListener('keydown', _chartCtxEsc, true);
+}
+
+function _chartCtxDocMouse(ev) {
+  var m = document.getElementById('chart-context-menu');
+  if (!m || m.classList.contains('hidden')) return;
+  if (m.contains(ev.target)) return;
+  _closeChartCtxMenu();
+}
+
+function _chartCtxEsc(ev) {
+  if (ev.key !== 'Escape') return;
+  _closeChartCtxMenu();
+  _closeChartTableModal();
+  _closeChartObjModal();
+  _closeChartSettingsModal();
+}
+
+function _positionChartCtxMenu(clientX, clientY) {
+  var m = document.getElementById('chart-context-menu');
+  if (!m) return;
+  m.classList.remove('hidden');
+  m.setAttribute('aria-hidden', 'false');
+  var w = m.offsetWidth || 260;
+  var h = m.offsetHeight || 200;
+  var x = clientX;
+  var y = clientY;
+  if (x + w > window.innerWidth - 8) x = window.innerWidth - w - 8;
+  if (y + h > window.innerHeight - 8) y = window.innerHeight - h - 8;
+  if (x < 8) x = 8;
+  if (y < 8) y = 8;
+  m.style.left = x + 'px';
+  m.style.top = y + 'px';
+  document.removeEventListener('mousedown', _chartCtxDocMouse, true);
+  document.addEventListener('mousedown', _chartCtxDocMouse, true);
+  document.removeEventListener('keydown', _chartCtxEsc, true);
+  document.addEventListener('keydown', _chartCtxEsc, true);
+}
+
+function _openChartCtxMenuAtEvent(e, numericPrice, priceDisplay) {
+  _ctxMenuPrice = numericPrice;
+  var t = currentTicker || '';
+  var copyLab = document.getElementById('ctx-copy-label');
+  var alertLab = document.getElementById('ctx-alert-label');
+  var remLab = document.getElementById('ctx-remove-ind-label');
+  var _isCr = t.indexOf('-USD') !== -1;
+  if (priceDisplay && copyLab) copyLab.textContent = 'Copy price ' + priceDisplay;
+  else if (copyLab) copyLab.textContent = 'Copy price';
+  if (alertLab) {
+    alertLab.textContent = (numericPrice != null && isFinite(numericPrice))
+      ? ('Add alert on ' + t + ' at ' + (priceDisplay || smartPrice(numericPrice, _isCr)))
+      : ('Add alert on ' + t + '…');
+  }
+  var n = activeIndicators.size;
+  if (remLab) remLab.textContent = n ? ('Remove ' + n + ' indicator' + (n !== 1 ? 's' : '')) : 'Remove indicators';
+  var btnCopy = document.getElementById('ctx-copy-price');
+  var btnAlert = document.getElementById('ctx-add-alert');
+  if (btnCopy) btnCopy.disabled = !(numericPrice != null && isFinite(numericPrice));
+  if (btnAlert) btnAlert.disabled = !(numericPrice != null && isFinite(numericPrice));
+  var btnRem = document.getElementById('ctx-remove-indicators');
+  if (btnRem) btnRem.disabled = n === 0;
+  _positionChartCtxMenu(e.clientX, e.clientY);
+}
+
+function _chartCtxCopyPrice() {
+  if (_ctxMenuPrice == null || !isFinite(_ctxMenuPrice)) return;
+  var t = (currentTicker || '').indexOf('-USD') !== -1;
+  var s = String(smartPrice(_ctxMenuPrice, t));
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(s).catch(function() { window.prompt('Copy:', s); });
+  } else {
+    window.prompt('Copy:', s);
+  }
+  _closeChartCtxMenu();
+}
+
+function _chartCtxPastePrice() {
+  if (!navigator.clipboard || !navigator.clipboard.readText) {
+    var v = window.prompt('Paste price value:');
+    if (v) _applyPastedPriceAlert(v);
+    _closeChartCtxMenu();
+    return;
+  }
+  navigator.clipboard.readText().then(function(txt) {
+    _applyPastedPriceAlert(txt);
+    _closeChartCtxMenu();
+  }).catch(function() { _closeChartCtxMenu(); });
+}
+
+function _applyPastedPriceAlert(txt) {
+  if (!txt) return;
+  var cleaned = String(txt).replace(/[$\s,]/g, '').replace(/,/g, '');
+  var p = parseFloat(cleaned);
+  if (!isNaN(p) && isFinite(p)) addChartAlert(p);
+}
+
+function _chartCtxAddAlertFromMenu() {
+  if (_ctxMenuPrice != null && isFinite(_ctxMenuPrice)) addChartAlert(_ctxMenuPrice);
+  _closeChartCtxMenu();
+}
+
+function _chartCtxAddAlertShortcut() {
+  if (_lastCrosshairPrice != null && isFinite(_lastCrosshairPrice)) addChartAlert(_lastCrosshairPrice);
+  else _promptChartAlert();
+}
+
+function _saveChartTemplate() {
+  try {
+    localStorage.setItem(CHART_TEMPLATE_STORAGE_KEY, JSON.stringify({
+      interval: currentInterval,
+      period: currentPeriod,
+      indicators: Array.from(activeIndicators),
+      theme: document.documentElement.getAttribute('data-theme') || 'dark',
+    }));
+  } catch (err) {}
+  _closeChartCtxMenu();
+}
+
+function _loadChartTemplate() {
+  try {
+    var s = localStorage.getItem(CHART_TEMPLATE_STORAGE_KEY);
+    if (!s) return;
+    var p = JSON.parse(s);
+    activeIndicators.clear();
+    (p.indicators || []).forEach(function(id) { if (typeof id === 'string') activeIndicators.add(id); });
+    buildIndicatorPanel();
+    var legacyInt = document.getElementById('interval-select');
+    if (legacyInt && typeof changeInterval === 'function' && p.interval) {
+      changeInterval(p.interval);
+      if (p.period && typeof changePeriod === 'function') changePeriod(p.period);
+    } else {
+      if (p.interval) {
+        currentInterval = p.interval;
+        if (typeof _syncIntervalUi === 'function') _syncIntervalUi(currentInterval);
+      }
+      if (p.period) currentPeriod = p.period;
+      loadChart();
+    }
+    if (p.theme) document.documentElement.setAttribute('data-theme', p.theme);
+    if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
+  } catch (err) {}
+  _closeChartCtxMenu();
+}
+
+function _resetChartTemplateDefault() {
+  try { localStorage.removeItem(CHART_TEMPLATE_STORAGE_KEY); } catch (e) {}
+  activeIndicators.clear();
+  buildIndicatorPanel();
+  currentInterval = '1d';
+  currentPeriod = '1y';
+  var legacyInt = document.getElementById('interval-select');
+  if (legacyInt && typeof changeInterval === 'function') {
+    changeInterval('1d');
+    if (typeof changePeriod === 'function') changePeriod('1y');
+  } else {
+    if (typeof _syncIntervalUi === 'function') _syncIntervalUi('1d');
+    loadChart();
+  }
+  if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
+  _closeChartCtxMenu();
+}
+
+function _openChartTableModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-table-modal');
+  var wrap = document.getElementById('chart-table-wrap');
+  var lab = document.getElementById('chart-table-ticker');
+  if (!overlay || !wrap) return;
+  if (lab) lab.textContent = currentTicker || '—';
+  if (!_rawOhlcData || !_rawOhlcData.length) {
+    wrap.innerHTML = '<p style="font-size:12px;color:var(--text-muted)">No chart data loaded.</p>';
+  } else {
+    var _isCr = (currentTicker || '').indexOf('-USD') !== -1;
+    var rows = _rawOhlcData.map(function(c) {
+      var ts = typeof c.time === 'number' ? c.time : parseInt(c.time, 10);
+      var d = new Date(ts * 1000);
+      var ds = isNaN(d.getTime()) ? String(c.time) : d.toLocaleString();
+      return '<tr><td>' + escHtml(ds) + '</td><td>' + escHtml(String(smartPrice(c.open, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.high, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.low, _isCr))) + '</td><td>' + escHtml(String(smartPrice(c.close, _isCr))) + '</td><td>' + escHtml(String(c.volume != null ? c.volume : '')) + '</td></tr>';
+    }).join('');
+    wrap.innerHTML = '<table><thead><tr><th>Time</th><th>O</th><th>H</th><th>L</th><th>C</th><th>Vol</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function _closeChartTableModal() {
+  var overlay = document.getElementById('chart-table-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _openChartObjModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-obj-modal');
+  var body = document.getElementById('chart-obj-modal-body');
+  if (!overlay || !body) return;
+  var indLines = [];
+  activeIndicators.forEach(function(id) {
+    var meta = INDICATORS.find(function(i) { return i.id === id; });
+    indLines.push(meta ? meta.label : id);
+  });
+  var indHtml = indLines.length ? indLines.map(function(l) { return '• ' + escHtml(l); }).join('<br/>') : 'No indicators active.';
+  var dCount = (_userDrawings && _userDrawings.length) ? _userDrawings.length : 0;
+  body.innerHTML =
+    '<div class="chart-ctx-obj-list"><strong>Indicators</strong><br/>' + indHtml +
+    '<br/><br/><strong>Drawings</strong><br/>' + dCount + ' object(s) on chart (session)</div>' +
+    '<div class="chart-ctx-obj-actions">' +
+    '<button type="button" onclick="clearAllActiveIndicators();_refreshObjModalIfOpen()">Remove all indicators</button>' +
+    '<button type="button" onclick="_clearAllDrawings();_refreshObjModalIfOpen()">Clear drawings</button>' +
+    '</div>';
+  overlay.classList.add('active');
+  overlay.setAttribute('aria-hidden', 'false');
+}
+
+function _refreshObjModalIfOpen() {
+  var o = document.getElementById('chart-obj-modal');
+  if (o && o.classList.contains('active')) _openChartObjModal();
+}
+
+function _closeChartObjModal() {
+  var overlay = document.getElementById('chart-obj-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _openChartSettingsModal() {
+  _closeChartCtxMenu();
+  var overlay = document.getElementById('chart-settings-modal');
+  var el = document.getElementById('chart-settings-shortcuts');
+  if (el) {
+    el.textContent = 'L Trend line | Y Ray | H H-line | V V-line | C Channel | R Rectangle | F Fib | A Arrow | N Callout | G Measure | T Text | S Magnet | E Eraser | X Clear drawings | Ctrl+Z Undo';
+  }
+  if (overlay) { overlay.classList.add('active'); overlay.setAttribute('aria-hidden', 'false'); }
+}
+
+function _closeChartSettingsModal() {
+  var overlay = document.getElementById('chart-settings-modal');
+  if (overlay) { overlay.classList.remove('active'); overlay.setAttribute('aria-hidden', 'true'); }
+}
+
+function _scrollToIndPanel() {
+  var p = document.getElementById('ind-panel');
+  if (p) p.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  _closeChartSettingsModal();
+}
+
+function _initChartContextMenu() {
+  var area = document.getElementById('chart-area');
+  if (!area) return;
+  area.addEventListener('contextmenu', function(ev) {
+    var grid = document.getElementById('multi-chart-grid');
+    if (grid && !grid.classList.contains('hidden')) return;
+    var dc = document.getElementById('draw-canvas');
+    if (dc && ev.target === dc && dc.classList.contains('drawing') && _drawTool) return;
+    var mc = document.getElementById('main-chart');
+    if (!mc || !chart || !candleSeries) return;
+    var r = mc.getBoundingClientRect();
+    if (ev.clientX < r.left || ev.clientX > r.right || ev.clientY < r.top || ev.clientY > r.bottom) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    var py = ev.clientY - r.top;
+    var price = candleSeries.coordinateToPrice(py);
+    var t = (currentTicker || '').indexOf('-USD') !== -1;
+    var priceStr = null;
+    var num = null;
+    if (price != null && isFinite(price)) {
+      num = price;
+      priceStr = smartPrice(price, t);
+    }
+    if (num == null && _lastCrosshairPrice != null && isFinite(_lastCrosshairPrice)) {
+      num = _lastCrosshairPrice;
+      priceStr = smartPrice(num, t);
+    }
+    _openChartCtxMenuAtEvent(ev, num, priceStr);
+  }, true);
+
+  var menu = document.getElementById('chart-context-menu');
+  if (!menu) return;
+  menu.addEventListener('click', function(ev) { ev.stopPropagation(); });
+  var elReset = document.getElementById('ctx-reset-view');
+  if (elReset) elReset.onclick = function() { _chartCtxResetView(); _closeChartCtxMenu(); };
+  var elCopy = document.getElementById('ctx-copy-price');
+  if (elCopy) elCopy.onclick = function() { _chartCtxCopyPrice(); };
+  var elPaste = document.getElementById('ctx-paste-price');
+  if (elPaste) elPaste.onclick = function() { _chartCtxPastePrice(); };
+  var elAlert = document.getElementById('ctx-add-alert');
+  if (elAlert) elAlert.onclick = function() { _chartCtxAddAlertFromMenu(); };
+  var elTbl = document.getElementById('ctx-table-view');
+  if (elTbl) elTbl.onclick = function() { _openChartTableModal(); };
+  var elObj = document.getElementById('ctx-object-tree');
+  if (elObj) elObj.onclick = function() { _openChartObjModal(); };
+  var elRem = document.getElementById('ctx-remove-indicators');
+  if (elRem) elRem.onclick = function() {
+    if (activeIndicators.size) clearAllActiveIndicators();
+    _closeChartCtxMenu();
+  };
+  var elSet = document.getElementById('ctx-chart-settings');
+  if (elSet) elSet.onclick = function() { _openChartSettingsModal(); };
+  var tplTog = document.getElementById('ctx-template-toggle');
+  var tplFly = document.getElementById('ctx-template-flyout');
+  if (tplTog && tplFly) {
+    tplTog.onclick = function(e) {
+      e.stopPropagation();
+      var wasHidden = tplFly.classList.contains('hidden');
+      tplFly.classList.toggle('hidden', !wasHidden);
+      tplTog.setAttribute('aria-expanded', wasHidden ? 'true' : 'false');
+    };
+    var ts = document.getElementById('ctx-tpl-save');
+    var tl = document.getElementById('ctx-tpl-load');
+    var tr = document.getElementById('ctx-tpl-reset');
+    if (ts) ts.onclick = function(e) { e.stopPropagation(); _saveChartTemplate(); };
+    if (tl) tl.onclick = function(e) { e.stopPropagation(); _loadChartTemplate(); };
+    if (tr) tr.onclick = function(e) { e.stopPropagation(); _resetChartTemplateDefault(); };
+  }
+  window.addEventListener('scroll', function() { _closeChartCtxMenu(); }, true);
+  ['chart-table-modal', 'chart-obj-modal', 'chart-settings-modal'].forEach(function(id) {
+    var o = document.getElementById(id);
+    if (!o) return;
+    o.addEventListener('click', function(ev) {
+      if (ev.target !== o) return;
+      if (id === 'chart-table-modal') _closeChartTableModal();
+      else if (id === 'chart-obj-modal') _closeChartObjModal();
+      else _closeChartSettingsModal();
+    });
+  });
 }
 
 /* ── Indicators ─────────────────────────────────── */
@@ -10026,21 +10578,29 @@ function _loadDrawings() {
 document.addEventListener('keydown', function(e) {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA' || e.target.isContentEditable) return;
   var k = e.key.toUpperCase();
+  if (k === 'R' && e.altKey && !e.ctrlKey && !e.metaKey) { _chartCtxResetView(); e.preventDefault(); return; }
+  if (k === 'A' && e.altKey && !e.ctrlKey && !e.metaKey) { _chartCtxAddAlertShortcut(); e.preventDefault(); return; }
   if (k === 'L') { _setDrawTool('trendline'); e.preventDefault(); }
-  else if (k === 'Y' && !e.ctrlKey && !e.metaKey) { _setDrawTool('ray'); e.preventDefault(); }
-  else if (k === 'H' && !e.ctrlKey && !e.metaKey) { _setDrawTool('hline'); e.preventDefault(); }
-  else if (k === 'V' && !e.ctrlKey && !e.metaKey) { _setDrawTool('vline'); e.preventDefault(); }
-  else if (k === 'C' && !e.ctrlKey && !e.metaKey) { _setDrawTool('channel'); e.preventDefault(); }
-  else if (k === 'R' && !e.ctrlKey && !e.metaKey) { _setDrawTool('rect'); e.preventDefault(); }
-  else if (k === 'F' && !e.ctrlKey && !e.metaKey) { _setDrawTool('fib'); e.preventDefault(); }
-  else if (k === 'A' && !e.ctrlKey && !e.metaKey) { _setDrawTool('arrow'); e.preventDefault(); }
-  else if (k === 'N' && !e.ctrlKey && !e.metaKey) { _setDrawTool('callout'); e.preventDefault(); }
-  else if (k === 'G' && !e.ctrlKey && !e.metaKey) { _setDrawTool('measure'); e.preventDefault(); }
-  else if (k === 'T' && !e.ctrlKey && !e.metaKey) { _setDrawTool('text'); e.preventDefault(); }
-  else if (k === 'S' && !e.ctrlKey && !e.metaKey) { _toggleMagnet(); e.preventDefault(); }
+  else if (k === 'Y' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('ray'); e.preventDefault(); }
+  else if (k === 'H' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('hline'); e.preventDefault(); }
+  else if (k === 'V' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('vline'); e.preventDefault(); }
+  else if (k === 'C' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('channel'); e.preventDefault(); }
+  else if (k === 'R' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('rect'); e.preventDefault(); }
+  else if (k === 'F' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('fib'); e.preventDefault(); }
+  else if (k === 'A' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('arrow'); e.preventDefault(); }
+  else if (k === 'N' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('callout'); e.preventDefault(); }
+  else if (k === 'G' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('measure'); e.preventDefault(); }
+  else if (k === 'T' && !e.ctrlKey && !e.metaKey && !e.altKey) { _setDrawTool('text'); e.preventDefault(); }
+  else if (k === 'S' && !e.ctrlKey && !e.metaKey && !e.altKey) { _toggleMagnet(); e.preventDefault(); }
   else if (k === 'E') { _setDrawTool('eraser'); e.preventDefault(); }
   else if (k === 'X') { _clearAllDrawings(); e.preventDefault(); }
-  else if (k === 'ESCAPE') { _setDrawTool(null); }
+  else if (k === 'ESCAPE') {
+    _setDrawTool(null);
+    _closeChartCtxMenu();
+    _closeChartTableModal();
+    _closeChartObjModal();
+    _closeChartSettingsModal();
+  }
   else if (k === 'Z' && (e.ctrlKey || e.metaKey) && !e.shiftKey) { _undoDraw(); e.preventDefault(); }
   else if ((k === 'Y' && (e.ctrlKey || e.metaKey)) || (k === 'Z' && (e.ctrlKey || e.metaKey) && e.shiftKey)) { _redoDraw(); e.preventDefault(); }
   else if (k === 'DELETE' || k === 'BACKSPACE') { if (_drawTool === 'eraser') e.preventDefault(); }
