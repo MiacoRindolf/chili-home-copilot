@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% block title %}CHILI Trading{% endblock %}
+{% block title %}CHILI Trading (backup){% endblock %}
 
 {% block head_extra %}
 <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
@@ -63,8 +63,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 .wl-list { flex: 1; overflow-y: auto; }
 .wl-item {
-  padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 6px;
-  font-size: 13px; border-bottom: 1px solid var(--border); transition: background .1s; flex-wrap: wrap;
+  padding: 8px 12px; cursor: pointer; display: flex; justify-content: space-between; align-items: center;
+  font-size: 13px; border-bottom: 1px solid var(--border); transition: background .1s;
 }
 .wl-item:hover { background: var(--bg); }
 .wl-item.active { background: var(--accent); color: #fff; border-radius: 0; }
@@ -75,46 +75,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .wl-item.active .wl-change { color: #fff; }
 .wl-rm { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 2px; }
 .wl-rm:hover { color: #ef4444; }
-.wl-group { border-bottom: 1px solid var(--border); }
-.wl-group-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--text-secondary); cursor: pointer; user-select: none; background: var(--bg); }
-.wl-group-head:hover { color: var(--text); }
-.wl-group-chev { font-size: 9px; opacity: .7; }
-.wl-group-body.wl-collapsed { display: none; }
-.wl-group-body { min-height: 4px; }
-.wl-drag-handle {
-  cursor: grab; color: var(--text-muted); padding: 0 6px 0 2px; user-select: none;
-  flex-shrink: 0; font-size: 14px; line-height: 1; opacity: .75;
-}
-.wl-drag-handle:active { cursor: grabbing; }
-.wl-item.wl-dragging { opacity: 0.45; }
-.wl-item.wl-drop-hover, .wl-group-body.wl-drop-hover { outline: 2px dashed var(--accent); outline-offset: -2px; background: rgba(99,102,241,.12); }
-.wl-ungrp-hint {
-  padding: 10px 12px; font-size: 11px; color: var(--text-muted); text-align: center;
-  border-bottom: 1px dashed var(--border);
-}
-.sidebar-wl-hint { padding: 0 10px 8px; font-size: 10px; color: var(--text-muted); line-height: 1.35; }
-
-/* ── Interval popover (toolbar) ─────────────────── */
-.interval-picker-wrap { position: relative; }
-.interval-trigger {
-  padding: 3px 10px; font-size: 11px; font-weight: 600; min-width: 44px;
-  background: var(--bg-secondary, #1e1e2e); border: 1px solid var(--border); border-radius: 4px;
-  color: var(--text); cursor: pointer; text-align: center;
-}
-.interval-trigger:hover { border-color: var(--accent); color: var(--accent); }
-.interval-popover {
-  position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 600;
-  background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.25);
-}
-.interval-popover.hidden { display: none; }
-.interval-pop-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; min-width: 200px; }
-.interval-pop-item {
-  padding: 6px 4px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px;
-  background: var(--bg-secondary, #1e1e2e); color: var(--text); cursor: pointer;
-}
-.interval-pop-item:hover { border-color: var(--accent); color: var(--accent); }
-.interval-pop-item.active { background: rgba(99,102,241,.15); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.wl-crypto-heading { border-top: 1px solid var(--border); padding-top: 8px; }
+.wl-crypto-grid { padding: 0 8px 8px; display: flex; flex-wrap: wrap; gap: 4px; }
 
 /* ── Main area ───────────────────────────────────── */
 .t-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -221,10 +183,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   flex: 1; position: relative; min-height: 180px;
   margin: 0 24px 0 0;
   display: flex; flex-direction: column;
-  /* Match outer width of .chart-draw-toolbar (34px + horizontal padding + border) */
   --chart-tools-width: 40px;
 }
-/* Keep candles, panes, and multi-grid out from under the left draw tools */
 #ind-panes-top,
 #main-chart,
 #ind-panes-bottom,
@@ -696,6 +656,11 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 }
 .ind-chip:hover { border-color: var(--accent); color: var(--text); }
 .ind-chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.crypto-btn {
+  padding: 3px 8px; font-size: 10px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--bg); color: var(--text-muted); cursor: pointer; transition: all .12s; font-weight: 500;
+}
+.crypto-btn:hover { background: rgba(99,102,241,.08); color: var(--accent); border-color: var(--accent); }
 .learn-btn {
   padding: 3px 8px; font-size: 10px; border: 1px solid var(--border); border-radius: 8px;
   background: var(--bg); color: var(--text-muted); cursor: pointer; transition: all .12s; font-weight: 500;
@@ -1379,7 +1344,21 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 .scr-row.scr-top, .scr-dt-row.scr-top, .scr-bo-row.scr-top { border-left: 2px solid #818cf8; }
 .scr-score-bar { display: inline-block; height: 4px; border-radius: 2px; vertical-align: middle; margin-left: 3px; }
 
+/* ── Wallet / Web3 ───────────────────────────────── */
+.wallet-btn {
+  display: flex; align-items: center; gap: 5px; padding: 4px 10px;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-header);
+  color: var(--text); cursor: pointer; font-size: 11px; font-weight: 600; transition: all .15s;
+}
+.wallet-btn:hover { border-color: var(--accent); }
+.wallet-btn.connected { border-color: #22c55e; background: rgba(34,197,94,.06); }
+.wallet-btn .wallet-dot { width: 6px; height: 6px; border-radius: 50%; background: #6b7280; }
+.wallet-btn.connected .wallet-dot { background: #22c55e; }
 .wallet-addr { font-family: monospace; font-size: 10px; }
+.chain-selector {
+  padding: 3px 6px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--input-bg); color: var(--text); font-size: 10px; cursor: pointer;
+}
 .wallet-balance { font-size: 10px; color: var(--text-muted); font-family: monospace; }
 
 /* ── Swap Panel ──────────────────────────────────── */
@@ -1560,6 +1539,11 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   background: var(--bg-secondary, #1e1e2e); border: 1px solid var(--border);
   border-radius: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.35);
   padding: 10px 14px; min-width: 180px;
+}
+#chart-type-select {
+  padding: 3px 6px; font-size: 11px; background: var(--bg-secondary, #1e1e2e);
+  border: 1px solid var(--border); border-radius: 4px; color: var(--text);
+  cursor: pointer;
 }
 #draw-canvas {
   position: absolute; inset: 0; z-index: 4; pointer-events: none;
@@ -2005,17 +1989,28 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 <div class="t-header">
   <div style="display:flex;align-items:center;gap:8px">
     <button class="mobile-toggle" onclick="toggleSidebar()" title="Watchlist" aria-label="Toggle watchlist">&#x2630;</button>
-    <h1>&#x1F4C8; CHILI Trading</h1>
+    <h1>&#x1F4C8; CHILI Trading <span style="font-size:11px;font-weight:600;color:var(--text-secondary);vertical-align:middle">(backup)</span></h1>
   </div>
   <nav>
     <a href="/">Home</a>
     <a href="/chat">Chat</a>
-    <a href="/trading" style="color:var(--accent)">Trading</a>
-    <a href="/trading-backup">Trading backup</a>
+    <a href="/trading">Trading</a>
+    <a href="/trading-backup" style="color:var(--accent)">Trading backup</a>
     <a href="/brain">Brain</a>
     {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
   </nav>
   <div class="t-header-actions">
+    <select class="chain-selector" id="chain-select" onchange="_switchChain(parseInt(this.value))" title="Blockchain network">
+      <option value="137">Polygon</option>
+      <option value="1">Ethereum</option>
+      <option value="56">BSC</option>
+      <option value="42161">Arbitrum</option>
+      <option value="8453">Base</option>
+    </select>
+    <button class="wallet-btn" id="wallet-btn" onclick="_connectWallet()">
+      <span class="wallet-dot"></span>
+      <span id="wallet-label">Connect Wallet</span>
+    </button>
     <button id="theme-toggle" onclick="toggleTheme()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--text);font-size:16px">&#127769;</button>
   </div>
 </div>
@@ -2069,8 +2064,11 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <button onclick="addToWatchlist()">+</button>
       <div class="wl-ac" id="wl-ac"></div>
     </div>
-    <p class="sidebar-wl-hint">Drag <b>⠿</b> onto another ticker to group, onto a group to add, or onto <b>Ungrouped</b> to ungroup.</p>
     <div class="wl-list" id="wl-list"></div>
+    <h3 class="wl-crypto-heading">Quick Add Crypto</h3>
+    <div class="wl-crypto-grid" id="wl-crypto-grid">
+      <span style="font-size:11px;color:var(--text-muted)">Loading...</span>
+    </div>
   </div>
 
   <!-- Main chart area -->
@@ -2084,26 +2082,33 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <span id="live-dot" class="live-dot disconnected" title="Live stream status"></span>
       <span class="price-display" id="price-label"></span>
       <span class="tb-divider"></span>
-      <div class="interval-picker-wrap">
-        <button type="button" id="interval-trigger" class="interval-trigger" onclick="toggleIntervalPopover(event)" aria-expanded="false" title="Chart interval">1D</button>
-        <div id="interval-popover" class="interval-popover hidden" role="listbox" aria-label="Interval">
-          <div class="interval-pop-grid">
-            <button type="button" class="interval-pop-item" data-interval="1m" onclick="changeInterval('1m')">1m</button>
-            <button type="button" class="interval-pop-item" data-interval="5m" onclick="changeInterval('5m')">5m</button>
-            <button type="button" class="interval-pop-item" data-interval="15m" onclick="changeInterval('15m')">15m</button>
-            <button type="button" class="interval-pop-item" data-interval="30m" onclick="changeInterval('30m')">30m</button>
-            <button type="button" class="interval-pop-item" data-interval="1h" onclick="changeInterval('1h')">1h</button>
-            <button type="button" class="interval-pop-item" data-interval="1d" onclick="changeInterval('1d')">1D</button>
-            <button type="button" class="interval-pop-item" data-interval="1wk" onclick="changeInterval('1wk')">1W</button>
-            <button type="button" class="interval-pop-item" data-interval="1mo" onclick="changeInterval('1mo')">1M</button>
-          </div>
-        </div>
-      </div>
+      <select id="interval-select" onchange="changeInterval(this.value)">
+        <option value="1m">1m</option><option value="5m">5m</option>
+        <option value="15m">15m</option><option value="30m">30m</option>
+        <option value="1h">1h</option>
+        <option value="1d" selected>1D</option><option value="1wk">1W</option><option value="1mo">1M</option>
+      </select>
+      <select id="chart-type-select" onchange="changeChartType(this.value)" title="Chart type">
+        <option value="candles" selected>Candles</option>
+        <option value="hollow">Hollow</option>
+        <option value="bars">Bars</option>
+        <option value="line">Line</option>
+        <option value="area">Area</option>
+        <option value="heikin_ashi">Heikin Ashi</option>
+        <option value="baseline">Baseline</option>
+      </select>
+      <select id="period-select" onchange="changePeriod(this.value)">
+        <option value="1d">1d</option><option value="5d">5d</option>
+        <option value="1mo">1mo</option><option value="3mo">3mo</option>
+        <option value="6mo" selected>6mo</option><option value="1y">1y</option>
+        <option value="2y">2y</option><option value="5y">5y</option><option value="max">Max</option>
+      </select>
       <button onclick="loadChart()" title="Refresh (R)">&#x21BB;</button>
       <span class="tb-divider"></span>
       <button id="btn-multiview" class="mv-btn" onclick="toggleMultiView()" title="Multi-timeframe view (M)">&#x25A6; Multi</button>
       <button id="btn-fullscreen" onclick="toggleFullscreen()" title="Fullscreen (F11)">&#x26F6;</button>
       <button id="btn-screenshot" onclick="chartScreenshot()" title="Screenshot chart">&#x1F4F7;</button>
+      <button id="btn-compare" onclick="toggleComparePanel()" title="Compare symbols">&#x1F4C8; Compare</button>
       <button id="btn-alert" onclick="_promptChartAlert()" title="Add price alert line">&#x1F514; Alert</button>
       <span class="tb-divider"></span>
       <button id="btn-analyze" class="tb-action" onclick="runAnalysis()">&#x1F916; AI Analyze</button>
@@ -2933,14 +2938,13 @@ document.addEventListener('keydown', function(e) {
 /* ── State ──────────────────────────────────────── */
 var currentTicker = '';  // set dynamically from watchlist/brain
 var currentInterval = '1d';
-/* Default chart range: 1y loads much faster than max (~20y daily + many provider pages). */
-var currentPeriod = '1y';
+var currentPeriod = '6mo';
 var currentChartType = 'candles';
 var chart = null;
 var candleSeries = null;
 var volumeSeries = null;
 var indicatorSeries = {};
-var activeIndicators = new Set();
+var activeIndicators = new Set(['sma_20', 'ema_20']);
 var _chartAnnotations = [];
 var _savedAnnotationSpecs = [];
 var _lastBreakoutData = null;
@@ -2953,16 +2957,31 @@ var _cachedScanTickers = [];
 var _multiViewActive = false;
 var _multiCharts = {};
 var _multiTimeframes = ['1wk', '1d', '1h', '15m'];
-var _multiPeriods = {'1wk':'1y', '1d':'1y', '1h':'3mo', '15m':'1mo'};
+var _multiPeriods = {'1wk':'2y', '1d':'6mo', '1h':'1mo', '15m':'5d'};
 
 var INDICATORS = [
+  {id:'sma_20',label:'SMA 20',color:'#f59e0b'},
   {id:'ema_20',label:'EMA 20',color:'#8b5cf6'},
   {id:'sma_50',label:'SMA 50',color:'#06b6d4'},
+  {id:'ema_50',label:'EMA 50',color:'#14b8a6'},
   {id:'ema_100',label:'EMA 100',color:'#f43f5e'},
   {id:'ema_200',label:'EMA 200',color:'#a855f7'},
+  {id:'bbands',label:'Bollinger',color:'#ec4899'},
+  {id:'ichimoku',label:'Ichimoku',color:'#06b6d4'},
+  {id:'supertrend',label:'Supertrend',color:'#22c55e'},
+  {id:'pivot',label:'Pivots',color:'#f97316'},
+  {id:'vol_profile',label:'Vol Profile',color:'#64748b'},
   {id:'rsi',label:'RSI',color:'#22c55e',pane:true},
   {id:'macd',label:'MACD',color:'#3b82f6',pane:true},
+  {id:'stoch',label:'Stochastic',color:'#f97316',pane:true},
   {id:'adx',label:'ADX',color:'#a855f7',pane:true},
+  {id:'atr',label:'ATR',color:'#14b8a6',pane:true},
+  {id:'obv',label:'OBV',color:'#64748b',pane:true},
+  {id:'vwap',label:'VWAP',color:'#e11d48'},
+  {id:'psar',label:'SAR',color:'#facc15'},
+  {id:'mfi',label:'MFI',color:'#84cc16',pane:true},
+  {id:'cci',label:'CCI',color:'#0ea5e9',pane:true},
+  {id:'willr',label:'Will%R',color:'#d946ef',pane:true},
 ];
 
 /* ── Init ───────────────────────────────────────── */
@@ -3066,54 +3085,59 @@ document.addEventListener('DOMContentLoaded', function() {
   setTimeout(prefetchWatchlistPrices, 2000);
   setTimeout(_autoLoadScreeners, 1500);
 
-  // Load brain tickers -> resolve default ticker if watchlist empty
+  // Load brain tickers -> populate Quick Add Crypto + resolve default ticker
   _initFromBrain();
-
-  document.addEventListener('click', function(e) {
-    var wrap = document.querySelector('.interval-picker-wrap');
-    if (wrap && !wrap.contains(e.target)) closeIntervalPopover();
-  });
 
 });
 
 function _initFromBrain() {
   var wlDone = false, brainDone = false, brainData = null;
-  var _sessionStarted = false;
 
-  function _maybeStartTradingSession() {
-    if (_sessionStarted) return;
-    if (!wlDone) return;
-    /* Don't block the chart on /brain/tickers when the watchlist already picked a ticker. */
-    if (!currentTicker && !brainDone) return;
-
-    _sessionStarted = true;
+  function _finishInit() {
+    if (!wlDone || !brainDone) return;
+    // If no ticker was set from watchlist, pick from brain's top stock
     if (!currentTicker && brainData) {
       var stocks = brainData.stocks || [];
       if (stocks.length) currentTicker = stocks[0].ticker;
     }
     if (!currentTicker) currentTicker = 'AAPL';
     document.getElementById('ticker-label').textContent = currentTicker;
-    _syncIntervalUi(currentInterval);
     loadChart();
     loadTickerDetail(currentTicker);
     loadTickerNews(currentTicker);
     loadSignals();
   }
 
+  // Load watchlist first to set default ticker from user's own list
   fetch('/api/trading/watchlist').then(function(r){return r.json();}).then(function(d) {
     if (d.ok && d.items && d.items.length && !currentTicker) {
       currentTicker = d.items[0].ticker;
     }
     wlDone = true;
     loadWatchlist();
-    _maybeStartTradingSession();
-  }).catch(function() { wlDone = true; _maybeStartTradingSession(); });
+    _finishInit();
+  }).catch(function() { wlDone = true; _finishInit(); });
 
+  // Load brain tickers for Quick Add Crypto + known tickers
   fetch('/api/trading/brain/tickers').then(function(r){return r.json();}).then(function(d) {
     brainData = d.ok ? d : null;
     brainDone = true;
-    _maybeStartTradingSession();
-  }).catch(function() { brainDone = true; _maybeStartTradingSession(); });
+    if (d.ok) _populateCryptoGrid(d.crypto || []);
+    _finishInit();
+  }).catch(function() { brainDone = true; _finishInit(); });
+}
+
+function _populateCryptoGrid(cryptoList) {
+  var grid = document.getElementById('wl-crypto-grid');
+  if (!grid) return;
+  if (!cryptoList.length) {
+    grid.innerHTML = '<span style="font-size:11px;color:var(--text-muted)">No crypto data yet — run a scan first.</span>';
+    return;
+  }
+  grid.innerHTML = cryptoList.slice(0, 12).map(function(c) {
+    var label = c.ticker.replace('-USD', '');
+    return '<button onclick="addCrypto(\'' + c.ticker + '\')" class="crypto-btn">' + label + '</button>';
+  }).join('');
 }
 
 function initChart() {
@@ -3755,7 +3779,6 @@ function loadChart() {
   document.getElementById('ticker-label').textContent = currentTicker;
   _updateWatermark();
   _showChartOverlay('Loading ' + currentTicker + '...');
-  refreshPrice();
   fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod)
     .then(function(r) { return r.json(); })
     .then(function(d) {
@@ -3776,6 +3799,7 @@ function loadChart() {
       var lastPrice = d.data[d.data.length - 1].close;
       candleSeries.applyOptions({ priceFormat: { type: 'price', minMove: smartMinMove(lastPrice) } });
       chart.timeScale().fitContent();
+      refreshPrice();
       _reconnectLiveForTicker();
       loadActiveIndicators();
       _restoreAnnotations();
@@ -4022,39 +4046,37 @@ function _showAlertToast(msg) {
   }
 }
 
-function _intervalLabel(iv) {
-  var m = {'1m':'1m','5m':'5m','15m':'15m','30m':'30m','1h':'1h','1d':'1D','1wk':'1W','1mo':'1M'};
-  return m[iv] || iv;
-}
+var _intervalPeriodLimits = {
+  '1m': ['1d','5d'],
+  '2m': ['1d','5d'],
+  '5m': ['1d','5d','1mo'],
+  '15m': ['1d','5d','1mo'],
+  '30m': ['1d','5d','1mo'],
+  '1h': ['1d','5d','1mo','3mo','6mo','1y','2y'],
+  '1d': ['1d','5d','1mo','3mo','6mo','1y','2y','5y','max'],
+  '1wk': ['1mo','3mo','6mo','1y','2y','5y','max'],
+  '1mo': ['3mo','6mo','1y','2y','5y','max'],
+};
+var _periodDefaults = {
+  '1m':'1d', '2m':'5d', '5m':'5d', '15m':'1mo', '30m':'1mo',
+  '1h':'3mo', '1d':'6mo', '1wk':'1y', '1mo':'5y',
+};
 
-function toggleIntervalPopover(ev) {
-  if (ev) ev.stopPropagation();
-  var pop = document.getElementById('interval-popover');
-  if (!pop) return;
-  pop.classList.toggle('hidden');
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.setAttribute('aria-expanded', pop.classList.contains('hidden') ? 'false' : 'true');
-}
-function closeIntervalPopover() {
-  var pop = document.getElementById('interval-popover');
-  if (pop) pop.classList.add('hidden');
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.setAttribute('aria-expanded', 'false');
-}
-function _syncIntervalUi(v) {
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.textContent = _intervalLabel(v);
-  document.querySelectorAll('.interval-pop-item').forEach(function(b) {
-    b.classList.toggle('active', b.getAttribute('data-interval') === v);
-  });
-}
 function changeInterval(v) {
   currentInterval = v;
-  _syncIntervalUi(v);
-  closeIntervalPopover();
+  var allowed = _intervalPeriodLimits[v] || _intervalPeriodLimits['1d'];
+  var periodSel = document.getElementById('period-select');
+  for (var i = 0; i < periodSel.options.length; i++) {
+    var opt = periodSel.options[i];
+    opt.disabled = allowed.indexOf(opt.value) === -1;
+  }
+  if (allowed.indexOf(currentPeriod) === -1) {
+    currentPeriod = _periodDefaults[v] || allowed[allowed.length - 1];
+    periodSel.value = currentPeriod;
+  }
   loadChart();
-  if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
 }
+function changePeriod(v) { currentPeriod = v; loadChart(); }
 
 var _selectDebounce = null;
 function selectTicker(t) {
@@ -4400,280 +4422,24 @@ function removeIndicatorSeries(id) {
   delete indicatorSeries[id];
 }
 
-/* ── Watchlist (groupable, localStorage) ─────────── */
-var WL_GROUPS_KEY = 'chili_trading_wl_groups_v1';
-
-function _loadWlGroupState() {
-  try {
-    var raw = localStorage.getItem(WL_GROUPS_KEY);
-    if (!raw) return { groups: [], tickerToGroupId: {}, collapsed: {} };
-    var o = JSON.parse(raw);
-    if (!o || typeof o !== 'object') return { groups: [], tickerToGroupId: {}, collapsed: {} };
-    return {
-      groups: Array.isArray(o.groups) ? o.groups : [],
-      tickerToGroupId: o.tickerToGroupId && typeof o.tickerToGroupId === 'object' ? o.tickerToGroupId : {},
-      collapsed: o.collapsed && typeof o.collapsed === 'object' ? o.collapsed : {},
-    };
-  } catch (e) { return { groups: [], tickerToGroupId: {}, collapsed: {} }; }
-}
-
-function _saveWlGroupState(st) {
-  try { localStorage.setItem(WL_GROUPS_KEY, JSON.stringify(st)); } catch (e) {}
-}
-
-function toggleWatchlistGroupCollapse(gid) {
-  var st = _loadWlGroupState();
-  st.collapsed[gid] = !st.collapsed[gid];
-  _saveWlGroupState(st);
-  loadWatchlist();
-}
-
-function _wlPruneEmptyGroups(st) {
-  var used = {};
-  for (var t in st.tickerToGroupId) {
-    if (st.tickerToGroupId[t]) used[st.tickerToGroupId[t]] = true;
-  }
-  st.groups = (st.groups || []).filter(function(g) { return used[g.id]; });
-  var valid = {};
-  st.groups.forEach(function(g) { valid[g.id] = true; });
-  for (var t2 in st.tickerToGroupId) {
-    var g2 = st.tickerToGroupId[t2];
-    if (g2 && !valid[g2]) delete st.tickerToGroupId[t2];
-  }
-}
-
-function _wlDropOnGroupId(srcTicker, groupId) {
-  var st = _loadWlGroupState();
-  if (!srcTicker) return;
-  if (!groupId) {
-    delete st.tickerToGroupId[srcTicker];
-  } else {
-    st.tickerToGroupId[srcTicker] = groupId;
-  }
-  _wlPruneEmptyGroups(st);
-  _saveWlGroupState(st);
-  loadWatchlist();
-}
-
-function _wlDropOnTicker(srcTicker, targetTicker) {
-  if (!srcTicker || !targetTicker || srcTicker === targetTicker) return;
-  var st = _loadWlGroupState();
-  var tg = st.tickerToGroupId[targetTicker];
-  var sg = st.tickerToGroupId[srcTicker];
-  if (tg) {
-    st.tickerToGroupId[srcTicker] = tg;
-  } else if (sg) {
-    st.tickerToGroupId[targetTicker] = sg;
-  } else {
-    var newId = 'g_' + Date.now();
-    var n = 1;
-    for (var gi = 0; gi < st.groups.length; gi++) {
-      if ((st.groups[gi].name || '').indexOf('Group ') === 0) {
-        var m = /^Group (\d+)$/.exec(st.groups[gi].name);
-        if (m) n = Math.max(n, parseInt(m[1], 10) + 1);
-      }
-    }
-    st.groups.push({ id: newId, name: 'Group ' + n });
-    st.tickerToGroupId[srcTicker] = newId;
-    st.tickerToGroupId[targetTicker] = newId;
-  }
-  _wlPruneEmptyGroups(st);
-  _saveWlGroupState(st);
-  loadWatchlist();
-}
-
-var _wlDnDInit = false;
-var _wlDropHoverEl = null;
-
-function _wlClearDropHover() {
-  if (_wlDropHoverEl) {
-    _wlDropHoverEl.classList.remove('wl-drop-hover');
-    _wlDropHoverEl = null;
-  }
-}
-
-function _wlSetDropHover(el) {
-  if (_wlDropHoverEl === el) return;
-  _wlClearDropHover();
-  if (el) {
-    el.classList.add('wl-drop-hover');
-    _wlDropHoverEl = el;
-  }
-}
-
-function _ensureWatchlistDnD() {
-  if (_wlDnDInit) return;
-  _wlDnDInit = true;
-  var list = document.getElementById('wl-list');
-  if (!list) return;
-
-  list.addEventListener('dragover', function(e) {
-    var row = e.target.closest('.wl-item');
-    var body = e.target.closest('.wl-group-body');
-    if (row || body) {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-    }
-    var h = row || body;
-    if (h) _wlSetDropHover(h);
-    else _wlClearDropHover();
-  });
-
-  list.addEventListener('drop', function(e) {
-    e.preventDefault();
-    _wlClearDropHover();
-    var src = (e.dataTransfer.getData('text/plain') || '').trim().toUpperCase();
-    if (!src) return;
-
-    var row = e.target.closest('.wl-item');
-    if (row && row.dataset.ticker && row.dataset.ticker !== src) {
-      _wlDropOnTicker(src, row.dataset.ticker);
-      return;
-    }
-
-    var body = e.target.closest('.wl-group-body');
-    if (body && body.dataset.wlGroupId !== undefined) {
-      _wlDropOnGroupId(src, body.dataset.wlGroupId || '');
-      return;
-    }
-
-    var head = e.target.closest('.wl-group-head');
-    if (head) {
-      var sec = head.closest('.wl-group');
-      if (sec && sec.dataset.wlGroupId !== undefined) {
-        _wlDropOnGroupId(src, sec.dataset.wlGroupId || '');
-      }
-    }
-  });
-}
-
+/* ── Watchlist ──────────────────────────────────── */
 function loadWatchlist() {
-  _ensureWatchlistDnD();
   fetch('/api/trading/watchlist').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var st = _loadWlGroupState();
-    var tickersPresent = {};
-    (d.items || []).forEach(function(item) { tickersPresent[item.ticker] = true; });
-    for (var tk in st.tickerToGroupId) {
-      if (!tickersPresent[tk]) delete st.tickerToGroupId[tk];
-    }
-    _wlPruneEmptyGroups(st);
-    _saveWlGroupState(st);
-
     var list = document.getElementById('wl-list');
     list.innerHTML = '';
     if (!d.items.length) {
       list.innerHTML = '<div style="padding:12px;color:var(--text-muted);font-size:12px">Add tickers above</div>';
       return;
     }
-
-    var ungrouped = [];
-    var byGroup = {};
-    st.groups.forEach(function(g) { byGroup[g.id] = []; });
     d.items.forEach(function(item) {
-      var gid = st.tickerToGroupId[item.ticker];
-      if (gid && Object.prototype.hasOwnProperty.call(byGroup, gid)) byGroup[gid].push(item);
-      else ungrouped.push(item);
-    });
-
-    function appendItem(parentEl, item) {
       var div = document.createElement('div');
       div.className = 'wl-item' + (item.ticker === currentTicker ? ' active' : '');
       div.dataset.ticker = item.ticker;
-
-      var handle = document.createElement('span');
-      handle.className = 'wl-drag-handle';
-      handle.innerHTML = '&#x2630;';
-      handle.title = 'Drag to group';
-      handle.draggable = true;
-      handle.addEventListener('dragstart', function(e) {
-        e.stopPropagation();
-        div.classList.add('wl-dragging');
-        e.dataTransfer.setData('text/plain', item.ticker);
-        e.dataTransfer.effectAllowed = 'move';
-      });
-      handle.addEventListener('dragend', function() {
-        div.classList.remove('wl-dragging');
-        _wlClearDropHover();
-      });
-
-      var tEl = document.createElement('span');
-      tEl.className = 'wl-ticker';
-      tEl.textContent = item.ticker;
-
-      var pEl = document.createElement('span');
-      pEl.className = 'wl-price';
-      pEl.id = 'wl-p-' + item.ticker;
-
-      var spacer = document.createElement('span');
-      spacer.style.flex = '1';
-
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'wl-rm';
-      rm.innerHTML = '&times;';
-      rm.title = 'Remove';
-      rm.onclick = function(ev) {
-        ev.stopPropagation();
-        removeWatchlist(item.ticker);
-      };
-
-      div.appendChild(handle);
-      div.appendChild(tEl);
-      div.appendChild(pEl);
-      div.appendChild(spacer);
-      div.appendChild(rm);
-
-      div.onclick = function(ev) {
-        if (ev.target.closest && (ev.target.closest('.wl-drag-handle') || ev.target.closest('.wl-rm'))) return;
-        selectTicker(item.ticker);
-      };
-
-      parentEl.appendChild(div);
+      div.innerHTML = '<span class="wl-ticker">' + item.ticker + '</span><span class="wl-price" id="wl-p-'+item.ticker+'"></span><button class="wl-rm" onclick="event.stopPropagation();removeWatchlist(\''+item.ticker+'\')">&times;</button>';
+      div.onclick = function() { selectTicker(item.ticker); };
+      list.appendChild(div);
       fetchWlPrice(item.ticker);
-    }
-
-    function appendSection(title, groupKey, items, collapsible) {
-      if (groupKey !== '' && !items.length) return;
-
-      var sec = document.createElement('div');
-      sec.className = 'wl-group';
-      sec.dataset.wlGroupId = groupKey;
-
-      var head = document.createElement('div');
-      head.className = 'wl-group-head';
-      var body = document.createElement('div');
-      body.className = 'wl-group-body';
-      body.dataset.wlGroupId = groupKey;
-
-      if (collapsible && groupKey && st.collapsed[groupKey]) body.classList.add('wl-collapsed');
-
-      var count = items.length;
-      if (collapsible && groupKey) {
-        head.innerHTML = '<span class="wl-group-chev">' + (st.collapsed[groupKey] ? '&#9654;' : '&#9660;') + '</span><span>' + escHtml(title) + '</span><span style="opacity:.5;margin-left:auto;font-weight:600">' + count + '</span>';
-        head.onclick = function() { toggleWatchlistGroupCollapse(groupKey); };
-      } else {
-        head.innerHTML = '<span>' + escHtml(title) + '</span><span style="opacity:.5;margin-left:auto;font-weight:600">' + count + '</span>';
-      }
-
-      sec.appendChild(head);
-      sec.appendChild(body);
-
-      if (!items.length && groupKey === '') {
-        var hint = document.createElement('div');
-        hint.className = 'wl-ungrp-hint';
-        hint.textContent = 'Drop tickers here to ungroup';
-        body.appendChild(hint);
-      } else {
-        items.forEach(function(item) { appendItem(body, item); });
-      }
-
-      list.appendChild(sec);
-    }
-
-    appendSection('Ungrouped', '', ungrouped, false);
-    st.groups.forEach(function(g) {
-      appendSection(g.name, g.id, byGroup[g.id] || [], true);
     });
   });
 }
@@ -4697,8 +4463,8 @@ function addToWatchlist() {
     .then(function() { loadWatchlist(); selectTicker(ticker); });
 }
 
-function addTickerToWatchlistQuick(ticker) {
-  fetch('/api/trading/watchlist', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ticker: ticker }) })
+function addCrypto(ticker) {
+  fetch('/api/trading/watchlist', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ticker:ticker}) })
     .then(function() { loadWatchlist(); selectTicker(ticker); });
 }
 
@@ -5306,7 +5072,7 @@ function renderTickerCards(html) {
       '</div>' +
       '<div class="tc-actions">' +
         '<button class="tc-btn-chart" onclick="selectTicker(\''+ticker+'\')">View Chart</button>' +
-        '<button class="tc-btn-wl" onclick="addTickerToWatchlistQuick(\''+ticker+'\')">+ Watchlist</button>' +
+        '<button class="tc-btn-wl" onclick="addCrypto(\''+ticker+'\')">+ Watchlist</button>' +
       '</div>' +
     '</div>';
     html += card;
@@ -6636,7 +6402,9 @@ function _selectBreakout(idx) {
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
   document.getElementById('ticker-label').textContent = currentTicker;
   if (_selectDebounce) clearTimeout(_selectDebounce);
-  changeInterval(targetInterval);
+  currentInterval = targetInterval;
+  document.getElementById('interval-select').value = targetInterval;
+  loadChart();
 }
 
 function _selectDaytrade(idx) {
@@ -6649,7 +6417,9 @@ function _selectDaytrade(idx) {
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
   document.getElementById('ticker-label').textContent = currentTicker;
   if (_selectDebounce) clearTimeout(_selectDebounce);
-  changeInterval('15m');
+  currentInterval = '15m';
+  document.getElementById('interval-select').value = '15m';
+  loadChart();
 }
 
 /* ── Tab switching and draggable order ──────────── */
@@ -8158,8 +7928,8 @@ var _brokerConnected = false;
 
 function signOut() {
   fetch('/auth/logout', { method: 'POST', credentials: 'same-origin' })
-    .then(function() { window.location.href = '/trading'; })
-    .catch(function() { window.location.href = '/trading'; });
+    .then(function() { window.location.href = '/trading-backup'; })
+    .catch(function() { window.location.href = '/trading-backup'; });
 }
 
 function loadBrokerStatus() {
@@ -8721,8 +8491,7 @@ async function _connectWallet() {
       _w3.chainId = parseInt(cid, 16);
       _w3.provider = new ethers.BrowserProvider(window.ethereum);
       _w3.provider.getSigner().then(function(s){ _w3.signer = s; });
-      var cs = document.getElementById('chain-select');
-      if (cs) cs.value = String(_w3.chainId);
+      document.getElementById('chain-select').value = _w3.chainId;
       _updateWalletUI();
       _loadTokenDefaults();
       _updateSwapBalances();
@@ -8737,9 +8506,8 @@ function _disconnectWallet() {
   _w3.balance = '0'; _w3.connected = false;
   _w3.sellToken = null; _w3.buyToken = null; _w3.lastQuote = null;
   var btn = document.getElementById('wallet-btn');
-  if (btn) btn.classList.remove('connected');
-  var wl = document.getElementById('wallet-label');
-  if (wl) wl.textContent = 'Connect Wallet';
+  btn.classList.remove('connected');
+  document.getElementById('wallet-label').textContent = 'Connect Wallet';
   document.getElementById('swap-connect-state').style.display = '';
   document.getElementById('swap-main').style.display = 'none';
 }
@@ -8750,29 +8518,28 @@ async function _updateWalletUI() {
   var mmDot = document.getElementById('broker-dot-mm');
   var mmSub = document.getElementById('broker-sub-mm');
   if (!_w3.connected) {
-    if (btn) btn.classList.remove('connected');
-    if (label) label.textContent = 'Connect Wallet';
+    btn.classList.remove('connected'); label.textContent = 'Connect Wallet';
     if (mmDot) mmDot.className = 'broker-dot disconnected';
     if (mmSub) mmSub.textContent = 'Connect wallet';
     return;
   }
-  if (btn) btn.classList.add('connected');
+  btn.classList.add('connected');
   if (mmDot) mmDot.className = 'broker-dot connected';
   var chain = CHAINS[_w3.chainId];
   var addr = _w3.address.slice(0,6) + '...' + _w3.address.slice(-4);
   if (mmSub) mmSub.textContent = addr;
-  if (label) {
-    try {
-      var bal = await _w3.provider.getBalance(_w3.address);
-      _w3.balance = ethers.formatEther(bal);
-      var dispBal = parseFloat(_w3.balance).toFixed(4);
-      label.innerHTML = '<span class="wallet-addr">' + addr + '</span> <span class="wallet-balance">' + dispBal + ' ' + (chain ? chain.symbol : '') + '</span>';
-    } catch(e) {
-      label.innerHTML = '<span class="wallet-addr">' + addr + '</span>';
-    }
+  try {
+    var bal = await _w3.provider.getBalance(_w3.address);
+    _w3.balance = ethers.formatEther(bal);
+    var dispBal = parseFloat(_w3.balance).toFixed(4);
+    label.innerHTML = '<span class="wallet-addr">' + addr + '</span> <span class="wallet-balance">' + dispBal + ' ' + (chain ? chain.symbol : '') + '</span>';
+  } catch(e) {
+    label.innerHTML = '<span class="wallet-addr">' + addr + '</span>';
   }
+  // Sync chain selector
   var sel = document.getElementById('chain-select');
-  if (sel && String(sel.value) !== String(_w3.chainId) && CHAINS[_w3.chainId]) sel.value = String(_w3.chainId);
+  if (sel.value != String(_w3.chainId) && CHAINS[_w3.chainId]) sel.value = _w3.chainId;
+  // Show swap main panel
   document.getElementById('swap-connect-state').style.display = 'none';
   document.getElementById('swap-main').style.display = '';
 }
@@ -10456,6 +10223,7 @@ function exitMultiView(interval) {
   var drawCanvas = document.getElementById('draw-canvas');
   if (drawToolbar) drawToolbar.style.display = '';
   if (drawCanvas) drawCanvas.style.display = '';
+  document.getElementById('interval-select').value = interval;
   changeInterval(interval);
   _resizeDrawCanvas();
 }
@@ -10542,7 +10310,6 @@ document.addEventListener('keydown', function(e) {
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
 
   if (e.key === 'Escape') {
-    closeIntervalPopover();
     if (_chartFullscreen) { toggleFullscreen(); return; }
     closeAllDrawers();
     clearAnnotations();
@@ -10556,6 +10323,7 @@ document.addEventListener('keydown', function(e) {
   // 1-4 for quick interval switch
   var intervalMap = {'1':'1d','2':'1h','3':'15m','4':'1wk'};
   if (intervalMap[e.key]) {
+    document.getElementById('interval-select').value = intervalMap[e.key];
     changeInterval(intervalMap[e.key]);
     e.preventDefault();
     return;

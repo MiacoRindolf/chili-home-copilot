@@ -272,6 +272,7 @@ def get_aggregates(
             cache_key = f"poly:agg:{poly_ticker}:{interval}:{period}"
         if timespan in ("minute", "hour"):
             cache_key = f"{cache_key}|ic"
+        cache_key = f"{cache_key}:pg1"
 
         cached = _cache_get(cache_key)
         if cached is not None:
@@ -334,15 +335,10 @@ def get_aggregates(
             _cache_set(cache_key, merged)
             return merged
 
-        url = f"{_base()}/v2/aggs/ticker/{poly_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}"
-        data = _get(url, {"adjusted": "true", "sort": "asc", "limit": "50000"})
-        if not data or data.get("resultsCount", 0) == 0:
-            return []
-
-        bars = _bars_from_response(data)
+        bars = _fetch_one_range(from_date, to_date)
         if not bars:
             return []
-
+        bars.sort(key=lambda x: x["time"])
         _cache_set(cache_key, bars)
         return bars
 

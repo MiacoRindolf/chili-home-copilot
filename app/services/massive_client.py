@@ -370,6 +370,7 @@ def get_aggregates(
             cache_key = f"massive:agg:{m_ticker}:{interval}:{period}"
         if timespan in ("minute", "hour"):
             cache_key = f"{cache_key}|ic"
+        cache_key = f"{cache_key}:pg1"
 
         if _is_dead_ticker(m_ticker):
             return []
@@ -441,17 +442,14 @@ def get_aggregates(
             _cache_set(cache_key, merged)
             return merged
 
-        data = _get(
-            f"{_base()}/v2/aggs/ticker/{m_ticker}/range/{multiplier}/{timespan}/{from_date}/{to_date}",
-            {"adjusted": "true", "sort": "asc", "limit": "50000"},
-        )
-        if data is _NOT_FOUND:
+        # Day / week / month: API may paginate via next_url; single-page fetch truncated history.
+        bars, dead = _fetch_one_range(from_date, to_date)
+        if dead:
             _mark_dead_ticker(m_ticker)
             return []
-        bars = _bars_from_response(data)
         if not bars:
             return []
-
+        bars.sort(key=lambda x: x["time"])
         _cache_set(cache_key, bars)
         return bars
 
@@ -647,7 +645,7 @@ def get_aggregates_batch(
         if massive_aggregate_variants_all_dead(t):
             continue
         m_ticker = to_massive_ticker(t)
-        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}{_ic_suffix}"
+        cache_key = f"massive:agg:{m_ticker}:{interval}:{period}{_ic_suffix}:pg1"
         cached = _cache_get(cache_key)
         if cached is not None:
             results[t] = cached

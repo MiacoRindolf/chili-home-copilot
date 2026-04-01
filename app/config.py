@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     use_polygon: bool = False  # feature flag: set USE_POLYGON=true in .env to enable
     polygon_max_rps: int = 5  # soft cap; governor will smooth bursts around this
 
+    # After Massive, allow Polygon + yfinance for OHLCV/quotes (scanner batch, prescreener, etc.).
+    # Set MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false to use Massive only and avoid Yahoo noise in logs.
+    market_data_allow_provider_fallback: bool = True
+
     # Learning schedule (1h = faster research cycles if worker + OHLCV provider keep up)
     learning_interval_hours: int = 1
     # If a cycle crashes without clearing _learning_status["running"], the brain worker would skip

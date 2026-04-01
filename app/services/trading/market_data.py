@@ -55,6 +55,13 @@ def _use_polygon() -> bool:
     )
 
 
+def _effective_allow_fallback(allow_provider_fallback: bool | None) -> bool:
+    """None → ``settings.market_data_allow_provider_fallback``; explicit bool wins."""
+    if allow_provider_fallback is not None:
+        return allow_provider_fallback
+    return settings.market_data_allow_provider_fallback
+
+
 def smart_round(value: float | None, fallback: int = 2, *, crypto: bool = False) -> float | None:
     """Round a price to an appropriate number of decimals based on magnitude.
 
@@ -131,6 +138,8 @@ def _clamp_period(interval: str, period: str) -> str:
     allowed = _INTERVAL_MAX_PERIOD.get(interval)
     if allowed is None:
         return period
+    if period == "max":
+        return allowed[-1]
     if period in allowed:
         return period
     return _INTERVAL_DEFAULT_PERIOD.get(interval, allowed[-1])
@@ -145,16 +154,23 @@ def fetch_ohlcv(
     *,
     start: str | None = None,
     end: str | None = None,
+    allow_provider_fallback: bool | None = None,
 ) -> list[dict[str, Any]]:
     """Fetch OHLCV candle data.  Massive → Polygon → yfinance.
 
     Either *period* **or** explicit *start*/*end* (YYYY-MM-DD or datetime)
     can be used.  When *start* is given it takes precedence over *period*.
+
+    *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
+    ``False`` forces Massive-only (trading chart routes use this).
     """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     if interval not in _VALID_INTERVALS:
         interval = "1d"
     if not start and period not in _VALID_PERIODS:
         period = "6mo"
+    if not start:
+        period = _clamp_period(interval, period)
 
     _start_str = str(start)[:10] if start else None
     _end_str = str(end)[:10] if end else None
@@ -177,6 +193,9 @@ def fetch_ohlcv(
             logger.warning(f"[market_data] Massive OHLCV failed for {ticker}: {e}")
 
     if _massive_dead:
+        return []
+
+    if not fb:
         return []
 
     # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
@@ -227,6 +246,7 @@ def fetch_ohlcv_df(
     *,
     start: str | None = None,
     end: str | None = None,
+    allow_provider_fallback: bool | None = None,
 ) -> pd.DataFrame:
     """Fetch OHLCV as a pandas DataFrame (Open/High/Low/Close/Volume columns).
 
@@ -235,11 +255,16 @@ def fetch_ohlcv_df(
 
     Either *period* **or** explicit *start*/*end* (YYYY-MM-DD or datetime)
     can be used.  When *start* is given it takes precedence over *period*.
+
+    *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
     """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     if interval not in _VALID_INTERVALS:
         interval = "1d"
     if not start and period not in _VALID_PERIODS:
         period = "6mo"
+    if not start:
+        period = _clamp_period(interval, period)
 
     _start_str = str(start)[:10] if start else None
     _end_str = str(end)[:10] if end else None
@@ -260,6 +285,9 @@ def fetch_ohlcv_df(
             logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
 
     if _massive_dead:
+        return pd.DataFrame()
+
+    if not fb:
         return pd.DataFrame()
 
     # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
@@ -291,12 +319,15 @@ def fetch_ohlcv_batch(
     tickers: list[str],
     interval: str = "1d",
     period: str = "6mo",
+    *,
+    allow_provider_fallback: bool | None = None,
 ) -> dict[str, pd.DataFrame]:
     """Fetch OHLCV DataFrames for many tickers in parallel.
 
     Uses Massive batch (concurrent thread pool) when available, otherwise
-    falls back to yfinance ``batch_download`` + per-ticker history.
+    Polygon then yfinance ``batch_download`` + per-ticker history (if fallback allowed).
     """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     results: dict[str, pd.DataFrame] = {}
 
     if _use_massive():
@@ -316,6 +347,9 @@ def fetch_ohlcv_batch(
         if not missing:
             return results
         tickers = missing
+
+    if not fb:
+        return results
 
     if _use_polygon():
         from concurrent.futures import ThreadPoolExecutor
@@ -349,8 +383,13 @@ def fetch_ohlcv_batch(
 
 # ── Quote ──────────────────────────────────────────────────────────────
 
-def fetch_quote(ticker: str) -> dict[str, Any] | None:
-    """Current price + enriched info.  Massive WS → Massive REST → Polygon → yfinance."""
+def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> dict[str, Any] | None:
+    """Current price + enriched info.  Massive WS → Massive REST → Polygon → yfinance.
+
+    *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
+    ``False`` forces Massive-only (WS + REST).
+    """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     fi: dict[str, Any] | None = None
 
     # --- Massive WebSocket cache (fastest path) ---
@@ -384,6 +423,9 @@ def fetch_quote(ticker: str) -> dict[str, Any] | None:
             logger.warning(f"[market_data] Massive quote failed for {ticker}: {e}")
 
     if _massive_dead:
+        return None
+
+    if not fb:
         return None
 
     # --- Polygon path (secondary) ---
@@ -435,8 +477,14 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
     return result
 
 
-def fetch_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
-    """Fetch quotes for multiple tickers.  Massive → Polygon → yfinance."""
+def fetch_quotes_batch(
+    tickers: list[str], *, allow_provider_fallback: bool | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Fetch quotes for multiple tickers.  Massive → Polygon → yfinance.
+
+    *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
+    """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     results: dict[str, dict[str, Any]] = {}
 
     # --- Massive path (primary) ---
@@ -455,6 +503,9 @@ def fetch_quotes_batch(tickers: list[str]) -> dict[str, dict[str, Any]]:
         if not missing:
             return results
         tickers = missing
+
+    if not fb:
+        return results
 
     # --- Polygon path (secondary) ---
     if _use_polygon():
@@ -523,6 +574,8 @@ def compute_indicators(
     interval: str = "1d",
     period: str = "6mo",
     indicators: list[str] | None = None,
+    *,
+    allow_provider_fallback: bool | None = None,
 ) -> dict[str, Any]:
     """Compute requested technical indicators for a ticker.
 
@@ -532,10 +585,11 @@ def compute_indicators(
     Results are cached for 5 minutes keyed on (ticker, interval, period,
     indicators) since the underlying OHLCV data is itself cached for 30 min.
     """
+    fb = _effective_allow_fallback(allow_provider_fallback)
     if indicators is None:
         indicators = ["rsi", "macd", "sma_20", "ema_20", "bbands"]
     period = _clamp_period(interval, period)
-    cache_key = (ticker.upper(), interval, period, frozenset(indicators))
+    cache_key = (ticker.upper(), interval, period, frozenset(indicators), fb)
 
     now = _time.time()
     with _ind_cache_lock:
@@ -543,7 +597,9 @@ def compute_indicators(
         if entry and now - entry[0] < _IND_CACHE_TTL:
             return entry[1]
 
-    result = _compute_indicators_fresh(ticker, interval, period, indicators)
+    result = _compute_indicators_fresh(
+        ticker, interval, period, indicators, allow_provider_fallback=fb,
+    )
 
     with _ind_cache_lock:
         if len(_ind_cache) >= _IND_CACHE_MAX:
@@ -556,13 +612,20 @@ def compute_indicators(
 
 
 def _compute_indicators_fresh(
-    ticker: str, interval: str, period: str, indicators: list[str],
+    ticker: str,
+    interval: str,
+    period: str,
+    indicators: list[str],
+    *,
+    allow_provider_fallback: bool = True,
 ) -> dict[str, Any]:
     """Actual indicator computation (no cache).
 
-    Uses fetch_ohlcv_df() which routes through Polygon → yfinance automatically.
+    Uses fetch_ohlcv_df() with the same provider fallback policy.
     """
-    df = fetch_ohlcv_df(ticker, interval=interval, period=period)
+    df = fetch_ohlcv_df(
+        ticker, interval=interval, period=period, allow_provider_fallback=allow_provider_fallback,
+    )
     if df.empty:
         return {}
 

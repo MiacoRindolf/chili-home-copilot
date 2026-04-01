@@ -47,6 +47,9 @@ router.include_router(ai_router)
 router.include_router(broker_router)
 router.include_router(web3_router)
 
+# /trading UI market-data routes: Massive only (no Polygon/yfinance). Brain/scanner keep full fallback.
+_TRADING_UI_ALLOW_PROVIDER_FALLBACK = False
+
 _TRADING_PROMPT: str | None = None
 _TRADING_PROMPT_MTIME: float = 0.0
 
@@ -134,12 +137,17 @@ def _json_safe(value: Any) -> Any:
 
 # ── Page ────────────────────────────────────────────────────────────────
 
-@router.get("/trading", response_class=HTMLResponse)
-def trading_page(request: Request, db: Session = Depends(get_db)):
+
+def _trading_page_response(
+    request: Request,
+    db: Session,
+    *,
+    template_name: str,
+    page_title: str,
+):
     ctx = get_identity_ctx(request, db)
     # Brain Worker handles all learning cycles - no auto-trigger on page load
 
-    identity = ctx["identity"]
     avatar_url = ""
     if not ctx["is_guest"] and ctx["user_id"]:
         from ..models.core import User as _User
@@ -151,14 +159,32 @@ def trading_page(request: Request, db: Session = Depends(get_db)):
     google_configured = bool(_s.google_client_id and _s.google_client_secret)
 
     return request.app.state.templates.TemplateResponse(
-        request, "trading.html",
+        request,
+        template_name,
         {
-            "title": "Trading",
+            "title": page_title,
             "is_guest": ctx["is_guest"],
             "user_name": ctx["user_name"],
             "avatar_url": avatar_url,
             "google_configured": google_configured,
         },
+    )
+
+
+@router.get("/trading", response_class=HTMLResponse)
+def trading_page(request: Request, db: Session = Depends(get_db)):
+    return _trading_page_response(
+        request, db, template_name="trading.html", page_title="Trading"
+    )
+
+
+@router.get("/trading-backup", response_class=HTMLResponse)
+def trading_backup_page(request: Request, db: Session = Depends(get_db)):
+    return _trading_page_response(
+        request,
+        db,
+        template_name="trading_backup.html",
+        page_title="Trading (backup)",
     )
 
 
@@ -171,7 +197,12 @@ def api_ohlcv(
     period: str = Query("6mo"),
 ):
     try:
-        data = ts.fetch_ohlcv(ticker, interval=interval, period=period)
+        data = ts.fetch_ohlcv(
+            ticker,
+            interval=interval,
+            period=period,
+            allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+        )
     except Exception:
         data = []
     return JSONResponse({"ok": True, "ticker": ticker.upper(), "data": data})
@@ -179,7 +210,9 @@ def api_ohlcv(
 
 @router.get("/api/trading/quote")
 def api_quote(ticker: str = Query(...)):
-    quote = ts.fetch_quote(ticker)
+    quote = ts.fetch_quote(
+        ticker, allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+    )
     if not quote:
         return JSONResponse({"ok": True, "ticker": ticker.upper(), "price": None, "change": None, "change_pct": None})
     return JSONResponse({"ok": True, **quote})
@@ -188,7 +221,9 @@ def api_quote(ticker: str = Query(...)):
 @router.get("/api/trading/quotes/batch")
 def api_quotes_batch(tickers: str = Query(..., description="Comma-separated ticker list")):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()][:50]
-    results = ts.fetch_quotes_batch(ticker_list)
+    results = ts.fetch_quotes_batch(
+        ticker_list, allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+    )
     return JSONResponse({"ok": True, "quotes": results})
 
 
@@ -224,7 +259,13 @@ def api_indicators(
     indicators: str = Query("rsi,macd,sma_20,ema_20,bbands"),
 ):
     ind_list = [i.strip() for i in indicators.split(",") if i.strip()]
-    data = ts.compute_indicators(ticker, interval=interval, period=period, indicators=ind_list)
+    data = ts.compute_indicators(
+        ticker,
+        interval=interval,
+        period=period,
+        indicators=ind_list,
+        allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+    )
     return JSONResponse({"ok": True, "ticker": ticker.upper(), "indicators": data})
 
 
@@ -1870,7 +1911,11 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
         interval = 5 if massive_available else 1
         while True:
             try:
-                quote = await asyncio.to_thread(ts.fetch_quote, ticker)
+                quote = await asyncio.to_thread(
+                    ts.fetch_quote,
+                    ticker,
+                    allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+                )
                 if quote and quote.get("price") is not None:
                     await tick_queue.put({
                         "type": "tick",

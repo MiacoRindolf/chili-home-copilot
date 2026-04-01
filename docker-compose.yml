@@ -59,6 +59,8 @@ services:
       # set CHILI_TLS=0 and break https:// in the browser (PR_END_OF_FILE_ERROR).
       # For plain HTTP in Docker, use: docker compose run -e CHILI_TLS=0 … or a compose override.
       - CHILI_TLS=1
+      # Scanner/prescreener batch OHLCV: Massive-only (no Polygon/yfinance log spam).
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
       - chili_data:/app/data
       - ./docs:/app/docs
@@ -119,6 +121,7 @@ services:
       - DATABASE_MAX_OVERFLOW=12
       # Optional: BRAIN_QUEUE_BACKTEST_EXECUTOR=process for multi-core queue backtests
       # Optional: BRAIN_QUEUE_PROCESS_CAP=16 to cap workers vs Postgres
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
       - chili_data:/app/data
     depends_on:

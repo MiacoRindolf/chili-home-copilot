@@ -249,6 +249,48 @@ class TestFetchOHLCVProviderOrder:
 
 
 # ---------------------------------------------------------------------------
+# fetch_ohlcv_batch provider fallback
+# ---------------------------------------------------------------------------
+
+class TestFetchOHLCVBatchProviderFallback:
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=True)
+    @patch("app.services.trading.market_data._use_massive", return_value=True)
+    @patch("app.services.trading.market_data._massive")
+    def test_batch_skips_polygon_yfinance_when_setting_off(
+        self, mock_massive_mod, _use_m, _use_p, mock_batch_dl, monkeypatch,
+    ):
+        from app.services.trading import market_data as md
+
+        monkeypatch.setattr(md.settings, "market_data_allow_provider_fallback", False)
+        mock_massive_mod.get_aggregates_df_batch.return_value = {}
+        mock_massive_mod.massive_aggregate_variants_all_dead.return_value = False
+
+        result = md.fetch_ohlcv_batch(["AAPL", "MSFT"])
+        assert result == {}
+        mock_batch_dl.assert_not_called()
+
+    @patch("app.services.yf_session.batch_download")
+    @patch("app.services.trading.market_data._use_polygon", return_value=True)
+    @patch("app.services.trading.market_data._use_massive", return_value=True)
+    @patch("app.services.trading.market_data._massive")
+    def test_batch_skips_fallback_when_kwarg_false(
+        self, mock_massive_mod, _use_m, _use_p, mock_batch_dl, monkeypatch,
+    ):
+        from app.services.trading import market_data as md
+
+        monkeypatch.setattr(md.settings, "market_data_allow_provider_fallback", True)
+        mock_massive_mod.get_aggregates_df_batch.return_value = {}
+        mock_massive_mod.massive_aggregate_variants_all_dead.return_value = False
+
+        result = md.fetch_ohlcv_batch(
+            ["AAPL"], allow_provider_fallback=False,
+        )
+        assert result == {}
+        mock_batch_dl.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
 # fetch_quotes_batch provider selection
 # ---------------------------------------------------------------------------
 

@@ -17,6 +17,7 @@ from ...models.trading import Trade  # noqa: F401 — used by routers as ts.Trad
 
 # Market data
 from .market_data import (
+    _clamp_period,
     fetch_ohlcv,
     fetch_quote,
     fetch_quotes_batch,

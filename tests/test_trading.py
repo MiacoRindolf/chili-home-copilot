@@ -302,6 +302,7 @@ class TestClampPeriod:
     def test_daily_any_period(self):
         assert ts._clamp_period("1d", "6mo") == "6mo"
         assert ts._clamp_period("1d", "1y") == "1y"
+        assert ts._clamp_period("1d", "max") == "max"
 
     def test_1m_clamped(self):
         result = ts._clamp_period("1m", "6mo")
@@ -309,6 +310,10 @@ class TestClampPeriod:
 
     def test_1h_valid(self):
         assert ts._clamp_period("1h", "3mo") == "3mo"
+
+    def test_max_uses_widest_intraday_window(self):
+        assert ts._clamp_period("1m", "max") == "5d"
+        assert ts._clamp_period("1h", "max") == "2y"
 
 
 # ── API Route Tests ──────────────────────────────────────────────────────────
@@ -318,6 +323,12 @@ class TestTradingPageAPI:
     @patch("app.services.trading_service.should_run_learning", return_value=False)
     def test_trading_page_loads(self, mock_learn, client):
         resp = client.get("/trading")
+        assert resp.status_code == 200
+        assert "Trading" in resp.text
+
+    @patch("app.services.trading_service.should_run_learning", return_value=False)
+    def test_trading_backup_page_loads(self, mock_learn, client):
+        resp = client.get("/trading-backup")
         assert resp.status_code == 200
         assert "Trading" in resp.text
 
@@ -418,8 +429,13 @@ class TestJournalAPI:
 
 
 class TestMarketDataAPI:
-    @patch("app.services.trading_service._yf_history")
-    def test_ohlcv_returns_data(self, mock_hist, client):
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    @patch("app.services.trading.market_data._yf_history")
+    def test_ohlcv_returns_data(self, mock_hist, _use_m, _use_p, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.routers.trading._TRADING_UI_ALLOW_PROVIDER_FALLBACK", True, raising=False,
+        )
         mock_df = pd.DataFrame({
             "Open": [100.0], "High": [105.0], "Low": [99.0],
             "Close": [103.0], "Volume": [1000000],
@@ -433,15 +449,25 @@ class TestMarketDataAPI:
         assert len(data["data"]) == 1
         assert data["data"][0]["close"] == 103.0
 
-    @patch("app.services.trading_service._yf_history")
-    def test_ohlcv_empty_data(self, mock_hist, client):
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    @patch("app.services.trading.market_data._yf_history")
+    def test_ohlcv_empty_data(self, mock_hist, _use_m, _use_p, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.routers.trading._TRADING_UI_ALLOW_PROVIDER_FALLBACK", True, raising=False,
+        )
         mock_hist.return_value = pd.DataFrame()
         resp = client.get("/api/trading/ohlcv?ticker=NOPE")
         assert resp.status_code == 200
         assert resp.json()["data"] == []
 
-    @patch("app.services.trading_service._yf_fast_info")
-    def test_quote_returns_data(self, mock_info, client):
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    @patch("app.services.trading.market_data._yf_fast_info")
+    def test_quote_returns_data(self, mock_info, _use_m, _use_p, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.routers.trading._TRADING_UI_ALLOW_PROVIDER_FALLBACK", True, raising=False,
+        )
         mock_info.return_value = {
             "last_price": 185.50,
             "previous_close": 183.0,
@@ -456,12 +482,28 @@ class TestMarketDataAPI:
         assert data["ok"] is True
         assert data["price"] == 185.50
 
-    @patch("app.services.trading_service._yf_fast_info")
-    def test_quote_returns_null_for_unknown(self, mock_info, client):
+    @patch("app.services.trading.market_data._use_polygon", return_value=False)
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    @patch("app.services.trading.market_data._yf_fast_info")
+    def test_quote_returns_null_for_unknown(self, mock_info, _use_m, _use_p, client, monkeypatch):
+        monkeypatch.setattr(
+            "app.routers.trading._TRADING_UI_ALLOW_PROVIDER_FALLBACK", True, raising=False,
+        )
         mock_info.return_value = None
         resp = client.get("/api/trading/quote?ticker=NOPE")
         assert resp.status_code == 200
         assert resp.json()["price"] is None
+
+    @patch("app.services.trading.market_data._use_massive", return_value=False)
+    @patch("app.services.trading.market_data._yf_history")
+    def test_trading_ohlcv_default_skips_yfinance_without_massive(
+        self, mock_hist, _use_m, client,
+    ):
+        """/api/trading/ohlcv uses allow_provider_fallback=False: no Yahoo when Massive off."""
+        resp = client.get("/api/trading/ohlcv?ticker=AAPL")
+        assert resp.status_code == 200
+        assert resp.json()["data"] == []
+        mock_hist.assert_not_called()
 
 
 class TestInsightsAPI:
