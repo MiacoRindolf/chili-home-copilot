@@ -94,27 +94,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 .sidebar-wl-hint { padding: 0 10px 8px; font-size: 10px; color: var(--text-muted); line-height: 1.35; }
 
-/* ── Interval popover (toolbar) ─────────────────── */
-.interval-picker-wrap { position: relative; }
-.interval-trigger {
-  padding: 3px 10px; font-size: 11px; font-weight: 600; min-width: 44px;
-  background: var(--bg-secondary, #1e1e2e); border: 1px solid var(--border); border-radius: 4px;
-  color: var(--text); cursor: pointer; text-align: center;
+/* ── Interval grid (toolbar, always visible 2×4) ─── */
+.interval-picker-wrap {
+  display: flex; align-items: center;
 }
-.interval-trigger:hover { border-color: var(--accent); color: var(--accent); }
-.interval-popover {
-  position: absolute; top: 100%; left: 0; margin-top: 4px; z-index: 600;
-  background: var(--bg-header); border: 1px solid var(--border); border-radius: 8px;
-  padding: 8px; box-shadow: 0 8px 24px rgba(0,0,0,.25);
+.interval-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-rows: repeat(2, auto);
+  gap: 3px;
+  min-width: 176px;
+  max-width: 220px;
 }
-.interval-popover.hidden { display: none; }
-.interval-pop-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; min-width: 200px; }
 .interval-pop-item {
-  padding: 6px 4px; font-size: 11px; border: 1px solid var(--border); border-radius: 6px;
+  padding: 4px 2px; font-size: 10px; font-weight: 600;
+  border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg-secondary, #1e1e2e); color: var(--text); cursor: pointer;
+  text-align: center; line-height: 1.2;
 }
 .interval-pop-item:hover { border-color: var(--accent); color: var(--accent); }
-.interval-pop-item.active { background: rgba(99,102,241,.15); border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.interval-pop-item.active { background: rgba(99,102,241,.15); border-color: var(--accent); color: var(--accent); }
 
 /* ── Main area ───────────────────────────────────── */
 .t-main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
@@ -155,9 +154,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tsr-item .tsr-add:hover { border-color: var(--accent); color: var(--accent); background: rgba(99,102,241,.08); }
 .tsr-empty { padding: 16px; text-align: center; color: var(--text-muted); font-size: 12px; }
 .tsr-hint { padding: 8px 12px; color: var(--text-muted); font-size: 10px; border-top: 1px solid var(--border); text-align: center; }
-.t-toolbar .price-display { font-size: 12px; margin-right: 6px; font-family: monospace; }
+.t-toolbar .price-display {
+  font-size: 12px; margin-right: 6px; font-family: monospace;
+  display: inline-block; padding: 3px 8px; border-radius: 8px; vertical-align: middle;
+}
 .t-toolbar .price-display .change.up { color: #22c55e; font-weight: 600; }
 .t-toolbar .price-display .change.down { color: #ef4444; font-weight: 600; }
+@keyframes priceToolbarFlashUp {
+  0% { background-color: transparent; box-shadow: 0 0 0 rgba(34, 197, 94, 0); }
+  18% { background-color: rgba(34, 197, 94, 0.5); box-shadow: 0 0 14px rgba(34, 197, 94, 0.55); }
+  40% { background-color: rgba(34, 197, 94, 0.2); box-shadow: 0 0 8px rgba(34, 197, 94, 0.3); }
+  100% { background-color: transparent; box-shadow: 0 0 0 rgba(34, 197, 94, 0); }
+}
+@keyframes priceToolbarFlashDown {
+  0% { background-color: transparent; box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
+  18% { background-color: rgba(239, 68, 68, 0.5); box-shadow: 0 0 14px rgba(239, 68, 68, 0.55); }
+  40% { background-color: rgba(239, 68, 68, 0.2); box-shadow: 0 0 8px rgba(239, 68, 68, 0.3); }
+  100% { background-color: transparent; box-shadow: 0 0 0 rgba(239, 68, 68, 0); }
+}
+.t-toolbar .price-display.price-flash-up { animation: priceToolbarFlashUp 0.78s ease-out; }
+.t-toolbar .price-display.price-flash-down { animation: priceToolbarFlashDown 0.78s ease-out; }
 .live-dot {
   display: inline-block; width: 8px; height: 8px; border-radius: 50%;
   margin-right: 4px; flex-shrink: 0; transition: background .3s;
@@ -1887,7 +1903,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   .t-bottom { height: 220px; min-height: 120px; }
   .t-toolbar { gap: 4px; padding: 4px 8px; }
   .t-toolbar .ticker-display { font-size: 13px; min-width: 50px; }
-  .t-toolbar .price-display { font-size: 11px; margin-right: 4px; }
+  .t-toolbar .price-display { font-size: 11px; margin-right: 4px; padding: 2px 6px; border-radius: 6px; }
   .t-toolbar select, .t-toolbar button { padding: 3px 6px; font-size: 10px; }
   .ind-panel { padding: 2px 8px 4px; gap: 3px; }
   .ind-chip { padding: 2px 6px; font-size: 9px; }
@@ -2260,22 +2276,18 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <span id="live-dot" class="live-dot disconnected" title="Live stream status"></span>
       <span class="price-display" id="price-label"></span>
       <span class="tb-divider"></span>
-      <div class="interval-picker-wrap">
-        <button type="button" id="interval-trigger" class="interval-trigger" onclick="toggleIntervalPopover(event)" aria-expanded="false" title="Chart interval">1D</button>
-        <div id="interval-popover" class="interval-popover hidden" role="listbox" aria-label="Interval">
-          <div class="interval-pop-grid">
-            <button type="button" class="interval-pop-item" data-interval="1m" onclick="changeInterval('1m')">1m</button>
-            <button type="button" class="interval-pop-item" data-interval="5m" onclick="changeInterval('5m')">5m</button>
-            <button type="button" class="interval-pop-item" data-interval="15m" onclick="changeInterval('15m')">15m</button>
-            <button type="button" class="interval-pop-item" data-interval="30m" onclick="changeInterval('30m')">30m</button>
-            <button type="button" class="interval-pop-item" data-interval="1h" onclick="changeInterval('1h')">1h</button>
-            <button type="button" class="interval-pop-item" data-interval="1d" onclick="changeInterval('1d')">1D</button>
-            <button type="button" class="interval-pop-item" data-interval="1wk" onclick="changeInterval('1wk')">1W</button>
-            <button type="button" class="interval-pop-item" data-interval="1mo" onclick="changeInterval('1mo')">1M</button>
-          </div>
+      <div class="interval-picker-wrap" role="group" aria-label="Chart interval">
+        <div class="interval-grid" role="listbox" aria-label="Timeframe">
+          <button type="button" class="interval-pop-item" data-interval="1m" onclick="changeInterval('1m')" role="option">1m</button>
+          <button type="button" class="interval-pop-item" data-interval="5m" onclick="changeInterval('5m')" role="option">5m</button>
+          <button type="button" class="interval-pop-item" data-interval="15m" onclick="changeInterval('15m')" role="option">15m</button>
+          <button type="button" class="interval-pop-item" data-interval="30m" onclick="changeInterval('30m')" role="option">30m</button>
+          <button type="button" class="interval-pop-item" data-interval="1h" onclick="changeInterval('1h')" role="option">1h</button>
+          <button type="button" class="interval-pop-item" data-interval="1d" onclick="changeInterval('1d')" role="option">1D</button>
+          <button type="button" class="interval-pop-item" data-interval="1wk" onclick="changeInterval('1wk')" role="option">1W</button>
+          <button type="button" class="interval-pop-item" data-interval="1mo" onclick="changeInterval('1mo')" role="option">1M</button>
         </div>
       </div>
-      <button onclick="loadChart()" title="Refresh (R)">&#x21BB;</button>
       <span class="tb-divider"></span>
       <button id="btn-multiview" class="mv-btn" onclick="toggleMultiView()" title="Multi-timeframe view (M)">&#x25A6; Multi</button>
       <button id="btn-fullscreen" onclick="toggleFullscreen()" title="Fullscreen (F11)">&#x26F6;</button>
@@ -3325,6 +3337,7 @@ document.addEventListener('DOMContentLoaded', function() {
   _initChartAlertCtxMenu();
   _initPaneDrag();
   buildIndicatorPanel();
+  _syncIntervalUi(currentInterval);
   loadStrategies().then(function() {
     var _urlParams = new URLSearchParams(window.location.search);
     if (_urlParams.get('tab') !== 'backtest') return;
@@ -3417,11 +3430,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
   // Load brain tickers -> resolve default ticker if watchlist empty
   _initFromBrain();
-
-  document.addEventListener('click', function(e) {
-    var wrap = document.querySelector('.interval-picker-wrap');
-    if (wrap && !wrap.contains(e.target)) closeIntervalPopover();
-  });
 
 });
 
@@ -4864,6 +4872,22 @@ function loadChart() {
     });
 }
 
+var _lastLiveDisplayedPrice = null;
+var _priceLabelFlashTimer = null;
+
+function _pulsePriceLabel(direction) {
+  var lbl = document.getElementById('price-label');
+  if (!lbl) return;
+  lbl.classList.remove('price-flash-up', 'price-flash-down');
+  void lbl.offsetWidth;
+  lbl.classList.add(direction === 'up' ? 'price-flash-up' : 'price-flash-down');
+  if (_priceLabelFlashTimer) clearTimeout(_priceLabelFlashTimer);
+  _priceLabelFlashTimer = setTimeout(function() {
+    lbl.classList.remove('price-flash-up', 'price-flash-down');
+    _priceLabelFlashTimer = null;
+  }, 820);
+}
+
 function refreshPrice() {
   fetch('/api/trading/quote?ticker=' + encodeURIComponent(currentTicker))
     .then(function(r) { return r.json(); })
@@ -4871,14 +4895,23 @@ function refreshPrice() {
       var lbl = document.getElementById('price-label');
       if (!d.ok || d.price == null) {
         lbl.innerHTML = '<strong>--</strong>';
+        _lastLiveDisplayedPrice = null;
         return;
       }
+      var prev = _lastLiveDisplayedPrice;
+      var p = parseFloat(d.price);
       _priceCache[currentTicker] = d;
       var cls = (d.change_pct||0) >= 0 ? 'up' : 'down';
       var sign = (d.change_pct||0) >= 0 ? '+' : '';
       lbl.innerHTML = '<strong>$' + d.price + '</strong> <span class="change ' + cls + '">' + sign + (d.change||0) + ' (' + sign + (d.change_pct||0) + '%)</span>';
+      if (prev != null && isFinite(prev) && isFinite(p) && p !== prev) {
+        if (p > prev) _pulsePriceLabel('up');
+        else if (p < prev) _pulsePriceLabel('down');
+      }
+      if (isFinite(p)) _lastLiveDisplayedPrice = p;
     }).catch(function() {
       document.getElementById('price-label').innerHTML = '<strong>--</strong>';
+      _lastLiveDisplayedPrice = null;
     });
 }
 
@@ -5013,6 +5046,7 @@ function _handleLiveTick(msg) {
 
   var lbl = document.getElementById('price-label');
   if (lbl) {
+    var prevTick = _lastLiveDisplayedPrice;
     var prevData = _priceCache[currentTicker];
     var prevClose = prevData ? (prevData.previous_close || prevData.price) : null;
     if (prevClose) {
@@ -5024,6 +5058,11 @@ function _handleLiveTick(msg) {
     } else {
       lbl.innerHTML = '<strong>$' + price.toFixed(2) + '</strong>';
     }
+    if (prevTick != null && isFinite(prevTick) && isFinite(price)) {
+      if (price > prevTick) _pulsePriceLabel('up');
+      else if (price < prevTick) _pulsePriceLabel('down');
+    }
+    _lastLiveDisplayedPrice = price;
   }
   _evaluateUserPriceAlertsOnTick(price);
 }
@@ -5096,36 +5135,16 @@ function _showAlertToast(msg, skipSound) {
   }
 }
 
-function _intervalLabel(iv) {
-  var m = {'1m':'1m','5m':'5m','15m':'15m','30m':'30m','1h':'1h','1d':'1D','1wk':'1W','1mo':'1M'};
-  return m[iv] || iv;
-}
-
-function toggleIntervalPopover(ev) {
-  if (ev) ev.stopPropagation();
-  var pop = document.getElementById('interval-popover');
-  if (!pop) return;
-  pop.classList.toggle('hidden');
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.setAttribute('aria-expanded', pop.classList.contains('hidden') ? 'false' : 'true');
-}
-function closeIntervalPopover() {
-  var pop = document.getElementById('interval-popover');
-  if (pop) pop.classList.add('hidden');
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.setAttribute('aria-expanded', 'false');
-}
 function _syncIntervalUi(v) {
-  var tr = document.getElementById('interval-trigger');
-  if (tr) tr.textContent = _intervalLabel(v);
   document.querySelectorAll('.interval-pop-item').forEach(function(b) {
-    b.classList.toggle('active', b.getAttribute('data-interval') === v);
+    var on = b.getAttribute('data-interval') === v;
+    b.classList.toggle('active', on);
+    b.setAttribute('aria-selected', on ? 'true' : 'false');
   });
 }
 function changeInterval(v) {
   currentInterval = v;
   _syncIntervalUi(v);
-  closeIntervalPopover();
   loadChart();
   if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
 }
@@ -5141,11 +5160,18 @@ function selectTicker(t) {
   tickerLabel.innerHTML = currentTicker + '<span class="ticker-spinner"></span>';
   var chartArea = document.getElementById('chart-area');
   if (chartArea) { chartArea.classList.remove('glow'); void chartArea.offsetWidth; chartArea.classList.add('glow'); }
+  var pl = document.getElementById('price-label');
+  if (pl) pl.classList.remove('price-flash-up', 'price-flash-down');
+  if (_priceLabelFlashTimer) { clearTimeout(_priceLabelFlashTimer); _priceLabelFlashTimer = null; }
   var cached = _priceCache[currentTicker];
   if (cached) {
     var cls = (cached.change_pct||0) >= 0 ? 'up' : 'down';
     var sign = (cached.change_pct||0) >= 0 ? '+' : '';
     document.getElementById('price-label').innerHTML = '<strong>$' + cached.price + '</strong> <span class="change ' + cls + '">' + sign + (cached.change||0) + ' (' + sign + (cached.change_pct||0) + '%)</span>';
+    var cp = parseFloat(cached.price);
+    _lastLiveDisplayedPrice = isFinite(cp) ? cp : null;
+  } else {
+    _lastLiveDisplayedPrice = null;
   }
   if (_selectDebounce) clearTimeout(_selectDebounce);
   _selectDebounce = setTimeout(function() {
@@ -12036,7 +12062,6 @@ document.addEventListener('keydown', function(e) {
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable) return;
 
   if (e.key === 'Escape') {
-    closeIntervalPopover();
     if (_chartFullscreen) { toggleFullscreen(); return; }
     closeAllDrawers();
     clearAnnotations();
@@ -12045,7 +12070,6 @@ document.addEventListener('keydown', function(e) {
   if (e.key === 'F11') { toggleFullscreen(); e.preventDefault(); return; }
   if (e.key === '/') { openToolbarSearch(); e.preventDefault(); return; }
   if (e.key === 'm' || e.key === 'M') { toggleMultiView(); e.preventDefault(); return; }
-  if (e.key === 'r' || e.key === 'R') { loadChart(); e.preventDefault(); return; }
 
   // 1-4 for quick interval switch
   var intervalMap = {'1':'1d','2':'1h','3':'15m','4':'1wk'};
