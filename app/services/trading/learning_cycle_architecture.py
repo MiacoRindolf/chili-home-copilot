@@ -69,9 +69,10 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
         "mutating PostgreSQL and producing the in-memory ``report`` dict.\n\n"
         "Where: ``app.services.trading.learning.run_learning_cycle`` (orchestrator), "
         "invoked by the brain worker and status APIs.\n\n"
-        "Why: A coherent cycle boundary keeps snapshots, mining, backtests, and meta-learning "
-        "consistent; prescreen (2:00) and market scan (2:30 America/Los_Angeles) are scheduled "
-        "separately in ``trading_scheduler``."
+        "Why: A coherent cycle boundary keeps mining, backtests, and meta-learning "
+        "consistent; prescreen (2:00), market scan (2:30), and **market snapshots** (interval "
+        "job ``brain_market_snapshots``) run in ``trading_scheduler`` unless "
+        "``brain_snapshots_on_learning_cycle`` is enabled."
     ),
     inputs=(
         "``db: Session`` — SQLAlchemy DB session for the worker",
@@ -82,9 +83,9 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
         "External OHLCV/quote providers (Massive, Polygon, or yfinance) via market modules",
     ),
     outputs=(
-        "``report: dict[str, Any]`` — prescreen/scan counts (DB read), snapshots, patterns, "
-        "backtests, ML metrics, ``elapsed_s``, ``step_timings``, funnel snapshot",
-        "Rows written/updated: ``market_snapshots``, ``scan_patterns``, insights, "
+        "``report: dict[str, Any]`` — prescreen/scan counts (DB read), snapshot counts (if inline), "
+        "patterns, backtests, ML metrics, ``elapsed_s``, ``step_timings``, funnel snapshot",
+        "Rows written/updated (when not snapshot-only): ``scan_patterns``, insights, "
         "backtests, ``learning_events``, journal, proposals (per sub-phase)",
         "``_learning_status`` global — ``current_step``, ``phase``, ``steps_completed``, "
         "``last_cycle_funnel`` for the Brain desk",
@@ -97,23 +98,23 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
         label="Scheduled universe & scan",
         phase_summary="batch jobs (not in run_learning_cycle)",
         description=(
-            "Daily prescreen and full market scan populate PostgreSQL before the learning "
-            "cycle runs; this cluster documents those jobs for the Network graph."
+            "Daily prescreen, full market scan, and interval market snapshots populate PostgreSQL "
+            "outside ``run_learning_cycle``; this cluster documents those jobs for the Network graph."
         ),
         remarks=(
             "What: **Not** executed inside ``run_learning_cycle``. APScheduler runs "
             "``run_daily_prescreen_job`` at **2:00** and ``run_full_market_scan`` at **2:30** "
-            "(America/Los_Angeles) so ``trading_prescreen_candidates`` and ``trading_scans`` "
-            "are fresh for snapshot selection.\n\n"
-            "Where: ``app.services.trading_scheduler`` (``_run_daily_prescreen_job``, "
-            "``_run_daily_market_scan_job``), ``prescreen_job``, ``scanner.run_full_market_scan``.\n\n"
-            "Why: Decouples heavy universe I/O from the interactive learning cycle and keeps "
-            "one authoritative prescreen + scan pass per day."
+            "(America/Los_Angeles), and ``_run_brain_market_snapshot_job`` on an interval "
+            "(default **15 min**, job id ``brain_market_snapshots``) so ``trading_snapshots`` "
+            "stay fresh when ``brain_snapshots_on_learning_cycle`` is false (default).\n\n"
+            "Where: ``app.services.trading_scheduler``.\n\n"
+            "Why: Decouples heavy universe I/O and snapshot writes from the brain worker cycle."
         ),
         inputs=("Cron triggers", "Provider APIs for prescreen and OHLCV for scoring"),
         outputs=(
             "``trading_prescreen_snapshots`` / ``trading_prescreen_candidates`` rows",
             "``trading_scans`` (``ScanResult``) ranked scores per ticker",
+            "``trading_snapshots`` / ``MarketSnapshot`` rows from ``brain_market_snapshots``",
             "``brain_batch_jobs`` audit rows per run",
         ),
         steps=(
@@ -133,6 +134,22 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 inputs=("``SessionLocal``", "``settings.brain_prescreen_scheduler_enabled``", "scan scheduler flag"),
                 outputs=("Prescreen + scan DB rows", "batch job audit ids"),
             ),
+            CycleStepDef(
+                sid="brain_market_snapshots",
+                label="Market snapshots (interval cron)",
+                code_ref="trading_scheduler._run_brain_market_snapshot_job + learning.run_scheduled_market_snapshots",
+                runner_phase="scheduled",
+                description=(
+                    "Periodic daily + intraday snapshot upserts into ``trading_snapshots`` "
+                    "(``brain_market_snapshot_interval_minutes``, ``JOB_BRAIN_MARKET_SNAPSHOTS``)."
+                ),
+                remarks=(
+                    "Default path while ``brain_snapshots_on_learning_cycle`` is false. "
+                    "Disable via ``BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED=0``."
+                ),
+                inputs=("``SessionLocal``", "``brain_default_user_id``", "merged ticker universe"),
+                outputs=("``trading_snapshots`` rows", "batch job payload_json"),
+            ),
         ),
     ),
     CycleClusterDef(
@@ -144,51 +161,79 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             "and prunes stale analytical artifacts."
         ),
         remarks=(
-            "What: Persists normalized market snapshots, fills forward-return and score "
+            "What: Persists normalized market snapshots into PostgreSQL (table "
+            "``trading_snapshots``, ORM ``MarketSnapshot``), keyed by "
+            "``(ticker, bar_interval, bar_start_at)``; then fills forward-return and score "
             "columns, then decays stale trading insights.\n\n"
-            "Where: ``learning.take_snapshots_parallel``, ``backfill_future_returns``, "
-            "``backfill_predicted_scores``, ``decay_stale_insights`` in "
-            "``app.services.trading.learning``.\n\n"
+            "Where: ``learning.take_snapshots_parallel``, ``snapshot_bar_ops.upsert_market_snapshot``, "
+            "``backfill_future_returns``, ``backfill_predicted_scores``, "
+            "``decay_stale_insights`` in ``app.services.trading.learning``.\n\n"
             "Why: Mining and backtests assume fresh, labeled snapshot rows; decay prevents "
             "old insights from skewing promotion and alerts."
         ),
         inputs=(
-            "``load_top_scan_tickers_for_snapshots`` (``trading_scans`` + prescreen fallback) "
-            "+ watchlist",
+            "``build_snapshot_ticker_universe`` (scan head + prescreen fallback + watchlist; "
+            "cap ``settings.brain_snapshot_top_tickers``)",
             "Historical bars and quotes from market_data stack",
         ),
         outputs=(
-            "``market_snapshots`` rows (upserts)",
+            "``trading_snapshots`` / ``MarketSnapshot`` rows (JSON ``indicator_data``, prices, bar keys)",
             "Updated forward-return and predicted-score fields on snapshots",
             "Insight decay/prune counters in ``report``",
         ),
         steps=(
             CycleStepDef(
-                sid="snapshots",
-                label="Taking market snapshots",
+                sid="snapshots_daily",
+                label="Taking daily market snapshots",
                 code_ref="learning.take_snapshots_parallel",
                 runner_phase="snapshots",
                 description=(
-                    "Fetches OHLCV and quotes in parallel and upserts normalized snapshot rows "
-                    "for top names (and optional intraday intervals for crypto)."
+                    "Fetches OHLCV and quotes in parallel and upserts ``1d`` bar snapshots "
+                    "for the merged top-ticker universe."
                 ),
                 remarks=(
-                    "What: Parallel fetch + ``upsert_market_snapshot`` for many tickers; "
-                    "optional intraday intervals when ``brain_intraday_snapshots_enabled``.\n\n"
-                    "Where: ``take_snapshots_parallel`` in ``learning.py``; progress updates "
-                    "use ``apply_learning_cycle_step_status_progress`` for UI.\n\n"
-                    "Why: Snapshots are the shared feature store for prediction, mining, and "
-                    "RAG-style brain context for the cycle."
+                    "What: ``take_snapshots_parallel(..., bar_interval='1d')`` → "
+                    "``upsert_market_snapshot`` rows in ``trading_snapshots``.\n\n"
+                    "Where: ``learning.py`` only when ``brain_snapshots_on_learning_cycle`` is true; "
+                    "otherwise the APScheduler job ``brain_market_snapshots`` runs the same work.\n\n"
+                    "Why: Daily bars are the default feature store for swing mining and backfill labels."
                 ),
                 inputs=(
                     "``db: Session``",
-                    "``top_tickers`` from scan head + watchlist merge (~800 cap in cycle)",
-                    "``bar_interval`` (default ``1d``); optional crypto intraday list from settings",
+                    "``top_tickers`` from ``scanner.build_snapshot_ticker_universe``",
+                    "``bar_interval='1d'``",
                 ),
                 outputs=(
-                    "``snap_count`` — rows written this step",
-                    "``report['snapshots_taken']``",
-                    "``market_snapshots`` table updates per (ticker, interval)",
+                    "``report['snapshots_taken_daily']`` — 1d rows written this step",
+                    "``report['snapshots_taken']`` — running total after daily (intraday adds next)",
+                    "``trading_snapshots`` upserts for ``bar_interval='1d'``",
+                ),
+            ),
+            CycleStepDef(
+                sid="snapshots_intraday",
+                label="Taking intraday snapshots (crypto)",
+                code_ref="learning._take_intraday_crypto_snapshots",
+                runner_phase="snapshots_intraday",
+                description=(
+                    "Optional intraday bars (e.g. 15m) for crypto symbols in ``top_tickers``, "
+                    "when ``brain_intraday_snapshots_enabled``."
+                ),
+                remarks=(
+                    "What: Subset of ``*-USD`` tickers from the same universe, capped by "
+                    "``brain_intraday_max_tickers``; one ``take_snapshots_parallel`` per configured "
+                    "interval in ``brain_intraday_intervals``.\n\n"
+                    "Where: ``learning._take_intraday_crypto_snapshots``.\n\n"
+                    "Why: Intraday rows feed compression/HV miners and interval_jobs inside "
+                    "``mine_patterns`` when snapshots exist before mining."
+                ),
+                inputs=(
+                    "``top_tickers`` (same list as daily step)",
+                    "``settings.brain_intraday_*``",
+                ),
+                outputs=(
+                    "``report['intraday_snapshots_taken']``",
+                    "``report['snapshots_taken']`` — includes daily + intraday counts",
+                    "``trading_snapshots`` rows for non-1d intervals",
                 ),
             ),
             CycleStepDef(
@@ -209,7 +254,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                     "missing backfill produces null targets and weak pattern stats."
                 ),
                 inputs=(
-                    "Existing ``market_snapshots`` and price history",
+                    "Existing ``trading_snapshots`` / ``MarketSnapshot`` rows and price history",
                     "Prediction pipeline for score columns (limit 1000 scores in cycle)",
                 ),
                 outputs=(
@@ -277,7 +322,8 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 remarks=(
                     "What: Scans indicator/snapshot space for candidate ``ScanPattern`` "
                     "structures and persists them.\n\n"
-                    "Where: ``mine_patterns(db, user_id)`` in ``learning.py``.\n\n"
+                    "Where: ``mine_patterns(db, user_id, ticker_universe=...)`` in ``learning.py`` "
+                    "(cycle passes the same ``top_tickers`` as snapshots; other callers use legacy universe).\n\n"
                     "Why: Core discovery loop for the trading brain — without it the queue "
                     "and evolution stages have nothing to validate."
                 ),

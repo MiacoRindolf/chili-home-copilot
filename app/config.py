@@ -19,14 +19,14 @@ class Settings(BaseSettings):
     wellness_model: str = "phi4-mini"
     ollama_vision_model: str = "llama3.2-vision"
 
-    # Primary LLM â€” defaults to Groq free tier (Llama 3.3 70B, ~800 tok/s).
-    # Override with Ollama or other OpenAI-compatible provider.
+    # Groq / OpenAI-compat primary stack (tiers 2–3 in app.openai_client after OpenAI official).
     llm_api_key: str = ""
-    openai_api_key: str = ""  # backward compat; used as primary if llm_api_key empty
+    # OpenAI official API (api.openai.com) — tried first when set. Also fills primary_api_key if llm_api_key empty.
+    openai_api_key: str = ""
     llm_model: str = "llama-3.3-70b-versatile"
     llm_base_url: str = "https://api.groq.com/openai/v1"
 
-    # Fallback LLM â€” defaults to Google Gemini free tier (OpenAI-compatible endpoint).
+    # Fallback LLM â€” Google Gemini free tier (OpenAI-compatible endpoint), tier 4.
     # Get a free key at https://aistudio.google.com/apikey
     premium_api_key: str = ""
     premium_model: str = "gemini-2.0-flash"
@@ -178,9 +178,10 @@ class Settings(BaseSettings):
     brain_fast_eval_max_tickers: int = 400
 
     # Snapshots + mining: canonical bar key (ticker, interval, bar_start_utc). Intraday is crypto-focused.
-    brain_intraday_snapshots_enabled: bool = False
+    brain_snapshot_top_tickers: int = 1000
+    brain_intraday_snapshots_enabled: bool = True
     brain_intraday_intervals: str = "15m"
-    brain_intraday_max_tickers: int = 40
+    brain_intraday_max_tickers: int = 1000
     brain_snapshot_backfill_years: int = 10
 
     # Crypto universe for prescreen / ticker_universe: 0 = fetch all pages from provider (CoinGecko, capped by safety limit); N>0 = top N by market cap.
@@ -266,10 +267,37 @@ class Settings(BaseSettings):
         ),
     )
 
+    # APScheduler process split: ``all`` (default, single process), ``web`` (no heavy market scans),
+    # ``worker`` (heavy scans + heartbeat only), ``none`` (no scheduler — use with a separate worker).
+    # Docker Compose: ``chili`` uses ``none``, ``scheduler-worker`` uses ``all`` + ``CHILI_SCHEDULER_EMIT_HEARTBEAT=1``.
+    chili_scheduler_role: str = Field(
+        default="all",
+        validation_alias=AliasChoices("CHILI_SCHEDULER_ROLE"),
+    )
+
     # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).
     brain_worker_compose_service: str = "brain-worker"
     # Optional: restrict to one compose project label (empty = match any project with that service name)
     brain_worker_compose_project: str = ""
+
+    # When false (default), ``run_learning_cycle`` does not write daily/intraday rows to
+    # ``trading_snapshots``; APScheduler job ``brain_market_snapshots`` does (see trading_scheduler).
+    brain_snapshots_on_learning_cycle: bool = Field(
+        default=False,
+        validation_alias=AliasChoices(
+            "BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE",
+            "CHILI_BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE",
+        ),
+    )
+    brain_market_snapshot_scheduler_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED"),
+    )
+    brain_market_snapshot_interval_minutes: int = Field(
+        default=15,
+        ge=5,
+        validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_INTERVAL_MINUTES"),
+    )
 
     # Pattern backtests (backtesting.py): spread = constant bid/ask friction as fraction of price.
     # Combined proxy for half-spread + slippage (e.g. 0.0002 â‰ˆ 2 bps per side order of magnitude).

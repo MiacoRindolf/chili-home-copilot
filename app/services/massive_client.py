@@ -25,6 +25,13 @@ from ..config import settings
 
 logger = logging.getLogger(__name__)
 
+
+def _massive_ws_allowed_in_this_process() -> bool:
+    """When ``CHILI_SCHEDULER_ROLE=none``, the web container is API-only; skip WS (use REST quotes)."""
+    role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+    return role != "none"
+
+
 # ---------------------------------------------------------------------------
 # In-memory TTL cache
 # ---------------------------------------------------------------------------
@@ -237,6 +244,11 @@ def _bare_concat_crypto_usd(ticker: str) -> bool:
     return base.isalnum() and 2 <= len(base) <= 15
 
 
+def _massive_url_ticker_ok(m_ticker: str) -> bool:
+    """False when *m_ticker* is blank — must not be embedded in Massive path segments."""
+    return bool((m_ticker or "").strip())
+
+
 def to_massive_ticker(ticker: str) -> str:
     """Convert app-internal ticker to Massive/Polygon-compatible symbol format.
 
@@ -274,6 +286,8 @@ def crypto_aggregate_symbol_candidates(ticker: str) -> list[str]:
     Providers list the same asset under ``X:BASEUSD``, ``X:BASEUSDT``, etc.
     Stocks return a single candidate.
     """
+    if not (ticker or "").strip():
+        return []
     primary = to_massive_ticker(ticker)
     out: list[str] = [primary]
     base = _crypto_base_for_quote_variants(ticker)
@@ -354,6 +368,9 @@ def get_aggregates(
     Crypto: Massive may list the same asset as ``X:BASEUSD``, ``X:BASEUSDT``, etc.
     We try those variants (and accept bare ``ZKUSD`` as well as ``ZK-USD``).
     """
+    if not (ticker or "").strip():
+        return []
+
     if start:
         from_date = start if isinstance(start, str) else str(start)
         to_date = end or date.today().strftime("%Y-%m-%d")
@@ -371,6 +388,9 @@ def get_aggregates(
         if timespan in ("minute", "hour"):
             cache_key = f"{cache_key}|ic"
         cache_key = f"{cache_key}:pg1"
+
+        if not _massive_url_ticker_ok(m_ticker):
+            return []
 
         if _is_dead_ticker(m_ticker):
             return []
@@ -497,6 +517,8 @@ def get_aggregates_df(
 def get_last_quote(ticker: str) -> dict[str, Any] | None:
     """Fetch the latest quote/price for a ticker via snapshot endpoint."""
     m_ticker = to_massive_ticker(ticker)
+    if not _massive_url_ticker_ok(m_ticker):
+        return None
 
     if _is_dead_ticker(m_ticker):
         return None
@@ -517,6 +539,8 @@ def get_last_quote(ticker: str) -> dict[str, Any] | None:
 
 
 def _get_stock_snapshot(m_ticker: str) -> dict[str, Any] | None:
+    if not _massive_url_ticker_ok(m_ticker):
+        return None
     url = f"{_base()}/v2/snapshot/locale/us/markets/stocks/tickers/{m_ticker}"
     data = _get(url)
     if data is _NOT_FOUND:
@@ -550,6 +574,8 @@ def _get_stock_snapshot(m_ticker: str) -> dict[str, Any] | None:
 
 
 def _get_crypto_snapshot(m_ticker: str, orig_ticker: str) -> dict[str, Any] | None:
+    if not _massive_url_ticker_ok(m_ticker):
+        return None
     url = f"{_base()}/v2/snapshot/locale/global/markets/crypto/tickers/{m_ticker}"
     data = _get(url)
     if data is _NOT_FOUND:
@@ -580,6 +606,8 @@ def _get_crypto_snapshot(m_ticker: str, orig_ticker: str) -> dict[str, Any] | No
 
 
 def _get_prev_close(m_ticker: str) -> dict[str, Any] | None:
+    if not _massive_url_ticker_ok(m_ticker):
+        return None
     url = f"{_base()}/v2/aggs/ticker/{m_ticker}/prev"
     data = _get(url)
     if data is _NOT_FOUND or not data or not data.get("results"):
@@ -872,6 +900,11 @@ class MassiveWSClient:
         return self._thread is not None and self._thread.is_alive()
 
     def start(self, tickers: list[str] | None = None):
+        if not _massive_ws_allowed_in_this_process():
+            logger.info(
+                "[massive-ws] WebSocket disabled in this process (CHILI_SCHEDULER_ROLE=none)"
+            )
+            return
         if not settings.massive_api_key or not settings.massive_use_websocket:
             logger.info("[massive-ws] WebSocket disabled or no API key")
             return

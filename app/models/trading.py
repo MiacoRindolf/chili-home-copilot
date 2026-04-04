@@ -463,4 +463,5 @@ class BrainBatchJob(Base):
     ended_at: Optional[datetime] = Column(DateTime, nullable=True)
     error_message: Optional[str] = Column(Text, nullable=True)
     meta_json: Optional[dict] = Column(JSONB, nullable=True)
+    payload_json: Optional[dict] = Column(JSONB, nullable=True)
     user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)

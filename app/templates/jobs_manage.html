@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<div class="dashboard" style="max-width:1000px;margin:0 auto;padding:24px 20px;">
+  <header class="home-header" style="position:relative;margin-bottom:24px;">
+    <div>
+      <h1>Jobs — manage</h1>
+      <p class="subtitle">Filters, payloads, and safe triggers</p>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/trading">Trading</a>
+        <a href="/app/jobs">Jobs</a>
+        <a href="/app/jobs/manage" style="color:var(--accent)">Manage</a>
+      </nav>
+    </div>
+  </header>
+
+  <section style="margin-bottom:24px;padding:16px;border:1px solid var(--border);border-radius:10px;">
+    <h2 style="font-size:16px;margin-bottom:10px;">Trigger</h2>
+    <button type="button" id="btn-crypto" style="padding:8px 14px;border-radius:8px;cursor:pointer;">Run crypto breakout scan now</button>
+    <p id="trigger-msg" class="subtitle" style="margin-top:10px;"></p>
+  </section>
+
+  <section>
+    <h2 style="font-size:16px;margin-bottom:10px;">Filter batch jobs</h2>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;margin-bottom:12px;align-items:center;">
+      <label>job_type <input type="text" id="f-type" placeholder="e.g. crypto_breakout_scanner" style="min-width:220px;padding:6px 10px;"></label>
+      <label>status <input type="text" id="f-status" placeholder="ok / error / running" style="width:120px;padding:6px 10px;"></label>
+      <button type="button" id="btn-filter" style="padding:6px 12px;border-radius:8px;cursor:pointer;">Load</button>
+    </div>
+    <div id="tbl-wrap" style="overflow-x:auto;"></div>
+    <pre id="payload-view" style="margin-top:16px;padding:12px;background:var(--code-bg);border-radius:8px;font-size:12px;max-height:320px;overflow:auto;display:none;"></pre>
+  </section>
+</div>
+<script>
+(function() {
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  function load() {
+    var jt = document.getElementById('f-type').value.trim();
+    var st = document.getElementById('f-status').value.trim();
+    var q = '/api/jobs/batch?limit=40';
+    if (jt) q += '&job_type=' + encodeURIComponent(jt);
+    if (st) q += '&status=' + encodeURIComponent(st);
+    fetch(q).then(function(r) { return r.json(); }).then(function(d) {
+      var w = document.getElementById('tbl-wrap');
+      if (!d.ok || !d.items.length) {
+        w.innerHTML = '<p class="subtitle">No rows.</p>';
+        return;
+      }
+      var rows = d.items.map(function(x) {
+        return '<tr><td><button type="button" class="payload-btn" data-id="' + esc(x.id) + '" style="cursor:pointer;">' + esc(x.id).slice(0, 8) + '…</button></td><td>' + esc(x.job_type) + '</td><td>' + esc(x.status) + '</td><td>' + esc(x.started_at) + '</td><td>' + (x.has_payload ? 'yes' : '') + '</td></tr>';
+      }).join('');
+      w.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr><th align="left">id</th><th align="left">type</th><th align="left">status</th><th align="left">started</th><th>payload</th></tr></thead><tbody>' + rows + '</tbody></table>';
+      w.querySelectorAll('.payload-btn').forEach(function(btn) {
+        btn.addEventListener('click', function() {
+          var id = btn.getAttribute('data-id');
+          var pv = document.getElementById('payload-view');
+          pv.style.display = 'block';
+          pv.textContent = 'Loading…';
+          fetch('/api/jobs/batch/' + encodeURIComponent(id) + '/payload').then(function(r) { return r.json(); }).then(function(p) {
+            pv.textContent = JSON.stringify(p, null, 2);
+          }).catch(function() { pv.textContent = 'Failed to load payload.'; });
+        });
+      });
+    });
+  }
+  document.getElementById('btn-filter').addEventListener('click', load);
+  document.getElementById('btn-crypto').addEventListener('click', function() {
+    var msg = document.getElementById('trigger-msg');
+    msg.textContent = 'Queueing…';
+    fetch('/api/jobs/trigger/crypto-breakout', { method: 'POST' }).then(function(r) { return r.json(); }).then(function(d) {
+      msg.textContent = d.message || (d.detail || JSON.stringify(d));
+    }).catch(function() { msg.textContent = 'Request failed.'; });
+  });
+  load();
+})();
+</script>
+{% endblock %}

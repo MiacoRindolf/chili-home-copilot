@@ -4,7 +4,7 @@ CHILI Brain Worker - Continuous Learning Loop
 Runs as a separate process, continuously executing the FULL learning cycle:
 - Pre-filter market (Massive.com)
 - Deep score candidates
-- Take snapshots
+- (Snapshots via scheduler job ``brain_market_snapshots`` unless BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE=1)
 - Backfill future returns
 - Decay stale insights
 - Mine patterns
@@ -322,7 +322,7 @@ def _brain_db_poll_loop(
                     phase = ls.get("phase", "")
                     step = ls.get("current_step", "")
                     steps_done = ls.get("steps_completed", 0)
-                    total_steps = ls.get("total_steps", 23)
+                    total_steps = ls.get("total_steps", 24)
                     progress = f"Step {steps_done}/{total_steps}"
                     status.set_step(step or phase, progress)
             except Exception:
@@ -470,7 +470,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
         db = SessionLocal()
         try:
             status.set_step("Running full learning cycle", "Starting...")
-            logger.info("[brain] Starting FULL learning cycle (23 steps)")
+            logger.info("[brain] Starting FULL learning cycle (24 steps)")
             # Do not skip here: run_learning_cycle() clears stale locks and returns
             # {"ok": False} if a non-stale cycle is already in progress.
 

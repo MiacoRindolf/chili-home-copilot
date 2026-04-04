@@ -3021,6 +3021,31 @@ function smartMinMove(price) {
   return 0.00000001;
 }
 
+function _isCryptoTickerUi(t) {
+  return (t || '').indexOf('-USD') !== -1;
+}
+
+/** When /api/trading/quote has no price, show last OHLCV close (same as chart). */
+function _paintToolbarPriceFromOhlcvFallback() {
+  var lbl = document.getElementById('price-label');
+  if (!lbl || !_rawOhlcData || !_rawOhlcData.length) return false;
+  if (_ohlcvBarsTicker !== currentTicker) return false;
+  var last = _rawOhlcData[_rawOhlcData.length - 1];
+  if (!last || last.close == null || isNaN(Number(last.close))) return false;
+  var prevClose = _rawOhlcData.length >= 2 ? _rawOhlcData[_rawOhlcData.length - 2].close : last.close;
+  var c = Number(last.close);
+  var p = Number(prevClose);
+  var _isCr = _isCryptoTickerUi(currentTicker);
+  var chg = c - p;
+  var pct = p ? (chg / p * 100) : 0;
+  var cls = chg >= 0 ? 'up' : 'down';
+  var sign = chg >= 0 ? '+' : '';
+  var pStr = smartPrice(c, _isCr);
+  lbl.innerHTML = '<strong>$' + pStr + '</strong> <span class="change ' + cls + '">' + sign + smartPrice(chg, _isCr) + ' (' + sign + (p ? pct.toFixed(2) : '0.00') + '%)</span>';
+  if (isFinite(c)) _lastLiveDisplayedPrice = c;
+  return true;
+}
+
 /* ── Mobile drawer management ──────────────────── */
 function toggleSidebar() {
   var sidebar = document.querySelector('.t-sidebar');
@@ -3295,6 +3320,8 @@ var _lastBreakoutData = null;
 var _magnetEnabled = false;
 var _drawUndoStack = [];
 var _rawOhlcData = null;
+/** Ticker that *_rawOhlcData* belongs to (avoids fallback label from wrong symbol). */
+var _ohlcvBarsTicker = null;
 var _lastCrosshairPrice = null;
 var _ctxMenuPrice = null;
 var CHART_TEMPLATE_STORAGE_KEY = 'chili_chart_template_v1';
@@ -4829,25 +4856,30 @@ function _hideChartOverlay() {
 var _pendingAnnotationFn = null;
 
 function loadChart() {
+  var reqTicker = currentTicker;
   document.getElementById('ticker-label').textContent = currentTicker;
   _updateWatermark();
   _showChartOverlay('Loading ' + currentTicker + '...');
+  _ohlcvBarsTicker = null;
   refreshPrice();
   fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(currentTicker) + '&interval=' + currentInterval + '&period=' + currentPeriod)
     .then(function(r) { return r.json(); })
     .then(function(d) {
       _hideChartOverlay();
+      if (currentTicker !== reqTicker) return;
       if (!d.ok || !d.data || !d.data.length) {
         document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">No data for ' + currentTicker + '</em>';
         candleSeries.setData([]);
         volumeSeries.setData([]);
         _rawOhlcData = [];
+        _ohlcvBarsTicker = null;
         _hydrateUserPriceAlertsAfterLoad();
         _pendingAnnotationFn = null;
         return;
       }
       clearAnnotations(true);
       _rawOhlcData = d.data;
+      _ohlcvBarsTicker = reqTicker;
       _chartBarTimes = d.data.map(function(c) { return c.time; });
       _lastBarTime = _chartBarTimes.length ? _chartBarTimes[_chartBarTimes.length - 1] : null;
       _applyChartType(d.data);
@@ -4864,11 +4896,16 @@ function loadChart() {
         _pendingAnnotationFn = null;
       }
       _hydrateUserPriceAlertsAfterLoad();
+      _paintToolbarPriceFromOhlcvFallback();
+      refreshPrice();
     }).catch(function() {
       _hideChartOverlay();
       _pendingAnnotationFn = null;
       _detachUserPriceAlertLines();
-      document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">Error loading chart</em>';
+      _ohlcvBarsTicker = null;
+      if (currentTicker === reqTicker) {
+        document.getElementById('price-label').innerHTML = '<em style="font-size:11px;color:#ef4444">Error loading chart</em>';
+      }
     });
 }
 
@@ -4889,13 +4926,18 @@ function _pulsePriceLabel(direction) {
 }
 
 function refreshPrice() {
-  fetch('/api/trading/quote?ticker=' + encodeURIComponent(currentTicker))
+  var t = (currentTicker && String(currentTicker).trim()) || '';
+  if (!t) return;
+  fetch('/api/trading/quote?ticker=' + encodeURIComponent(t))
     .then(function(r) { return r.json(); })
     .then(function(d) {
       var lbl = document.getElementById('price-label');
+      if (t !== currentTicker) return;
       if (!d.ok || d.price == null) {
-        lbl.innerHTML = '<strong>--</strong>';
-        _lastLiveDisplayedPrice = null;
+        if (!_paintToolbarPriceFromOhlcvFallback()) {
+          lbl.innerHTML = '<strong>--</strong>';
+          _lastLiveDisplayedPrice = null;
+        }
         return;
       }
       var prev = _lastLiveDisplayedPrice;
@@ -4910,8 +4952,12 @@ function refreshPrice() {
       }
       if (isFinite(p)) _lastLiveDisplayedPrice = p;
     }).catch(function() {
-      document.getElementById('price-label').innerHTML = '<strong>--</strong>';
-      _lastLiveDisplayedPrice = null;
+      var lbl = document.getElementById('price-label');
+      if (t !== currentTicker) return;
+      if (!_paintToolbarPriceFromOhlcvFallback()) {
+        lbl.innerHTML = '<strong>--</strong>';
+        _lastLiveDisplayedPrice = null;
+      }
     });
 }
 
@@ -4933,7 +4979,8 @@ function _bucketTime(epochSec, intervalStr) {
 
 function _connectLiveWS() {
   if (!_liveWSEnabled) return;
-  var targetTicker = currentTicker;
+  var targetTicker = (currentTicker && String(currentTicker).trim()) || '';
+  if (!targetTicker) return;
   if (_liveWS && _liveWSTicker === targetTicker &&
       (_liveWS.readyState === WebSocket.OPEN || _liveWS.readyState === WebSocket.CONNECTING)) {
     return;

@@ -742,6 +742,22 @@ def take_snapshots_parallel(
     return count
 
 
+def _take_intraday_crypto_snapshots(db: Session, top_tickers: list[str]) -> int:
+    """Intraday snapshot passes for crypto in ``top_tickers``; returns rows written."""
+    from ...config import settings as _s
+
+    if not _s.brain_intraday_snapshots_enabled:
+        return 0
+    total = 0
+    cap = max(1, int(_s.brain_intraday_max_tickers))
+    crypto_sn = [t for t in top_tickers if t.endswith("-USD")][:cap]
+    for raw_iv in _s.brain_intraday_intervals.split(","):
+        iv = raw_iv.strip()
+        if iv and iv != "1d" and crypto_sn:
+            total += take_snapshots_parallel(db, crypto_sn, bar_interval=iv)
+    return total
+
+
 def take_all_snapshots(db: Session, user_id: int | None, ticker_list: list[str] | None = None) -> int:
     if ticker_list:
         tickers = list(set(ticker_list))
@@ -1148,26 +1164,34 @@ def mine_row_to_indicator_payload(row: dict) -> dict:
     }
 
 
-def mine_patterns(db: Session, user_id: int | None) -> list[str]:
+def mine_patterns(
+    db: Session,
+    user_id: int | None,
+    *,
+    ticker_universe: list[str] | None = None,
+) -> list[str]:
     """Discover patterns from historical price data + existing snapshots."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from ...config import settings
     from .market_data import ALL_SCAN_TICKERS as _ALL_TICKERS
 
-    mine_tickers = list(_ALL_TICKERS)
+    if ticker_universe is not None:
+        mine_tickers = list(ticker_universe)
+    else:
+        mine_tickers = list(_ALL_TICKERS)
 
-    watchlist = get_watchlist(db, user_id)
-    for w in watchlist:
-        if w.ticker not in mine_tickers:
-            mine_tickers.append(w.ticker)
+        watchlist = get_watchlist(db, user_id)
+        for w in watchlist:
+            if w.ticker not in mine_tickers:
+                mine_tickers.append(w.ticker)
 
-    try:
-        from .prescreener import get_trending_crypto
-        for t in get_trending_crypto():
-            if t not in mine_tickers:
-                mine_tickers.append(t)
-    except Exception:
-        pass
+        try:
+            from .prescreener import get_trending_crypto
+            for t in get_trending_crypto():
+                if t not in mine_tickers:
+                    mine_tickers.append(t)
+        except Exception:
+            pass
 
     max_mine = int(getattr(settings, "brain_mine_patterns_max_tickers", 1000))
     if max_mine > 0:
@@ -7338,17 +7362,38 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
 # when changing public graph shape.
 
 
+def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Daily + intraday ``trading_snapshots`` writes for APScheduler (``brain_market_snapshots`` job).
+
+    Mirrors the snapshot phases removed from ``run_learning_cycle`` when
+    ``brain_snapshots_on_learning_cycle`` is false.
+    """
+    from .scanner import build_snapshot_ticker_universe
+
+    top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
+    daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
+    intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
+    return {
+        "ok": True,
+        "snapshots_taken_daily": daily_count,
+        "intraday_snapshots_taken": intra_count,
+        "snapshots_taken": daily_count + intra_count,
+        "universe_size": len(top_tickers),
+        "snapshot_driver": _drv.get("snapshot_driver"),
+    }
+
+
 def run_learning_cycle(
     db: Session,
     user_id: int | None,
     full_universe: bool = True,
 ) -> dict[str, Any]:
-    """Complete learning cycle: snapshots -> backfill -> mine -> backtest -> journal -> signals.
+    """Learning cycle: (optional inline snapshots) -> backfill -> mine -> backtest -> journal -> signals.
 
-    Daily prescreen (2:00) and full market scan (2:30 America/Los_Angeles) run as batch jobs;
-    this cycle reads ``trading_scans`` / prescreen tables for snapshot drivers.
+    Daily prescreen, market scan, and **market snapshots** default to APScheduler; set
+    ``BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE=1`` to take snapshots inside this call again.
     """
-    from .scanner import load_top_scan_tickers_for_snapshots
+    from .scanner import build_snapshot_ticker_universe
     from .journal import daily_market_journal, check_signal_events
 
     _shutting_down.clear()  # allow new cycle (e.g. after worker was stopped)
@@ -7408,7 +7453,7 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 23
+    _learning_status["total_steps"] = 24
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -7464,6 +7509,15 @@ def run_learning_cycle(
         from ...config import settings
         from ...trading_brain.wiring import brain_shadow_begin_cycle
 
+        _snap_inline = getattr(settings, "brain_snapshots_on_learning_cycle", False)
+        _cycle_step = 0
+        _learning_status["total_steps"] = 24 if _snap_inline else 22
+
+        def _bump_cycle_step() -> None:
+            nonlocal _cycle_step
+            _cycle_step += 1
+            _learning_status["steps_completed"] = _cycle_step
+
         brain_shadow_begin_cycle(
             db,
             ctx=_brain_shadow_ctx,
@@ -7492,43 +7546,54 @@ def run_learning_cycle(
         report["tickers_scored"] = _scan_n
         report["tickers_scanned"] = _scan_n
 
-        # Step 1: Snapshots (parallel, top from latest scan + watchlist)
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        # graph-node: c_state/snapshots
-        apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots")
-        top_tickers, _snap_drv = load_top_scan_tickers_for_snapshots(db, user_id, limit=800)
+        # Universe for mining / backfill (same as snapshot job uses)
+        top_tickers, _snap_drv = build_snapshot_ticker_universe(db, user_id)
         report["snapshot_driver"] = _snap_drv.get("snapshot_driver")
         if _snap_drv.get("fallback"):
             report["snapshot_driver_fallback"] = _snap_drv["fallback"]
-        watchlist = get_watchlist(db, user_id)
-        for w in watchlist:
-            if w.ticker not in top_tickers:
-                top_tickers.append(w.ticker)
-        snap_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
-        try:
-            from ...config import settings as _snap_settings
-            if _snap_settings.brain_intraday_snapshots_enabled:
-                crypto_sn = [
-                    t for t in top_tickers if t.endswith("-USD")
-                ][: max(1, int(_snap_settings.brain_intraday_max_tickers))]
-                for raw_iv in _snap_settings.brain_intraday_intervals.split(","):
-                    iv = raw_iv.strip()
-                    if iv and iv != "1d" and crypto_sn:
-                        snap_count += take_snapshots_parallel(
-                            db, crypto_sn, bar_interval=iv,
-                        )
-        except Exception:
-            pass
-        report["snapshots_taken"] = snap_count
         _learning_status["tickers_processed"] = len(top_tickers)
-        _learning_status["steps_completed"] = 1
-        _step_time("snapshots", step_start,
-                    f"{snap_count}/{len(top_tickers)} tickers via {_provider}")
-        _commit_step()
 
-        # Step 2: Backfill future returns + predicted scores
+        daily_count = 0
+        intra_count = 0
+        if _snap_inline:
+            # Step 1: Daily snapshots (parallel) — optional; default off (APScheduler job)
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            # graph-node: c_state/snapshots_daily
+            apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots_daily")
+            daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
+            report["snapshots_taken_daily"] = daily_count
+            report["snapshots_taken"] = daily_count
+            _bump_cycle_step()
+            _step_time("snapshots_daily", step_start,
+                        f"{daily_count}/{len(top_tickers)} tickers via {_provider}")
+            _commit_step()
+
+            # Step 2: Intraday snapshots (crypto subset)
+            if _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            step_start = time.time()
+            # graph-node: c_state/snapshots_intraday
+            apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots_intraday")
+            intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
+            report["intraday_snapshots_taken"] = intra_count
+            report["snapshots_taken"] = daily_count + intra_count
+            _bump_cycle_step()
+            _step_time("snapshots_intraday", step_start,
+                        f"{intra_count} intraday rows via {_provider}")
+            _commit_step()
+        else:
+            report["snapshots_taken_daily"] = 0
+            report["intraday_snapshots_taken"] = 0
+            report["snapshots_taken"] = 0
+            report["snapshots_inline_skipped"] = True
+            logger.info(
+                "[learning] Inline snapshots skipped (brain_snapshots_on_learning_cycle=false); "
+                "use APScheduler job brain_market_snapshots"
+            )
+
+        # Step 3: Backfill future returns + predicted scores
         step_start = time.time()
         # graph-node: c_state/backfill
         apply_learning_cycle_step_status(_learning_status, "c_state", "backfill")
@@ -7536,12 +7601,12 @@ def run_learning_cycle(
         scores_filled = backfill_predicted_scores(db, limit=1000)
         report["returns_backfilled"] = filled
         report["scores_backfilled"] = scores_filled
-        _learning_status["steps_completed"] = 2
+        _bump_cycle_step()
         _step_time("backfill", step_start,
                     f"{filled} returns + {scores_filled} scores via {_provider}")
         _commit_step()
 
-        # Step 3: Confidence decay (prune stale insights early)
+        # Step 4: Confidence decay (prune stale insights early)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7550,24 +7615,24 @@ def run_learning_cycle(
         decay_result = decay_stale_insights(db, user_id)
         report["insights_decayed"] = decay_result.get("decayed", 0)
         report["insights_pruned"] = decay_result.get("pruned", 0)
-        _learning_status["steps_completed"] = 3
+        _bump_cycle_step()
         _step_time("confidence_decay", step_start,
                     f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned")
         _commit_step()
 
-        # Step 4: Mine patterns
+        # Step 5: Mine patterns
         # graph-node: c_discovery/mine
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "mine")
         step_start = time.time()
-        discoveries = mine_patterns(db, user_id)
+        discoveries = mine_patterns(db, user_id, ticker_universe=top_tickers)
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
-        _learning_status["steps_completed"] = 4
+        _bump_cycle_step()
         _step_time("mine", step_start,
                     f"{len(discoveries)} patterns from OHLCV via {_provider}")
         _commit_step()
 
-        # Step 5: Active pattern seeking (boost under-sampled patterns)
+        # Step 6: Active pattern seeking (boost under-sampled patterns)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7575,12 +7640,12 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "seek")
         seek_result = seek_pattern_data(db, user_id)
         report["patterns_boosted"] = seek_result.get("sought", 0)
-        _learning_status["steps_completed"] = 5
+        _bump_cycle_step()
         _step_time("active_seek", step_start,
                     f"{seek_result.get('sought', 0)} boosted")
         _commit_step()
 
-        # Step 6: Backtest TradingInsights (legacy; optional — ScanPattern queue is canonical)
+        # Step 7: Backtest TradingInsights (legacy; optional — ScanPattern queue is canonical)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7595,10 +7660,10 @@ def run_learning_cycle(
             bt_count = 0
             report["insight_backtests_skipped"] = True
             _step_time("backtest_insights", step_start, "skipped (brain_insight_backtest_on_cycle=false)")
-        _learning_status["steps_completed"] = 6
+        _bump_cycle_step()
         _commit_step()
 
-        # Step 7: Backtest ScanPatterns from priority queue
+        # Step 8: Backtest ScanPatterns from priority queue
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7611,13 +7676,13 @@ def run_learning_cycle(
         report["queue_pending"] = queue_result.get("pending", 0)
         report["queue_empty"] = queue_result.get("queue_empty", True)
         report["backtests_run"] = bt_count + queue_result.get("backtests_run", 0)
-        _learning_status["steps_completed"] = 7
+        _bump_cycle_step()
         _step_time("backtest_queue", step_start,
                    f"{queue_result.get('patterns_processed', 0)} patterns, "
                    f"{queue_result.get('pending', 0)} still pending")
         _commit_step()
 
-        # Step 8: Fork / compare / promote ScanPattern variants (exit, entry, combo, …)
+        # Step 9: Fork / compare / promote ScanPattern variants (exit, entry, combo, …)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7629,7 +7694,7 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning("[learning] evolve_pattern_strategies failed: %s", e)
             report["evolution"] = {}
-        _learning_status["steps_completed"] = 8
+        _bump_cycle_step()
         _step_time(
             "pattern_variant_evolution",
             step_start,
@@ -7637,7 +7702,7 @@ def run_learning_cycle(
         )
         _commit_step()
 
-        # Step 9: Self-validation & weight evolution (with dynamic hypotheses)
+        # Step 10: Self-validation & weight evolution (with dynamic hypotheses)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7651,13 +7716,13 @@ def run_learning_cycle(
         report["hypothesis_patterns_spawned"] = sum(
             1 for d in evolve_result.get("details", []) if d.get("spawned_pattern_id")
         )
-        _learning_status["steps_completed"] = 9
+        _bump_cycle_step()
         _step_time("evolve", step_start,
                     f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
                     f"{evolve_result.get('weights_evolved', 0)} weights evolved")
         _commit_step()
 
-        # Step 10: Breakout outcome learning
+        # Step 11: Breakout outcome learning
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start_bo = time.time()
@@ -7665,7 +7730,7 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_evolution", "breakout")
         bo_result = learn_from_breakout_outcomes(db, user_id)
         report["breakout_patterns_learned"] = bo_result.get("patterns_learned", 0)
-        _learning_status["steps_completed"] = 10
+        _bump_cycle_step()
         _step_time("breakout_outcomes", step_start_bo,
                     f"{bo_result.get('patterns_learned', 0)} patterns from "
                     f"{bo_result.get('total_resolved', 0)} resolved alerts")
@@ -7683,7 +7748,7 @@ def run_learning_cycle(
             hv_result = mine_high_vol_regime_patterns(db, user_id, cycle_budget)
             report["intraday_discoveries"] = intra_result.get("discoveries", 0)
             report["high_vol_discoveries"] = hv_result.get("discoveries", 0)
-            _learning_status["steps_completed"] = 11
+            _bump_cycle_step()
             _step_time(
                 "intraday_mining",
                 step_start_id,
@@ -7700,7 +7765,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "refine")
             refine_result = refine_patterns(db, user_id)
             report["patterns_refined"] = refine_result.get("refined", 0)
-            _learning_status["steps_completed"] = 12
+            _bump_cycle_step()
             _step_time("refine", step_start,
                         f"{refine_result.get('refined', 0)} patterns refined")
             _commit_step()
@@ -7713,7 +7778,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "exit")
             exit_result = learn_exit_optimization(db, user_id)
             report["exit_adjustments"] = exit_result.get("adjustments", 0)
-            _learning_status["steps_completed"] = 13
+            _bump_cycle_step()
             _step_time("exit_optimization", step_start,
                         f"{exit_result.get('adjustments', 0)} adjustments")
             _commit_step()
@@ -7726,7 +7791,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "fakeout")
             fakeout_result = mine_fakeout_patterns(db, user_id)
             report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
-            _learning_status["steps_completed"] = 14
+            _bump_cycle_step()
             _step_time("fakeout_mining", step_start,
                         f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
             _commit_step()
@@ -7739,7 +7804,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "sizing")
             sizing_result = tune_position_sizing(db, user_id)
             report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
-            _learning_status["steps_completed"] = 15
+            _bump_cycle_step()
             _step_time("position_sizing", step_start,
                         f"{sizing_result.get('adjustments', 0)} sizing adjustments")
             _commit_step()
@@ -7752,7 +7817,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "inter_alert")
             inter_result = learn_inter_alert_patterns(db, user_id)
             report["inter_alert_insights"] = inter_result.get("insights", 0)
-            _learning_status["steps_completed"] = 16
+            _bump_cycle_step()
             _step_time("inter_alert", step_start,
                         f"{inter_result.get('insights', 0)} inter-alert insights")
             _commit_step()
@@ -7765,7 +7830,7 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "timeframe")
             tf_result = learn_timeframe_performance(db, user_id)
             report["timeframe_insights"] = tf_result.get("insights", 0)
-            _learning_status["steps_completed"] = 17
+            _bump_cycle_step()
             _step_time("timeframe_learning", step_start,
                         f"{tf_result.get('insights', 0)} timeframe insights")
             _commit_step()
@@ -7778,18 +7843,19 @@ def run_learning_cycle(
             apply_learning_cycle_step_status(_learning_status, "c_secondary", "synergy")
             synergy_result = mine_signal_synergies(db, user_id)
             report["synergies_found"] = synergy_result.get("synergies_found", 0)
-            _learning_status["steps_completed"] = 18
+            _bump_cycle_step()
             _step_time("synergy_mining", step_start,
                         f"{synergy_result.get('synergies_found', 0)} synergies found")
             _commit_step()
         else:
             report["secondary_miners_skipped"] = True
-            _learning_status["steps_completed"] = 18
+            _cycle_step += 8
+            _learning_status["steps_completed"] = _cycle_step
             logger.info("[learning] Secondary miners skipped (brain_secondary_miners_on_cycle=false)")
 
         report["brain_resource_budget"] = cycle_budget.to_report_dict()
 
-        # Step 19: Market journal
+        # Step 20: Market journal
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7797,11 +7863,11 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_journal", "journal")
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
-        _learning_status["steps_completed"] = 19
+        _bump_cycle_step()
         _step_time("journal", step_start)
         _commit_step()
 
-        # Step 20: Signal events
+        # Step 21: Signal events
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7809,11 +7875,11 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_journal", "signals")
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
-        _learning_status["steps_completed"] = 20
+        _bump_cycle_step()
         _step_time("signals", step_start, f"{len(events)} events")
         _commit_step()
 
-        # Step 21: Train pattern meta-learner
+        # Step 22: Train pattern meta-learner
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7834,13 +7900,13 @@ def run_learning_cycle(
                 f"{ml_result.get('active_patterns',0)} patterns, "
                 f"{_fb.get('boosted',0)} boosted, {_fb.get('penalised',0)} penalised",
             )
-        _learning_status["steps_completed"] = 21
+        _bump_cycle_step()
         _step_time("ml_train", step_start,
                     f"acc={ml_result.get('cv_accuracy', 0):.3f}"
                     if ml_result.get("ok") else "skipped")
         _commit_step()
 
-        # Step 22: Generate strategy proposals
+        # Step 23: Generate strategy proposals
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7853,12 +7919,12 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning(f"[trading] Strategy proposal generation failed: {e}")
             report["proposals_generated"] = 0
-        _learning_status["steps_completed"] = 22
+        _bump_cycle_step()
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
         _commit_step()
 
-        # Step 23: Pattern engine — discover, test, evolve
+        # Step 24: Pattern engine — discover, test, evolve
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7871,7 +7937,7 @@ def run_learning_cycle(
             report["patterns_evolved"] = pe_result.get("patterns_evolved", 0)
         except Exception as e:
             logger.warning(f"[trading] Pattern engine cycle failed: {e}")
-        _learning_status["steps_completed"] = 23
+        _bump_cycle_step()
         _step_time("pattern_engine", step_start, "done")
         _commit_step()
 
@@ -7889,7 +7955,7 @@ def run_learning_cycle(
                 report["cycle_ai_report_id"] = rid
             except Exception as e:
                 logger.warning("[trading] Cycle AI report failed: %s", e)
-            _learning_status["steps_completed"] = 23
+            _learning_status["steps_completed"] = _cycle_step
             _step_time(
                 "cycle_ai_report",
                 step_start,
@@ -7897,7 +7963,7 @@ def run_learning_cycle(
             )
             _commit_step()
         else:
-            _learning_status["steps_completed"] = 23
+            _learning_status["steps_completed"] = _cycle_step
 
         # Live vs research depromotion (optional)
         if not _shutting_down.is_set():
@@ -7932,7 +7998,7 @@ def run_learning_cycle(
             f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
         _commit_step()
-        _learning_status["steps_completed"] = 23
+        _learning_status["steps_completed"] = _cycle_step
         _commit_step()
 
     except InterruptedError:

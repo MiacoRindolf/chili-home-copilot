@@ -6,6 +6,7 @@ Domains: Trading (active), Code (active).
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -29,6 +30,7 @@ from ..services.project_brain import learning as pb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
 from ..services.trading.brain_network_graph import get_trading_brain_network_graph
 from ..models import (
+    BrainBatchJob,
     ReasoningAnticipation,
     ReasoningConfidenceSnapshot,
     ReasoningEvent,
@@ -38,6 +40,7 @@ from ..models import (
     ReasoningResearch,
     ReasoningUserModel,
 )
+from ..services.trading.batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
 
 logger = logging.getLogger(__name__)
 
@@ -94,12 +97,36 @@ def brain_page(
 
 # ── Cross-domain status ────────────────────────────────────────────────
 
+def _scheduler_worker_jobs_status(db: Session) -> dict:
+    """Recent scheduler-worker heartbeat from brain_batch_jobs (ok rows)."""
+    st = {"running": False, "last_run": None, "phase": "idle"}
+    try:
+        row = (
+            db.query(BrainBatchJob)
+            .filter(
+                BrainBatchJob.job_type == JOB_SCHEDULER_WORKER_HEARTBEAT,
+                BrainBatchJob.status == "ok",
+            )
+            .order_by(BrainBatchJob.ended_at.desc())
+            .first()
+        )
+        if row and row.ended_at:
+            st["last_run"] = row.ended_at.isoformat()
+            age_sec = (datetime.utcnow() - row.ended_at).total_seconds()
+            st["running"] = age_sec < 15 * 60
+            st["phase"] = "heartbeat" if st["running"] else "quiet"
+    except Exception:
+        pass
+    return st
+
+
 @router.get("/api/brain/domains")
-def api_brain_domains():
+def api_brain_domains(db: Session = Depends(get_db)):
     """List all Brain domains and their high-level status."""
     trading_st = ts.get_learning_status()
     code_st = cb_learning.get_code_learning_status()
     reasoning_st = rb_learning.get_reasoning_status()
+    jobs_st = _scheduler_worker_jobs_status(db)
     return JSONResponse({
         "ok": True,
         "domains": [
@@ -132,12 +159,22 @@ def api_brain_domains():
                 "last_run": reasoning_st.get("last_run"),
                 "phase": reasoning_st.get("phase", "idle"),
             },
+            {
+                "id": "jobs",
+                "label": "Jobs",
+                "icon": "\U0001f4cb",
+                "description": "Scheduled batch runs, scan payloads, and scheduler-worker heartbeat.",
+                "navigate_url": "/app/jobs",
+                "status": "learning" if jobs_st.get("running") else "idle",
+                "last_run": jobs_st.get("last_run"),
+                "phase": jobs_st.get("phase", "idle"),
+            },
         ],
     })
 
 
 @router.get("/api/brain/status")
-def api_brain_status():
+def api_brain_status(db: Session = Depends(get_db)):
     """Unified Brain health across all domains. Partial status on per-domain errors."""
     trading_st = {"running": False, "last_run": None, "phase": "idle"}
     code_st = {"running": False, "last_run": None, "phase": "idle"}
@@ -154,11 +191,13 @@ def api_brain_status():
         reasoning_st = rb_learning.get_reasoning_status()
     except Exception:
         pass
+    jobs_st = _scheduler_worker_jobs_status(db)
     return JSONResponse({
         "ok": True,
         "trading": trading_st,
         "code": code_st,
         "reasoning": reasoning_st,
+        "jobs": jobs_st,
     })
 
 

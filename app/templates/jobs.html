@@ -1,0 +1,75 @@
+{% extends "base.html" %}
+{% block title %}{{ title }}{% endblock %}
+{% block content %}
+<div class="dashboard" style="max-width:1000px;margin:0 auto;padding:24px 20px;">
+  <header class="home-header" style="position:relative;margin-bottom:24px;">
+    <div>
+      <h1>Jobs</h1>
+      <p class="subtitle">Batch job metrics from the last 7 days (brain_batch_jobs)</p>
+      <nav>
+        <a href="/">Home</a>
+        <a href="/trading">Trading</a>
+        <a href="/app/jobs" style="color:var(--accent)">Jobs</a>
+        <a href="/app/jobs/manage">Manage</a>
+      </nav>
+    </div>
+  </header>
+
+  <section id="hb" style="margin-bottom:20px;padding:14px;border:1px solid var(--border);border-radius:10px;background:var(--bg-header);">
+    <strong>Scheduler worker</strong>
+    <span id="hb-text" class="subtitle">Loading heartbeat…</span>
+  </section>
+
+  <h2 style="font-size:18px;margin-bottom:12px;">Runs by job type</h2>
+  <div id="summary" style="margin-bottom:32px;">Loading…</div>
+
+  <h2 style="font-size:18px;margin-bottom:12px;">Recent runs</h2>
+  <div id="recent" style="overflow-x:auto;">Loading…</div>
+</div>
+<script>
+(function() {
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.textContent = s;
+    return d.innerHTML;
+  }
+  fetch('/api/jobs/summary?hours=168').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) return;
+    var hb = d.scheduler_heartbeat;
+    var el = document.getElementById('hb-text');
+    if (hb && hb.last_ended_at) {
+      el.textContent = 'Last heartbeat: ' + hb.last_ended_at;
+    } else {
+      el.textContent = 'No heartbeat yet (start scheduler-worker; Docker uses CHILI_SCHEDULER_ROLE=all + CHILI_SCHEDULER_EMIT_HEARTBEAT=1).';
+    }
+    var sum = document.getElementById('summary');
+    if (!d.by_type || !d.by_type.length) {
+      sum.innerHTML = '<p class="subtitle">No batch jobs recorded in this window.</p>';
+      return;
+    }
+    var rows = d.by_type.map(function(x) {
+      return '<tr><td>' + esc(x.job_type) + '</td><td>' + x.runs + '</td><td>' + x.ok_runs + '</td><td>' + esc(x.last_started_at || '') + '</td></tr>';
+    }).join('');
+    sum.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:14px;"><thead><tr><th align="left">job_type</th><th align="right">runs</th><th align="right">ok</th><th align="left">last start</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }).catch(function() {
+    document.getElementById('summary').textContent = 'Could not load summary.';
+  });
+
+  fetch('/api/jobs/batch?limit=30').then(function(r) { return r.json(); }).then(function(d) {
+    if (!d.ok) return;
+    var rec = document.getElementById('recent');
+    if (!d.items || !d.items.length) {
+      rec.innerHTML = '<p class="subtitle">No rows.</p>';
+      return;
+    }
+    var rows = d.items.map(function(x) {
+      return '<tr><td>' + esc(x.id).slice(0, 8) + '…</td><td>' + esc(x.job_type) + '</td><td>' + esc(x.status) + '</td><td>' + esc(x.started_at) + '</td><td>' + esc(x.ended_at) + '</td></tr>';
+    }).join('');
+    rec.innerHTML = '<table style="width:100%;border-collapse:collapse;font-size:13px;"><thead><tr><th align="left">id</th><th align="left">type</th><th align="left">status</th><th align="left">started</th><th align="left">ended</th></tr></thead><tbody>' + rows + '</tbody></table>';
+  }).catch(function() {
+    document.getElementById('recent').textContent = 'Could not load recent jobs.';
+  });
+})();
+</script>
+{% endblock %}

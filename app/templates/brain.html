@@ -1784,6 +1784,16 @@ function updateSidebarStatus() {
     } else if (r.last_run) {
       banner.textContent += ' | Reasoning: ' + timeSince(new Date(r.last_run)) + ' ago';
     }
+    var j = d.jobs || {};
+    var jDot = document.getElementById('jobs-status-dot');
+    if (jDot) {
+      jDot.className = j.running ? 'b-domain-dot learning' : 'b-domain-dot idle';
+    }
+    if (j.running) {
+      banner.textContent += ' | Jobs: ' + (j.phase || 'scheduler') + '...';
+    } else if (j.last_run) {
+      banner.textContent += ' | Jobs: ' + timeSince(new Date(j.last_run)) + ' ago';
+    }
   }).catch(function(){ setSidebarBannerFallback(); });
 }
 
@@ -4715,7 +4725,7 @@ function brainReadUrlDomainString() {
     var v = String(rawParam).toLowerCase();
     if (v === 'hub') return 'hub';
     if (v === 'code') return 'project';
-    if (v === 'trading' || v === 'project' || v === 'reasoning') return v;
+    if (v === 'trading' || v === 'project' || v === 'reasoning' || v === 'jobs') return v;
     return '__invalid__';
   } catch (e) {
     return null;
@@ -4760,7 +4770,7 @@ function renderBrainHubCards() {
       title.className = 'b-hub-card-title';
       title.appendChild(document.createTextNode(label));
       var dot = document.createElement('span');
-      dot.className = 'b-domain-dot idle';
+      dot.className = (dom.status === 'learning') ? 'b-domain-dot learning' : 'b-domain-dot idle';
       dot.id = id + '-status-dot';
       title.appendChild(dot);
       var p = document.createElement('p');
@@ -4778,7 +4788,13 @@ function renderBrainHubCards() {
       inner.appendChild(ic);
       inner.appendChild(body);
       card.appendChild(inner);
-      function go() { switchDomain(id); }
+      function go() {
+        if (dom.navigate_url) {
+          window.location.href = dom.navigate_url;
+          return;
+        }
+        switchDomain(id);
+      }
       card.onclick = go;
       card.onkeydown = function(e) {
         if (e.key === 'Enter' || e.key === ' ') {
@@ -4835,6 +4851,10 @@ function brainApplyInitialView() {
   if (raw === 'hub' || raw === '__invalid__') {
     showBrainHub({ skipUrl: true });
     brainSetUrlDomain('hub');
+    return;
+  }
+  if (raw === 'jobs') {
+    window.location.replace('/app/jobs');
     return;
   }
   if (raw === 'trading' || raw === 'project' || raw === 'reasoning') {

@@ -1180,7 +1180,6 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
 
 # ── Crypto Intraday Breakout Scoring ──────────────────────────────────
 
-_crypto_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _CRYPTO_BREAKOUT_TTL = 900  # 15 minutes
 _crypto_scan_running = False
 
@@ -2193,24 +2192,86 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         return None
 
 
-def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
-    """Scan 70+ crypto pairs for intraday breakout setups on 15m candles.
+def _crypto_breakout_payload_from_run(
+    results: list[dict[str, Any]],
+    *,
+    total: int,
+    scan_time_iso: str,
+    elapsed_s: float,
+    errors: int,
+) -> dict[str, Any]:
+    return {
+        "results": results,
+        "total_scanned": total,
+        "scan_time": scan_time_iso,
+        "elapsed_s": elapsed_s,
+        "errors": errors,
+    }
 
-    Results are cached for 15 minutes. Runs all crypto candidates through
-    _score_crypto_breakout() and returns the top setups sorted by score.
+
+def _persist_crypto_breakout_adhoc(
+    meta: dict[str, Any],
+    payload: dict[str, Any],
+) -> None:
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_CRYPTO_BREAKOUT_SCANNER
+    from .brain_batch_job_log import brain_batch_job_record_completed
+
+    db = SessionLocal()
+    try:
+        brain_batch_job_record_completed(
+            db,
+            JOB_CRYPTO_BREAKOUT_SCANNER,
+            ok=True,
+            meta=meta,
+            payload_json=payload,
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("[crypto_breakout] DB persist failed: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
+def run_crypto_breakout_scan(
+    max_results: int = 20,
+    *,
+    batch_job_id: str | None = None,
+    skip_db_ttl_check: bool = False,
+) -> dict[str, Any]:
+    """Scan crypto pairs for intraday breakout setups on 15m candles.
+
+    Latest results are stored in ``brain_batch_jobs`` (payload_json) for cross-process reads.
+    When ``batch_job_id`` is set, the caller must ``brain_batch_job_finish`` with payload;
+    otherwise this function records a completed row (API-triggered runs).
     """
-    global _crypto_breakout_cache, _crypto_scan_running
+    global _crypto_scan_running
 
-    now = time.time()
-    if _crypto_breakout_cache["ts"] > 0 and (now - _crypto_breakout_cache["ts"]) < _CRYPTO_BREAKOUT_TTL:
-        return {
-            "ok": True,
-            "cached": True,
-            "results": _crypto_breakout_cache["results"][:max_results],
-            "total_scanned": _crypto_breakout_cache.get("total_scanned", 0),
-            "scan_time": _crypto_breakout_cache.get("scan_time"),
-            "age_seconds": int(now - _crypto_breakout_cache["ts"]),
-        }
+    if not skip_db_ttl_check:
+        from ...db import SessionLocal
+        from .batch_job_constants import JOB_CRYPTO_BREAKOUT_SCANNER
+        from .brain_batch_job_log import fetch_latest_ok_payload
+
+        _db = SessionLocal()
+        try:
+            payload, ended_at, _meta = fetch_latest_ok_payload(_db, JOB_CRYPTO_BREAKOUT_SCANNER)
+            if payload and ended_at:
+                age_s = (datetime.utcnow() - ended_at).total_seconds()
+                if age_s >= 0 and age_s < _CRYPTO_BREAKOUT_TTL:
+                    return {
+                        "ok": True,
+                        "cached": True,
+                        "results": (payload.get("results") or [])[:max_results],
+                        "all_results": payload.get("results") or [],
+                        "total_scanned": int(payload.get("total_scanned") or 0),
+                        "scan_time": payload.get("scan_time"),
+                        "elapsed_s": payload.get("elapsed_s"),
+                        "errors": int(payload.get("errors") or 0),
+                        "age_seconds": int(age_s),
+                    }
+        finally:
+            _db.close()
 
     if _crypto_scan_running:
         return {"ok": True, "warming_up": True, "results": [], "total_scanned": 0}
@@ -2289,13 +2350,7 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
 
         results.sort(key=lambda x: x["score"], reverse=True)
         elapsed = round(time.time() - t0, 1)
-
-        _crypto_breakout_cache.update(
-            results=results, ts=time.time(),
-            total_scanned=total,
-            scan_time=datetime.utcnow().isoformat(),
-            elapsed_s=elapsed, errors=errors,
-        )
+        scan_time_iso = datetime.utcnow().isoformat()
 
         above_6 = sum(1 for r in results if r["score"] >= 6)
         above_7 = sum(1 for r in results if r["score"] >= 7)
@@ -2308,32 +2363,77 @@ def run_crypto_breakout_scan(max_results: int = 20) -> dict[str, Any]:
             + (results[0]["ticker"] + f" ({results[0]['score']})" if results else "none")
         )
 
+        payload = _crypto_breakout_payload_from_run(
+            results,
+            total=total,
+            scan_time_iso=scan_time_iso,
+            elapsed_s=elapsed,
+            errors=errors,
+        )
+        meta = {
+            "scored": len(results),
+            "total": total,
+            "elapsed_s": elapsed,
+            "errors": errors,
+            "above_6": above_6,
+            "above_7": above_7,
+            "squeezes": squeezes,
+        }
+        if batch_job_id is None:
+            _persist_crypto_breakout_adhoc(meta, payload)
+
         return {
             "ok": True,
             "cached": False,
             "results": results[:max_results],
+            "all_results": results,
             "total_scanned": total,
-            "scan_time": _crypto_breakout_cache["scan_time"],
+            "scan_time": scan_time_iso,
             "elapsed_s": elapsed,
+            "errors": errors,
             "age_seconds": 0,
         }
     except Exception as exc:
         logger.exception(f"[crypto_breakout] Scan failed: {exc}")
-        return {"ok": False, "error": str(exc), "results": [], "total_scanned": 0}
+        return {
+            "ok": False,
+            "error": str(exc),
+            "results": [],
+            "all_results": [],
+            "total_scanned": 0,
+            "errors": 0,
+        }
     finally:
         _crypto_scan_running = False
 
 
 def get_crypto_breakout_cache() -> dict[str, Any]:
-    """Return the current cached crypto breakout results (for brain context)."""
-    now = time.time()
-    age = int(now - _crypto_breakout_cache["ts"]) if _crypto_breakout_cache["ts"] > 0 else None
-    return {
-        "results": _crypto_breakout_cache.get("results", []),
-        "scan_time": _crypto_breakout_cache.get("scan_time"),
-        "age_seconds": age,
-        "total_scanned": _crypto_breakout_cache.get("total_scanned", 0),
-    }
+    """Latest crypto breakout scan from Postgres (``brain_batch_jobs``)."""
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_CRYPTO_BREAKOUT_SCANNER
+    from .brain_batch_job_log import fetch_latest_ok_payload
+
+    db = SessionLocal()
+    try:
+        payload, ended_at, _meta = fetch_latest_ok_payload(db, JOB_CRYPTO_BREAKOUT_SCANNER)
+        if not payload:
+            return {
+                "results": [],
+                "scan_time": None,
+                "age_seconds": None,
+                "total_scanned": 0,
+            }
+        age = None
+        if ended_at:
+            age = int((datetime.utcnow() - ended_at).total_seconds())
+        return {
+            "results": payload.get("results") or [],
+            "scan_time": payload.get("scan_time"),
+            "age_seconds": age,
+            "total_scanned": int(payload.get("total_scanned") or 0),
+        }
+    finally:
+        db.close()
 
 
 # ── Breakout Detection Scoring ────────────────────────────────────────
@@ -2943,7 +3043,6 @@ _daytrade_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _DAYTRADE_CACHE_TTL = 600  # 10 min
 _daytrade_scan_running = False
 
-_breakout_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _BREAKOUT_CACHE_TTL = 600  # 10 min
 _breakout_scan_running = False
 
@@ -2961,14 +3060,33 @@ def get_daytrade_cache() -> dict[str, Any]:
 
 
 def get_breakout_cache() -> dict[str, Any]:
-    """Return merged stock + crypto breakout results (for API layer)."""
-    now = time.time()
-    stock_age = int(now - _breakout_cache["ts"]) if _breakout_cache["ts"] > 0 else None
-    crypto_age = int(now - _crypto_breakout_cache["ts"]) if _crypto_breakout_cache["ts"] > 0 else None
-    age = min(a for a in (stock_age, crypto_age) if a is not None) if (stock_age is not None or crypto_age is not None) else None
+    """Merged stock + crypto breakout results from Postgres (and crypto helper)."""
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_STOCK_BREAKOUT_SCANNER
+    from .brain_batch_job_log import fetch_latest_ok_payload
 
-    merged = list(_breakout_cache.get("results", []))
-    crypto_results = _crypto_breakout_cache.get("results", [])
+    crypto = get_crypto_breakout_cache()
+    crypto_results = list(crypto.get("results") or [])
+    crypto_age = crypto.get("age_seconds")
+
+    stock_results: list[dict[str, Any]] = []
+    stock_age: int | None = None
+    stock_scanned = 0
+    db = SessionLocal()
+    try:
+        payload, ended_at, _meta = fetch_latest_ok_payload(db, JOB_STOCK_BREAKOUT_SCANNER)
+        if payload:
+            stock_results = list(payload.get("results") or [])
+            stock_scanned = int(payload.get("candidates_scanned") or 0)
+            if ended_at:
+                stock_age = int((datetime.utcnow() - ended_at).total_seconds())
+    finally:
+        db.close()
+
+    ages = [a for a in (stock_age, crypto_age) if a is not None]
+    age = min(ages) if ages else None
+
+    merged = list(stock_results)
     if crypto_results:
         existing_tickers = {r["ticker"] for r in merged}
         for cr in crypto_results:
@@ -2978,12 +3096,9 @@ def get_breakout_cache() -> dict[str, Any]:
 
     return {
         "results": merged,
-        "scan_time": _breakout_cache.get("scan_time"),
+        "scan_time": crypto.get("scan_time"),
         "age_seconds": age,
-        "total_scanned": (
-            _breakout_cache.get("candidates_scanned", 0)
-            + _crypto_breakout_cache.get("total_scanned", 0)
-        ),
+        "total_scanned": stock_scanned + int(crypto.get("total_scanned") or 0),
     }
 
 
@@ -3073,22 +3188,78 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
     }
 
 
-def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
-    """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
-    global _breakout_cache, _breakout_scan_running
+def _stock_breakout_payload_from_run(
+    results: list[dict[str, Any]],
+    *,
+    candidates_scanned: int,
+    total_sourced: int,
+    elapsed_s: float,
+) -> dict[str, Any]:
+    return {
+        "results": results,
+        "candidates_scanned": candidates_scanned,
+        "total_sourced": total_sourced,
+        "elapsed_s": elapsed_s,
+        "scan_time": datetime.utcnow().isoformat(),
+    }
 
-    now = time.time()
-    if _breakout_cache["ts"] > 0 and (now - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
-        return {
-            "ok": True,
-            "scan_type": "breakout",
-            "cached": True,
-            "candidates_scanned": _breakout_cache.get("candidates_scanned", 0),
-            "total_sourced": _breakout_cache.get("total_sourced", 0),
-            "matches": len(_breakout_cache["results"][:max_results]),
-            "results": _breakout_cache["results"][:max_results],
-            "brain": _brain_meta(),
-        }
+
+def _persist_stock_breakout_adhoc(meta: dict[str, Any], payload: dict[str, Any]) -> None:
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_STOCK_BREAKOUT_SCANNER
+    from .brain_batch_job_log import brain_batch_job_record_completed
+
+    db = SessionLocal()
+    try:
+        brain_batch_job_record_completed(
+            db,
+            JOB_STOCK_BREAKOUT_SCANNER,
+            ok=True,
+            meta=meta,
+            payload_json=payload,
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("[breakout] stock DB persist failed: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
+def run_breakout_scan(
+    max_results: int = 30,
+    *,
+    batch_job_id: str | None = None,
+    skip_db_ttl_check: bool = False,
+) -> dict[str, Any]:
+    """Full-universe breakout scan: prescreen -> batch-quote filter -> breakout scoring."""
+    global _breakout_scan_running
+
+    if not skip_db_ttl_check:
+        from ...db import SessionLocal
+        from .batch_job_constants import JOB_STOCK_BREAKOUT_SCANNER
+        from .brain_batch_job_log import fetch_latest_ok_payload
+
+        _db = SessionLocal()
+        try:
+            payload, ended_at, _meta = fetch_latest_ok_payload(_db, JOB_STOCK_BREAKOUT_SCANNER)
+            if payload and ended_at:
+                age_s = (datetime.utcnow() - ended_at).total_seconds()
+                if age_s >= 0 and age_s < _BREAKOUT_CACHE_TTL:
+                    res = payload.get("results") or []
+                    return {
+                        "ok": True,
+                        "scan_type": "breakout",
+                        "cached": True,
+                        "candidates_scanned": int(payload.get("candidates_scanned") or 0),
+                        "total_sourced": int(payload.get("total_sourced") or 0),
+                        "matches": len(res[:max_results]),
+                        "results": res[:max_results],
+                        "all_results": res,
+                        "brain": _brain_meta(),
+                    }
+        finally:
+            _db.close()
 
     if _breakout_scan_running:
         return {"ok": True, "scan_type": "breakout", "warming_up": True, "matches": 0, "results": []}
@@ -3141,13 +3312,21 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
         results.sort(key=lambda r: r["score"], reverse=True)
         elapsed = round(time.time() - start, 1)
 
-        _breakout_cache.update(
-            results=results, ts=time.time(),
+        payload = _stock_breakout_payload_from_run(
+            results,
             candidates_scanned=len(candidates),
             total_sourced=len(stock_candidates),
-            scan_time=elapsed,
+            elapsed_s=elapsed,
         )
-        logger.info(f"[trading] Breakout cache filled: {len(results)} results in {elapsed}s")
+        meta = {
+            "scored": len(results),
+            "candidates_scanned": len(candidates),
+            "total_sourced": len(stock_candidates),
+            "elapsed_s": elapsed,
+        }
+        if batch_job_id is None:
+            _persist_stock_breakout_adhoc(meta, payload)
+        logger.info(f"[trading] Breakout scan filled: {len(results)} results in {elapsed}s")
     except Exception as exc:
         logger.exception(f"[trading] Breakout scan failed: {exc}")
     finally:
@@ -3163,35 +3342,93 @@ def run_breakout_scan(max_results: int = 30) -> dict[str, Any]:
         "matches": len(results[:max_results]),
         "elapsed_s": elapsed,
         "results": results[:max_results],
+        "all_results": results,
         "brain": _brain_meta(),
     }
 
 
 # ── Momentum Scanner (active, finds "immaculate" trades) ──────────────
 
-_momentum_cache: dict[str, Any] = {"results": [], "ts": 0.0}
 _MOMENTUM_CACHE_TTL = 120  # 2 minutes
 
-def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
+
+def _momentum_payload_from_run(
+    results: list[dict[str, Any]],
+    *,
+    candidates_scanned: int,
+    total_sourced: int,
+    elapsed_s: float,
+    immaculate_count: int,
+) -> dict[str, Any]:
+    return {
+        "results": results,
+        "candidates_scanned": candidates_scanned,
+        "total_sourced": total_sourced,
+        "elapsed_s": elapsed_s,
+        "immaculate_count": immaculate_count,
+        "scan_time": datetime.utcnow().isoformat(),
+    }
+
+
+def _persist_momentum_adhoc(meta: dict[str, Any], payload: dict[str, Any]) -> None:
+    from ...db import SessionLocal
+    from .batch_job_constants import JOB_MOMENTUM_SCANNER
+    from .brain_batch_job_log import brain_batch_job_record_completed
+
+    db = SessionLocal()
+    try:
+        brain_batch_job_record_completed(
+            db,
+            JOB_MOMENTUM_SCANNER,
+            ok=True,
+            meta=meta,
+            payload_json=payload,
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("[momentum] DB persist failed: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
+def run_momentum_scanner(
+    max_results: int = 10,
+    *,
+    batch_job_id: str | None = None,
+    skip_db_ttl_check: bool = False,
+) -> dict[str, Any]:
     """Active momentum scanner: finds the best intraday setups right now.
 
     Applies strict "immaculate trade" filters so only A+ setups surface:
     score >= 8.0, MACD positive, relative volume >= 3x, risk:reward >= 2:1.
     Returns the top few setups ranked by score.
     """
-    global _momentum_cache
-    now = time.time()
-    if _momentum_cache["results"] and (now - _momentum_cache["ts"]) < _MOMENTUM_CACHE_TTL:
-        return {
-            "ok": True,
-            "scan_type": "momentum",
-            "cached": True,
-            "candidates_scanned": _momentum_cache.get("candidates_scanned", 0),
-            "total_sourced": _momentum_cache.get("total_sourced", 0),
-            "matches": len(_momentum_cache["results"]),
-            "results": _momentum_cache["results"],
-            "brain": _brain_meta(),
-        }
+    if not skip_db_ttl_check:
+        from ...db import SessionLocal
+        from .batch_job_constants import JOB_MOMENTUM_SCANNER
+        from .brain_batch_job_log import fetch_latest_ok_payload
+
+        _db = SessionLocal()
+        try:
+            payload, ended_at, _meta = fetch_latest_ok_payload(_db, JOB_MOMENTUM_SCANNER)
+            if payload and ended_at:
+                age_s = (datetime.utcnow() - ended_at).total_seconds()
+                if age_s >= 0 and age_s < _MOMENTUM_CACHE_TTL:
+                    res = payload.get("results") or []
+                    return {
+                        "ok": True,
+                        "scan_type": "momentum",
+                        "cached": True,
+                        "candidates_scanned": int(payload.get("candidates_scanned") or 0),
+                        "total_sourced": int(payload.get("total_sourced") or 0),
+                        "immaculate_count": int(payload.get("immaculate_count") or 0),
+                        "matches": len(res),
+                        "results": res,
+                        "brain": _brain_meta(),
+                    }
+        finally:
+            _db.close()
 
     from .prescreener import get_daytrade_candidates
 
@@ -3258,11 +3495,28 @@ def run_momentum_scanner(max_results: int = 10) -> dict[str, Any]:
     else:
         results = immaculate
 
-    _momentum_cache = {"results": results, "ts": time.time(), "total_sourced": total_sourced, "candidates_scanned": len(candidates)}
     elapsed = round(time.time() - start, 1)
 
     with _intraday_progress_lock:
         _intraday_scan_progress.update(running=False, scan_type="")
+
+    _pl = _momentum_payload_from_run(
+        results,
+        candidates_scanned=len(candidates),
+        total_sourced=total_sourced,
+        elapsed_s=elapsed,
+        immaculate_count=len(immaculate),
+    )
+    if batch_job_id is None:
+        _persist_momentum_adhoc(
+            {
+                "candidates_scanned": len(candidates),
+                "total_sourced": total_sourced,
+                "elapsed_s": elapsed,
+                "immaculate_count": len(immaculate),
+            },
+            _pl,
+        )
 
     return {
         "ok": True,
@@ -3321,8 +3575,13 @@ def _try_load_cached_scores(db: "Session | None") -> list[dict[str, Any]]:
     """
     results: list[dict[str, Any]] = []
 
-    if _breakout_cache["results"] and (time.time() - _breakout_cache["ts"]) < _BREAKOUT_CACHE_TTL:
-        results.extend(_breakout_cache["results"])
+    try:
+        _bc = get_breakout_cache()
+        _age = _bc.get("age_seconds")
+        if _bc.get("results") and _age is not None and _age < _BREAKOUT_CACHE_TTL:
+            results.extend(_bc["results"])
+    except Exception:
+        pass
     if _daytrade_cache["results"] and (time.time() - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
         results.extend(_daytrade_cache["results"])
 
@@ -3940,7 +4199,7 @@ def load_top_scan_tickers_for_snapshots(
     db: Session,
     user_id: int | None,
     *,
-    limit: int = 800,
+    limit: int | None = None,
     max_age_hours: float = 48.0,
 ) -> tuple[list[str], dict[str, Any]]:
     """Ranked tickers from latest ``trading_scans`` for snapshot driver; prescreen fallback if empty."""
@@ -3948,13 +4207,16 @@ def load_top_scan_tickers_for_snapshots(
     from ...models.trading import ScanResult
     from .prescreen_job import load_active_global_candidate_tickers
 
+    _lim = limit if limit is not None else int(
+        getattr(_snap_settings, "brain_snapshot_top_tickers", 1000),
+    )
     cutoff = datetime.utcnow() - timedelta(hours=max_age_hours)
     rows = (
         db.query(ScanResult.ticker)
         .filter(ScanResult.user_id == user_id)
         .filter(ScanResult.scanned_at >= cutoff)
         .order_by(ScanResult.score.desc())
-        .limit(limit)
+        .limit(_lim)
         .all()
     )
     tickers = [r[0] for r in rows if r[0]]
@@ -3965,17 +4227,34 @@ def load_top_scan_tickers_for_snapshots(
     if not tickers:
         _max_pre = int(getattr(_snap_settings, "brain_prescreen_max_total", 3000))
         pres = load_active_global_candidate_tickers(db)
-        tickers = pres[: min(limit, _max_pre)]
+        tickers = pres[: min(_lim, _max_pre)]
         meta["snapshot_driver"] = "prescreen_only"
         meta["fallback"] = "no_recent_scan_rows"
         if not tickers:
-            tickers = list(ALL_SCAN_TICKERS[:limit])
+            tickers = list(ALL_SCAN_TICKERS[:_lim])
             meta["snapshot_driver"] = "static_universe_slice"
             meta["fallback"] = "no_scan_no_prescreen"
             logger.warning(
                 "[scanner] load_top_scan_tickers_for_snapshots: empty scan + prescreen; "
                 "using static list slice",
             )
+    return tickers, meta
+
+
+def build_snapshot_ticker_universe(
+    db: Session,
+    user_id: int | None,
+    *,
+    limit: int | None = None,
+) -> tuple[list[str], dict[str, Any]]:
+    """Scan/prescreen driver list plus watchlist — same universe as snapshot + cycle mining."""
+    tickers, meta = load_top_scan_tickers_for_snapshots(
+        db, user_id, limit=limit, max_age_hours=48.0,
+    )
+    watchlist = get_watchlist(db, user_id)
+    for w in watchlist:
+        if w.ticker not in tickers:
+            tickers.append(w.ticker)
     return tickers, meta
 
 

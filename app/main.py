@@ -27,7 +27,7 @@ from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, auth, brain, brain_v1_compat, chat, health_routes, pages, marketplace, mobile, trading
+from .routers import admin, auth, brain, brain_v1_compat, chat, health_routes, jobs, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import (  # noqa: F401 — register ORM tables
     BrainWorkerControl,
@@ -504,18 +504,31 @@ def _run_deferred_startup() -> None:
     _agent_log("H1", "lifespan", "deferred_thread_begin", {})
     # endregion
     try:
+        from .config import settings as _settings
+
+        _sched_role = (getattr(_settings, "chili_scheduler_role", None) or "all").strip().lower()
         # Robinhood restore can block on device approval / MFA — must not run in lifespan
         # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
         _restore_broker_sessions()
-        _dedup_backtests()
+        if _sched_role != "none":
+            _dedup_backtests()
         _repair_wrongly_deactivated()
         _ensure_ticker_scope_columns()
-        _cleanup_cross_asset_backtests()
-        _reinfer_pattern_timeframes()
-        _recompute_all_ticker_scopes()
+        if _sched_role != "none":
+            _cleanup_cross_asset_backtests()
+        if _sched_role != "none":
+            _reinfer_pattern_timeframes()
         _start_massive_ws()
-        _prewarm_market_context()
-        threading.Thread(target=_backfill_backtests, daemon=True).start()
+        if _sched_role != "none":
+            _recompute_all_ticker_scopes()
+        if _sched_role != "none":
+            _prewarm_market_context()
+            threading.Thread(target=_backfill_backtests, daemon=True).start()
+        else:
+            _log.info(
+                "[startup] CHILI_SCHEDULER_ROLE=none: skipping dedup_backtests, cross-asset cleanup, reinfer, "
+                "scope recompute, Massive WebSocket (REST quotes), market prewarm, backtest backfill thread"
+            )
         start_scheduler()
     except Exception:
         _log.exception("[startup] Deferred startup failed")
@@ -576,9 +589,12 @@ def _restore_broker_sessions():
 
 
 def _start_massive_ws():
-    """Start the Massive WebSocket client if configured."""
+    """Start the Massive WebSocket client if configured (not in API-only ``none`` role)."""
     try:
         from .config import settings
+        _role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+        if _role == "none":
+            return
         if settings.massive_api_key and settings.massive_use_websocket:
             from .services.massive_client import get_ws_client
             ws = get_ws_client()
@@ -732,6 +748,7 @@ app.include_router(admin.router)
 app.include_router(brain.router)
 app.include_router(brain_v1_compat.router)
 app.include_router(pages.router)
+app.include_router(jobs.router)
 app.include_router(health_routes.router)
 app.include_router(marketplace.router)
 app.include_router(mobile.router)

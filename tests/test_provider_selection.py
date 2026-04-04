@@ -442,6 +442,25 @@ class TestMassiveClient:
         assert "X:ZKUSDT" in c
         assert c == list(dict.fromkeys(c))
         assert crypto_aggregate_symbol_candidates("AAPL") == ["AAPL"]
+        assert crypto_aggregate_symbol_candidates("") == []
+        assert crypto_aggregate_symbol_candidates("   ") == []
+
+    @patch("app.services.massive_client._get")
+    @patch("app.services.massive_client._api_key", return_value="test-key")
+    def test_empty_ticker_never_calls_massive_http(self, _key, mock_get):
+        from app.services.massive_client import (
+            get_last_quote,
+            get_aggregates,
+            _get_stock_snapshot,
+            _get_prev_close,
+        )
+
+        assert get_last_quote("") is None
+        assert get_last_quote("   ") is None
+        assert get_aggregates("", interval="1d", period="5d") == []
+        assert _get_stock_snapshot("") is None
+        assert _get_prev_close("") is None
+        mock_get.assert_not_called()
 
     def test_is_crypto(self):
         from app.services.massive_client import is_crypto

@@ -2369,6 +2369,16 @@ def _migration_060_brain_batch_jobs(conn) -> None:
     conn.commit()
 
 
+def _migration_061_brain_batch_jobs_payload_json(conn) -> None:
+    """Large scan results (crypto/stock breakout lists) for cross-process reads."""
+    if "brain_batch_jobs" not in _tables(conn):
+        return
+    cols = _columns(conn, "brain_batch_jobs")
+    if "payload_json" not in cols:
+        conn.execute(text("ALTER TABLE brain_batch_jobs ADD COLUMN payload_json JSONB"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2431,6 +2441,7 @@ MIGRATIONS = [
     ("058_trading_prescreen_artifacts", _migration_058_trading_prescreen_artifacts),
     ("059_prescreen_asset_universe", _migration_059_prescreen_asset_universe),
     ("060_brain_batch_jobs", _migration_060_brain_batch_jobs),
+    ("061_brain_batch_jobs_payload_json", _migration_061_brain_batch_jobs_payload_json),
 ]
 
 

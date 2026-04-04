@@ -28,7 +28,7 @@ app/
   routers/             # FastAPI APIRouter modules
     trading_sub/       # Trading sub-routes (ai.py, broker.py, web3.py)
   services/            # Business logic layer
-    trading/           # Scanner, learning, pattern engine, portfolio, alerts, ML
+    trading/           # Scanner, learning, pattern engine, portfolio, alerts, ML; snapshots in PostgreSQL trading_snapshots (MarketSnapshot)
     code_brain/        # Code indexer, analyzer, reviewer, graph, trends
     reasoning_brain/   # User model, interest graph, anticipator, web researcher
     project_brain/     # Autonomous agents (PO, PM, Arch, BE, FE, UX, QA, DevOps, Security, AI Eng)

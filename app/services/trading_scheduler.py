@@ -100,6 +100,45 @@ def _run_daily_market_scan_job():
         db.close()
 
 
+def _run_brain_market_snapshot_job():
+    """Write daily + intraday ``trading_snapshots`` (decoupled from ``run_learning_cycle`` by default)."""
+    from ..config import settings as _settings
+
+    if not getattr(_settings, "brain_market_snapshot_scheduler_enabled", True):
+        return
+
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_BRAIN_MARKET_SNAPSHOTS
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading import learning as _learning
+
+    _uid = getattr(_settings, "brain_default_user_id", None)
+    db = SessionLocal()
+    jid = None
+    try:
+        jid = brain_batch_job_begin(db, JOB_BRAIN_MARKET_SNAPSHOTS, user_id=_uid)
+        db.commit()
+        out = _learning.run_scheduled_market_snapshots(db, _uid)
+        brain_batch_job_finish(db, jid, ok=True, payload_json=out, meta={})
+        db.commit()
+        logger.info(
+            "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",
+            out.get("snapshots_taken_daily"),
+            out.get("intraday_snapshots_taken"),
+            out.get("universe_size"),
+        )
+    except Exception as e:
+        logger.warning("[scheduler] brain_market_snapshots failed: %s", e, exc_info=True)
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] brain_market_snapshots batch finish failed")
+    finally:
+        db.close()
+
+
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
@@ -158,8 +197,11 @@ def _run_pattern_imminent_job():
     Crypto-friendly patterns run 24/7; stock patterns only during US equity session
     (handled inside ``run_pattern_imminent_scan``).
     """
+    import time as _t
     from ..config import settings as _settings
     from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_PATTERN_IMMINENT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
     from .trading.pattern_imminent_alerts import run_pattern_imminent_scan
 
     if not getattr(_settings, "pattern_imminent_alert_enabled", True):
@@ -167,12 +209,50 @@ def _run_pattern_imminent_job():
 
     logger.info("[scheduler] Pattern imminent breakout scan starting")
     db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
     try:
         _uid = getattr(_settings, "brain_default_user_id", None)
+        jid = brain_batch_job_begin(db, JOB_PATTERN_IMMINENT_SCANNER, _uid)
+        db.commit()
+
         result = run_pattern_imminent_scan(db, user_id=_uid)
         logger.info("[scheduler] Pattern imminent result: %s", result)
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error=str(result.get("reason") or "pattern imminent failed"),
+                meta={"duration_s": duration},
+                payload_json=dict(result),
+            )
+            db.commit()
+            return
+
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "alerts_sent": result.get("alerts_sent", 0),
+                "tickers_scored": result.get("tickers_scored", 0),
+                "candidates": result.get("candidates", 0),
+            },
+            payload_json=dict(result),
+        )
+        db.commit()
     except Exception as e:
         logger.error("[scheduler] Pattern imminent scan failed: %s", e)
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] pattern_imminent batch_job_finish failed")
     finally:
         db.close()
 
@@ -245,12 +325,34 @@ def _run_crypto_breakout_job():
     """
     import time as _t
     import uuid as _uuid
-    from .trading.scanner import run_crypto_breakout_scan, get_adaptive_weight
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_CRYPTO_BREAKOUT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import (
+        _crypto_breakout_payload_from_run,
+        get_adaptive_weight,
+        run_crypto_breakout_scan,
+    )
     from .trading.alerts import dispatch_alert
 
     logger.info("[scheduler] Running crypto breakout scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
     try:
-        result = run_crypto_breakout_scan(max_results=20)
+        jid = brain_batch_job_begin(
+            db,
+            JOB_CRYPTO_BREAKOUT_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_crypto_breakout_scan(
+            max_results=20,
+            batch_job_id=jid,
+            skip_db_ttl_check=True,
+        )
         now = _t.time()
         _cycle_id = str(_uuid.uuid4())[:12]
 
@@ -277,7 +379,7 @@ def _run_crypto_breakout_job():
         rvol_building = get_adaptive_weight("crypto_alert_rvol_building_min")
         rvol_high = get_adaptive_weight("crypto_alert_rvol_high_score_min")
 
-        all_results = result.get("results", [])
+        all_results = list(result.get("all_results") or result.get("results") or [])
 
         # Diagnostic: score distribution
         score_buckets = {"8+": 0, "7-8": 0, "6-7": 0, "5-6": 0, "<5": 0}
@@ -422,8 +524,51 @@ def _run_crypto_breakout_job():
             f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
             f"{sent} alerts sent"
         )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error=str(result.get("error") or "scan failed"),
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        payload = _crypto_breakout_payload_from_run(
+            all_results,
+            total=int(result.get("total_scanned") or 0),
+            scan_time_iso=str(result.get("scan_time") or ""),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+            errors=int(result.get("errors") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "total_scanned": result.get("total_scanned", 0),
+                "scored": len(all_results),
+                "score_buckets": score_buckets,
+                "alerts_sent": sent,
+                "alertable": len(alertable),
+            },
+            payload_json=payload,
+        )
+        db.commit()
     except Exception as e:
         logger.error(f"[scheduler] Crypto breakout scan failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] crypto breakout batch_job_finish failed")
+    finally:
+        db.close()
 
 
 def _run_stock_breakout_job():
@@ -434,12 +579,26 @@ def _run_stock_breakout_job():
     """
     import time as _t
     import uuid as _uuid
-    from .trading.scanner import run_breakout_scan, get_adaptive_weight
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_STOCK_BREAKOUT_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import _stock_breakout_payload_from_run, get_adaptive_weight, run_breakout_scan
     from .trading.alerts import dispatch_alert
 
     logger.info("[scheduler] Running stock breakout scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
     try:
-        result = run_breakout_scan(max_results=20)
+        jid = brain_batch_job_begin(
+            db,
+            JOB_STOCK_BREAKOUT_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_breakout_scan(max_results=20, batch_job_id=jid, skip_db_ttl_check=True)
         now = _t.time()
         _cycle_id = str(_uuid.uuid4())[:12]
 
@@ -451,7 +610,7 @@ def _run_stock_breakout_job():
         t_squeeze = get_adaptive_weight("stock_alert_squeeze_firing_min")
         t_high = get_adaptive_weight("stock_alert_high_score_min")
 
-        all_results = result.get("results", [])
+        all_results = list(result.get("all_results") or result.get("results") or [])
         logger.info(
             f"[scheduler] Stock breakout scan: {result.get('candidates_scanned', 0)} scanned, "
             f"{len(all_results)} scored"
@@ -540,18 +699,77 @@ def _run_stock_breakout_job():
             f"{len(alertable)} alertable ({cooldown_skipped} cooldown-skipped), "
             f"{sent} alerts sent"
         )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error="stock breakout scan failed",
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        payload = _stock_breakout_payload_from_run(
+            all_results,
+            candidates_scanned=int(result.get("candidates_scanned") or 0),
+            total_sourced=int(result.get("total_sourced") or 0),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "alerts_sent": sent,
+                "alertable": len(alertable),
+                "scored": len(all_results),
+            },
+            payload_json=payload,
+        )
+        db.commit()
     except Exception as e:
         logger.error(f"[scheduler] Stock breakout scan failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] stock breakout batch_job_finish failed")
+    finally:
+        db.close()
 
 
 def _run_momentum_scanner_job():
     """Active momentum scanner: find immaculate day-trade setups and alert."""
-    from .trading.scanner import run_momentum_scanner, get_adaptive_weight
+    import time as _t
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_MOMENTUM_SCANNER
+    from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
+    from .trading.scanner import _momentum_payload_from_run, get_adaptive_weight, run_momentum_scanner
     from .trading.alerts import dispatch_alert
 
     logger.info("[scheduler] Running momentum scanner")
+    db = SessionLocal()
+    jid = None
+    t_wall = _t.time()
     try:
-        result = run_momentum_scanner(max_results=int(get_adaptive_weight("momentum_max_results")))
+        jid = brain_batch_job_begin(
+            db,
+            JOB_MOMENTUM_SCANNER,
+            getattr(_settings, "brain_default_user_id", None),
+        )
+        db.commit()
+
+        result = run_momentum_scanner(
+            max_results=int(get_adaptive_weight("momentum_max_results")),
+            batch_job_id=jid,
+            skip_db_ttl_check=True,
+        )
         immaculate = [r for r in result.get("results", []) if r.get("immaculate")]
         if immaculate:
             for setup in immaculate:
@@ -584,8 +802,49 @@ def _run_momentum_scanner_job():
             logger.info(
                 f"[scheduler] Momentum scanner: {result.get('matches', 0)} decent, 0 immaculate"
             )
+
+        duration = round(_t.time() - t_wall, 1)
+        if not result.get("ok", True):
+            brain_batch_job_finish(
+                db,
+                jid,
+                ok=False,
+                error="momentum scan failed",
+                meta={"duration_s": duration},
+            )
+            db.commit()
+            return
+
+        res_list = result.get("results") or []
+        payload = _momentum_payload_from_run(
+            res_list,
+            candidates_scanned=int(result.get("candidates_scanned") or 0),
+            total_sourced=int(result.get("total_sourced") or 0),
+            elapsed_s=float(result.get("elapsed_s") or 0),
+            immaculate_count=int(result.get("immaculate_count") or 0),
+        )
+        brain_batch_job_finish(
+            db,
+            jid,
+            ok=True,
+            meta={
+                "duration_s": duration,
+                "immaculate_count": len(immaculate),
+                "matches": result.get("matches", 0),
+            },
+            payload_json=payload,
+        )
+        db.commit()
     except Exception as e:
         logger.error(f"[scheduler] Momentum scanner failed: {e}")
+        if jid:
+            try:
+                brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] momentum batch_job_finish failed")
+    finally:
+        db.close()
 
 
 def _check_breakout_outcomes():
@@ -920,6 +1179,30 @@ def _run_pattern_backfill_job():
         logger.warning(f"[scheduler] Pattern backfill failed: {e}")
 
 
+def _run_scheduler_worker_heartbeat():
+    """Record liveness for Jobs UI (scheduler-worker container)."""
+    from datetime import datetime as _dt
+
+    from ..db import SessionLocal
+    from .trading.batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
+    from .trading.brain_batch_job_log import brain_batch_job_record_completed
+
+    db = SessionLocal()
+    try:
+        brain_batch_job_record_completed(
+            db,
+            JOB_SCHEDULER_WORKER_HEARTBEAT,
+            ok=True,
+            meta={"ts": _dt.utcnow().isoformat() + "Z"},
+        )
+        db.commit()
+    except Exception as e:
+        logger.warning("[scheduler] heartbeat failed: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
 def start_scheduler():
     """Start the background scheduler. Safe to call multiple times."""
     global _scheduler
@@ -927,10 +1210,41 @@ def start_scheduler():
         if _scheduler is not None:
             return
 
+        import os
+
         from ..config import settings
         _learning_hours = max(1, settings.learning_interval_hours)
 
+        role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
+        if role == "none":
+            logger.info(
+                "[scheduler] Role=none — APScheduler disabled (CHILI_SCHEDULER_ROLE env=%r parsed=%r)",
+                os.environ.get("CHILI_SCHEDULER_ROLE"),
+                role,
+            )
+            return
+        if role not in ("all", "web", "worker"):
+            logger.warning(
+                "[scheduler] invalid CHILI_SCHEDULER_ROLE=%r; using 'all' "
+                "(if you meant API-only web, set none and rebuild image — see docker-compose.yml)",
+                role,
+            )
+            role = "all"
+        include_heavy = role in ("all", "worker")
+        include_web_light = role in ("all", "web")
+        _hb_env = os.environ.get("CHILI_SCHEDULER_EMIT_HEARTBEAT", "").strip().lower()
+        emit_worker_heartbeat = role == "worker" or (
+            role == "all" and _hb_env in ("1", "true", "yes", "on")
+        )
+
         _scheduler = BackgroundScheduler(daemon=True)
+        logger.info(
+            "[scheduler] Role=%s (heavy_scan_jobs=%s web_jobs=%s emit_heartbeat=%s)",
+            role,
+            include_heavy,
+            include_web_light,
+            emit_worker_heartbeat,
+        )
 
         # DISABLED: Brain Worker now handles the full learning cycle continuously
         # _scheduler.add_job(
@@ -943,7 +1257,7 @@ def start_scheduler():
         #     next_run_time=datetime.now() + timedelta(minutes=3),
         # )
 
-        if getattr(settings, "brain_prescreen_scheduler_enabled", True):
+        if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):
             _scheduler.add_job(
                 _run_daily_prescreen_job,
                 trigger=CronTrigger(hour=2, minute=0, timezone="America/Los_Angeles"),
@@ -954,7 +1268,7 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=25),
             )
 
-        if getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
+        if include_web_light and getattr(settings, "brain_daily_market_scan_scheduler_enabled", True):
             _scheduler.add_job(
                 _run_daily_market_scan_job,
                 trigger=CronTrigger(hour=2, minute=30, timezone="America/Los_Angeles"),
@@ -965,144 +1279,177 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=35),
             )
 
-        _scheduler.add_job(
-            _run_weekly_review_job,
-            trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
-            id="weekly_review",
-            name="Weekly performance review",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _scheduler.add_job(
-            _run_broker_sync_job,
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour="9-16",
-                minute="*/2",
-            ),
-            id="broker_sync",
-            name="Robinhood order+position sync (market hours every 2min)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _scheduler.add_job(
-            _run_price_monitor_job,
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour="9-16",
-                minute="*/5",
-            ),
-            id="price_monitor",
-            name="Price monitor & alerts (market hours every 5min)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _scheduler.add_job(
-            _run_momentum_scanner_job,
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour="9-10",
-                minute="*/15",
-                timezone="US/Eastern",
-            ),
-            id="momentum_scanner",
-            name="Momentum scanner (9:30-11AM ET every 15min)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _scheduler.add_job(
-            _run_crypto_breakout_job,
-            trigger=IntervalTrigger(minutes=15),
-            id="crypto_breakout_scanner",
-            name="Crypto breakout scanner (every 15min, 24/7)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(seconds=10),
-        )
-
-        _scheduler.add_job(
-            _run_stock_breakout_job,
-            trigger=CronTrigger(
-                day_of_week="mon-fri",
-                hour="9-15",
-                minute="*/15",
-                timezone="US/Eastern",
-            ),
-            id="stock_breakout_scanner",
-            name="Stock breakout scanner (market hours every 15min)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(seconds=15),
-        )
-
-        _scheduler.add_job(
-            _run_pattern_imminent_job,
-            trigger=IntervalTrigger(minutes=15),
-            id="pattern_imminent_scanner",
-            name="ScanPattern imminent breakout alerts (every 15min; stocks US hours only)",
-            replace_existing=True,
-            max_instances=1,
-            next_run_time=datetime.now() + timedelta(seconds=20),
-        )
-
-        _scheduler.add_job(
-            _check_breakout_outcomes,
-            trigger=IntervalTrigger(hours=1),
-            id="breakout_outcome_checker",
-            name="Breakout outcome checker (hourly)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _fe_m = max(1, int(getattr(settings, "brain_fast_eval_interval_minutes", 10)))
-        if getattr(settings, "brain_fast_eval_enabled", True) and getattr(
-            settings, "brain_fast_eval_scheduler_enabled", False
+        if getattr(settings, "brain_market_snapshot_scheduler_enabled", True) and (
+            include_web_light or role in ("all", "worker")
         ):
+            _bsm = max(5, int(getattr(settings, "brain_market_snapshot_interval_minutes", 15)))
             _scheduler.add_job(
-                _run_promoted_fast_eval_job,
-                trigger=IntervalTrigger(minutes=_fe_m),
-                id="promoted_pattern_fast_eval",
-                name=f"Promoted pattern prediction refresh (every {_fe_m}m)",
+                _run_brain_market_snapshot_job,
+                trigger=IntervalTrigger(minutes=_bsm),
+                id="brain_market_snapshots",
+                name=f"Brain market snapshots (every {_bsm}min)",
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=45),
             )
 
-        _code_hours = max(1, settings.code_brain_interval_hours)
-        _scheduler.add_job(
-            _run_code_learning_job,
-            trigger=IntervalTrigger(hours=_code_hours),
-            id="code_learning_cycle",
-            name=f"Code Brain learning cycle (every {_code_hours}h)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _reasoning_hours = max(1, settings.reasoning_interval_hours)
-        _scheduler.add_job(
-            _run_reasoning_learning_job,
-            trigger=IntervalTrigger(hours=_reasoning_hours),
-            id="reasoning_cycle",
-            name=f"Reasoning Brain cycle (every {_reasoning_hours}h)",
-            replace_existing=True,
-            max_instances=1,
-        )
-
-        _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
-        if getattr(settings, "project_brain_enabled", True) and getattr(
-            settings, "project_brain_scheduler_enabled", False
-        ):
+        if include_web_light:
             _scheduler.add_job(
-                _run_project_brain_job,
-                trigger=IntervalTrigger(minutes=_pb_minutes),
-                id="project_brain_cycle",
-                name=f"Project Brain cycle (every {_pb_minutes}min)",
+                _run_weekly_review_job,
+                trigger=CronTrigger(day_of_week="sun", hour=18, minute=0),
+                id="weekly_review",
+                name="Weekly performance review",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_broker_sync_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-16",
+                    minute="*/2",
+                ),
+                id="broker_sync",
+                name="Robinhood order+position sync (market hours every 2min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_price_monitor_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-16",
+                    minute="*/5",
+                ),
+                id="price_monitor",
+                name="Price monitor & alerts (market hours every 5min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if include_heavy:
+            _scheduler.add_job(
+                _run_momentum_scanner_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-10",
+                    minute="*/15",
+                    timezone="US/Eastern",
+                ),
+                id="momentum_scanner",
+                name="Momentum scanner (9:30-11AM ET every 15min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_crypto_breakout_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="crypto_breakout_scanner",
+                name="Crypto breakout scanner (every 15min, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=10),
+            )
+
+            _scheduler.add_job(
+                _run_stock_breakout_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-15",
+                    minute="*/15",
+                    timezone="US/Eastern",
+                ),
+                id="stock_breakout_scanner",
+                name="Stock breakout scanner (market hours every 15min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=15),
+            )
+
+            _scheduler.add_job(
+                _run_pattern_imminent_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="pattern_imminent_scanner",
+                name="ScanPattern imminent breakout alerts (every 15min; stocks US hours only)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+        if include_web_light:
+            _scheduler.add_job(
+                _check_breakout_outcomes,
+                trigger=IntervalTrigger(hours=1),
+                id="breakout_outcome_checker",
+                name="Breakout outcome checker (hourly)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+        if include_web_light:
+            _fe_m = max(1, int(getattr(settings, "brain_fast_eval_interval_minutes", 10)))
+            if getattr(settings, "brain_fast_eval_enabled", True) and getattr(
+                settings, "brain_fast_eval_scheduler_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_promoted_fast_eval_job,
+                    trigger=IntervalTrigger(minutes=_fe_m),
+                    id="promoted_pattern_fast_eval",
+                    name=f"Promoted pattern prediction refresh (every {_fe_m}m)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=45),
+                )
+
+            _code_hours = max(1, settings.code_brain_interval_hours)
+            _scheduler.add_job(
+                _run_code_learning_job,
+                trigger=IntervalTrigger(hours=_code_hours),
+                id="code_learning_cycle",
+                name=f"Code Brain learning cycle (every {_code_hours}h)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _reasoning_hours = max(1, settings.reasoning_interval_hours)
+            _scheduler.add_job(
+                _run_reasoning_learning_job,
+                trigger=IntervalTrigger(hours=_reasoning_hours),
+                id="reasoning_cycle",
+                name=f"Reasoning Brain cycle (every {_reasoning_hours}h)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
+            if getattr(settings, "project_brain_enabled", True) and getattr(
+                settings, "project_brain_scheduler_enabled", False
+            ):
+                _scheduler.add_job(
+                    _run_project_brain_job,
+                    trigger=IntervalTrigger(minutes=_pb_minutes),
+                    id="project_brain_cycle",
+                    name=f"Project Brain cycle (every {_pb_minutes}min)",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        else:
+            _code_hours = max(1, settings.code_brain_interval_hours)
+            _reasoning_hours = max(1, settings.reasoning_interval_hours)
+            _pb_minutes = max(15, getattr(settings, "project_brain_auto_cycle_minutes", 60))
+
+        if emit_worker_heartbeat:
+            _scheduler.add_job(
+                _run_scheduler_worker_heartbeat,
+                trigger=IntervalTrigger(minutes=5),
+                id="scheduler_worker_heartbeat",
+                name="Scheduler worker heartbeat (every 5min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=5),
             )
 
         # Web pattern research runs inside run_learning_cycle (_run_pattern_engine_cycle), not on a separate schedule.

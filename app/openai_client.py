@@ -1,21 +1,18 @@
 """Tiered LLM API client for CHILI's general chat.
 
-Free tier chain (no cost):
-  1. Primary: Groq Llama 3.3 70B (high quality, 100K TPD free limit)
-  2. Secondary: Groq Llama 3.1 8B Instant (lighter, separate higher rate limit)
-  3. Tertiary: Google Gemini 2.0 Flash via OpenAI-compatible endpoint (free)
+Cascade (when keys are set):
+  1. OpenAI (api.openai.com) — OPENAI_API_KEY, model gpt-4o-mini
+  2. Groq primary: LLM_API_KEY + LLM_BASE_URL + LLM_MODEL (default Llama 3.3 70B)
+  3. Groq secondary: same key, llama-3.1-8b-instant (separate rate limit)
+  4. Google Gemini (PREMIUM_* OpenAI-compatible endpoint)
 
-The system tracks daily Groq token usage and preemptively switches to the
-secondary model when approaching the daily limit, avoiding hard 429 errors
-and eliminating the need for paid premium fallback.
+Groq daily usage is tracked; near the free-tier limit the primary Groq model is skipped.
 
 Configure via env vars:
-  LLM_API_KEY   / OPENAI_API_KEY     — Primary API key (e.g. Groq gsk_...)
-  LLM_MODEL     / OPENAI_MODEL       — Primary model (default: llama-3.3-70b-versatile)
-  LLM_BASE_URL  / OPENAI_BASE_URL    — Primary base URL (default: Groq)
-  PREMIUM_API_KEY                     — Tertiary/fallback API key (e.g. Google AI Studio)
-  PREMIUM_MODEL                      — Tertiary model (default: gemini-2.0-flash)
-  PREMIUM_BASE_URL                   — Tertiary base URL (default: Gemini OpenAI compat)
+  OPENAI_API_KEY       — Paid OpenAI; tried first when set
+  LLM_API_KEY          — Groq (or other OpenAI-compat) for tiers 2–3
+  LLM_MODEL / LLM_BASE_URL — Groq defaults if unset
+  PREMIUM_API_KEY / PREMIUM_MODEL / PREMIUM_BASE_URL — Gemini fallback
 """
 import re
 import time
@@ -37,7 +34,7 @@ PREMIUM_API_KEY = settings.premium_api_key
 PREMIUM_MODEL = settings.premium_model
 PREMIUM_BASE_URL = settings.premium_base_url
 
-# Paid OpenAI (optional, true last resort)
+# OpenAI (official API — first tier when OPENAI_API_KEY is set)
 PAID_OPENAI_API_KEY = settings.openai_api_key
 PAID_OPENAI_MODEL = "gpt-4o-mini"
 PAID_OPENAI_BASE_URL = "https://api.openai.com/v1"
@@ -93,7 +90,18 @@ def _is_weak_response(reply: str, user_message: str) -> bool:
 
 
 def is_configured() -> bool:
+    """True if any primary-style key exists (LLM_API_KEY or OPENAI_API_KEY)."""
     return bool(settings.primary_api_key and settings.primary_api_key.strip())
+
+
+def _openai_official_configured() -> bool:
+    """OPENAI_API_KEY set — use api.openai.com first."""
+    return bool(settings.openai_api_key and settings.openai_api_key.strip())
+
+
+def _groq_stack_configured() -> bool:
+    """LLM_API_KEY set — Groq (or custom) stack; never mix with OPENAI_API_KEY on wrong host."""
+    return bool(settings.llm_api_key and settings.llm_api_key.strip())
 
 
 def _premium_configured() -> bool:
@@ -122,7 +130,8 @@ def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict]
                 temperature=0.7,
                 **_token_param(base_url, max_tokens),
             )
-            reply = response.choices[0].message.content.strip()
+            raw = response.choices[0].message.content
+            reply = (raw or "").strip()
             tokens = response.usage.total_tokens if response.usage else 0
             log_info(trace_id, f"llm_reply model={model} tokens={tokens}")
             if "groq.com" in base_url:
@@ -165,9 +174,16 @@ def _stream_provider(api_key: str, base_url: str, model: str, messages: list[dic
             raise
 
     for chunk in stream:
-        delta = chunk.choices[0].delta if chunk.choices else None
-        if delta and delta.content:
+        if not chunk.choices:
+            continue
+        ch0 = chunk.choices[0]
+        delta = getattr(ch0, "delta", None)
+        if delta and getattr(delta, "content", None):
             yield delta.content, model
+        else:
+            fr = getattr(ch0, "finish_reason", None)
+            if fr and fr not in (None, "stop"):
+                log_info(trace_id, f"llm_stream_chunk model={model} finish_reason={fr}")
     log_info(trace_id, f"llm_stream_complete model={model}")
 
 
@@ -178,45 +194,43 @@ def chat(
     user_message: str = "",
     max_tokens: int = 1024,
 ) -> dict:
-    """Chat with free-tier cascade: primary → secondary (smaller Groq) → Gemini.
-
-    Only uses paid models as a last resort. Preemptively downgrades to the
-    secondary model when approaching the daily Groq token limit.
-    """
+    """Chat: OpenAI (if OPENAI_API_KEY) → Groq stack (if LLM_API_KEY) → Gemini."""
     prompt = system_prompt or SYSTEM_PROMPT
 
-    if not is_configured():
-        if _premium_configured():
-            try:
-                return _call_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                      messages, prompt, trace_id, max_tokens=max_tokens)
-            except Exception as e:
-                log_info(trace_id, f"premium_error={e}")
-        return {"reply": "", "tokens_used": 0, "model": "none"}
-
-    # Tier 1: Primary model (skip if near daily limit)
-    if not _near_daily_limit():
+    # Tier 1: OpenAI official API
+    if _openai_official_configured():
         try:
-            result = _call_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
+            result = _call_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
                                     messages, prompt, trace_id, max_tokens=max_tokens)
             if not _is_weak_response(result["reply"], user_message):
                 return result
-            log_info(trace_id, f"primary reply weak ({len(result['reply'])} chars), trying secondary")
+            log_info(trace_id, f"openai_primary weak ({len(result['reply'])} chars), trying groq")
         except Exception as e:
-            log_info(trace_id, f"primary_error={e}")
-    else:
-        log_info(trace_id, f"primary skipped (daily tokens ~{_daily_tokens['used']})")
+            log_info(trace_id, f"openai_primary_error={e}")
 
-    # Tier 2: Secondary Groq model (smaller, separate rate limit)
-    try:
-        result = _call_provider(settings.primary_api_key, settings.llm_base_url, _SECONDARY_MODEL,
-                                messages, prompt, trace_id, max_tokens=max_tokens)
-        if result["reply"]:
-            return result
-    except Exception as e:
-        log_info(trace_id, f"secondary_error={e}")
+    # Tier 2–3: Groq (LLM_API_KEY only)
+    if _groq_stack_configured():
+        if not _near_daily_limit():
+            try:
+                result = _call_provider(settings.llm_api_key, settings.llm_base_url, settings.llm_model,
+                                        messages, prompt, trace_id, max_tokens=max_tokens)
+                if not _is_weak_response(result["reply"], user_message):
+                    return result
+                log_info(trace_id, f"primary reply weak ({len(result['reply'])} chars), trying secondary")
+            except Exception as e:
+                log_info(trace_id, f"primary_error={e}")
+        else:
+            log_info(trace_id, f"primary groq skipped (daily tokens ~{_daily_tokens['used']})")
 
-    # Tier 3: Free Gemini fallback
+        try:
+            result = _call_provider(settings.llm_api_key, settings.llm_base_url, _SECONDARY_MODEL,
+                                    messages, prompt, trace_id, max_tokens=max_tokens)
+            if result["reply"]:
+                return result
+        except Exception as e:
+            log_info(trace_id, f"secondary_error={e}")
+
+    # Tier 4: Gemini
     if _premium_configured():
         try:
             log_info(trace_id, "falling back to gemini (free)")
@@ -224,15 +238,6 @@ def chat(
                                   messages, prompt, trace_id, max_tokens=max_tokens)
         except Exception as e2:
             log_info(trace_id, f"gemini_fallback_error={e2}")
-
-    # Tier 4: Paid OpenAI (true last resort)
-    if PAID_OPENAI_API_KEY:
-        try:
-            log_info(trace_id, "falling back to paid OpenAI as last resort")
-            return _call_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
-                                  messages, prompt, trace_id, max_tokens=max_tokens)
-        except Exception as e3:
-            log_info(trace_id, f"openai_last_resort_error={e3}")
 
     return {"reply": "", "tokens_used": 0, "model": "error"}
 
@@ -244,57 +249,79 @@ def chat_stream(
     user_message: str = "",
     max_tokens: int = 1024,
 ):
-    """Stream tokens with free-tier cascade: primary → secondary → Gemini."""
+    """Stream: OpenAI → Groq primary/secondary → Gemini."""
     prompt = system_prompt or SYSTEM_PROMPT
 
-    if not is_configured():
-        if _premium_configured():
-            try:
-                for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
-                                                   messages, prompt, trace_id, max_tokens=max_tokens):
-                    yield tok, model
-            except Exception as e:
-                log_info(trace_id, f"premium_stream_error={e}")
-        return
-
-    # Tier 1: Primary (skip if near daily limit)
-    if not _near_daily_limit():
+    # Tier 1: OpenAI official API
+    if _openai_official_configured():
         try:
-            for tok, model in _stream_provider(settings.primary_api_key, settings.llm_base_url, settings.llm_model,
+            _got = False
+            for tok, model in _stream_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
                                                messages, prompt, trace_id, max_tokens=max_tokens):
+                _got = True
                 yield tok, model
-            return
+            if _got:
+                return
+            log_info(trace_id, "openai_stream yielded no tokens; trying groq")
         except Exception as e:
-            log_info(trace_id, f"primary_stream_error={e}")
-    else:
-        log_info(trace_id, f"primary stream skipped (daily tokens ~{_daily_tokens['used']})")
+            log_info(trace_id, f"openai_primary_stream_error={e}")
 
-    # Tier 2: Secondary Groq model
-    try:
-        for tok, model in _stream_provider(settings.primary_api_key, settings.llm_base_url, _SECONDARY_MODEL,
-                                           messages, prompt, trace_id, max_tokens=max_tokens):
-            yield tok, model
-        return
-    except Exception as e:
-        log_info(trace_id, f"secondary_stream_error={e}")
+    # Tier 2–3: Groq (LLM_API_KEY only)
+    if _groq_stack_configured():
+        if not _near_daily_limit():
+            try:
+                _got = False
+                for tok, model in _stream_provider(settings.llm_api_key, settings.llm_base_url, settings.llm_model,
+                                                   messages, prompt, trace_id, max_tokens=max_tokens):
+                    _got = True
+                    yield tok, model
+                if _got:
+                    return
+                log_info(trace_id, "primary_stream yielded no tokens; trying secondary")
+            except Exception as e:
+                log_info(trace_id, f"primary_stream_error={e}")
+        else:
+            log_info(trace_id, f"primary stream skipped (daily tokens ~{_daily_tokens['used']})")
 
-    # Tier 3: Free Gemini fallback
+        try:
+            _got = False
+            for tok, model in _stream_provider(settings.llm_api_key, settings.llm_base_url, _SECONDARY_MODEL,
+                                               messages, prompt, trace_id, max_tokens=max_tokens):
+                _got = True
+                yield tok, model
+            if _got:
+                return
+            log_info(trace_id, "secondary_stream yielded no tokens; trying gemini")
+        except Exception as e:
+            log_info(trace_id, f"secondary_stream_error={e}")
+
+    # Tier 4: Gemini
     if _premium_configured():
         try:
             log_info(trace_id, "stream falling back to gemini (free)")
+            _got = False
             for tok, model in _stream_provider(settings.premium_api_key, settings.premium_base_url, settings.premium_model,
                                                messages, prompt, trace_id, max_tokens=max_tokens):
+                _got = True
                 yield tok, model
-            return
+            if _got:
+                return
+            log_info(trace_id, "gemini_stream yielded no tokens")
         except Exception as e2:
             log_info(trace_id, f"gemini_stream_fallback_error={e2}")
 
-    # Tier 4: Paid OpenAI (true last resort)
-    if PAID_OPENAI_API_KEY:
-        try:
-            log_info(trace_id, "stream falling back to paid OpenAI as last resort")
-            for tok, model in _stream_provider(PAID_OPENAI_API_KEY, PAID_OPENAI_BASE_URL, PAID_OPENAI_MODEL,
-                                               messages, prompt, trace_id, max_tokens=max_tokens):
-                yield tok, model
-        except Exception as e3:
-            log_info(trace_id, f"openai_stream_last_resort_error={e3}")
+    # All streaming tiers returned no token deltas (provider quirk, content filters, or empty stream).
+    try:
+        result = chat(
+            messages=messages,
+            system_prompt=prompt,
+            trace_id=f"{trace_id}-stream-fallback",
+            user_message=user_message,
+            max_tokens=max_tokens,
+        )
+        reply = (result.get("reply") or "").strip()
+        if reply:
+            log_info(trace_id, "chat_stream: non-streaming fallback after empty stream")
+            yield reply, result.get("model") or "chat-fallback"
+    except Exception as e:
+        log_info(trace_id, f"chat_stream non-stream fallback error: {e}")

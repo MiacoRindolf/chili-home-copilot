@@ -263,7 +263,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 11,
+        "graph_version": 13,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

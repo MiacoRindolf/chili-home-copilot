@@ -40,6 +40,9 @@ services:
   # Planner coding validation (Phase 1+): for Docker dev parity, use the Phase 4 mount below
   # (/workspace) + CODE_BRAIN_REPOS=/workspace. For prod-like runs, omit the repo mount and bake
   # paths intentionally; do not rely on host bind mounts outside local dev.
+  #
+  # After changing app/*.py or app/services/*, either: ``docker compose build chili`` or rely on
+  # the ./app bind mount below (local dev). Stale images ignore CHILI_SCHEDULER_ROLE=none handling.
   chili:
     build: .
     image: chili-app:local
@@ -61,13 +64,14 @@ services:
       - CHILI_TLS=1
       # Scanner/prescreener batch OHLCV: Massive-only (no Polygon/yfinance log spam).
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
+      # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
+      - CHILI_SCHEDULER_ROLE=none
     volumes:
       - chili_data:/app/data
       - ./docs:/app/docs
-      # LOCAL DEV / ITERATION ONLY — not a production default. Mount host Jinja templates so
-      # planner/coding UI edits apply without rebuilding the image. For prod-like validation,
-      # remove this line and rely on the baked image; do not treat this mount as a long-term API.
-      - ./app/templates:/app/app/templates
+      # LOCAL DEV — mount Python package so scheduler/WS-off fixes apply without ``docker build``.
+      - ./app:/app/app
       # Phase 4 LOCAL DEV ONLY — read-only host checkout at /workspace for in-container coding
       # validation (CODE_BRAIN_REPOS=/workspace). Omit for production-like deploys. Do not widen
       # to read-write unless a concrete validator step proves write is required (Phase 4 blocker).
@@ -124,9 +128,34 @@ services:
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
       - chili_data:/app/data
+      - ./app:/app/app
     depends_on:
       chili:
         condition: service_started
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
+
+  # All APScheduler jobs (broker sync, scans, code/reasoning cycles, …). ``chili`` uses role ``none``.
+  scheduler-worker:
+    image: chili-app:local
+    command: ["python", "scripts/scheduler_worker.py"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - CHILI_SCHEDULER_ROLE=all
+      - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
+      - DATABASE_POOL_SIZE=8
+      - DATABASE_MAX_OVERFLOW=12
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+    volumes:
+      - chili_data:/app/data
+      - ./app:/app/app
+    depends_on:
       postgres:
         condition: service_healthy
       ollama:

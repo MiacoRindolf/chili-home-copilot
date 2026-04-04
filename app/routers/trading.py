@@ -47,7 +47,9 @@ router.include_router(ai_router)
 router.include_router(broker_router)
 router.include_router(web3_router)
 
-# /trading UI market-data routes: Massive only (no Polygon/yfinance). Brain/scanner keep full fallback.
+# Chart/indicators: Massive only. Quotes (header, watchlist, WS poll) use
+# ``allow_provider_fallback=None`` → ``settings.market_data_allow_provider_fallback`` (default True)
+# so Polygon/yfinance fill when Massive has no snapshot (common for some OTC/foreign listings).
 _TRADING_UI_ALLOW_PROVIDER_FALLBACK = False
 
 _TRADING_PROMPT: str | None = None
@@ -211,7 +213,7 @@ def api_ohlcv(
 @router.get("/api/trading/quote")
 def api_quote(ticker: str = Query(...)):
     quote = ts.fetch_quote(
-        ticker, allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+        ticker, allow_provider_fallback=None,
     )
     if not quote:
         return JSONResponse({"ok": True, "ticker": ticker.upper(), "price": None, "change": None, "change_pct": None})
@@ -222,7 +224,7 @@ def api_quote(ticker: str = Query(...)):
 def api_quotes_batch(tickers: str = Query(..., description="Comma-separated ticker list")):
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()][:50]
     results = ts.fetch_quotes_batch(
-        ticker_list, allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+        ticker_list, allow_provider_fallback=None,
     )
     return JSONResponse({"ok": True, "quotes": results})
 
@@ -724,6 +726,7 @@ def api_analyze_stream(
     def _generate():
         from .. import openai_client
         try:
+            _stream_had_token = False
             for tok, model in openai_client.chat_stream(
                 messages=messages,
                 system_prompt=system_prompt,
@@ -731,7 +734,14 @@ def api_analyze_stream(
                 user_message=user_msg,
                 max_tokens=2048,
             ):
+                _stream_had_token = True
                 yield f"data: {json.dumps({'token': tok})}\n\n"
+            if not _stream_had_token:
+                _empty = (
+                    "*No analysis text was returned.* The AI stream completed without content. "
+                    "Please try again — if it keeps happening, check provider status or try a shorter question."
+                )
+                yield f"data: {json.dumps({'token': _empty})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             log_info(trace_id, f"[trading] stream error: {e}")
@@ -876,6 +886,7 @@ End with portfolio allocation advice and any general market context warnings.
             }
             yield f"data: {json.dumps({'meta': meta})}\n\n"
 
+            _stream_had_token = False
             for tok, model in openai_client.chat_stream(
                 messages=[{"role": "user", "content": user_msg}],
                 system_prompt=system_prompt_full,
@@ -883,7 +894,14 @@ End with portfolio allocation advice and any general market context warnings.
                 user_message=user_msg,
                 max_tokens=4096,
             ):
+                _stream_had_token = True
                 yield f"data: {json.dumps({'token': tok})}\n\n"
+            if not _stream_had_token:
+                _empty = (
+                    "*Smart Pick returned no narrative text from the AI.* "
+                    "Please try again in a moment."
+                )
+                yield f"data: {json.dumps({'token': _empty})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             log_info(trace_id, f"[trading] smart-pick stream error: {e}")
@@ -1914,7 +1932,7 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
                 quote = await asyncio.to_thread(
                     ts.fetch_quote,
                     ticker,
-                    allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+                    allow_provider_fallback=None,
                 )
                 if quote and quote.get("price") is not None:
                     await tick_queue.put({
