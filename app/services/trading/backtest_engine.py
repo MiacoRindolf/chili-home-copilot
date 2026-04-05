@@ -295,11 +295,16 @@ def _extract_context(
     description: str,
     db: Session | None = None,
     insight_id: int | None = None,
+    *,
+    learning_event_descriptions: list[str] | None = None,
 ) -> dict[str, Any]:
     """Parse a pattern description to extract actionable context.
 
     Also checks ``LearningEvent`` records associated with the insight to
     detect the original asset class the pattern was discovered from.
+
+    When ``learning_event_descriptions`` is not ``None``, use those strings
+    instead of querying the DB (batch callers pre-load up to 20 per insight).
     """
     desc_lower = description.lower()
 
@@ -317,7 +322,19 @@ def _extract_context(
 
     # Check learning events for original discovery context (crypto tickers etc.)
     event_crypto = False
-    if db and insight_id and not keyword_crypto and not has_crypto_tickers:
+    if learning_event_descriptions is not None and not keyword_crypto and not has_crypto_tickers:
+        for det in learning_event_descriptions:
+            if not det:
+                continue
+            det_lower = det.lower()
+            if any(h in det_lower for h in _CRYPTO_HINTS):
+                event_crypto = True
+                break
+            evt_tickers = _TICKER_RE.findall(det)
+            if any(t.endswith("-USD") for t in evt_tickers):
+                event_crypto = True
+                break
+    elif db and insight_id and not keyword_crypto and not has_crypto_tickers:
         try:
             from ...models.trading import LearningEvent
             events = (

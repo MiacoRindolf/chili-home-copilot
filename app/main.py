@@ -16,7 +16,6 @@ from . import logger as _chili_log_setup  # noqa: F401
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse as StarletteJSONResponse
@@ -494,15 +493,8 @@ def _run_deferred_startup() -> None:
     Order: DB maintenance first, then WS, prewarm, backfill thread, scheduler.
     """
     import threading
-    import time as _time
 
     _log = logging.getLogger("chili.startup")
-    # region agent log
-    from .debug_agent_log import agent_log as _agent_log
-
-    _t0 = _time.perf_counter()
-    _agent_log("H1", "lifespan", "deferred_thread_begin", {})
-    # endregion
     try:
         from .config import settings as _settings
 
@@ -532,26 +524,11 @@ def _run_deferred_startup() -> None:
         start_scheduler()
     except Exception:
         _log.exception("[startup] Deferred startup failed")
-    # region agent log
-    _agent_log(
-        "H1",
-        "lifespan",
-        "deferred_thread_complete",
-        {"elapsed_ms": round((_time.perf_counter() - _t0) * 1000, 1)},
-    )
-    # endregion
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import threading
-    import time as _time
-    # region agent log
-    from .debug_agent_log import agent_log as _agent_log
-
-    _ls_t0 = _time.perf_counter()
-    _agent_log("H1", "lifespan", "startup_begin", {})
-    # endregion
     # Load ML model first (doesn't need DB)
     try:
         from .services.trading.ml_engine import load_model
@@ -563,17 +540,6 @@ async def lifespan(app: FastAPI):
     # Broker restore runs inside _run_deferred_startup (not here) so Robinhood login
     # cannot block application startup.
     threading.Thread(target=_run_deferred_startup, daemon=True, name="chili-deferred-startup").start()
-    # region agent log
-    _agent_log(
-        "H1",
-        "lifespan",
-        "before_yield_ready",
-        {
-            "elapsed_ms": round((_time.perf_counter() - _ls_t0) * 1000, 1),
-            "deferred_in_background": True,
-        },
-    )
-    # endregion
     yield
     _stop_massive_ws()
     stop_scheduler()
@@ -659,46 +625,6 @@ async def _sqlalchemy_operational_error_handler(request: Request, exc: Operation
     )
 
 
-class _DebugRequestMiddleware(BaseHTTPMiddleware):
-    """Log selected routes to debug-f139e5.log (H2/H3/H4)."""
-
-    async def dispatch(self, request: Request, call_next):
-        # region agent log
-        import time as _time
-
-        from .debug_agent_log import agent_log as _agent_log
-
-        p = request.url.path
-        if p == "/brain" or p.startswith("/api/brain"):
-            _agent_log(
-                "H2",
-                "middleware",
-                "request_in",
-                {
-                    "path": p,
-                    "scheme": request.url.scheme,
-                    "method": request.method,
-                },
-            )
-        t0 = _time.perf_counter()
-        # endregion
-        response = await call_next(request)
-        # region agent log
-        if p == "/brain" or p.startswith("/api/brain"):
-            _agent_log(
-                "H3",
-                "middleware",
-                "request_out",
-                {
-                    "path": p,
-                    "status": getattr(response, "status_code", None),
-                    "ms": round((_time.perf_counter() - t0) * 1000, 1),
-                },
-            )
-        # endregion
-        return response
-
-
 # Session middleware (authlib OAuth stores nonce/state here)
 from .config import settings as _cfg
 app.add_middleware(SessionMiddleware, secret_key=_cfg.session_secret)
@@ -711,8 +637,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-app.add_middleware(_DebugRequestMiddleware)
 
 app.mount("/static", StaticFiles(directory=Path(__file__).parent / "static"), name="static")
 
@@ -777,9 +701,3 @@ try:
 except Exception:
     # Fail-soft on marketplace load; core app must still boot.
     pass
-
-# region agent log
-from .debug_agent_log import agent_log as _agent_log_main_done
-
-_agent_log_main_done("H5", "main_module", "import_and_routers_complete", {})
-# endregion

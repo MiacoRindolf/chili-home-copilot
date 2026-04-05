@@ -1009,6 +1009,9 @@ def api_quick_backtest(
     )
     if cached:
         import json as _json
+
+        from ..services.trading.backtest_metrics import backtest_win_rate_db_to_display_pct
+
         eq = []
         try:
             eq = _json.loads(cached.equity_curve) if cached.equity_curve else []
@@ -1019,7 +1022,7 @@ def api_quick_backtest(
             "ticker": cached.ticker,
             "strategy_name": cached.strategy_name,
             "return_pct": cached.return_pct,
-            "win_rate": cached.win_rate,
+            "win_rate": backtest_win_rate_db_to_display_pct(cached.win_rate),
             "sharpe": cached.sharpe,
             "max_drawdown": cached.max_drawdown,
             "trade_count": cached.trade_count,

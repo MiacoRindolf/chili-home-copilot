@@ -3908,9 +3908,14 @@ def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
             BacktestResult.ticker == w.ticker,
         ).order_by(BacktestResult.return_pct.desc()).first()
 
+        from .backtest_metrics import backtest_win_rate_display_pct_for_compare
+
         bt_confidence = 0
-        if best_bt and best_bt.win_rate > 50:
-            bt_confidence = min(30, best_bt.win_rate - 50)
+        _wr_disp = backtest_win_rate_display_pct_for_compare(
+            getattr(best_bt, "win_rate", None) if best_bt else None,
+        )
+        if best_bt and _wr_disp > 50:
+            bt_confidence = min(30, _wr_disp - 50)
 
         base_confidence = (scored["score"] / 10) * 70
         confidence = min(95, base_confidence + bt_confidence)
@@ -4156,16 +4161,30 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
 
     picks = list(candidates.values())
 
-    # Bulk-fetch best backtest per ticker (single query instead of N)
+    # Bulk-fetch backtests for pick tickers; prefer rows for pick's scan_pattern_id when set.
+    from collections import defaultdict
+
     pick_tickers = [p["ticker"] for p in picks]
     bt_rows = db.query(BacktestResult).filter(
         BacktestResult.ticker.in_(pick_tickers),
     ).all() if pick_tickers else []
-    bt_map: dict[str, BacktestResult] = {}
+    by_ticker: dict[str, list[BacktestResult]] = defaultdict(list)
     for bt in bt_rows:
-        prev = bt_map.get(bt.ticker)
-        if prev is None or (bt.return_pct or 0) > (prev.return_pct or 0):
-            bt_map[bt.ticker] = bt
+        by_ticker[bt.ticker].append(bt)
+
+    def _best_backtest_for_pick(
+        rows: list[BacktestResult], pattern_id: int | None
+    ) -> BacktestResult | None:
+        if not rows:
+            return None
+        pool = rows
+        if pattern_id is not None:
+            scoped = [b for b in rows if b.scan_pattern_id == pattern_id]
+            if scoped:
+                pool = scoped
+        return max(pool, key=lambda b: (b.return_pct or 0))
+
+    from .backtest_metrics import backtest_win_rate_db_to_display_pct
 
     for pick in picks:
         combined = pick["score"]
@@ -4186,11 +4205,13 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             if risk_amt > 0:
                 pick["position_size_pct"] = round(min(5.0, 1.0 / (risk_amt / price * 100)) * 100 / 100, 2)
 
-        best_bt = bt_map.get(pick["ticker"])
+        _sp = pick.get("scan_pattern_id")
+        _sp_i = int(_sp) if _sp is not None else None
+        best_bt = _best_backtest_for_pick(by_ticker.get(pick["ticker"], []), _sp_i)
         if best_bt:
             pick["best_strategy"] = best_bt.strategy_name
             pick["backtest_return"] = best_bt.return_pct
-            pick["backtest_win_rate"] = best_bt.win_rate
+            pick["backtest_win_rate"] = backtest_win_rate_db_to_display_pct(best_bt.win_rate)
             if best_bt.scan_pattern_id and not pick.get("scan_pattern_id"):
                 _sid = _active_scan_pattern_id(int(best_bt.scan_pattern_id))
                 if _sid is not None:

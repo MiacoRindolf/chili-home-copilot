@@ -6766,6 +6766,15 @@ function _timeStr() {
 
 function escHtml(s) { var d=document.createElement('div'); d.textContent=s; return d.innerHTML; }
 
+/** Backtest win_rate may be fraction [0,1] (DB) or percent [0,100] (engine); return display percent or null. */
+function tradingBacktestWinRateToPct(wr) {
+  if (wr == null || (typeof wr === 'number' && isNaN(wr))) return null;
+  var n = Number(wr);
+  if (!isFinite(n)) return null;
+  if (n <= 1 && n >= 0) return n * 100;
+  return n;
+}
+
 /* Ticker tag regex: $AAPL, $BTC-USD or standalone known patterns */
 var _TICKER_RE = /\$([A-Z]{1,5}(?:-USD)?)\b/g;
 var _BARE_TICKER_RE = /\b([A-Z]{2,5}(?:-USD)?)\b/g;
@@ -7363,7 +7372,7 @@ function _backtestSuggestedPattern(patternId) {
       }
       var r = d.result || d;
       var html = '**Backtest Results**\n\n';
-      html += '- Win Rate: **' + ((r.win_rate || 0) * 100).toFixed(1) + '%**\n';
+      html += '- Win Rate: **' + (function(){ var w = tradingBacktestWinRateToPct(r.win_rate); return (w != null ? w : 0).toFixed(1); })() + '%**\n';
       html += '- Return: **' + (r.return_pct || 0).toFixed(1) + '%**\n';
       html += '- Trades: **' + (r.trade_count || 0) + '**\n';
       html += '- Sharpe: **' + (r.sharpe || 0).toFixed(2) + '**\n';
@@ -7629,7 +7638,7 @@ function _renderPatternsList(patterns) {
       '<div class="pat-stats">' +
         '<span>Boost: <b>+' + (p.score_boost||0).toFixed(1) + '</b></span>' +
         '<span>Confidence: <span style="color:' + confColor + '">' + confBar + '%</span></span>' +
-        (p.win_rate != null ? '<span>WR: ' + p.win_rate.toFixed(0) + '%</span>' : '') +
+        (p.win_rate != null ? '<span>WR: ' + (function(){ var w = tradingBacktestWinRateToPct(p.win_rate); return w != null ? w.toFixed(0) : '--'; })() + '%</span>' : '') +
         (p.backtest_count ? '<span>Tests: ' + p.backtest_count + '</span>' : '') +
       '</div>' +
       '<div class="pat-actions">' +
@@ -7689,7 +7698,7 @@ function _backtestPattern(id) {
     .then(function(r){return r.json();}).then(function(d) {
       btn.textContent = 'Backtest'; btn.disabled = false;
       if (d.ok) {
-        alert('Backtest on ' + ticker + ':\nReturn: ' + (d.return_pct||0).toFixed(1) + '%\nWin Rate: ' + (d.win_rate||0).toFixed(0) + '%\nTrades: ' + (d.trade_count||0) + '\nSharpe: ' + (d.sharpe||0).toFixed(2));
+        alert('Backtest on ' + ticker + ':\nReturn: ' + (d.return_pct||0).toFixed(1) + '%\nWin Rate: ' + (function(){ var w = tradingBacktestWinRateToPct(d.win_rate); return w != null ? w.toFixed(0) : '0'; })() + '%\nTrades: ' + (d.trade_count||0) + '\nSharpe: ' + (d.sharpe||0).toFixed(2));
         _loadPatterns();
       } else {
         alert(d.error || 'Backtest failed');
@@ -8670,7 +8679,10 @@ function _renderBestIdeaRow(item) {
     html += '<div class="bi-bt-card">';
     html += '<div class="bi-bt-card-name">' + escHtml(btStrategy) + '</div>';
     if (btReturn != null) html += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Return</span><span class="bi-bt-card-val bi-bt-val ' + retCls + '">' + (btReturn >= 0 ? '+' : '') + btReturn.toFixed(1) + '%</span></div>';
-    if (btWinRate != null) html += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + btWinRate.toFixed(0) + '%</span></div>';
+    if (btWinRate != null) {
+      var _wrDisp = tradingBacktestWinRateToPct(btWinRate);
+      if (_wrDisp != null) html += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + _wrDisp.toFixed(0) + '%</span></div>';
+    }
     html += '</div>';
   }
   html += '<div class="bi-bt-card" style="display:flex;align-items:center;justify-content:center;cursor:pointer;border-style:dashed" onclick="event.stopPropagation();runAllBacktests(\'' + escAttr(ticker) + '\',this)">';
@@ -8761,7 +8773,7 @@ function runAllBacktests(ticker, btnEl) {
         var card = '<div class="bi-bt-card">';
         card += '<div class="bi-bt-card-name">' + escHtml(r.strategy) + '</div>';
         card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Return</span><span class="bi-bt-card-val bi-bt-val ' + retCls + '">' + (r.return_pct >= 0 ? '+' : '') + r.return_pct.toFixed(1) + '%</span></div>';
-        card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + r.win_rate.toFixed(0) + '%</span></div>';
+        card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Win Rate</span><span class="bi-bt-card-val">' + (function(){ var w = tradingBacktestWinRateToPct(r.win_rate); return w != null ? w.toFixed(0) : '--'; })() + '%</span></div>';
         card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Trades</span><span class="bi-bt-card-val">' + r.trade_count + '</span></div>';
         if (r.sharpe != null) card += '<div class="bi-bt-card-row"><span class="bi-bt-card-lbl">Sharpe</span><span class="bi-bt-card-val">' + r.sharpe.toFixed(2) + '</span></div>';
         card += '</div>';
@@ -8833,7 +8845,7 @@ function runQuickBacktest(ticker, btnEl) {
       var statsHtml = '<div class="bi-bt-stats">';
       statsHtml += '<div>Strategy: <span>' + escHtml(d.strategy_name || '--') + '</span></div>';
       statsHtml += '<div>Return: <span style="color:' + (d.return_pct >= 0 ? '#22c55e' : '#ef4444') + '">' + (d.return_pct >= 0 ? '+' : '') + (d.return_pct || 0).toFixed(1) + '%</span></div>';
-      statsHtml += '<div>Win Rate: <span>' + (d.win_rate || 0).toFixed(0) + '%</span></div>';
+      statsHtml += '<div>Win Rate: <span>' + (function(){ var w = tradingBacktestWinRateToPct(d.win_rate); return (w != null ? w : 0).toFixed(0); })() + '%</span></div>';
       statsHtml += '<div>Trades: <span>' + (d.trade_count || 0) + '</span>';
       if (tradesList.length > 0) statsHtml += ' <span style="color:#22c55e">' + wins + 'W</span>/<span style="color:#ef4444">' + losses + 'L</span>';
       statsHtml += '</div>';
@@ -9397,7 +9409,7 @@ function runBacktest() {
       '<div class="bt-stats">' +
         '<div class="bt-stat"><div class="bt-val '+retCls+'">'+d.return_pct+'%</div><div class="bt-lbl">Strategy Return</div></div>' +
         '<div class="bt-stat"><div class="bt-val '+bhCls+'">'+d.buy_hold_pct+'%</div><div class="bt-lbl">Buy & Hold</div></div>' +
-        '<div class="bt-stat"><div class="bt-val">'+d.win_rate+'%</div><div class="bt-lbl">Win Rate</div></div>' +
+        '<div class="bt-stat"><div class="bt-val">'+(function(){ var w = tradingBacktestWinRateToPct(d.win_rate); return w != null ? w.toFixed(1) : (d.win_rate != null ? String(d.win_rate) : '--'); })()+'%</div><div class="bt-lbl">Win Rate</div></div>' +
         '<div class="bt-stat"><div class="bt-val">'+(d.sharpe||'-')+'</div><div class="bt-lbl">Sharpe Ratio</div></div>' +
         '<div class="bt-stat"><div class="bt-val" style="color:#ef4444">'+d.max_drawdown+'%</div><div class="bt-lbl">Max Drawdown</div></div>' +
         '<div class="bt-stat"><div class="bt-val">'+d.trade_count+'</div><div class="bt-lbl">Total Trades</div></div>' +

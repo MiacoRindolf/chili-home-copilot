@@ -446,9 +446,13 @@ def build_ai_context(
                     )
             except Exception:
                 kpi_bits = ""
+            from .backtest_metrics import backtest_win_rate_db_to_display_pct
+
+            _wr_llm = backtest_win_rate_db_to_display_pct(bt.win_rate)
+            _wr_s = f"{_wr_llm:.0f}%" if _wr_llm is not None else "N/A"
             lines.append(
                 f"- {bt.strategy_name}: {bt.return_pct:+.1f}% return, "
-                f"{bt.win_rate:.0f}% win rate, {bt.trade_count} trades, "
+                f"{_wr_s} win rate, {bt.trade_count} trades, "
                 f"Sharpe {bt.sharpe or 'N/A'}, Max DD {bt.max_drawdown:.1f}%{kpi_bits}"
             )
         parts.append("\n".join(lines))

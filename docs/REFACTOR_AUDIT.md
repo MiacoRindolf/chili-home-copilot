@@ -63,7 +63,7 @@ Generated as part of the **CHILI total refactor** plan. Use this as the baseline
 | Worker control | Paths under `/api/brain/trading/worker/*` vs `/api/trading/brain/worker/*` | Consolidate + migration guide |
 | `brain_v1_compat` vs native | Overlap with worker wake | Keep compat until clients migrate; document |
 | Backtest | `backtest_service.py` vs `backtest_engine.py` vs queue | Document ownership; reduce duplicate entry points in later phase |
-| Debug | `app/debug_agent_log.py` | Gate behind env or remove if unused |
+| Debug | (removed) | `debug_agent_log` NDJSON sink removed; use app logger if needed |
 | Config | Single large `config.py` | Split per domain after extraction |
 
 ## Move / keep / delete (initial)

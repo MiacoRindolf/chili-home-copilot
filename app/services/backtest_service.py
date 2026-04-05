@@ -619,8 +619,15 @@ def save_backtest(
         )
         if sp_row:
             resolved_sp_id = sp_row.id
+    from .trading.backtest_metrics import normalize_win_rate_for_db
+
     ret_pct = _sanitize_float(result.get("return_pct"))
-    wr = _sanitize_float(result.get("win_rate"))
+    _raw_wr = result.get("win_rate")
+    if _raw_wr is None:
+        wr = 0.0
+    else:
+        _nw = normalize_win_rate_for_db(_sanitize_float(_raw_wr))
+        wr = float(_nw) if _nw is not None else 0.0
     sharpe = result.get("sharpe")
     if sharpe is not None:
         sharpe = _sanitize_float(sharpe, 0.0) or None
@@ -674,7 +681,8 @@ def save_backtest(
             existing.params = params_json
             existing.scan_pattern_id = int(resolved_sp_id) if resolved_sp_id is not None else None
             if result.get("oos_win_rate") is not None:
-                existing.oos_win_rate = float(result["oos_win_rate"])
+                _ow = normalize_win_rate_for_db(_sanitize_float(result["oos_win_rate"]))
+                existing.oos_win_rate = float(_ow) if _ow is not None else None
                 existing.oos_return_pct = float(result.get("oos_return_pct") or 0)
                 existing.oos_trade_count = int(result.get("oos_trade_count") or 0)
                 existing.oos_holdout_fraction = float(result.get("oos_holdout_fraction") or 0)
@@ -687,7 +695,12 @@ def save_backtest(
             )
             return existing
 
-    _oos_wr = result.get("oos_win_rate")
+    _oos_wr_raw = result.get("oos_win_rate")
+    _oos_wr = (
+        normalize_win_rate_for_db(_sanitize_float(_oos_wr_raw))
+        if _oos_wr_raw is not None
+        else None
+    )
     _oos_ret = result.get("oos_return_pct")
     _oos_tc = result.get("oos_trade_count")
     _oos_frac = result.get("oos_holdout_fraction")

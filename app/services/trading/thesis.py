@@ -28,6 +28,12 @@ _SIGNAL_TRANSLATIONS: dict[str, str] = {
 }
 
 
+def _bt_wr_pct_for_display(bt_wr: float | None) -> float | None:
+    from .backtest_metrics import backtest_win_rate_db_to_display_pct
+
+    return backtest_win_rate_db_to_display_pct(bt_wr)
+
+
 def build_conversational_thesis(pick: dict[str, Any]) -> str:
     """Produce a 2-4 sentence plain-English thesis that 'sells' the pick."""
     ticker = pick.get("ticker", "")
@@ -72,11 +78,11 @@ def build_conversational_thesis(pick: dict[str, Any]) -> str:
             f"the potential upside meaningfully outweighs the downside."
         )
 
-    if bt_strategy and bt_wr:
+    if bt_strategy and bt_wr is not None:
         ret_str = f" returning {bt_return:+.1f}%" if bt_return else ""
         parts.append(
             f"Historical backtesting of the {bt_strategy} strategy shows "
-            f"a {bt_wr:.0f}% win rate{ret_str}."
+            f"a {float(bt_wr):.0f}% win rate{ret_str}."
         )
 
     return " ".join(parts)
@@ -207,9 +213,11 @@ def build_smart_pick_context_strings(db: Session, ctx: dict[str, Any]) -> str:
             BacktestResult.ticker == p["ticker"],
         ).order_by(BacktestResult.return_pct.desc()).first()
         if best_bt:
+            _wrp = _bt_wr_pct_for_display(best_bt.win_rate)
+            _wr_txt = f"{_wrp:.0f}%" if _wrp is not None else "N/A"
             detail += (
                 f"\n  Best backtest: {best_bt.strategy_name} → "
-                f"{best_bt.return_pct:+.1f}% return, {best_bt.win_rate:.0f}% win rate"
+                f"{best_bt.return_pct:+.1f}% return, {_wr_txt} win rate"
             )
 
         pick_details.append(detail)

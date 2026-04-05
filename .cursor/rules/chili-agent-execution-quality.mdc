@@ -44,6 +44,22 @@ When completing items, update BOTH:
 
 The user sees plan files directly — unticked items cause confusion. Update YAML frontmatter `status: completed` for each finished todo.
 
+### Hard sync (Composer / multi-step work)
+
+1. **Single source of truth for the user is the plan file**, not Cursor’s internal todo list. If you mark internal todos `completed` but leave the plan’s YAML as `status: pending`, the user correctly believes work was skipped.
+2. **On the same turn** you finish (or partially finish) a plan todo: edit the matching `.plan.md` entry — set `status: completed` **only** for work actually merged, or keep `pending` and **narrow the `content` string** to what remains (do not claim an umbrella item done when only a slice landed).
+3. **Partial delivery:** Prefer splitting into two YAML todos (one `completed`, one `pending`) over one misleading `completed`.
+4. **Session closeout:** If the user attached a plan, end with a short “plan sync” note — which YAML ids are `completed` vs still `pending` — so they do not have to diff the repo.
+
+## Run repo scripts (do not only tell the user to run them)
+
+When the user asks to run project scripts (diagnose, recompute, migrations, pytest, etc.) and this environment has shell + DB/network access:
+
+1. **Run the commands yourself** from the repo root using `conda run -n chili-env ...` (or the documented script path). **Paste real stdout/stderr and the exit code** in the reply.
+2. If a script fails with a **trivial bug** (e.g. `NameError`, wrong `sys.path`), **fix the script** and re-run once.
+3. **Heavy or costly scripts** (e.g. `regenerate_pattern_backtests.py` without `--dry-run`, mass backtests): use **`--dry-run`** when ids are not specified, or require **explicit `--pattern-ids`** from the user; do not fire large API batches without confirmation.
+4. If **`run_migrations(engine)`** fails (e.g. `UniqueViolation` on `schema_version`), **report the error verbatim** — the database may have drift vs the migration runner; do not paper over with ad-hoc SQL unless the user explicitly asks for repair.
+
 ## Parallel Independent Changes
 
 Batch Read and StrReplace calls for independent files. Don't serialize what can be parallelized.

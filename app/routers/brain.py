@@ -62,14 +62,6 @@ def brain_page(
     planner_task_id: int | None = Query(default=None, ge=1),
     planner_project_id: int | None = Query(default=None, ge=1),
 ):
-    # region agent log
-    import time as _time
-
-    from ..debug_agent_log import agent_log as _agent_log
-
-    _bp_t0 = _time.perf_counter()
-    _agent_log("H3", "brain_page", "handler_entry", {})
-    # endregion
     ctx = get_identity_ctx(request, db)
     resp = request.app.state.templates.TemplateResponse(
         request, "brain.html",
@@ -84,14 +76,6 @@ def brain_page(
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).
     resp.headers["Cache-Control"] = "no-store, max-age=0, must-revalidate"
-    # region agent log
-    _agent_log(
-        "H3",
-        "brain_page",
-        "handler_exit",
-        {"ms": round((_time.perf_counter() - _bp_t0) * 1000, 1)},
-    )
-    # endregion
     return resp
 
 

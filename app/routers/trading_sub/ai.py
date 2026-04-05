@@ -20,6 +20,10 @@ from ...prompts import load_prompt
 from ...services import trading_service as ts
 from ...services import trading_scheduler
 from ...services import ticker_universe
+from ...services.trading.backtest_metrics import (
+    backtest_win_rate_db_to_display_pct,
+    normalize_win_rate_for_db,
+)
 
 router = APIRouter(tags=["trading-ai"])
 _log = logging.getLogger(__name__)
@@ -89,24 +93,6 @@ def _get_trading_prompt() -> str:
 def api_brain_stats(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
     stats = ts.get_brain_stats(db, ctx["user_id"])
-    # region agent log
-    try:
-        from ...debug_agent_log import agent_log, safe_db_fingerprint
-
-        agent_log(
-            "H1",
-            "trading_sub.ai.api_brain_stats",
-            "brain_stats_identity",
-            {
-                "user_id": ctx.get("user_id"),
-                "is_guest": ctx.get("is_guest"),
-                "total_patterns": stats.get("total_patterns"),
-                "db_fingerprint": safe_db_fingerprint(),
-            },
-        )
-    except Exception:
-        pass
-    # endregion
     return JSONResponse({"ok": True, **stats})
 
 
@@ -493,25 +479,6 @@ def api_brain_cycle_reports(
     uid = ctx["user_id"]
     base = _cycle_reports_base_query(db, uid)
     total = base.count()
-    # region agent log
-    try:
-        from ...debug_agent_log import agent_log, safe_db_fingerprint
-
-        agent_log(
-            "H3",
-            "trading_sub.ai.api_brain_cycle_reports",
-            "cycle_reports_scope",
-            {
-                "user_id": uid,
-                "is_guest": ctx.get("is_guest"),
-                "total_reports": total,
-                "query_branch": "user_id_match" if uid is not None else "user_id_is_null_only",
-                "db_fingerprint": safe_db_fingerprint(),
-            },
-        )
-    except Exception:
-        pass
-    # endregion
     rows = (
         base.order_by(LearningCycleAiReport.created_at.desc())
         .offset(offset)
@@ -917,6 +884,8 @@ def _evidence_backtest_asset_universe(
     desc: str,
     scan_pattern_id: int | None,
     insight_id: int | None = None,
+    *,
+    learning_event_descriptions: list[str] | None = None,
 ) -> str:
     """Match backtest_engine: crypto-only / stocks-only / all for evidence aggregation."""
     from ...models.trading import ScanPattern
@@ -930,7 +899,12 @@ def _evidence_backtest_asset_universe(
         sp = db.query(ScanPattern).get(scan_pattern_id)
         if sp:
             ac = getattr(sp, "asset_class", None)
-    ctx = _extract_context(desc or "", db=db, insight_id=insight_id)
+    ctx = _extract_context(
+        desc or "",
+        db=db,
+        insight_id=insight_id,
+        learning_event_descriptions=learning_event_descriptions,
+    )
     return effective_backtest_asset_universe(ac, ctx)
 
 
@@ -1022,16 +996,22 @@ def _compute_deduped_backtest_win_stats(
     *,
     linked_limit: int = _EVIDENCE_LINKED_BACKTEST_LIMIT,
     asset_universe: str = "all",
+    scan_pattern_id: int | None = None,
 ) -> dict:
     """Backtest list + win stats for the pattern evidence modal.
 
     Sibling-linked BacktestResult rows only (latest per ticker/strategy within the recent window).
+
+    Aggregate **win_rate** / W–L in the header matches the per-row **win_rate** columns (simulated
+    trades): trade-weighted across deduped rows, not ``return_pct > 0`` (a backtest can lose money
+    while still showing a partial trade win rate).
     """
     from ...models.trading import BacktestResult
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
     from ...services.trading.research_kpis import parse_kpis_from_backtest_params
 
     backtests_out: list[dict] = []
+    deduped_bt: list[BacktestResult] = []
     seen_bt_keys: set[tuple[str, str]] = set()
     try:
         linked_bts = (
@@ -1046,10 +1026,17 @@ def _compute_deduped_backtest_win_stats(
                 continue
             if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
                 continue
+            if (
+                scan_pattern_id is not None
+                and bt.scan_pattern_id is not None
+                and int(bt.scan_pattern_id) != int(scan_pattern_id)
+            ):
+                continue
             dedup_key = (bt.ticker or "", bt.strategy_name or "")
             if dedup_key in seen_bt_keys:
                 continue
             seen_bt_keys.add(dedup_key)
+            deduped_bt.append(bt)
             pdisp = _period_display_from_stored_params(bt.params)
             if not pdisp:
                 try:
@@ -1060,12 +1047,13 @@ def _compute_deduped_backtest_win_stats(
                 except (json.JSONDecodeError, TypeError, ValueError):
                     pdisp = None
             _kpis = parse_kpis_from_backtest_params(bt.params)
+            _wr_ui = backtest_win_rate_db_to_display_pct(bt.win_rate)
             backtests_out.append({
                 "id": bt.id,
                 "ticker": bt.ticker,
                 "strategy_name": bt.strategy_name,
                 "return_pct": bt.return_pct,
-                "win_rate": bt.win_rate,
+                "win_rate": _wr_ui,
                 "sharpe": bt.sharpe,
                 "max_drawdown": bt.max_drawdown,
                 "trade_count": bt.trade_count,
@@ -1085,21 +1073,28 @@ def _compute_deduped_backtest_win_stats(
     except Exception:
         pass
 
-    bt_with_trades = [b for b in backtests_out if (b.get("trade_count") or 0) > 0]
-    bt_wins = sum(1 for b in bt_with_trades if (b.get("return_pct") or 0) > 0)
-    bt_losses = len(bt_with_trades) - bt_wins
-    bt_win_rate = (
-        round(bt_wins / max(1, len(bt_with_trades)) * 100, 1) if bt_with_trades else None
-    )
+    bt_with_trades = [b for b in deduped_bt if (b.trade_count or 0) > 0]
+    bt_total_trades = int(sum(int(b.trade_count or 0) for b in bt_with_trades))
+    bt_win_rate = None
+    bt_wins = 0
+    bt_losses = 0
+    if bt_with_trades and bt_total_trades > 0:
+        tw_sum = 0.0
+        for b in bt_with_trades:
+            pct = backtest_win_rate_db_to_display_pct(b.win_rate)
+            fr = (float(pct) / 100.0) if pct is not None else 0.0
+            tw_sum += fr * int(b.trade_count or 0)
+        bt_win_rate = round(tw_sum / float(bt_total_trades) * 100.0, 1)
+        bt_wins = int(round(tw_sum))
+        bt_losses = max(0, bt_total_trades - bt_wins)
     bt_avg_return = (
-        round(sum(b.get("return_pct") or 0 for b in bt_with_trades) / len(bt_with_trades), 1)
+        round(sum(float(b.return_pct or 0) for b in bt_with_trades) / len(bt_with_trades), 1)
         if bt_with_trades else None
     )
-    bt_total_trades = int(sum(int(b.get("trade_count") or 0) for b in bt_with_trades))
     dd_vals = [
-        float(b["max_drawdown"])
+        float(b.max_drawdown)
         for b in bt_with_trades
-        if b.get("max_drawdown") is not None
+        if b.max_drawdown is not None
     ]
     bt_worst_max_drawdown = round(min(dd_vals), 2) if dd_vals else None
     return {
@@ -1109,6 +1104,7 @@ def _compute_deduped_backtest_win_stats(
         "bt_win_rate": bt_win_rate,
         "bt_avg_return": bt_avg_return,
         "bt_total_trades": bt_total_trades,
+        "bt_runs_with_trades": len(bt_with_trades),
         "bt_worst_max_drawdown": bt_worst_max_drawdown,
     }
 
@@ -1119,12 +1115,14 @@ def _deduped_win_rate_progress_series(
     *,
     row_limit: int = _EVIDENCE_LINKED_BACKTEST_LIMIT,
     asset_universe: str = "all",
+    scan_pattern_id: int | None = None,
 ) -> list[dict]:
     """Chronological win-rate series over sibling-linked backtests only (no global padding).
 
     Uses the same recent row pool as the panel: newest ``row_limit`` runs, then replayed in time
-    order. State is updated for every run (including 0-trade); WR matches the panel (tickers with
-    trades only). Last point aligns with ``_compute_deduped_backtest_win_stats`` for that pool.
+    order. State is updated for every run (including 0-trade). Win rate is **trade-weighted** over
+    deduped tickers (same formula as ``_compute_deduped_backtest_win_stats``). Last point aligns
+    with that panel for the same replayed pool.
     """
     from ...models.trading import BacktestResult
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
@@ -1149,16 +1147,33 @@ def _deduped_win_rate_progress_series(
             continue
         if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
             continue
+        if (
+            scan_pattern_id is not None
+            and bt.scan_pattern_id is not None
+            and int(bt.scan_pattern_id) != int(scan_pattern_id)
+        ):
+            continue
         ran_at = bt.ran_at
         if not ran_at:
             continue
         key = (bt.ticker or "", bt.strategy_name or "")
         state[key] = bt
         with_trades = [v for v in state.values() if (v.trade_count or 0) > 0]
-        wins = sum(1 for v in with_trades if (v.return_pct or 0) > 0)
-        total = len(with_trades)
-        losses = total - wins
-        wr = round(wins / max(1, total) * 100, 1)
+        total_t = sum(int(v.trade_count or 0) for v in with_trades)
+        if total_t > 0:
+            tw_sum = sum(
+                (float(backtest_win_rate_db_to_display_pct(v.win_rate) or 0) / 100.0)
+                * int(v.trade_count or 0)
+                for v in with_trades
+            )
+            wr = round(tw_sum / float(total_t) * 100.0, 1)
+            wins = int(round(tw_sum))
+            losses = max(0, total_t - wins)
+        else:
+            wr = 0.0
+            wins = 0
+            losses = 0
+            total_t = 0
         ts = int(ran_at.timestamp())
         if last_ts is not None and ts <= last_ts:
             ts = last_ts + 1
@@ -1169,7 +1184,8 @@ def _deduped_win_rate_progress_series(
             "win_rate": wr,
             "wins": wins,
             "losses": losses,
-            "deduped_runs": total,
+            "deduped_runs": len(with_trades),
+            "simulated_trades": total_t,
         })
     return points
 
@@ -1177,7 +1193,9 @@ def _deduped_win_rate_progress_series(
 @router.get("/api/trading/learn/patterns")
 def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-    from ...models.trading import TradingInsight, ScanPattern
+    from collections import defaultdict
+
+    from ...models.trading import LearningEvent, TradingInsight, ScanPattern
 
     # Shared Brain: all users who can open this page see the full insight pool (not scoped by owner).
     all_insights = (
@@ -1186,24 +1204,6 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
         .limit(200)
         .all()
     )
-    # region agent log
-    try:
-        from ...debug_agent_log import agent_log, safe_db_fingerprint
-
-        agent_log(
-            "H1",
-            "trading_sub.ai.api_learned_patterns",
-            "insights_for_user",
-            {
-                "user_id": ctx["user_id"],
-                "is_guest": ctx.get("is_guest"),
-                "insights_count": len(all_insights),
-                "db_fingerprint": safe_db_fingerprint(),
-            },
-        )
-    except Exception:
-        pass
-    # endregion
 
     scan_patterns_by_id: dict[int, ScanPattern] = {}
     for sp in db.query(ScanPattern).all():
@@ -1228,6 +1228,54 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
                 sectors.append(sec)
         return sectors
 
+    # Batch prefetch: avoid per-insight LearningEvent + sibling-id queries (was ~2s × N → 524 timeouts).
+    _insight_ids = [int(i.id) for i in all_insights]
+    _sp_ids_for_siblings = {
+        int(i.scan_pattern_id) for i in all_insights if i.scan_pattern_id is not None
+    }
+    _sibling_ids_by_sp: dict[int, list[int]] = {}
+    if _sp_ids_for_siblings:
+        _sib_rows = (
+            db.query(TradingInsight.id, TradingInsight.scan_pattern_id)
+            .filter(TradingInsight.scan_pattern_id.in_(_sp_ids_for_siblings))
+            .all()
+        )
+        _tmp_sib: dict[int, list[int]] = defaultdict(list)
+        for iid, spid in _sib_rows:
+            if spid is not None:
+                _tmp_sib[int(spid)].append(int(iid))
+        _sibling_ids_by_sp = {k: sorted(set(v)) for k, v in _tmp_sib.items()}
+
+    def _sibling_ids_batched(
+        primary_insight_id: int,
+        scan_pid: int | None,
+        sp_resolved: int | None,
+    ) -> list[int]:
+        sid = scan_pid or sp_resolved
+        if not sid:
+            return [primary_insight_id]
+        ids = list(_sibling_ids_by_sp.get(int(sid), []))
+        if primary_insight_id not in ids:
+            ids = [*ids, primary_insight_id]
+        return ids
+
+    _le_by_insight: dict[int, list[str]] = defaultdict(list)
+    if _insight_ids:
+        for rid, det in (
+            db.query(LearningEvent.related_insight_id, LearningEvent.description)
+            .filter(LearningEvent.related_insight_id.in_(_insight_ids))
+            .order_by(LearningEvent.id.desc())
+            .all()
+        ):
+            if not det:
+                continue
+            rid_i = int(rid)
+            if len(_le_by_insight[rid_i]) >= 20:
+                continue
+            _le_by_insight[rid_i].append(det)
+
+    _bt_panel_cache: dict[tuple[tuple[int, ...], str, int | None], dict] = {}
+
     active = []
     demoted = []
     for ins in all_insights:
@@ -1247,15 +1295,30 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             "OBV", "MFI", "CCI", "SAR", "USD", "AVG", "NET", "LOW", "HIGH",
         }][:5]
 
-        sp_resolved = _resolve_scan_pattern_id_for_insight(db, ins)
+        raw_sid = getattr(ins, "scan_pattern_id", None)
+        if raw_sid is not None and int(raw_sid) in scan_patterns_by_id:
+            sp_resolved = int(raw_sid)
+        else:
+            sp_resolved = _resolve_scan_pattern_id_for_insight(db, ins)
         scan_pid = getattr(ins, "scan_pattern_id", None)
-        sibs = _sibling_insight_ids_for_pattern(db, ins.id, scan_pid, sp_resolved)
+        sibs = _sibling_ids_batched(ins.id, scan_pid, sp_resolved)
+        _le_descs = _le_by_insight.get(int(ins.id), [])
         _bt_univ = _evidence_backtest_asset_universe(
-            db, desc, sp_resolved, insight_id=ins.id,
+            db,
+            desc,
+            sp_resolved,
+            insight_id=ins.id,
+            learning_event_descriptions=_le_descs,
         )
-        panel = _compute_deduped_backtest_win_stats(
-            db, sibs, asset_universe=_bt_univ,
-        )
+        _panel_key = (tuple(sorted(sibs)), _bt_univ, sp_resolved)
+        if _panel_key not in _bt_panel_cache:
+            _bt_panel_cache[_panel_key] = _compute_deduped_backtest_win_stats(
+                db,
+                sibs,
+                asset_universe=_bt_univ,
+                scan_pattern_id=sp_resolved,
+            )
+        panel = _bt_panel_cache[_panel_key]
         wc = int(panel["bt_wins"])
         lc = int(panel["bt_losses"])
         bt_total_trades = int(panel.get("bt_total_trades") or 0)
@@ -1544,6 +1607,7 @@ def _api_pattern_evidence_response(
     )
     panel = _compute_deduped_backtest_win_stats(
         db, sibling_ids, asset_universe=_ev_univ,
+        scan_pattern_id=sp_resolved_id,
     )
     backtests_out = panel["backtests_out"]
     bt_wins = int(panel["bt_wins"])
@@ -1552,6 +1616,7 @@ def _api_pattern_evidence_response(
     bt_avg_return = panel["bt_avg_return"]
     win_rate_progress = _deduped_win_rate_progress_series(
         db, sibling_ids, asset_universe=_ev_univ,
+        scan_pattern_id=sp_resolved_id,
     )
 
     pattern_display = (
@@ -1564,6 +1629,7 @@ def _api_pattern_evidence_response(
         timeline, hypotheses, trades_out, backtests_out,
         bt_wins, bt_losses, bt_win_rate, bt_avg_return,
         backtest_total_displayed=len(backtests_out),
+        bt_runs_with_trades=int(panel.get("bt_runs_with_trades") or 0),
     )
 
     return JSONResponse(
@@ -1579,7 +1645,7 @@ def _api_pattern_evidence_response(
                     "pattern_display": pattern_display,
                     "confidence": round(insight.confidence * 100, 1),
                     "evidence_count": insight.evidence_count,
-                    # Same source as header WR: sibling-linked backtests with trades (deduped latest per ticker/strategy).
+                    # Header WR: trade-weighted simulated WR; win/loss = rounded simulated wins vs losses (not # of backtest rows).
                     "win_count": bt_wins,
                     "loss_count": bt_losses,
                     "win_rate": bt_win_rate,
@@ -1641,7 +1707,7 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
         "ticker": bt.ticker,
         "strategy_name": bt.strategy_name,
         "return_pct": float(bt.return_pct) if bt.return_pct is not None else None,
-        "win_rate": float(bt.win_rate) if bt.win_rate is not None else None,
+        "win_rate": backtest_win_rate_db_to_display_pct(bt.win_rate),
         "trade_count": bt.trade_count or 0,
         "sharpe": float(bt.sharpe) if bt.sharpe is not None else None,
         "max_drawdown": float(bt.max_drawdown) if bt.max_drawdown is not None else None,
@@ -1839,7 +1905,9 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
     ret = body.get("return_pct")
     bt.return_pct = float(ret) if ret is not None else bt.return_pct
     wr = body.get("win_rate")
-    bt.win_rate = float(wr) if wr is not None else bt.win_rate
+    if wr is not None:
+        _nw = normalize_win_rate_for_db(float(wr))
+        bt.win_rate = float(_nw) if _nw is not None else bt.win_rate
     sh = body.get("sharpe")
     bt.sharpe = float(sh) if sh is not None else None
     md = body.get("max_drawdown")
@@ -1889,7 +1957,7 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
         "ok": True,
         "id": bt.id,
         "return_pct": float(bt.return_pct),
-        "win_rate": float(bt.win_rate),
+        "win_rate": backtest_win_rate_db_to_display_pct(bt.win_rate),
         "sharpe": float(bt.sharpe) if bt.sharpe is not None else None,
         "max_drawdown": float(bt.max_drawdown),
         "trade_count": bt.trade_count,
@@ -2108,6 +2176,8 @@ def _compute_evidence_stats(
     bt_win_rate: float | None = None,
     bt_avg_return: float | None = None,
     backtest_total_displayed: int | None = None,
+    *,
+    bt_runs_with_trades: int | None = None,
 ) -> dict:
     """Compute live aggregate stats from the actual evidence data.
 
@@ -2132,10 +2202,17 @@ def _compute_evidence_stats(
             stats["trade_count"] = len(closed)
             stats["total_pnl"] = round(sum(t["pnl"] for t in closed), 2)
 
-    bt_total = bt_wins + bt_losses
-    if bt_total > 0:
+    # bt_wins/bt_losses are simulated-trade tallies (trade-weighted panel). backtest_count in the UI
+    # is deduped rows with trades (e.g. "4/38 with trades"), not total simulated trades.
+    sim_trade_total = bt_wins + bt_losses
+    if sim_trade_total > 0 and bt_win_rate is not None:
         stats["backtest_avg_win_rate"] = bt_win_rate
-        stats["backtest_count"] = bt_total
+        stats["backtest_count"] = (
+            int(bt_runs_with_trades)
+            if bt_runs_with_trades is not None
+            else sim_trade_total
+        )
+        stats["backtest_simulated_trades"] = sim_trade_total
     if backtest_total_displayed is not None:
         stats["backtest_total_displayed"] = backtest_total_displayed
     if bt_avg_return is not None:

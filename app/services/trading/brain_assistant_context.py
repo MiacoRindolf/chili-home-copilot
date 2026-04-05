@@ -16,6 +16,7 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import LearningEvent, ScanPattern, TradingInsight
+from .backtest_metrics import backtest_win_rate_db_to_display_pct
 from .backtest_queue import get_queue_status
 
 logger = logging.getLogger(__name__)
@@ -98,19 +99,33 @@ def _patterns_summary(
         ScanPattern.last_backtest_at.asc().nullsfirst(),
     ).limit(limit)
     rows = q.all()
-    return [
-        {
-            "id": p.id,
-            "name": p.name,
-            "active": p.active,
-            "last_backtest_at": p.last_backtest_at.isoformat() if p.last_backtest_at else None,
-            "backtest_priority": p.backtest_priority,
-            "win_rate": round(p.win_rate, 4) if p.win_rate is not None else None,
-            "confidence": round(p.confidence, 2) if p.confidence is not None else None,
-            "origin": p.origin,
-        }
-        for p in rows
-    ]
+    out: list[dict[str, Any]] = []
+    for p in rows:
+        wr_pct = (
+            round(float(backtest_win_rate_db_to_display_pct(p.win_rate)), 2)
+            if p.win_rate is not None
+            else None
+        )
+        oos_pct = (
+            round(float(backtest_win_rate_db_to_display_pct(p.oos_win_rate)), 2)
+            if getattr(p, "oos_win_rate", None) is not None
+            else None
+        )
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "active": p.active,
+                "last_backtest_at": p.last_backtest_at.isoformat() if p.last_backtest_at else None,
+                "backtest_priority": p.backtest_priority,
+                "win_rate": round(p.win_rate, 4) if p.win_rate is not None else None,
+                "win_rate_pct": wr_pct,
+                "oos_win_rate_pct": oos_pct,
+                "confidence": round(p.confidence, 2) if p.confidence is not None else None,
+                "origin": p.origin,
+            }
+        )
+    return out
 
 
 def _insights_summary(db: Session, _user_id: int | None) -> dict[str, Any]:

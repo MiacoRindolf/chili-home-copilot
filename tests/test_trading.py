@@ -690,7 +690,7 @@ class TestBrainAPI:
                 ticker="SPY",
                 strategy_name="dynamic_pattern",
                 return_pct=2.0,
-                win_rate=60.0,
+                win_rate=0.6,
                 max_drawdown=-4.0,
                 trade_count=5,
                 related_insight_id=ins.id,
@@ -704,7 +704,7 @@ class TestBrainAPI:
                 ticker="QQQ",
                 strategy_name="dynamic_pattern",
                 return_pct=1.0,
-                win_rate=55.0,
+                win_rate=0.55,
                 max_drawdown=-8.5,
                 trade_count=7,
                 related_insight_id=ins.id,
@@ -722,6 +722,78 @@ class TestBrainAPI:
         assert row.get("bt_total_trades") == 12
         assert row.get("bt_worst_max_drawdown") == -8.5
         assert "oos_trade_count" in row
+        # Trade-weighted simulated WR: (60*5 + 55*7) / 12
+        assert row.get("win_rate") == 57.1
+        assert row.get("win_count") + row.get("loss_count") == 12
+
+    def test_pattern_evidence_trade_weighted_wr_matches_table(self, db, client):
+        """Evidence modal WR matches per-row win_rate columns (not return_pct > 0)."""
+        from datetime import datetime
+
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="EvTradeWR",
+            description="test",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="EvTradeWR — RC test",
+            confidence=0.8,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        # Loses money but 50% simulated trade win rate — must not count as 0% aggregate.
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="AAA-USD",
+                strategy_name="s1",
+                return_pct=-10.0,
+                win_rate=0.5,
+                trade_count=10,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="BBB-USD",
+                strategy_name="s1",
+                return_pct=-5.0,
+                win_rate=0.3,
+                trade_count=10,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.get(f"/api/trading/learn/patterns/{ins.id}/evidence")
+        assert resp.status_code == 200
+        j = resp.json()
+        assert j["ok"] is True
+        assert j["insight"]["win_rate"] == 40.0
+        assert j["insight"]["win_count"] + j["insight"]["loss_count"] == 20
+        cs = j["computed_stats"]
+        assert cs["backtest_avg_win_rate"] == 40.0
+        assert cs["backtest_count"] == 2
+        assert cs["backtest_total_displayed"] == 2
+        assert cs["backtest_simulated_trades"] == 20
+        rows = {b["ticker"]: b for b in j["backtests"]}
+        assert rows["AAA-USD"]["win_rate"] == 50.0
+        assert rows["BBB-USD"]["win_rate"] == 30.0
 
     @patch("app.services.backtest_service._fetch_ohlcv_df")
     def test_benchmark_walk_forward_evaluate_smoke(self, mock_fetch):
@@ -1176,8 +1248,8 @@ class TestAttributionAPI:
             name="Test pat",
             rules_json="{}",
             origin="user",
-            win_rate=55.0,
-            oos_win_rate=60.0,
+            win_rate=0.55,
+            oos_win_rate=0.60,
             promotion_status="promoted",
         )
         db.add(pat)

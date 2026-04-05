@@ -19,6 +19,8 @@ def live_vs_research_by_pattern(
     """Aggregate closed trades with ``scan_pattern_id`` vs ``ScanPattern`` research fields."""
     from ...models.trading import ScanPattern, Trade
 
+    from .backtest_metrics import backtest_win_rate_db_to_display_pct
+
     if user_id is None:
         return {"ok": True, "window_days": days, "patterns": []}
 
@@ -61,10 +63,16 @@ def live_vs_research_by_pattern(
                 "scan_pattern_id": pid,
                 "pattern_name": pat.name if pat else None,
                 "promotion_status": pat.promotion_status if pat else None,
-                "research_win_rate_pct": round(float(pat.win_rate), 2) if pat and pat.win_rate is not None else None,
-                "research_oos_win_rate_pct": round(float(pat.oos_win_rate), 2)
-                if pat and pat.oos_win_rate is not None
-                else None,
+                "research_win_rate_pct": (
+                    round(float(backtest_win_rate_db_to_display_pct(pat.win_rate)), 2)
+                    if pat and pat.win_rate is not None
+                    else None
+                ),
+                "research_oos_win_rate_pct": (
+                    round(float(backtest_win_rate_db_to_display_pct(pat.oos_win_rate)), 2)
+                    if pat and pat.oos_win_rate is not None
+                    else None
+                ),
                 "research_oos_avg_return_pct": round(float(pat.oos_avg_return_pct), 3)
                 if pat and pat.oos_avg_return_pct is not None
                 else None,
