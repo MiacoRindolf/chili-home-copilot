@@ -116,9 +116,16 @@ def suggest_adaptive_spread(
     p90 = stats.get("p90_slippage_pct", 0)
     suggested = max(0.001, round(p90 / 100, 4))
 
-    # Don't suggest anything too far from current
-    suggested = min(suggested, current_spread * 3)
-    suggested = max(suggested, current_spread * 0.5)
+    # Don't suggest anything too far from current (avoid div-by-zero if spread misconfigured)
+    if current_spread and current_spread > 0:
+        suggested = min(suggested, current_spread * 3)
+        suggested = max(suggested, current_spread * 0.5)
+
+    denom = current_spread if current_spread and current_spread > 0 else None
+    if denom:
+        should_update = abs(suggested - current_spread) / denom > 0.2
+    else:
+        should_update = abs(suggested - current_spread) > 1e-12
 
     return {
         "current_spread": current_spread,
@@ -126,7 +133,7 @@ def suggest_adaptive_spread(
         "p90_slippage_pct": round(p90, 4),
         "avg_slippage_pct": stats.get("avg_slippage_pct", 0),
         "trades_measured": stats.get("measurable", 0),
-        "should_update": abs(suggested - current_spread) / current_spread > 0.2,
+        "should_update": should_update,
     }
 
 

@@ -1,7 +1,11 @@
 """Version-tracked schema migrations for PostgreSQL. Run at app startup."""
 from __future__ import annotations
 
+import logging
+
 from sqlalchemy import inspect as sa_inspect, text
+
+logger = logging.getLogger(__name__)
 from sqlalchemy.engine import Engine
 
 
@@ -2632,6 +2636,351 @@ def _migration_068_paper_trades_table(conn) -> None:
     conn.commit()
 
 
+def _migration_070_normalize_win_rate(conn) -> None:
+    """Normalize win_rate/oos_win_rate from 0-100 percent to 0-1 fraction where needed."""
+    tables = _tables(conn)
+
+    if "scan_patterns" in tables:
+        conn.execute(text(
+            "UPDATE scan_patterns SET win_rate = win_rate / 100.0 "
+            "WHERE win_rate IS NOT NULL AND win_rate > 1.0"
+        ))
+        conn.execute(text(
+            "UPDATE scan_patterns SET oos_win_rate = oos_win_rate / 100.0 "
+            "WHERE oos_win_rate IS NOT NULL AND oos_win_rate > 1.0"
+        ))
+
+    if "trading_backtests" in tables:
+        conn.execute(text(
+            "UPDATE trading_backtests SET win_rate = win_rate / 100.0 "
+            "WHERE win_rate IS NOT NULL AND win_rate > 1.0"
+        ))
+        conn.execute(text(
+            "UPDATE trading_backtests SET oos_win_rate = oos_win_rate / 100.0 "
+            "WHERE oos_win_rate IS NOT NULL AND oos_win_rate > 1.0"
+        ))
+
+    conn.commit()
+
+
+def _migration_071_reconcile_backtest_links(conn) -> None:
+    """Re-link orphaned backtests by strategy_name and null out dangling FKs."""
+    tables = _tables(conn)
+
+    if "trading_backtests" not in tables:
+        return
+
+    # 1. Re-link orphaned backtests whose strategy_name matches an active scan_pattern
+    if "scan_patterns" in tables:
+        conn.execute(text(
+            "UPDATE trading_backtests bt "
+            "SET scan_pattern_id = sp.id "
+            "FROM scan_patterns sp "
+            "WHERE bt.scan_pattern_id IS NULL "
+            "  AND bt.strategy_name = sp.name "
+            "  AND sp.active = true"
+        ))
+
+    # 2. Null out dangling scan_pattern_id references
+    if "scan_patterns" in tables:
+        conn.execute(text(
+            "UPDATE trading_backtests "
+            "SET scan_pattern_id = NULL "
+            "WHERE scan_pattern_id IS NOT NULL "
+            "  AND scan_pattern_id NOT IN (SELECT id FROM scan_patterns)"
+        ))
+
+    # 3. Null out dangling related_insight_id references
+    if "trading_insights" in tables:
+        conn.execute(text(
+            "UPDATE trading_backtests "
+            "SET related_insight_id = NULL "
+            "WHERE related_insight_id IS NOT NULL "
+            "  AND related_insight_id NOT IN (SELECT id FROM trading_insights)"
+        ))
+
+    conn.commit()
+
+
+def _migration_072_recompute_pattern_stats(conn) -> None:
+    """Recompute ScanPattern stats (backtest_count, trade_count, win_rate)
+    from actual DB rows so counters match reality after cleanup migrations."""
+    tables = _tables(conn)
+
+    if "scan_patterns" not in tables:
+        return
+
+    # 1. backtest_count from actual backtest rows
+    if "trading_backtests" in tables:
+        conn.execute(text(
+            "UPDATE scan_patterns sp "
+            "SET backtest_count = sub.cnt "
+            "FROM ("
+            "    SELECT scan_pattern_id, COUNT(*) AS cnt "
+            "    FROM trading_backtests "
+            "    WHERE scan_pattern_id IS NOT NULL "
+            "    GROUP BY scan_pattern_id"
+            ") sub "
+            "WHERE sp.id = sub.scan_pattern_id "
+            "  AND (sp.backtest_count IS NULL OR sp.backtest_count != sub.cnt)"
+        ))
+        # Zero out patterns with no matching backtests
+        conn.execute(text(
+            "UPDATE scan_patterns "
+            "SET backtest_count = 0 "
+            "WHERE id NOT IN ("
+            "    SELECT DISTINCT scan_pattern_id FROM trading_backtests "
+            "    WHERE scan_pattern_id IS NOT NULL"
+            ") AND backtest_count > 0"
+        ))
+
+    # 2. trade_count from actual trade rows
+    if "trading_trades" in tables:
+        conn.execute(text(
+            "UPDATE scan_patterns sp "
+            "SET trade_count = sub.cnt "
+            "FROM ("
+            "    SELECT scan_pattern_id, COUNT(*) AS cnt "
+            "    FROM trading_trades "
+            "    WHERE scan_pattern_id IS NOT NULL "
+            "    GROUP BY scan_pattern_id"
+            ") sub "
+            "WHERE sp.id = sub.scan_pattern_id "
+            "  AND (sp.trade_count IS NULL OR sp.trade_count != sub.cnt)"
+        ))
+        # Zero out patterns with no matching trades
+        conn.execute(text(
+            "UPDATE scan_patterns "
+            "SET trade_count = 0 "
+            "WHERE id NOT IN ("
+            "    SELECT DISTINCT scan_pattern_id FROM trading_trades "
+            "    WHERE scan_pattern_id IS NOT NULL"
+            ") AND trade_count > 0"
+        ))
+
+    # 3. win_rate from closed trades (0-1 fraction, post-normalization)
+    if "trading_trades" in tables:
+        conn.execute(text(
+            "UPDATE scan_patterns sp "
+            "SET win_rate = sub.wr "
+            "FROM ("
+            "    SELECT scan_pattern_id, "
+            "           CASE WHEN COUNT(*) > 0 "
+            "                THEN COUNT(*) FILTER (WHERE pnl > 0)::float / COUNT(*) "
+            "                ELSE 0 END AS wr "
+            "    FROM trading_trades "
+            "    WHERE scan_pattern_id IS NOT NULL "
+            "      AND status = 'closed' "
+            "    GROUP BY scan_pattern_id"
+            ") sub "
+            "WHERE sp.id = sub.scan_pattern_id "
+            "  AND sp.trade_count >= 5"
+        ))
+
+    conn.commit()
+
+
+def _migration_073_scan_patterns_user_id(conn) -> None:
+    """Optional owner for scan patterns (per-user scoping for stats/decay)."""
+    if "scan_patterns" not in _tables(conn):
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "user_id" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE scan_patterns ADD COLUMN user_id INTEGER "
+                "REFERENCES users(id) ON DELETE SET NULL"
+            )
+        )
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_scan_patterns_user_id ON scan_patterns (user_id)"))
+    conn.commit()
+
+
+def _migration_074_backfill_pattern_trade_asset_class(conn) -> None:
+    """Backfill asset_class='crypto' for pattern_trade_rows with crypto tickers."""
+    if "pattern_trade_rows" not in _tables(conn):
+        return
+    conn.execute(text(
+        "UPDATE pattern_trade_rows "
+        "SET asset_class = 'crypto' "
+        "WHERE asset_class = 'stock' "
+        "  AND (ticker LIKE '%-USD' OR ticker LIKE '%-USDT' "
+        "       OR ticker LIKE '%USDT' OR ticker LIKE '%BUSD' "
+        "       OR ticker LIKE '%-BTC' OR ticker LIKE '%-ETH' "
+        "       OR UPPER(SPLIT_PART(ticker, '-', 1)) IN "
+        "         ('BTC','ETH','SOL','DOGE','XRP','ADA','AVAX','MATIC','DOT','LINK','SHIB','BNB'))"
+    ))
+    conn.commit()
+
+
+def _migration_075_text_to_jsonb(conn) -> None:
+    """Convert JSON-stored Text columns to JSONB."""
+    conversions = [
+        ("trading_trades", "indicator_snapshot"),
+        ("trading_insights", "indicator_snapshot"),
+        ("trading_top_picks", "indicator_data"),
+        ("trading_backtests", "params"),
+        ("trading_backtests", "equity_curve"),
+        ("trading_snapshots", "indicator_data"),
+        ("trading_breakout_alerts", "indicator_snapshot"),
+        ("trading_breakout_alerts", "signals_snapshot"),
+        ("trading_strategy_proposals", "signals_json"),
+        ("trading_strategy_proposals", "indicator_json"),
+        ("scan_patterns", "rules_json"),
+        ("scan_patterns", "exit_config"),
+        ("trading_hypothesis_ab_tests", "last_result_json"),
+    ]
+    existing = _tables(conn)
+    for tbl, col in conversions:
+        if tbl not in existing:
+            continue
+        try:
+            row = conn.execute(text(
+                "SELECT data_type FROM information_schema.columns "
+                "WHERE table_name = :tbl AND column_name = :col"
+            ), {"tbl": tbl, "col": col}).fetchone()
+            if not row or row[0] == "jsonb":
+                continue
+            conn.execute(text(f"UPDATE {tbl} SET {col} = NULL WHERE {col} IS NOT NULL AND {col} !~ :pat"), {"pat": r"^\s*[\[\{]"})
+            conn.execute(text(f"ALTER TABLE {tbl} ALTER COLUMN {col} TYPE JSONB USING {col}::jsonb"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_076_check_constraints(conn) -> None:
+    """Add CHECK constraints for value ranges and enum columns."""
+    checks = [
+        ("scan_patterns", "chk_sp_win_rate", "win_rate IS NULL OR (win_rate >= 0 AND win_rate <= 1)"),
+        ("scan_patterns", "chk_sp_oos_win_rate", "oos_win_rate IS NULL OR (oos_win_rate >= 0 AND oos_win_rate <= 1)"),
+        ("scan_patterns", "chk_sp_confidence", "confidence IS NULL OR (confidence >= 0 AND confidence <= 1)"),
+        ("scan_patterns", "chk_sp_lifecycle", "lifecycle_stage IN ('candidate','backtested','validated','promoted','live','decayed','retired')"),
+        ("trading_backtests", "chk_bt_win_rate", "win_rate IS NULL OR (win_rate >= 0 AND win_rate <= 1)"),
+        ("brain_batch_jobs", "chk_bbj_status", "status IN ('queued','running','ok','error','timeout')"),
+        ("trading_paper_trades", "chk_pt_status", "status IN ('open','closed','expired','cancelled')"),
+    ]
+    existing = _tables(conn)
+    for tbl, name, expr in checks:
+        if tbl not in existing:
+            continue
+        try:
+            conn.execute(text(f"ALTER TABLE {tbl} ADD CONSTRAINT {name} CHECK ({expr}) NOT VALID"))
+            conn.execute(text(f"ALTER TABLE {tbl} VALIDATE CONSTRAINT {name}"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_077_composite_indexes(conn) -> None:
+    """Add composite indexes for hot query paths."""
+    indexes = [
+        "CREATE INDEX IF NOT EXISTS idx_bt_sp_id_ran_at ON trading_backtests(scan_pattern_id, ran_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_trades_sp_status ON trading_trades(scan_pattern_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_sp_active_lifecycle ON scan_patterns(active, lifecycle_stage)",
+        "CREATE INDEX IF NOT EXISTS idx_sp_origin_active ON scan_patterns(origin, active)",
+        "CREATE INDEX IF NOT EXISTS idx_insights_sp_id ON trading_insights(scan_pattern_id) WHERE scan_pattern_id IS NOT NULL",
+        "CREATE INDEX IF NOT EXISTS idx_alerts_status_created ON trading_alerts(status, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_snapshots_date_ticker ON trading_snapshots(ticker, snapshot_date)",
+        "CREATE INDEX IF NOT EXISTS idx_batch_jobs_status_started ON brain_batch_jobs(status, started_at)",
+        "CREATE INDEX IF NOT EXISTS idx_paper_trades_sp_status ON trading_paper_trades(scan_pattern_id, status)",
+        "CREATE INDEX IF NOT EXISTS idx_learning_events_created ON trading_learning_events(created_at)",
+    ]
+    existing = _tables(conn)
+    for stmt in indexes:
+        tbl = stmt.split(" ON ")[-1].split("(")[0].strip()
+        if tbl not in existing:
+            continue
+        try:
+            conn.execute(text(stmt))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_078_foreign_keys_phase2(conn) -> None:
+    """Add missing FK constraints after orphan cleanup."""
+    existing = _tables(conn)
+    if "trading_backtests" in existing and "trading_insights" in existing:
+        try:
+            conn.execute(text("UPDATE trading_backtests SET related_insight_id = NULL WHERE related_insight_id IS NOT NULL AND related_insight_id NOT IN (SELECT id FROM trading_insights)"))
+        except Exception:
+            conn.rollback()
+    if "trading_strategy_proposals" in existing and "scan_patterns" in existing:
+        try:
+            conn.execute(text("DELETE FROM trading_strategy_proposals WHERE scan_pattern_id IS NOT NULL AND scan_pattern_id NOT IN (SELECT id FROM scan_patterns)"))
+        except Exception:
+            conn.rollback()
+    if "trading_paper_trades" in existing and "scan_patterns" in existing:
+        try:
+            conn.execute(text("DELETE FROM trading_paper_trades WHERE scan_pattern_id IS NOT NULL AND scan_pattern_id NOT IN (SELECT id FROM scan_patterns)"))
+        except Exception:
+            conn.rollback()
+    fks = [
+        ("trading_backtests", "fk_bt_insight", "related_insight_id", "trading_insights", "id", "SET NULL"),
+        ("trading_strategy_proposals", "fk_proposal_sp", "scan_pattern_id", "scan_patterns", "id", "CASCADE"),
+        ("trading_paper_trades", "fk_paper_sp", "scan_pattern_id", "scan_patterns", "id", "CASCADE"),
+    ]
+    for tbl, name, col, ref_tbl, ref_col, on_del in fks:
+        if tbl not in existing or ref_tbl not in existing:
+            continue
+        try:
+            conn.execute(text(f"ALTER TABLE {tbl} ADD CONSTRAINT {name} FOREIGN KEY ({col}) REFERENCES {ref_tbl}({ref_col}) ON DELETE {on_del}"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_079_unique_constraints(conn) -> None:
+    """Add partial unique indexes to prevent duplicates."""
+    existing = _tables(conn)
+    if "scan_patterns" in existing:
+        try:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_sp_name_origin_active ON scan_patterns(name, origin) WHERE active = true"))
+        except Exception:
+            conn.rollback()
+    if "brain_batch_jobs" in existing:
+        try:
+            conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS uq_bbj_running ON brain_batch_jobs(job_type, batch_key) WHERE status = 'running'"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_080_orphan_cleanup(conn) -> None:
+    """Clean up dead patterns, stuck jobs, and orphan references."""
+    existing = _tables(conn)
+    if "scan_patterns" in existing:
+        try:
+            conn.execute(text("UPDATE scan_patterns SET active = false WHERE active = true AND backtest_count = 0 AND trade_count = 0 AND evidence_count = 0 AND lifecycle_stage = 'candidate' AND created_at < NOW() - INTERVAL '30 days'"))
+        except Exception:
+            conn.rollback()
+    if "brain_batch_jobs" in existing:
+        try:
+            conn.execute(text("UPDATE brain_batch_jobs SET status = 'timeout' WHERE status = 'running' AND started_at < NOW() - INTERVAL '4 hours'"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_081_graduate_startup_repairs(conn) -> None:
+    """One-time migration for repairs previously run on every startup."""
+    existing = _tables(conn)
+    if "trading_backtests" in existing:
+        try:
+            conn.execute(text("DELETE FROM trading_backtests WHERE id IN (SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY strategy_name, ticker ORDER BY ran_at DESC) AS rn FROM trading_backtests) sub WHERE rn > 1)"))
+        except Exception:
+            conn.rollback()
+    if "scan_patterns" in existing:
+        try:
+            conn.execute(text("UPDATE scan_patterns SET ticker_scope = 'universal' WHERE ticker_scope IS NULL"))
+        except Exception:
+            conn.rollback()
+
+
+def _migration_082_breakout_alert_outcome_notes(conn) -> None:
+    """Optional free-text notes on breakout alert outcomes (e.g. auto-expire reason)."""
+    if "trading_breakout_alerts" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_breakout_alerts")
+    if "outcome_notes" not in cols:
+        conn.execute(text("ALTER TABLE trading_breakout_alerts ADD COLUMN outcome_notes TEXT"))
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2703,6 +3052,19 @@ MIGRATIONS = [
     ("067_data_retention_columns", _migration_067_data_retention_columns),
     ("068_paper_trades_table", _migration_068_paper_trades_table),
     ("069_supporting_tables", _migration_069_supporting_tables),
+    ("070_normalize_win_rate", _migration_070_normalize_win_rate),
+    ("071_reconcile_backtest_links", _migration_071_reconcile_backtest_links),
+    ("072_recompute_pattern_stats", _migration_072_recompute_pattern_stats),
+    ("073_scan_patterns_user_id", _migration_073_scan_patterns_user_id),
+    ("074_backfill_pattern_trade_asset_class", _migration_074_backfill_pattern_trade_asset_class),
+    ("075_text_to_jsonb", _migration_075_text_to_jsonb),
+    ("076_check_constraints", _migration_076_check_constraints),
+    ("077_composite_indexes", _migration_077_composite_indexes),
+    ("078_foreign_keys_phase2", _migration_078_foreign_keys_phase2),
+    ("079_unique_constraints", _migration_079_unique_constraints),
+    ("080_orphan_cleanup", _migration_080_orphan_cleanup),
+    ("081_graduate_startup_repairs", _migration_081_graduate_startup_repairs),
+    ("082_breakout_alert_outcome_notes", _migration_082_breakout_alert_outcome_notes),
 ]
 
 

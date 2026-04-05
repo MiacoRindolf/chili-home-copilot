@@ -15,6 +15,20 @@ logger = logging.getLogger(__name__)
 
 _MAX_TRADES_PER_SAVE = 50
 
+_CRYPTO_SUFFIXES = ("-USD", "-USDT", "-BTC", "-ETH", "USDT", "BUSD")
+_CRYPTO_BASES = frozenset({
+    "BTC", "ETH", "SOL", "DOGE", "XRP", "ADA", "AVAX", "MATIC",
+    "DOT", "LINK", "SHIB", "BNB",
+})
+
+
+def _infer_asset_class(ticker: str) -> str:
+    t = ticker.upper()
+    base = t.split("-")[0] if "-" in t else t
+    if any(t.endswith(s) for s in _CRYPTO_SUFFIXES) or base in _CRYPTO_BASES:
+        return "crypto"
+    return "stock"
+
 
 def persist_rows_from_backtest_result(
     db: Session,
@@ -57,7 +71,7 @@ def persist_rows_from_backtest_result(
                 ticker=result.get("ticker", backtest_row.ticker)[:20],
                 as_of_ts=as_of,
                 timeframe=str(result.get("period", "1d") or "1d")[:10],
-                asset_class="stock",
+                asset_class=_infer_asset_class(result.get("ticker", backtest_row.ticker) or ""),
                 outcome_return_pct=float(ret) if ret is not None else None,
                 label_win=label_win,
                 features_json=feats,

@@ -44,6 +44,7 @@ def get_legacy_unlinked_scan_pattern_id(db: Session) -> int:
         confidence=0.0,
         active=False,
         promotion_status="legacy",
+        lifecycle_stage="retired",
     )
     db.add(sp)
     db.commit()

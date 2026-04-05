@@ -22,6 +22,17 @@ from .portfolio import get_watchlist, get_trade_stats, get_insights
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_indicator_dict(indicator_data: Any) -> dict[str, Any]:
+    if not indicator_data:
+        return {}
+    try:
+        data = json.loads(indicator_data)
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 import os as _os
 
 from ta.momentum import RSIIndicator, StochasticOscillator
@@ -3678,7 +3689,7 @@ def _try_load_cached_scores(db: "Session | None") -> list[dict[str, Any]]:
                     "take_profit": r.take_profit,
                     "risk_level": r.risk_level,
                     "signals": r.rationale.split("; ") if r.rationale else [],
-                    "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+                    "indicators": _safe_indicator_dict(r.indicator_data),
                 })
         except Exception as e:
             logger.debug(f"[trading] Could not load cached scores from DB: {e}")
@@ -3867,7 +3878,7 @@ def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[d
             "entry_price": r.entry_price, "stop_loss": r.stop_loss,
             "take_profit": r.take_profit, "risk_level": r.risk_level,
             "rationale": r.rationale,
-            "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            "indicators": _safe_indicator_dict(r.indicator_data),
             "scanned_at": r.scanned_at.isoformat(),
         }
         for r in rows
@@ -4036,7 +4047,7 @@ from .thesis import (
 
 def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str, Any]]:
     """Core logic — scan DB + optionally merge Brain predictions."""
-    from ...models.trading import ScanResult, BacktestResult
+    from ...models.trading import BacktestResult, ScanPattern, ScanResult
     from sqlalchemy import or_
 
     recent_cutoff = datetime.utcnow() - timedelta(hours=6)
@@ -4064,11 +4075,20 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             "take_profit": r.take_profit,
             "risk_level": r.risk_level,
             "signals": r.rationale.split("; ") if r.rationale else [],
-            "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+            "indicators": _safe_indicator_dict(r.indicator_data),
             "source": "scan",
             "scanned_at": r.scanned_at.isoformat() if r.scanned_at else None,
             "is_crypto": _cr,
         }
+
+    def _active_scan_pattern_id(sp_id: int | None) -> int | None:
+        if sp_id is None:
+            return None
+        active = db.query(ScanPattern.id).filter(
+            ScanPattern.id == int(sp_id),
+            ScanPattern.active.is_(True),
+        ).scalar()
+        return int(sp_id) if active else None
 
     def _get_brain_predictions():
         from .learning import get_current_predictions
@@ -4094,7 +4114,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             t = p["ticker"]
             if p.get("direction") != "bullish" or (p.get("confidence") or 0) < 50:
                 continue
-            _spid = _scan_pattern_from_prediction(p)
+            _spid = _active_scan_pattern_id(_scan_pattern_from_prediction(p))
             if t in candidates:
                 candidates[t]["brain_score"] = p["score"]
                 candidates[t]["brain_confidence"] = p["confidence"]
@@ -4172,7 +4192,9 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
             pick["backtest_return"] = best_bt.return_pct
             pick["backtest_win_rate"] = best_bt.win_rate
             if best_bt.scan_pattern_id and not pick.get("scan_pattern_id"):
-                pick["scan_pattern_id"] = int(best_bt.scan_pattern_id)
+                _sid = _active_scan_pattern_id(int(best_bt.scan_pattern_id))
+                if _sid is not None:
+                    pick["scan_pattern_id"] = _sid
         else:
             pick["best_strategy"] = None
             pick["backtest_return"] = None
@@ -4586,7 +4608,7 @@ def smart_pick_context(
                 "take_profit": r.take_profit,
                 "risk_level": r.risk_level,
                 "signals": r.rationale.split("; ") if r.rationale else [],
-                "indicators": json.loads(r.indicator_data) if r.indicator_data else {},
+                "indicators": _safe_indicator_dict(r.indicator_data),
             }
             for r in recent_results
         ]

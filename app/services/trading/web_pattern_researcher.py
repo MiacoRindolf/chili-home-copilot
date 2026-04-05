@@ -480,6 +480,11 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
                 "[web_research] OOS gate rejected web pattern: %s (status=%s)",
                 pattern.name, prom_stat,
             )
+        from .lifecycle import lifecycle_stage_from_promotion_status
+
+        patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(
+            str(patch.get("promotion_status", ""))
+        )
         update_pattern(db, pattern.id, patch)
 
 

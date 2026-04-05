@@ -995,6 +995,18 @@ def _check_breakout_outcomes():
                 closed += 1
                 updated += 1
 
+        # Expire permanently-pending alerts older than 48h (e.g. no quote data)
+        cutoff_expire = now - timedelta(hours=48)
+        stale = db.query(BreakoutAlert).filter(
+            BreakoutAlert.outcome == "pending",
+            BreakoutAlert.alerted_at < cutoff_expire,
+        ).all()
+        for alert in stale:
+            alert.outcome = "expired"
+            alert.outcome_checked_at = now
+            alert.outcome_notes = (alert.outcome_notes or "") + " [auto-expired: no resolution within 48h]"
+            updated += 1
+
         db.commit()
         logger.info(
             f"[scheduler] Breakout outcome check: {len(pending)} pending, "

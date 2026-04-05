@@ -11,15 +11,46 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import ScanPattern
+from ...models.trading import PaperTrade, ScanPattern, StrategyProposal
 
 logger = logging.getLogger(__name__)
 
-VALID_STAGES = ("candidate", "backtested", "promoted", "live", "decayed", "retired")
+VALID_STAGES = ("candidate", "backtested", "validated", "promoted", "live", "decayed", "retired")
+
+
+def lifecycle_stage_from_promotion_status(promotion_status: str | None) -> str:
+    """Map legacy ``promotion_status`` to ``lifecycle_stage`` (consolidation with Phase 7).
+
+    New code should set ``lifecycle_stage`` directly; this supports dual-writes from
+    older promotion_status strings.
+    """
+    s = (promotion_status or "").strip().lower()
+    if s == "candidate":
+        return "candidate"
+    if s == "validated":
+        return "validated"
+    if s == "promoted":
+        return "promoted"
+    if s == "rejected":
+        return "retired"
+    if s.startswith("rejected"):
+        return "retired"
+    if s in ("pending_oos",):
+        return "candidate"
+    if s == "backtested":
+        return "backtested"
+    if s in ("degraded_live",):
+        return "decayed"
+    if s == "retired":
+        return "retired"
+    if s == "legacy":
+        return "backtested"
+    return "candidate"
 
 _ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
     "candidate":  ("backtested", "retired"),
-    "backtested": ("promoted", "candidate", "retired"),
+    "backtested": ("promoted", "candidate", "retired", "validated"),
+    "validated":  ("promoted", "backtested", "retired", "candidate"),
     "promoted":   ("live", "decayed", "retired", "backtested"),
     "live":       ("decayed", "retired"),
     "decayed":    ("retired", "backtested", "candidate"),
@@ -58,6 +89,16 @@ def transition(
 
     _sync_legacy_fields(pattern, target_stage)
 
+    if target_stage in ("decayed", "retired"):
+        db.query(StrategyProposal).filter(
+            StrategyProposal.scan_pattern_id == pattern.id,
+            StrategyProposal.status.in_(("pending", "approved", "working")),
+        ).update({"status": "expired"}, synchronize_session=False)
+        db.query(PaperTrade).filter(
+            PaperTrade.scan_pattern_id == pattern.id,
+            PaperTrade.status == "open",
+        ).update({"status": "expired"}, synchronize_session=False)
+
     if commit:
         db.flush()
 
@@ -87,6 +128,9 @@ def _sync_legacy_fields(pattern: ScanPattern, stage: str) -> None:
     elif stage == "backtested":
         if pattern.promotion_status in ("legacy", "candidate"):
             pattern.promotion_status = "backtested"
+    elif stage == "validated":
+        pattern.promotion_status = "validated"
+        pattern.active = True
     elif stage == "candidate":
         if pattern.promotion_status in ("retired", "degraded_live"):
             pattern.promotion_status = "candidate"

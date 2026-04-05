@@ -8,7 +8,7 @@ from typing import Any, Literal, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from sqlalchemy import and_, func as sa_func, or_
+from sqlalchemy import and_, func as sa_func, or_, text
 from sqlalchemy.orm import Session
 
 from ...db import DATA_DIR
@@ -117,6 +117,86 @@ def api_brain_performance(request: Request, db: Session = Depends(get_db)):
     from ...services.trading.portfolio import get_performance_dashboard
     data = get_performance_dashboard(db, ctx["user_id"])
     return JSONResponse(data)
+
+
+@router.get("/api/trading/brain/data-health")
+def api_data_health(db: Session = Depends(get_db)):
+    """Diagnostic endpoint showing DB integrity metrics."""
+    checks: dict[str, int] = {}
+    try:
+        checks["orphan_backtests"] = db.execute(
+            text(
+                "SELECT COUNT(*) FROM trading_backtests "
+                "WHERE scan_pattern_id IS NOT NULL "
+                "AND scan_pattern_id NOT IN (SELECT id FROM scan_patterns)"
+            )
+        ).scalar() or 0
+    except Exception:
+        checks["orphan_backtests"] = -1
+
+    try:
+        checks["win_rate_over_1"] = db.execute(
+            text("SELECT COUNT(*) FROM scan_patterns WHERE win_rate > 1")
+        ).scalar() or 0
+    except Exception:
+        checks["win_rate_over_1"] = -1
+
+    try:
+        checks["stuck_jobs"] = db.execute(
+            text(
+                "SELECT COUNT(*) FROM brain_batch_jobs "
+                "WHERE status = 'running' AND started_at < NOW() - INTERVAL '2 hours'"
+            )
+        ).scalar() or 0
+    except Exception:
+        checks["stuck_jobs"] = -1
+
+    try:
+        row = db.execute(
+            text(
+                "SELECT "
+                "  COUNT(*) FILTER (WHERE active = true) AS active_patterns, "
+                "  COUNT(*) FILTER (WHERE lifecycle_stage = 'promoted') AS promoted, "
+                "  COUNT(*) FILTER (WHERE lifecycle_stage = 'backtested') AS backtested, "
+                "  COUNT(*) AS total "
+                "FROM scan_patterns"
+            )
+        ).fetchone()
+        checks["active_patterns"] = int(row[0]) if row and row[0] is not None else 0
+        checks["promoted_patterns"] = int(row[1]) if row and row[1] is not None else 0
+        checks["backtested_patterns"] = int(row[2]) if row and row[2] is not None else 0
+        checks["total_patterns"] = int(row[3]) if row and row[3] is not None else 0
+    except Exception:
+        checks["active_patterns"] = -1
+        checks["promoted_patterns"] = -1
+        checks["backtested_patterns"] = -1
+        checks["total_patterns"] = -1
+
+    try:
+        checks["total_backtests"] = db.execute(
+            text("SELECT COUNT(*) FROM trading_backtests")
+        ).scalar() or 0
+    except Exception:
+        checks["total_backtests"] = -1
+
+    try:
+        checks["total_trades"] = db.execute(
+            text("SELECT COUNT(*) FROM trading_trades")
+        ).scalar() or 0
+    except Exception:
+        checks["total_trades"] = -1
+
+    all_ok = all(
+        v == 0
+        for k, v in checks.items()
+        if k.startswith("orphan")
+        or k.startswith("win_rate")
+        or k == "stuck_jobs"
+    )
+    return {
+        "status": "healthy" if all_ok else "issues_found",
+        "checks": checks,
+    }
 
 
 @router.get("/api/trading/brain/paper")
@@ -2810,7 +2890,7 @@ def api_config_profiles(request: Request, db: Session = Depends(get_db)):
 
 
 @router.post("/api/trading/brain/config/apply-profile")
-def api_apply_config_profile(request: Request, db: Session = Depends(get_db)):
+async def api_apply_config_profile(request: Request, db: Session = Depends(get_db)):
     """Apply a named config profile to the running Settings object.
 
     Body: ``{"profile": "conservative" | "moderate" | "aggressive"}``
@@ -2819,14 +2899,12 @@ def api_apply_config_profile(request: Request, db: Session = Depends(get_db)):
     current process.  Changes persist until the server restarts — to make
     them permanent, set the corresponding env vars or ``.env`` entries.
     """
-    import asyncio
-
     ctx = get_identity_ctx(request, db)
     if ctx.get("demo"):
         return JSONResponse({"ok": False, "error": "Demo users cannot modify config"}, status_code=403)
 
     try:
-        body = asyncio.get_event_loop().run_until_complete(request.json())
+        body = await request.json()
     except Exception:
         return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
 

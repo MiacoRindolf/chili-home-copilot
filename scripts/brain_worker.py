@@ -644,6 +644,11 @@ def main():
     
     parser = argparse.ArgumentParser(description="CHILI Brain Worker")
     parser.add_argument(
+        "--mode", type=str, default="lean-cycle",
+        choices=["lean-cycle", "mining", "backtest", "fast-scan"],
+        help="Worker mode (default: lean-cycle)",
+    )
+    parser.add_argument(
         "--interval", type=int, default=DEFAULT_CYCLE_INTERVAL,
         help=f"Minutes between cycles (default: {DEFAULT_CYCLE_INTERVAL})"
     )
@@ -678,7 +683,7 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
     
-    logger.info(f"[brain] Brain Worker starting (PID: {status.pid})")
+    logger.info(f"[brain] Brain Worker starting (PID: {status.pid}, mode: {args.mode})")
     logger.info(f"[brain] DATA_DIR (must match app DB / API): {DATA_DIR.resolve()}")
     logger.info(f"[brain] Cycle interval: {args.interval} minutes")
     

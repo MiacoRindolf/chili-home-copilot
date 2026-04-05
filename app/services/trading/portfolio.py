@@ -404,6 +404,7 @@ def save_insight(
     from .pattern_resolution import get_legacy_unlinked_scan_pattern_id
     from datetime import datetime
 
+    explicit_scan_pattern_id = scan_pattern_id
     if scan_pattern_id is None:
         scan_pattern_id = get_legacy_unlinked_scan_pattern_id(db)
 
@@ -428,6 +429,8 @@ def save_insight(
             ins.pattern_description = pattern
             if hypothesis_family:
                 ins.hypothesis_family = hypothesis_family
+            if explicit_scan_pattern_id is not None:
+                ins.scan_pattern_id = explicit_scan_pattern_id
             db.commit()
             if abs(ins.confidence - old_conf) > 0.005:
                 log_learning_event(

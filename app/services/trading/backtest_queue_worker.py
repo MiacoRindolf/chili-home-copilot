@@ -28,6 +28,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
     from .backtest_queue import mark_pattern_tested
     from .backtest_engine import hydrate_scan_pattern_rules_json, smart_backtest_insight
     from .learning_events import log_learning_event
+    from datetime import datetime
 
     db = SessionLocal()
     try:
@@ -99,6 +100,8 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             elif pattern and total >= 2:
                 pattern.active = False
                 pattern.promotion_status = "rejected_prescreen"
+                pattern.lifecycle_stage = "retired"
+                pattern.lifecycle_changed_at = datetime.utcnow()
                 db.commit()
                 from .backtest_queue import invalidate_queue_status_cache
 

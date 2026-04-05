@@ -20,7 +20,7 @@ from .trading.research_integrity import (
 )
 
 from ..config import settings
-from ..models.trading import BacktestResult
+from ..models.trading import BacktestResult, ScanPattern
 from .trading.research_kpis import build_research_kpis
 
 logger = logging.getLogger(__name__)
@@ -611,6 +611,14 @@ def save_backtest(
     ticker = result.get("ticker", "")
     strategy = result.get("strategy", "")
     resolved_sp_id = scan_pattern_id if scan_pattern_id is not None else result.get("scan_pattern_id")
+    if resolved_sp_id is None and strategy:
+        sp_row = (
+            db.query(ScanPattern.id)
+            .filter(ScanPattern.name == strategy, ScanPattern.active.is_(True))
+            .first()
+        )
+        if sp_row:
+            resolved_sp_id = sp_row.id
     ret_pct = _sanitize_float(result.get("return_pct"))
     wr = _sanitize_float(result.get("win_rate"))
     sharpe = result.get("sharpe")
@@ -664,8 +672,7 @@ def save_backtest(
             existing.trade_count = tc
             existing.equity_curve = json.dumps(eq)
             existing.params = params_json
-            if resolved_sp_id is not None:
-                existing.scan_pattern_id = int(resolved_sp_id)
+            existing.scan_pattern_id = int(resolved_sp_id) if resolved_sp_id is not None else None
             if result.get("oos_win_rate") is not None:
                 existing.oos_win_rate = float(result["oos_win_rate"])
                 existing.oos_return_pct = float(result.get("oos_return_pct") or 0)

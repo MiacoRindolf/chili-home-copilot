@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import time
 import threading
@@ -391,6 +392,8 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
                 except Exception:
                     p.active = False
                     p.promotion_status = "degraded_live"
+                    p.lifecycle_stage = "decayed"
+                    p.lifecycle_changed_at = datetime.utcnow()
                 demoted += 1
     if demoted:
         db.commit()
@@ -1392,7 +1395,7 @@ def mine_patterns(
 
     discoveries: list[str] = []
     MIN_SAMPLES = max(20, int(getattr(settings, "brain_mining_min_samples", 20)))
-    MIN_WIN_RATE = float(getattr(settings, "brain_mining_min_win_rate", 58.0))
+    MIN_WIN_RATE = float(getattr(settings, "brain_mining_min_win_rate", 0.58))
     _cpcv_on = getattr(settings, "brain_mining_purged_cpcv_enabled", True)
     _emit_scan_patterns = bool(getattr(settings, "brain_mining_emit_scan_patterns", True))
 
@@ -1410,25 +1413,29 @@ def mine_patterns(
         avg_10d_vals = [r["ret_10d"] for r in filtered if r.get("ret_10d") is not None]
         avg_10d = (sum(avg_10d_vals) / len(avg_10d_vals)) if avg_10d_vals else None
         wins = sum(1 for r in filtered if r["ret_5d"] > 0)
-        wr = wins / len(filtered) * 100
+        wr = wins / len(filtered)
+        if math.isnan(avg_5d) or math.isnan(wr):
+            return
+        if avg_10d is not None and math.isnan(avg_10d):
+            return
         if avg_5d > 0.3 and wr >= MIN_WIN_RATE:
             ret_str = f"{avg_5d:+.1f}%/5d"
             if avg_10d is not None:
                 ret_str += f", {avg_10d:+.1f}%/10d"
-            pattern = f"{label} -> avg {ret_str} ({wr:.0f}% win, {len(filtered)} samples){regime_tag}"
+            pattern = f"{label} -> avg {ret_str} ({wr*100:.0f}% win, {len(filtered)} samples){regime_tag}"
             discoveries.append(pattern)
 
             sp_id = None
             if _emit_scan_patterns and conditions:
                 sp_id = _ensure_mined_scan_pattern(
                     db, label, conditions,
-                    confidence=min(0.9, wr / 100),
+                    confidence=min(0.9, wr),
                     win_rate=wr,
                     avg_return_pct=avg_5d,
                     evidence_count=len(filtered),
                 )
 
-            save_insight(db, user_id, pattern, confidence=min(0.9, wr / 100),
+            save_insight(db, user_id, pattern, confidence=min(0.9, wr),
                          wins=wins, losses=len(filtered) - wins,
                          scan_pattern_id=sp_id,
                          _existing_cache=_insight_cache)
@@ -2931,6 +2938,7 @@ def _bridge_compression_scanpattern_from_miner(
         confidence=0.45,
         active=True,
         promotion_status="pending_oos",
+        lifecycle_stage="candidate",
         hypothesis_family=BRAIN_HYPOTHESIS_FAMILY_COMPRESSION,
         queue_tier="prescreen",
     )
@@ -3001,20 +3009,20 @@ def mine_intraday_patterns(
     if len(sq) >= 10 and len(no_sq) >= 10:
         avg_sq = sum(r["ret_4h"] for r in sq) / len(sq)
         avg_no = sum(r["ret_4h"] for r in no_sq) / len(no_sq)
-        wr_sq = sum(1 for r in sq if r["ret_4h"] > 0) / len(sq) * 100
+        wr_sq = sum(1 for r in sq if r["ret_4h"] > 0) / len(sq)
         if avg_sq > avg_no and avg_sq > 0.1:
             w = sum(1 for r in sq if r["ret_4h"] > 0)
             sp_id = ensure_mined_scan_pattern(
                 db, "Intraday BB Squeeze -> 4h Return",
                 [{"indicator": "bb_squeeze", "op": "==", "value": True}],
-                confidence=min(0.80, wr_sq / 100), win_rate=wr_sq,
+                confidence=min(0.80, wr_sq), win_rate=wr_sq,
                 avg_return_pct=avg_sq, evidence_count=len(sq),
             )
             save_insight(
                 db, user_id,
                 f"Intraday: BB squeeze -> {avg_sq:+.2f}% avg 4h return, "
-                f"{wr_sq:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
-                confidence=min(0.80, wr_sq / 100),
+                f"{wr_sq*100:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
+                confidence=min(0.80, wr_sq),
                 wins=w, losses=len(sq) - w,
                 scan_pattern_id=sp_id,
                 hypothesis_family=_fam,
@@ -3028,7 +3036,7 @@ def mine_intraday_patterns(
         avg_low = sum(r["ret_4h"] for r in sq_vol_low) / len(sq_vol_low)
         avg_high = sum(r["ret_4h"] for r in sq_vol_high) / len(sq_vol_high)
         w_low = sum(1 for r in sq_vol_low if r["ret_4h"] > 0)
-        wr_low = w_low / len(sq_vol_low) * 100 if sq_vol_low else 0
+        wr_low = w_low / len(sq_vol_low) if sq_vol_low else 0
         sp_id = ensure_mined_scan_pattern(
             db, "Intraday Squeeze + Declining Volume",
             [{"indicator": "bb_squeeze", "op": "==", "value": True},
@@ -3052,19 +3060,19 @@ def mine_intraday_patterns(
     nr7s = [r for r in rows if r["nr7"]]
     if len(nr7s) >= 10:
         avg_nr7 = sum(r["ret_8h"] for r in nr7s) / len(nr7s)
-        wr_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0) / len(nr7s) * 100
+        wr_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0) / len(nr7s)
         w_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0)
         sp_id = ensure_mined_scan_pattern(
             db, "Intraday NR7 -> 8h Expansion",
             [{"indicator": "nr7", "op": "==", "value": True}],
-            confidence=min(0.75, wr_nr7 / 100), win_rate=wr_nr7,
+            confidence=min(0.75, wr_nr7), win_rate=wr_nr7,
             avg_return_pct=avg_nr7, evidence_count=len(nr7s),
         )
         save_insight(
             db, user_id,
             f"Intraday: NR7 (narrow range 7) -> {avg_nr7:+.2f}% avg 8h return, "
-            f"{wr_nr7:.0f}%wr (n={len(nr7s)})",
-            confidence=min(0.75, wr_nr7 / 100),
+            f"{wr_nr7*100:.0f}%wr (n={len(nr7s)})",
+            confidence=min(0.75, wr_nr7),
             wins=w_nr7, losses=len(nr7s) - w_nr7,
             scan_pattern_id=sp_id,
             hypothesis_family=_fam,
@@ -3332,10 +3340,13 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
 
     try:
         cutoff = datetime.utcnow() - timedelta(days=180)
-        resolved = db.query(BreakoutAlert).filter(
+        alert_q = db.query(BreakoutAlert).filter(
             BreakoutAlert.outcome != "pending",
             BreakoutAlert.outcome_checked_at >= cutoff,
-        ).order_by(BreakoutAlert.outcome_checked_at.desc()).limit(500).all()
+        )
+        if user_id is not None:
+            alert_q = alert_q.filter(BreakoutAlert.user_id == user_id)
+        resolved = alert_q.order_by(BreakoutAlert.outcome_checked_at.desc()).limit(500).all()
     except Exception:
         return {"patterns_learned": 0}
 
@@ -3369,7 +3380,13 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         pattern = db.query(ScanPattern).get(pattern_id)
         if not pattern:
             continue
-        
+        if (
+            user_id is not None
+            and pattern.user_id is not None
+            and pattern.user_id != user_id
+        ):
+            continue
+
         winners = sum(1 for o in outcomes if o["outcome"] == "winner")
         total = len(outcomes)
         new_win_rate = winners / total
@@ -3385,7 +3402,10 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         
         pattern.win_rate = round(old_wr * (1 - blend) + new_win_rate * blend, 4)
         pattern.avg_return_pct = round(old_ret * (1 - blend) + avg_gain * blend, 2)
-        pattern.trade_count = (pattern.trade_count or 0) + total
+        actual_trade_count = db.query(func.count(Trade.id)).filter(
+            Trade.scan_pattern_id == pattern.id
+        ).scalar() or 0
+        pattern.trade_count = actual_trade_count
         pattern.updated_at = datetime.utcnow()
         
         patterns_updated += 1
@@ -3396,7 +3416,7 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
             pattern.name, pattern.id,
             pattern.win_rate * 100, old_wr * 100,
             pattern.avg_return_pct, old_ret,
-            total,
+            actual_trade_count,
         )
 
     # Also create/update TradingInsight summaries by asset_type/tier (existing logic)
@@ -3470,7 +3490,7 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
 
     cutoff = datetime.utcnow() - timedelta(days=180)
     try:
-        closed = (
+        closed_q = (
             db.query(
                 Trade.scan_pattern_id,
                 Trade.pnl,
@@ -3482,8 +3502,10 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
                 Trade.scan_pattern_id.isnot(None),
                 Trade.exit_date >= cutoff,
             )
-            .all()
         )
+        if user_id is not None:
+            closed_q = closed_q.filter(Trade.user_id == user_id)
+        closed = closed_q.all()
     except Exception:
         return {"patterns_updated": 0}
 
@@ -3511,6 +3533,12 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
         pattern = db.get(ScanPattern, pattern_id)
         if not pattern:
             continue
+        if (
+            user_id is not None
+            and pattern.user_id is not None
+            and pattern.user_id != user_id
+        ):
+            continue
 
         wins = sum(1 for t in trades if t["win"])
         n = len(trades)
@@ -3523,7 +3551,10 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
 
         pattern.win_rate = round(old_wr * (1 - blend) + new_wr * blend, 4)
         pattern.avg_return_pct = round(old_ret * (1 - blend) + new_ret * blend, 2)
-        pattern.trade_count = (pattern.trade_count or 0) + n
+        actual_trade_count = db.query(func.count(Trade.id)).filter(
+            Trade.scan_pattern_id == pattern.id
+        ).scalar() or 0
+        pattern.trade_count = actual_trade_count
         pattern.updated_at = datetime.utcnow()
         updated += 1
 
@@ -3533,7 +3564,7 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
             pattern.name, pattern.id,
             pattern.win_rate * 100, old_wr * 100,
             pattern.avg_return_pct, old_ret,
-            n,
+            actual_trade_count,
         )
 
     return {"patterns_updated": updated, "trades_processed": len(closed)}
@@ -4152,8 +4183,8 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
 
                     avg_5d = sum(r["ret_5d"] for r in filtered) / len(filtered)
                     wins = sum(1 for r in filtered if r["ret_5d"] > 0)
-                    wr = wins / len(filtered) * 100
-                    composite = avg_5d * 0.6 + (wr / 100) * 0.4
+                    wr = wins / len(filtered)
+                    composite = avg_5d * 0.6 + wr * 0.4
 
                     if composite > best_score:
                         best_score = composite
@@ -4166,12 +4197,12 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                     original_desc = ins.pattern_description[:80]
                     refined_label = (
                         f"CHILI refinement: {field} {op} {best_variant} "
-                        f"(avg {best_score:.2f}, {best_wr:.0f}%wr, n={best_n}) "
+                        f"(avg {best_score:.2f}, {best_wr*100:.0f}%wr, n={best_n}) "
                         f"— refined from '{original_desc}'"
                     )
                     save_insight(
                         db, user_id, refined_label,
-                        confidence=min(0.85, best_wr / 100),
+                        confidence=min(0.85, best_wr),
                         wins=best_wins, losses=best_n - best_wins,
                     )
                     refined_count += 1
@@ -4179,7 +4210,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                         db, user_id, "pattern_refinement",
                         f"Refined '{original_desc}': best threshold "
                         f"{field}{op}{best_variant} "
-                        f"({best_wr:.0f}%wr, n={best_n})",
+                        f"({best_wr*100:.0f}%wr, n={best_n})",
                         related_insight_id=ins.id,
                     )
                     break
@@ -5893,6 +5924,7 @@ def _find_insight_for_pattern(db: Session, pattern) -> Any | None:
     return (
         db.query(TradingInsight)
         .filter(TradingInsight.scan_pattern_id == pattern.id)
+        .order_by(TradingInsight.id.desc())
         .first()
     )
 
@@ -6094,14 +6126,19 @@ def test_pattern_hypothesis(
         "research_integrity": aggregate_promotion_integrity(integrity_rows),
     }
 
+    from ...models.trading import BacktestResult as _BT
+    actual_bt_count = db.query(func.count(_BT.id)).filter(
+        _BT.scan_pattern_id == pattern.id
+    ).scalar() or 0
+
     patch: dict[str, Any] = {
         "confidence": round(new_confidence, 3),
-        "win_rate": round(mean_is_wr, 1),
+        "win_rate": round(mean_is_wr / 100.0, 4),
         "avg_return_pct": round(avg_return, 2),
-        "backtest_count": (pattern.backtest_count or 0) + total,
-        "evidence_count": (pattern.evidence_count or 0) + total,
+        "backtest_count": actual_bt_count,
+        "evidence_count": actual_bt_count,
         "promotion_status": prom_stat,
-        "oos_win_rate": round(mean_oos_wr, 1) if mean_oos_wr is not None else None,
+        "oos_win_rate": round(mean_oos_wr / 100.0, 4) if mean_oos_wr is not None else None,
         "oos_avg_return_pct": round(mean_oos_ret, 2) if mean_oos_ret is not None else None,
         "oos_trade_count": oos_trade_sum if oos_trade_sum else None,
         "backtest_spread_used": bt_kw.get("spread"),
@@ -6223,18 +6260,26 @@ def test_pattern_hypothesis(
         oos_validation_merged["research_integrity_blocked_promotion"] = True
         patch["oos_validation_json"] = oos_validation_merged
 
+    from .lifecycle import (
+        lifecycle_stage_from_promotion_status,
+        retire,
+        transition_on_backtest,
+        transition_on_promotion,
+    )
+
+    patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(
+        str(patch.get("promotion_status", prom_stat))
+    )
     update_pattern(db, pattern.id, patch)
 
     # Lifecycle FSM transitions based on promotion outcome
     _final_status = str(patch.get("promotion_status", prom_stat))
     try:
-        from .lifecycle import transition_on_backtest, transition_on_promotion
         if _final_status == "promoted":
             transition_on_promotion(db, pattern)
         elif _final_status in ("pending_oos", "backtested"):
             transition_on_backtest(db, pattern, oos_pass=True)
         elif _final_status.startswith("rejected"):
-            from .lifecycle import retire
             retire(db, pattern, reason=f"promotion_gate_{_final_status}")
     except Exception as e:
         logger.debug("[learning] Lifecycle transition after promotion: %s", e)

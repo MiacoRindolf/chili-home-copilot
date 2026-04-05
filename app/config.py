@@ -378,6 +378,22 @@ class Settings(BaseSettings):
     brain_bar_quality_strict: bool = False
     brain_bar_quality_max_gap_bars: int = 5
 
+    # Data retention policy (days). Used by data_retention.py scheduler job.
+    brain_retention_snapshot_days: int = 180
+    brain_retention_batch_job_days: int = 90
+    brain_retention_event_days: int = 120
+    brain_retention_alert_days: int = 90
+    brain_retention_backtest_days: int = 180
+    brain_retention_prediction_days: int = 30
+    brain_retention_cycle_run_days: int = 180
+    brain_retention_integration_event_days: int = 90
+    brain_retention_prescreen_days: int = 90
+    brain_retention_pattern_trade_days: int = 365
+    brain_retention_proposal_days: int = 90
+    brain_retention_paper_trade_days: int = 180
+    brain_retention_hypothesis_days: int = 180
+    brain_retention_breakout_alert_days: int = 180
+
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0
 

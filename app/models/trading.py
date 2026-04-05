@@ -35,7 +35,7 @@ class Trade(Base):
     pnl: Optional[float] = Column(Float, nullable=True)
     tags: Optional[str] = Column(String(500), nullable=True)
     notes: Optional[str] = Column(Text, nullable=True)
-    indicator_snapshot: Optional[str] = Column(Text, nullable=True)  # JSON blob
+    indicator_snapshot: Optional[dict] = Column(JSONB, nullable=True)
     broker_source: Optional[str] = Column(String(20), nullable=True)  # "robinhood" / "manual" / None
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
     broker_status: Optional[str] = Column(String(30), nullable=True)  # raw RH state: queued / confirmed / partially_filled / filled / cancelled / rejected / failed
@@ -100,7 +100,7 @@ class ScanResult(Base):
     take_profit: Optional[float] = Column(Float, nullable=True)
     risk_level: str = Column(String(10), nullable=False, default="medium")  # low / medium / high
     rationale: str = Column(Text, nullable=False, default="")
-    indicator_data: Optional[str] = Column(Text, nullable=True)  # JSON blob
+    indicator_data: Optional[dict] = Column(JSONB, nullable=True)
     scanned_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -112,13 +112,13 @@ class BacktestResult(Base):
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
     ticker: str = Column(String(20), nullable=False)
     strategy_name: str = Column(String(100), nullable=False)
-    params: Optional[str] = Column(Text, nullable=True)  # JSON blob
+    params: Optional[dict] = Column(JSONB, nullable=True)
     return_pct: float = Column(Float, nullable=False, default=0.0)
     win_rate: float = Column(Float, nullable=False, default=0.0)
     sharpe: Optional[float] = Column(Float, nullable=True)
     max_drawdown: float = Column(Float, nullable=False, default=0.0)
     trade_count: int = Column(Integer, nullable=False, default=0)
-    equity_curve: Optional[str] = Column(Text, nullable=True)  # JSON list
+    equity_curve: Optional[list] = Column(JSONB, nullable=True)
     ran_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
@@ -139,7 +139,7 @@ class MarketSnapshot(Base):
     ticker: str = Column(String(20), nullable=False, index=True)
     snapshot_date: datetime = Column(DateTime, nullable=False, index=True)
     close_price: float = Column(Float, nullable=False)
-    indicator_data: Optional[str] = Column(Text, nullable=True)  # JSON blob
+    indicator_data: Optional[dict] = Column(JSONB, nullable=True)
     predicted_score: Optional[float] = Column(Float, nullable=True)  # -10 bearish to +10 bullish
     vix_at_snapshot: Optional[float] = Column(Float, nullable=True)
     future_return_1d: Optional[float] = Column(Float, nullable=True)
@@ -211,12 +211,12 @@ class BreakoutAlert(Base):
     asset_type: str = Column(String(10), nullable=False, default="crypto")
     alert_tier: str = Column(String(50), nullable=False)
     score_at_alert: float = Column(Float, nullable=False)
-    indicator_snapshot: Optional[str] = Column(Text, nullable=True)
+    indicator_snapshot: Optional[dict] = Column(JSONB, nullable=True)
     price_at_alert: float = Column(Float, nullable=False)
     entry_price: Optional[float] = Column(Float, nullable=True)
     stop_loss: Optional[float] = Column(Float, nullable=True)
     target_price: Optional[float] = Column(Float, nullable=True)
-    signals_snapshot: Optional[str] = Column(Text, nullable=True)
+    signals_snapshot: Optional[dict] = Column(JSONB, nullable=True)
     alerted_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
     price_1h: Optional[float] = Column(Float, nullable=True)
     price_4h: Optional[float] = Column(Float, nullable=True)
@@ -226,6 +226,7 @@ class BreakoutAlert(Base):
     max_drawdown_pct: Optional[float] = Column(Float, nullable=True)
     outcome: str = Column(String(20), nullable=False, default="pending")
     outcome_checked_at: Optional[datetime] = Column(DateTime, nullable=True)
+    outcome_notes: Optional[str] = Column(Text, nullable=True)
 
     # Exit optimization fields
     time_to_peak_hours: Optional[float] = Column(Float, nullable=True)
@@ -269,8 +270,8 @@ class StrategyProposal(Base):
 
     timeframe: str = Column(String(30), nullable=False, default="swing")
     thesis: str = Column(Text, nullable=False, default="")
-    signals_json: Optional[str] = Column(Text, nullable=True)
-    indicator_json: Optional[str] = Column(Text, nullable=True)
+    signals_json: Optional[dict] = Column(JSONB, nullable=True)
+    indicator_json: Optional[dict] = Column(JSONB, nullable=True)
 
     brain_score: Optional[float] = Column(Float, nullable=True)
     ml_probability: Optional[float] = Column(Float, nullable=True)
@@ -293,7 +294,7 @@ class ScanPattern(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     name: str = Column(String(120), nullable=False)
     description: Optional[str] = Column(Text, nullable=True)
-    rules_json: str = Column(Text, nullable=False, default="{}")
+    rules_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     origin: str = Column(String(30), nullable=False, default="user")
     asset_class: str = Column(String(20), nullable=False, default="all")
     timeframe: str = Column(String(10), nullable=False, default="1d")
@@ -306,7 +307,7 @@ class ScanPattern(Base):
     min_base_score: float = Column(Float, nullable=False, default=0.0)
     active: bool = Column(Boolean, nullable=False, default=True)
     parent_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    exit_config: Optional[str] = Column(Text, nullable=True)
+    exit_config: Optional[dict] = Column(JSONB, nullable=True)
     variant_label: Optional[str] = Column(String(40), nullable=True)
     generation: int = Column(Integer, nullable=False, default=0)
     ticker_scope: str = Column(String(20), nullable=False, default="universal")
@@ -317,7 +318,8 @@ class ScanPattern(Base):
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
-    # Out-of-sample / promotion (see brain_oos_* settings and learning.py gates)
+    # Out-of-sample / promotion (see brain_oos_* settings and learning.py gates).
+    # Deprecated: prefer lifecycle_stage; kept for backwards compatibility and reads.
     promotion_status: str = Column(String(32), nullable=False, default="legacy")
     oos_win_rate: Optional[float] = Column(Float, nullable=True)
     oos_avg_return_pct: Optional[float] = Column(Float, nullable=True)
@@ -336,6 +338,9 @@ class ScanPattern(Base):
     # Lifecycle FSM: candidate -> backtested -> promoted -> live -> decayed -> retired
     lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")
     lifecycle_changed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
@@ -420,7 +425,7 @@ class TradingHypothesis(Base):
     times_tested: int = Column(Integer, nullable=False, default=0)
     times_confirmed: int = Column(Integer, nullable=False, default=0)
     times_rejected: int = Column(Integer, nullable=False, default=0)
-    last_result_json: Optional[str] = Column(Text, nullable=True)
+    last_result_json: Optional[dict] = Column(JSONB, nullable=True)
     related_weight: Optional[str] = Column(String(80), nullable=True)
     related_pattern_id: Optional[int] = Column(Integer, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

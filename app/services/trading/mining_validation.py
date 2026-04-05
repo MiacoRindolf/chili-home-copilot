@@ -50,6 +50,9 @@ def mined_candidate_passes_purged_segments(
         lo = s * seg_len
         hi = (s + 1) * seg_len if s < segs - 1 else n
         chunk = ordered[lo:hi]
+        if not chunk:
+            detail["segments"].append({"index": s, "n": 0, "skipped": True})
+            continue
         if len(chunk) < min_samples_per_segment:
             detail["segments"].append({"index": s, "n": len(chunk), "skipped": True})
             continue
@@ -95,9 +98,13 @@ def bootstrap_win_rate_ci(
     """
     if len(filtered) < 5:
         return {"error": "too_few_samples", "n": len(filtered)}
+    if n_resamples < 1:
+        return {"error": "invalid_n_resamples", "n": len(filtered)}
 
     rets = [float(r.get(return_key) or 0) for r in filtered]
     n = len(rets)
+    if n < 1:
+        return {"error": "too_few_samples", "n": 0}
 
     boot_wrs: list[float] = []
     boot_rets: list[float] = []
@@ -112,8 +119,8 @@ def bootstrap_win_rate_ci(
     boot_rets.sort()
 
     alpha = (1 - ci_level) / 2
-    lo_idx = int(alpha * n_resamples)
-    hi_idx = int((1 - alpha) * n_resamples) - 1
+    lo_idx = max(0, min(int(alpha * n_resamples), n_resamples - 1))
+    hi_idx = max(0, min(int((1 - alpha) * n_resamples) - 1, n_resamples - 1))
 
     wr_mean = sum(boot_wrs) / n_resamples
     ret_mean = sum(boot_rets) / n_resamples
@@ -141,6 +148,8 @@ def ensemble_promotion_check(
     1. Purged segment validation (all 3 segments positive)
     2. Bootstrap CI (lower bound of win-rate > 50%)
     3. Walk-forward half-split (both halves profitable)
+
+    DEPRECATED: This function is not called by any code path. Consider removal.
     """
     results: dict[str, Any] = {"methods": {}}
     votes = 0
@@ -165,11 +174,12 @@ def ensemble_promotion_check(
     second_half = ordered[mid:]
     wf_ok = False
     wf_detail: dict[str, Any] = {}
-    if len(first_half) >= 5 and len(second_half) >= 5:
-        avg_1 = sum(float(r.get("ret_5d") or 0) for r in first_half) / len(first_half)
-        avg_2 = sum(float(r.get("ret_5d") or 0) for r in second_half) / len(second_half)
-        wr_1 = sum(1 for r in first_half if float(r.get("ret_5d") or 0) > 0) / len(first_half) * 100
-        wr_2 = sum(1 for r in second_half if float(r.get("ret_5d") or 0) > 0) / len(second_half) * 100
+    n1, n2 = len(first_half), len(second_half)
+    if n1 >= 5 and n2 >= 5 and n1 > 0 and n2 > 0:
+        avg_1 = sum(float(r.get("ret_5d") or 0) for r in first_half) / n1
+        avg_2 = sum(float(r.get("ret_5d") or 0) for r in second_half) / n2
+        wr_1 = sum(1 for r in first_half if float(r.get("ret_5d") or 0) > 0) / n1 * 100
+        wr_2 = sum(1 for r in second_half if float(r.get("ret_5d") or 0) > 0) / n2 * 100
         wf_ok = avg_1 > 0 and avg_2 > 0 and wr_2 >= 50
         wf_detail = {
             "first_half_avg": round(avg_1, 4), "second_half_avg": round(avg_2, 4),
