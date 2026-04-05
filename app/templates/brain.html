@@ -894,9 +894,19 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
       <div class="trading-brain-body-row">
       <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
-        <div class="tbn-hint-row">
-          <p class="tbn-hint" id="tbn-hint-text">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+        <div class="tbn-hint-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+          <input type="text" id="tbn-search" placeholder="Search nodes..." style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;width:140px" />
+          <button type="button" id="tbn-reset-view" title="Reset zoom & pan" style="padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Reset</button>
           <button type="button" class="tbn-refresh-graph" id="tbn-refresh-graph" title="Reload graph from server">Refresh graph</button>
+        </div>
+        <div id="tbn-legend" style="display:flex;gap:12px;padding:2px 8px;font-size:9px;color:var(--text-muted);flex-wrap:wrap">
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a78bfa;vertical-align:middle"></span> Root</span>
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#60a5fa;vertical-align:middle"></span> Cluster</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;vertical-align:middle"></span> Step</span>
+          <span style="border-left:2px dashed var(--accent);padding-left:6px">Pipeline</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#22c55e;vertical-align:middle"></span> Running</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#f59e0b;vertical-align:middle"></span> Pending</span>
         </div>
         <div id="trading-brain-network-viewport" class="tbn-viewport" aria-label="Trading brain architecture graph">
           <div id="trading-brain-network-stage" class="tbn-stage">
@@ -1028,7 +1038,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-mined">0</div><div class="bw-stat-lbl">Mined</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-tested">0</div><div class="bw-stat-lbl">Tested</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-validated">0</div><div class="bw-stat-lbl">Validated</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-confirmed">0</div><div class="bw-stat-lbl">Confirmed</div></div>
+            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-challenged">0</div><div class="bw-stat-lbl">Challenged</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-evolved">0</div><div class="bw-stat-lbl">Evolved</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
             <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
@@ -1112,6 +1122,23 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
         </div>
         <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading…</div>
+        <div id="brain-near-tradeable-candidates" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
+      </div>
+
+      <div class="brain-section" id="brain-playbook-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+          <span class="bs-icon">&#x1F4CB;</span> Daily Playbook
+          <button type="button" onclick="loadPlaybook()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Generate</button>
+        </div>
+        <div id="brain-playbook-content" style="font-size:11px;color:var(--text-muted)">Click Generate for today's playbook.</div>
+      </div>
+
+      <div class="brain-section" id="brain-perf-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+          <span class="bs-icon">&#x1F4C8;</span> P&amp;L Performance
+          <button type="button" onclick="loadPerfDashboard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-perf-content" style="font-size:11px;color:var(--text-muted)">Loading performance data...</div>
       </div>
 
       <div class="brain-section">
@@ -1888,7 +1915,7 @@ function updateBrainWorkerUI(data) {
   document.getElementById('bw-stat-mined').textContent = totals.patterns_mined || 0;
   document.getElementById('bw-stat-tested').textContent = totals.patterns_tested || 0;
   document.getElementById('bw-stat-validated').textContent = totals.hypotheses_validated || 0;
-  document.getElementById('bw-stat-confirmed').textContent = totals.hypotheses_confirmed || 0;
+  document.getElementById('bw-stat-challenged').textContent = totals.hypotheses_challenged || 0;
   document.getElementById('bw-stat-evolved').textContent = totals.patterns_evolved || 0;
   document.getElementById('bw-stat-spawned').textContent = totals.patterns_spawned || 0;
   var promEl = document.getElementById('bw-stat-promoted');
@@ -2507,6 +2534,78 @@ function initTradingBrainNetworkGraph() {
         else tbnShowGraphError();
       });
   }
+
+  // Reset view button
+  var resetBtn = document.getElementById('tbn-reset-view');
+  if (resetBtn) {
+    resetBtn.onclick = function() {
+      var vw = vp.clientWidth || 900;
+      var vh = vp.clientHeight || 500;
+      _tbnState.scale = Math.min(vw / 1600, vh / 950, 0.65);
+      _tbnState.tx = (vw - 1600 * _tbnState.scale) / 2;
+      _tbnState.ty = (vh - 950 * _tbnState.scale) / 2;
+      _tbnApplyStage();
+    };
+  }
+
+  // Search nodes
+  var searchInput = document.getElementById('tbn-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', function() {
+      var q = this.value.trim().toLowerCase();
+      var allNodes = gNodes.querySelectorAll('.tbn-node');
+      allNodes.forEach(function(g) {
+        var title = g.querySelector('title');
+        var txt = (title ? title.textContent : '').toLowerCase();
+        var label = g.querySelector('.tbn-node-label');
+        var ltxt = (label ? label.textContent : '').toLowerCase();
+        var match = !q || txt.indexOf(q) >= 0 || ltxt.indexOf(q) >= 0;
+        g.style.opacity = match ? '1' : '0.15';
+      });
+    });
+  }
+
+  // ResizeObserver for viewport
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(function() {
+      var svg = document.getElementById('trading-brain-network-svg');
+      if (svg && vp.clientWidth > 0) {
+        svg.setAttribute('width', String(Math.max(vp.clientWidth, 800)));
+      }
+    }).observe(vp);
+  }
+
+  // Live cycle status overlay — piggyback on scan/status polling
+  function tbnUpdateNodeStatuses() {
+    fetch('/api/trading/scan/status', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d || !d.ok || !d.learning) return;
+        var lr = d.learning;
+        var phase = (lr.phase || '').toLowerCase();
+        var currentStep = lr.current_step_sid || phase || '';
+        var stepsCompleted = lr.steps_completed || 0;
+        var running = lr.running;
+        var allNodes = gNodes.querySelectorAll('.tbn-node');
+        allNodes.forEach(function(g) {
+          var nid = (g.getAttribute('data-node-id') || '').toLowerCase();
+          var circle = g.querySelector('.tbn-node-circle');
+          if (!circle) return;
+          circle.style.stroke = '';
+          circle.style.strokeWidth = '';
+          circle.style.strokeOpacity = '';
+          if (!running) return;
+          if (nid && (nid === currentStep || currentStep.indexOf(nid) >= 0 || nid.indexOf(currentStep) >= 0)) {
+            circle.style.stroke = '#22c55e';
+            circle.style.strokeWidth = '3';
+          }
+        });
+      })
+      .catch(function() {});
+  }
+  if (window._tbnStatusInterval) clearInterval(window._tbnStatusInterval);
+  window._tbnStatusInterval = setInterval(tbnUpdateNodeStatuses, 5000);
+  tbnUpdateNodeStatuses();
 }
 
 function initTradingBrainAssistant() {
@@ -2997,9 +3096,9 @@ function loadBrainDashboard() {
           '<div class="ring-label ' + _accCls(d.strong_accuracy||0, d.strong_predictions||0) + '">' + _accDisp(d.strong_accuracy||0, d.strong_predictions||0) + '</div></div>' +
         '<div class="bk-lbl">Strong Signal</div>' + strongSub + '</div>' +
       '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')">' +
-        '<div class="bk-tooltip">Active patterns discovered through market analysis.</div>' +
-        '<div class="bk-val" style="color:#8b5cf6">' + d.total_patterns + '</div>' +
-        '<div class="bk-lbl">Patterns Learned</div>' + weekTrend + '</div>' +
+        '<div class="bk-tooltip">Active scan patterns discovered through market analysis.</div>' +
+        '<div class="bk-val" style="color:#8b5cf6">' + (d.total_scan_patterns || d.total_patterns) + '</div>' +
+        '<div class="bk-lbl">Discovered Patterns</div>' + weekTrend + '</div>' +
       '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')">' +
         '<div class="bk-tooltip">Weighted average confidence across all active patterns.</div>' +
         '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
@@ -3045,6 +3144,7 @@ function loadBrainDashboard() {
   loadLearnedPatterns();
   loadTradeablePatterns();
   loadNearTradeableCandidates();
+  loadPerfDashboard();
   loadBrainPredictions();
   loadCycleAiReportsPage(true);
   pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
@@ -3105,7 +3205,7 @@ function showMLDetail() {
 function showKpiInfo(type) {
   var d = window._brainStats || {};
   var info = {
-    patterns: { title: 'Patterns Learned', html: '<p>CHILI discovers patterns by analyzing historical indicator snapshots.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800;color:#8b5cf6">' + d.total_patterns + '</div><div style="font-size:10px;color:var(--text-muted)">active patterns</div></div>' },
+    patterns: { title: 'Discovered Patterns', html: '<p>CHILI discovers scan patterns by analyzing historical indicator snapshots and market data.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800;color:#8b5cf6">' + (d.total_scan_patterns || d.total_patterns) + '</div><div style="font-size:10px;color:var(--text-muted)">active scan patterns</div></div>' + (d.promoted_patterns ? '<div style="font-size:11px;text-align:center;color:var(--text-muted)">' + d.promoted_patterns + ' promoted to live</div>' : '') },
     confidence: { title: 'Average Confidence', html: '<p>Average confidence across all active patterns.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800">' + d.avg_confidence + '%</div></div>' },
     snapshots: { title: 'Market Snapshots', html: '<p>Snapshots record indicator values at a point in time. After ~5 days, CHILI checks actual price movement.</p><div style="margin:10px 0;padding:10px;background:rgba(139,92,246,.06);border-radius:8px;text-align:center"><div style="font-size:20px;font-weight:800">' + (d.total_snapshots||0).toLocaleString() + '</div><div style="font-size:10px;color:var(--text-muted)">total snapshots</div></div>' },
   };
@@ -3160,6 +3260,121 @@ function showThesisDetail() {
   if (typeof marked !== 'undefined') { try { html += '<div style="line-height:1.7">' + marked.parse(d.thesis||'') + '</div>'; } catch(e) { html += '<pre>' + escHtml(d.thesis) + '</pre>'; } }
   else html += '<pre>' + escHtml(d.thesis) + '</pre>';
   openBrainModal('Market Thesis', html, '<button onclick="closeBrainModal();loadBrainThesis()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff">&#x1F504; Regenerate</button>');
+}
+
+function loadPlaybook() {
+  var el = document.getElementById('brain-playbook-content');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Generating playbook…</div>';
+  fetch('/api/trading/brain/playbook', {credentials:'same-origin'})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      if (!d.ok) { el.innerHTML = '<div style="padding:12px;text-align:center">No playbook data.</div>'; return; }
+      var html = '';
+      var reg = d.regime || {};
+      var regColor = reg.composite === 'risk_on' ? '#22c55e' : (reg.composite === 'risk_off' ? '#ef4444' : '#f59e0b');
+      html += '<div style="background:var(--card-bg,rgba(30,30,40,.6));border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px">';
+      html += '<div style="font-weight:700;font-size:12px;margin-bottom:4px"><span style="color:'+regColor+'">&#x25CF;</span> Regime: <span style="color:'+regColor+'">' + (reg.composite||'unknown').toUpperCase() + '</span></div>';
+      html += '<div style="font-size:10px;color:var(--text-muted)">' + (reg.guidance || '') + '</div>';
+      html += '</div>';
+
+      var risk = d.risk || {};
+      html += '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;margin-bottom:8px">';
+      html += _perfCard('Open Pos', String(risk.open_positions||0), 'var(--text)');
+      html += _perfCard('Heat', (risk.total_heat_pct||0).toFixed(1)+'%', (risk.total_heat_pct||0)>4?'#ef4444':'#22c55e');
+      html += _perfCard('Avail Heat', (risk.available_heat_pct||0).toFixed(1)+'%', '#60a5fa');
+      html += _perfCard('Max New', String(risk.max_new_trades_today||0), (risk.max_new_trades_today||0)>0?'#22c55e':'#ef4444');
+      html += '</div>';
+
+      if (risk.breaker_tripped) {
+        html += '<div style="background:rgba(239,68,68,.15);border:1px solid rgba(239,68,68,.3);border-radius:6px;padding:6px 10px;font-size:10px;color:#ef4444;margin-bottom:8px">&#x26A0; Circuit breaker active: ' + (risk.breaker_reason||'') + '</div>';
+      }
+
+      var ideas = d.ideas || [];
+      if (ideas.length) {
+        html += '<div style="font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin-bottom:4px">Top Trade Ideas</div>';
+        html += '<table style="width:100%;font-size:10px;border-collapse:collapse">';
+        html += '<tr style="color:var(--text-muted)"><th style="padding:3px;text-align:left">Pattern</th><th style="padding:3px">Score</th><th style="padding:3px">OOS WR</th><th style="padding:3px">Avg Ret</th><th style="padding:3px">TF</th></tr>';
+        ideas.forEach(function(idea) {
+          var sc = idea.idea_score >= 0.5 ? '#22c55e' : '#f59e0b';
+          html += '<tr><td style="padding:3px">' + idea.pattern_name + '</td>';
+          html += '<td style="padding:3px;text-align:center;color:'+sc+'">' + idea.idea_score.toFixed(3) + '</td>';
+          html += '<td style="padding:3px;text-align:center">' + idea.oos_win_rate.toFixed(1) + '%</td>';
+          html += '<td style="padding:3px;text-align:center">' + idea.avg_return_pct.toFixed(2) + '%</td>';
+          html += '<td style="padding:3px;text-align:center">' + idea.timeframe + '</td></tr>';
+        });
+        html += '</table>';
+      }
+
+      var wl = d.watchlist || [];
+      if (wl.length) {
+        html += '<div style="font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted);margin:8px 0 4px">Near Promotion Watchlist</div>';
+        wl.forEach(function(w) {
+          html += '<div style="font-size:10px;padding:2px 0">' + w.name + ' — OOS WR ' + w.oos_win_rate.toFixed(1) + '%, ' + w.backtest_count + ' backtests</div>';
+        });
+      }
+
+      html += '<div style="font-size:9px;color:var(--text-muted);margin-top:8px;text-align:right">Generated: ' + (d.generated_at || '') + '</div>';
+      el.innerHTML = html;
+    })
+    .catch(function() { el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to generate playbook.</div>'; });
+}
+
+function loadPerfDashboard() {
+  var el = document.getElementById('brain-perf-content');
+  if (!el) return;
+  el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading…</div>';
+  fetch('/api/trading/brain/performance', {credentials:'same-origin'})
+    .then(function(r){return r.json();})
+    .then(function(d) {
+      if (!d.ok) { el.innerHTML = '<div style="padding:12px;text-align:center">No performance data yet.</div>'; return; }
+      var o = d.overall || {};
+      var w = d.week || {};
+      var m = d.month || {};
+      var html = '<div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:8px;margin-bottom:12px">';
+      html += _perfCard('Total P&L', '$' + (o.total_pnl||0).toFixed(2), (o.total_pnl||0)>=0?'#22c55e':'#ef4444');
+      html += _perfCard('Win Rate', (o.win_rate||0).toFixed(1)+'%', (o.win_rate||0)>=50?'#22c55e':'#f59e0b');
+      html += _perfCard('Trades', String(o.total_trades||0), 'var(--text)');
+      html += _perfCard('7d P&L', '$' + (w.pnl||0).toFixed(2), (w.pnl||0)>=0?'#22c55e':'#ef4444');
+      html += _perfCard('30d P&L', '$' + (m.pnl||0).toFixed(2), (m.pnl||0)>=0?'#22c55e':'#ef4444');
+      html += _perfCard('30d WR', (m.win_rate||0).toFixed(1)+'%', (m.win_rate||0)>=50?'#22c55e':'#f59e0b');
+      html += '</div>';
+
+      if (d.daily_pnl && d.daily_pnl.length) {
+        html += '<div style="margin-bottom:8px;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)">30-Day Equity Curve</div>';
+        html += '<div style="display:flex;align-items:flex-end;gap:2px;height:60px;overflow-x:auto">';
+        var maxAbs = 1;
+        d.daily_pnl.forEach(function(dp) { maxAbs = Math.max(maxAbs, Math.abs(dp.pnl)); });
+        d.daily_pnl.forEach(function(dp) {
+          var h = Math.max(2, Math.abs(dp.pnl) / maxAbs * 50);
+          var c = dp.pnl >= 0 ? '#22c55e' : '#ef4444';
+          html += '<div title="' + dp.date + ': $' + dp.pnl.toFixed(2) + '" style="width:6px;height:'+h+'px;background:'+c+';border-radius:2px;flex-shrink:0"></div>';
+        });
+        html += '</div>';
+      }
+
+      if (d.attribution && d.attribution.length) {
+        html += '<div style="margin-top:12px;font-weight:600;font-size:10px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)">Pattern Attribution (Top 10)</div>';
+        html += '<table style="width:100%;font-size:10px;border-collapse:collapse;margin-top:4px">';
+        html += '<tr style="text-align:left;color:var(--text-muted)"><th style="padding:3px">Pattern</th><th style="padding:3px">Trades</th><th style="padding:3px">P&L</th><th style="padding:3px">WR</th></tr>';
+        d.attribution.slice(0,10).forEach(function(a) {
+          var pc = a.total_pnl >= 0 ? '#22c55e' : '#ef4444';
+          html += '<tr><td style="padding:3px">' + (a.pattern_name||'—') + '</td>';
+          html += '<td style="padding:3px">' + a.trades + '</td>';
+          html += '<td style="padding:3px;color:'+pc+'">$' + a.total_pnl.toFixed(2) + '</td>';
+          html += '<td style="padding:3px">' + a.win_rate.toFixed(1) + '%</td></tr>';
+        });
+        html += '</table>';
+      }
+      el.innerHTML = html;
+    })
+    .catch(function() { el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to load performance data.</div>'; });
+}
+function _perfCard(label, value, color) {
+  return '<div style="background:var(--card-bg, rgba(30,30,40,.6));border:1px solid var(--border);border-radius:8px;padding:8px 10px;text-align:center">'
+    + '<div style="font-size:9px;text-transform:uppercase;letter-spacing:.5px;color:var(--text-muted)">' + label + '</div>'
+    + '<div style="font-size:16px;font-weight:700;color:' + color + ';margin-top:2px">' + value + '</div>'
+    + '</div>';
 }
 
 function loadTradeablePatterns() {

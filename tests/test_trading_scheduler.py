@@ -32,7 +32,6 @@ def test_brain_learning_cycle_config_defaults():
     assert int(getattr(settings, "brain_snapshot_top_tickers", 0)) == 1000
     assert getattr(settings, "brain_intraday_snapshots_enabled", None) is True
     assert int(getattr(settings, "brain_intraday_max_tickers", 0)) == 1000
-    assert getattr(settings, "brain_snapshots_on_learning_cycle", None) is False
     assert getattr(settings, "brain_market_snapshot_scheduler_enabled", None) is True
 
 

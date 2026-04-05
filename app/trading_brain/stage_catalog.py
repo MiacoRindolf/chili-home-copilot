@@ -1,37 +1,23 @@
-"""Canonical ordered stage keys for future `brain_stage_job` rows (aligned to `run_learning_cycle` phases).
+"""Canonical ordered stage keys derived from ``learning_cycle_architecture`` (single source of truth).
 
-`TOTAL_STAGES` is the single source for `LearningStatusDTO.total_steps` when DB-backed status lands.
+``STAGE_KEYS`` lists every in-cycle step SID in execution order.
+``TOTAL_STAGES`` equals the number of steps that bump the progress counter.
 """
 
 from __future__ import annotations
 
-# 25 keys: through breakout (11) + secondary miners block (8) + tail (6) — see learning.py step sequence.
-STAGE_KEYS: tuple[str, ...] = (
-    "pre_filter",
-    "scan",
-    "snapshots",
-    "backfill",
-    "confidence_decay",
-    "mine",
-    "active_seek",
-    "legacy_insight_and_queue_backtests",
-    "pattern_variant_evolution",
-    "evolve",
-    "breakout_outcomes",
-    "intraday_mining",
-    "refine_patterns",
-    "exit_optimization",
-    "fakeout_mining",
-    "position_sizing",
-    "inter_alert",
-    "timeframe_learning",
-    "synergy_mining",
-    "market_journal",
-    "signal_events",
-    "ml_train",
-    "proposals",
-    "pattern_engine",
-    "cycle_ai_report",
+from ..services.trading.learning_cycle_architecture import (
+    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+    count_cycle_progress_steps,
 )
 
-TOTAL_STAGES: int = len(STAGE_KEYS)
+_SCHEDULED_CLUSTER = "c_scheduled"
+
+STAGE_KEYS: tuple[str, ...] = tuple(
+    step.sid
+    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+    if cluster.id != _SCHEDULED_CLUSTER
+    for step in cluster.steps
+)
+
+TOTAL_STAGES: int = count_cycle_progress_steps()

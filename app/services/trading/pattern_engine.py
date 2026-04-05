@@ -237,6 +237,9 @@ def evaluate_patterns(
 
     Returns a list of matched patterns with their score boosts.
     """
+    from .regime import inject_regime_into_indicators
+    indicators = inject_regime_into_indicators(indicators)
+
     matches: list[dict[str, Any]] = []
 
     for pattern in patterns:

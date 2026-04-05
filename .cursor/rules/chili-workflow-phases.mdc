@@ -1,0 +1,46 @@
+---
+description: Phase discipline, scope boundaries, plan vs execute, freeze/reopen for CHILI repo
+globs:
+alwaysApply: true
+---
+
+# CHILI — Phase, scope, and freeze discipline
+
+## Default workflow (phased work)
+
+1. **Plan** — Objective, allowed changes, **forbidden** changes, file order (if any), verification gates, rollback criteria, non-goals, definition of done.
+2. **Freeze** — User approves checklist; treat it as the **only** contract for that phase until they explicitly say **execute**.
+3. **Execute** — Implement **only** the frozen scope. One logical change at a time when possible.
+4. **Verify** — Run agreed tests **and** any **mandatory runtime/Docker** steps for that phase (see `chili-docker-validation-rollout.mdc`).
+5. **Closeout** — Short summary: what shipped, what was deferred, gates run.
+6. **Next phase** — New plan only after closeout (unless user explicitly bundles).
+
+Do **not** jump ahead (e.g. Phase 9) without a **new** approved plan.
+
+## Planning vs execution
+
+- **Plan mode** (iterate checklist, no code): user refines objectives, boundaries, or design — **update plan only**, do not implement.
+- **Execute mode**: user clearly asks to implement / execute / ship / apply the frozen checklist — **write code and run commands** within scope.
+- If ambiguous → **assume plan iteration** or ask **one** clarifying question; do not silently expand scope.
+
+## Scope discipline
+
+- **No stealth widening** — no drive-by refactors, unrelated files, or "while I'm here" edits.
+- **Conflicts** — If implementation would violate the frozen checklist or authority contracts, **stop and report the conflict**; do not improvise around it.
+- **Non-goals** — List them in the phase plan and **honor** them unless the user explicitly reopens them.
+
+## Freeze and reopen (hardened tracks)
+
+- A **frozen** track (e.g. prediction-mirror through Phase 8) is **closed** for Cursor-initiated expansion.
+- **Reopen** only when the user supplies **all** of: **named objective**, **consumer/path**, **authority expectations**, **rollout/risk expectations**, and willingness to **rerun runtime soak + release-blocker checks** in the target environment.
+- Do **not** invent follow-on phases (Phase 9, 10, …) without that.
+
+## Execution discipline (Cursor agent)
+
+- When execution is **feasible** (tests, Docker, grep, scripts) in this environment, **run commands** and paste **real** output — do not substitute long "you should run" instructions unless blocked (permissions, secrets, production-only systems).
+- Never execute **beyond** approved scope (e.g. no prod deploys without explicit ask).
+
+## Repo touchstones
+
+- Trading-brain / prediction-mirror **authority and ops contracts**: when editing those areas, apply `chili-trading-brain-prediction-mirror.mdc` (globs).
+- Rollout flag order and blocker grep: `docs/TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md`.

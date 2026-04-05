@@ -122,7 +122,6 @@ from .learning import (
     get_current_predictions,
     run_learning_cycle,
     run_promoted_pattern_fast_eval,
-    should_run_learning,
     dedup_existing_patterns,
     get_accuracy_detail,
 )
@@ -131,7 +130,6 @@ from .learning import (
 # ML engine (deprecated stubs — real logic lives in pattern_ml)
 from .ml_engine import (
     train_model as train_ml_model,
-    predict_ml,
     extract_features as extract_ml_features,
     get_model_stats as get_ml_model_stats,
     load_model as load_ml_model,
@@ -166,6 +164,19 @@ from .alerts import (
     reject_proposal,
     recheck_proposal,
     run_price_monitor,
+)
+
+
+# Portfolio risk controls
+from .portfolio_risk import (
+    get_portfolio_risk_snapshot,
+    check_new_trade_allowed,
+    size_position,
+    get_risk_limits,
+    check_drawdown_breaker,
+    is_breaker_tripped,
+    get_breaker_status,
+    reset_breaker,
 )
 
 

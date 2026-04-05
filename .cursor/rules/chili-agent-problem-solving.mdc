@@ -1,0 +1,49 @@
+---
+description: How to analyze, research, diagnose, debug, and plan solutions before writing code
+alwaysApply: true
+---
+
+# Problem Solving Methodology
+
+## Understand Before Proposing
+
+Before suggesting any fix, trace the full data flow. Read the function, its callers, its callees, and the models involved. Use Grep to find all references. Never propose a change based on function name alone.
+
+## Categorize and Prioritize
+
+Group issues into tiers and fix in this order:
+1. **Crashes/errors** blocking functionality
+2. **Logic bugs** producing wrong results silently
+3. **Structural/architectural** improvements
+4. **Performance** optimization
+5. **New features**
+
+## Root Cause, Not Symptoms
+
+Trace to the root cause. Examples from this project:
+- Duplicated `_eval_condition_bt` — fix was delegation to canonical `_eval_condition`, not syncing two copies
+- Keyword matching in `evolve_strategy_weights` — root cause was mining producing NL text instead of structured `rules_json`
+- N+1 queries in `save_insight` — fix was `preload_active_insights()`, not caching individual queries
+
+## Dependency-Aware Ordering
+
+Migrations before code using new columns. Models before services. Services before routers. Tests after implementation.
+
+## Debugging Methodology
+
+1. Start from the error message — identify exact line and variable
+2. Read the function plus 30 lines of context above/below
+3. Grep for the variable/function name to find where it should be defined
+4. Check: missing import? typo? wrong column name? logic error?
+5. For runtime issues: check logs (`brain_worker.log`, Docker logs), look for `[module_name]` prefixed lines
+6. For DB issues: check migrations ran (`schema_version` table), verify columns with `_columns(conn, table_name)`
+7. Add logging using project pattern: `logger.warning("[module] descriptive message: %s", variable)`
+
+## Research Checklist Before Editing
+
+1. Read the function you plan to change (at least 50 lines of context)
+2. Grep for all callers of that function
+3. Check if a similar function/module already exists in `app/services/trading/`
+4. Check the models for existing columns/fields
+5. Check `app/migrations.py` MIGRATIONS list for recent schema changes
+6. If adding a new file, verify the pattern doesn't already exist

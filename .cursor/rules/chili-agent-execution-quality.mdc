@@ -1,0 +1,57 @@
+---
+description: Edit discipline, git practices, todo tracking, and plan file management
+alwaysApply: true
+---
+
+# Execution Quality
+
+## Read Before Editing
+
+Always Read the target file before StrReplace. Read at least 30 lines of surrounding context. Never edit based on memory.
+
+## One Logical Change at a Time
+
+Don't mix bug fixes with refactors with new features in a single edit.
+
+## StrReplace Discipline
+
+Include enough surrounding lines to make the match unique. If "0 occurrences," re-read the file.
+
+## Lint After Edits
+
+Call ReadLints on changed files. Fix errors you introduced before moving on.
+
+## Git/Commit Discipline
+
+- Only commit when the user explicitly asks
+- Use HEREDOC format for messages
+- Summarize the *why* not the *what*
+- Never commit `.env`, credentials, or secrets — warn the user if asked
+- Never force push to main/master or amend pushed commits
+- Run `git status` and `git diff` before committing
+
+## TodoWrite Tracking
+
+- Multi-step work (3+ steps): create todos upfront
+- Mark `in_progress` when starting, `completed` when done
+- Only one item `in_progress` at a time
+
+## Plan File Management
+
+When completing items, update BOTH:
+1. The TodoWrite system (internal)
+2. Any `.plan.md` files in `.cursor/plans/` (user-visible)
+
+The user sees plan files directly — unticked items cause confusion. Update YAML frontmatter `status: completed` for each finished todo.
+
+## Parallel Independent Changes
+
+Batch Read and StrReplace calls for independent files. Don't serialize what can be parallelized.
+
+## Error Recovery
+
+If an edit causes cascading problems, stop. Re-read the original code. Consider reverting rather than patching patches.
+
+## Migration Discipline
+
+Check the last migration number in `app/migrations.py` MIGRATIONS list before adding new ones. Migrations are sequential. Use idempotent guards (`if col not in cols`, `if table not in tables`).

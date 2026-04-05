@@ -20,25 +20,6 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 
-def _run_learning_job():
-    """Executed by APScheduler in a background thread."""
-    from ..db import SessionLocal
-    from . import trading_service as ts
-
-    logger.info("[scheduler] Starting scheduled learning cycle")
-    db = SessionLocal()
-    try:
-        from ..config import settings as _settings
-
-        _uid = getattr(_settings, "brain_default_user_id", None)
-        result = ts.run_learning_cycle(db, user_id=_uid, full_universe=True)
-        logger.info(f"[scheduler] Learning cycle result: {result}")
-    except Exception as e:
-        logger.error(f"[scheduler] Learning cycle failed: {e}")
-    finally:
-        db.close()
-
-
 def _run_daily_prescreen_job():
     """Persist global prescreen candidates (~2 AM America/Los_Angeles)."""
     from ..config import settings as _settings
@@ -69,7 +50,7 @@ def _run_daily_market_scan_job():
 
     from ..db import SessionLocal
     from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
-    from .trading.scanner import run_full_market_scan
+    from .trading.scanner import clear_scanner_caches, run_full_market_scan
 
     logger.info("[scheduler] Daily market scan job starting")
     db = SessionLocal()
@@ -97,6 +78,7 @@ def _run_daily_market_scan_job():
         except Exception:
             logger.exception("[scheduler] Failed to record daily_market_scan batch job failure")
     finally:
+        clear_scanner_caches()
         db.close()
 
 
@@ -135,6 +117,39 @@ def _run_brain_market_snapshot_job():
                 db.commit()
             except Exception:
                 logger.exception("[scheduler] brain_market_snapshots batch finish failed")
+    finally:
+        db.close()
+
+
+def _run_paper_trade_check_job():
+    """Check open paper trades for stop/target/expiry exits."""
+    from ..db import SessionLocal
+
+    db = SessionLocal()
+    try:
+        from .trading.paper_trading import check_paper_exits
+        result = check_paper_exits(db)
+        if result.get("closed", 0) > 0:
+            logger.info("[scheduler] Paper trades: checked %d, closed %d",
+                        result["checked"], result["closed"])
+    except Exception as e:
+        logger.error("[scheduler] Paper trade check failed: %s", e)
+    finally:
+        db.close()
+
+
+def _run_data_retention_job():
+    """Daily sweep: archive old snapshots, prune stale batch job payloads."""
+    from ..db import SessionLocal
+
+    logger.info("[scheduler] Data retention sweep starting")
+    db = SessionLocal()
+    try:
+        from .trading.data_retention import run_retention_policy
+        results = run_retention_policy(db)
+        logger.info("[scheduler] Data retention done: %s", results)
+    except Exception as e:
+        logger.error("[scheduler] Data retention failed: %s", e)
     finally:
         db.close()
 
@@ -269,6 +284,7 @@ def _record_breakout_alert(
     """Write a BreakoutAlert row for outcome tracking."""
     import json as _json
     try:
+        from ..config import settings as _settings
         from ..db import SessionLocal
         from ..models.trading import BreakoutAlert
         from .trading.market_data import get_market_regime
@@ -281,6 +297,14 @@ def _record_breakout_alert(
 
         _sector = setup.get("sector") or ("crypto" if asset_type == "crypto" else None)
         _news_sent = setup.get("news_sentiment")
+        _uid = setup.get("user_id") or getattr(_settings, "brain_default_user_id", None)
+
+        # Extract best scan_pattern_id from pattern engine matches if available
+        _spid: int | None = setup.get("scan_pattern_id")
+        if not _spid:
+            _pe_matches = setup.get("pattern_engine_matches") or []
+            if _pe_matches:
+                _spid = _pe_matches[0].get("pattern_id")
 
         db = SessionLocal()
         try:
@@ -301,6 +325,8 @@ def _record_breakout_alert(
                 timeframe=timeframe,
                 sector=_sector,
                 news_sentiment_at_alert=_news_sent,
+                user_id=_uid,
+                scan_pattern_id=_spid,
             )
             db.add(row)
             db.commit()
@@ -1066,119 +1092,6 @@ def _run_project_brain_job():
         db.close()
 
 
-def _run_pattern_backfill_job():
-    """Periodically backtest patterns: new ones and recently reinforced ones.
-
-    Skips patterns that already have 50+ linked backtests with a stable
-    win rate (the engine will still pick them up during the full learning
-    cycle).  Prioritizes patterns with recent evidence but few backtests.
-    Insights linked to a ScanPattern that only have generic backtests get
-    their old results cleared and are re-queued for pattern-aware backtesting.
-    """
-    from ..main import _backfill_state
-    if _backfill_state.get("running"):
-        logger.info("[scheduler] Pattern backfill already running, skipping")
-        return
-
-    logger.info("[scheduler] Starting smart pattern backfill")
-    try:
-        from ..db import SessionLocal
-        from ..models.trading import TradingInsight, BacktestResult
-        from .trading.backtest_engine import (
-            smart_backtest_insight, _extract_context, _GENERIC_STRATEGY_NAMES,
-        )
-
-        db = SessionLocal()
-        try:
-            bt_by_insight: dict[int, list[str]] = {}
-            bt_has_generic: dict[int, bool] = {}
-            for row in (
-                db.query(
-                    BacktestResult.related_insight_id,
-                    BacktestResult.ticker,
-                    BacktestResult.strategy_name,
-                )
-                .filter(BacktestResult.related_insight_id.isnot(None))
-                .all()
-            ):
-                bt_by_insight.setdefault(row[0], []).append(row[1])
-                if row[2] in _GENERIC_STRATEGY_NAMES:
-                    bt_has_generic[row[0]] = True
-
-            candidates = (
-                db.query(TradingInsight)
-                .filter(TradingInsight.active.is_(True))
-                .order_by(TradingInsight.last_seen.desc())
-                .all()
-            )
-
-            need_backtest = []
-            for ins in candidates:
-                existing = bt_by_insight.get(ins.id, [])
-
-                if bt_has_generic.get(ins.id):
-                    old_count = (
-                        db.query(BacktestResult)
-                        .filter(BacktestResult.related_insight_id == ins.id)
-                        .delete()
-                    )
-                    ins.win_count = 0
-                    ins.loss_count = 0
-                    ins.evidence_count = max(1, ins.evidence_count)
-                    db.commit()
-                    logger.info(
-                        "[scheduler] Cleared %d generic backtests for insight %d",
-                        old_count, ins.id,
-                    )
-                    need_backtest.append(ins)
-                    continue
-
-                if len(existing) >= 50:
-                    continue
-                if not existing:
-                    need_backtest.append(ins)
-                    continue
-                ctx = _extract_context(
-                    ins.pattern_description or "", db=db, insight_id=ins.id,
-                )
-                if ctx["wants_crypto"] and not any(
-                    t.endswith("-USD") for t in existing
-                ):
-                    need_backtest.append(ins)
-                    continue
-                if len(existing) < 50:
-                    need_backtest.append(ins)
-
-            if not need_backtest:
-                logger.info("[scheduler] All patterns sufficiently backtested")
-                return
-
-            _backfill_state["running"] = True
-            _backfill_state["total"] = len(need_backtest)
-            _backfill_state["done"] = 0
-            _backfill_state["filled"] = 0
-
-            for ins in need_backtest:
-                try:
-                    result = smart_backtest_insight(db, ins, target_tickers=25)
-                    if result["total"] > 0:
-                        _backfill_state["filled"] += 1
-                except Exception:
-                    pass
-                _backfill_state["done"] += 1
-
-            logger.info(
-                f"[scheduler] Pattern backfill complete: "
-                f"{_backfill_state['filled']}/{len(need_backtest)} updated"
-            )
-        finally:
-            _backfill_state["running"] = False
-            db.close()
-    except Exception as e:
-        _backfill_state["running"] = False
-        logger.warning(f"[scheduler] Pattern backfill failed: {e}")
-
-
 def _run_scheduler_worker_heartbeat():
     """Record liveness for Jobs UI (scheduler-worker container)."""
     from datetime import datetime as _dt
@@ -1213,7 +1126,6 @@ def start_scheduler():
         import os
 
         from ..config import settings
-        _learning_hours = max(1, settings.learning_interval_hours)
 
         role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
         if role == "none":
@@ -1245,17 +1157,6 @@ def start_scheduler():
             include_web_light,
             emit_worker_heartbeat,
         )
-
-        # DISABLED: Brain Worker now handles the full learning cycle continuously
-        # _scheduler.add_job(
-        #     _run_learning_job,
-        #     trigger=IntervalTrigger(hours=_learning_hours),
-        #     id="learning_cycle",
-        #     name=f"Full market learning cycle (every {_learning_hours}h)",
-        #     replace_existing=True,
-        #     max_instances=1,
-        #     next_run_time=datetime.now() + timedelta(minutes=3),
-        # )
 
         if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):
             _scheduler.add_job(
@@ -1452,20 +1353,27 @@ def start_scheduler():
                 next_run_time=datetime.now() + timedelta(seconds=5),
             )
 
-        # Web pattern research runs inside run_learning_cycle (_run_pattern_engine_cycle), not on a separate schedule.
+        # Paper trade exit checking: every 15 min during market hours
+        if include_web_light:
+            _scheduler.add_job(
+                _run_paper_trade_check_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="paper_trade_check",
+                name="Paper trade exit check (every 15min)",
+                replace_existing=True,
+                max_instances=1,
+            )
 
-        # DISABLED: Brain Worker now handles pattern backtesting as part of the full learning cycle
-        # _scheduler.add_job(
-        #     _run_pattern_backfill_job,
-        #     trigger=IntervalTrigger(hours=1),
-        #     id="pattern_backfill",
-        #     name="Backtest new untested patterns (every 1h)",
-        #     replace_existing=True,
-        #     max_instances=1,
-        # )
-
-        # Pattern variant evolution (fork/compare/promote) runs inside run_learning_cycle
-        # (brain worker / full cycle), not as a separate scheduler job — avoids double runs.
+        # Data retention: archive old snapshots, prune payloads daily at 3:30 AM
+        if include_web_light:
+            _scheduler.add_job(
+                _run_data_retention_job,
+                trigger=CronTrigger(hour=3, minute=30, timezone="America/Los_Angeles"),
+                id="data_retention",
+                name="Data retention sweep (daily 3:30AM PT)",
+                replace_existing=True,
+                max_instances=1,
+            )
 
         _scheduler.start()
         _ps_note = (
@@ -1474,8 +1382,7 @@ def start_scheduler():
             else ""
         )
         logger.info(
-            f"[scheduler] Trading scheduler started (legacy learning_interval_hours={_learning_hours}h unused for full cycle; "
-            f"brain worker runs run_learning_cycle; {_ps_note}"
+            f"[scheduler] Trading scheduler started (brain worker runs run_learning_cycle; {_ps_note}"
             f"code brain every {_code_hours}h, "
             f"reasoning brain every {_reasoning_hours}h, "
             f"project brain every {_pb_minutes}min, "
@@ -1533,12 +1440,3 @@ def get_scheduler_info() -> dict:
     }
 
 
-def trigger_learning_now():
-    """Manually trigger a learning cycle if not already running."""
-    from . import trading_service as ts
-    if ts.get_learning_status()["running"]:
-        return False
-
-    thread = threading.Thread(target=_run_learning_job, daemon=True)
-    thread.start()
-    return True

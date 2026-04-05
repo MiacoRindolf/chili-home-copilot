@@ -1,0 +1,72 @@
+---
+description: ScanPattern lifecycle, rules_json DSL, condition evaluation, and promotion gates
+globs:
+  - app/services/trading/pattern_engine.py
+  - app/services/trading/lifecycle.py
+  - app/services/trading/mining_validation.py
+  - app/services/trading/learning.py
+  - app/models/trading.py
+---
+
+# ScanPattern DSL and Lifecycle
+
+## ScanPattern Model (`scan_patterns` table)
+
+Key columns: `name`, `description`, `rules_json` (JSON text), `origin` (user/mined/hypothesis/evolved/regime_gated), `asset_class` (crypto/stock/all), `timeframe` (1d/1h/etc), `confidence`, `win_rate`, `avg_return_pct`, `backtest_count`, `lifecycle_stage`, `promotion_status`, `oos_win_rate`, `oos_avg_return_pct`, `oos_trade_count`, `bench_walk_forward_json`, `hypothesis_family`, `paper_book_json`.
+
+## rules_json Format
+
+Top-level key `conditions` containing an array of condition objects:
+
+```json
+{
+  "conditions": [
+    {"indicator": "rsi_14", "op": "<", "value": 30},
+    {"indicator": "macd", "op": ">", "ref": "macd_signal"},
+    {"indicator": "price", "op": ">", "ref": "ema_20"},
+    {"indicator": "volume_ratio", "op": ">", "value": 2.0},
+    {"indicator": "regime_composite", "op": "!=", "value": "risk_on"}
+  ]
+}
+```
+
+### Condition Fields
+- `indicator`: what to evaluate (e.g. `rsi_14`, `adx`, `bb_pct`, `macd_histogram`, `price`, `volume_ratio`, `stochastic_k`, `regime_composite`)
+- `op`: comparison operator
+- `value`: scalar threshold (number or string)
+- `ref`: alternative — compare against another indicator value instead of a fixed threshold
+
+### Supported Operators (`_eval_condition` in `pattern_engine.py`)
+`>`, `>=`, `<`, `<=`, `==`, `!=`, `between` (2-element list, inclusive), `any_of` (membership), `not_in` (exclusion). Missing actual or ref → `False`. Unrecognized op → `False`.
+
+### Regime Conditions
+`regime_condition_matches` in `regime.py` handles `regime_*` indicators with numeric/string/`in` operators.
+
+## Lifecycle State Machine (`lifecycle.py`)
+
+States: `candidate` → `backtested` → `promoted` → `live` → `decayed` → `retired`
+
+Allowed transitions:
+- `candidate` → `backtested`, `retired`
+- `backtested` → `promoted`, `candidate`, `retired`
+- `promoted` → `live`, `decayed`, `retired`, `backtested`
+- `live` → `decayed`, `retired`
+- `decayed` → `retired`, `backtested`, `candidate`
+- `retired` → `candidate` (re-mining)
+
+Helper functions: `transition_on_backtest`, `transition_on_promotion`, `transition_to_live`, `transition_on_decay`, `retire`. All sync legacy fields (`promotion_status`, `active`).
+
+## Promotion Gates (`mining_validation.py`)
+
+Three-voter ensemble (`ensemble_promotion_check`, `min_agree=2`):
+1. **Purged segments**: 3 time-ordered segments, each ≥5 samples, all must have mean `ret_5d > 0.05%`
+2. **Bootstrap CI**: 1000 resamples at 95% confidence; lower bound of win rate must exceed 50%, average return lower bound > 0
+3. **Walk-forward split**: both halves avg `ret_5d > 0`, second half WR ≥ 50%, each half ≥ 5 samples
+
+## Pattern Creation (`ensure_mined_scan_pattern` in `learning.py`)
+
+Mining calls `_check(rows, description, conditions=[...])` → `ensure_mined_scan_pattern` → inserts/updates `ScanPattern` with `rules_json = json.dumps({"conditions": conditions})`.
+
+## Backtest/Live Parity
+
+`_eval_condition_bt` in `backtest_service.py` delegates to `_eval_condition` in `pattern_engine.py` — single source of truth. Indicator arrays from `indicator_core.compute_all_from_df`. Never duplicate condition logic.

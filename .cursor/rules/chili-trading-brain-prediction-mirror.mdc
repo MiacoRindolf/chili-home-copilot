@@ -1,0 +1,51 @@
+---
+description: Trading-brain prediction mirror — authority, observability, rollout references; no scope creep
+globs:
+  - app/trading_brain/**
+  - docs/TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md
+  - scripts/check_chili_prediction_ops_release_blocker.ps1
+alwaysApply: false
+---
+
+# Trading-brain / prediction-mirror — authority and contracts
+
+## Hardened baseline (do not erode casually)
+
+Phases **3–8** established: mirror write/read/compare/narrow authoritative path, **Phase 6** ops log, **Phase 7** explicit-vs-implicit choke point in `learning.py`, **Phase 8** rollout doc + blocker script. Treat **changing authority or log contract** as a **deliberate phase**, not a side edit.
+
+## Authority (frozen unless user opens a new phase)
+
+- **Candidate-authoritative** mirror read (`auth_mirror` when flags allow) applies only to **explicit, non-empty** ticker intent at the API boundary — enforced at **`get_current_predictions` / `_get_current_predictions_impl`** choke point.
+- **`tickers=None`**, **empty** ticker list, **cache/SWR refresh**, **inferred / full-universe** callers → **`explicit_api_tickers=false`** → **not** candidate-authoritative. Do **not** broaden `tickers=None` authority without an **explicitly approved** future phase (design + tests + soak + rollout doc update).
+
+## Release blocker (runtime)
+
+Any `[chili_prediction_ops]` line with **`read=auth_mirror`** and **`explicit_api_tickers=false`** → **release blocker**. See `docs/TRADING_BRAIN_PREDICTION_MIRROR_ROLLOUT.md` and `scripts/check_chili_prediction_ops_release_blocker.ps1`.
+
+## Phase 6 observability contract
+
+- Prefix: `[chili_prediction_ops]`.
+- **Single bounded INFO** line per completion of `_get_current_predictions_impl` tail (not early `return []`).
+- Gated by **`brain_prediction_ops_log_enabled`** only for that INFO line.
+- Do **not** add ticker lists, blobs, or casually change field names/enums without an approved observability phase.
+
+## Intentionally deferred (unless user reopens)
+
+- Proposal / publication integration using mirror as source of truth.
+- Outcome feedback / closed-loop learning on mirror rows.
+- New **consumers** of mirror reads or new **authority surfaces** without named goal + tests + soak + rollout.
+- Default-on flags in `app/config.py` for production — rollout remains **env-driven** per doc.
+
+## When editing this area
+
+- Prefer **minimal** diffs; preserve parity and dedicated-session patterns already in code.
+- If a change could affect **`explicit_api_tickers`** or **`read=`** metadata, require **tests + runtime blocker check** in the checklist before merge.
+- Read **`app/trading_brain/README.md`** for phase semantics and pointers.
+
+## Optional glob extension
+
+If you often edit the prediction choke point outside `app/trading_brain/`, add to `globs` above:
+
+`app/services/trading/learning.py`
+
+(That widens when this rule attaches; use only if needed.)

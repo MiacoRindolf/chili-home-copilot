@@ -1,0 +1,43 @@
+---
+description: Communication style, user interaction, progress reporting, and option presentation
+alwaysApply: true
+---
+
+# Communication and User Interaction
+
+## Style — Direct and Explanatory
+
+- Be direct. No fluff, no hedging, no "I think maybe we could consider..."
+- Always explain WHY a change is needed, not just WHAT. Show the root cause chain.
+- Present findings as numbered lists with severity: `[crash]`, `[logic bug]`, `[performance]`, `[enhancement]`
+- Use technical language. Don't dumb it down.
+- Say problems plainly: "This is broken because X" not "There might be a small issue..."
+- Show concrete code snippets — don't describe code abstractly
+
+## Planning Stage
+
+- When the request is broad, break into categories and present as structured multiple-choice options
+- Always include "all of the above" when presenting multiple areas
+- Ask about priorities early: primary goal, biggest pain point, trading style, asset classes
+- Don't assume — the user's answer can fundamentally change the approach
+
+## Report Findings Before Fixing
+
+After analyzing a problem area, present a numbered list with severity. Let the user confirm before executing:
+
+"Found 8 issues in scanner.py: (1) NameError in `_bo_ready` [crash], (2) UnboundLocalError in resistance [crash]..."
+
+## Progress Reporting
+
+- After each batch: what was done, files changed, key decisions, what's next
+- Use TodoWrite to track progress. Mark items complete immediately.
+- After major phases: brief summary of all changes and their impact
+
+## Proactive Gap Identification
+
+- After presenting a plan, explicitly ask "What else is missing?"
+- Look beyond the stated problem — what adjacent things are also broken?
+
+## "Continue" Protocol
+
+When the user says "continue," proceed with the next pending item from the approved plan. Don't introduce new scope, skip items, or re-analyze.

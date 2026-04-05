@@ -239,6 +239,18 @@ def fetch_ohlcv(
     return records
 
 
+_ohlcv_df_cache: dict[str, tuple[float, "pd.DataFrame"]] = {}
+_ohlcv_df_lock = threading.Lock()
+_OHLCV_DF_TTL = 600  # 10 min
+_OHLCV_DF_MAX = 300
+
+
+def clear_ohlcv_cache() -> None:
+    """Drop the in-memory OHLCV DataFrame cache."""
+    with _ohlcv_df_lock:
+        _ohlcv_df_cache.clear()
+
+
 def fetch_ohlcv_df(
     ticker: str,
     interval: str = "1d",
@@ -266,8 +278,23 @@ def fetch_ohlcv_df(
     if not start:
         period = _clamp_period(interval, period)
 
+    _cache_key = f"{ticker}|{interval}|{period}|{start}|{end}"
+    _now = _time.time()
+    with _ohlcv_df_lock:
+        _hit = _ohlcv_df_cache.get(_cache_key)
+        if _hit and _now - _hit[0] < _OHLCV_DF_TTL:
+            return _hit[1].copy()
+
     _start_str = str(start)[:10] if start else None
     _end_str = str(end)[:10] if end else None
+
+    def _store_and_return(result: pd.DataFrame) -> pd.DataFrame:
+        if not result.empty:
+            with _ohlcv_df_lock:
+                if len(_ohlcv_df_cache) >= _OHLCV_DF_MAX:
+                    _ohlcv_df_cache.clear()
+                _ohlcv_df_cache[_cache_key] = (_time.time(), result)
+        return result
 
     # --- Massive path (primary) ---
     _massive_dead = False
@@ -278,7 +305,7 @@ def fetch_ohlcv_df(
                 start=_start_str, end=_end_str,
             )
             if not df.empty:
-                return df
+                return _store_and_return(df)
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
         except Exception as e:
@@ -298,7 +325,7 @@ def fetch_ohlcv_df(
                 start=_start_str, end=_end_str,
             )
             if not df.empty:
-                return df
+                return _store_and_return(df)
         except Exception as e:
             logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
 
@@ -312,7 +339,7 @@ def fetch_ohlcv_df(
     else:
         period = _clamp_period(interval, period)
         df = _yf_history(ticker, period=period, interval=interval)
-    return df if df is not None else pd.DataFrame()
+    return _store_and_return(df if df is not None else pd.DataFrame())
 
 
 def fetch_ohlcv_batch(
@@ -544,8 +571,9 @@ def fetch_quotes_batch(
 def search_tickers(query: str, limit: int = 10) -> list[dict[str, str]]:
     """Search for tickers matching a query string."""
     try:
+        import yfinance as _yf_mod
         _yf_acquire()
-        results = yf.search(query, max_results=limit)
+        results = _yf_mod.search(query, max_results=limit)
         quotes = results.get("quotes", []) if isinstance(results, dict) else []
         return [
             {

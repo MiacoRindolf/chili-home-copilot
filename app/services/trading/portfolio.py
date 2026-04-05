@@ -243,6 +243,77 @@ def get_daily_pnl(
     return result
 
 
+def get_performance_dashboard(
+    db: Session, user_id: int | None,
+) -> dict[str, Any]:
+    """Comprehensive performance dashboard data for the Brain UI."""
+    from ...models.trading import ScanPattern
+    from datetime import datetime, timedelta
+
+    now = datetime.utcnow()
+    stats = get_trade_stats(db, user_id)
+    by_source = get_trade_stats_by_source(db, user_id)
+
+    # 30-day daily P&L
+    daily = get_daily_pnl(db, user_id, now - timedelta(days=30), now)
+
+    # Per-pattern attribution via scan_pattern_id
+    closed_with_sp = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "closed",
+        Trade.scan_pattern_id.isnot(None),
+    ).all()
+    sp_pnl: dict[int, list[float]] = {}
+    for t in closed_with_sp:
+        sp_pnl.setdefault(t.scan_pattern_id, []).append(t.pnl or 0)
+    sp_ids = list(sp_pnl.keys())
+    sp_names = {}
+    if sp_ids:
+        for sp in db.query(ScanPattern).filter(ScanPattern.id.in_(sp_ids)).all():
+            sp_names[sp.id] = sp.name
+    attribution = sorted([
+        {
+            "pattern_id": sp_id,
+            "pattern_name": sp_names.get(sp_id, f"Pattern #{sp_id}"),
+            "trades": len(pnls),
+            "total_pnl": round(sum(pnls), 2),
+            "avg_pnl": round(sum(pnls) / len(pnls), 2) if pnls else 0,
+            "win_rate": round(sum(1 for p in pnls if p > 0) / len(pnls) * 100, 1) if pnls else 0,
+        }
+        for sp_id, pnls in sp_pnl.items()
+    ], key=lambda x: x["total_pnl"], reverse=True)
+
+    # Period comparisons
+    week_ago = now - timedelta(days=7)
+    month_ago = now - timedelta(days=30)
+    recent_week = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "closed",
+        Trade.exit_date >= week_ago,
+    ).all()
+    recent_month = db.query(Trade).filter(
+        Trade.user_id == user_id, Trade.status == "closed",
+        Trade.exit_date >= month_ago,
+    ).all()
+
+    return {
+        "ok": True,
+        "overall": stats,
+        "by_source": by_source,
+        "daily_pnl": daily,
+        "attribution": attribution[:20],
+        "week": {
+            "trades": len(recent_week),
+            "pnl": round(sum(t.pnl or 0 for t in recent_week), 2),
+            "win_rate": round(sum(1 for t in recent_week if (t.pnl or 0) > 0) / max(1, len(recent_week)) * 100, 1),
+        },
+        "month": {
+            "trades": len(recent_month),
+            "pnl": round(sum(t.pnl or 0 for t in recent_month), 2),
+            "win_rate": round(sum(1 for t in recent_month if (t.pnl or 0) > 0) / max(1, len(recent_month)) * 100, 1),
+        },
+    }
+
+
 def get_trade_stats_by_pattern(
     db: Session, user_id: int | None, min_trades: int = 1,
 ) -> list[dict[str, Any]]:
@@ -313,12 +384,21 @@ def _insight_text_with_family(description: str, family: str | None) -> str:
     return prefix + description
 
 
+def preload_active_insights(db: Session, user_id: int | None) -> list["TradingInsight"]:
+    """Pre-fetch active insights once so callers can reuse across multiple save_insight calls."""
+    return db.query(TradingInsight).filter(
+        TradingInsight.user_id == user_id,
+        TradingInsight.active.is_(True),
+    ).all()
+
+
 def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
     wins: int = 0, losses: int = 0,
     scan_pattern_id: int | None = None,
     hypothesis_family: str | None = None,
+    _existing_cache: list["TradingInsight"] | None = None,
 ) -> TradingInsight:
     from .learning import log_learning_event
     from .pattern_resolution import get_legacy_unlinked_scan_pattern_id
@@ -331,10 +411,7 @@ def save_insight(
 
     new_label = _pattern_label(pattern)
     new_kw = _pattern_keywords(new_label)
-    existing = db.query(TradingInsight).filter(
-        TradingInsight.user_id == user_id,
-        TradingInsight.active.is_(True),
-    ).all()
+    existing = _existing_cache if _existing_cache is not None else preload_active_insights(db, user_id)
     for ins in existing:
         old_label = _pattern_label(ins.pattern_description)
         old_kw = _pattern_keywords(old_label)

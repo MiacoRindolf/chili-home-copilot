@@ -1,0 +1,90 @@
+---
+description: Indicator computation, market data providers, data quality, and backtest/live parity
+globs:
+  - app/services/trading/indicator_core.py
+  - app/services/trading/data_quality.py
+  - app/services/trading/market_data.py
+  - app/services/trading/regime.py
+  - app/services/backtest_service.py
+---
+
+# Indicators and Market Data
+
+## Indicator Core (`indicator_core.py`) — Single Source of Truth
+
+All indicator math lives here. Both `backtest_service.py` and `pattern_engine.py`/`scanner.py` consume these functions.
+
+### Available Functions
+- `compute_rsi(close, period=14)` → pd.Series
+- `compute_ema(close, span)` → pd.Series
+- `compute_sma(close, span)` → pd.Series
+- `compute_adx(high, low, close, period=14)` → pd.Series
+- `compute_macd(close)` → tuple(macd_line, signal, histogram)
+- `compute_bollinger(close, period=20, num_std=2)` → dict(upper, lower, mid, pct, width)
+- `compute_atr(high, low, close, period=14)` → pd.Series
+- `compute_stochastic(high, low, close, k_period=14, d_period=3)` → tuple(k, d)
+- `compute_relative_volume(volume, period=20)` → pd.Series
+- `compute_gap_pct(open_series, prev_close)` → pd.Series
+
+### `compute_all_from_df(df, needed=None)` → dict[str, list]
+Computes full indicator set from OHLCV DataFrame. If `needed` set provided, only computes requested indicators. Keys include:
+`price`, `rsi_14`, `ema_9/12/20/21/26/50/100/200`, `sma_10/20/50/100/200`, `adx`, `macd`, `macd_signal`, `macd_hist`/`macd_histogram`, `bb_upper/lower/mid/pct/width`, `atr`, `stoch_k`/`stochastic_k`, `stoch_d`, `rel_vol`/`volume_ratio`, `gap_pct`, `daily_change_pct`, `resistance`, `dist_to_resistance_pct`
+
+### Aliases (both names map to same array)
+- `macd_hist` = `macd_histogram`
+- `stoch_k` = `stochastic_k`
+- `rel_vol` = `volume_ratio`
+
+## Market Data Providers (`market_data.py`)
+
+### Resolution Order
+OHLCV/quotes: **Massive → Polygon (if enabled) → yfinance**
+
+| Provider | Usage |
+|----------|-------|
+| Massive | Primary OHLCV, quotes, batch operations, prescreener |
+| Polygon | Secondary OHLCV/quotes when `settings.use_polygon` + API key |
+| yfinance | Fallback OHLCV/quotes, VIX data (`^VIX`), ticker search |
+| CoinGecko | Crypto top movers and trending (HTTP API in `prescreener.py`) |
+
+### VIX
+Always via yfinance (`^VIX`). Cached 15 minutes.
+
+## Data Quality (`data_quality.py`)
+
+### Cleaning Pipeline
+`clean_ohlcv(df)` = `filter_zero_volume` → `filter_bad_prints(z_threshold=5.0)`
+
+### Individual Functions
+- `detect_stock_split(close, threshold=0.45)` — flags >45% single-bar changes
+- `filter_bad_prints(df, z_threshold=5.0)` — drops bars with |z-score| > 5 on returns
+- `filter_zero_volume(df)` — drops Volume ≤ 0
+- `validate_ohlcv_integrity(df)` — checks columns, nulls, High<Low, Close range, neg volume, splits
+
+### Integration
+`clean_ohlcv` is called in `mine_patterns()` before indicator computation. Always clean before computing indicators.
+
+## Regime Detection (`regime.py`)
+
+### Regime Indicators
+- `regime_spy_direction`: `up` / `down` / `flat` (from SPY change_pct: >0.3 up, <-0.3 down)
+- `regime_spy_momentum_5d`: 5-day SPY % return
+- `regime_vix`: `low` (<15) / `normal` (<20) / `elevated` (<30) / `extreme` (≥30)
+- `regime_vix_value`: raw VIX number
+- `regime_composite`: `risk_on` / `cautious` / `risk_off`
+- `regime_numeric`: 1 / 0 / -1
+
+### Composite Logic
+- `risk_on`: VIX low/normal AND SPY not down
+- `risk_off`: VIX elevated/extreme OR SPY down
+- `cautious`: everything else
+
+### Caching
+Market regime: 5-minute TTL. VIX data: 15-minute TTL.
+
+## Parity Rules
+
+1. Never compute indicators outside `indicator_core.py`
+2. Backtest-specific indicators (candlestick patterns, squeeze, VCP) stay in `backtest_service._compute_series_for_conditions`
+3. `_eval_condition_bt` delegates to `_eval_condition` — never diverge
+4. Test parity with `tests/test_indicator_parity.py` — signal replay on synthetic data

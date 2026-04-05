@@ -666,12 +666,26 @@ def save_backtest(
             existing.params = params_json
             if resolved_sp_id is not None:
                 existing.scan_pattern_id = int(resolved_sp_id)
+            if result.get("oos_win_rate") is not None:
+                existing.oos_win_rate = float(result["oos_win_rate"])
+                existing.oos_return_pct = float(result.get("oos_return_pct") or 0)
+                existing.oos_trade_count = int(result.get("oos_trade_count") or 0)
+                existing.oos_holdout_fraction = float(result.get("oos_holdout_fraction") or 0)
+                existing.in_sample_bars = int(result.get("in_sample_bars") or 0)
+                existing.out_of_sample_bars = int(result.get("out_of_sample_bars") or 0)
             db.commit()
             db.refresh(existing)
             _persist_pattern_trade_analytics(
                 db, user_id, resolved_sp_id, insight_id, existing, result,
             )
             return existing
+
+    _oos_wr = result.get("oos_win_rate")
+    _oos_ret = result.get("oos_return_pct")
+    _oos_tc = result.get("oos_trade_count")
+    _oos_frac = result.get("oos_holdout_fraction")
+    _is_bars = result.get("in_sample_bars")
+    _oos_bars = result.get("out_of_sample_bars")
 
     record = BacktestResult(
         user_id=user_id,
@@ -686,6 +700,12 @@ def save_backtest(
         equity_curve=json.dumps(eq),
         related_insight_id=insight_id,
         scan_pattern_id=int(resolved_sp_id) if resolved_sp_id is not None else None,
+        oos_win_rate=float(_oos_wr) if _oos_wr is not None else None,
+        oos_return_pct=float(_oos_ret) if _oos_ret is not None else None,
+        oos_trade_count=int(_oos_tc) if _oos_tc is not None else None,
+        oos_holdout_fraction=float(_oos_frac) if _oos_frac is not None else None,
+        in_sample_bars=int(_is_bars) if _is_bars is not None else None,
+        out_of_sample_bars=int(_oos_bars) if _oos_bars is not None else None,
     )
     db.add(record)
     db.commit()
@@ -775,9 +795,9 @@ def _compute_series_for_conditions(
 ) -> dict[str, list]:
     """Pre-compute full-length indicator series required by pattern conditions.
 
-    Only computes indicators actually referenced by the conditions, keeping the
-    work proportional to pattern complexity.  Returns a dict mapping indicator
-    key to a Python list of per-bar values (None where data is unavailable).
+    Delegates standard indicators to ``indicator_core`` for backtest/live parity,
+    then computes backtest-specific composite indicators (candlestick patterns,
+    squeeze, VCP, etc.) that are only needed in the backtest context.
     """
     needed: set[str] = set()
     for cond in conditions:
@@ -794,56 +814,12 @@ def _compute_series_for_conditions(
     volume = df["Volume"].astype(float)
     n = len(df)
 
-    result: dict[str, list] = {}
+    # Delegate standard indicators to the shared core for parity
+    from app.services.trading.indicator_core import compute_all_from_df
+    result: dict[str, list] = compute_all_from_df(df, needed=needed)
 
     def _safe(series: pd.Series) -> list:
         return [None if pd.isna(v) else float(v) for v in series]
-
-    # -- Price (just close) ------------------------------------------------
-    if "price" in needed:
-        result["price"] = _safe(close)
-
-    # -- RSI ---------------------------------------------------------------
-    if "rsi_14" in needed:
-        try:
-            from ta.momentum import RSIIndicator
-            result["rsi_14"] = _safe(RSIIndicator(close, window=14).rsi())
-        except Exception:
-            result["rsi_14"] = _safe(_rsi(close, 14))
-
-    # -- EMAs --------------------------------------------------------------
-    for span in (9, 12, 20, 21, 26, 50, 100, 200):
-        key = f"ema_{span}"
-        if key in needed:
-            result[key] = _safe(close.ewm(span=span, adjust=False).mean())
-
-    # -- SMAs --------------------------------------------------------------
-    for span in (10, 20, 50, 100, 200):
-        key = f"sma_{span}"
-        if key in needed:
-            result[key] = _safe(close.rolling(span).mean())
-
-    # -- ADX ---------------------------------------------------------------
-    if "adx" in needed:
-        try:
-            from ta.trend import ADXIndicator
-            result["adx"] = _safe(ADXIndicator(high, low, close, window=14).adx())
-        except Exception:
-            result["adx"] = [None] * n
-
-    # -- MACD histogram ----------------------------------------------------
-    if "macd_hist" in needed:
-        try:
-            from ta.trend import MACD
-            result["macd_hist"] = _safe(MACD(close).macd_diff())
-        except Exception:
-            result["macd_hist"] = [None] * n
-
-    # -- Relative volume ---------------------------------------------------
-    if "rel_vol" in needed:
-        vol_avg = volume.rolling(20).mean()
-        rv = volume / vol_avg.replace(0, np.nan)
-        result["rel_vol"] = _safe(rv)
 
     # -- Internal Bar Strength: (close - low) / (high - low), 0..1 ----------
     if "ibs" in needed:
@@ -866,18 +842,6 @@ def _compute_series_for_conditions(
                 continue
             stretch[i] = bool(float(cl) < float(th))
         result["pullback_stretch_entry"] = stretch
-
-    # -- Daily change % (bar-over-bar) -------------------------------------
-    if "daily_change_pct" in needed:
-        prev_close = close.shift(1)
-        pct = (close - prev_close) / prev_close.replace(0, np.nan) * 100
-        result["daily_change_pct"] = _safe(pct)
-
-    # -- Gap % (open vs previous close) ------------------------------------
-    if "gap_pct" in needed:
-        prev_close = close.shift(1)
-        gap = (df["Open"] - prev_close) / prev_close.replace(0, np.nan) * 100
-        result["gap_pct"] = _safe(gap)
 
     # -- Candlestick pattern indicators ------------------------------------
     _open = df["Open"]
@@ -964,14 +928,8 @@ def _compute_series_for_conditions(
                 bool(v) if pd.notna(v) else None for v in (prev_sq & ~sq)
             ]
 
-    # -- Resistance (rolling 20-bar high) ----------------------------------
+    # -- Resistance (use core-computed or recompute for retests) ----------
     resistance_s = high.rolling(20).max()
-    if "resistance" in needed:
-        result["resistance"] = _safe(resistance_s)
-
-    if "dist_to_resistance_pct" in needed:
-        dist = (resistance_s - close) / close.replace(0, np.nan) * 100
-        result["dist_to_resistance_pct"] = _safe(dist)
 
     # -- Resistance retests (rolling count of bars near resistance) --------
     if "resistance_retests" in needed:
@@ -1076,54 +1034,16 @@ def _compute_series_for_conditions(
     return result
 
 
-# ── Condition evaluation (backtest version) ──────────────────────────
+# ── Condition evaluation (delegates to canonical pattern_engine) ──────
 
 def _eval_condition_bt(cond: dict, snap: dict[str, Any]) -> bool:
     """Evaluate a single pattern condition against a bar snapshot.
 
-    Mirrors ``pattern_engine._eval_condition`` exactly so that entry signals
-    during backtesting match live scanner behavior.
+    Delegates to ``pattern_engine._eval_condition`` to guarantee
+    backtest/live parity — a single source of truth for condition logic.
     """
-    ind_key = cond.get("indicator", "")
-    op = cond.get("op", "")
-    value = cond.get("value")
-    ref = cond.get("ref")
-
-    actual = snap.get(ind_key)
-    if actual is None:
-        return False
-
-    if ref:
-        ref_val = snap.get(ref)
-        if ref_val is None:
-            return False
-        value = ref_val
-
-    try:
-        if op == ">":
-            return float(actual) > float(value)
-        elif op == ">=":
-            return float(actual) >= float(value)
-        elif op == "<":
-            return float(actual) < float(value)
-        elif op == "<=":
-            return float(actual) <= float(value)
-        elif op == "==":
-            return actual == value
-        elif op == "!=":
-            return actual != value
-        elif op == "between":
-            if isinstance(value, list) and len(value) == 2:
-                return float(value[0]) <= float(actual) <= float(value[1])
-        elif op == "any_of":
-            if isinstance(value, list):
-                return actual in value
-        elif op == "not_in":
-            if isinstance(value, list):
-                return actual not in value
-    except (TypeError, ValueError):
-        return False
-    return False
+    from app.services.trading.pattern_engine import _eval_condition
+    return _eval_condition(cond, snap)
 
 
 # ── Dynamic pattern strategy ─────────────────────────────────────────

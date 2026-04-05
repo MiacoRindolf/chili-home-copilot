@@ -1,0 +1,53 @@
+---
+description: Session continuity, environment specifics, migration numbering, LLM patterns, and module inventory
+alwaysApply: true
+---
+
+# Continuation Guide
+
+## Multi-Session Continuity
+
+- Agent transcripts: `C:\Users\rindo\.cursor\projects\c-dev-chili-home-copilot\agent-transcripts\`
+- Search transcripts with Grep for keywords (task names, files, errors) to reconstruct context
+- Check `.cursor/plans/*.plan.md` for existing plans before starting new work
+- Check TodoWrite state for pending items from previous sessions
+- Read the conversation summary carefully before acting
+
+## Windows / PowerShell
+
+- Use `;` to chain commands (not `&&`)
+- `conda activate chili-env` before Python commands
+- `rg` may not be installed — use the Grep tool instead
+- Double-quote paths with spaces
+
+## Large File Strategy
+
+- `learning.py` (8k+ lines), `scanner.py` (4.7k+), `backtest_service.py` (2.1k+) — never read whole files
+- Use Grep to find function definitions, then Read with offset/limit
+- Key functions in `learning.py`: `run_learning_cycle`, `mine_patterns`, `mine_intraday_patterns`, `evolve_pattern_strategies`, `get_brain_stats`, `ensure_mined_scan_pattern`
+
+## Migration Numbering
+
+- Check LAST entry in `app/migrations.py::MIGRATIONS` before adding
+- Current tail: `("069_supporting_tables", _migration_069_supporting_tables)`
+- Next: `070_*`. Never skip numbers.
+- Pattern: define `_migration_NNN_name(conn)`, append tuple to MIGRATIONS
+
+## LLM Integration
+
+- Use `from ..llm_caller import call_llm` in services (avoids circular imports)
+- Trading brain LLM usage: cycle reports (`learning_cycle_report.py`), journal (`journal.py`), brain assistant (`brain_assistant.py`), web research (`web_pattern_researcher.py`)
+- Prompts in `app/prompts/*.txt` — don't hardcode in Python
+- Always fallback when LLM calls fail
+
+## Module Inventory (check before creating new files)
+
+`indicator_core.py` (TA math), `data_quality.py` (OHLCV cleaning), `lifecycle.py` (pattern FSM), `governance.py` (kill switch/approval), `portfolio_risk.py` (sizing/risk), `mining_validation.py` (promotion gates), `paper_trading.py` (simulated trades), `model_registry.py` (ML versioning), `execution_quality.py` (slippage), `daily_playbook.py` (morning briefing), `intraday_signals.py` (real-time scanners), `alpha_decay.py` (decay monitoring), `regime.py` (market regime), `mtf_consensus.py` (multi-TF), `data_retention.py` (DB cleanup), `alerts.py` (throttling/tiering)
+
+## Key DB Tables
+
+`scan_patterns`, `trading_paper_trades`, `trading_backtests`, `trading_snapshots`, `trading_risk_state`, `trading_brain_performance_daily`, `trading_daily_playbooks`, `trading_ml_model_versions` — all in `app/models/trading.py`
+
+## Key API Endpoints
+
+`/api/trading/brain/stats`, `/api/trading/brain/performance`, `/api/trading/brain/paper`, `/api/trading/brain/playbook`, `/api/trading/brain/governance`, `/api/trading/brain/governance/kill-switch`, `/api/trading/brain/governance/approve/{id}` — all in `app/routers/trading_sub/ai.py`

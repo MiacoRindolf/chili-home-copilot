@@ -71,8 +71,7 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
         "invoked by the brain worker and status APIs.\n\n"
         "Why: A coherent cycle boundary keeps mining, backtests, and meta-learning "
         "consistent; prescreen (2:00), market scan (2:30), and **market snapshots** (interval "
-        "job ``brain_market_snapshots``) run in ``trading_scheduler`` unless "
-        "``brain_snapshots_on_learning_cycle`` is enabled."
+        "job ``brain_market_snapshots``) run in ``trading_scheduler``."
     ),
     inputs=(
         "``db: Session`` — SQLAlchemy DB session for the worker",
@@ -106,7 +105,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             "``run_daily_prescreen_job`` at **2:00** and ``run_full_market_scan`` at **2:30** "
             "(America/Los_Angeles), and ``_run_brain_market_snapshot_job`` on an interval "
             "(default **15 min**, job id ``brain_market_snapshots``) so ``trading_snapshots`` "
-            "stay fresh when ``brain_snapshots_on_learning_cycle`` is false (default).\n\n"
+                    "stay fresh (snapshots are always scheduler-only).\n\n"
             "Where: ``app.services.trading_scheduler``.\n\n"
             "Why: Decouples heavy universe I/O and snapshot writes from the brain worker cycle."
         ),
@@ -144,7 +143,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                     "(``brain_market_snapshot_interval_minutes``, ``JOB_BRAIN_MARKET_SNAPSHOTS``)."
                 ),
                 remarks=(
-                    "Default path while ``brain_snapshots_on_learning_cycle`` is false. "
+                    "Snapshots are always scheduler-only. "
                     "Disable via ``BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED=0``."
                 ),
                 inputs=("``SessionLocal``", "``brain_default_user_id``", "merged ticker universe"),
@@ -194,8 +193,7 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 remarks=(
                     "What: ``take_snapshots_parallel(..., bar_interval='1d')`` → "
                     "``upsert_market_snapshot`` rows in ``trading_snapshots``.\n\n"
-                    "Where: ``learning.py`` only when ``brain_snapshots_on_learning_cycle`` is true; "
-                    "otherwise the APScheduler job ``brain_market_snapshots`` runs the same work.\n\n"
+                    "Where: APScheduler job ``brain_market_snapshots`` runs the snapshot work.\n\n"
                     "Why: Daily bars are the default feature store for swing mining and backfill labels."
                 ),
                 inputs=(
@@ -909,6 +907,30 @@ def _build_step_index() -> dict[tuple[str, str], CycleStepDef]:
 
 
 _CYCLE_STEP_INDEX: dict[tuple[str, str], CycleStepDef] = _build_step_index()
+
+
+_SCHEDULED_CLUSTER = "c_scheduled"
+_NO_PROGRESS_SIDS = frozenset({"cycle_report", "depromote", "finalize"})
+_SNAP_INLINE_SIDS = frozenset({"snapshots_daily", "snapshots_intraday"})
+
+
+def count_cycle_progress_steps(*, snap_inline: bool = False) -> int:
+    """Return the number of steps that contribute to the cycle progress bar.
+
+    Excludes scheduled-only steps (APScheduler) and post-cycle steps that don't
+    bump the counter.  Snapshot steps are only included when *snap_inline* is True.
+    """
+    count = 0
+    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
+        if cluster.id == _SCHEDULED_CLUSTER:
+            continue
+        for step in cluster.steps:
+            if step.sid in _NO_PROGRESS_SIDS:
+                continue
+            if step.sid in _SNAP_INLINE_SIDS and not snap_inline:
+                continue
+            count += 1
+    return count
 
 
 def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:

@@ -1,0 +1,75 @@
+---
+description: Trading brain module map, data flow, brain worker, scheduler, and subtask system
+globs:
+  - app/services/trading/**
+  - scripts/brain_worker.py
+  - app/services/trading_scheduler.py
+---
+
+# Trading Brain Architecture
+
+## Module Map (~60 files in `app/services/trading/`)
+
+### Core Orchestration
+- `learning.py` — Pattern mining, learning cycle orchestration, brain stats (~8k lines)
+- `learning_cycle_architecture.py` — Canonical step/cluster definitions for graph + status
+- `learning_cycle_report.py` — LLM/fallback cycle report generation
+- `brain_resource_budget.py` — Per-cycle caps for fetches/miners/injects
+
+### Brain Worker (`scripts/brain_worker.py`)
+- Main loop: acquire file lock → `run_learning_cycle(status)` → `run_subtasks` → sleep
+- Subtask modes: `alpha_decay` (every 3 cycles), `signal_refresh` (every 1), `fast_backtest` (every 1), `retention` (every 12)
+- Status JSON: `data/brain_worker_status.json`
+- Control signals: `brain_worker_stop`, `_pause`, `_wake` (file + DB)
+- Idle sleep: 60s if active queue, else `--interval` minutes; chunked with heartbeat/stop checks
+
+### Scheduler (`app/services/trading_scheduler.py`)
+Scheduler role from `settings.chili_scheduler_role`: `none`, `all`, `web`, `worker`.
+
+| Job | Schedule | Notes |
+|-----|----------|-------|
+| `daily_prescreen` | Cron 2:00 PT | Heavy |
+| `daily_market_scan` | Cron 2:30 PT | Heavy |
+| `brain_market_snapshots` | Interval 15min | Heavy |
+| `paper_trade_check` | Interval 15min | Light |
+| `data_retention` | Cron 3:30 PT | Heavy |
+| `breakout_outcome_checker` | Interval 1h | Light |
+| `crypto_breakout_scanner` | Interval 15min 24/7 | Light |
+| `stock_breakout_scanner` | Mon-Fri 9-15 ET, 15min | Light |
+| `momentum_scanner` | Mon-Fri 9-10 ET, 15min | Light |
+| `pattern_imminent_scanner` | Interval 15min | Light |
+| `price_monitor` | Mon-Fri 9-16, 5min | Light |
+| `broker_sync` | Mon-Fri 9-16, 2min | Light |
+
+### Learning Cycle Steps (actual order in `run_learning_cycle`)
+1. Shadow begin → hydrate prescreen/scan counts
+2. Backfill future returns + predicted scores
+3. Decay stale insights
+4. Mine patterns (`mine_patterns`, multi-strategy miners)
+5. Seek pattern data
+6. Queue backtests (`_auto_backtest_from_queue`)
+7. Variant evolution (`evolve_pattern_strategies`)
+8. Hypotheses (`validate_and_evolve`)
+9. Breakout + trade feedback
+10. Secondary miners (intraday, fakeout, exit optimization, synergies)
+11. Journal → signals → ML meta-learner
+12. Strategy proposals → pattern engine cycle
+13. AI report → live depromotion → finalize
+
+### Data Pipeline
+- **Prescreen**: Massive/yfinance/CoinGecko → `prescreen_candidates` table → ticker universe
+- **Snapshots**: `trading_snapshots` (OHLCV + indicators, interval-scheduled)
+- **Mining**: Snapshot data → `mine_patterns` → `ScanPattern` rows with `rules_json`
+- **Backtesting**: `ScanPattern` → `backtest_service` → `BacktestResult` + OOS fields
+- **Promotion**: `mining_validation.py` ensemble gates → lifecycle transition
+- **Live signals**: `pattern_engine.py` + `intraday_signals.py` → alerts/paper trades
+- **Feedback**: Closed trades → `alpha_decay` / `update_pattern_stats_from_closed_trades`
+
+### Key Services (non-trading)
+- `app/services/backtest_service.py` — Walk-forward backtesting, OOS holdouts
+- `app/services/brain_worker_signals.py` — DB-level stop/wake controls
+- `app/models/trading.py` — All SQLAlchemy models (21 classes)
+
+### Network Graph
+- `brain_network_graph.py` — Generates D3-compatible JSON from architecture definitions
+- `app/templates/brain.html` — JavaScript visualization with LightweightCharts, search, legend

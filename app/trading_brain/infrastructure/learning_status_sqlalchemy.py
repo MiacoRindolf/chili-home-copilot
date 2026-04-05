@@ -71,7 +71,7 @@ def log_learning_status_parity(
     if lt != db_view.total_steps:
         mismatches.append(
             f"total_steps legacy={lt!r} db_mirror={db_view.total_steps!r} "
-            f"(known debt: idle init may use 14 vs catalog {TOTAL_STAGES})"
+            f"(catalog={TOTAL_STAGES})"
         )
     if not mismatches:
         return

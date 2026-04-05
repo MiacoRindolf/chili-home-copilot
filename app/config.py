@@ -280,15 +280,6 @@ class Settings(BaseSettings):
     # Optional: restrict to one compose project label (empty = match any project with that service name)
     brain_worker_compose_project: str = ""
 
-    # When false (default), ``run_learning_cycle`` does not write daily/intraday rows to
-    # ``trading_snapshots``; APScheduler job ``brain_market_snapshots`` does (see trading_scheduler).
-    brain_snapshots_on_learning_cycle: bool = Field(
-        default=False,
-        validation_alias=AliasChoices(
-            "BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE",
-            "CHILI_BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE",
-        ),
-    )
     brain_market_snapshot_scheduler_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED"),

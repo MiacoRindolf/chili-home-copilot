@@ -1,6 +1,13 @@
-"""Purged / segmented validation for mined pattern candidates (lightweight CPCV-style)."""
+"""Purged / segmented validation for mined pattern candidates (lightweight CPCV-style).
+
+Includes:
+- Time-segmented validation (purged CPCV lite)
+- Bootstrap resampling for confidence intervals
+- Ensemble confirmation (2-of-3 methods must agree for promotion)
+"""
 from __future__ import annotations
 
+import random
 from datetime import datetime
 from typing import Any, Callable
 
@@ -21,9 +28,9 @@ def mined_candidate_passes_purged_segments(
     filtered: list[dict[str, Any]],
     *,
     n_segments: int = 3,
-    min_samples_per_segment: int = 2,
-    min_positive_segments: int = 2,
-    min_segment_mean_5d_pct: float = 0.0,
+    min_samples_per_segment: int = 5,
+    min_positive_segments: int = 3,
+    min_segment_mean_5d_pct: float = 0.05,
 ) -> tuple[bool, dict[str, Any]]:
     """Time-ordered segments: require positive mean 5d return in enough segments.
 
@@ -72,6 +79,111 @@ def filter_with_purged_gate(
     filt = [r for r in rows if predicate(r)]
     ok, meta = mined_candidate_passes_purged_segments(filt, **kw)
     return filt, ok, meta
+
+
+def bootstrap_win_rate_ci(
+    filtered: list[dict[str, Any]],
+    *,
+    n_resamples: int = 1000,
+    ci_level: float = 0.95,
+    return_key: str = "ret_5d",
+) -> dict[str, Any]:
+    """Bootstrap resample to get confidence interval on win-rate and avg return.
+
+    Returns {win_rate_mean, win_rate_lower, win_rate_upper, avg_return_mean,
+    avg_return_lower, avg_return_upper, n, passes_50pct_wr}.
+    """
+    if len(filtered) < 5:
+        return {"error": "too_few_samples", "n": len(filtered)}
+
+    rets = [float(r.get(return_key) or 0) for r in filtered]
+    n = len(rets)
+
+    boot_wrs: list[float] = []
+    boot_rets: list[float] = []
+
+    for _ in range(n_resamples):
+        sample = random.choices(rets, k=n)
+        w = sum(1 for r in sample if r > 0)
+        boot_wrs.append(w / n * 100)
+        boot_rets.append(sum(sample) / n)
+
+    boot_wrs.sort()
+    boot_rets.sort()
+
+    alpha = (1 - ci_level) / 2
+    lo_idx = int(alpha * n_resamples)
+    hi_idx = int((1 - alpha) * n_resamples) - 1
+
+    wr_mean = sum(boot_wrs) / n_resamples
+    ret_mean = sum(boot_rets) / n_resamples
+
+    return {
+        "n": n,
+        "win_rate_mean": round(wr_mean, 2),
+        "win_rate_lower": round(boot_wrs[lo_idx], 2),
+        "win_rate_upper": round(boot_wrs[hi_idx], 2),
+        "avg_return_mean": round(ret_mean, 4),
+        "avg_return_lower": round(boot_rets[lo_idx], 4),
+        "avg_return_upper": round(boot_rets[hi_idx], 4),
+        "passes_50pct_wr": boot_wrs[lo_idx] > 50.0,
+    }
+
+
+def ensemble_promotion_check(
+    filtered: list[dict[str, Any]],
+    *,
+    min_agree: int = 2,
+) -> tuple[bool, dict[str, Any]]:
+    """Run 3 independent validation methods. Promote only if >=min_agree pass.
+
+    Methods:
+    1. Purged segment validation (all 3 segments positive)
+    2. Bootstrap CI (lower bound of win-rate > 50%)
+    3. Walk-forward half-split (both halves profitable)
+    """
+    results: dict[str, Any] = {"methods": {}}
+    votes = 0
+
+    # Method 1: Purged segments
+    seg_ok, seg_detail = mined_candidate_passes_purged_segments(filtered)
+    results["methods"]["purged_segments"] = {"pass": seg_ok, **seg_detail}
+    if seg_ok:
+        votes += 1
+
+    # Method 2: Bootstrap CI
+    boot = bootstrap_win_rate_ci(filtered)
+    boot_ok = boot.get("passes_50pct_wr", False) and boot.get("avg_return_lower", -1) > 0
+    results["methods"]["bootstrap_ci"] = {"pass": boot_ok, **boot}
+    if boot_ok:
+        votes += 1
+
+    # Method 3: Walk-forward half-split
+    ordered = sorted(filtered, key=_row_time_key)
+    mid = len(ordered) // 2
+    first_half = ordered[:mid]
+    second_half = ordered[mid:]
+    wf_ok = False
+    wf_detail: dict[str, Any] = {}
+    if len(first_half) >= 5 and len(second_half) >= 5:
+        avg_1 = sum(float(r.get("ret_5d") or 0) for r in first_half) / len(first_half)
+        avg_2 = sum(float(r.get("ret_5d") or 0) for r in second_half) / len(second_half)
+        wr_1 = sum(1 for r in first_half if float(r.get("ret_5d") or 0) > 0) / len(first_half) * 100
+        wr_2 = sum(1 for r in second_half if float(r.get("ret_5d") or 0) > 0) / len(second_half) * 100
+        wf_ok = avg_1 > 0 and avg_2 > 0 and wr_2 >= 50
+        wf_detail = {
+            "first_half_avg": round(avg_1, 4), "second_half_avg": round(avg_2, 4),
+            "first_half_wr": round(wr_1, 1), "second_half_wr": round(wr_2, 1),
+            "first_n": len(first_half), "second_n": len(second_half),
+        }
+    results["methods"]["walk_forward_split"] = {"pass": wf_ok, **wf_detail}
+    if wf_ok:
+        votes += 1
+
+    results["votes"] = votes
+    results["required"] = min_agree
+    results["promoted"] = votes >= min_agree
+    return votes >= min_agree, results
 
 
 def decay_signals_from_walk_forward_windows(

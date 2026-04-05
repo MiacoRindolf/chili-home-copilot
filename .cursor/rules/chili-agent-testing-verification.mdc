@@ -1,0 +1,54 @@
+---
+description: When and how to test, performance profiling, and verification standards
+alwaysApply: true
+---
+
+# Testing and Verification
+
+## When to Write Tests
+
+- New utility modules with reusable logic
+- Parity between two code paths (backtest vs live, old vs new)
+- Complex validation logic (statistical methods, ensemble gates)
+- NOT for every small bug fix, config change, or template tweak
+
+## Parity Testing Pattern
+
+Feed identical input to both code paths, assert equal output at every step. Example: `tests/test_indicator_parity.py` runs conditions through `_eval_condition` and `_eval_condition_bt`.
+
+## Signal Replay Testing
+
+Record full indicator arrays, evaluate conditions bar-by-bar, verify both paths agree at every bar index.
+
+## Running Tests
+
+```powershell
+python -m pytest tests/test_specific.py -v --tb=short
+```
+
+On Windows PowerShell: use `;` not `&&` to chain commands. Always check exit code 0.
+
+## Synthetic Test Data
+
+Use `numpy.random.default_rng(seed=42)` for reproducible OHLCV data:
+
+```python
+def _make_ohlcv_df(n=100, seed=42):
+    rng = np.random.default_rng(seed)
+    close = 100 + np.cumsum(rng.normal(0, 1, n))
+    # ... build DataFrame with Open, High, Low, Close, Volume
+```
+
+## Performance Profiling
+
+- Measure before/after with `time.monotonic()` around slow sections
+- Common bottlenecks: N+1 DB queries (batch preload), unbounded caches (LRU cap), redundant API calls (TTL cache)
+- For DB: check composite indexes in migrations 063+ before adding new ones
+- All caches must have a hard max size and TTL
+
+## Verification Gates Per Phase
+
+1. Lint check on changed files (ReadLints)
+2. Run related tests
+3. Spot-check changed logic by reading the result
+4. For DB changes: verify migration applies cleanly

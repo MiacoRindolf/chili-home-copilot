@@ -320,14 +320,12 @@ class TestClampPeriod:
 
 
 class TestTradingPageAPI:
-    @patch("app.services.trading_service.should_run_learning", return_value=False)
-    def test_trading_page_loads(self, mock_learn, client):
+    def test_trading_page_loads(self, client):
         resp = client.get("/trading")
         assert resp.status_code == 200
         assert "Trading" in resp.text
 
-    @patch("app.services.trading_service.should_run_learning", return_value=False)
-    def test_trading_backup_page_loads(self, mock_learn, client):
+    def test_trading_backup_page_loads(self, client):
         resp = client.get("/trading-backup")
         assert resp.status_code == 200
         assert "Trading" in resp.text

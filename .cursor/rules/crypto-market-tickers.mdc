@@ -1,0 +1,40 @@
+---
+description: Crypto ticker normalization, Massive/Polygon X: symbols, and multi-quote fallbacks for CHILI market data
+alwaysApply: true
+---
+
+# Crypto and provider tickers (CHILI)
+
+## App convention (DB, UI, backtests, yfinance-style)
+
+- Use **`BASE-USD`** (hyphen), e.g. `ZK-USD`, `BTC-USD`.
+- **Bare concat** is also valid crypto input: **`ZKUSD`**, **`BTCUSD`** (no hyphen, ends with `USD`, base 2–15 alnum). Treat as crypto everywhere you branch on asset class.
+
+## Massive / Polygon REST (aggregates, snapshots)
+
+- Provider symbols are **`X:BASEQUOTE`** (no hyphen in the pair), e.g. `X:ZKUSD`, `X:BTCUSD`.
+- **Do not** assume `X:BASEUSD` is the only listing. The same asset may trade as **`X:BASEUSDT`** or **`X:BASEUSDC`**.
+
+## Single source of truth (implement here, do not fork logic)
+
+| Function | Module | Role |
+|----------|--------|------|
+| `to_massive_ticker` | `app/services/massive_client.py` | `ZK-USD` / `ZKUSD` → `X:ZKUSD`; stocks pass through |
+| `crypto_aggregate_symbol_candidates` | same | Ordered list: primary + `USD` / `USDT` / `USDC` variants |
+| `massive_aggregate_variants_all_dead` | same | True only if **every** candidate is in the dead cache (avoid skipping Massive when one quote pair is dead) |
+| `is_crypto` | same | `*-USD`, bare `*USD`, not `X:` prefixes |
+| `from_massive_ticker` | same | `X:…` → app `BASE-USD` (handles USDT/USDC suffixes) |
+
+- **`get_aggregates`** in Massive and Polygon tries **`crypto_aggregate_symbol_candidates`** until bars are returned.
+- **`polygon_client`** imports `is_crypto`, `to_massive_ticker`, and `crypto_aggregate_symbol_candidates` from **`massive_client`** (same package: `from .massive_client import …`). Keep naming aligned; do not duplicate variant lists in Polygon-only code.
+
+## `market_data` and tests
+
+- **`fetch_ohlcv` / `fetch_ohlcv_df`**: use **`massive_aggregate_variants_all_dead(ticker)`** (not only `to_massive_ticker`) when deciding if Massive is exhausted.
+- When mocking **`_massive`** in tests, set **`massive_aggregate_variants_all_dead.return_value = False`** if the code path should fall through to Polygon/yfinance (otherwise a `MagicMock` is truthy and blocks fallbacks).
+
+## Anti-patterns
+
+- Treating a **404 or empty** on **`X:BASEUSD`** as “coin unavailable” without trying **USDT/USDC** candidates.
+- Marking the **entire** asset dead because **one** intraday chunk or **one** quote currency failed (per-symbol / per-variant dead cache only).
+- Hardcoding `X:…` strings in routers or templates instead of normalizing through **`to_massive_ticker`** / candidates.

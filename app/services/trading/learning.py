@@ -7,6 +7,7 @@ import os
 import time
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -23,7 +24,7 @@ from .market_data import (
     get_vix, get_volatility_regime, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS,
     _use_massive, _use_polygon,
 )
-from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, get_trade_stats_by_pattern
+from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, preload_active_insights, get_trade_stats_by_pattern
 from .brain_resource_budget import BrainResourceBudget
 from .snapshot_bar_ops import (
     dedupe_sample_rows,
@@ -34,6 +35,7 @@ from .snapshot_bar_ops import (
 from .learning_cycle_architecture import (
     apply_learning_cycle_step_status,
     apply_learning_cycle_step_status_progress,
+    count_cycle_progress_steps,
 )
 
 logger = logging.getLogger(__name__)
@@ -380,8 +382,15 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         if float(live_wr) < float(oos_wr) - max_gap:
             p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
             if p and p.active and (p.promotion_status or "") == "promoted":
-                p.active = False
-                p.promotion_status = "degraded_live"
+                from .lifecycle import transition_on_decay
+                try:
+                    transition_on_decay(
+                        db, p,
+                        reason=f"live WR {live_wr:.1f}% vs OOS {oos_wr:.1f}% (gap>{max_gap}pp)",
+                    )
+                except Exception:
+                    p.active = False
+                    p.promotion_status = "degraded_live"
                 demoted += 1
     if demoted:
         db.commit()
@@ -694,9 +703,9 @@ def take_snapshots_parallel(
             if done % 100 == 0 or done == total:
                 elapsed = round(time.time() - _t0, 1)
                 logger.info(f"[learning] Snapshot progress: {done}/{total} ({elapsed}s)")
-                # graph-node: c_state/snapshots (progress text; metadata in learning_cycle_architecture)
+                # graph-node: c_state/snapshots_daily (progress text; metadata in learning_cycle_architecture)
                 apply_learning_cycle_step_status_progress(
-                    _learning_status, "c_state", "snapshots", done, total,
+                    _learning_status, "c_state", "snapshots_daily", done, total,
                 )
 
     _fetch_elapsed = round(time.time() - _t0, 1)
@@ -989,11 +998,16 @@ def _mine_from_history(ticker: str, bar_interval: str = "1d") -> list[dict]:
     from ta.volume import OnBalanceVolumeIndicator
     from .scanner import _detect_resistance_retests, _detect_narrow_range, _detect_vcp
 
+    from .data_quality import clean_ohlcv
+
     period = "6mo" if bar_interval == "1d" else "90d"
     min_len = 60 if bar_interval == "1d" else 120
     try:
         df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
         if df.empty or len(df) < min_len:
+            return []
+        df = clean_ohlcv(df)
+        if len(df) < min_len:
             return []
     except Exception:
         return []
@@ -1162,6 +1176,50 @@ def mine_row_to_indicator_payload(row: dict) -> dict:
         "volume_z_20": {"value": row.get("vol_z_20")},
         "realized_vol_20": {"value": row.get("realized_vol_20")},
     }
+
+
+def ensure_mined_scan_pattern(
+    db, name: str, conditions: list[dict], *,
+    confidence: float, win_rate: float, avg_return_pct: float,
+    evidence_count: int, asset_class: str = "all",
+) -> int | None:
+    """Create or update a ScanPattern with structured rules_json from mining.
+
+    Shared by all miners (daily, intraday, secondary) so every discovery
+    produces a machine-actionable ScanPattern entry.
+    """
+    from ...models.trading import ScanPattern
+
+    rules = json.dumps({"conditions": conditions})
+    existing = db.query(ScanPattern).filter(
+        ScanPattern.name == name,
+        ScanPattern.origin == "mined",
+        ScanPattern.active.is_(True),
+    ).first()
+    if existing:
+        existing.confidence = confidence
+        existing.win_rate = win_rate
+        existing.avg_return_pct = avg_return_pct
+        existing.evidence_count = evidence_count
+        existing.rules_json = rules
+        db.flush()
+        return existing.id
+
+    sp = ScanPattern(
+        name=name,
+        description=f"Mined: {name}",
+        rules_json=rules,
+        origin="mined",
+        asset_class=asset_class,
+        confidence=confidence,
+        win_rate=win_rate,
+        avg_return_pct=avg_return_pct,
+        evidence_count=evidence_count,
+        lifecycle_stage="candidate",
+    )
+    db.add(sp)
+    db.flush()
+    return sp.id
 
 
 def mine_patterns(
@@ -1333,10 +1391,14 @@ def mine_patterns(
     regime_tag = f" [{vol_regime['label']}]" if vol_regime.get("regime") != "unknown" else ""
 
     discoveries: list[str] = []
-    MIN_SAMPLES = 3
+    MIN_SAMPLES = max(20, int(getattr(settings, "brain_mining_min_samples", 20)))
+    MIN_WIN_RATE = float(getattr(settings, "brain_mining_min_win_rate", 58.0))
     _cpcv_on = getattr(settings, "brain_mining_purged_cpcv_enabled", True)
+    _emit_scan_patterns = bool(getattr(settings, "brain_mining_emit_scan_patterns", True))
 
-    def _check(filtered, label):
+    _insight_cache = preload_active_insights(db, user_id)
+
+    def _check(filtered, label, conditions=None):
         if len(filtered) < MIN_SAMPLES:
             return
         if _cpcv_on:
@@ -1349,39 +1411,73 @@ def mine_patterns(
         avg_10d = (sum(avg_10d_vals) / len(avg_10d_vals)) if avg_10d_vals else None
         wins = sum(1 for r in filtered if r["ret_5d"] > 0)
         wr = wins / len(filtered) * 100
-        if avg_5d > 0.2 or (avg_5d > 0 and wr >= 55):
+        if avg_5d > 0.3 and wr >= MIN_WIN_RATE:
             ret_str = f"{avg_5d:+.1f}%/5d"
             if avg_10d is not None:
                 ret_str += f", {avg_10d:+.1f}%/10d"
             pattern = f"{label} -> avg {ret_str} ({wr:.0f}% win, {len(filtered)} samples){regime_tag}"
             discoveries.append(pattern)
+
+            sp_id = None
+            if _emit_scan_patterns and conditions:
+                sp_id = _ensure_mined_scan_pattern(
+                    db, label, conditions,
+                    confidence=min(0.9, wr / 100),
+                    win_rate=wr,
+                    avg_return_pct=avg_5d,
+                    evidence_count=len(filtered),
+                )
+
             save_insight(db, user_id, pattern, confidence=min(0.9, wr / 100),
-                         wins=wins, losses=len(filtered) - wins)
+                         wins=wins, losses=len(filtered) - wins,
+                         scan_pattern_id=sp_id,
+                         _existing_cache=_insight_cache)
+
+    def _ensure_mined_scan_pattern(
+        _db, name, conds, *, confidence, win_rate, avg_return_pct, evidence_count,
+    ) -> int | None:
+        return ensure_mined_scan_pattern(
+            _db, name, conds,
+            confidence=confidence, win_rate=win_rate,
+            avg_return_pct=avg_return_pct, evidence_count=evidence_count,
+        )
 
     logger.info(f"[mine_patterns] Mining from {len(all_rows)} historical data points")
 
-    _check([r for r in all_rows if r["rsi"] < 30], "RSI oversold (<30)")
-    _check([r for r in all_rows if r["rsi"] > 70], "RSI overbought (>70) — sell signal")
-    _check([r for r in all_rows if 30 <= r["rsi"] < 40], "RSI near-oversold (30-40)")
-    _check([r for r in all_rows if r["macd"] > r["macd_sig"]], "MACD bullish crossover")
+    _check([r for r in all_rows if r["rsi"] < 30], "RSI oversold (<30)",
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}])
+    _check([r for r in all_rows if r["rsi"] > 70], "RSI overbought (>70) — sell signal",
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 70}])
+    _check([r for r in all_rows if 30 <= r["rsi"] < 40], "RSI near-oversold (30-40)",
+           conditions=[{"indicator": "rsi_14", "op": ">=", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
+    _check([r for r in all_rows if r["macd"] > r["macd_sig"]], "MACD bullish crossover",
+           conditions=[{"indicator": "macd", "op": ">", "ref": "macd_signal"}])
     _check([r for r in all_rows if r["macd_hist"] > 0 and r["macd"] < 0],
-           "MACD histogram positive while MACD negative (early reversal)")
+           "MACD histogram positive while MACD negative (early reversal)",
+           conditions=[{"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "macd", "op": "<", "value": 0}])
     _check([r for r in all_rows if r["bb_pct"] < 0.1],
-           "Price below lower Bollinger Band (<10%)")
+           "Price below lower Bollinger Band (<10%)",
+           conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.1}])
     _check([r for r in all_rows if r["bb_pct"] > 0.9],
-           "Price above upper Bollinger Band (>90%) — sell signal")
+           "Price above upper Bollinger Band (>90%) — sell signal",
+           conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.9}])
     _check([r for r in all_rows if r["adx"] > 30 and r["rsi"] < 40],
-           "Strong trend (ADX>30) + RSI<40 (trending oversold)")
+           "Strong trend (ADX>30) + RSI<40 (trending oversold)",
+           conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
     _check([r for r in all_rows if r["adx"] < 15],
-           "No trend (ADX<15) — range-bound, mean reversion expected")
+           "No trend (ADX<15) — range-bound, mean reversion expected",
+           conditions=[{"indicator": "adx", "op": "<", "value": 15}])
     _check([r for r in all_rows if r["ema_stack"]],
-           "EMA stacking bullish (Price > EMA20 > EMA50 > EMA100)")
+           "EMA stacking bullish (Price > EMA20 > EMA50 > EMA100)",
+           conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "price", "op": ">", "ref": "ema_100"}])
     _check([r for r in all_rows
             if r["rsi"] < 35 and r["macd"] > r["macd_sig"] and r["bb_pct"] < 0.2],
-           "Triple confluence: RSI<35 + MACD bullish + near lower BB")
+           "Triple confluence: RSI<35 + MACD bullish + near lower BB",
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "bb_pct", "op": "<", "value": 0.2}])
     _check([r for r in all_rows
             if r["rsi"] > 55 and r["adx"] > 25 and r["macd"] > r["macd_sig"]],
-           "Momentum confluence: RSI>55 + ADX>25 + MACD bullish (trend continuation)")
+           "Momentum confluence: RSI>55 + ADX>25 + MACD bullish (trend continuation)",
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 55}, {"indicator": "adx", "op": ">", "value": 25}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}])
 
     atr_vals = [r["atr"] for r in all_rows if r["atr"] > 0]
     if atr_vals:
@@ -1532,6 +1628,68 @@ def mine_patterns(
         _check([r for r in sent_rows if abs(r["news_sentiment"]) < 0.05
                 and r["adx"] > 30 and r["rsi"] < 40],
                "Neutral news + strong trend (ADX>30) + RSI<40 — trend pullback, no catalyst fear")
+
+    # ── Volume profile patterns ──
+    vp_rows = [r for r in all_rows if r.get("vol_ratio") is not None and r.get("atr") and r["atr"] > 0]
+    if len(vp_rows) >= 20:
+        _check([r for r in vp_rows if r["vol_ratio"] > 3.0 and r["bb_pct"] > 0.8],
+               "Volume profile breakout: 3x volume + upper BB (institutional buying)",
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 3.0}, {"indicator": "bb_pct", "op": ">", "value": 0.8}])
+        _check([r for r in vp_rows if r["vol_ratio"] < 0.5 and r["bb_pct"] > 0.4 and r["bb_pct"] < 0.6],
+               "Volume dry-up in mid-range: coiling before expansion",
+               conditions=[{"indicator": "volume_ratio", "op": "<", "value": 0.5}, {"indicator": "bb_pct", "op": ">", "value": 0.4}, {"indicator": "bb_pct", "op": "<", "value": 0.6}])
+        _check([r for r in vp_rows if r["vol_ratio"] > 2.0 and r["rsi"] > 50 and r["macd_hist"] > 0 and r["ema_stack"]],
+               "Volume accumulation: 2x vol + RSI>50 + MACD+ + EMA stack (institutional trend)",
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "price", "op": ">", "ref": "ema_20"}])
+
+    # ── Cross-asset / correlation patterns ──
+    crypto_rows = [r for r in all_rows if r["is_crypto"]]
+    stock_rows = [r for r in all_rows if not r["is_crypto"]]
+    if len(crypto_rows) >= 10 and len(stock_rows) >= 10:
+        crypto_avg = sum(r["ret_5d"] for r in crypto_rows) / len(crypto_rows)
+        stock_avg = sum(r["ret_5d"] for r in stock_rows) / len(stock_rows)
+        if crypto_avg > 0.5 and stock_avg < -0.5:
+            _check([r for r in crypto_rows if r["rsi"] > 50 and r["macd_hist"] > 0],
+                   "Crypto divergence: crypto bullish while stocks weak (risk-on rotation)",
+                   conditions=[{"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "regime_composite", "op": "!=", "value": "risk_on"}])
+        if stock_avg > 0.5 and crypto_avg < -0.5:
+            _check([r for r in stock_rows if r["ema_stack"] and r["adx"] > 20],
+                   "Stock leadership: stocks strong while crypto weak (traditional risk-on)",
+                   conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "adx", "op": ">", "value": 20}])
+
+    # ── Microstructure / price action patterns ──
+    atr_rows = [r for r in all_rows if r.get("atr") and r["atr"] > 0]
+    if len(atr_rows) >= 20:
+        atr_med = sorted([r["atr"] for r in atr_rows])[len(atr_rows) // 2]
+        _check([r for r in atr_rows if r["atr"] < atr_med * 0.4 and r["adx"] < 15 and r["bb_pct"] > 0.3 and r["bb_pct"] < 0.7],
+               "Extreme compression: ATR<40%med + ADX<15 + mid-BB (NR setup pre-breakout)",
+               conditions=[{"indicator": "adx", "op": "<", "value": 15}, {"indicator": "bb_pct", "op": ">", "value": 0.3}, {"indicator": "bb_pct", "op": "<", "value": 0.7}])
+        _check([r for r in atr_rows if r["atr"] > atr_med * 2.0 and r["rsi"] < 30 and r["macd_hist"] > 0],
+               "Volatility expansion + oversold + MACD turning: capitulation reversal",
+               conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+
+    # ── Composite multi-signal miners (4+ conditions) ──
+    _check([r for r in all_rows
+            if r["rsi"] > 45 and r["rsi"] < 65
+            and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
+            and r["ema_stack"] and r["adx"] > 20
+            and r.get("vol_ratio") is not None and r["vol_ratio"] > 1.5
+            and r["bb_pct"] > 0.4 and r["bb_pct"] < 0.8],
+           "Full setup: RSI neutral + MACD+ + EMA stack + ADX>20 + vol surge + mid-BB (highest conviction)",
+           conditions=[
+               {"indicator": "rsi_14", "op": ">=", "value": 45}, {"indicator": "rsi_14", "op": "<=", "value": 65},
+               {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "adx", "op": ">", "value": 20},
+               {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+           ])
+    _check([r for r in all_rows
+            if r["stoch_k"] < 25 and r["rsi"] < 35 and r["bb_pct"] < 0.15
+            and r["macd_hist"] > 0 and r.get("vol_ratio") is not None and r["vol_ratio"] > 1.5],
+           "Quad oversold bounce: Stoch<25 + RSI<35 + BB<15% + MACD turning + volume (max-conviction reversal)",
+           conditions=[
+               {"indicator": "stochastic_k", "op": "<", "value": 25}, {"indicator": "rsi_14", "op": "<", "value": 35},
+               {"indicator": "bb_pct", "op": "<", "value": 0.15}, {"indicator": "macd_histogram", "op": ">", "value": 0},
+               {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+           ])
 
     try:
         if getattr(settings, "brain_regime_mining_enabled", True):
@@ -2835,6 +2993,7 @@ def mine_intraday_patterns(
 
     discoveries = 0
     _fam = BRAIN_HYPOTHESIS_FAMILY_COMPRESSION
+    _insight_cache = preload_active_insights(db, user_id)
 
     # Hypothesis: BB squeeze -> 4h positive returns
     sq = [r for r in rows if r["bb_squeeze"]]
@@ -2845,12 +3004,19 @@ def mine_intraday_patterns(
         wr_sq = sum(1 for r in sq if r["ret_4h"] > 0) / len(sq) * 100
         if avg_sq > avg_no and avg_sq > 0.1:
             w = sum(1 for r in sq if r["ret_4h"] > 0)
+            sp_id = ensure_mined_scan_pattern(
+                db, "Intraday BB Squeeze -> 4h Return",
+                [{"indicator": "bb_squeeze", "op": "==", "value": True}],
+                confidence=min(0.80, wr_sq / 100), win_rate=wr_sq,
+                avg_return_pct=avg_sq, evidence_count=len(sq),
+            )
             save_insight(
                 db, user_id,
                 f"Intraday: BB squeeze -> {avg_sq:+.2f}% avg 4h return, "
                 f"{wr_sq:.0f}%wr (n={len(sq)}) vs non-squeeze {avg_no:+.2f}%",
                 confidence=min(0.80, wr_sq / 100),
                 wins=w, losses=len(sq) - w,
+                scan_pattern_id=sp_id,
                 hypothesis_family=_fam,
             )
             discoveries += 1
@@ -2862,6 +3028,14 @@ def mine_intraday_patterns(
         avg_low = sum(r["ret_4h"] for r in sq_vol_low) / len(sq_vol_low)
         avg_high = sum(r["ret_4h"] for r in sq_vol_high) / len(sq_vol_high)
         w_low = sum(1 for r in sq_vol_low if r["ret_4h"] > 0)
+        wr_low = w_low / len(sq_vol_low) * 100 if sq_vol_low else 0
+        sp_id = ensure_mined_scan_pattern(
+            db, "Intraday Squeeze + Declining Volume",
+            [{"indicator": "bb_squeeze", "op": "==", "value": True},
+             {"indicator": "volume_ratio", "op": "<", "value": 0.8}],
+            confidence=0.5, win_rate=wr_low,
+            avg_return_pct=avg_low, evidence_count=len(sq_vol_low),
+        )
         save_insight(
             db, user_id,
             f"Intraday: squeeze + low vol {avg_low:+.2f}%/4h "
@@ -2869,6 +3043,7 @@ def mine_intraday_patterns(
             f"(n={len(sq_vol_low)}+{len(sq_vol_high)})",
             confidence=0.5,
             wins=w_low, losses=len(sq_vol_low) - w_low,
+            scan_pattern_id=sp_id,
             hypothesis_family=_fam,
         )
         discoveries += 1
@@ -2879,12 +3054,19 @@ def mine_intraday_patterns(
         avg_nr7 = sum(r["ret_8h"] for r in nr7s) / len(nr7s)
         wr_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0) / len(nr7s) * 100
         w_nr7 = sum(1 for r in nr7s if r["ret_8h"] > 0)
+        sp_id = ensure_mined_scan_pattern(
+            db, "Intraday NR7 -> 8h Expansion",
+            [{"indicator": "nr7", "op": "==", "value": True}],
+            confidence=min(0.75, wr_nr7 / 100), win_rate=wr_nr7,
+            avg_return_pct=avg_nr7, evidence_count=len(nr7s),
+        )
         save_insight(
             db, user_id,
             f"Intraday: NR7 (narrow range 7) -> {avg_nr7:+.2f}% avg 8h return, "
             f"{wr_nr7:.0f}%wr (n={len(nr7s)})",
             confidence=min(0.75, wr_nr7 / 100),
             wins=w_nr7, losses=len(nr7s) - w_nr7,
+            scan_pattern_id=sp_id,
             hypothesis_family=_fam,
         )
         discoveries += 1
@@ -3152,8 +3334,8 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         cutoff = datetime.utcnow() - timedelta(days=180)
         resolved = db.query(BreakoutAlert).filter(
             BreakoutAlert.outcome != "pending",
-            BreakoutAlert.resolved_at >= cutoff,
-        ).order_by(BreakoutAlert.resolved_at.desc()).limit(500).all()
+            BreakoutAlert.outcome_checked_at >= cutoff,
+        ).order_by(BreakoutAlert.outcome_checked_at.desc()).limit(500).all()
     except Exception:
         return {"patterns_learned": 0}
 
@@ -3167,16 +3349,14 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
     for alert in resolved:
         key = f"{alert.asset_type}|{alert.alert_tier}"
         groups[key].append(alert)
-        
-        # Also group by scan_pattern_id via related insight
-        if alert.related_insight_id:
-            insight = db.query(TradingInsight).get(alert.related_insight_id)
-            if insight and insight.scan_pattern_id:
-                pattern_outcomes[insight.scan_pattern_id].append({
-                    "outcome": alert.outcome,
-                    "gain_pct": alert.max_gain_pct or 0,
-                    "drawdown_pct": alert.max_drawdown_pct or 0,
-                })
+
+        _spid = getattr(alert, "scan_pattern_id", None)
+        if _spid:
+            pattern_outcomes[_spid].append({
+                "outcome": alert.outcome,
+                "gain_pct": alert.max_gain_pct or 0,
+                "drawdown_pct": alert.max_drawdown_pct or 0,
+            })
 
     patterns_created = 0
     patterns_updated = 0
@@ -3276,6 +3456,87 @@ def learn_from_breakout_outcomes(db: Session, user_id: int | None) -> dict[str, 
         "scan_patterns_updated": patterns_updated,
         "total_resolved": len(resolved),
     }
+
+
+# ── Closed-Trade → ScanPattern Feedback ────────────────────────────────
+
+def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Aggregate win/loss/return from closed trades and update their linked ScanPattern.
+
+    Only considers trades closed in the last 180 days that have a ``scan_pattern_id``.
+    Uses exponential blending so new data gradually outweighs stale stats.
+    """
+    from ...models.trading import ScanPattern, Trade
+
+    cutoff = datetime.utcnow() - timedelta(days=180)
+    try:
+        closed = (
+            db.query(
+                Trade.scan_pattern_id,
+                Trade.pnl,
+                Trade.entry_price,
+                Trade.exit_price,
+            )
+            .filter(
+                Trade.status == "closed",
+                Trade.scan_pattern_id.isnot(None),
+                Trade.exit_date >= cutoff,
+            )
+            .all()
+        )
+    except Exception:
+        return {"patterns_updated": 0}
+
+    if not closed:
+        return {"patterns_updated": 0, "note": "no closed trades with pattern linkage"}
+
+    from collections import defaultdict
+
+    buckets: dict[int, list[dict]] = defaultdict(list)
+    for row in closed:
+        if row.scan_pattern_id is None:
+            continue
+        ret_pct = 0.0
+        if row.entry_price and row.exit_price and row.entry_price > 0:
+            ret_pct = (row.exit_price - row.entry_price) / row.entry_price * 100
+        buckets[row.scan_pattern_id].append({
+            "win": (row.pnl or 0) > 0,
+            "return_pct": ret_pct,
+        })
+
+    updated = 0
+    for pattern_id, trades in buckets.items():
+        if len(trades) < 2:
+            continue
+        pattern = db.get(ScanPattern, pattern_id)
+        if not pattern:
+            continue
+
+        wins = sum(1 for t in trades if t["win"])
+        n = len(trades)
+        new_wr = wins / n
+        new_ret = sum(t["return_pct"] for t in trades) / n
+
+        blend = min(0.8, n / 30)
+        old_wr = pattern.win_rate or 0.5
+        old_ret = pattern.avg_return_pct or 0.0
+
+        pattern.win_rate = round(old_wr * (1 - blend) + new_wr * blend, 4)
+        pattern.avg_return_pct = round(old_ret * (1 - blend) + new_ret * blend, 2)
+        pattern.trade_count = (pattern.trade_count or 0) + n
+        pattern.updated_at = datetime.utcnow()
+        updated += 1
+
+        logger.info(
+            "[learning] Trade feedback → ScanPattern '%s' (id=%d): "
+            "wr=%.1f%% (was %.1f%%), avg_ret=%.2f%% (was %.2f%%), n=%d",
+            pattern.name, pattern.id,
+            pattern.win_rate * 100, old_wr * 100,
+            pattern.avg_return_pct, old_ret,
+            n,
+        )
+
+    return {"patterns_updated": updated, "trades_processed": len(closed)}
 
 
 # ── Exit Optimization Learning ────────────────────────────────────────
@@ -4999,11 +5260,20 @@ def backfill_predicted_scores(db: Session, limit: int = 500) -> int:
 
 
 def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
+    from ...models.trading import ScanPattern
     from ..ticker_universe import get_ticker_count
     from .scanner import get_scan_status
 
     total_patterns = db.query(TradingInsight).filter(
         TradingInsight.user_id == user_id, TradingInsight.active.is_(True),
+    ).count()
+
+    total_scan_patterns = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True),
+    ).count()
+    promoted_patterns = db.query(ScanPattern).filter(
+        ScanPattern.active.is_(True),
+        ScanPattern.promotion_status == "promoted",
     ).count()
 
     avg_confidence_row = db.query(func.avg(TradingInsight.confidence)).filter(
@@ -5036,9 +5306,6 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
 
     total_snapshots = db.query(MarketSnapshot).count()
 
-    # Backfill predicted_score on snapshots that have indicator_data but no score
-    backfill_predicted_scores(db, limit=500)
-
     filled_snaps = db.query(MarketSnapshot).filter(
         MarketSnapshot.future_return_5d.isnot(None),
     ).order_by(MarketSnapshot.snapshot_date.desc()).limit(2000).all()
@@ -5056,7 +5323,6 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
                 if not ind_data:
                     continue
                 pred_score = compute_prediction(ind_data)
-                snap.predicted_score = pred_score
 
             if abs(pred_score) < 0.1:
                 continue
@@ -5220,6 +5486,8 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
 
     return {
         "total_patterns": total_patterns,
+        "total_scan_patterns": total_scan_patterns,
+        "promoted_patterns": promoted_patterns,
         "avg_confidence": avg_confidence,
         "confidence_trend": conf_delta,
         "patterns_this_week": patterns_this_week,
@@ -5407,7 +5675,7 @@ _learning_status: dict[str, Any] = {
     "phase": "idle",
     "current_step": "",
     "steps_completed": 0,
-    "total_steps": 14,
+    "total_steps": count_cycle_progress_steps(snap_inline=False),
     "patterns_found": 0,
     "tickers_processed": 0,
     "step_timings": {},
@@ -5956,6 +6224,20 @@ def test_pattern_hypothesis(
         patch["oos_validation_json"] = oos_validation_merged
 
     update_pattern(db, pattern.id, patch)
+
+    # Lifecycle FSM transitions based on promotion outcome
+    _final_status = str(patch.get("promotion_status", prom_stat))
+    try:
+        from .lifecycle import transition_on_backtest, transition_on_promotion
+        if _final_status == "promoted":
+            transition_on_promotion(db, pattern)
+        elif _final_status in ("pending_oos", "backtested"):
+            transition_on_backtest(db, pattern, oos_pass=True)
+        elif _final_status.startswith("rejected"):
+            from .lifecycle import retire
+            retire(db, pattern, reason=f"promotion_gate_{_final_status}")
+    except Exception as e:
+        logger.debug("[learning] Lifecycle transition after promotion: %s", e)
 
     _oos_log = f"{mean_oos_wr:.0f}%" if mean_oos_wr is not None else "n/a"
     _bench_log = (
@@ -6948,10 +7230,6 @@ def _analyze_variant_losses(
     return report
 
 
-def evolve_exit_strategies(db: Session) -> dict[str, Any]:
-    """Legacy alias — delegates to the full pattern evolution engine."""
-    return evolve_pattern_strategies(db)
-
 
 def _get_evolution_insights(db: Session) -> dict[str, Any]:
     """Gather insights from specialized mining to guide evolution.
@@ -7072,12 +7350,17 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
         .all()
     )
 
+    _root_ids = [rp.id for rp in root_patterns]
+    _child_counts_q = (
+        db.query(ScanPattern.parent_id, func.count(ScanPattern.id))
+        .filter(ScanPattern.parent_id.in_(_root_ids), ScanPattern.active.is_(True))
+        .group_by(ScanPattern.parent_id)
+        .all()
+    ) if _root_ids else []
+    _child_count_map = {pid: cnt for pid, cnt in _child_counts_q}
+
     for rp in root_patterns:
-        child_count = (
-            db.query(func.count(ScanPattern.id))
-            .filter(ScanPattern.parent_id == rp.id, ScanPattern.active.is_(True))
-            .scalar()
-        )
+        child_count = _child_count_map.get(rp.id, 0)
         if child_count == 0:
             exit_ids = fork_exit_variants(db, rp.id)
             stats["forked_exit"] += len(exit_ids)
@@ -7363,11 +7646,7 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
 
 
 def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Daily + intraday ``trading_snapshots`` writes for APScheduler (``brain_market_snapshots`` job).
-
-    Mirrors the snapshot phases removed from ``run_learning_cycle`` when
-    ``brain_snapshots_on_learning_cycle`` is false.
-    """
+    """Daily + intraday ``trading_snapshots`` writes for APScheduler (``brain_market_snapshots`` job)."""
     from .scanner import build_snapshot_ticker_universe
 
     top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
@@ -7381,6 +7660,17 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         "universe_size": len(top_tickers),
         "snapshot_driver": _drv.get("snapshot_driver"),
     }
+
+
+class _StepCtx:
+    """Mutable bag carried through a ``_cycle_step_ctx`` block."""
+
+    __slots__ = ("start", "extra", "error")
+
+    def __init__(self) -> None:
+        self.start: float = 0.0
+        self.extra: str = ""
+        self.error: str | None = None
 
 
 def run_learning_cycle(
@@ -7509,14 +7799,53 @@ def run_learning_cycle(
         from ...config import settings
         from ...trading_brain.wiring import brain_shadow_begin_cycle
 
-        _snap_inline = getattr(settings, "brain_snapshots_on_learning_cycle", False)
         _cycle_step = 0
-        _learning_status["total_steps"] = 24 if _snap_inline else 22
+        _learning_status["total_steps"] = count_cycle_progress_steps()
 
         def _bump_cycle_step() -> None:
             nonlocal _cycle_step
             _cycle_step += 1
             _learning_status["steps_completed"] = _cycle_step
+
+        @contextmanager
+        def _cycle_step_ctx(
+            timing_name: str,
+            cluster_id: str,
+            step_sid: str,
+            *,
+            check_shutdown: bool = True,
+            critical: bool = True,
+        ):
+            """Context manager that wraps the boilerplate around every cycle step.
+
+            When *critical* is False, exceptions are swallowed (logged + recorded
+            in ``step.error``) so the cycle can continue.
+
+            Usage::
+
+                with _cycle_step_ctx("mine", "c_discovery", "mine") as step:
+                    discoveries = mine_patterns(db, user_id)
+                    step.extra = f"{len(discoveries)} patterns"
+            """
+            if check_shutdown and _shutting_down.is_set():
+                raise InterruptedError("shutdown")
+            apply_learning_cycle_step_status(_learning_status, cluster_id, step_sid)
+            step = _StepCtx()
+            step.start = time.time()
+            try:
+                yield step
+            except InterruptedError:
+                raise
+            except Exception as exc:
+                if critical:
+                    raise
+                step.extra = f"FAILED: {exc}"
+                step.error = str(exc)
+                logger.warning("[learning] Non-critical step '%s' failed: %s", timing_name, exc)
+            finally:
+                _bump_cycle_step()
+                _step_time(timing_name, step.start, step.extra)
+                _commit_step()
 
         brain_shadow_begin_cycle(
             db,
@@ -7553,45 +7882,9 @@ def run_learning_cycle(
             report["snapshot_driver_fallback"] = _snap_drv["fallback"]
         _learning_status["tickers_processed"] = len(top_tickers)
 
-        daily_count = 0
-        intra_count = 0
-        if _snap_inline:
-            # Step 1: Daily snapshots (parallel) — optional; default off (APScheduler job)
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_state/snapshots_daily
-            apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots_daily")
-            daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
-            report["snapshots_taken_daily"] = daily_count
-            report["snapshots_taken"] = daily_count
-            _bump_cycle_step()
-            _step_time("snapshots_daily", step_start,
-                        f"{daily_count}/{len(top_tickers)} tickers via {_provider}")
-            _commit_step()
-
-            # Step 2: Intraday snapshots (crypto subset)
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_state/snapshots_intraday
-            apply_learning_cycle_step_status(_learning_status, "c_state", "snapshots_intraday")
-            intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
-            report["intraday_snapshots_taken"] = intra_count
-            report["snapshots_taken"] = daily_count + intra_count
-            _bump_cycle_step()
-            _step_time("snapshots_intraday", step_start,
-                        f"{intra_count} intraday rows via {_provider}")
-            _commit_step()
-        else:
-            report["snapshots_taken_daily"] = 0
-            report["intraday_snapshots_taken"] = 0
-            report["snapshots_taken"] = 0
-            report["snapshots_inline_skipped"] = True
-            logger.info(
-                "[learning] Inline snapshots skipped (brain_snapshots_on_learning_cycle=false); "
-                "use APScheduler job brain_market_snapshots"
-            )
+        report["snapshots_taken_daily"] = 0
+        report["intraday_snapshots_taken"] = 0
+        report["snapshots_taken"] = 0
 
         # Step 3: Backfill future returns + predicted scores
         step_start = time.time()
@@ -7730,10 +8023,20 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_evolution", "breakout")
         bo_result = learn_from_breakout_outcomes(db, user_id)
         report["breakout_patterns_learned"] = bo_result.get("patterns_learned", 0)
+
+        # Closed-trade → ScanPattern feedback (runs in same step; fast query)
+        try:
+            tf_result = update_pattern_stats_from_closed_trades(db, user_id)
+            report["trade_feedback_patterns"] = tf_result.get("patterns_updated", 0)
+        except Exception as _tf_err:
+            logger.warning("[learning] Trade feedback failed: %s", _tf_err)
+            report["trade_feedback_patterns"] = 0
+
         _bump_cycle_step()
         _step_time("breakout_outcomes", step_start_bo,
                     f"{bo_result.get('patterns_learned', 0)} patterns from "
-                    f"{bo_result.get('total_resolved', 0)} resolved alerts")
+                    f"{bo_result.get('total_resolved', 0)} resolved alerts, "
+                    f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates")
         _commit_step()
 
         # Steps 11–18: Secondary miners (optional — disable for faster cycles)
@@ -8091,16 +8394,3 @@ def run_learning_cycle(
     return {"ok": True, **report}
 
 
-def should_run_learning() -> bool:
-    if _learning_status["running"]:
-        return False
-    last = _learning_status.get("last_run")
-    if last is None:
-        return True
-    try:
-        from ...config import settings
-        cooldown = max(1, settings.learning_interval_hours)
-        last_dt = datetime.fromisoformat(last)
-        return datetime.utcnow() - last_dt > timedelta(hours=cooldown)
-    except Exception:
-        return True

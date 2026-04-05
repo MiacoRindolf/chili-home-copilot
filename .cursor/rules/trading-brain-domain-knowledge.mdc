@@ -1,0 +1,100 @@
+---
+description: Trading concepts, strategy styles, quality metrics, and what makes a good pattern
+globs:
+  - app/services/trading/**
+---
+
+# Trading Brain Domain Knowledge
+
+## Strategy Styles This Brain Targets
+
+### Momentum / Breakout (Primary Focus)
+Ross Cameron-style: high relative volume (>2x), price breaking resistance, tight risk with 2:1+ R:R. Key indicators: `volume_ratio`, `price > resistance`, `adx > 20`, `ema_stack`.
+
+### Mean Reversion / Oversold Bounce
+RSI < 30, Stochastic < 25, Bollinger Band %B < 0.15, with MACD histogram turning positive as confirmation. Key: convergence of multiple oversold signals.
+
+### Intraday Setups
+Opening range breakout, VWAP reclaim, gap-and-go. Implemented in `intraday_signals.py`. Tighter stops, faster exits.
+
+### Crypto-Specific
+24/7 scanning, BTC-USD correlation awareness, higher volatility thresholds. CoinGecko trending integration.
+
+## What Makes a Good Pattern
+
+### Minimum Quality Bar
+- ≥5 historical occurrences (statistical relevance)
+- Win rate >50% with bootstrap CI lower bound >50%
+- Positive average return after costs (spread + commission)
+- Passes purged time-segment validation (not just one lucky period)
+- 2-of-3 ensemble promotion votes
+
+### Structural Quality Indicators
+- Multiple confirming conditions (3+ is better than 1)
+- Mix of trend + momentum + volume indicators
+- Defined market regime context (not "works in all conditions")
+- Reasonable parameter values (not overfit to exact thresholds)
+
+### Red Flags (Pattern is Likely Overfit)
+- Extreme thresholds that rarely trigger (RSI < 5)
+- Too many conditions (>8) that severely limit sample size
+- Only works in one specific time period
+- Win rate >80% with <10 trades (too few samples)
+- No OOS validation or OOS significantly worse than IS
+
+## Key Quality Metrics
+
+### For Individual Patterns
+- `win_rate` — percentage of trades that are profitable
+- `avg_return_pct` — mean return per trade
+- `oos_win_rate` — out-of-sample win rate (more reliable)
+- `evidence_count` — how many historical matches
+- `trade_count` — total trades taken (paper + live)
+- `confidence` — composite score from backtests
+
+### For the Brain Overall
+- Active patterns count (lifecycle_stage in promoted/live)
+- Daily trade ideas generated
+- Paper trade P&L (validation before real money)
+- Alpha decay rate (how fast patterns stop working)
+- Promotion rate (mined → backtested → promoted pipeline health)
+
+## Pattern Lifecycle Quality Gates
+
+```
+candidate ──[mine_patterns]──→ backtested ──[ensemble_promotion_check]──→ promoted
+    │                              │                                         │
+    │                              │                                         ▼
+    │                              │                                       live
+    │                              │                                         │
+    │                              ▼                                         ▼
+    └───────── retired ◄───── decayed ◄──────────────────────────── [alpha_decay]
+```
+
+Each transition has enforcement:
+- `candidate → backtested`: must have backtest results with OOS holdout
+- `backtested → promoted`: must pass ensemble_promotion_check (2-of-3 votes)
+- `promoted → live`: requires governance approval (human-in-the-loop)
+- `live → decayed`: alpha_decay detects WR drop >12pp or negative avg PnL
+- `decayed → retired`: manual or after multiple failed re-promotion attempts
+
+## Multi-Timeframe Consensus (`mtf_consensus.py`)
+
+Score patterns across multiple timeframes (1h, 4h, 1d). Higher consensus = higher conviction. Prevents taking daily breakouts when hourly is bearish.
+
+## Execution Quality Considerations
+
+- Slippage: tracked by `execution_quality.py`, adaptive spread suggestions
+- Commission: always included in backtests
+- Paper trading validates before real capital exposure
+- P90 slippage used for spread estimation (conservative)
+
+## Domain-Specific Gotchas
+
+1. **Crypto tickers** end in `-USD` (e.g. `BTC-USD`). Asset class detection uses this suffix.
+2. **Stock splits** cause false breakout signals — `data_quality.detect_stock_split` filters these
+3. **Low-volume stocks** produce unreliable signals — volume ratio and min volume filters required
+4. **Market hours**: stocks 9:30-16:00 ET only; crypto 24/7. Scheduler jobs respect this.
+5. **Regime matters**: a bullish pattern in a risk-off regime is much less reliable
+6. **Survivorship bias**: prescreen should include delisted/failed tickers for honest backtesting
+7. **Look-ahead bias**: never use future data in mining. `research_integrity.py` enforces bar alignment.

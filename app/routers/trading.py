@@ -1459,13 +1459,12 @@ def api_run_pattern_imminent_scan(request: Request, db: Session = Depends(get_db
 
 # ── Background Learning ───────────────────────────────────────────────
 
-@router.post("/api/trading/learn/snapshot")
-def api_take_snapshots(
+def _start_learning_cycle_bg(
     background_tasks: BackgroundTasks,
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Trigger a full learning cycle (replaces the old snapshot-only endpoint)."""
+    """Trigger a full learning cycle in the background."""
     ctx = get_identity_ctx(request, db)
 
     if ts.get_learning_status()["running"]:
@@ -1482,6 +1481,26 @@ def api_take_snapshots(
 
     background_tasks.add_task(_bg_learn, ctx["user_id"])
     return JSONResponse({"ok": True, "message": "Full learning cycle started in background"})
+
+
+@router.post("/api/trading/learn/cycle")
+def api_run_learning_cycle(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Trigger a full learning cycle in the background."""
+    return _start_learning_cycle_bg(background_tasks, request, db)
+
+
+@router.post("/api/trading/learn/snapshot", deprecated=True)
+def api_take_snapshots(
+    background_tasks: BackgroundTasks,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Deprecated — use POST /api/trading/learn/cycle instead."""
+    return _start_learning_cycle_bg(background_tasks, request, db)
 
 
 # ── Data Provider Status ──────────────────────────────────────────────

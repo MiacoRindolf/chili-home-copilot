@@ -122,6 +122,13 @@ class BacktestResult(Base):
     ran_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    # OOS walk-forward fields
+    oos_win_rate: Optional[float] = Column(Float, nullable=True)
+    oos_return_pct: Optional[float] = Column(Float, nullable=True)
+    oos_trade_count: Optional[int] = Column(Integer, nullable=True)
+    oos_holdout_fraction: Optional[float] = Column(Float, nullable=True)
+    in_sample_bars: Optional[int] = Column(Integer, nullable=True)
+    out_of_sample_bars: Optional[int] = Column(Integer, nullable=True)
 
 
 class MarketSnapshot(Base):
@@ -233,6 +240,11 @@ class BreakoutAlert(Base):
     sector: Optional[str] = Column(String(60), nullable=True)
     news_sentiment_at_alert: Optional[float] = Column(Float, nullable=True)
 
+    # Feedback linkage
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
+
 
 class StrategyProposal(Base):
     """AI-generated trade proposal for user review and optional auto-execution."""
@@ -321,6 +333,9 @@ class ScanPattern(Base):
     oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     queue_tier: str = Column(String(16), nullable=False, default="full")
     paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    # Lifecycle FSM: candidate -> backtested -> promoted -> live -> decayed -> retired
+    lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")
+    lifecycle_changed_at: Optional[datetime] = Column(DateTime, nullable=True)
 
     trading_insights = relationship("TradingInsight", back_populates="scan_pattern")
 
@@ -449,6 +464,31 @@ class PrescreenCandidate(Base):
     modified_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     entry_reasons: list = Column(JSONB, nullable=False, default=lambda: [])
     sources_json: Optional[dict] = Column(JSONB, nullable=True)
+
+
+class PaperTrade(Base):
+    """Simulated trade for paper-trading promoted patterns before going live."""
+
+    __tablename__ = "trading_paper_trades"
+
+    id: int = Column(Integer, primary_key=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    ticker: str = Column(String(32), nullable=False)
+    direction: str = Column(String(8), nullable=False, default="long")
+    entry_price: float = Column(Float, nullable=False)
+    stop_price: Optional[float] = Column(Float, nullable=True)
+    target_price: Optional[float] = Column(Float, nullable=True)
+    quantity: int = Column(Integer, nullable=False, default=1)
+    status: str = Column(String(16), nullable=False, default="open")  # open, closed, expired
+    entry_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    exit_date: Optional[datetime] = Column(DateTime, nullable=True)
+    exit_price: Optional[float] = Column(Float, nullable=True)
+    exit_reason: Optional[str] = Column(String(32), nullable=True)  # stop, target, expired, manual
+    pnl: Optional[float] = Column(Float, nullable=True)
+    pnl_pct: Optional[float] = Column(Float, nullable=True)
+    signal_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class BrainBatchJob(Base):

@@ -110,6 +110,62 @@ def api_brain_stats(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, **stats})
 
 
+@router.get("/api/trading/brain/performance")
+def api_brain_performance(request: Request, db: Session = Depends(get_db)):
+    """Comprehensive P&L performance dashboard data."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.portfolio import get_performance_dashboard
+    data = get_performance_dashboard(db, ctx["user_id"])
+    return JSONResponse(data)
+
+
+@router.get("/api/trading/brain/paper")
+def api_paper_dashboard(request: Request, db: Session = Depends(get_db)):
+    """Paper trading simulation dashboard."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.paper_trading import get_paper_dashboard
+    data = get_paper_dashboard(db, ctx["user_id"])
+    return JSONResponse(data)
+
+
+@router.get("/api/trading/brain/playbook")
+def api_daily_playbook(request: Request, db: Session = Depends(get_db)):
+    """Generate today's trading playbook with regime, ideas, risk budget."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.daily_playbook import generate_daily_playbook
+    data = generate_daily_playbook(db, ctx["user_id"])
+    return JSONResponse(data)
+
+
+@router.get("/api/trading/brain/governance")
+def api_governance_dashboard(request: Request):
+    """Governance dashboard: kill switch, approvals, velocity."""
+    from ...services.trading.governance import get_governance_dashboard
+    return JSONResponse(get_governance_dashboard())
+
+
+@router.post("/api/trading/brain/governance/kill-switch")
+def api_kill_switch(request: Request, action: str = Query("activate")):
+    """Toggle the kill switch. action=activate|deactivate"""
+    from ...services.trading.governance import activate_kill_switch, deactivate_kill_switch, get_kill_switch_status
+    if action == "activate":
+        activate_kill_switch("manual_api")
+    elif action == "deactivate":
+        deactivate_kill_switch()
+    return JSONResponse(get_kill_switch_status())
+
+
+@router.post("/api/trading/brain/governance/approve/{approval_id}")
+def api_approve(approval_id: int, action: str = Query("approve")):
+    """Approve or reject a pending governance request."""
+    from ...services.trading.governance import approve, reject
+    if action == "approve":
+        ok = approve(approval_id)
+    else:
+        ok = reject(approval_id, reason="manual_rejection")
+    return JSONResponse({"ok": ok})
+
+
 @router.get("/api/trading/brain/tradeable-patterns")
 def api_tradeable_patterns(
     request: Request,

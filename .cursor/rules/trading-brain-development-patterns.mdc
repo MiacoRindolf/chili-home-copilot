@@ -1,0 +1,90 @@
+---
+description: Code patterns, anti-patterns, caching, batching, and migration conventions for trading brain
+globs:
+  - app/services/trading/**
+  - app/services/backtest_service.py
+  - app/migrations.py
+---
+
+# Trading Brain Development Patterns
+
+## Code Patterns (DO)
+
+### Structured Mining Output
+Always pass `conditions` as a list of dicts to `_check()`. Never rely on NL text for pattern matching:
+```python
+_check(filtered_rows,
+       "RSI oversold bounce with MACD confirmation",
+       conditions=[
+           {"indicator": "rsi_14", "op": "<", "value": 30},
+           {"indicator": "macd_histogram", "op": ">", "value": 0},
+       ])
+```
+
+### Single Source of Truth for Indicators
+All indicator computation goes through `indicator_core.py`. Backtest uses `compute_all_from_df`. Live scan uses the same functions. Never reimplement RSI/MACD/etc in a new file.
+
+### Condition Evaluation Parity
+`_eval_condition` lives in `pattern_engine.py`. Backtest delegates to it via `_eval_condition_bt`. Never create a parallel evaluator.
+
+### Batch DB Operations
+Preload patterns/insights before loops. Use `preload_active_insights()` instead of per-ticker queries. Batch `INSERT` with `executemany` or bulk list operations.
+
+### LRU Caches with Hard Limits
+Every cache must have `maxsize` and TTL:
+```python
+@lru_cache(maxsize=500)
+def _cached_fn(key, ttl_bucket):
+    ...
+```
+Use `_cache_put(cache_dict, key, value, max_size=500)` for manual dicts.
+
+### Context Manager for Cycle Steps
+```python
+with _step_context(status, step_idx, "mine_patterns"):
+    ...
+```
+
+### Migration Guards
+```python
+if "new_column" not in _columns(conn, "table_name"):
+    conn.execute(text("ALTER TABLE table_name ADD COLUMN new_column TYPE DEFAULT val"))
+```
+
+## Anti-Patterns (DON'T)
+
+### Never duplicate indicator math
+BAD: Computing RSI in `backtest_service.py` AND `learning.py` AND `scanner.py`
+GOOD: All use `indicator_core.compute_rsi`
+
+### Never match patterns by NL description
+BAD: `if "RSI oversold" in pattern.description`
+GOOD: Parse `json.loads(pattern.rules_json)["conditions"]` and check indicator/op/value
+
+### Never hardcode step counts
+BAD: `total_steps = 14`
+GOOD: Derive from `get_cycle_clusters()` or count actual steps
+
+### Never write to DB on GET requests
+Router handlers for GET endpoints must be read-only.
+
+### Never skip OOS validation
+Every backtest must use `oos_holdout_fraction > 0` and `spread > 0`.
+
+### Never use circular features in ML
+BAD: Using `win_rate` as a feature to predict win rate
+GOOD: Use structural features (condition count, indicator diversity, timeframe)
+
+### Never create unbounded caches
+BAD: `cache = {}` with no eviction
+GOOD: `@lru_cache(maxsize=N)` or manual size check
+
+## DB Migration Conventions
+
+1. Check last migration number: `MIGRATIONS[-1]` in `app/migrations.py`
+2. Current tail: `069_supporting_tables` → next is `070_*`
+3. Function signature: `def _migration_NNN_name(conn) -> None:`
+4. Always use idempotent guards (`if col not in _columns(...)`, `if table not in _tables(...)`)
+5. Append tuple to `MIGRATIONS` list at bottom
+6. Composite indexes: check existing indexes in migrations 063+ before adding duplicates
+7. Always `conn.commit()` at end of migration function

@@ -1,0 +1,83 @@
+---
+description: Risk controls, kill switch, drawdown breaker, approval queue, and safety invariants
+globs:
+  - app/services/trading/portfolio_risk.py
+  - app/services/trading/governance.py
+  - app/services/trading/paper_trading.py
+  - app/services/trading/alpha_decay.py
+---
+
+# Risk Management and Governance
+
+## Portfolio Risk (`portfolio_risk.py`)
+
+### Dataclasses
+- `RiskLimits`: max positions, max single position %, max portfolio heat %, max correlated positions
+- `RiskBudget`: per-trade risk %, portfolio heat cap
+- `DrawdownLimits`: max drawdown %, reduce-at threshold, reduce factor
+
+### Position Sizing Methods
+1. **Fixed-fractional**: `size_position(capital, risk_pct, entry, stop)` — risk-based lot sizing
+2. **Kelly**: `kelly_fraction(win_rate, avg_win, avg_loss)` → `size_position_kelly`
+3. **Drawdown-scaled**: `size_with_drawdown_scaling` — reduces size as drawdown approaches limit
+
+### Drawdown Circuit Breaker
+- `check_drawdown_breaker(db, user_id, capital)` — trips if drawdown exceeds limit
+- `is_breaker_tripped(db, user_id)` — check state
+- `reset_breaker(db, user_id)` — manual reset
+- State persisted in `trading_risk_state` table
+
+### Trade Gate
+`check_new_trade_allowed(db, user_id)` — verifies position count, heat, and breaker status before any new entry.
+
+## Governance (`governance.py`)
+
+### Kill Switch
+- `activate_kill_switch(db, user_id, reason)` — halts all automated trading
+- `deactivate_kill_switch(db, user_id)` — resumes
+- `is_kill_switch_active(db, user_id)` — checked before any trade execution
+
+### Approval Queue
+- `submit_for_approval(db, pattern_id, action, metadata)` — queue pattern for human review
+- `get_pending_approvals(db, user_id)` — list pending items
+- `approve(db, approval_id)` / `reject(db, approval_id)`
+- `request_pattern_to_live(db, pattern_id)` — submits pattern for live promotion approval
+
+### Trade Gates
+- `check_trade_gate(db, user_id, trade_size)` — position size caps
+- `check_velocity(db, user_id)` — trade frequency limits
+- `record_trade_executed(db, user_id, trade_info)` — log for velocity tracking
+
+## Alpha Decay (`alpha_decay.py`)
+
+### Thresholds
+- Rolling window: 30 days
+- Min trades for check: 5
+- WR gap for decay: 12 percentage points below OOS win rate
+- Return floor: -1.0 avg PnL per trade
+
+### Actions
+- Auto-demote: `transition_on_decay` → moves pattern to `decayed` lifecycle stage
+- Half-life estimation: needs ≥10 trades, ≥3 rolling WR points, log-linear fit
+
+## Paper Trading (`paper_trading.py`)
+
+### Constants
+- Default capital: $100,000
+- Max open paper trades: 20
+- Expiry: 5 days
+
+### Entry/Exit
+- Entry: confidence ≥ 0.6, position sized at 0.5% risk, min qty 10
+- Stop: defaults to entry × 0.97 (3% stop)
+- Target: defaults to 2:1 R:R from entry-stop distance
+- Exit checks: stop hit, target hit, or expired (5 days)
+
+## Safety Invariants
+
+1. Kill switch must be checked before ANY automated trade entry
+2. Drawdown breaker must be checked before position sizing
+3. Paper trades must respect max open trade limit
+4. No pattern goes live without passing `ensemble_promotion_check`
+5. Alpha decay runs every 3 worker cycles
+6. All governance actions are logged with timestamps

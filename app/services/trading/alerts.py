@@ -14,6 +14,71 @@ from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
 
+# ── Throttle / dedup / quality tracking ───────────────────────────────
+
+_recent_alerts: dict[str, float] = {}
+_THROTTLE_WINDOW_SECS = 300  # 5 min minimum between same-type alerts for same ticker
+_MAX_ALERTS_PER_HOUR = 20
+_hourly_count = 0
+_hourly_reset_at = 0.0
+
+# Alert tiers: A = high confidence / promoted pattern, B = standard, C = speculative
+TIER_A = "A"
+TIER_B = "B"
+TIER_C = "C"
+
+
+def _alert_dedup_key(alert_type: str, ticker: str | None) -> str:
+    return f"{alert_type}:{(ticker or '').upper()}"
+
+
+def _check_throttle(alert_type: str, ticker: str | None) -> tuple[bool, str]:
+    """Return (allowed, reason). Enforces per-ticker dedup and hourly cap."""
+    import time
+    global _hourly_count, _hourly_reset_at
+
+    now = time.time()
+    if now > _hourly_reset_at:
+        _hourly_count = 0
+        _hourly_reset_at = now + 3600
+
+    if _hourly_count >= _MAX_ALERTS_PER_HOUR:
+        return False, f"Hourly cap ({_MAX_ALERTS_PER_HOUR}) reached"
+
+    key = _alert_dedup_key(alert_type, ticker)
+    last = _recent_alerts.get(key, 0)
+    if now - last < _THROTTLE_WINDOW_SECS:
+        return False, f"Duplicate suppressed ({key}, {int(now - last)}s ago)"
+
+    return True, "ok"
+
+
+def _record_alert_sent(alert_type: str, ticker: str | None) -> None:
+    import time
+    global _hourly_count
+    key = _alert_dedup_key(alert_type, ticker)
+    _recent_alerts[key] = time.time()
+    _hourly_count += 1
+    if len(_recent_alerts) > 500:
+        cutoff = time.time() - _THROTTLE_WINDOW_SECS * 2
+        _recent_alerts.clear()
+
+
+def classify_alert_tier(
+    alert_type: str,
+    scan_pattern_id: int | None = None,
+    confidence: float = 0.0,
+) -> str:
+    """Classify alert into A/B/C tiers based on signal source and confidence."""
+    if alert_type in (TARGET_HIT, STOP_HIT, POSITION_CLOSED, POSITION_OPENED):
+        return TIER_A
+    if scan_pattern_id and confidence >= 0.7:
+        return TIER_A
+    if scan_pattern_id or confidence >= 0.5:
+        return TIER_B
+    return TIER_C
+
+
 # Alert type constants
 BREAKOUT_TRIGGERED = "breakout_triggered"
 CRYPTO_BREAKOUT = "crypto_breakout"
@@ -206,15 +271,26 @@ def dispatch_alert(
     trade_type: str | None = None,
     duration_estimate: str | None = None,
     scan_pattern_id: int | None = None,
+    confidence: float = 0.0,
+    skip_throttle: bool = False,
 ) -> bool:
     """Log an alert to the DB and optionally send via SMS.
 
+    Enforces throttle/dedup unless *skip_throttle* is True.
     Always persists to DB regardless of SMS outcome.  If SMS is not
     configured, the alert is logged with sent_via='log_only' (no
     error-level log — just info).  Only logs a warning when SMS IS
     configured but delivery fails.
     """
     from ..sms_service import is_configured as sms_is_configured, send_sms
+
+    if not skip_throttle:
+        allowed, reason = _check_throttle(alert_type, ticker)
+        if not allowed:
+            logger.debug("[alerts] Throttled: %s", reason)
+            return False
+
+    tier = classify_alert_tier(alert_type, scan_pattern_id, confidence)
 
     own_session = False
     if db is None:
@@ -226,7 +302,7 @@ def dispatch_alert(
     sent_via = "log_only"
 
     try:
-        if sms_is_configured():
+        if sms_is_configured() and tier in (TIER_A, TIER_B):
             sent = send_sms(message)
             sent_via = ("twilio" if sent else "sms_failed")
             if sent:
@@ -235,6 +311,8 @@ def dispatch_alert(
                 logger.warning(f"[alerts] SMS delivery failed for {alert_type}/{ticker}")
         else:
             logger.info(f"[alerts] Logged {alert_type} for {ticker} (SMS not configured)")
+
+        _record_alert_sent(alert_type, ticker)
 
         from ...models.trading import AlertHistory
         record = AlertHistory(

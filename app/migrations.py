@@ -2379,6 +2379,259 @@ def _migration_061_brain_batch_jobs_payload_json(conn) -> None:
         conn.commit()
 
 
+def _migration_062_breakout_alert_feedback_cols(conn) -> None:
+    """Add user_id, scan_pattern_id, related_insight_id to trading_breakout_alerts for feedback linkage."""
+    if "trading_breakout_alerts" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_breakout_alerts")
+    for col_name, col_type in [
+        ("user_id", "INTEGER"),
+        ("scan_pattern_id", "INTEGER"),
+        ("related_insight_id", "INTEGER"),
+    ]:
+        if col_name not in cols:
+            conn.execute(text(f"ALTER TABLE trading_breakout_alerts ADD COLUMN {col_name} {col_type}"))
+    for idx_name, idx_col in [
+        ("ix_breakout_alert_user_id", "user_id"),
+        ("ix_breakout_alert_scan_pattern_id", "scan_pattern_id"),
+        ("ix_breakout_alert_related_insight_id", "related_insight_id"),
+    ]:
+        try:
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON trading_breakout_alerts({idx_col})"))
+        except Exception:
+            pass
+    conn.commit()
+
+
+def _migration_063_composite_indexes_performance(conn) -> None:
+    """Add composite and partial indexes for hot query paths."""
+    _idx_defs = [
+        ("ix_scans_user_scanned", "trading_scans", "(user_id, scanned_at DESC)"),
+        ("ix_snapshots_future_ret_5d", "trading_snapshots", "(future_return_5d) WHERE future_return_5d IS NOT NULL"),
+        ("ix_snapshots_ticker_bar", "trading_snapshots", "(ticker, bar_interval, bar_start_at DESC)"),
+        ("ix_scan_patterns_active", "scan_patterns", "(active) WHERE active = true"),
+        ("ix_insights_user_active", "trading_insights", "(user_id) WHERE active = true"),
+    ]
+    for idx_name, tbl, expr in _idx_defs:
+        if tbl not in _tables(conn):
+            continue
+        try:
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS {idx_name} ON {tbl} {expr}"))
+        except Exception:
+            pass
+    conn.commit()
+
+
+def _migration_064_backtest_oos_fields(conn) -> None:
+    """Add OOS walk-forward columns to trading_backtests."""
+    tbl = "trading_backtests"
+    if tbl not in _tables(conn):
+        return
+    cols = _columns(conn, tbl)
+    _new = [
+        ("oos_win_rate", "FLOAT"),
+        ("oos_return_pct", "FLOAT"),
+        ("oos_trade_count", "INTEGER"),
+        ("oos_holdout_fraction", "FLOAT"),
+        ("in_sample_bars", "INTEGER"),
+        ("out_of_sample_bars", "INTEGER"),
+    ]
+    for col, typ in _new:
+        if col not in cols:
+            conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN {col} {typ}"))
+    conn.commit()
+
+
+def _migration_065_scan_pattern_lifecycle(conn) -> None:
+    """Add lifecycle_stage + lifecycle_changed_at to scan_patterns; backfill from promotion_status."""
+    tbl = "scan_patterns"
+    if tbl not in _tables(conn):
+        return
+    cols = _columns(conn, tbl)
+    if "lifecycle_stage" not in cols:
+        conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN lifecycle_stage VARCHAR(20) NOT NULL DEFAULT 'candidate'"))
+    if "lifecycle_changed_at" not in cols:
+        conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN lifecycle_changed_at TIMESTAMP"))
+    conn.commit()
+    # Backfill: promoted patterns → 'live', rejected → 'retired', others → 'candidate'
+    try:
+        conn.execute(text(f"""
+            UPDATE {tbl} SET lifecycle_stage = 'live', lifecycle_changed_at = NOW()
+            WHERE promotion_status = 'promoted' AND lifecycle_stage = 'candidate'
+        """))
+        conn.execute(text(f"""
+            UPDATE {tbl} SET lifecycle_stage = 'retired', lifecycle_changed_at = NOW()
+            WHERE promotion_status LIKE 'rejected%' AND lifecycle_stage = 'candidate' AND active = false
+        """))
+        conn.execute(text(f"""
+            UPDATE {tbl} SET lifecycle_stage = 'backtested', lifecycle_changed_at = NOW()
+            WHERE last_backtest_at IS NOT NULL AND lifecycle_stage = 'candidate' AND active = true
+        """))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
+def _migration_066_foreign_keys(conn) -> None:
+    """Add soft FK constraints where both tables exist. Nullify orphans first."""
+    _fk_defs = [
+        ("trading_backtests", "scan_pattern_id", "scan_patterns", "id", "fk_bt_scan_pattern"),
+        ("trading_backtests", "related_insight_id", "trading_insights", "id", "fk_bt_insight"),
+        ("trading_trades", "scan_pattern_id", "scan_patterns", "id", "fk_trade_scan_pattern"),
+        ("trading_breakout_alerts", "scan_pattern_id", "scan_patterns", "id", "fk_alert_scan_pattern"),
+    ]
+    tables = _tables(conn)
+    for child_tbl, child_col, parent_tbl, parent_col, fk_name in _fk_defs:
+        if child_tbl not in tables or parent_tbl not in tables:
+            continue
+        if child_col not in _columns(conn, child_tbl):
+            continue
+        try:
+            conn.execute(text(f"""
+                UPDATE {child_tbl} SET {child_col} = NULL
+                WHERE {child_col} IS NOT NULL
+                  AND {child_col} NOT IN (SELECT {parent_col} FROM {parent_tbl})
+            """))
+            conn.execute(text(f"""
+                ALTER TABLE {child_tbl}
+                ADD CONSTRAINT {fk_name}
+                FOREIGN KEY ({child_col}) REFERENCES {parent_tbl}({parent_col})
+                ON DELETE SET NULL
+            """))
+        except Exception:
+            pass
+    conn.commit()
+
+
+def _migration_067_data_retention_columns(conn) -> None:
+    """Add archived_at column to large tables for soft-archive retention."""
+    for tbl in ("trading_snapshots", "trading_backtests", "brain_batch_jobs"):
+        if tbl not in _tables(conn):
+            continue
+        cols = _columns(conn, tbl)
+        if "archived_at" not in cols:
+            try:
+                conn.execute(text(f"ALTER TABLE {tbl} ADD COLUMN archived_at TIMESTAMP"))
+            except Exception:
+                pass
+    conn.commit()
+
+
+def _migration_069_supporting_tables(conn) -> None:
+    """Create supporting tables for risk state, daily performance, playbooks, and ML model versions."""
+    tables = _tables(conn)
+
+    if "trading_risk_state" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_risk_state (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                snapshot_date DATE NOT NULL,
+                open_positions INTEGER NOT NULL DEFAULT 0,
+                total_heat_pct FLOAT NOT NULL DEFAULT 0,
+                breaker_tripped BOOLEAN NOT NULL DEFAULT FALSE,
+                breaker_reason VARCHAR(256),
+                capital FLOAT NOT NULL DEFAULT 100000,
+                regime VARCHAR(32),
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_risk_state_user_date ON trading_risk_state (user_id, snapshot_date DESC)"))
+
+    if "trading_brain_performance_daily" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_brain_performance_daily (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                perf_date DATE NOT NULL,
+                total_pnl FLOAT NOT NULL DEFAULT 0,
+                trade_count INTEGER NOT NULL DEFAULT 0,
+                win_count INTEGER NOT NULL DEFAULT 0,
+                loss_count INTEGER NOT NULL DEFAULT 0,
+                win_rate FLOAT,
+                avg_pnl FLOAT,
+                max_win FLOAT,
+                max_loss FLOAT,
+                patterns_active INTEGER,
+                patterns_promoted INTEGER,
+                signals_generated INTEGER,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX uix_perf_daily_user_date ON trading_brain_performance_daily (user_id, perf_date)"))
+
+    if "trading_daily_playbooks" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_daily_playbooks (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER,
+                playbook_date DATE NOT NULL,
+                regime VARCHAR(32),
+                regime_guidance TEXT,
+                max_new_trades INTEGER,
+                ideas_json JSONB,
+                watchlist_json JSONB,
+                risk_snapshot_json JSONB,
+                performance_json JSONB,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE UNIQUE INDEX uix_playbooks_user_date ON trading_daily_playbooks (user_id, playbook_date)"))
+        conn.execute(text("CREATE INDEX ix_playbooks_user_date ON trading_daily_playbooks (user_id, playbook_date DESC)"))
+
+    if "trading_ml_model_versions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_ml_model_versions (
+                id SERIAL PRIMARY KEY,
+                version_id VARCHAR(128) NOT NULL UNIQUE,
+                model_type VARCHAR(64) NOT NULL,
+                trained_at TIMESTAMP NOT NULL,
+                is_active BOOLEAN NOT NULL DEFAULT FALSE,
+                is_shadow BOOLEAN NOT NULL DEFAULT FALSE,
+                metrics_json JSONB,
+                file_path VARCHAR(512),
+                parent_version VARCHAR(128),
+                notes TEXT,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_ml_versions_type_active ON trading_ml_model_versions (model_type, is_active)"))
+
+    conn.commit()
+
+
+def _migration_068_paper_trades_table(conn) -> None:
+    """Create paper trades table for simulated trading."""
+    if "trading_paper_trades" in _tables(conn):
+        return
+    conn.execute(text("""
+        CREATE TABLE trading_paper_trades (
+            id SERIAL PRIMARY KEY,
+            user_id INTEGER,
+            scan_pattern_id INTEGER,
+            ticker VARCHAR(32) NOT NULL,
+            direction VARCHAR(8) NOT NULL DEFAULT 'long',
+            entry_price FLOAT NOT NULL,
+            stop_price FLOAT,
+            target_price FLOAT,
+            quantity INTEGER NOT NULL DEFAULT 1,
+            status VARCHAR(16) NOT NULL DEFAULT 'open',
+            entry_date TIMESTAMP NOT NULL DEFAULT NOW(),
+            exit_date TIMESTAMP,
+            exit_price FLOAT,
+            exit_reason VARCHAR(32),
+            pnl FLOAT,
+            pnl_pct FLOAT,
+            signal_json JSONB,
+            created_at TIMESTAMP NOT NULL DEFAULT NOW()
+        )
+    """))
+    conn.execute(text("CREATE INDEX ix_paper_trades_user ON trading_paper_trades (user_id)"))
+    conn.execute(text("CREATE INDEX ix_paper_trades_status ON trading_paper_trades (status)"))
+    conn.execute(text("CREATE INDEX ix_paper_trades_pattern ON trading_paper_trades (scan_pattern_id)"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -2442,6 +2695,14 @@ MIGRATIONS = [
     ("059_prescreen_asset_universe", _migration_059_prescreen_asset_universe),
     ("060_brain_batch_jobs", _migration_060_brain_batch_jobs),
     ("061_brain_batch_jobs_payload_json", _migration_061_brain_batch_jobs_payload_json),
+    ("062_breakout_alert_feedback_cols", _migration_062_breakout_alert_feedback_cols),
+    ("063_composite_indexes_performance", _migration_063_composite_indexes_performance),
+    ("064_backtest_oos_fields", _migration_064_backtest_oos_fields),
+    ("065_scan_pattern_lifecycle", _migration_065_scan_pattern_lifecycle),
+    ("066_foreign_keys", _migration_066_foreign_keys),
+    ("067_data_retention_columns", _migration_067_data_retention_columns),
+    ("068_paper_trades_table", _migration_068_paper_trades_table),
+    ("069_supporting_tables", _migration_069_supporting_tables),
 ]
 
 

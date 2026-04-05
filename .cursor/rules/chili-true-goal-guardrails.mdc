@@ -1,0 +1,32 @@
+﻿---
+description: Keep CHILI aligned with the true task-first coding-brain goal
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+For this project, prefer the original architecture goal over later micro-phase drift.
+
+Source-of-truth direction:
+- build a task-first coding brain / project implementer
+- planner remains the shell
+- task is the primary persistent unit
+- Brain/project surfaces may expose explicit controls, but should not become separate orchestration systems
+- implementation capabilities should progress in this order:
+  1. safe substrate
+  2. reviewable suggestion
+  3. durable snapshot/review layer
+  4. explicit apply
+  5. post-apply status / validate bridge
+  6. only later, broader controlled loops
+
+Rules:
+1. Do not propose another read-only/navigation polish phase by default.
+2. Treat browser/TLS/image/DB/runtime issues as operational unless they truly block product behavior.
+3. Prefer the narrowest explicit user-triggered implementation capability over UI polish.
+4. Do not widen scope into planner parity, autonomous loops, or broad agent orchestration unless explicitly requested.
+5. When proposing the next phase, state clearly whether it advances:
+   - substrate only
+   - implementation bridge
+   - post-apply validation/review
+6. If the current branch is already sufficient for the intended capability, say so instead of inventing more foundation phases.

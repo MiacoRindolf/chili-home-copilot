@@ -66,6 +66,26 @@ DEFAULT_CYCLE_INTERVAL = 5  # minutes between cycles when queue empty (override 
 _lock_handle = None
 
 
+def _db_heartbeat_tick() -> None:
+    """Update the worker heartbeat in PostgreSQL during pause/idle so the UI knows we're alive."""
+    try:
+        from app.services.brain_worker_signals import update_worker_heartbeat
+
+        db = SessionLocal()
+        try:
+            update_worker_heartbeat(db)
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+    except Exception as exc:
+        logger.debug("[brain] heartbeat tick failed: %s", exc)
+
+
 def acquire_lock() -> bool:
     """Acquire an exclusive lock to prevent multiple brain workers.
     
@@ -138,7 +158,7 @@ class BrainWorkerStatus:
             "patterns_tested": 0,
             "queue_patterns_processed": 0,
             "hypotheses_validated": 0,
-            "hypotheses_confirmed": 0,
+            "hypotheses_challenged": 0,
             "patterns_spawned": 0,
             "patterns_evolved": 0,
             "patterns_variant_promoted": 0,
@@ -342,6 +362,103 @@ def _get_live_queue_status():
         db.close()
 
 
+# ── Multi-mode sub-tasks (run between full cycles) ─────────────────────
+
+def _run_subtask_alpha_decay(status: "BrainWorkerStatus") -> dict:
+    """Check live patterns for alpha decay and auto-demote."""
+    status.set_step("AlphaDecay", "Checking live patterns...")
+    db = SessionLocal()
+    try:
+        from app.services.trading.alpha_decay import check_alpha_decay
+        from app.config import settings as _s
+        result = check_alpha_decay(db, user_id=getattr(_s, "brain_default_user_id", None))
+        db.commit()
+        return result
+    except Exception as e:
+        db.rollback()
+        logger.warning("[brain:subtask] alpha_decay failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+def _run_subtask_retention(status: "BrainWorkerStatus") -> dict:
+    """Run data retention sweep."""
+    status.set_step("Retention", "Archiving old data...")
+    db = SessionLocal()
+    try:
+        from app.services.trading.data_retention import run_retention_policy
+        result = run_retention_policy(db)
+        return result
+    except Exception as e:
+        logger.warning("[brain:subtask] retention failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+def _run_subtask_signal_refresh(status: "BrainWorkerStatus") -> dict:
+    """Refresh promoted pattern prediction cache."""
+    status.set_step("SignalRefresh", "Refreshing promoted predictions...")
+    db = SessionLocal()
+    try:
+        from app.services.trading.learning import refresh_promoted_prediction_cache
+        result = refresh_promoted_prediction_cache(db)
+        return result
+    except Exception as e:
+        logger.warning("[brain:subtask] signal_refresh failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
+    """Process backtest queue items without running a full cycle."""
+    status.set_step("FastBacktest", "Processing backtest queue...")
+    db = SessionLocal()
+    try:
+        from app.services.trading.backtest_engine import smart_backtest_insight
+        from app.config import settings as _s
+        result = smart_backtest_insight(
+            db, user_id=getattr(_s, "brain_default_user_id", None), max_patterns=5,
+        )
+        return result or {}
+    except Exception as e:
+        logger.warning("[brain:subtask] fast_backtest failed: %s", e)
+        return {"error": str(e)}
+    finally:
+        db.close()
+
+
+# Subtask registry: (name, function, run_every_n_cycles)
+_SUBTASKS = [
+    ("alpha_decay", _run_subtask_alpha_decay, 3),
+    ("signal_refresh", _run_subtask_signal_refresh, 1),
+    ("fast_backtest", _run_subtask_fast_backtest, 1),
+    ("retention", _run_subtask_retention, 12),
+]
+_subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
+
+
+def run_subtasks(status: "BrainWorkerStatus") -> dict:
+    """Run due subtasks between full learning cycles."""
+    results = {}
+    for name, fn, every_n in _SUBTASKS:
+        _subtask_counters[name] = _subtask_counters.get(name, 0) + 1
+        if _subtask_counters[name] >= every_n:
+            _subtask_counters[name] = 0
+            try:
+                t0 = time.time()
+                r = fn(status)
+                elapsed = round(time.time() - t0, 1)
+                results[name] = {"result": r, "elapsed_s": elapsed}
+                logger.info("[brain:subtask] %s completed in %.1fs", name, elapsed)
+            except Exception as e:
+                results[name] = {"error": str(e)}
+                logger.warning("[brain:subtask] %s failed: %s", name, e)
+    return results
+
+
 def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None:
     """Map `run_learning_cycle` return dict into worker cycle_stats (in-process or remote)."""
     if result.get("ok", True):
@@ -350,7 +467,7 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
         cycle_stats["patterns_mined"] = result.get("patterns_discovered", 0)
         cycle_stats["patterns_tested"] = result.get("backtests_run", 0)
         cycle_stats["hypotheses_validated"] = result.get("hypotheses_tested", 0)
-        cycle_stats["hypotheses_confirmed"] = result.get("hypotheses_challenged", 0)
+        cycle_stats["hypotheses_challenged"] = result.get("hypotheses_challenged", 0)
         cycle_stats["insights_decayed"] = result.get("insights_decayed", 0)
         cycle_stats["patterns_pruned"] = result.get("insights_pruned", 0)
         cycle_stats["patterns_spawned"] = result.get("hypothesis_patterns_spawned", 0)
@@ -409,7 +526,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
         "patterns_mined": 0,
         "patterns_tested": 0,
         "hypotheses_validated": 0,
-        "hypotheses_confirmed": 0,
+        "hypotheses_challenged": 0,
         "patterns_spawned": 0,
         "patterns_evolved": 0,
         "patterns_variant_promoted": 0,
@@ -610,7 +727,7 @@ def main():
                     status.totals["cycles_completed"] += 1
                     for key in ["tickers_scanned", "snapshots_taken", "patterns_mined", 
                                "patterns_tested", "queue_patterns_processed",
-                               "hypotheses_validated", "hypotheses_confirmed", 
+                               "hypotheses_validated", "hypotheses_challenged", 
                                "patterns_spawned", "patterns_evolved", "patterns_variant_promoted",
                                "patterns_pruned", "insights_decayed"]:
                         status.totals[key] += cycle_stats.get(key, 0)
@@ -625,6 +742,15 @@ def main():
                         f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
                         f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"
                     )
+
+                    # Run subtasks between cycles
+                    try:
+                        sub_results = run_subtasks(status)
+                        if sub_results:
+                            cycle_stats["subtasks"] = sub_results
+                    except Exception as sub_e:
+                        logger.warning("[brain] Subtask sweep failed: %s", sub_e)
+
                     break  # Success, exit retry loop
                     
                 except Exception as e:

@@ -108,8 +108,6 @@ def compute_condition_strength(cond: dict, indicators: dict[str, Any]) -> float:
 # Aggregate feature names (always present regardless of pattern count)
 _AGG_FEATURES = [
     "n_patterns_matched",
-    "avg_wr_matched",
-    "max_wr_matched",
     "total_strength",
     "pattern_agreement",
 ]
@@ -179,10 +177,7 @@ def extract_pattern_features(
             features[f"pat_{pid}_quality"] = round(quality, 3)
             features[f"pat_{pid}_avg_strength"] = round(avg_str, 3)
 
-            raw_wr = pattern.win_rate if pattern.win_rate is not None else 0.5
-            wr = raw_wr / 100.0 if raw_wr > 1 else raw_wr
-            match_wrs.append(wr)
-            match_strengths.append(avg_str * max(0.1, wr))
+            match_strengths.append(avg_str)
 
             boost = pattern.score_boost or 0.0
             if boost >= 0:
@@ -194,10 +189,8 @@ def extract_pattern_features(
             features[f"pat_{pid}_quality"] = 0.0
             features[f"pat_{pid}_avg_strength"] = 0.0
 
-    n_matched = len(match_wrs)
+    n_matched = len(match_strengths)
     features["n_patterns_matched"] = float(n_matched)
-    features["avg_wr_matched"] = round(sum(match_wrs) / n_matched, 3) if n_matched else 0.0
-    features["max_wr_matched"] = round(max(match_wrs), 3) if match_wrs else 0.0
     features["total_strength"] = round(sum(match_strengths), 3)
     majority = max(bullish_count, bearish_count)
     features["pattern_agreement"] = round(majority / n_matched, 3) if n_matched else 0.0
@@ -333,7 +326,6 @@ class PatternMetaLearner:
 
     def train(self, db) -> dict[str, Any]:
         """Train on ``MarketSnapshot`` rows using pattern features."""
-        from sklearn.ensemble import GradientBoostingClassifier
         from sklearn.model_selection import TimeSeriesSplit, cross_val_score
         from sklearn.metrics import accuracy_score, precision_score, recall_score
 
@@ -372,6 +364,9 @@ class PatternMetaLearner:
             for suffix in ("matched", "quality", "avg_strength"):
                 feature_names.append(f"pat_{p.id}_{suffix}")
 
+        # Use >1% return as positive label (filters out noise near zero)
+        _LABEL_THRESHOLD_PCT = 1.0
+
         X_rows: list[list[float]] = []
         y_rows: list[int] = []
 
@@ -383,7 +378,7 @@ class PatternMetaLearner:
                 if not feats:
                     continue
                 row = [feats.get(f, 0.0) for f in feature_names]
-                label = 1 if (snap.future_return_5d or 0) > 0 else 0
+                label = 1 if (snap.future_return_5d or 0) > _LABEL_THRESHOLD_PCT else 0
                 X_rows.append(row)
                 y_rows.append(label)
             except Exception:
@@ -400,23 +395,37 @@ class PatternMetaLearner:
         X = np.array(X_rows)
         y = np.array(y_rows)
 
-        # Optional GPU path via LightGBM when BRAIN_USE_GPU_ML=true
+        # Temporal split: train on first 80%, holdout last 20% for OOS eval
+        split_idx = int(len(X) * 0.8)
+        X_train, X_oos = X[:split_idx], X[split_idx:]
+        y_train, y_oos = y[:split_idx], y[split_idx:]
+
+        if len(X_train) < _MIN_SAMPLES or len(X_oos) < 20:
+            return {
+                "ok": False,
+                "reason": "Not enough samples for temporal split",
+                "train_size": len(X_train),
+                "oos_size": len(X_oos),
+            }
+
         clf = self._make_meta_learner_clf()
 
-        n_splits = min(5, max(2, len(X) // 200))
+        # Cross-validate on training set only (temporal folds)
+        n_splits = min(5, max(2, len(X_train) // 200))
         tscv = TimeSeriesSplit(n_splits=n_splits)
         n_jobs_cv = 1 if getattr(clf, "device", None) == "gpu" else -1
         cv_scores = cross_val_score(
-            clf, X, y, cv=tscv, scoring="accuracy", n_jobs=n_jobs_cv,
+            clf, X_train, y_train, cv=tscv, scoring="accuracy", n_jobs=n_jobs_cv,
         )
 
-        clf.fit(X, y)
-        y_pred = clf.predict(X)
+        # Train on training set, evaluate on OOS holdout
+        clf.fit(X_train, y_train)
+        y_pred_oos = clf.predict(X_oos)
 
-        train_acc = round(accuracy_score(y, y_pred) * 100, 1)
+        oos_acc = round(accuracy_score(y_oos, y_pred_oos) * 100, 1)
         cv_acc = round(cv_scores.mean() * 100, 1)
-        precision = round(precision_score(y, y_pred, zero_division=0) * 100, 1)
-        recall = round(recall_score(y, y_pred, zero_division=0) * 100, 1)
+        precision = round(precision_score(y_oos, y_pred_oos, zero_division=0) * 100, 1)
+        recall = round(recall_score(y_oos, y_pred_oos, zero_division=0) * 100, 1)
 
         raw_importances = {
             feature_names[i]: round(float(clf.feature_importances_[i]), 4)
@@ -432,13 +441,16 @@ class PatternMetaLearner:
             self._stats = {
                 "trained_at": datetime.utcnow().isoformat(),
                 "samples": len(X),
+                "train_samples": len(X_train),
+                "oos_samples": len(X_oos),
                 "positive_rate": round(float(y.mean()) * 100, 1),
-                "train_accuracy": train_acc,
+                "label_threshold_pct": _LABEL_THRESHOLD_PCT,
+                "oos_accuracy": oos_acc,
                 "cv_accuracy": cv_acc,
                 "cv_method": "TimeSeriesSplit",
                 "cv_splits": n_splits,
-                "precision": precision,
-                "recall": recall,
+                "precision_oos": precision,
+                "recall_oos": recall,
                 "feature_importances": raw_importances,
                 "active_patterns": len(patterns),
             }
@@ -446,9 +458,10 @@ class PatternMetaLearner:
         self.save()
 
         logger.info(
-            "[pattern_ml] Trained on %d samples (%d patterns): "
-            "CV acc=%s%%, prec=%s%%, recall=%s%%",
-            len(X), len(patterns), cv_acc, precision, recall,
+            "[pattern_ml] Trained on %d samples (OOS=%d, %d patterns): "
+            "OOS acc=%s%%, CV acc=%s%%, prec=%s%%, recall=%s%%",
+            len(X_train), len(X_oos), len(patterns),
+            oos_acc, cv_acc, precision, recall,
         )
 
         return {"ok": True, **self._stats}
@@ -544,18 +557,26 @@ def apply_ml_feedback(db, importances: dict[int, float]) -> dict[str, Any]:
         if imp < 0.001
     }
 
+    all_ids = list(top_ids | bottom_ids)
+    patterns_by_id: dict[int, Any] = {}
+    if all_ids:
+        pats = db.query(ScanPattern).filter(
+            ScanPattern.id.in_(all_ids), ScanPattern.active.is_(True),
+        ).all()
+        patterns_by_id = {p.id: p for p in pats}
+
     boosted = penalised = 0
 
     for pid in top_ids:
-        pat = db.query(ScanPattern).get(pid)
-        if pat and pat.active:
+        pat = patterns_by_id.get(pid)
+        if pat:
             old = pat.score_boost or 0.0
             pat.score_boost = min(5.0, round(old + 0.3, 2))
             boosted += 1
 
     for pid in bottom_ids:
-        pat = db.query(ScanPattern).get(pid)
-        if pat and pat.active:
+        pat = patterns_by_id.get(pid)
+        if pat:
             old = pat.score_boost or 0.0
             pat.score_boost = max(0.0, round(old - 0.2, 2))
             penalised += 1

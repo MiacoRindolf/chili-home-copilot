@@ -1,0 +1,217 @@
+"""Intraday signal pipeline for the trading brain.
+
+Scans for real-time setups across crypto and stocks:
+- Pre-market gap detection
+- Opening Range Breakout (ORB)
+- Crypto breakout signals
+- Momentum continuation after pullback
+
+Signals are scored, filtered, and optionally routed to paper trading
+or alert dispatch.
+"""
+from __future__ import annotations
+
+import logging
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+logger = logging.getLogger(__name__)
+
+
+def scan_premarket_gaps(
+    tickers: list[str] | None = None,
+    min_gap_pct: float = 3.0,
+) -> list[dict[str, Any]]:
+    """Detect pre-market gaps by comparing yesterday's close to current price."""
+    from .market_data import fetch_quote, DEFAULT_SCAN_TICKERS
+
+    if tickers is None:
+        tickers = list(DEFAULT_SCAN_TICKERS)[:50]
+
+    gaps = []
+    for ticker in tickers:
+        try:
+            q = fetch_quote(ticker)
+            if not q:
+                continue
+            price = q.get("price", 0)
+            prev_close = q.get("previous_close") or q.get("regularMarketPreviousClose", 0)
+            if not price or not prev_close or prev_close <= 0:
+                continue
+            gap_pct = (price - prev_close) / prev_close * 100
+            if abs(gap_pct) >= min_gap_pct:
+                gaps.append({
+                    "ticker": ticker,
+                    "price": round(price, 2),
+                    "prev_close": round(prev_close, 2),
+                    "gap_pct": round(gap_pct, 2),
+                    "direction": "up" if gap_pct > 0 else "down",
+                    "signal_type": "premarket_gap",
+                })
+        except Exception:
+            continue
+
+    gaps.sort(key=lambda x: abs(x["gap_pct"]), reverse=True)
+    return gaps[:15]
+
+
+def scan_opening_range_breakout(
+    tickers: list[str] | None = None,
+    orb_minutes: int = 30,
+) -> list[dict[str, Any]]:
+    """Detect Opening Range Breakouts — price breaking above/below the first N minutes' range."""
+    from .market_data import fetch_ohlcv_df, DEFAULT_SCAN_TICKERS
+
+    if tickers is None:
+        tickers = list(DEFAULT_SCAN_TICKERS)[:30]
+
+    signals = []
+    for ticker in tickers:
+        try:
+            df = fetch_ohlcv_df(ticker, period="2d", interval="5m")
+            if df.empty or len(df) < 12:
+                continue
+
+            today = df.index[-1].date() if hasattr(df.index[-1], "date") else None
+            if today is None:
+                continue
+
+            today_bars = df[df.index.date == today] if hasattr(df.index, "date") else df.tail(78)
+            if len(today_bars) < 6:
+                continue
+
+            orb_bars = orb_minutes // 5
+            opening_range = today_bars.head(orb_bars)
+            orb_high = float(opening_range["High"].max())
+            orb_low = float(opening_range["Low"].min())
+            current = float(today_bars["Close"].iloc[-1])
+            volume = float(today_bars["Volume"].iloc[-1])
+
+            if current > orb_high:
+                signals.append({
+                    "ticker": ticker,
+                    "price": round(current, 2),
+                    "orb_high": round(orb_high, 2),
+                    "orb_low": round(orb_low, 2),
+                    "direction": "long",
+                    "breakout_pct": round((current - orb_high) / orb_high * 100, 2),
+                    "signal_type": "orb_breakout",
+                    "stop_price": round(orb_low, 2),
+                    "target_price": round(current + (orb_high - orb_low), 2),
+                })
+            elif current < orb_low:
+                signals.append({
+                    "ticker": ticker,
+                    "price": round(current, 2),
+                    "orb_high": round(orb_high, 2),
+                    "orb_low": round(orb_low, 2),
+                    "direction": "short",
+                    "breakout_pct": round((orb_low - current) / orb_low * 100, 2),
+                    "signal_type": "orb_breakdown",
+                    "stop_price": round(orb_high, 2),
+                    "target_price": round(current - (orb_high - orb_low), 2),
+                })
+        except Exception:
+            continue
+
+    signals.sort(key=lambda x: abs(x.get("breakout_pct", 0)), reverse=True)
+    return signals[:10]
+
+
+def scan_momentum_continuation(
+    tickers: list[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Find stocks/crypto in strong momentum that pulled back to support."""
+    from .market_data import fetch_ohlcv_df, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS
+    import pandas as pd
+
+    if tickers is None:
+        tickers = list(DEFAULT_SCAN_TICKERS)[:30] + list(DEFAULT_CRYPTO_TICKERS)[:10]
+
+    signals = []
+    for ticker in tickers:
+        try:
+            df = fetch_ohlcv_df(ticker, period="1mo", interval="1d")
+            if df.empty or len(df) < 20:
+                continue
+
+            close = df["Close"].astype(float)
+            ema9 = close.ewm(span=9, adjust=False).mean()
+            ema21 = close.ewm(span=21, adjust=False).mean()
+
+            last_close = float(close.iloc[-1])
+            last_ema9 = float(ema9.iloc[-1])
+            last_ema21 = float(ema21.iloc[-1])
+
+            # Strong uptrend: EMA9 > EMA21, price pulled back to EMA9
+            if last_ema9 > last_ema21:
+                pullback_to_ema9 = abs(last_close - last_ema9) / last_close * 100
+                if pullback_to_ema9 < 1.5 and last_close > last_ema21:
+                    # 5-day momentum
+                    mom_5d = (last_close - float(close.iloc[-5])) / float(close.iloc[-5]) * 100 if len(close) >= 5 else 0
+
+                    if mom_5d > 2:
+                        signals.append({
+                            "ticker": ticker,
+                            "price": round(last_close, 2),
+                            "ema9": round(last_ema9, 2),
+                            "ema21": round(last_ema21, 2),
+                            "pullback_pct": round(pullback_to_ema9, 2),
+                            "momentum_5d_pct": round(mom_5d, 2),
+                            "direction": "long",
+                            "signal_type": "momentum_continuation",
+                            "stop_price": round(last_ema21 * 0.99, 2),
+                            "target_price": round(last_close * 1.05, 2),
+                        })
+        except Exception:
+            continue
+
+    signals.sort(key=lambda x: x.get("momentum_5d_pct", 0), reverse=True)
+    return signals[:10]
+
+
+def run_intraday_signal_sweep(
+    db: Session,
+    user_id: int | None = None,
+    *,
+    auto_paper: bool = False,
+) -> dict[str, Any]:
+    """Run all intraday signal scanners and optionally paper-trade the best ones."""
+    results: dict[str, Any] = {"timestamp": datetime.utcnow().isoformat() + "Z"}
+
+    try:
+        gaps = scan_premarket_gaps()
+        results["premarket_gaps"] = gaps
+    except Exception as e:
+        logger.warning("[intraday] Gap scan failed: %s", e)
+        results["premarket_gaps"] = []
+
+    try:
+        orbs = scan_opening_range_breakout()
+        results["orb_signals"] = orbs
+    except Exception as e:
+        logger.warning("[intraday] ORB scan failed: %s", e)
+        results["orb_signals"] = []
+
+    try:
+        momentum = scan_momentum_continuation()
+        results["momentum_signals"] = momentum
+    except Exception as e:
+        logger.warning("[intraday] Momentum scan failed: %s", e)
+        results["momentum_signals"] = []
+
+    all_signals = results.get("premarket_gaps", []) + results.get("orb_signals", []) + results.get("momentum_signals", [])
+    results["total_signals"] = len(all_signals)
+
+    if auto_paper and all_signals:
+        try:
+            from .paper_trading import auto_enter_from_signals
+            entered = auto_enter_from_signals(db, user_id, all_signals[:5])
+            results["paper_entered"] = entered
+        except Exception as e:
+            logger.warning("[intraday] Paper entry failed: %s", e)
+
+    results["ok"] = True
+    return results

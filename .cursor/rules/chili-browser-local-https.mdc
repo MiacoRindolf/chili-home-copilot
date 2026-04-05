@@ -1,0 +1,38 @@
+---
+description: Handle local HTTPS/TLS interstitials automatically during CHILI browser validation
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+When validating CHILI in a browser against local HTTPS targets such as:
+- https://localhost:8000
+- https://127.0.0.1:8000
+
+follow this execution policy:
+
+1. Treat local TLS/interstitial handling as part of execution, not as a user responsibility.
+2. If the browser lands on a certificate/privacy warning, interstitial, or equivalent local HTTPS warning page:
+   - attempt to click through it automatically
+   - then retry the intended URL
+3. Do not conclude "browser validation failed" until you have:
+   - tried the target URL
+   - handled any visible TLS/interstitial warning
+   - retried the target URL at least once after handling it
+4. Distinguish clearly between:
+   - TLS/interstitial/browser-state failure
+   - pairing/auth/session failure
+   - actual app/page failure
+   - stale image / deployment mismatch
+5. If the page still resolves to a browser error page after interstitial handling:
+   - report the exact browser-level blocker
+   - then fall back to API/DB/runtime validation where appropriate
+   - do not misclassify the result as an app-contract failure without evidence
+6. If browser automation is blocked by tooling limitations and you cannot click through the warning:
+   - state that explicitly
+   - state that the remaining gap is browser-tooling/TLS handling, not necessarily an application defect
+7. For local validation passes, prefer preserving progress by:
+   - retrying once after TLS acceptance
+   - retrying once after container refresh/recreate if the browser was already open on the old session
+8. Keep this rule limited to local/dev browser validation.
+   It must not be interpreted as a rule to bypass production security warnings.

@@ -826,6 +826,11 @@ def smart_backtest_insight(
 
     jobs_count = len(tickers)
 
+    from ...config import settings as _bt_settings
+    _oos_frac = float(getattr(_bt_settings, "brain_oos_holdout_fraction", 0.25))
+    _bt_spread = float(getattr(_bt_settings, "backtest_spread", 0.001))
+    _bt_comm = float(getattr(_bt_settings, "backtest_commission", 0.001))
+
     def _run_one_pattern(ticker: str) -> dict[str, Any] | None:
         if shutdown.is_set():
             return None
@@ -834,6 +839,9 @@ def smart_backtest_insight(
                 ticker, conditions, pattern_name=pattern_name,
                 period=bt_period, interval=bt_interval,
                 exit_config=exit_config,
+                oos_holdout_fraction=_oos_frac,
+                spread=_bt_spread,
+                commission=_bt_comm,
             )
             if result.get("ok"):
                 return result

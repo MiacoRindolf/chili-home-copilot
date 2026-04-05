@@ -543,9 +543,71 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
     except Exception as e:
         logger.warning(f"[scanner] Hypothesis weight adjustment failed: {e}")
 
-    # ── Insight-based weight adjustment (skip if already adjusted by hypothesis) ──
+    # ── ScanPattern-based weight adjustment ──
+    # Instead of NL keyword matching, use actual ScanPattern rules_json
+    # conditions to map factors to their measured performance.
+    try:
+        import json as _wj
+        from ...models.trading import ScanPattern as _SP, Trade as _Trade
+        _live_patterns = db.query(_SP).filter(
+            _SP.active.is_(True),
+            _SP.lifecycle_stage.in_(("live", "promoted", "backtested")),
+            _SP.rules_json.isnot(None),
+        ).all()
+
+        _indicator_to_factor: dict[str, list[str]] = {
+            "rsi_14": ["swing_rsi_oversold", "swing_rsi_near_oversold", "swing_rsi_overbought", "intra_rsi_momentum_zone"],
+            "macd": ["macd_positive_bonus", "macd_negative_penalty", "swing_macd_bull", "swing_macd_bear"],
+            "macd_signal": ["macd_positive_bonus", "swing_macd_bull"],
+            "macd_histogram": ["macd_positive_bonus"],
+            "bb_pct": ["swing_bb_near_lower", "swing_bb_near_upper"],
+            "adx": ["swing_adx_strong", "bo_adx_consolidating", "bo_adx_trending"],
+            "ema_20": ["swing_ema_stack_full_bull", "swing_ema_stack_partial_bull"],
+            "ema_50": ["swing_ema_stack_full_bull", "swing_sma_uptrend"],
+            "ema_100": ["swing_ema_stack_full_bull"],
+            "resistance_retests": ["bo_near_resistance_close", "bo_near_resistance_mid"],
+            "vwap": ["intra_vwap_above", "intra_vwap_below"],
+        }
+
+        factor_scores: dict[str, list[float]] = {}
+        for sp in _live_patterns:
+            try:
+                rules = _wj.loads(sp.rules_json)
+                conds = rules.get("conditions", [])
+            except Exception:
+                continue
+            wr = sp.win_rate or 50.0
+            conf = sp.confidence or 0.5
+            score = (wr / 100.0) * conf
+            for c in conds:
+                ind = c.get("indicator") or c.get("ref", "")
+                for factor in _indicator_to_factor.get(ind, []):
+                    if factor not in hyp_adjusted_weights:
+                        factor_scores.setdefault(factor, []).append(score)
+
+        for factor_key, scores in factor_scores.items():
+            if factor_key in hyp_adjusted_weights or factor_key not in _DEFAULT_WEIGHTS:
+                continue
+            if len(scores) < 2:
+                continue
+            avg_score = sum(scores) / len(scores)
+            default = _DEFAULT_WEIGHTS[factor_key]
+            boost = 1.0 + (avg_score - 0.25) * 0.4
+            new_val = round(default * max(0.5, min(1.5, boost)), 3)
+
+            if abs(new_val - default) > 0.05:
+                adjustments[factor_key] = new_val
+                direction = "up" if abs(new_val) > abs(default) else "down"
+                details.append(
+                    f"{factor_key}: {default}->{new_val:.3f} ({direction}, "
+                    f"pattern_score={avg_score:.2f}, n_patterns={len(scores)})"
+                )
+    except Exception as e:
+        logger.warning("[scanner] Pattern-based weight adjustment failed: %s", e)
+
+    # ── Legacy insight fallback for factors not yet covered ──
     for factor_key, keywords in FACTOR_KEYWORDS.items():
-        if factor_key in hyp_adjusted_weights:
+        if factor_key in hyp_adjusted_weights or factor_key in adjustments:
             continue
         related = [
             ins for ins in insights
@@ -573,7 +635,7 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
             direction = "up" if abs(new_val) > abs(default) else "down"
             details.append(
                 f"{factor_key}: {default}->{new_val:.3f} ({direction}, "
-                f"avg_conf={avg_conf:.0%}, evidence={total_evidence})"
+                f"avg_conf={avg_conf:.0%}, evidence={total_evidence}, legacy_fallback)"
             )
 
     if adjustments:
@@ -591,11 +653,26 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
     }
 
 
+# ── Cache helpers ─────────────────────────────────────────────────────
+
+def _cache_put(cache: dict, lock: threading.Lock, key, value, ttl: float, max_size: int) -> None:
+    now = time.time()
+    with lock:
+        if len(cache) >= max_size:
+            cutoff = now - ttl
+            stale = [k for k, v in cache.items() if v[0] < cutoff]
+            for k in stale:
+                del cache[k]
+            if len(cache) >= max_size:
+                cache.clear()
+        cache[key] = (now, value)
+
+
 # ── Single ticker scoring ─────────────────────────────────────────────
 
 _score_cache: dict[tuple, tuple[float, dict | None]] = {}
 _score_cache_lock = threading.Lock()
-_SCORE_CACHE_TTL = 300  # 5 min (64 GB RAM)
+_SCORE_CACHE_TTL = 300  # 5 min
 _SCORE_CACHE_MAX = 1000
 
 
@@ -617,13 +694,7 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
 
     result = _score_ticker_impl(ticker, skip_fundamentals=skip_fundamentals)
 
-    with _score_cache_lock:
-        if len(_score_cache) >= _SCORE_CACHE_MAX:
-            cutoff = now - _SCORE_CACHE_TTL
-            stale = [k for k, v in _score_cache.items() if v[0] < cutoff]
-            for k in stale:
-                del _score_cache[k]
-        _score_cache[cache_key] = (now, result)
+    _cache_put(_score_cache, _score_cache_lock, cache_key, result, _SCORE_CACHE_TTL, _SCORE_CACHE_MAX)
     return result
 
 
@@ -827,23 +898,26 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                 _asset_class = "crypto" if is_crypto_ticker else "stocks"
                 _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
                 if _pe_patterns:
+                    _sw_resistance = float(high.rolling(20).max().iloc[-1])
                     _pe_snap = build_indicator_snapshot(
-                        ticker=ticker,
                         price=price,
-                        rsi=float(rsi_val) if pd.notna(rsi_val) else None,
-                        macd_hist=float(macd_hist) if pd.notna(macd_hist) else None,
-                        adx=float(adx_val) if pd.notna(adx_val) else None,
-                        bb_pct=(price - float(bb_lower)) / (float(bb_upper) - float(bb_lower))
-                            if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
-                        vol_ratio=vol_latest / vol_avg if vol_avg > 0 else None,
-                        ema_stack_bullish=ema_stack_bullish,
-                        ema_stack_bearish=ema_stack_bearish,
-                        extra={
-                            "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                        indicators={
+                            "rsi_14": float(rsi_val) if pd.notna(rsi_val) else None,
+                            "macd_hist": float(macd_hist) if pd.notna(macd_hist) else None,
+                            "adx": float(adx_val) if pd.notna(adx_val) else None,
+                            "bb_pct": (price - float(bb_lower)) / (float(bb_upper) - float(bb_lower))
+                                if pd.notna(bb_lower) and pd.notna(bb_upper) and float(bb_upper) > float(bb_lower) else None,
+                            "rel_vol": vol_latest / vol_avg if vol_avg > 0 else None,
+                            "ema_stack_bullish": ema_stack_bullish,
+                            "ema_stack_bearish": ema_stack_bearish,
                             "ema_20": float(ema_20) if pd.notna(ema_20) else None,
                             "ema_50": float(ema_50) if pd.notna(ema_50) else None,
                             "sma_20": float(sma_20) if pd.notna(sma_20) else None,
                             "sma_50": float(sma_50) if pd.notna(sma_50) else None,
+                        },
+                        resistance=_sw_resistance,
+                        extra={
+                            "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
                         },
                     )
                     _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
@@ -1689,7 +1763,8 @@ def _get_cached_news_sentiment(ticker: str) -> float | None:
 
 _cbo_score_cache: dict[str, tuple[float, dict | None]] = {}
 _cbo_score_lock = threading.Lock()
-_CBO_SCORE_TTL = 600  # 10 min for crypto (64 GB RAM — keep scores longer)
+_CBO_SCORE_TTL = 600  # 10 min for crypto
+_CBO_SCORE_MAX = 500
 
 
 def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
@@ -1704,8 +1779,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
         ind = _compute_indicators(df, crypto=True)
         if ind is None:
-            with _cbo_score_lock:
-                _cbo_score_cache[key] = (time.time(), None)
+            _cache_put(_cbo_score_cache, _cbo_score_lock, key, None, _CBO_SCORE_TTL, _CBO_SCORE_MAX)
             return None
 
         close = ind["close"]
@@ -1793,6 +1867,8 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
             pd.notna(macd_line) and pd.notna(macd_sig) and pd.notna(macd_hist)
             and float(macd_line) > float(macd_sig) and float(macd_hist) > 0
         )
+
+        resistance = float(high.rolling(20).max().iloc[-1])
 
         # ── Scoring ──
         score = 5.0
@@ -2112,8 +2188,6 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
         else:
             signal = "watch"
 
-        # Resistance & distance (use 20-bar rolling high on 15m candles)
-        resistance = float(high.rolling(20).max().iloc[-1])
         dist_to_breakout = round((resistance - price) / price * 100, 2) if resistance and price else 0.0
 
         if dist_to_breakout <= 0:
@@ -2182,13 +2256,11 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 float(adx_val) if pd.notna(adx_val) else None,
             ),
         }
-        with _cbo_score_lock:
-            _cbo_score_cache[key] = (time.time(), result)
+        _cache_put(_cbo_score_cache, _cbo_score_lock, key, result, _CBO_SCORE_TTL, _CBO_SCORE_MAX)
         return result
     except Exception as e:
         logger.debug(f"[crypto_breakout] {ticker} failed: {e}")
-        with _cbo_score_lock:
-            _cbo_score_cache[key] = (time.time(), None)
+        _cache_put(_cbo_score_cache, _cbo_score_lock, key, None, _CBO_SCORE_TTL, _CBO_SCORE_MAX)
         return None
 
 
@@ -2440,6 +2512,7 @@ def get_crypto_breakout_cache() -> dict[str, Any]:
 
 _bo_score_cache: dict[str, tuple[float, dict | None]] = {}
 _bo_score_lock = threading.Lock()
+_BO_SCORE_MAX = 500
 _BO_SCORE_TTL = 900  # 15 min — breakout setups don't change fast (64 GB RAM)
 
 
@@ -2455,8 +2528,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
         df = fetch_ohlcv_df(ticker, period="6mo", interval="1d")
         ind = _compute_indicators(df, crypto=False)
         if ind is None:
-            with _bo_score_lock:
-                _bo_score_cache[key] = (time.time(), None)
+            _cache_put(_bo_score_cache, _bo_score_lock, key, None, _BO_SCORE_TTL, _BO_SCORE_MAX)
             return None
 
         close = ind["close"]
@@ -2836,6 +2908,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             pass
 
         score = max(1.0, min(10.0, score))
+        _bo_ready = get_adaptive_weight("bo_signal_ready")
         _bo_watch = get_adaptive_weight("bo_signal_watch")
         if dist_to_breakout <= 0:
             status = "breaking_out"
@@ -2887,13 +2960,11 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 float(adx_val) if pd.notna(adx_val) else None,
             ),
         }
-        with _bo_score_lock:
-            _bo_score_cache[key] = (time.time(), result)
+        _cache_put(_bo_score_cache, _bo_score_lock, key, result, _BO_SCORE_TTL, _BO_SCORE_MAX)
         return result
     except Exception as exc:
         logger.debug(f"[scanner] _score_breakout({ticker}) failed: {exc}")
-        with _bo_score_lock:
-            _bo_score_cache[key] = (time.time(), None)
+        _cache_put(_bo_score_cache, _bo_score_lock, key, None, _BO_SCORE_TTL, _BO_SCORE_MAX)
         return None
 
 
@@ -4193,6 +4264,18 @@ _scan_status: dict[str, Any] = {
 
 def get_scan_status() -> dict[str, Any]:
     return dict(_scan_status)
+
+
+def clear_scanner_caches() -> None:
+    """Drop all in-memory score caches to free RAM between scan runs."""
+    from .market_data import clear_ohlcv_cache
+    with _score_cache_lock:
+        _score_cache.clear()
+    with _cbo_score_lock:
+        _cbo_score_cache.clear()
+    with _bo_score_lock:
+        _bo_score_cache.clear()
+    clear_ohlcv_cache()
 
 
 def load_top_scan_tickers_for_snapshots(
