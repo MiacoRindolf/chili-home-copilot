@@ -64,3 +64,4 @@ class BrainWorkerControl(Base):
     updated_at = Column(DateTime, nullable=True)
     last_cycle_digest_json = Column(Text, nullable=True)
     last_proposal_skips_json = Column(Text, nullable=True)
+    learning_live_json = Column(Text, nullable=True)

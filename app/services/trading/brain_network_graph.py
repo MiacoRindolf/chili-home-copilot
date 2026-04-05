@@ -210,6 +210,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         cx, cy = positions[ci]
         cid = cdef.id
         cref = "run_learning_cycle → " + cid
+        in_lc = cid != "c_universe"
         nodes.append(
             {
                 "id": cid,
@@ -218,6 +219,8 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                 "x": cx,
                 "y": cy,
                 "phase": cdef.phase_summary,
+                "cluster_index": ci,
+                "in_learning_cycle": in_lc,
                 "code_ref": cref,
                 "code_snippet": build_code_snippet_from_ref(cref),
                 "description": cdef.description,
@@ -245,6 +248,9 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
                     "tier": "step",
                     "x": sx,
                     "y": sy,
+                    "cluster_index": ci,
+                    "step_index": si,
+                    "in_learning_cycle": in_lc,
                     "code_ref": st.code_ref,
                     "code_snippet": build_code_snippet_from_ref(st.code_ref),
                     "description": st.description,
@@ -263,7 +269,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 13,
+        "graph_version": 14,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

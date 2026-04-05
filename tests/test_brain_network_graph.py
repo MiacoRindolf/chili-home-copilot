@@ -5,6 +5,20 @@ from __future__ import annotations
 from app.services.trading.brain_network_graph import get_trading_brain_network_graph
 
 
+def test_trading_brain_network_graph_universe_and_step_ordinals() -> None:
+    data = get_trading_brain_network_graph()
+    assert int(data["meta"]["graph_version"]) >= 14
+    for n in data["nodes"]:
+        if not isinstance(n, dict):
+            continue
+        tid = n.get("id", "")
+        if n.get("tier") == "step":
+            assert isinstance(n.get("cluster_index"), int)
+            assert isinstance(n.get("step_index"), int)
+        if tid == "c_universe" or (isinstance(tid, str) and tid.startswith("s_c_universe_")):
+            assert n.get("in_learning_cycle") is False
+
+
 def test_trading_brain_network_graph_structure() -> None:
     data = get_trading_brain_network_graph()
     assert data.get("ok") is True
@@ -17,7 +31,7 @@ def test_trading_brain_network_graph_structure() -> None:
         assert e.get("from") in ids, f"missing from-node: {e!r}"
         assert e.get("to") in ids, f"missing to-node: {e!r}"
     meta = data.get("meta") or {}
-    assert int(meta.get("graph_version", 0)) >= 10
+    assert int(meta.get("graph_version", 0)) >= 14
     assert meta.get("architecture_source") == "learning_cycle_architecture"
     for n in nodes:
         if not isinstance(n, dict):

@@ -202,6 +202,36 @@ def persist_last_proposal_skips_json(db: Session, payload: dict[str, Any]) -> No
             pass
 
 
+def persist_learning_live_json(db: Session, payload: dict[str, Any]) -> None:
+    """Store live learning-cycle fields for cross-process Brain UI (Network graph). Commits on success."""
+    from ..models.core import BrainWorkerControl
+
+    try:
+        row = db.get(BrainWorkerControl, _CONTROL_ID)
+        now = datetime.utcnow()
+        blob = json.dumps(payload, default=str)
+        if row is None:
+            db.add(
+                BrainWorkerControl(
+                    id=_CONTROL_ID,
+                    wake_requested=False,
+                    stop_requested=False,
+                    updated_at=now,
+                    learning_live_json=blob,
+                )
+            )
+        else:
+            row.learning_live_json = blob
+            row.updated_at = now
+        db.commit()
+    except Exception as e:
+        logger.warning("[brain_worker_signals] persist_learning_live_json: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def heartbeat_is_stale(last_heartbeat_at: datetime | None) -> bool:
     """True if heartbeat missing or older than BRAIN_WORKER_HEARTBEAT_STALE_S."""
     if last_heartbeat_at is None:

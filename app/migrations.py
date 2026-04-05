@@ -2981,6 +2981,90 @@ def _migration_082_breakout_alert_outcome_notes(conn) -> None:
         conn.commit()
 
 
+def _migration_083_backtest_win_rate_scale_cleanup(conn) -> None:
+    """Normalize win_rate/oos_win_rate stored as percent (>1.0) to fraction in trading_backtests."""
+    if "trading_backtests" not in _tables(conn):
+        return
+    cols = _columns(conn, "trading_backtests")
+    if "win_rate" in cols:
+        for _ in range(12):
+            r = conn.execute(
+                text(
+                    "UPDATE trading_backtests SET win_rate = win_rate / 100.0 "
+                    "WHERE win_rate IS NOT NULL AND win_rate > 1.0"
+                )
+            )
+            if (r.rowcount or 0) == 0:
+                break
+    if "oos_win_rate" in cols:
+        for _ in range(12):
+            r = conn.execute(
+                text(
+                    "UPDATE trading_backtests SET oos_win_rate = oos_win_rate / 100.0 "
+                    "WHERE oos_win_rate IS NOT NULL AND oos_win_rate > 1.0"
+                )
+            )
+            if (r.rowcount or 0) == 0:
+                break
+    cols2 = _columns(conn, "trading_backtests")
+    if "win_rate" in cols2:
+        conn.execute(
+            text(
+                "UPDATE trading_backtests SET win_rate = NULL "
+                "WHERE win_rate IS NOT NULL "
+                "AND NOT (win_rate >= 0 AND win_rate <= 1)"
+            )
+        )
+    if "oos_win_rate" in cols2:
+        conn.execute(
+            text(
+                "UPDATE trading_backtests SET oos_win_rate = NULL "
+                "WHERE oos_win_rate IS NOT NULL "
+                "AND NOT (oos_win_rate >= 0 AND oos_win_rate <= 1)"
+            )
+        )
+    conn.commit()
+
+
+def _migration_084_align_backtest_scan_pattern_from_insight(conn) -> None:
+    """Align ``trading_backtests.scan_pattern_id`` with authoritative ``TradingInsight.scan_pattern_id``.
+
+    Policy (pattern-evidence plan): trust the insight when both are linked; backfill NULL
+    from the insight and fix disagreements. Does not delete rows.
+    """
+    if "trading_backtests" not in _tables(conn) or "trading_insights" not in _tables(conn):
+        return
+    cols_bt = _columns(conn, "trading_backtests")
+    cols_ti = _columns(conn, "trading_insights")
+    if (
+        "scan_pattern_id" not in cols_bt
+        or "scan_pattern_id" not in cols_ti
+        or "related_insight_id" not in cols_bt
+    ):
+        return
+    conn.execute(
+        text(
+            "UPDATE trading_backtests bt "
+            "SET scan_pattern_id = ti.scan_pattern_id "
+            "FROM trading_insights ti "
+            "WHERE bt.related_insight_id = ti.id "
+            "  AND ti.scan_pattern_id IS NOT NULL "
+            "  AND (bt.scan_pattern_id IS NULL OR bt.scan_pattern_id != ti.scan_pattern_id)"
+        )
+    )
+    conn.commit()
+
+
+def _migration_085_brain_worker_learning_live_json(conn) -> None:
+    """Cross-process live learning cycle snapshot for Brain UI (Network tab graph, scan/status)."""
+    if "brain_worker_control" not in _tables(conn):
+        return
+    cols = _columns(conn, "brain_worker_control")
+    if "learning_live_json" not in cols:
+        conn.execute(text("ALTER TABLE brain_worker_control ADD COLUMN learning_live_json TEXT"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -3065,6 +3149,9 @@ MIGRATIONS = [
     ("080_orphan_cleanup", _migration_080_orphan_cleanup),
     ("081_graduate_startup_repairs", _migration_081_graduate_startup_repairs),
     ("082_breakout_alert_outcome_notes", _migration_082_breakout_alert_outcome_notes),
+    ("083_backtest_win_rate_scale_cleanup", _migration_083_backtest_win_rate_scale_cleanup),
+    ("084_align_backtest_scan_pattern_from_insight", _migration_084_align_backtest_scan_pattern_from_insight),
+    ("085_brain_worker_learning_live_json", _migration_085_brain_worker_learning_live_json),
 ]
 
 
@@ -3084,7 +3171,13 @@ def run_migrations(engine: Engine) -> None:
                 continue
             try:
                 migrate_fn(conn)
-                conn.execute(text("INSERT INTO schema_version (version_id) VALUES (:vid)"), {"vid": version_id})
+                conn.execute(
+                    text(
+                        "INSERT INTO schema_version (version_id) VALUES (:vid) "
+                        "ON CONFLICT (version_id) DO NOTHING"
+                    ),
+                    {"vid": version_id},
+                )
                 conn.commit()
             except Exception as e:
                 conn.rollback()

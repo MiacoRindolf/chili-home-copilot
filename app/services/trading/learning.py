@@ -5705,6 +5705,11 @@ _learning_status: dict[str, Any] = {
     "last_duration_s": None,
     "phase": "idle",
     "current_step": "",
+    "graph_node_id": "",
+    "current_cluster_id": "",
+    "current_step_sid": "",
+    "current_cluster_index": -1,
+    "current_step_index": -1,
     "steps_completed": 0,
     "total_steps": count_cycle_progress_steps(snap_inline=False),
     "patterns_found": 0,
@@ -5721,8 +5726,27 @@ _brain_shadow_ctx: dict[str, Any] = {}
 # Phase 3: global cycle lease enforcement (dedicated sessions; cleared in run_learning_cycle finally).
 _brain_lease_enforcement_ctx: dict[str, Any] = {}
 
+_last_learning_live_persist_mono: float = 0.0
+_LEARNING_LIVE_DB_THROTTLE_S = 2.0
 
-def get_learning_status() -> dict[str, Any]:
+# Keys mirrored in data/brain_worker_status.json["learning"] for cross-process UI (uvicorn reads worker).
+_BRAIN_WORKER_STATUS_LEARNING_KEYS: tuple[str, ...] = (
+    "running",
+    "phase",
+    "current_step",
+    "graph_node_id",
+    "current_cluster_id",
+    "current_step_sid",
+    "current_cluster_index",
+    "current_step_index",
+    "steps_completed",
+    "total_steps",
+    "started_at",
+    "elapsed_s",
+)
+
+
+def _learning_status_with_elapsed() -> dict[str, Any]:
     status = dict(_learning_status)
     if status.get("running") and status.get("started_at"):
         try:
@@ -5730,6 +5754,106 @@ def get_learning_status() -> dict[str, Any]:
             status["elapsed_s"] = round((datetime.utcnow() - started).total_seconds(), 1)
         except Exception:
             pass
+    return status
+
+
+def snapshot_learning_for_brain_worker_status_file() -> dict[str, Any]:
+    """In-process cycle fields for ``brain_worker_status.json`` (brain worker process)."""
+    st = _learning_status_with_elapsed()
+    return {k: st.get(k) for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS}
+
+
+def _overlay_learning_from_brain_worker_status_file(status: dict[str, Any]) -> None:
+    """When the trading brain worker runs out-of-process, merge its live cycle snapshot for the web UI."""
+    try:
+        from ...db import DATA_DIR
+
+        path = DATA_DIR / "brain_worker_status.json"
+        if not path.exists():
+            return
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("status") != "running":
+            return
+        file_pid = data.get("pid")
+        try:
+            if file_pid is not None and int(file_pid) == os.getpid():
+                return
+        except (TypeError, ValueError):
+            pass
+        snap = data.get("learning")
+        if not isinstance(snap, dict):
+            return
+        for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS:
+            if k in snap:
+                status[k] = snap[k]
+    except Exception:
+        pass
+
+
+def _overlay_learning_from_brain_worker_db(status: dict[str, Any]) -> None:
+    """Merge live cycle snapshot from PostgreSQL (authoritative across processes/containers)."""
+    try:
+        from ...db import SessionLocal
+        from ...models.core import BrainWorkerControl
+
+        _sdb = SessionLocal()
+        try:
+            row = _sdb.get(BrainWorkerControl, 1)
+            if row is None or not row.learning_live_json:
+                return
+            data = json.loads(row.learning_live_json)
+            if not isinstance(data, dict):
+                return
+            for k in _BRAIN_WORKER_STATUS_LEARNING_KEYS:
+                if k in data:
+                    status[k] = data[k]
+        finally:
+            _sdb.close()
+    except Exception:
+        pass
+
+
+def _persist_learning_live_snapshot_to_db() -> None:
+    try:
+        from ...db import SessionLocal
+        from ..brain_worker_signals import persist_learning_live_json
+
+        snap = snapshot_learning_for_brain_worker_status_file()
+        _sdb = SessionLocal()
+        try:
+            persist_learning_live_json(_sdb, snap)
+        finally:
+            _sdb.close()
+    except Exception as e:
+        logger.warning("[learning] persist_learning_live_snapshot_to_db: %s", e)
+
+
+def maybe_persist_learning_live_after_architecture_step(status_dict: dict[str, Any]) -> None:
+    """Throttled DB write while a cycle is running (skip tests using a throwaway status dict)."""
+    if status_dict is not _learning_status:
+        return
+    if not _learning_status.get("running"):
+        return
+    global _last_learning_live_persist_mono
+    now = time.monotonic()
+    if now - _last_learning_live_persist_mono < _LEARNING_LIVE_DB_THROTTLE_S:
+        return
+    _last_learning_live_persist_mono = now
+    _persist_learning_live_snapshot_to_db()
+
+
+def persist_learning_live_snapshot_force() -> None:
+    """Write current in-memory snapshot (e.g. idle after cycle end); bypasses throttle."""
+    global _last_learning_live_persist_mono
+    _last_learning_live_persist_mono = time.monotonic()
+    _persist_learning_live_snapshot_to_db()
+
+
+def get_learning_status() -> dict[str, Any]:
+    status = _learning_status_with_elapsed()
+    _overlay_learning_from_brain_worker_status_file(status)
+    _overlay_learning_from_brain_worker_db(status)
     try:
         from ...config import settings as _st
 
@@ -8369,8 +8493,14 @@ def run_learning_cycle(
         _learning_status["running"] = False
         _learning_status["phase"] = "idle"
         _learning_status["current_step"] = ""
+        _learning_status["graph_node_id"] = ""
+        _learning_status["current_cluster_id"] = ""
+        _learning_status["current_step_sid"] = ""
+        _learning_status["current_cluster_index"] = -1
+        _learning_status["current_step_index"] = -1
         _learning_status["last_run"] = datetime.utcnow().isoformat()
         _learning_status["last_duration_s"] = round(elapsed, 1)
+        persist_learning_live_snapshot_force()
         report["elapsed_s"] = round(elapsed, 1)
         report["step_timings"] = dict(_learning_status.get("step_timings", {}))
         report["funnel_snapshot"] = {

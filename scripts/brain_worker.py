@@ -183,6 +183,12 @@ class BrainWorkerStatus:
     def save(self):
         """Write status to JSON file (atomic so readers never see partial content)."""
         DATA_DIR.mkdir(exist_ok=True)
+        try:
+            from app.services.trading.learning import snapshot_learning_for_brain_worker_status_file
+
+            learning_snap = snapshot_learning_for_brain_worker_status_file()
+        except Exception:
+            learning_snap = {}
         data = {
             "pid": self.pid,
             "status": self.status,
@@ -191,6 +197,7 @@ class BrainWorkerStatus:
             "current_progress": self.current_progress,
             "last_cycle": self.last_cycle,
             "totals": self.totals,
+            "learning": learning_snap,
             "updated_at": datetime.utcnow().isoformat(),
         }
         tmp = STATUS_FILE.with_suffix(".json.tmp")

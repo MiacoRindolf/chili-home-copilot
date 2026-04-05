@@ -195,6 +195,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-tier-step .tbn-node-circle {
   fill: var(--bg-header); stroke: var(--accent); stroke-opacity: 0.55; stroke-width: 1.2; filter: none;
 }
+.tbn-node.tbn-tier-step.tbn-node--running .tbn-node-circle {
+  stroke: #22c55e; stroke-width: 3; stroke-opacity: 1;
+}
+.tbn-node.tbn-tier-step.tbn-node--pending .tbn-node-circle {
+  stroke: #f59e0b; stroke-width: 2.5; stroke-opacity: 1;
+}
+.tbn-node.tbn-tier-cluster.tbn-cluster--active .tbn-node-circle {
+  stroke: #4ade80; stroke-width: 2.8; stroke-opacity: 0.95;
+}
 .tbn-node-label {
   font-size: 10px; font-weight: 600; fill: var(--text-secondary); pointer-events: none;
   text-shadow: 0 1px 3px var(--bg);
@@ -2500,6 +2509,12 @@ function initTradingBrainNetworkGraph() {
       var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
       g.setAttribute('class', 'tbn-node tbn-tier-' + n.tier);
       g.setAttribute('data-node-id', n.id);
+      var cidx = typeof n.cluster_index === 'number' ? n.cluster_index : -1;
+      var sidx = typeof n.step_index === 'number' ? n.step_index : -1;
+      g.setAttribute('data-cluster-index', String(cidx));
+      g.setAttribute('data-step-index', String(sidx));
+      var inLc = n.tier !== 'root' && n.in_learning_cycle !== false;
+      g.setAttribute('data-in-learning-cycle', inLc ? '1' : '0');
       g.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
       var r = n.tier === 'root' ? 30 : (n.tier === 'cluster' ? 19 : 8);
       var circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
@@ -2665,29 +2680,42 @@ function initTradingBrainNetworkGraph() {
       .then(function(d) {
         if (!d || !d.ok || !d.learning) return;
         var lr = d.learning;
-        var phase = (lr.phase || '').toLowerCase();
-        var currentStep = lr.current_step_sid || phase || '';
-        var stepsCompleted = lr.steps_completed || 0;
-        var running = lr.running;
+        var running = !!lr.running;
+        var graphId = (lr.graph_node_id || '').toLowerCase();
+        var curCi = typeof lr.current_cluster_index === 'number' ? lr.current_cluster_index : -1;
+        var curSi = typeof lr.current_step_index === 'number' ? lr.current_step_index : -1;
+        var curClusterId = (lr.current_cluster_id || '').toLowerCase();
         var allNodes = gNodes.querySelectorAll('.tbn-node');
         allNodes.forEach(function(g) {
-          var nid = (g.getAttribute('data-node-id') || '').toLowerCase();
           var circle = g.querySelector('.tbn-node-circle');
           if (!circle) return;
-          circle.style.stroke = '';
-          circle.style.strokeWidth = '';
-          circle.style.strokeOpacity = '';
+          g.classList.remove('tbn-node--running', 'tbn-node--pending', 'tbn-cluster--active');
           if (!running) return;
-          if (nid && (nid === currentStep || currentStep.indexOf(nid) >= 0 || nid.indexOf(currentStep) >= 0)) {
-            circle.style.stroke = '#22c55e';
-            circle.style.strokeWidth = '3';
+          var nid = (g.getAttribute('data-node-id') || '').toLowerCase();
+          var inLc = g.getAttribute('data-in-learning-cycle') !== '0';
+          var cci = parseInt(g.getAttribute('data-cluster-index'), 10);
+          var si = parseInt(g.getAttribute('data-step-index'), 10);
+          if (isNaN(cci)) cci = -1;
+          if (isNaN(si)) si = -1;
+          if (g.classList.contains('tbn-tier-step') && graphId && nid === graphId) {
+            g.classList.add('tbn-node--running');
+            return;
+          }
+          if (g.classList.contains('tbn-tier-cluster') && curClusterId && nid === curClusterId) {
+            g.classList.add('tbn-cluster--active');
+            return;
+          }
+          if (g.classList.contains('tbn-tier-step') && inLc && curCi >= 0 && curSi >= 0 && cci >= 0 && si >= 0) {
+            if (cci > curCi || (cci === curCi && si > curSi)) {
+              g.classList.add('tbn-node--pending');
+            }
           }
         });
       })
       .catch(function() {});
   }
   if (window._tbnStatusInterval) clearInterval(window._tbnStatusInterval);
-  window._tbnStatusInterval = setInterval(tbnUpdateNodeStatuses, 5000);
+  window._tbnStatusInterval = setInterval(tbnUpdateNodeStatuses, 3000);
   tbnUpdateNodeStatuses();
 }
 
@@ -4147,7 +4175,7 @@ function showPatternDetail(patternId) {
     '<pre id="ev-trade-analytics-out" style="display:none;margin-top:8px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg)"></pre>' +
     '</div>';
   html += '<div id="ev-wr-progress-wrap" style="display:none;margin-top:10px">' +
-    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> — sibling-linked backtests only (latest per ticker/strategy in the recent window). Same formula as the header; last point matches aggregate WR.</div>' +
+    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> — sibling-linked backtests only (latest per ticker/strategy in the recent window). Aggregate WR is <strong>trade-weighted</strong> (matches per-row win rate columns), not “% of backtests with positive return.” Last point matches the header.</div>' +
     '<div id="ev-wr-progress-chart" style="height:140px;width:100%"></div></div>';
   if (p.example_tickers && p.example_tickers.length) {
     html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
@@ -4405,6 +4433,14 @@ function _renderEvTrades(trades) {
   el.innerHTML = html;
 }
 
+/** DB may store win_rate as fraction [0,1] or API may send percent; normalize for display. */
+function backtestWinRateToPct(wr) {
+  if (wr == null || (typeof wr === 'number' && isNaN(wr))) return null;
+  var n = Number(wr);
+  if (n <= 1 && n >= 0) return n * 100;
+  return n;
+}
+
 /** Period + interval for /patterns/{id}/backtest (never pass full period_display as period). */
 function _btPeriodIntervalForApi(b) {
   var period = '1y', interval = '1d';
@@ -4453,7 +4489,7 @@ function _renderEvBacktests(bts) {
       '<td><b>' + escHtml(b.ticker) + '</b></td>' +
       '<td>' + escHtml(b.strategy_name||'--') + '</td>' +
       '<td class="' + retClass + '">' + (noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (b.return_pct != null ? b.return_pct.toFixed(1) + '%' : '--')) + '</td>' +
-      '<td>' + (noTrades ? '--' : (b.win_rate != null ? b.win_rate.toFixed(0) + '%' : '--')) + '</td>' +
+      '<td>' + (noTrades ? '--' : (function(){ var wrp = backtestWinRateToPct(b.win_rate); return wrp != null ? wrp.toFixed(0) + '%' : '--'; })()) + '</td>' +
       '<td>' + (noTrades ? '--' : (b.sharpe != null ? b.sharpe.toFixed(2) : '--')) + '</td>' +
       '<td>' + (noTrades ? '--' : (b.max_drawdown != null ? b.max_drawdown.toFixed(1) + '%' : '--')) + '</td>' +
       '<td>' + (b.trade_count||0) + '</td>' +
@@ -4516,7 +4552,10 @@ function toggleBtChart(row, idx, ticker, strategy, btPeriod, btInterval, btId) {
       cells[2].className = retClass;
       cells[2].innerHTML = noTrades ? '<span style="color:var(--text-muted);font-size:10px">no signal</span>' : (ret != null ? ret.toFixed(1) + '%' : '--');
     }
-    if (cells[3]) cells[3].textContent = noTrades ? '--' : (res.win_rate != null ? res.win_rate.toFixed(0) + '%' : '--');
+    if (cells[3]) {
+      var _wrp = backtestWinRateToPct(res.win_rate);
+      cells[3].textContent = noTrades ? '--' : (_wrp != null ? _wrp.toFixed(0) + '%' : '--');
+    }
     if (cells[4]) cells[4].textContent = noTrades ? '--' : (res.sharpe != null ? res.sharpe.toFixed(2) : '--');
     if (cells[5]) cells[5].textContent = noTrades ? '--' : (res.max_drawdown != null ? res.max_drawdown.toFixed(1) + '%' : '--');
     if (cells[6]) cells[6].textContent = tc;
@@ -4654,7 +4693,7 @@ function _drawBtMiniChart(idx, data) {
       statsEl.innerHTML =
         '<span>Return: <b style="color:' + retColor + '">' + (data.return_pct != null ? (data.return_pct > 0 ? '+' : '') + data.return_pct.toFixed(1) + '%' : '--') + '</b></span>' +
         '<span>Trades: <b>' + (data.trade_count||0) + '</b></span>' +
-        '<span>Win Rate: <b>' + (data.win_rate != null ? data.win_rate.toFixed(0) + '%' : '--') + '</b></span>' +
+        '<span>Win Rate: <b>' + (function(){ var w = backtestWinRateToPct(data.win_rate); return w != null ? w.toFixed(0) + '%' : '--'; })() + '</b></span>' +
         '<span>Sharpe: <b>' + (data.sharpe != null ? data.sharpe.toFixed(2) : '--') + '</b></span>';
     }
     var wrap = el.closest('.bt-chart-wrap');
@@ -4671,7 +4710,7 @@ function _drawBtMiniChart(idx, data) {
     statsEl.innerHTML =
       '<span>Return: <b style="color:' + retColor + '">' + (data.return_pct != null ? (data.return_pct > 0 ? '+' : '') + data.return_pct.toFixed(1) + '%' : '--') + '</b></span>' +
       '<span>Trades: <b>' + (data.trade_count||0) + '</b></span>' +
-      '<span>Win Rate: <b>' + (data.win_rate != null ? data.win_rate.toFixed(0) + '%' : '--') + '</b></span>' +
+      '<span>Win Rate: <b>' + (function(){ var w = backtestWinRateToPct(data.win_rate); return w != null ? w.toFixed(0) + '%' : '--'; })() + '</b></span>' +
       '<span>Sharpe: <b>' + (data.sharpe != null ? data.sharpe.toFixed(2) : '--') + '</b></span>';
   }
 

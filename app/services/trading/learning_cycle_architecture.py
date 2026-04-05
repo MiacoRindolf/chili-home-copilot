@@ -940,10 +940,38 @@ def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:
         raise KeyError(f"unknown cycle step ({cluster_id!r}, {step_sid!r})") from e
 
 
+def _set_cycle_graph_node_fields(status_dict: dict[str, Any], cluster_id: str, step_sid: str) -> None:
+    """Align learning status with Network tab node ids (``brain_network_graph``)."""
+    status_dict["graph_node_id"] = f"s_{cluster_id}_{step_sid}"
+    status_dict["current_cluster_id"] = cluster_id
+    status_dict["current_step_sid"] = step_sid
+    status_dict["current_cluster_index"] = -1
+    status_dict["current_step_index"] = -1
+    for ci, c in enumerate(TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS):
+        if c.id == cluster_id:
+            status_dict["current_cluster_index"] = ci
+            for si, st in enumerate(c.steps):
+                if st.sid == step_sid:
+                    status_dict["current_step_index"] = si
+                    break
+            break
+
+
+def _notify_learning_live_db_after_step(status_dict: dict[str, Any]) -> None:
+    try:
+        import app.services.trading.learning as learning_mod
+
+        learning_mod.maybe_persist_learning_live_after_architecture_step(status_dict)
+    except Exception:
+        pass
+
+
 def apply_learning_cycle_step_status(status_dict: dict[str, Any], cluster_id: str, step_sid: str) -> None:
     s = get_cycle_step(cluster_id, step_sid)
     status_dict["current_step"] = s.label
     status_dict["phase"] = s.runner_phase
+    _set_cycle_graph_node_fields(status_dict, cluster_id, step_sid)
+    _notify_learning_live_db_after_step(status_dict)
 
 
 def apply_learning_cycle_step_status_progress(
@@ -956,3 +984,5 @@ def apply_learning_cycle_step_status_progress(
     s = get_cycle_step(cluster_id, step_sid)
     status_dict["current_step"] = f"{s.label} ({done}/{total})"
     status_dict["phase"] = s.runner_phase
+    _set_cycle_graph_node_fields(status_dict, cluster_id, step_sid)
+    _notify_learning_live_db_after_step(status_dict)
