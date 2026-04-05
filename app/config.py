@@ -75,6 +75,13 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
+    # Discord webhook (optional, parallel dispatch)
+    discord_webhook_url: str = ""
+
+    # Web Push / VAPID keys (optional, for PWA push notifications)
+    vapid_private_key: str = ""
+    vapid_contact_email: str = ""
+
     # Google OAuth SSO (Sign in with Google)
     google_client_id: str = ""
     google_client_secret: str = ""

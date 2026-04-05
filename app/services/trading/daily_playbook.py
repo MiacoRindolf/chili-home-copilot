@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,32 @@ from sqlalchemy.orm import Session
 from ...models.trading import ScanPattern, Trade
 
 logger = logging.getLogger(__name__)
+
+# #region agent log
+import os as _dbg_os, time as _dbg_time
+_DBG_LOG = _dbg_os.path.join(_dbg_os.path.dirname(_dbg_os.path.abspath(__file__)), "..", "..", "..", "debug-b9c3da.log")
+def _dbg(loc, msg, data=None, hyp=""):
+    import json as _j
+    try:
+        line = _j.dumps({"sessionId":"b9c3da","timestamp":int(_dbg_time.time()*1000),"location":loc,"message":msg,"data":data or {},"hypothesisId":hyp})
+        with open(_DBG_LOG, "a") as f:
+            f.write(line + "\n")
+    except Exception:
+        pass
+def _find_bad_floats(obj, path=""):
+    """Recursively find inf/nan floats in a nested dict/list."""
+    bad = []
+    if isinstance(obj, float):
+        if math.isinf(obj) or math.isnan(obj):
+            bad.append({"path": path, "value": str(obj)})
+    elif isinstance(obj, dict):
+        for k, v in obj.items():
+            bad.extend(_find_bad_floats(v, f"{path}.{k}"))
+    elif isinstance(obj, (list, tuple)):
+        for i, v in enumerate(obj):
+            bad.extend(_find_bad_floats(v, f"{path}[{i}]"))
+    return bad
+# #endregion
 
 
 def generate_daily_playbook(
@@ -54,6 +81,9 @@ def generate_daily_playbook(
     except Exception as e:
         logger.warning("[playbook] Regime fetch failed: %s", e)
         playbook["regime"] = {"composite": "unknown", "guidance": "Unable to assess regime"}
+    # #region agent log
+    _dbg("daily_playbook.py:regime", "H1: regime section bad floats", {"bad": _find_bad_floats(playbook.get("regime", {})), "raw_regime": {k: str(v) for k, v in playbook.get("regime", {}).items()}}, "H1")
+    # #endregion
 
     # 2. Risk budget
     limits = get_risk_limits()
@@ -69,17 +99,38 @@ def generate_daily_playbook(
         "max_new_trades_today": _max_new_trades(budget, limits),
     }
 
+    # #region agent log
+    _dbg("daily_playbook.py:risk", "H2: risk section bad floats", {"bad": _find_bad_floats(playbook.get("risk", {})), "raw_risk": {k: str(v) for k, v in playbook.get("risk", {}).items()}}, "H2")
+    # #endregion
+
     # 3. Pattern lifecycle summary
     playbook["lifecycle"] = get_lifecycle_summary(db)
 
     # 4. Ranked trade ideas from promoted patterns
     playbook["ideas"] = _generate_trade_ideas(db, user_id, capital)
 
+    # #region agent log
+    _dbg("daily_playbook.py:ideas", "H3: ideas section bad floats", {"bad": _find_bad_floats(playbook.get("ideas", [])), "idea_count": len(playbook.get("ideas", []))}, "H3")
+    # #endregion
+
     # 5. Recent performance context
     playbook["recent_performance"] = _recent_performance(db, user_id, capital)
 
+    # #region agent log
+    _dbg("daily_playbook.py:perf", "H4: recent_performance bad floats", {"bad": _find_bad_floats(playbook.get("recent_performance", {}))}, "H4")
+    # #endregion
+
     # 6. Watchlist — patterns close to promotion
     playbook["watchlist"] = _near_promotion_watchlist(db)
+
+    # #region agent log
+    _dbg("daily_playbook.py:watchlist", "H3b: watchlist bad floats", {"bad": _find_bad_floats(playbook.get("watchlist", []))}, "H3")
+    # #endregion
+
+    # #region agent log
+    all_bad = _find_bad_floats(playbook)
+    _dbg("daily_playbook.py:final", "FINAL: all bad floats in full playbook", {"bad": all_bad, "count": len(all_bad)}, "ALL")
+    # #endregion
 
     playbook["ok"] = True
 
@@ -177,15 +228,15 @@ def _generate_trade_ideas(db: Session, user_id: int | None, capital: float) -> l
 
     ideas = []
     for p in promoted:
-        oos_wr = p.oos_win_rate or p.win_rate or 0
-        avg_ret = p.avg_return_pct or 0
+        oos_wr = _safe_float(p.oos_win_rate) or _safe_float(p.win_rate)
+        avg_ret = _safe_float(p.avg_return_pct)
         score = round((oos_wr / 100) * 0.6 + min(1.0, avg_ret / 5) * 0.4, 3)
 
         idea: dict[str, Any] = {
             "pattern_id": p.id,
             "pattern_name": p.name,
             "lifecycle_stage": p.lifecycle_stage,
-            "confidence": round(p.confidence, 3),
+            "confidence": round(_safe_float(p.confidence), 3),
             "oos_win_rate": round(oos_wr, 1),
             "avg_return_pct": round(avg_ret, 2),
             "idea_score": score,
@@ -236,6 +287,18 @@ def _recent_performance(db: Session, user_id: int | None, capital: float) -> dic
     return {"week": _stats(week_trades), "month": _stats(month_trades)}
 
 
+def _safe_float(v: Any, default: float = 0.0) -> float:
+    """Return default if v is None, NaN, or inf."""
+    if v is None:
+        return default
+    try:
+        if math.isnan(v) or math.isinf(v):
+            return default
+    except TypeError:
+        return default
+    return float(v)
+
+
 def _near_promotion_watchlist(db: Session) -> list[dict[str, Any]]:
     """Patterns that are backtested but not yet promoted — close to the gate."""
     candidates = (
@@ -253,8 +316,8 @@ def _near_promotion_watchlist(db: Session) -> list[dict[str, Any]]:
         {
             "pattern_id": p.id,
             "name": p.name,
-            "oos_win_rate": round(p.oos_win_rate or 0, 1),
-            "confidence": round(p.confidence, 3),
+            "oos_win_rate": round(_safe_float(p.oos_win_rate), 1),
+            "confidence": round(_safe_float(p.confidence), 3),
             "backtest_count": p.backtest_count or 0,
         }
         for p in candidates

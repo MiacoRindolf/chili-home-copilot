@@ -844,12 +844,77 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .code-agent-result-box code { font-family: 'Fira Code', 'JetBrains Mono', monospace; }
 .code-agent-context-bar { display: flex; gap: 10px; font-size: 10px; color: var(--text-muted); margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); }
 
+/* ── Status Bar (Zone 1) ─────────────────────── */
+.brain-status-bar {
+  background: var(--bg-header); border: 1px solid var(--border); border-radius: 10px;
+  padding: 8px 14px; margin-bottom: 12px;
+}
+.bsb-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+}
+.bsb-left {
+  display: flex; align-items: center; gap: 8px; flex-shrink: 0;
+}
+.bsb-label { font-size: 11px; font-weight: 700; color: var(--text); }
+.bsb-controls { display: flex; gap: 4px; }
+.bsb-center {
+  display: flex; align-items: center; gap: 6px; flex: 1; justify-content: center;
+}
+.bsb-chip {
+  display: inline-flex; align-items: center; gap: 3px;
+  padding: 2px 10px; border-radius: 12px; font-size: 10px; font-weight: 600;
+  background: rgba(245,158,11,.12); color: #f59e0b; white-space: nowrap;
+}
+.bsb-chip-ok { background: rgba(34,197,94,.12); color: #22c55e; }
+.bsb-chip-danger { background: rgba(239,68,68,.15); color: #ef4444; }
+.bsb-chip-bull { background: rgba(34,197,94,.12); color: #22c55e; }
+.bsb-chip-bear { background: rgba(239,68,68,.12); color: #ef4444; }
+.bsb-right {
+  display: flex; align-items: center; gap: 10px; flex-shrink: 0; margin-left: auto;
+}
+.bsb-meta { font-size: 10px; color: var(--text-muted); white-space: nowrap; }
+.bsb-progress {
+  margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+}
+.bsb-progress-inner {
+  display: flex; align-items: center; gap: 8px; justify-content: space-between;
+}
+
+/* ── Edge Grid (Zone 2) ─────────────────────── */
+.brain-edge-grid {
+  display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;
+}
+.brain-edge-col { min-width: 0; }
+.brain-edge-col .brain-section { margin-bottom: 0; }
+
+/* ── Deep Dive Tabs (Zone 3) ────────────────── */
+.brain-deep-dive {
+  margin-top: 8px; border-top: 1px solid var(--border); padding-top: 10px;
+}
+.bdd-tabs {
+  display: flex; gap: 2px; margin-bottom: 10px; flex-wrap: wrap;
+}
+.bdd-tab {
+  padding: 5px 14px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text-muted); cursor: pointer;
+  font-size: 11px; font-weight: 600; transition: all .15s;
+}
+.bdd-tab:hover { border-color: var(--accent); color: var(--text); }
+.bdd-tab.active {
+  background: rgba(139,92,246,.1); border-color: rgba(139,92,246,.4);
+  color: var(--accent);
+}
+.bdd-panel { min-height: 100px; }
+
 /* Responsive */
 @media (max-width: 768px) {
   .b-main { padding: 12px 14px; }
   .brain-kpis { grid-template-columns: repeat(2, 1fr); }
   .pred-grid { grid-template-columns: 1fr; }
   .code-repos-grid { grid-template-columns: 1fr; }
+  .brain-edge-grid { grid-template-columns: 1fr; }
+  .bsb-row { gap: 6px; }
+  .bsb-center { order: 3; flex-basis: 100%; justify-content: flex-start; }
 }
 </style>
 {% endblock %}
@@ -939,146 +1004,43 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           </div>
         </div>
       </div>
-      <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-hidden="false">
+      <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-hidden="false" style="overflow-y:auto">
       <div class="trading-main-content">
-      <div class="b-main-header">
-        <h2>Trading Brain</h2>
-        <span id="brain-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
-      </div>
 
-      <div class="brain-quant-doctrine" id="brain-quant-doctrine">
-        <strong style="font-size:11px;color:var(--text)">Quant operating model</strong>
-        <span style="display:block;font-size:9px;color:var(--text-muted);margin-top:2px">Research discipline for this desk — robust evidence, not one hero curve.</span>
-        <ul>
-          <li><strong>Hypothesis first</strong> — treat each pattern as testable; say what would falsify it.</li>
-          <li><strong>Universe &amp; timeframe</strong> — asset class, symbols or filters, and bar size before trusting stats.</li>
-          <li><strong>In-sample vs out-of-sample</strong> — prefer OOS / hold-out when CHILI exposes it; flag when only IS exists.</li>
-          <li><strong>Costs &amp; tails</strong> — commission/spread proxies in backtests; max drawdown and streak risk matter.</li>
-          <li><strong>Sample size</strong> — low trade counts are noisy; stability beats a single pretty equity line.</li>
-        </ul>
-      </div>
-
-      <div class="brain-section" id="brain-pipeline-section" style="display:none">
-        <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Learning In Progress</div>
-        <div class="brain-live-pipeline" id="brain-pipeline-steps"></div>
-        <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
-          <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:10px;color:var(--text-muted);margin-top:3px">
-          <span id="brain-learning-step"></span>
-          <span id="brain-learning-progress"></span>
-        </div>
-      </div>
-
-      <div class="brain-action-row" style="border-bottom:none;margin-bottom:8px;padding:4px 0">
-        <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
-      </div>
-
-      <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Cycle AI reports</div>
-        <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">One summary per learning cycle (newest first). Flip for full report.</p>
-        <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No cycle reports yet — run a learning cycle.</div>
-        <div id="cycle-report-ui" style="display:none">
-          <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
-            <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
-            <span id="cycle-report-pos" style="font-size:10px;color:var(--text-muted)"></span>
-            <button type="button" class="bw-ctrl-btn" id="cycle-report-next" onclick="cycleReportNav(1)">Older &#x2192;</button>
-          </div>
-          <div class="cr-flip-scene">
-            <div class="cr-flip-inner" id="cycle-report-flip-inner" onclick="toggleCycleReportFlip(event)">
-              <div class="cr-flip-face cr-flip-front">
-                <div id="cycle-report-front-date" style="font-size:11px;font-weight:700;color:var(--accent)"></div>
-                <div id="cycle-report-front-metrics" style="font-size:10px;color:var(--text-muted);margin-top:6px"></div>
-                <div id="cycle-report-front-robustness" style="font-size:9px;color:var(--text-secondary);margin-top:5px;line-height:1.45"></div>
-                <div class="cr-flip-front-preview" id="cycle-report-front-preview"></div>
-                <div style="font-size:9px;color:var(--text-muted);margin-top:10px">Click to flip for full report</div>
-              </div>
-              <div class="cr-flip-face cr-flip-back">
-                <div id="cycle-report-back-md" class="cr-back-scroll prose-dark"></div>
-                <div style="font-size:9px;color:var(--text-muted);margin-top:8px">Click to flip back</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Brain Worker Dashboard -->
-      <div class="bw-section" id="brain-worker-section">
-        <div class="bw-header">
-          <div class="bw-title">
+      <!-- ═══ ZONE 1: STATUS BAR ═══ -->
+      <div class="brain-status-bar" id="brain-status-bar">
+        <div class="bsb-row">
+          <div class="bsb-left">
             <span class="bw-status-dot stopped" id="bw-status-dot"></span>
-            Brain Worker
-            <span class="bw-toggle-details" onclick="toggleBwDetails()">&#x25BC;</span>
-          </div>
-          <div class="bw-controls" id="bw-controls">
-            <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
-            <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip the idle wait and start the next learning cycle now">&#x23ED; Run next cycle</button>
-            <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
-            <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
-          </div>
-        </div>
-        <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:6px 0 8px 0;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
-          <strong>How it works:</strong> <strong>Start / Stop</strong> control the Docker Compose <code style="font-size:9px">brain-worker</code> service (same image as the app, running <code>scripts/brain_worker.py</code>), not a subprocess inside this web server. In Docker, the <code>chili</code> container needs the Docker socket mounted so the API can start that service. Same <strong>DATABASE_URL</strong> / shared volume as this app.
-          <strong>Run next cycle</strong> only skips <em>idle sleep</em> between full learning cycles; it does not interrupt a cycle that is already running.
-          <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug — same rules as the worker).
-        </div>
-        <div class="bw-status-row">
-          <span><span class="bw-status-label">Status:</span> <span class="bw-status-value" id="bw-status">Stopped</span></span>
-          <span><span class="bw-status-label">Uptime:</span> <span class="bw-status-value" id="bw-uptime">--</span></span>
-          <span><span class="bw-status-label">Cycles:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
-        </div>
-        <div class="bw-current" id="bw-current" style="display:none">
-          <span class="bw-current-step" id="bw-current-step">Idle</span>
-          <span class="bw-current-progress" id="bw-current-progress"></span>
-        </div>
-        <div class="bw-details" id="bw-details">
-          <div class="bw-stats-grid">
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-scanned">0</div><div class="bw-stat-lbl">Scanned</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-snapshots">0</div><div class="bw-stat-lbl">Snapshots</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-mined">0</div><div class="bw-stat-lbl">Mined</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-tested">0</div><div class="bw-stat-lbl">Tested</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-validated">0</div><div class="bw-stat-lbl">Validated</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-challenged">0</div><div class="bw-stat-lbl">Challenged</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-evolved">0</div><div class="bw-stat-lbl">Evolved</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
-            <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-decayed">0</div><div class="bw-stat-lbl">Decayed</div></div>
-          </div>
-          <div class="bw-queue-status" id="bw-queue-status">
-            <div class="bw-queue-header">
-              <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Backtest Queue</span>
-              <span class="bw-queue-badge" id="bw-queue-badge">--</span>
-            </div>
-            <div class="bw-queue-details">
-              <span><span class="bw-queue-label">Pending:</span> <span id="bw-queue-pending">--</span></span>
-              <span><span class="bw-queue-label">Boosted:</span> <span id="bw-queue-boosted">0</span></span>
-              <span><span class="bw-queue-label">Tested:</span> <span id="bw-queue-tested">--</span></span>
-            </div>
-            <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
-              <button type="button" class="bw-ctrl-btn" id="bw-queue-batch-btn" onclick="runQueueBatchFromWeb()" style="font-size:10px" title="Runs one queue batch inside the web server process (no brain_worker required)">Process queue on server</button>
-              <span style="font-size:9px;color:var(--text-muted)">Background job; check server logs for [learning] Queue backtest</span>
+            <span class="bsb-label" id="bw-status">Stopped</span>
+            <div class="bsb-controls" id="bw-controls">
+              <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
+              <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip the idle wait and start the next learning cycle now">&#x23ED; Wake</button>
+              <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
+              <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
             </div>
           </div>
-          <div class="bw-timings" id="bw-last-cycle-timings" style="font-size:10px;color:var(--text-muted);margin-top:6px;margin-bottom:6px">
-            <span class="bw-timings-label">Last cycle: --</span>
-            <span class="bw-timings-steps" id="bw-step-timings"></span>
+          <div class="bsb-center">
+            <span class="bsb-chip" id="bsb-regime" title="Market regime">&#x1F7E1; --</span>
+            <span class="bsb-chip bsb-chip-ok" id="bsb-breaker" style="display:none" title="Circuit breaker status">&#x26A0; Breaker</span>
           </div>
-          <div class="bw-cycle-chart-wrap" style="margin-top:8px;margin-bottom:8px">
-            <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cycle history</div>
-            <div id="bw-cycle-chart" style="width:100%;height:100px;border-radius:6px;overflow:hidden;background:var(--card);border:1px solid var(--border)"></div>
-            <div id="bw-cycle-chart-legend" style="font-size:9px;color:var(--text-muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
-              <span><span style="color:#8b5cf6">&#x25CF;</span> Patterns tested</span>
-              <span><span style="color:#22c55e">&#x25CF;</span> Duration (s)</span>
-            </div>
+          <div class="bsb-right">
+            <span class="bsb-meta" id="bsb-last-cycle">--</span>
+            <span class="bsb-meta" id="brain-scheduler-info"></span>
           </div>
-          <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Recent Activity</div>
-          <div class="bw-activity" id="bw-activity">
-            <div style="color:var(--text-muted);font-style:italic">No activity yet</div>
+        </div>
+        <div id="brain-pipeline-section" class="bsb-progress" style="display:none">
+          <div class="bsb-progress-inner">
+            <span id="brain-learning-step" style="font-size:10px;font-weight:600;color:#a78bfa"></span>
+            <span id="brain-learning-progress" style="font-size:10px;color:var(--text-muted)"></span>
+          </div>
+          <div style="height:3px;background:var(--border);border-radius:2px;margin-top:3px">
+            <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
           </div>
         </div>
       </div>
 
+      <!-- AI Learning Report (floating, hidden until triggered) -->
       <div class="brain-reflection-box" id="brain-reflection">
         <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
           <span>&#x1F52C;</span><strong style="font-size:11px">AI Learning Report</strong>
@@ -1087,58 +1049,26 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div id="brain-reflection-content"></div>
       </div>
 
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Market Thesis</div>
-        <div class="brain-thesis-card neutral" id="brain-thesis-card">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
-            <span class="thesis-stance neutral" id="thesis-stance">Loading...</span>
-            <span style="font-size:9px;color:var(--text-muted)" id="thesis-meta"></span>
+      <!-- ═══ ZONE 2: TODAY'S EDGE ═══ -->
+      <div class="brain-edge-grid" id="brain-edge-grid">
+        <div class="brain-edge-col">
+          <div class="brain-section" id="brain-playbook-section">
+            <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+              <span class="bs-icon">&#x1F4CB;</span> Daily Playbook
+              <button type="button" onclick="loadPlaybook()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+            </div>
+            <div id="brain-playbook-content" style="font-size:11px;color:var(--text-muted)">Loading today's playbook...</div>
           </div>
-          <div class="thesis-gauge"><div class="thesis-gauge-fill" id="thesis-gauge" style="width:50%;background:#f59e0b"></div></div>
-          <div class="thesis-text" id="thesis-text" style="font-size:11px;color:var(--text-muted)">Generating...</div>
         </div>
-      </div>
-
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Performance</div>
-        <div class="brain-pipeline" id="brain-pipeline"></div>
-        <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
-        <div id="brain-cycle-digest" style="font-size:10px;color:var(--text-secondary);margin:0 0 8px;line-height:1.5"></div>
-        <div id="brain-proposal-skips" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
-        <div id="brain-research-kpi-benchmarks" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5"></div>
-        <div id="brain-pipeline-near" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
-        <div class="brain-kpis" id="brain-kpis">
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
-          <div class="brain-kpi" style="opacity:.3"></div>
+        <div class="brain-edge-col">
+          <div class="brain-section" id="brain-perf-section">
+            <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+              <span class="bs-icon">&#x1F4C8;</span> P&amp;L Performance
+              <button type="button" onclick="loadPerfDashboard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+            </div>
+            <div id="brain-perf-content" style="font-size:11px;color:var(--text-muted)">Loading performance data...</div>
+          </div>
         </div>
-      </div>
-
-      <div class="brain-section" id="brain-tradeable-section">
-        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
-          <span class="bs-icon">&#x1F9E0;</span> Tradeable patterns
-          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:420px;line-height:1.35">Promoted scan patterns meeting OOS / sample-size gates. Open in Trading to run a pattern backtest.</span>
-          <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
-        </div>
-        <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading…</div>
-        <div id="brain-near-tradeable-candidates" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
-      </div>
-
-      <div class="brain-section" id="brain-playbook-section">
-        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
-          <span class="bs-icon">&#x1F4CB;</span> Daily Playbook
-          <button type="button" onclick="loadPlaybook()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Generate</button>
-        </div>
-        <div id="brain-playbook-content" style="font-size:11px;color:var(--text-muted)">Click Generate for today's playbook.</div>
-      </div>
-
-      <div class="brain-section" id="brain-perf-section">
-        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
-          <span class="bs-icon">&#x1F4C8;</span> P&amp;L Performance
-          <button type="button" onclick="loadPerfDashboard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
-        </div>
-        <div id="brain-perf-content" style="font-size:11px;color:var(--text-muted)">Loading performance data...</div>
       </div>
 
       <div class="brain-section">
@@ -1149,55 +1079,217 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         <div id="brain-predictions" style="font-size:11px;color:var(--text-muted)">Loading predictions...</div>
       </div>
 
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F9E9;</span> Discovered Patterns</div>
-        <div id="backfill-banner" style="display:none;padding:8px 12px;margin-bottom:8px;background:linear-gradient(90deg,rgba(139,92,246,.12),rgba(59,130,246,.08));border:1px solid rgba(139,92,246,.25);border-radius:8px;font-size:11px;color:var(--text-secondary)">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><div class="brain-pulse" style="width:6px;height:6px"></div><strong style="color:#8b5cf6">Backtesting patterns...</strong> <span id="bf-progress-text"></span></div>
-          <div style="height:4px;background:rgba(139,92,246,.15);border-radius:2px;overflow:hidden"><div id="bf-progress-bar" style="height:100%;background:#8b5cf6;border-radius:2px;transition:width .5s ease;width:0%"></div></div>
+      <div class="brain-section" id="brain-tradeable-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F9E0;</span> Tradeable Patterns
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:420px;line-height:1.35">Promoted patterns meeting OOS / sample-size gates.</span>
+          <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
         </div>
-        <div class="pat-toolbar" id="pat-toolbar">
-          <select id="pat-sort" onchange="renderPatterns()">
-            <option value="confidence">Confidence</option>
-            <option value="win_rate">Win Rate</option>
-            <option value="evidence">Evidence</option>
-            <option value="newest">Newest</option>
-            <option value="recent">Recently Active</option>
-          </select>
-          <input type="text" id="pat-search" placeholder="Search patterns..." oninput="renderPatterns()">
-          <span class="pat-chip on bullish" data-sig="bullish" onclick="togglePatChip(this)">Bullish</span>
-          <span class="pat-chip on bearish" data-sig="bearish" onclick="togglePatChip(this)">Bearish</span>
-          <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
-          <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
-          <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
-          <span class="pat-chip" data-sig="hideVariants" onclick="togglePatChip(this)">Hide Variants</span>
-          <span class="pat-sep"></span>
-          <span class="pat-chip sector-chip" data-sector="crypto" onclick="togglePatChip(this)">Crypto</span>
-          <span class="pat-chip sector-chip" data-sector="tech" onclick="togglePatChip(this)">Tech</span>
-          <span class="pat-chip sector-chip" data-sector="finance" onclick="togglePatChip(this)">Finance</span>
-          <span class="pat-chip sector-chip" data-sector="healthcare" onclick="togglePatChip(this)">Healthcare</span>
-          <span class="pat-chip sector-chip" data-sector="consumer" onclick="togglePatChip(this)">Consumer</span>
-          <span class="pat-chip sector-chip" data-sector="industrial" onclick="togglePatChip(this)">Industrial</span>
-          <span class="pat-chip sector-chip" data-sector="energy" onclick="togglePatChip(this)">Energy</span>
-        </div>
-        <div class="pat-count" id="pat-count"></div>
-        <div id="brain-patterns" style="max-height:500px;overflow-y:auto"></div>
+        <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
       </div>
 
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
-        <div class="brain-filter-bar" id="brain-filter-bar">
-          <button class="brain-filter-btn active" data-filter="all" onclick="filterBrainEvents('all',this)">All</button>
-          <button class="brain-filter-btn" data-filter="discovery" onclick="filterBrainEvents('discovery',this)">Discovery</button>
-          <button class="brain-filter-btn" data-filter="scan" onclick="filterBrainEvents('scan',this)">Scan</button>
-          <button class="brain-filter-btn" data-filter="review" onclick="filterBrainEvents('review',this)">Review</button>
+      <!-- ═══ ZONE 3: DEEP DIVE (tabbed, lazy-loaded) ═══ -->
+      <div class="brain-deep-dive" id="brain-deep-dive">
+        <div class="bdd-tabs" id="bdd-tabs">
+          <button class="bdd-tab" data-bdd="patterns" onclick="switchDeepDiveTab('patterns')">Patterns</button>
+          <button class="bdd-tab" data-bdd="cycles" onclick="switchDeepDiveTab('cycles')">Cycles</button>
+          <button class="bdd-tab" data-bdd="ops" onclick="switchDeepDiveTab('ops')">Ops</button>
+          <button class="bdd-tab" data-bdd="research" onclick="switchDeepDiveTab('research')">Research</button>
+          <button class="bdd-tab" data-bdd="analytics" onclick="switchDeepDiveTab('analytics')">Analytics</button>
         </div>
-        <div class="brain-timeline" id="brain-activity"></div>
-      </div>
+        <div class="bdd-content" id="bdd-content">
 
-      <div class="brain-section">
-        <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence History</div>
-        <div id="brain-chart" style="width:100%;height:180px"></div>
-      </div>
+          <!-- Patterns sub-tab -->
+          <div class="bdd-panel" id="bdd-patterns" style="display:none">
+            <div id="backfill-banner" style="display:none;padding:8px 12px;margin-bottom:8px;background:linear-gradient(90deg,rgba(139,92,246,.12),rgba(59,130,246,.08));border:1px solid rgba(139,92,246,.25);border-radius:8px;font-size:11px;color:var(--text-secondary)">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><div class="brain-pulse" style="width:6px;height:6px"></div><strong style="color:#8b5cf6">Backtesting patterns...</strong> <span id="bf-progress-text"></span></div>
+              <div style="height:4px;background:rgba(139,92,246,.15);border-radius:2px;overflow:hidden"><div id="bf-progress-bar" style="height:100%;background:#8b5cf6;border-radius:2px;transition:width .5s ease;width:0%"></div></div>
+            </div>
+            <div class="pat-toolbar" id="pat-toolbar">
+              <select id="pat-sort" onchange="renderPatterns()">
+                <option value="confidence">Confidence</option>
+                <option value="win_rate">Win Rate</option>
+                <option value="evidence">Evidence</option>
+                <option value="newest">Newest</option>
+                <option value="recent">Recently Active</option>
+              </select>
+              <input type="text" id="pat-search" placeholder="Search patterns..." oninput="renderPatterns()">
+              <span class="pat-chip on bullish" data-sig="bullish" onclick="togglePatChip(this)">Bullish</span>
+              <span class="pat-chip on bearish" data-sig="bearish" onclick="togglePatChip(this)">Bearish</span>
+              <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
+              <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
+              <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
+              <span class="pat-chip" data-sig="hideVariants" onclick="togglePatChip(this)">Hide Variants</span>
+              <span class="pat-sep"></span>
+              <span class="pat-chip sector-chip" data-sector="crypto" onclick="togglePatChip(this)">Crypto</span>
+              <span class="pat-chip sector-chip" data-sector="tech" onclick="togglePatChip(this)">Tech</span>
+              <span class="pat-chip sector-chip" data-sector="finance" onclick="togglePatChip(this)">Finance</span>
+              <span class="pat-chip sector-chip" data-sector="healthcare" onclick="togglePatChip(this)">Healthcare</span>
+              <span class="pat-chip sector-chip" data-sector="consumer" onclick="togglePatChip(this)">Consumer</span>
+              <span class="pat-chip sector-chip" data-sector="industrial" onclick="togglePatChip(this)">Industrial</span>
+              <span class="pat-chip sector-chip" data-sector="energy" onclick="togglePatChip(this)">Energy</span>
+            </div>
+            <div class="pat-count" id="pat-count"></div>
+            <div id="brain-patterns" style="max-height:600px;overflow-y:auto"></div>
+            <div id="brain-near-tradeable-candidates" style="font-size:11px;color:var(--text-muted);margin-top:10px"></div>
+          </div>
+
+          <!-- Cycles sub-tab -->
+          <div class="bdd-panel" id="bdd-cycles" style="display:none">
+            <div style="margin-bottom:10px;padding:4px 0">
+              <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
+            </div>
+            <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Cycle AI Reports</div>
+              <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">One summary per learning cycle (newest first). Flip for full report.</p>
+              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No cycle reports yet — run a learning cycle.</div>
+              <div id="cycle-report-ui" style="display:none">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                  <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
+                  <span id="cycle-report-pos" style="font-size:10px;color:var(--text-muted)"></span>
+                  <button type="button" class="bw-ctrl-btn" id="cycle-report-next" onclick="cycleReportNav(1)">Older &#x2192;</button>
+                </div>
+                <div class="cr-flip-scene">
+                  <div class="cr-flip-inner" id="cycle-report-flip-inner" onclick="toggleCycleReportFlip(event)">
+                    <div class="cr-flip-face cr-flip-front">
+                      <div id="cycle-report-front-date" style="font-size:11px;font-weight:700;color:var(--accent)"></div>
+                      <div id="cycle-report-front-metrics" style="font-size:10px;color:var(--text-muted);margin-top:6px"></div>
+                      <div id="cycle-report-front-robustness" style="font-size:9px;color:var(--text-secondary);margin-top:5px;line-height:1.45"></div>
+                      <div class="cr-flip-front-preview" id="cycle-report-front-preview"></div>
+                      <div style="font-size:9px;color:var(--text-muted);margin-top:10px">Click to flip for full report</div>
+                    </div>
+                    <div class="cr-flip-face cr-flip-back">
+                      <div id="cycle-report-back-md" class="cr-back-scroll prose-dark"></div>
+                      <div style="font-size:9px;color:var(--text-muted);margin-top:8px">Click to flip back</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="brain-cycle-digest" style="font-size:10px;color:var(--text-secondary);line-height:1.5"></div>
+            <div class="brain-section" style="margin-top:10px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
+              <div class="brain-filter-bar" id="brain-filter-bar">
+                <button class="brain-filter-btn active" data-filter="all" onclick="filterBrainEvents('all',this)">All</button>
+                <button class="brain-filter-btn" data-filter="discovery" onclick="filterBrainEvents('discovery',this)">Discovery</button>
+                <button class="brain-filter-btn" data-filter="scan" onclick="filterBrainEvents('scan',this)">Scan</button>
+                <button class="brain-filter-btn" data-filter="review" onclick="filterBrainEvents('review',this)">Review</button>
+              </div>
+              <div class="brain-timeline" id="brain-activity" style="max-height:400px;overflow-y:auto"></div>
+            </div>
+          </div>
+
+          <!-- Ops sub-tab -->
+          <div class="bdd-panel" id="bdd-ops" style="display:none">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
+              <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Config Profile:</span>
+              <select id="ops-profile-select" style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;cursor:pointer">
+                <option value="">-- select --</option>
+                <option value="conservative">Conservative</option>
+                <option value="moderate">Moderate</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+              <button type="button" onclick="applyConfigProfile()" class="bw-ctrl-btn" style="font-size:10px">Apply</button>
+              <span id="ops-profile-status" style="font-size:9px;color:var(--text-muted)"></span>
+            </div>
+            <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:0 0 10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
+              <strong>How it works:</strong> <strong>Start / Stop</strong> control the Docker Compose <code style="font-size:9px">brain-worker</code> service (same image as the app, running <code>scripts/brain_worker.py</code>), not a subprocess inside this web server.
+              <strong>Run next cycle</strong> only skips <em>idle sleep</em> between full learning cycles.
+              <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug).
+            </div>
+            <div class="bw-status-row" style="margin-bottom:10px">
+              <span><span class="bw-status-label">Uptime:</span> <span class="bw-status-value" id="bw-uptime">--</span></span>
+              <span><span class="bw-status-label">Cycles:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
+            </div>
+            <div class="bw-current" id="bw-current" style="display:none;margin-bottom:10px">
+              <span class="bw-current-step" id="bw-current-step">Idle</span>
+              <span class="bw-current-progress" id="bw-current-progress"></span>
+            </div>
+            <div class="bw-stats-grid" id="bw-stats-grid">
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-scanned">0</div><div class="bw-stat-lbl">Scanned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-snapshots">0</div><div class="bw-stat-lbl">Snapshots</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-mined">0</div><div class="bw-stat-lbl">Mined</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-tested">0</div><div class="bw-stat-lbl">Tested</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-validated">0</div><div class="bw-stat-lbl">Validated</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-challenged">0</div><div class="bw-stat-lbl">Challenged</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-evolved">0</div><div class="bw-stat-lbl">Evolved</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-decayed">0</div><div class="bw-stat-lbl">Decayed</div></div>
+            </div>
+            <div class="bw-queue-status" id="bw-queue-status">
+              <div class="bw-queue-header">
+                <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Backtest Queue</span>
+                <span class="bw-queue-badge" id="bw-queue-badge">--</span>
+              </div>
+              <div class="bw-queue-details">
+                <span><span class="bw-queue-label">Pending:</span> <span id="bw-queue-pending">--</span></span>
+                <span><span class="bw-queue-label">Boosted:</span> <span id="bw-queue-boosted">0</span></span>
+                <span><span class="bw-queue-label">Tested:</span> <span id="bw-queue-tested">--</span></span>
+              </div>
+              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                <button type="button" class="bw-ctrl-btn" id="bw-queue-batch-btn" onclick="runQueueBatchFromWeb()" style="font-size:10px" title="Runs one queue batch inside the web server process (no brain_worker required)">Process queue on server</button>
+              </div>
+            </div>
+            <div class="bw-timings" id="bw-last-cycle-timings" style="font-size:10px;color:var(--text-muted);margin-top:8px">
+              <span class="bw-timings-label">Last cycle: --</span>
+              <span class="bw-timings-steps" id="bw-step-timings"></span>
+            </div>
+            <div class="bw-cycle-chart-wrap" style="margin-top:10px">
+              <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cycle History</div>
+              <div id="bw-cycle-chart" style="width:100%;height:100px;border-radius:6px;overflow:hidden;background:var(--card);border:1px solid var(--border)"></div>
+              <div id="bw-cycle-chart-legend" style="font-size:9px;color:var(--text-muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
+                <span><span style="color:#8b5cf6">&#x25CF;</span> Patterns tested</span>
+                <span><span style="color:#22c55e">&#x25CF;</span> Duration (s)</span>
+              </div>
+            </div>
+            <div style="font-size:10px;font-weight:600;margin:10px 0 4px;color:var(--text-muted)">Recent Activity</div>
+            <div class="bw-activity" id="bw-activity">
+              <div style="color:var(--text-muted);font-style:italic">No activity yet</div>
+            </div>
+          </div>
+
+          <!-- Research sub-tab -->
+          <div class="bdd-panel" id="bdd-research" style="display:none">
+            <div class="brain-pipeline" id="brain-pipeline"></div>
+            <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
+            <div id="brain-proposal-skips" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
+            <div id="brain-research-kpi-benchmarks" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5"></div>
+            <div id="brain-pipeline-near" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
+            <div class="brain-kpis" id="brain-kpis">
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+            </div>
+            <div class="brain-section" style="margin-top:12px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence History</div>
+              <div id="brain-chart" style="width:100%;height:180px"></div>
+            </div>
+          </div>
+
+          <!-- Analytics sub-tab -->
+          <div class="bdd-panel" id="bdd-analytics" style="display:none">
+            <div class="brain-section">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Market Thesis</div>
+              <div class="brain-thesis-card neutral" id="brain-thesis-card">
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+                  <span class="thesis-stance neutral" id="thesis-stance">Loading...</span>
+                  <span style="font-size:9px;color:var(--text-muted)" id="thesis-meta"></span>
+                </div>
+                <div class="thesis-gauge"><div class="thesis-gauge-fill" id="thesis-gauge" style="width:50%;background:#f59e0b"></div></div>
+                <div class="thesis-text" id="thesis-text" style="font-size:11px;color:var(--text-muted)">Generating...</div>
+              </div>
+            </div>
+            <div id="bdd-analytics-content" style="font-size:11px;color:var(--text-muted)">
+              <p style="padding:12px;text-align:center">Select the Analytics tab to load pattern attribution, signal hit rates, and paper trading results.</p>
+            </div>
+          </div>
+
+        </div><!-- .bdd-content -->
+      </div><!-- .brain-deep-dive -->
+
       </div><!-- .trading-main-content -->
       </div><!-- #trading-brain-pane-output -->
 
@@ -1842,16 +1934,7 @@ var _bwCycleHistoryMax = 40;
 var _bwCycleChart = null;
 
 function toggleBwDetails() {
-  var section = document.getElementById('brain-worker-section');
-  var toggle = section.querySelector('.bw-toggle-details');
-  _bwCollapsed = !_bwCollapsed;
-  if (_bwCollapsed) {
-    section.classList.add('bw-collapsed');
-    toggle.innerHTML = '&#x25B6;';
-  } else {
-    section.classList.remove('bw-collapsed');
-    toggle.innerHTML = '&#x25BC;';
-  }
+  /* Legacy no-op; Ops tab always shows details */
 }
 
 function updateBrainWorkerUI(data) {
@@ -2876,257 +2959,98 @@ function evTradeAnalyticsMl() {
     .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
 }
 
-function startBwPolling() {
-  var qLink = document.getElementById('bw-queue-debug-link');
-  if (qLink && !qLink._bwWired) {
-    qLink._bwWired = true;
-    qLink.addEventListener('click', function(ev) {
-      ev.preventDefault();
-      bwOpenQueueDebug();
-    });
+/* ── Deep Dive tab switching + lazy loading ──── */
+var _bddLoaded = {};
+var _bddActiveTab = null;
+
+function switchDeepDiveTab(tab) {
+  _bddActiveTab = tab;
+  document.querySelectorAll('#bdd-tabs .bdd-tab').forEach(function(btn) {
+    btn.classList.toggle('active', btn.getAttribute('data-bdd') === tab);
+  });
+  document.querySelectorAll('#bdd-content .bdd-panel').forEach(function(p) {
+    p.style.display = p.id === ('bdd-' + tab) ? '' : 'none';
+  });
+  if (!_bddLoaded[tab]) {
+    _bddLoaded[tab] = true;
+    if (tab === 'patterns') {
+      loadLearnedPatterns();
+      loadNearTradeableCandidates();
+      pollBackfillStatus();
+    } else if (tab === 'cycles') {
+      loadCycleAiReportsPage(true);
+      loadBrainActivity();
+      _loadCycleDigestOnly();
+    } else if (tab === 'ops') {
+      _wireOpsTab();
+      _startOpsPolling();
+    } else if (tab === 'research') {
+      _loadResearchData();
+    } else if (tab === 'analytics') {
+      loadBrainThesis();
+    }
   }
-  function refreshBwChain() {
-    return loadBrainWorkerStatus()
-      .catch(function(){})
-      .then(function() { return loadBrainWorkerActivity().catch(function(){}); })
-      .then(function() { return loadBacktestQueueStatus().catch(function(){}); });
-  }
-  refreshBwChain();
-  if (_bwPollInterval) clearInterval(_bwPollInterval);
-  _bwPollInterval = setInterval(refreshBwChain, 10000);
+  if (tab === 'ops') _startOpsPolling();
+  else _stopOpsPolling();
 }
 
-/* ── Brain Dashboard (reuses /api/trading/brain/* endpoints) ─── */
-var brainChart = null, brainConfSeries = null;
-var _brainEventsRaw = [], _brainActiveFilter = 'all';
-var brainPollInterval = null;
-var _predShowAll = false, _PRED_INITIAL = 30;
+function _loadCycleDigestOnly() {
+  fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    var cdEl = document.getElementById('brain-cycle-digest');
+    if (!cdEl) return;
+    var lcd = d.last_cycle_digest;
+    if (lcd && typeof lcd === 'object') {
+      var parts = [];
+      parts.push('<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Last learning cycle</div>');
+      if (lcd.updated_at) parts.push('<div style="font-size:9px;color:var(--text-muted)">Updated ' + escHtml(String(lcd.updated_at)) + '</div>');
+      var line = [];
+      if (lcd.elapsed_s != null) line.push(lcd.elapsed_s + 's');
+      if (lcd.data_provider) line.push(escHtml(String(lcd.data_provider)));
+      if (lcd.interrupted) line.push('<span style="color:#f59e0b">interrupted</span>');
+      if (lcd.error) line.push('<span style="color:#ef4444">error</span>');
+      if (line.length) parts.push('<div>' + line.join(' &middot; ') + '</div>');
+      var counts = [];
+      function _cdn(k, lab) { if (lcd[k] != null) counts.push(lab + ' <strong>' + lcd[k] + '</strong>'); }
+      _cdn('prescreen_candidates', 'pre-screen'); _cdn('tickers_scored', 'scored');
+      _cdn('snapshots_taken', 'snapshots'); _cdn('patterns_discovered', 'patterns');
+      _cdn('backtests_run', 'backtests'); _cdn('proposals_generated', 'proposals');
+      _cdn('signal_events', 'signals');
+      if (counts.length) parts.push('<div>' + counts.join(' &middot; ') + '</div>');
+      cdEl.innerHTML = parts.join('');
+    }
+  }).catch(function(){});
+}
 
-function loadBrainDashboard() {
+function _loadResearchData() {
   fetch('/api/trading/brain/stats').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     window._brainStats = d;
-    var kpis = document.getElementById('brain-kpis');
     var pipeline = document.getElementById('brain-pipeline');
-
-    var hasData = d.total_predictions > 0;
-    var pending = d.pending_predictions || 0;
-    var evaluated = d.evaluated_snapshots || 0;
-    var ps = d.pipeline_status || 'no_data';
-
-    var snapDot = d.total_snapshots > 0 ? 'active' : 'empty';
-    var pendDot = pending > 0 ? 'pending' : 'empty';
-    var verDot = evaluated > 0 ? 'active' : (d.early_predictions > 0 ? 'pending' : 'empty');
-    var verLabel = evaluated > 0 ? evaluated.toLocaleString() : (d.early_predictions > 0 ? d.early_predictions.toLocaleString() + ' (3d)' : '0');
-    pipeline.innerHTML =
-      '<span class="bp-step"><span class="bp-dot ' + snapDot + '"></span> Snapshots: <span class="bp-num">' + (d.total_snapshots||0).toLocaleString() + '</span></span>' +
-      '<span class="bp-arrow">&rarr;</span>' +
-      '<span class="bp-step"><span class="bp-dot ' + pendDot + '"></span> Pending: <span class="bp-num">' + pending.toLocaleString() + '</span></span>' +
-      '<span class="bp-arrow">&rarr;</span>' +
-      '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + verLabel + '</span></span>';
-
-    var rfEl = document.getElementById('brain-research-funnel');
-    if (rfEl && d.research_funnel) {
-      var qf = d.research_funnel.queue || {};
-      var pa = d.research_funnel.promotion_status_active || {};
-      var pin = d.research_funnel.promotion_status_inactive || {};
-      var qt = d.research_funnel.queue_tier_active || {};
-      var cov = d.attribution_coverage || {};
-      var bud = d.last_cycle_budget || {};
-      var rej = (pa.rejected_oos||0) + (pa.rejected_bench||0) + (pa.rejected_bench_stress||0) + (pa.rejected_prescreen||0);
-      rfEl.innerHTML =
-        '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research funnel</div>' +
-        '<div>Backtest queue pending: <strong>' + (qf.pending!=null?qf.pending:'—') + '</strong> · ScanPatterns total: <strong>' + (d.research_funnel.scan_patterns_total||0) + '</strong></div>' +
-        '<div>Active by promo: promoted <strong>' + (pa.promoted||0) + '</strong>, pending OOS <strong>' + (pa.pending_oos||0) + '</strong>, candidates <strong>' + (pa.candidate||0) + '</strong>, legacy <strong>' + (pa.legacy||0) + '</strong>, rejected sum <strong>' + rej + '</strong></div>' +
-        '<div>Inactive: rejected OOS <strong>' + (pin.rejected_oos||0) + '</strong>, degraded live <strong>' + (pin.degraded_live||0) + '</strong>, rejected prescreen <strong>' + (pin.rejected_prescreen||0) + '</strong></div>' +
-        (Object.keys(qt).length ? '<div>Queue tier (active): ' + Object.keys(qt).map(function(k){ return k + ' <strong>' + qt[k] + '</strong>'; }).join(' · ') + '</div>' : '') +
-        (cov.coverage_pct!=null ? '<div>Live attribution: <strong>' + cov.coverage_pct + '%</strong> of closed trades carry <code style="font-size:9px">scan_pattern_id</code> (' + (cov.closed_with_scan_pattern_id||0) + '/' + (cov.closed_trades||0) + ')</div>' : '') +
-        (bud.ohlcv_used!=null ? '<div>Last cycle budget: OHLCV ' + bud.ohlcv_used + '/' + (bud.ohlcv_cap||'∞') + ', miner rows ' + (bud.miner_rows_used||0) + '/' + (bud.miner_rows_cap||'∞') + '</div>' : '') +
-        '<div style="font-size:9px;color:var(--text-muted);margin-top:6px;max-width:52rem">Per-ticker rows in pattern evidence can show few trades; promotion uses <strong>aggregate</strong> OOS stats across many tickers.</div>';
-    } else if (rfEl) { rfEl.innerHTML = ''; }
-
-    var cdEl = document.getElementById('brain-cycle-digest');
-    if (cdEl) {
-      var lcd = d.last_cycle_digest;
-      if (lcd && typeof lcd === 'object') {
-        var cdparts = [];
-        cdparts.push('<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Last learning cycle</div>');
-        if (lcd.updated_at) cdparts.push('<div style="font-size:9px;color:var(--text-muted)">Updated ' + escHtml(String(lcd.updated_at)) + '</div>');
-        var cdline = [];
-        if (lcd.elapsed_s != null) cdline.push(lcd.elapsed_s + 's');
-        if (lcd.data_provider) cdline.push(escHtml(String(lcd.data_provider)));
-        if (lcd.interrupted) cdline.push('<span style="color:#f59e0b">interrupted</span>');
-        if (lcd.error) cdline.push('<span style="color:#ef4444">error</span>');
-        if (cdline.length) cdparts.push('<div>' + cdline.join(' · ') + '</div>');
-        var ccounts = [];
-        function _cdn(k, lab) { if (lcd[k] != null) ccounts.push(lab + ' <strong>' + lcd[k] + '</strong>'); }
-        _cdn('prescreen_candidates', 'pre-screen');
-        _cdn('tickers_scored', 'scored');
-        _cdn('snapshots_taken', 'snapshots');
-        _cdn('patterns_discovered', 'patterns');
-        _cdn('backtests_run', 'backtests');
-        _cdn('proposals_generated', 'proposals');
-        _cdn('signal_events', 'signals');
-        if (ccounts.length) cdparts.push('<div>' + ccounts.join(' · ') + '</div>');
-        if (lcd.promoted_fast_eval && typeof lcd.promoted_fast_eval === 'object') {
-          var pfe = lcd.promoted_fast_eval;
-          var pfeOk = pfe.ok === true || (pfe.ok === undefined && !pfe.error);
-          cdparts.push('<div style="font-size:9px;margin-top:4px">Promoted fast-eval: ' + (pfeOk ? '<span style="color:#22c55e">ok</span>' : escHtml(String(pfe.error || 'failed'))) + '</div>');
-        }
-        cdEl.innerHTML = cdparts.join('');
-      } else {
-        cdEl.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Last learning cycle</div><div style="font-size:9px;color:var(--text-muted)">No digest yet — run a learning cycle (Learn / worker).</div>';
-      }
+    if (pipeline) {
+      var snapDot = d.total_snapshots > 0 ? 'active' : 'empty';
+      var pending = d.pending_predictions || 0;
+      var evaluated = d.evaluated_snapshots || 0;
+      var pendDot = pending > 0 ? 'pending' : 'empty';
+      var verDot = evaluated > 0 ? 'active' : (d.early_predictions > 0 ? 'pending' : 'empty');
+      var verLabel = evaluated > 0 ? evaluated.toLocaleString() : (d.early_predictions > 0 ? d.early_predictions.toLocaleString() + ' (3d)' : '0');
+      pipeline.innerHTML =
+        '<span class="bp-step"><span class="bp-dot ' + snapDot + '"></span> Snapshots: <span class="bp-num">' + (d.total_snapshots||0).toLocaleString() + '</span></span>' +
+        '<span class="bp-arrow">&rarr;</span>' +
+        '<span class="bp-step"><span class="bp-dot ' + pendDot + '"></span> Pending: <span class="bp-num">' + pending.toLocaleString() + '</span></span>' +
+        '<span class="bp-arrow">&rarr;</span>' +
+        '<span class="bp-step"><span class="bp-dot ' + verDot + '"></span> Verified: <span class="bp-num">' + verLabel + '</span></span>';
     }
-    var psEl = document.getElementById('brain-proposal-skips');
-    if (psEl) {
-      var lps = d.last_proposal_skips;
-      if (lps && typeof lps === 'object' && (lps.picks_total != null || lps.skips)) {
-        var sk = lps.skips || {};
-        var skeys = Object.keys(sk).filter(function(k){ return sk[k] > 0; }).sort();
-        var skipRows = skeys.map(function(k){
-          return '<div style="display:flex;justify-content:space-between;max-width:28rem;border-bottom:1px solid var(--border);padding:2px 0"><span style="font-size:9px">' + escHtml(k) + '</span><strong style="font-size:9px">' + sk[k] + '</strong></div>';
-        }).join('');
-        psEl.innerHTML =
-          '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation (last run)</div>' +
-          '<div style="font-size:9px;color:var(--text-muted)">Picks ' + (lps.picks_total != null ? lps.picks_total : '—') + ' · created <strong>' + (lps.created != null ? lps.created : 0) + '</strong>' + (lps.updated_at ? ' · ' + escHtml(String(lps.updated_at)) : '') + '</div>' +
-          (skipRows ? '<div style="margin-top:6px">' + skipRows + '</div>' : '<div style="font-size:9px;color:var(--text-muted);margin-top:4px">No skips recorded.</div>');
-      } else {
-        psEl.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation</div><div style="font-size:9px;color:var(--text-muted)">No skip rollup yet — proposals run after a cycle or price monitor.</div>';
-      }
-    }
-
-    var pipeNear = document.getElementById('brain-pipeline-near');
-    if (pipeNear) {
-      var pn = d.pattern_pipeline_near;
-      if (pn && pn.length) {
-        var rows = pn.map(function(x) {
-          var wr = x.oos_win_rate != null ? x.oos_win_rate + '% OOS' : 'OOS pending';
-          var tc = x.oos_trade_count != null ? x.oos_trade_count + ' agg. trades' : '';
-          var st = escHtml((x.promotion_status||'').replace(/</g,''));
-          var rawName = x.name || ('#' + x.id);
-          var nm = escHtml(rawName.length > 56 ? rawName.slice(0, 53) + '…' : rawName);
-          var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(x.id);
-          return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">' +
-            '<a href="' + link + '" style="font-weight:600;color:var(--accent);text-decoration:none;max-width:240px">' + nm + '</a>' +
-            '<span style="font-size:9px;color:var(--text-muted)">' + st + '</span>' +
-            '<span style="font-size:9px">' + wr + (tc? ' · ' + tc : '') + '</span>' +
-            '<span style="font-size:9px;color:var(--text-muted)">' + escHtml(x.timeframe||'') + '</span></div>';
-        }).join('');
-        pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion (active pending OOS / candidates)</div>' + rows;
-      } else {
-        pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion</div><div style="font-size:9px;color:var(--text-muted)">No active pending_oos or candidate patterns right now.</div>';
-      }
-    }
-
-    var rkEl = document.getElementById('brain-research-kpi-benchmarks');
-    if (rkEl && d.research_kpi_benchmarks && d.research_kpi_benchmarks.sample_count > 0 && d.research_kpi_benchmarks.means) {
-      var m = d.research_kpi_benchmarks.means;
-      var parts = [];
-      function _rk(k, label) { if (m[k] != null) parts.push('<strong>' + label + '</strong> ' + m[k]); }
-      _rk('sharpe_ratio', 'Sharpe');
-      _rk('sortino_ratio', 'Sortino');
-      _rk('information_ratio', 'IR');
-      _rk('calmar_ratio', 'Calmar');
-      _rk('max_drawdown_pct', 'MaxDD%');
-      _rk('jensen_alpha_pct', 'Jensen α%');
-      _rk('win_loss_payoff_ratio', 'W/L payoff');
-      rkEl.innerHTML = parts.length
-        ? '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research KPIs (mean over recent pattern backtests, n=' + d.research_kpi_benchmarks.sample_count + ')</div><div>' + parts.join(' · ') + '</div><div style="font-size:9px;color:var(--text-muted);margin-top:4px">IR vs buy&amp;hold on same bars; α/β from backtesting.py CAPM-style vs B&amp;H. Compare to institutional benchmarks externally.</div>'
-        : '';
-    } else if (rkEl) { rkEl.innerHTML = ''; }
-
-    function _accDisp(acc, count) { return count > 0 ? acc + '%' : '--'; }
-    function _accCls(acc, count) { if (count === 0) return ''; return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger'; }
-    function _accColor(acc, count) { if (count === 0) return 'var(--text-muted)'; return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444'; }
-    function _noDataCls(count) { return count > 0 ? '' : ' no-data'; }
-    var daysLeft = d.days_until_first_result;
-    function _accSub(count) {
-      if (count > 0) return '<div class="bk-trend flat">' + count + ' predictions</div>';
-      if (ps === 'pending_verification') {
-        var eta = (daysLeft != null && daysLeft > 0)
-          ? '<br><span style="font-size:9px;color:var(--text-muted)">~' + daysLeft + ' day' + (daysLeft === 1 ? '' : 's') + ' until first results</span>'
-          : (daysLeft === 0 ? '<br><span style="font-size:9px;color:#22c55e">Results ready next cycle</span>' : '');
-        return '<div class="bk-trend flat" style="color:#f59e0b">' + pending.toLocaleString() + ' awaiting verification' + eta + '</div>';
-      }
-      if (ps === 'collecting') return '<div class="bk-trend flat">Collecting snapshots&hellip;</div>';
-      return '<div class="bk-trend flat">Run scans to start</div>';
-    }
-
-    var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
-    var weekTrend = d.patterns_this_week > 0
-      ? '<div class="bk-trend up">&#9650; +' + d.patterns_this_week + ' this week</div>'
-      : '<div class="bk-trend flat">&mdash; no new this week</div>';
-
-    var strongSub = (d.strong_predictions||0) > 0
-      ? '<div class="bk-trend flat">' + d.strong_predictions + ' high-conviction</div>'
-      : pending > 0
-        ? '<div class="bk-trend flat" style="color:#f59e0b">' + pending.toLocaleString() + ' awaiting results' +
-          ((daysLeft != null && daysLeft > 0) ? '<br><span style="font-size:9px;color:var(--text-muted)">~' + daysLeft + 'd until verification</span>' : '') + '</div>'
-        : '<div class="bk-trend flat">Run scans to gather data</div>';
-
-    var earlyAcc = d.early_accuracy || 0;
-    var earlyPred = d.early_predictions || 0;
-    var hasEarly = !hasData && earlyPred > 0;
-    var accRingPct = hasData ? d.prediction_accuracy : (hasEarly ? earlyAcc : 0);
-    var strRingPct = (d.strong_predictions||0) > 0 ? (d.strong_accuracy||0) : 0;
-
-    var accKpiCls = hasData ? _noDataCls(d.total_predictions) : (hasEarly ? '' : _noDataCls(0));
-    var accDispVal = hasData ? _accDisp(d.prediction_accuracy, d.total_predictions) : (hasEarly ? earlyAcc + '%' : '--');
-    var accClsVal = hasData ? _accCls(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accCls(earlyAcc, earlyPred) : '');
-    var accColorVal = hasData ? _accColor(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accColor(earlyAcc, earlyPred) : 'var(--text-muted)');
-    var accTooltip = hasData
-      ? 'Percentage of 5-day direction predictions that were correct.'
-      : (hasEarly ? 'Early preview using 3-day returns. Full 5-day accuracy available soon.' : 'Percentage of 5-day direction predictions that were correct.');
-    var accLabel = hasEarly ? 'Overall Accuracy <span style="font-size:9px;color:var(--text-muted)">(3d preview)</span>' : 'Overall Accuracy';
-    var accSubText = hasData ? _accSub(d.total_predictions) : (hasEarly
-      ? '<div class="bk-trend flat">' + earlyPred + ' early results' +
-        ((daysLeft != null && daysLeft > 0) ? ' &middot; ' + daysLeft + 'd to 5d' : '') + '</div>'
-      : _accSub(0));
-
-    kpis.innerHTML =
-      '<div class="brain-kpi clickable' + accKpiCls + '" onclick="showAccuracyDetail(\'all\')">' +
-        '<div class="bk-tooltip">' + accTooltip + '</div>' +
-        '<div class="brain-ring">' + _makeRingSvg(accRingPct, accColorVal) +
-          '<div class="ring-label ' + accClsVal + '">' + accDispVal + '</div></div>' +
-        '<div class="bk-lbl">' + accLabel + '</div>' + accSubText + '</div>' +
-      '<div class="brain-kpi clickable' + _noDataCls(d.strong_predictions||0) + '" onclick="showAccuracyDetail(\'strong\')">' +
-        '<div class="bk-tooltip">Accuracy of high-conviction predictions (score &ge; 3.0).</div>' +
-        '<div class="brain-ring">' + _makeRingSvg(strRingPct, _accColor(d.strong_accuracy||0, d.strong_predictions||0)) +
-          '<div class="ring-label ' + _accCls(d.strong_accuracy||0, d.strong_predictions||0) + '">' + _accDisp(d.strong_accuracy||0, d.strong_predictions||0) + '</div></div>' +
-        '<div class="bk-lbl">Strong Signal</div>' + strongSub + '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')">' +
-        '<div class="bk-tooltip">Active scan patterns discovered through market analysis.</div>' +
-        '<div class="bk-val" style="color:#8b5cf6">' + (d.total_scan_patterns || d.total_patterns) + '</div>' +
-        '<div class="bk-lbl">Discovered Patterns</div>' + weekTrend + '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')">' +
-        '<div class="bk-tooltip">Weighted average confidence across all active patterns.</div>' +
-        '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
-        '<div class="bk-lbl">Avg Confidence</div>' +
-        (d.confidence_trend > 0
-          ? '<div class="bk-trend up">&#9650; +' + d.confidence_trend + '% vs last week</div>'
-          : d.confidence_trend < 0
-            ? '<div class="bk-trend down">&#9660; ' + d.confidence_trend + '% vs last week</div>'
-            : '<div class="bk-trend flat">&mdash; stable</div>') + '</div>' +
-      '<div class="brain-kpi clickable' + _noDataCls(d.stock_predictions||0) + '" onclick="showAccuracyDetail(\'stock\')">' +
-        '<div class="bk-val ' + _accCls(d.stock_accuracy||0, d.stock_predictions||0) + '">' + _accDisp(d.stock_accuracy||0, d.stock_predictions||0) + '</div>' +
-        '<div class="bk-lbl">Stock Accuracy</div>' + _accSub(d.stock_predictions||0) + '</div>' +
-      '<div class="brain-kpi clickable' + _noDataCls(d.crypto_predictions||0) + '" onclick="showAccuracyDetail(\'crypto\')">' +
-        '<div class="bk-val ' + _accCls(d.crypto_accuracy||0, d.crypto_predictions||0) + '">' + _accDisp(d.crypto_accuracy||0, d.crypto_predictions||0) + '</div>' +
-        '<div class="bk-lbl">Crypto Accuracy</div>' + _accSub(d.crypto_predictions||0) + '</div>' +
-      '<div class="brain-kpi clickable" onclick="showMLDetail()">' +
-        (d.ml_ready
-          ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div class="bk-lbl">Pattern ML (CV)</div><div class="bk-trend flat">' + (d.ml_samples||0) + ' samples · ' + (d.ml_active_patterns||0) + ' patterns</div>'
-          : '<div class="bk-val" style="color:var(--text-muted)">--</div><div class="bk-lbl">Pattern ML</div><div class="bk-trend flat">Not trained yet</div>') + '</div>' +
-      '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')">' +
-        '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
-        '<div class="bk-lbl">Snapshots</div>' +
-        '<div class="bk-trend flat">' + (d.universe_total||0).toLocaleString() + ' tickers</div></div>';
-  });
-  loadBrainThesis();
+    _fillResearchFunnel(d);
+    _fillProposalSkips(d);
+    _fillResearchKpiBenchmarks(d);
+    _fillPipelineNear(d);
+    _fillKpis(d);
+  }).catch(function(){});
   fetch('/api/trading/brain/confidence-history').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok || !d.data || !d.data.length) return;
     var el = document.getElementById('brain-chart');
+    if (!el) return;
     el.innerHTML = '';
     var isDark = document.documentElement.getAttribute('data-theme') === 'dark';
     brainChart = LightweightCharts.createChart(el, {
@@ -3139,21 +3063,294 @@ function loadBrainDashboard() {
     brainConfSeries.setData(d.data);
     brainChart.timeScale().fitContent();
     new ResizeObserver(function() { if (brainChart) brainChart.applyOptions({width:el.clientWidth}); }).observe(el);
+  }).catch(function(){});
+}
+
+function applyConfigProfile() {
+  var sel = document.getElementById('ops-profile-select');
+  var st = document.getElementById('ops-profile-status');
+  var name = sel ? sel.value : '';
+  if (!name) { if (st) st.textContent = 'Select a profile first.'; return; }
+  if (st) st.textContent = 'Applying...';
+  fetch('/api/trading/brain/config/apply-profile', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({profile: name})
+  }).then(function(r){ return r.json(); }).then(function(d) {
+    if (d.ok) {
+      if (st) st.innerHTML = '<span style="color:#22c55e">Applied ' + escHtml(name) + ' (' + Object.keys(d.applied||{}).length + ' settings)</span>';
+    } else {
+      if (st) st.innerHTML = '<span style="color:#ef4444">' + escHtml(d.error || 'Failed') + '</span>';
+    }
+  }).catch(function(e) {
+    if (st) st.innerHTML = '<span style="color:#ef4444">Error: ' + escHtml(e.message||'') + '</span>';
   });
-  loadBrainActivity();
-  loadLearnedPatterns();
-  loadTradeablePatterns();
-  loadNearTradeableCandidates();
+}
+
+function _wireOpsTab() {
+  var qLink = document.getElementById('bw-queue-debug-link');
+  if (qLink && !qLink._bwWired) {
+    qLink._bwWired = true;
+    qLink.addEventListener('click', function(ev) {
+      ev.preventDefault();
+      bwOpenQueueDebug();
+    });
+  }
+}
+
+var _opsPollingInterval = null;
+function _startOpsPolling() {
+  if (_opsPollingInterval) return;
+  function refreshOps() {
+    return loadBrainWorkerStatus()
+      .catch(function(){})
+      .then(function() { return loadBrainWorkerActivity().catch(function(){}); })
+      .then(function() { return loadBacktestQueueStatus().catch(function(){}); });
+  }
+  refreshOps();
+  _opsPollingInterval = setInterval(refreshOps, 10000);
+}
+function _stopOpsPolling() {
+  if (_opsPollingInterval) { clearInterval(_opsPollingInterval); _opsPollingInterval = null; }
+}
+
+function startBwPolling() {
+  loadBrainWorkerStatus().catch(function(){});
+}
+
+/* ── Brain Dashboard (reuses /api/trading/brain/* endpoints) ─── */
+var brainChart = null, brainConfSeries = null;
+var _brainEventsRaw = [], _brainActiveFilter = 'all';
+var brainPollInterval = null;
+var _predShowAll = false, _PRED_INITIAL = 30;
+
+function loadBrainDashboard() {
+  /* Zone 1: status bar — worker status + regime chip */
+  startBwPolling();
+  _loadRegimeChip();
+
+  /* Zone 2: Playbook + P&L + Predictions + Tradeable */
+  loadPlaybook();
   loadPerfDashboard();
   loadBrainPredictions();
-  loadCycleAiReportsPage(true);
-  pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
+  loadTradeablePatterns();
+
+  /* Polling: learning status (status bar only) */
+  pollLearningStatus().catch(function(){});
   if (brainPollInterval) clearInterval(brainPollInterval);
   brainPollInterval = setInterval(function() {
-    pollLearningStatus().then(function() { return pollBackfillStatus(); }).catch(function(){});
+    pollLearningStatus().catch(function(){});
   }, 3000);
+
+  /* Tradeable auto-refresh */
   if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
-  window._tradeablePatternsInterval = setInterval(function() { loadTradeablePatterns(); loadNearTradeableCandidates(); }, 120000);
+  window._tradeablePatternsInterval = setInterval(function() { loadTradeablePatterns(); }, 120000);
+
+  /* Reset deep-dive tab state so tabs lazy-load fresh */
+  _bddLoaded = {};
+  _bddActiveTab = null;
+}
+
+function _loadRegimeChip() {
+  fetch('/api/trading/brain/thesis').then(function(r){return r.json();}).then(function(d) {
+    if (!d.ok) return;
+    window._brainThesisData = d;
+    var chip = document.getElementById('bsb-regime');
+    if (!chip) return;
+    var icons = {bullish:'&#x1F7E2;', bearish:'&#x1F534;', neutral:'&#x1F7E1;'};
+    var cls = {bullish:'bsb-chip-bull', bearish:'bsb-chip-bear'};
+    chip.innerHTML = (icons[d.stance]||'&#x1F7E1;') + ' ' + (d.stance||'neutral').charAt(0).toUpperCase() + (d.stance||'neutral').slice(1);
+    chip.className = 'bsb-chip ' + (cls[d.stance]||'');
+
+    /* Also fill the full thesis card in Analytics tab */
+    var stanceEl = document.getElementById('thesis-stance');
+    var gaugeEl = document.getElementById('thesis-gauge');
+    var textEl = document.getElementById('thesis-text');
+    var metaEl = document.getElementById('thesis-meta');
+    var card = document.getElementById('brain-thesis-card');
+    if (card) {
+      card.className = 'brain-thesis-card ' + d.stance;
+      card.style.cursor = 'pointer';
+      card.onclick = function() { showThesisDetail(); };
+    }
+    if (stanceEl) {
+      stanceEl.className = 'thesis-stance ' + d.stance;
+      var stanceLabels = {bullish:'&#x1F7E2; Bullish', bearish:'&#x1F534; Bearish', neutral:'&#x1F7E1; Neutral'};
+      stanceEl.innerHTML = stanceLabels[d.stance] || 'Neutral';
+    }
+    if (gaugeEl) {
+      var gp = d.stance === 'bullish' ? 75 : d.stance === 'bearish' ? 25 : 50;
+      var gc = d.stance === 'bullish' ? '#22c55e' : d.stance === 'bearish' ? '#ef4444' : '#f59e0b';
+      gaugeEl.style.width = gp + '%'; gaugeEl.style.background = gc;
+    }
+    if (textEl) {
+      var truncated = d.thesis.length > 300 ? d.thesis.substring(0, 300) + '...' : d.thesis;
+      if (typeof marked !== 'undefined') { try { textEl.innerHTML = marked.parse(truncated); } catch(e) { textEl.textContent = truncated; } }
+      else textEl.innerHTML = truncated;
+      textEl.style.color = 'var(--text)';
+    }
+    if (metaEl) {
+      var mp = [];
+      if (d.patterns_count) mp.push(d.patterns_count + ' patterns');
+      if (d.total_predictions) mp.push(d.accuracy + '% accuracy (' + d.total_predictions + ')');
+      metaEl.innerHTML = mp.join(' &middot; ');
+    }
+  }).catch(function(){});
+  fetch('/api/trading/brain/volatility').then(function(r){return r.json();}).then(function(v) {
+    if (!v.ok) return;
+    window._brainVixData = v;
+    var chip = document.getElementById('bsb-regime');
+    if (chip) {
+      var regimeColors = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
+      chip.innerHTML += ' <span style="font-size:8px;opacity:.8">VIX ' + (v.vix||'?') + '</span>';
+    }
+    var stanceEl = document.getElementById('thesis-stance');
+    if (stanceEl) {
+      var rc2 = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
+      stanceEl.innerHTML += ' <span style="font-size:9px;padding:1px 6px;border-radius:8px;background:' + (rc2[v.regime]||'#6b7280') + '20;color:' + (rc2[v.regime]||'#6b7280') + ';font-weight:700;vertical-align:middle">VIX ' + (v.vix||'?') + ' ' + (v.label||'') + '</span>';
+    }
+  }).catch(function(){});
+}
+
+/* ── Research sub-tab data helpers ───────────── */
+function _fillResearchFunnel(d) {
+  var rfEl = document.getElementById('brain-research-funnel');
+  if (rfEl && d.research_funnel) {
+    var qf = d.research_funnel.queue || {};
+    var pa = d.research_funnel.promotion_status_active || {};
+    var pin = d.research_funnel.promotion_status_inactive || {};
+    var qt = d.research_funnel.queue_tier_active || {};
+    var cov = d.attribution_coverage || {};
+    var bud = d.last_cycle_budget || {};
+    var rej = (pa.rejected_oos||0) + (pa.rejected_bench||0) + (pa.rejected_bench_stress||0) + (pa.rejected_prescreen||0);
+    rfEl.innerHTML =
+      '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research funnel</div>' +
+      '<div>Backtest queue pending: <strong>' + (qf.pending!=null?qf.pending:'—') + '</strong> · ScanPatterns total: <strong>' + (d.research_funnel.scan_patterns_total||0) + '</strong></div>' +
+      '<div>Active by promo: promoted <strong>' + (pa.promoted||0) + '</strong>, pending OOS <strong>' + (pa.pending_oos||0) + '</strong>, candidates <strong>' + (pa.candidate||0) + '</strong>, legacy <strong>' + (pa.legacy||0) + '</strong>, rejected sum <strong>' + rej + '</strong></div>' +
+      '<div>Inactive: rejected OOS <strong>' + (pin.rejected_oos||0) + '</strong>, degraded live <strong>' + (pin.degraded_live||0) + '</strong>, rejected prescreen <strong>' + (pin.rejected_prescreen||0) + '</strong></div>' +
+      (Object.keys(qt).length ? '<div>Queue tier (active): ' + Object.keys(qt).map(function(k){ return k + ' <strong>' + qt[k] + '</strong>'; }).join(' · ') + '</div>' : '') +
+      (cov.coverage_pct!=null ? '<div>Live attribution: <strong>' + cov.coverage_pct + '%</strong> (' + (cov.closed_with_scan_pattern_id||0) + '/' + (cov.closed_trades||0) + ')</div>' : '') +
+      (bud.ohlcv_used!=null ? '<div>Budget: OHLCV ' + bud.ohlcv_used + '/' + (bud.ohlcv_cap||'∞') + ', rows ' + (bud.miner_rows_used||0) + '/' + (bud.miner_rows_cap||'∞') + '</div>' : '');
+  } else if (rfEl) { rfEl.innerHTML = ''; }
+}
+
+function _fillProposalSkips(d) {
+  var psEl = document.getElementById('brain-proposal-skips');
+  if (!psEl) return;
+  var lps = d.last_proposal_skips;
+  if (lps && typeof lps === 'object' && (lps.picks_total != null || lps.skips)) {
+    var sk = lps.skips || {};
+    var skeys = Object.keys(sk).filter(function(k){ return sk[k] > 0; }).sort();
+    var skipRows = skeys.map(function(k){
+      return '<div style="display:flex;justify-content:space-between;max-width:28rem;border-bottom:1px solid var(--border);padding:2px 0"><span style="font-size:9px">' + escHtml(k) + '</span><strong style="font-size:9px">' + sk[k] + '</strong></div>';
+    }).join('');
+    psEl.innerHTML =
+      '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation (last run)</div>' +
+      '<div style="font-size:9px;color:var(--text-muted)">Picks ' + (lps.picks_total != null ? lps.picks_total : '—') + ' · created <strong>' + (lps.created != null ? lps.created : 0) + '</strong>' + (lps.updated_at ? ' · ' + escHtml(String(lps.updated_at)) : '') + '</div>' +
+      (skipRows ? '<div style="margin-top:6px">' + skipRows + '</div>' : '');
+  } else {
+    psEl.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Proposal generation</div><div style="font-size:9px;color:var(--text-muted)">No skip rollup yet.</div>';
+  }
+}
+
+function _fillResearchKpiBenchmarks(d) {
+  var rkEl = document.getElementById('brain-research-kpi-benchmarks');
+  if (rkEl && d.research_kpi_benchmarks && d.research_kpi_benchmarks.sample_count > 0 && d.research_kpi_benchmarks.means) {
+    var m = d.research_kpi_benchmarks.means;
+    var parts = [];
+    function _rk(k, label) { if (m[k] != null) parts.push('<strong>' + label + '</strong> ' + m[k]); }
+    _rk('sharpe_ratio', 'Sharpe'); _rk('sortino_ratio', 'Sortino'); _rk('information_ratio', 'IR');
+    _rk('calmar_ratio', 'Calmar'); _rk('max_drawdown_pct', 'MaxDD%'); _rk('jensen_alpha_pct', 'Jensen α%'); _rk('win_loss_payoff_ratio', 'W/L payoff');
+    rkEl.innerHTML = parts.length
+      ? '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Research KPIs (mean, n=' + d.research_kpi_benchmarks.sample_count + ')</div><div>' + parts.join(' · ') + '</div>'
+      : '';
+  } else if (rkEl) { rkEl.innerHTML = ''; }
+}
+
+function _fillPipelineNear(d) {
+  var pipeNear = document.getElementById('brain-pipeline-near');
+  if (!pipeNear) return;
+  var pn = d.pattern_pipeline_near;
+  if (pn && pn.length) {
+    var rows = pn.map(function(x) {
+      var wr = x.oos_win_rate != null ? x.oos_win_rate + '% OOS' : 'OOS pending';
+      var tc = x.oos_trade_count != null ? x.oos_trade_count + ' trades' : '';
+      var rawName = x.name || ('#' + x.id);
+      var nm = escHtml(rawName.length > 56 ? rawName.slice(0, 53) + '…' : rawName);
+      var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(x.id);
+      return '<div style="display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border)">' +
+        '<a href="' + link + '" style="font-weight:600;color:var(--accent);text-decoration:none;max-width:240px">' + nm + '</a>' +
+        '<span style="font-size:9px">' + wr + (tc ? ' · ' + tc : '') + '</span></div>';
+    }).join('');
+    pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion</div>' + rows;
+  } else {
+    pipeNear.innerHTML = '<div style="font-weight:700;color:var(--text);margin-bottom:4px;font-size:10px">Near promotion</div><div style="font-size:9px;color:var(--text-muted)">No active pending_oos or candidate patterns.</div>';
+  }
+}
+
+function _fillKpis(d) {
+  var kpis = document.getElementById('brain-kpis');
+  if (!kpis) return;
+  var hasData = d.total_predictions > 0;
+  var pending = d.pending_predictions || 0;
+  var ps = d.pipeline_status || 'no_data';
+  function _accDisp(acc, count) { return count > 0 ? acc + '%' : '--'; }
+  function _accCls(acc, count) { if (count === 0) return ''; return acc >= 55 ? 'good' : acc >= 40 ? 'warn' : 'danger'; }
+  function _accColor(acc, count) { if (count === 0) return 'var(--text-muted)'; return acc >= 55 ? '#22c55e' : acc >= 40 ? '#f59e0b' : '#ef4444'; }
+  function _noDataCls(count) { return count > 0 ? '' : ' no-data'; }
+  var daysLeft = d.days_until_first_result;
+  function _accSub(count) {
+    if (count > 0) return '<div class="bk-trend flat">' + count + ' predictions</div>';
+    if (ps === 'pending_verification') {
+      var eta = (daysLeft != null && daysLeft > 0) ? '<br><span style="font-size:9px;color:var(--text-muted)">~' + daysLeft + 'd</span>' : '';
+      return '<div class="bk-trend flat" style="color:#f59e0b">' + pending.toLocaleString() + ' awaiting verification' + eta + '</div>';
+    }
+    if (ps === 'collecting') return '<div class="bk-trend flat">Collecting snapshots&hellip;</div>';
+    return '<div class="bk-trend flat">Run scans to start</div>';
+  }
+  var confCls = d.avg_confidence >= 60 ? 'good' : d.avg_confidence >= 40 ? 'warn' : 'danger';
+  var weekTrend = d.patterns_this_week > 0
+    ? '<div class="bk-trend up">&#9650; +' + d.patterns_this_week + ' this week</div>'
+    : '<div class="bk-trend flat">&mdash; no new this week</div>';
+  var strongSub = (d.strong_predictions||0) > 0
+    ? '<div class="bk-trend flat">' + d.strong_predictions + ' high-conviction</div>'
+    : _accSub(0);
+  var earlyAcc = d.early_accuracy || 0;
+  var earlyPred = d.early_predictions || 0;
+  var hasEarly = !hasData && earlyPred > 0;
+  var accRingPct = hasData ? d.prediction_accuracy : (hasEarly ? earlyAcc : 0);
+  var strRingPct = (d.strong_predictions||0) > 0 ? (d.strong_accuracy||0) : 0;
+  var accKpiCls = hasData ? _noDataCls(d.total_predictions) : (hasEarly ? '' : _noDataCls(0));
+  var accDispVal = hasData ? _accDisp(d.prediction_accuracy, d.total_predictions) : (hasEarly ? earlyAcc + '%' : '--');
+  var accClsVal = hasData ? _accCls(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accCls(earlyAcc, earlyPred) : '');
+  var accColorVal = hasData ? _accColor(d.prediction_accuracy, d.total_predictions) : (hasEarly ? _accColor(earlyAcc, earlyPred) : 'var(--text-muted)');
+  kpis.innerHTML =
+    '<div class="brain-kpi clickable' + accKpiCls + '" onclick="showAccuracyDetail(\'all\')">' +
+      '<div class="brain-ring">' + _makeRingSvg(accRingPct, accColorVal) + '<div class="ring-label ' + accClsVal + '">' + accDispVal + '</div></div>' +
+      '<div class="bk-lbl">Overall Accuracy</div>' + _accSub(hasData ? d.total_predictions : earlyPred) + '</div>' +
+    '<div class="brain-kpi clickable' + _noDataCls(d.strong_predictions||0) + '" onclick="showAccuracyDetail(\'strong\')">' +
+      '<div class="brain-ring">' + _makeRingSvg(strRingPct, _accColor(d.strong_accuracy||0, d.strong_predictions||0)) + '<div class="ring-label ' + _accCls(d.strong_accuracy||0, d.strong_predictions||0) + '">' + _accDisp(d.strong_accuracy||0, d.strong_predictions||0) + '</div></div>' +
+      '<div class="bk-lbl">Strong Signal</div>' + strongSub + '</div>' +
+    '<div class="brain-kpi clickable" onclick="showKpiInfo(\'patterns\')">' +
+      '<div class="bk-val" style="color:#8b5cf6">' + (d.total_scan_patterns || d.total_patterns) + '</div>' +
+      '<div class="bk-lbl">Discovered Patterns</div>' + weekTrend + '</div>' +
+    '<div class="brain-kpi clickable" onclick="showKpiInfo(\'confidence\')">' +
+      '<div class="bk-val ' + confCls + '">' + d.avg_confidence + '%</div>' +
+      '<div class="bk-lbl">Avg Confidence</div>' +
+      (d.confidence_trend > 0 ? '<div class="bk-trend up">&#9650; +' + d.confidence_trend + '%</div>' : d.confidence_trend < 0 ? '<div class="bk-trend down">&#9660; ' + d.confidence_trend + '%</div>' : '<div class="bk-trend flat">&mdash; stable</div>') + '</div>' +
+    '<div class="brain-kpi clickable' + _noDataCls(d.stock_predictions||0) + '" onclick="showAccuracyDetail(\'stock\')">' +
+      '<div class="bk-val ' + _accCls(d.stock_accuracy||0, d.stock_predictions||0) + '">' + _accDisp(d.stock_accuracy||0, d.stock_predictions||0) + '</div>' +
+      '<div class="bk-lbl">Stock Accuracy</div>' + _accSub(d.stock_predictions||0) + '</div>' +
+    '<div class="brain-kpi clickable' + _noDataCls(d.crypto_predictions||0) + '" onclick="showAccuracyDetail(\'crypto\')">' +
+      '<div class="bk-val ' + _accCls(d.crypto_accuracy||0, d.crypto_predictions||0) + '">' + _accDisp(d.crypto_accuracy||0, d.crypto_predictions||0) + '</div>' +
+      '<div class="bk-lbl">Crypto Accuracy</div>' + _accSub(d.crypto_predictions||0) + '</div>' +
+    '<div class="brain-kpi clickable" onclick="showMLDetail()">' +
+      (d.ml_ready
+        ? '<div class="bk-val" style="color:#06b6d4">' + (d.ml_accuracy||0) + '%</div><div class="bk-lbl">Pattern ML</div><div class="bk-trend flat">' + (d.ml_samples||0) + ' samples</div>'
+        : '<div class="bk-val" style="color:var(--text-muted)">--</div><div class="bk-lbl">Pattern ML</div><div class="bk-trend flat">Not trained</div>') + '</div>' +
+    '<div class="brain-kpi clickable" onclick="showKpiInfo(\'snapshots\')">' +
+      '<div class="bk-val">' + d.total_snapshots.toLocaleString() + '</div>' +
+      '<div class="bk-lbl">Snapshots</div>' +
+      '<div class="bk-trend flat">' + (d.universe_total||0).toLocaleString() + ' tickers</div></div>';
 }
 
 function showAccuracyDetail(type) {
@@ -3214,40 +3411,7 @@ function showKpiInfo(type) {
 }
 
 function loadBrainThesis() {
-  fetch('/api/trading/brain/thesis').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    window._brainThesisData = d;
-    var card = document.getElementById('brain-thesis-card');
-    var stanceEl = document.getElementById('thesis-stance');
-    var gaugeEl = document.getElementById('thesis-gauge');
-    var textEl = document.getElementById('thesis-text');
-    var metaEl = document.getElementById('thesis-meta');
-    card.className = 'brain-thesis-card ' + d.stance;
-    card.style.cursor = 'pointer';
-    card.onclick = function() { showThesisDetail(); };
-    stanceEl.className = 'thesis-stance ' + d.stance;
-    var stanceLabels = {bullish:'&#x1F7E2; Bullish', bearish:'&#x1F534; Bearish', neutral:'&#x1F7E1; Neutral'};
-    stanceEl.innerHTML = stanceLabels[d.stance] || 'Neutral';
-    var gaugePct = d.stance === 'bullish' ? 75 : d.stance === 'bearish' ? 25 : 50;
-    var gaugeColor = d.stance === 'bullish' ? '#22c55e' : d.stance === 'bearish' ? '#ef4444' : '#f59e0b';
-    gaugeEl.style.width = gaugePct + '%'; gaugeEl.style.background = gaugeColor;
-    var truncated = d.thesis.length > 300 ? d.thesis.substring(0, 300) + '...' : d.thesis;
-    if (typeof marked !== 'undefined') { try { textEl.innerHTML = marked.parse(truncated); } catch(e) { textEl.textContent = truncated; } }
-    else { textEl.innerHTML = truncated; }
-    textEl.style.color = 'var(--text)';
-    var metaParts = [];
-    if (d.patterns_count) metaParts.push(d.patterns_count + ' patterns');
-    if (d.total_predictions) metaParts.push(d.accuracy + '% accuracy (' + d.total_predictions + ')');
-    metaEl.innerHTML = metaParts.join(' &middot; ');
-  }).catch(function() { document.getElementById('thesis-text').textContent = 'Could not load thesis.'; });
-  fetch('/api/trading/brain/volatility').then(function(r){return r.json();}).then(function(v) {
-    if (!v.ok) return;
-    window._brainVixData = v;
-    var stanceEl = document.getElementById('thesis-stance');
-    if (!stanceEl) return;
-    var regimeColors = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
-    stanceEl.innerHTML += ' <span style="font-size:9px;padding:1px 6px;border-radius:8px;background:' + (regimeColors[v.regime]||'#6b7280') + '20;color:' + (regimeColors[v.regime]||'#6b7280') + ';font-weight:700;vertical-align:middle">VIX ' + (v.vix||'?') + ' ' + (v.label||'') + '</span>';
-  });
+  _loadRegimeChip();
 }
 
 function showThesisDetail() {
@@ -4811,21 +4975,14 @@ function pollLearningStatus() {
     var pipelineSection = document.getElementById('brain-pipeline-section');
 
     if (learning.running) {
-      pipelineSection.style.display = 'block';
-      var phase = (learning.phase||'').toLowerCase();
-      var stepsHtml = '';
-      _PIPELINE_STEPS.forEach(function(step, i) {
-        var status = 'pending';
-        if (phase === step.id || phase.indexOf(step.id) !== -1) status = 'running';
-        else { var pIdx = _PIPELINE_STEPS.findIndex(function(s){return phase === s.id || phase.indexOf(s.id)!==-1;}); if (pIdx >= 0 && i < pIdx) status = 'done'; }
-        if (i > 0) stepsHtml += '<span class="blp-arrow">&#x2192;</span>';
-        stepsHtml += '<div class="blp-step ' + status + '">' + (status==='running'?'<div class="brain-pulse" style="width:6px;height:6px"></div>':status==='done'?'&#x2713;':'') + ' ' + step.icon + ' ' + step.label + '</div>';
-      });
-      document.getElementById('brain-pipeline-steps').innerHTML = stepsHtml;
-      document.getElementById('brain-learning-step').textContent = learning.current_step || '';
+      pipelineSection.style.display = '';
+      var stepEl = document.getElementById('brain-learning-step');
+      var progEl = document.getElementById('brain-learning-progress');
+      var barEl = document.getElementById('brain-progress-bar');
+      if (stepEl) stepEl.textContent = learning.current_step || '';
       var pct = Math.round(learning.steps_completed / learning.total_steps * 100);
-      document.getElementById('brain-learning-progress').textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
-      document.getElementById('brain-progress-bar').style.width = Math.min(100, pct) + '%';
+      if (progEl) progEl.textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
+      if (barEl) barEl.style.width = Math.min(100, pct) + '%';
     } else {
       pipelineSection.style.display = 'none';
     }
@@ -4838,9 +4995,14 @@ function pollLearningStatus() {
       var nextJob = scheduler.jobs.find(function(j){return j.id==='learning_cycle';});
       if (nextJob && nextJob.next_run) parts.push('Next: ' + new Date(nextJob.next_run).toLocaleTimeString());
     }
-    infoEl.textContent = parts.join(' · ');
+    if (infoEl) infoEl.textContent = parts.join(' · ');
 
-    if (!learning.running && pipelineSection._wasRunning) loadBrainDashboard();
+    if (!learning.running && pipelineSection._wasRunning) {
+      loadPlaybook();
+      loadPerfDashboard();
+      loadTradeablePatterns();
+      if (_bddActiveTab === 'research') { _bddLoaded['research'] = false; _loadResearchData(); }
+    }
     pipelineSection._wasRunning = learning.running;
   }).catch(function(){}).then(function() { return updateSidebarStatus(); });
 }

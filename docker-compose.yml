@@ -107,10 +107,10 @@ services:
       ollama:
         condition: service_healthy
 
-  # Continuous learning worker: in-process cycle by default. Set CHILI_USE_BRAIN_SERVICE=1 to delegate to `brain`.
+  # Lean learning cycle worker (default mode). Runs periodic evaluation: backfill, evolve, ML, proposals.
   brain-worker:
     image: chili-app:local
-    command: ["python", "scripts/brain_worker.py", "--interval", "5"]
+    command: ["python", "scripts/brain_worker.py", "--mode", "lean-cycle", "--interval", "5"]
     env_file:
       - path: .env
         required: false
@@ -120,11 +120,8 @@ services:
       - CHILI_USE_BRAIN_SERVICE=${CHILI_USE_BRAIN_SERVICE:-0}
       - BRAIN_SERVICE_URL=${BRAIN_SERVICE_URL:-http://brain:8090}
       - BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
-      # Parent process pool; process-executor children use brain_mp_child_* (see .env.example).
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
-      # Optional: BRAIN_QUEUE_BACKTEST_EXECUTOR=process for multi-core queue backtests
-      # Optional: BRAIN_QUEUE_PROCESS_CAP=16 to cap workers vs Postgres
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
       - chili_data:/app/data
@@ -136,6 +133,116 @@ services:
         condition: service_healthy
       ollama:
         condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Continuous pattern mining worker. Discovers new ScanPatterns and feeds the backtest queue.
+  mining-worker:
+    image: chili-app:local
+    command: ["python", "scripts/brain_worker.py", "--mode", "mining"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - OLLAMA_HOST=http://ollama:11434
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=6
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+    volumes:
+      - chili_data:/app/data
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 1536M
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Continuous backtest worker. Drains the ScanPattern queue with walk-forward backtests.
+  backtest-worker:
+    image: chili-app:local
+    command: ["python", "scripts/brain_worker.py", "--mode", "backtest"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - DATABASE_POOL_SIZE=6
+      - DATABASE_MAX_OVERFLOW=10
+      - BRAIN_QUEUE_BACKTEST_EXECUTOR=${BRAIN_QUEUE_BACKTEST_EXECUTOR:-process}
+      - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_QUEUE_PROCESS_CAP:-8}
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+    volumes:
+      - chili_data:/app/data
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          cpus: "3.0"
+          memory: 3G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+  # Fast scan worker. 1-5 min breakout/momentum detection on promoted patterns, fires alerts.
+  fast-scan-worker:
+    image: chili-app:local
+    command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan"]
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
+      - DATABASE_POOL_SIZE=4
+      - DATABASE_MAX_OVERFLOW=4
+      - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+    volumes:
+      - chili_data:/app/data
+      - ./app:/app/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    profiles:
+      - workers
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 1G
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
 
   # All APScheduler jobs (broker sync, scans, code/reasoning cycles, …). ``chili`` uses role ``none``.
   scheduler-worker:

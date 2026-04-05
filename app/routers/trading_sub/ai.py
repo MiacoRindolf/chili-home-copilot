@@ -2794,3 +2794,124 @@ async def api_brain_worker_run_queue_batch(
             ),
         }
     )
+
+
+# ── Config profiles ──────────────────────────────────────────────────────────
+
+@router.get("/api/trading/brain/config/profiles")
+def api_config_profiles(request: Request, db: Session = Depends(get_db)):
+    """List available config profiles with their settings."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot access config profiles"}, status_code=403)
+    from ...services.trading.config_profiles import list_profiles
+
+    return JSONResponse({"ok": True, "profiles": list_profiles()})
+
+
+@router.post("/api/trading/brain/config/apply-profile")
+def api_apply_config_profile(request: Request, db: Session = Depends(get_db)):
+    """Apply a named config profile to the running Settings object.
+
+    Body: ``{"profile": "conservative" | "moderate" | "aggressive"}``
+
+    Applies overrides to the in-memory ``Settings()`` singleton for the
+    current process.  Changes persist until the server restarts — to make
+    them permanent, set the corresponding env vars or ``.env`` entries.
+    """
+    import asyncio
+
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot modify config"}, status_code=403)
+
+    try:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+
+    profile_name = body.get("profile", "").strip().lower()
+    from ...services.trading.config_profiles import PROFILES
+
+    if profile_name not in PROFILES:
+        return JSONResponse(
+            {"ok": False, "error": f"Unknown profile '{profile_name}'. Choose from: {list(PROFILES.keys())}"},
+            status_code=400,
+        )
+
+    from ...config import Settings
+
+    settings = Settings()
+    profile = PROFILES[profile_name]
+    applied: dict[str, Any] = {}
+    for key, value in profile.items():
+        if hasattr(settings, key):
+            setattr(settings, key, value)
+            applied[key] = value
+
+    _log.info("[config_profiles] Applied profile '%s': %d settings", profile_name, len(applied))
+    return JSONResponse({"ok": True, "profile": profile_name, "applied": applied})
+
+
+# ── Notification preferences ─────────────────────────────────────────────────
+
+@router.get("/api/trading/brain/notification-preferences")
+def api_notification_preferences(request: Request, db: Session = Depends(get_db)):
+    """Return current per-channel, per-tier notification preferences."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot access notifications"}, status_code=403)
+    from ...services.sms_service import get_notification_preferences
+
+    return JSONResponse({"ok": True, "preferences": get_notification_preferences()})
+
+
+@router.post("/api/trading/brain/notification-preferences")
+def api_update_notification_preferences(request: Request, db: Session = Depends(get_db)):
+    """Update per-channel, per-tier notification preferences.
+
+    Body: ``{"preferences": {"telegram": {"A": true, "B": true, "C": false}, ...}}``
+    """
+    import asyncio
+
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo users cannot modify notifications"}, status_code=403)
+    try:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON body"}, status_code=400)
+
+    prefs = body.get("preferences")
+    if not isinstance(prefs, dict):
+        return JSONResponse({"ok": False, "error": "preferences must be a dict"}, status_code=400)
+
+    from ...services.sms_service import set_notification_preferences
+
+    set_notification_preferences(prefs)
+    return JSONResponse({"ok": True, "message": "Preferences updated"})
+
+
+@router.post("/api/notifications/subscribe")
+def api_push_subscribe(request: Request, db: Session = Depends(get_db)):
+    """Register a Web Push subscription for the current user.
+
+    Body: PushSubscription JSON from the browser (``endpoint``, ``keys``).
+    """
+    import asyncio
+
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("demo"):
+        return JSONResponse({"ok": False, "error": "Demo"}, status_code=403)
+    try:
+        body = asyncio.get_event_loop().run_until_complete(request.json())
+    except Exception:
+        return JSONResponse({"ok": False, "error": "Invalid JSON"}, status_code=400)
+
+    if not body.get("endpoint"):
+        return JSONResponse({"ok": False, "error": "Missing endpoint in subscription"}, status_code=400)
+
+    from ...services.sms_service import register_push_subscription
+
+    register_push_subscription(body)
+    return JSONResponse({"ok": True, "message": "Push subscription registered"})
