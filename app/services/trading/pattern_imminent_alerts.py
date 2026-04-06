@@ -407,17 +407,24 @@ def gather_imminent_candidate_rows(
     equity_session_open: bool | None = None,
     all_active_patterns: bool = False,
     apply_main_dispatch_filters: bool = False,
+    for_opportunity_board: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Score (pattern × ticker) rows using shared composite math.
 
     *all_active_patterns*: when False, only promoted/live (or legacy promoted) patterns.
     *apply_main_dispatch_filters*: when True, enforce main Telegram coverage + composite floors.
+    *for_opportunity_board*: when True, apply tighter universe/per-pattern/total score caps so
+      the HTTP board stays within latency budgets. Does **not** change main imminent dispatch
+      (call with ``for_opportunity_board=False`` there).
     """
     eq_open = equity_session_open if equity_session_open is not None else us_stock_session_open()
     max_eta = float(settings.pattern_imminent_max_eta_hours)
     min_rd = float(settings.pattern_imminent_min_readiness)
     cap_rd = float(settings.pattern_imminent_readiness_cap)
     max_tickers = int(settings.pattern_imminent_max_tickers_per_run)
+    if for_opportunity_board:
+        cap_u = int(getattr(settings, "opportunity_board_max_universe_cap", 80))
+        max_tickers = max(1, min(max_tickers, cap_u))
     eval_floor_board = float(settings.pattern_imminent_evaluable_ratio_floor)
     min_cov_main = float(getattr(settings, "pattern_imminent_min_feature_coverage_main", 0.45))
     min_comp_main = float(getattr(settings, "pattern_imminent_min_composite_main", 0.42))
@@ -444,6 +451,14 @@ def gather_imminent_candidate_rows(
     }
     suppressed: list[dict[str, Any]] = []
 
+    per_pat_cap = 10**9
+    score_budget = 10**9
+    if for_opportunity_board:
+        per_pat_cap = max(1, int(getattr(settings, "opportunity_board_max_tickers_per_pattern", 10)))
+        score_budget = max(1, int(getattr(settings, "opportunity_board_max_ticker_scores_per_request", 360)))
+
+    board_budget_hit = False
+
     for pat in patterns:
         if not all_active_patterns and not scan_pattern_eligible_main_imminent(pat):
             skip["excluded_promotion_lifecycle"] += 1
@@ -460,7 +475,12 @@ def gather_imminent_candidate_rows(
             continue
 
         patterns_tried += 1
+        if for_opportunity_board and len(tickers) > per_pat_cap:
+            tickers = tickers[:per_pat_cap]
         for ticker in tickers:
+            if for_opportunity_board and tickers_scored >= score_budget:
+                board_budget_hit = True
+                break
             score = _score_ticker(ticker, skip_fundamentals=True)
             if not score:
                 skip["score_failed"] += 1
@@ -588,6 +608,9 @@ def gather_imminent_candidate_rows(
                 "missing_indicators": missing,
             })
 
+        if board_budget_hit:
+            break
+
     candidates.sort(key=lambda x: (-x["composite"], x["eta_hi"]))
     meta = {
         "patterns_active": len(patterns),
@@ -599,6 +622,11 @@ def gather_imminent_candidate_rows(
         "top_suppressed": suppressed,
         "equity_session_open": eq_open,
     }
+    if for_opportunity_board:
+        meta["for_opportunity_board"] = True
+        meta["board_eval_budget_hit"] = board_budget_hit
+        meta["board_per_pattern_cap"] = per_pat_cap
+        meta["board_score_budget"] = score_budget
     return candidates, meta
 
 

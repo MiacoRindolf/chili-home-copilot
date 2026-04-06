@@ -133,14 +133,27 @@ def api_trading_opportunity_board(
     if max_tier_d is not None:
         caps["D"] = max_tier_d
 
-    data = get_trading_opportunity_board(
-        db,
-        ctx["user_id"],
-        include_research=bool(include_research),
-        include_debug=(debug == 1),
-        max_per_tier=caps or None,
-    )
-    return JSONResponse(to_jsonable(data))
+    try:
+        data = get_trading_opportunity_board(
+            db,
+            ctx["user_id"],
+            include_research=bool(include_research),
+            include_debug=(debug == 1),
+            max_per_tier=caps or None,
+        )
+        return JSONResponse(to_jsonable(data))
+    except Exception as e:
+        _log.exception("[opportunity-board] failed: %s", e)
+        return JSONResponse(
+            to_jsonable(
+                {
+                    "ok": False,
+                    "error": "opportunity_board_failed",
+                    "message": "Opportunity board could not be computed. Check server logs.",
+                }
+            ),
+            status_code=500,
+        )
 
 
 @router.get("/api/trading/brain/data-health")

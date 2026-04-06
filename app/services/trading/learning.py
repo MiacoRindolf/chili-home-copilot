@@ -71,6 +71,25 @@ _pred_refreshing = False
 _pred_refresh_lock = threading.Lock()
 
 
+def get_prediction_swr_cache_meta() -> dict[str, Any]:
+    """Read-only metadata for live-prediction SWR cache (no API keys, no ticker lists).
+
+    Used by opportunity board freshness: ``data_as_of`` must not pretend predictions
+    are newer than this wall time when serving from cache.
+    """
+    with _pred_refresh_lock:
+        ts = float(_pred_cache.get("ts") or 0.0)
+        n = len(_pred_cache.get("results") or [])
+        refreshing = bool(_pred_refreshing)
+    now = time.time()
+    return {
+        "cache_last_updated_unix": ts,
+        "cache_age_seconds": round(now - ts, 3) if ts > 0 else None,
+        "cached_result_count": n,
+        "background_refresh_in_progress": refreshing,
+    }
+
+
 def get_current_predictions(db: Session, tickers: list[str] | None = None) -> list[dict]:
     """Generate live predictions for a set of tickers.
 

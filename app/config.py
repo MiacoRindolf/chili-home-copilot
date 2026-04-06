@@ -435,6 +435,18 @@ class Settings(BaseSettings):
 
     # Opportunity board + shared composite weights (see opportunity_scoring.py).
     opportunity_board_stale_seconds: int = 180
+    # Board-only cost caps (imminent Telegram path unchanged). Reduce live timeouts.
+    opportunity_board_max_universe_cap: int = 80
+    opportunity_board_max_tickers_per_pattern: int = 10
+    opportunity_board_max_ticker_scores_per_request: int = 360
+    opportunity_board_max_scanner_fallback: int = 6
+    opportunity_board_max_prescreener_fallback: int = 8
+    opportunity_board_scanner_fallback_min_score_b: float = 6.5
+    # Read-only inspect API: optional Bearer; empty = session-only (non-guest).
+    trading_inspect_bearer_secret: str = Field(
+        default="",
+        validation_alias=AliasChoices("CHILI_TRADING_INSPECT_SECRET", "TRADING_INSPECT_BEARER_SECRET"),
+    )
     opportunity_tier_a_min_composite: float = 0.48
     opportunity_tier_a_min_coverage: float = 0.5
     opportunity_tier_b_min_composite: float = 0.38

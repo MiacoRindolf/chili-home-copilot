@@ -1339,7 +1339,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
           <!-- Debug: opportunity-board raw + skip reasons (not default operator view) -->
           <div class="bdd-panel" id="bdd-debug" style="display:none">
-            <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Opportunity board API with <code>debug=1</code> (suppressions, skip counts). Scheduler / imminent dry-run: Ops tab or <code>POST /api/trading/alerts/run-pattern-imminent?dry_run=1</code>.</p>
+            <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Opportunity board API with <code>debug=1</code> (suppressions, skip counts). Scheduler / imminent dry-run: Ops tab or <code>POST /api/trading/alerts/run-pattern-imminent?dry_run=1</code>. Inspect API: <code>/api/trading/inspect/health</code> (session or Bearer).</p>
+            <div id="bdd-inspect-health-card" style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:10px;background:var(--bg-secondary, rgba(0,0,0,.03))">
+              <div style="font-weight:700;margin-bottom:6px">Inspect health</div>
+              <div id="bdd-inspect-health-body" style="color:var(--text-muted)">Open this tab to load.</div>
+              <button type="button" class="bw-ctrl-btn" style="margin-top:8px" onclick="loadInspectHealthCard()">Refresh inspect health</button>
+            </div>
             <button type="button" class="bw-ctrl-btn" onclick="loadOpportunityBoardDebug()">Load debug JSON</button>
             <pre id="bdd-debug-opp-json" style="margin-top:10px;font-size:10px;max-height:480px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word">Not loaded.</pre>
           </div>
@@ -3094,6 +3099,8 @@ function switchDeepDiveTab(tab) {
       _loadResearchData();
     } else if (tab === 'analytics') {
       loadBrainThesis();
+    } else if (tab === 'debug') {
+      loadInspectHealthCard();
     }
   }
   if (tab === 'ops') _startOpsPolling();
@@ -3753,6 +3760,64 @@ function loadNearTradeableCandidates() {
 
 window._oppTierCaps = { A: null, B: null, C: null, D: null };
 window._oppLastPayload = null;
+var OPP_BOARD_FETCH_TIMEOUT_MS = 75000;
+
+function setOppStatusChips(actionable, watchSoon, watchToday, refreshLine, chipState) {
+  var ca = document.getElementById('opp-chip-a');
+  var cb = document.getElementById('opp-chip-b');
+  var cc = document.getElementById('opp-chip-c');
+  var cr = document.getElementById('opp-chip-refresh');
+  if (ca) {
+    ca.textContent = 'Actionable: ' + actionable;
+    ca.classList.toggle('opp-chip-loading', chipState === 'loading');
+    ca.classList.toggle('opp-chip-error', chipState === 'error');
+  }
+  if (cb) {
+    cb.textContent = 'Watch soon: ' + watchSoon;
+    cb.classList.toggle('opp-chip-loading', chipState === 'loading');
+    cb.classList.toggle('opp-chip-error', chipState === 'error');
+  }
+  if (cc) {
+    cc.textContent = 'Watch today: ' + watchToday;
+    cc.classList.toggle('opp-chip-loading', chipState === 'loading');
+    cc.classList.toggle('opp-chip-error', chipState === 'error');
+  }
+  if (cr) {
+    cr.textContent = refreshLine || '';
+    cr.classList.toggle('opp-chip-loading', chipState === 'loading');
+    cr.classList.toggle('opp-chip-error', chipState === 'error');
+  }
+}
+
+function loadInspectHealthCard() {
+  var body = document.getElementById('bdd-inspect-health-body');
+  if (!body) return;
+  body.textContent = 'Loading…';
+  var ctrl = new AbortController();
+  var tid = setTimeout(function() { try { ctrl.abort(); } catch (e0) {} }, 20000);
+  fetch('/api/trading/inspect/health', { signal: ctrl.signal }).then(parseFetchJson).then(function(d) {
+    clearTimeout(tid);
+    if (!d || !d.ok) {
+      body.textContent = 'Inspect health unavailable (auth or server).';
+      return;
+    }
+    var parts = [];
+    if (d.data_as_of) parts.push('data_as_of: ' + escHtml(String(d.data_as_of)));
+    parts.push('scan rows in DB: ' + (d.scan_result_row_count != null ? d.scan_result_row_count : '—'));
+    if (d.predictions_cache_meta) {
+      var pm = d.predictions_cache_meta;
+      parts.push('pred cache count: ' + (pm.cached_result_count != null ? pm.cached_result_count : '—'));
+    }
+    if (d.degraded && d.degraded.length) {
+      parts.push('<span style="color:#b45309">degraded: ' + escHtml(d.degraded.join(', ')) + '</span>');
+    }
+    if (d.scheduler) parts.push('scheduler running: ' + (d.scheduler.running ? 'yes' : 'no'));
+    body.innerHTML = parts.join('<br/>');
+  }).catch(function(err) {
+    clearTimeout(tid);
+    body.textContent = 'Failed: ' + (err && err.message ? err.message : 'unknown');
+  });
+}
 
 function oppExpandTier(t) {
   var prev = (window._oppLastPayload && window._oppLastPayload.applied_tier_caps) || {};
@@ -3788,37 +3853,72 @@ function loadOpportunityBoard() {
   });
   var qstr = qs.length ? ('?' + qs.join('&')) : '';
   var strip = document.getElementById('opp-operator-strip');
+
+  function showBoardError(msg, code) {
+    setOppStatusChips('—', '—', '—', 'Board: error', 'error');
+    if (strip) {
+      strip.innerHTML = '<div id="opp-op-sum"><span style="color:#b45309">' + escHtml(msg) + '</span>' +
+        (code ? ' <code style="font-size:9px;color:var(--text-muted)">' + escHtml(code) + '</code>' : '') +
+        ' <button type="button" class="bw-ctrl-btn" style="margin-left:8px" onclick="loadOpportunityBoard()">Retry</button></div>';
+    }
+    ['opp-tier-a', 'opp-tier-b', 'opp-tier-c'].forEach(function(tid) {
+      var el = document.getElementById(tid);
+      if (el) el.innerHTML = '<div style="font-size:10px;color:var(--text-muted)">Could not load — Retry above.</div>';
+    });
+  }
+
+  setOppStatusChips('…', '…', '…', 'Board: loading…', 'loading');
   if (strip) strip.innerHTML = '<span id="opp-op-sum">Loading opportunity board…</span>';
-  fetch('/api/trading/opportunity-board' + qstr).then(parseFetchJson).then(function(d) {
+
+  var ctrl = new AbortController();
+  var to = setTimeout(function() { try { ctrl.abort(); } catch (e1) {} }, OPP_BOARD_FETCH_TIMEOUT_MS);
+
+  fetch('/api/trading/opportunity-board' + qstr, { signal: ctrl.signal }).then(parseFetchJson).then(function(d) {
+    clearTimeout(to);
     window._oppLastPayload = d;
-    if (!d || !d.ok) {
-      if (strip) strip.innerHTML = '<span style="color:var(--text-muted)">Board unavailable.</span>';
+    if (!d || d.ok === false) {
+      showBoardError((d && d.message) ? String(d.message) : 'Board unavailable.', d && d.error ? String(d.error) : 'ok_false');
       return;
     }
     var os = d.operator_summary || {};
-    var ca = document.getElementById('opp-chip-a');
-    var cb = document.getElementById('opp-chip-b');
-    var cc = document.getElementById('opp-chip-c');
-    var cr = document.getElementById('opp-chip-refresh');
-    if (ca) ca.textContent = 'Actionable: ' + (os.actionable_count != null ? os.actionable_count : '—');
-    if (cb) cb.textContent = 'Watch soon: ' + (os.watch_soon_count != null ? os.watch_soon_count : '—');
-    if (cc) cc.textContent = 'Watch today: ' + (os.watch_today_count != null ? os.watch_today_count : '—');
-    if (cr) cr.textContent = 'Refreshed: ' + (os.last_refresh_utc || d.generated_at || '—');
+    var refShort = (os.last_refresh_utc || d.generated_at || '—').toString();
+    if (refShort.length > 24) refShort = refShort.slice(0, 22) + '…';
+    setOppStatusChips(
+      os.actionable_count != null ? os.actionable_count : '0',
+      os.watch_soon_count != null ? os.watch_soon_count : '0',
+      os.watch_today_count != null ? os.watch_today_count : '0',
+      'Board: ' + refShort,
+      ''
+    );
 
     var sumEl = document.getElementById('opp-op-sum');
     if (sumEl) {
       var parts = [];
-      parts.push('<strong>Actionable:</strong> ' + (os.actionable_count != null ? os.actionable_count : '—'));
-      parts.push('<strong>Watch soon:</strong> ' + (os.watch_soon_count != null ? os.watch_soon_count : '—'));
-      parts.push('<strong>Watch today:</strong> ' + (os.watch_today_count != null ? os.watch_today_count : '—'));
+      parts.push('<strong>Actionable:</strong> ' + (os.actionable_count != null ? os.actionable_count : '0'));
+      parts.push('<strong>Watch soon:</strong> ' + (os.watch_soon_count != null ? os.watch_soon_count : '0'));
+      parts.push('<strong>Watch today:</strong> ' + (os.watch_today_count != null ? os.watch_today_count : '0'));
       parts.push('<strong>No-trade now:</strong> ' + (os.no_trade_now ? 'yes' : 'no'));
-      parts.push('<strong>Last refresh (UTC):</strong> ' + escHtml(String(os.last_refresh_utc || d.generated_at || '—')));
+      parts.push('<strong>Generated (UTC):</strong> ' + escHtml(String(d.generated_at || '—')));
+      if (d.data_as_of) parts.push('<strong>Data as of (UTC):</strong> ' + escHtml(String(d.data_as_of)));
+      if (d.age_seconds != null) parts.push('<strong>Data age (s):</strong> ' + escHtml(String(d.age_seconds)));
+      if (d.is_stale) parts.push('<span style="color:#b45309;font-weight:700">STALE</span>');
       if (os.session_line) parts.push('<strong>Session:</strong> ' + escHtml(String(os.session_line)));
+      parts.push('<button type="button" class="bw-ctrl-btn" style="margin-left:6px" onclick="loadOpportunityBoard()">Refresh</button>');
       sumEl.innerHTML = parts.join(' <span style="color:var(--border)">|</span> ');
     }
 
     var ban = document.getElementById('opp-stale-banner');
-    if (ban) ban.style.display = d.is_stale ? 'block' : 'none';
+    if (ban) {
+      if (d.is_stale) {
+        ban.style.display = 'block';
+        ban.textContent = 'Feeds look stale versus threshold (see data age). Verify with Inspect health or refresh predictions/scanner.';
+      } else if (d.freshness_degraded) {
+        ban.style.display = 'block';
+        ban.textContent = 'Could not derive full data_as_of from sources — treat rows as context only.';
+      } else {
+        ban.style.display = 'none';
+      }
+    }
 
     var nt = document.getElementById('opp-no-trade');
     if (nt) {
@@ -3836,6 +3936,7 @@ function loadOpportunityBoard() {
       var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + escHtml(String(it.ticker || '')) + '</div>';
       var sub = [];
       if (it.pattern_name) sub.push(escHtml(String(it.pattern_name)));
+      if (it.source_strength) sub.push('evidence: ' + escHtml(String(it.source_strength)));
       if (it.composite != null) sub.push('comp ' + it.composite);
       if (it.feature_coverage != null) sub.push('cov ' + it.feature_coverage);
       if (it.eta_label) sub.push(escHtml(String(it.eta_label)));
@@ -3880,8 +3981,12 @@ function loadOpportunityBoard() {
         dd.innerHTML = '';
       }
     }
-  }).catch(function() {
-    if (strip) strip.innerHTML = '<span style="color:var(--text-muted)">Failed to load opportunity board.</span>';
+  }).catch(function(err) {
+    clearTimeout(to);
+    var msg = 'Failed to load opportunity board.';
+    if (err && err.name === 'AbortError') msg = 'Board request timed out — server may be busy.';
+    else if (err && err.message) msg = err.message;
+    showBoardError(msg, 'fetch_error');
   });
 }
 

@@ -7,7 +7,10 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from sqlalchemy import desc
+
 from ...config import settings
+from ...models.trading import PrescreenCandidate, ScanResult
 from .learning import get_current_predictions
 from .market_data import is_crypto
 from .opportunity_scoring import scan_pattern_eligible_main_imminent
@@ -17,6 +20,8 @@ from .pattern_imminent_alerts import (
     gather_imminent_candidate_rows,
     us_stock_session_open,
 )
+from .prescreen_job import load_active_global_candidate_tickers
+from .trading_source_freshness import collect_source_freshness, compute_board_data_as_of
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +44,7 @@ def _pattern_row_to_candidate(
     main_risk: str,
     sources: list[str],
     pred: dict[str, Any] | None,
+    source_strength: str = "strong",
 ) -> dict[str, Any]:
     pat = row["pattern"]
     sc = row["score"]
@@ -49,6 +55,7 @@ def _pattern_row_to_candidate(
         "asset_class": "crypto" if is_crypto(ticker) else "stocks",
         "tier": tier,
         "sources": sources,
+        "source_strength": source_strength,
         "scan_pattern_id": pat.id,
         "pattern_name": pat.name,
         "lifecycle_stage": getattr(pat, "lifecycle_stage", None),
@@ -188,6 +195,7 @@ def _prediction_only_candidates(
             "asset_class": "crypto" if is_crypto(t) else "stocks",
             "tier": "C",
             "sources": ["live_predictions"],
+            "source_strength": "moderate",
             "scan_pattern_id": None,
             "pattern_name": None,
             "lifecycle_stage": None,
@@ -215,6 +223,216 @@ def _prediction_only_candidates(
     return out
 
 
+def _scanner_fallback_rows(
+    db: Session,
+    seen: set[str],
+    *,
+    max_rows: int,
+    min_score_b: float,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Recent AI scanner picks as Tier B (stronger score) or C; no pattern composite."""
+    tier_b: list[dict[str, Any]] = []
+    tier_c: list[dict[str, Any]] = []
+    if max_rows <= 0:
+        return tier_b, tier_c
+    try:
+        rows = (
+            db.query(ScanResult)
+            .order_by(desc(ScanResult.scanned_at))
+            .limit(max(30, max_rows * 5))
+            .all()
+        )
+    except Exception as e:
+        logger.warning("[opportunity_board] scanner fallback query failed: %s", e)
+        return tier_b, tier_c
+
+    used_tickers: set[str] = set()
+    for sr in rows:
+        if len(tier_b) + len(tier_c) >= max_rows:
+            break
+        t = (sr.ticker or "").strip().upper()
+        if not t or t in seen or t in used_tickers:
+            continue
+        used_tickers.add(t)
+        seen.add(t)
+        tier_label = "B" if float(sr.score or 0) >= float(min_score_b) else "C"
+        scanned_iso = None
+        if sr.scanned_at:
+            dt = sr.scanned_at
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            scanned_iso = dt.isoformat()
+        wh = (
+            f"Scanner pick ({sr.signal or 'n/a'}) with confluence score {sr.score:.1f}/10"
+            + (f", as of {scanned_iso}" if scanned_iso else "")
+            + "."
+        )
+        wnh = (
+            "Not derived from ScanPattern imminent rules — Tier A requires promoted/live pattern context."
+            if tier_label == "B"
+            else "Lower scanner score or older context vs Watch Soon bar."
+        )
+        risk = "Scanner snapshot only; no live pattern rule evaluation on this row."
+        row = {
+            "ticker": t,
+            "asset_class": "crypto" if is_crypto(t) else "stocks",
+            "tier": tier_label,
+            "sources": ["scanner"],
+            "source_strength": "moderate" if tier_label == "B" else "weak",
+            "scan_pattern_id": None,
+            "pattern_name": None,
+            "lifecycle_stage": None,
+            "promotion_status": None,
+            "timeframe": None,
+            "composite": None,
+            "score_breakdown": None,
+            "readiness": None,
+            "feature_coverage": None,
+            "eta_hours": None,
+            "eta_label": None,
+            "entry": sr.entry_price,
+            "stop": sr.stop_loss,
+            "target": sr.take_profit,
+            "price": None,
+            "scanner_score": float(sr.score) if sr.score is not None else None,
+            "scanner_signal": sr.signal,
+            "scanner_scanned_at_utc": scanned_iso,
+            "why_here": wh,
+            "why_not_higher_tier": wnh,
+            "main_risk": risk,
+            "also_in_live_predictions": False,
+            "prediction_support": None,
+            "missing_indicators": [],
+        }
+        if tier_label == "B":
+            tier_b.append(row)
+        else:
+            tier_c.append(row)
+    return tier_b, tier_c
+
+
+def _prescreener_fallback_rows(
+    db: Session,
+    seen: set[str],
+    *,
+    max_rows: int,
+) -> list[dict[str, Any]]:
+    """Active global prescreen universe — Tier C context only."""
+    out: list[dict[str, Any]] = []
+    if max_rows <= 0:
+        return out
+    try:
+        rows = (
+            db.query(PrescreenCandidate)
+            .filter(PrescreenCandidate.user_id.is_(None))
+            .filter(PrescreenCandidate.active.is_(True))
+            .order_by(desc(PrescreenCandidate.last_seen_at))
+            .limit(max_rows * 3)
+            .all()
+        )
+    except Exception as e:
+        logger.warning("[opportunity_board] prescreener fallback query failed: %s", e)
+        return _prescreener_fallback_list_only(db, seen, max_rows=max_rows)
+
+    for pc in rows:
+        if len(out) >= max_rows:
+            break
+        t = (pc.ticker_norm or pc.ticker or "").strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        ls = pc.last_seen_at
+        ls_iso = None
+        if ls:
+            if ls.tzinfo is None:
+                ls = ls.replace(tzinfo=timezone.utc)
+            ls_iso = ls.isoformat()
+        wh = (
+            "Global prescreen candidate (liquidity/universe filter) — worth watching for future pattern alignment."
+            + (f" Last seen in prescreen data: {ls_iso}." if ls_iso else "")
+        )
+        out.append({
+            "ticker": t,
+            "asset_class": "crypto" if is_crypto(t) else "stocks",
+            "tier": "C",
+            "sources": ["prescreener"],
+            "source_strength": "weak",
+            "scan_pattern_id": None,
+            "pattern_name": None,
+            "lifecycle_stage": None,
+            "promotion_status": None,
+            "timeframe": None,
+            "composite": None,
+            "score_breakdown": None,
+            "readiness": None,
+            "feature_coverage": None,
+            "eta_hours": None,
+            "eta_label": None,
+            "entry": None,
+            "stop": None,
+            "target": None,
+            "price": None,
+            "prescreen_last_seen_utc": ls_iso,
+            "why_here": wh,
+            "why_not_higher_tier": "No ScanPattern×ticker imminent evaluation — not actionable Tier A/B.",
+            "main_risk": "Universe listing only; may never match a promoted pattern.",
+            "also_in_live_predictions": False,
+            "prediction_support": None,
+            "missing_indicators": [],
+        })
+    return out
+
+
+def _prescreener_fallback_list_only(
+    db: Session,
+    seen: set[str],
+    *,
+    max_rows: int,
+) -> list[dict[str, Any]]:
+    """Fallback when PrescreenCandidate ORM query fails — ticker strings only."""
+    out: list[dict[str, Any]] = []
+    try:
+        tickers = load_active_global_candidate_tickers(db)[: max_rows * 2]
+    except Exception:
+        return out
+    for t_raw in tickers:
+        if len(out) >= max_rows:
+            break
+        t = (t_raw or "").strip().upper()
+        if not t or t in seen:
+            continue
+        seen.add(t)
+        out.append({
+            "ticker": t,
+            "asset_class": "crypto" if is_crypto(t) else "stocks",
+            "tier": "C",
+            "sources": ["prescreener"],
+            "source_strength": "weak",
+            "scan_pattern_id": None,
+            "pattern_name": None,
+            "lifecycle_stage": None,
+            "promotion_status": None,
+            "timeframe": None,
+            "composite": None,
+            "score_breakdown": None,
+            "readiness": None,
+            "feature_coverage": None,
+            "eta_hours": None,
+            "eta_label": None,
+            "entry": None,
+            "stop": None,
+            "target": None,
+            "price": None,
+            "why_here": "Global prescreen candidate (ticker list only; timestamps unavailable).",
+            "why_not_higher_tier": "No pattern imminent row — Tier C context.",
+            "main_risk": "Universe listing only.",
+            "also_in_live_predictions": False,
+            "prediction_support": None,
+            "missing_indicators": [],
+        })
+    return out
+
+
 def get_trading_opportunity_board(
     db: Session,
     user_id: int | None,
@@ -238,12 +456,17 @@ def get_trading_opportunity_board(
 
     pred_by_ticker = _prediction_index(predictions)
 
+    # Freshness: grounded on DB + prediction cache times, not HTTP request duration.
+    source_freshness = collect_source_freshness(db)
+    data_as_of, data_as_of_min_keys = compute_board_data_as_of(source_freshness)
+
     rows, meta = gather_imminent_candidate_rows(
         db,
         user_id,
         equity_session_open=eq_open,
         all_active_patterns=True,
         apply_main_dispatch_filters=False,
+        for_opportunity_board=True,
     )
 
     tier_a, tier_b, tier_c = _tier_a_b_c_from_pattern_rows(
@@ -257,6 +480,18 @@ def get_trading_opportunity_board(
         max_add=max(0, int(settings.opportunity_max_tier_c)),
     )
     tier_c.extend(pred_only)
+
+    sb_max = int(getattr(settings, "opportunity_board_max_scanner_fallback", 6))
+    ps_max = int(getattr(settings, "opportunity_board_max_prescreener_fallback", 8))
+    min_sb = float(getattr(settings, "opportunity_board_scanner_fallback_min_score_b", 6.5))
+    scan_b, scan_c = _scanner_fallback_rows(db, seen, max_rows=sb_max, min_score_b=min_sb)
+    tier_b.extend(scan_b)
+    tier_c.extend(scan_c)
+    tier_c.extend(_prescreener_fallback_rows(db, seen, max_rows=ps_max))
+
+    # Re-sort tiers so stronger pattern rows stay first; fallbacks follow.
+    tier_b.sort(key=lambda x: (0 if x.get("composite") is not None else 1, -(x.get("composite") or 0)))
+    tier_c.sort(key=lambda x: (0 if x.get("composite") is not None else 1, -(x.get("composite") or 0)))
 
     caps = {
         "A": int(settings.opportunity_max_tier_a),
@@ -300,6 +535,7 @@ def get_trading_opportunity_board(
                     main_risk="Experimental; do not treat as production signal.",
                     sources=["pattern_research"],
                     pred=pred_by_ticker.get(t),
+                    source_strength="moderate",
                 )
             )
             if len(tier_d) >= max_d:
@@ -333,11 +569,31 @@ def get_trading_opportunity_board(
     if no_trade and not rows:
         reason_codes.append("no_evaluable_candidates")
         summary_lines.append("No pattern×ticker rows passed readiness and ETA filters.")
+    if meta.get("board_eval_budget_hit"):
+        reason_codes.append("board_eval_budget_truncated")
+        summary_lines.append(
+            "Board scoring stopped early to stay within latency caps — some patterns were not fully evaluated."
+        )
 
     stale_sec = int(settings.opportunity_board_stale_seconds)
-    done_at = datetime.now(timezone.utc)
-    age_sec = max(0.0, (done_at - generated_at).total_seconds())
-    is_stale = age_sec > stale_sec
+    now_utc = datetime.now(timezone.utc)
+    freshness_unknown = data_as_of is None
+    if data_as_of:
+        try:
+            das = data_as_of.replace("Z", "+00:00")
+            dao = datetime.fromisoformat(das)
+            if dao.tzinfo is None:
+                dao = dao.replace(tzinfo=timezone.utc)
+            else:
+                dao = dao.astimezone(timezone.utc)
+            age_sec = max(0.0, (now_utc - dao).total_seconds())
+            is_stale = age_sec > float(stale_sec)
+        except (ValueError, TypeError):
+            age_sec = None
+            is_stale = True
+    else:
+        age_sec = None
+        is_stale = True
 
     op_sum = {
         "actionable_count": len(tier_a),
@@ -346,14 +602,24 @@ def get_trading_opportunity_board(
         "no_trade_now": no_trade,
         "last_refresh_utc": iso,
         "session_line": sess.get("label", "") + " · " + crypto_ctx.get("label", ""),
+        "data_freshness_unknown": freshness_unknown,
     }
 
     out: dict[str, Any] = {
         "ok": True,
         "generated_at": iso,
-        "age_seconds": round(age_sec, 3),
+        # data_as_of: conservative UTC instant — board narrative cannot be newer than this.
+        "data_as_of": data_as_of,
+        "data_as_of_explanation": (
+            "Minimum (stalest) of non-null source timestamps in source_freshness; "
+            "the composite board is not fresher than its weakest feed."
+        ),
+        "data_as_of_min_keys": data_as_of_min_keys,
+        "source_freshness": source_freshness,
+        "age_seconds": round(age_sec, 3) if age_sec is not None else None,
         "is_stale": is_stale,
         "stale_threshold_seconds": stale_sec,
+        "freshness_degraded": freshness_unknown,
         "session_context": {**sess, "crypto_context": crypto_ctx},
         "operator_summary": op_sum,
         "no_trade_now": no_trade,
@@ -380,5 +646,8 @@ def get_trading_opportunity_board(
             "skip_reasons": meta.get("skip_reasons"),
             "top_suppressed": meta.get("top_suppressed"),
             "tickers_scored": meta.get("tickers_scored"),
+            "board_eval_budget_hit": meta.get("board_eval_budget_hit"),
+            "board_per_pattern_cap": meta.get("board_per_pattern_cap"),
+            "board_score_budget": meta.get("board_score_budget"),
         }
     return out

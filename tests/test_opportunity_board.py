@@ -30,6 +30,10 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
             },
             "top_suppressed": [],
             "equity_session_open": True,
+            "for_opportunity_board": True,
+            "board_eval_budget_hit": False,
+            "board_per_pattern_cap": 10,
+            "board_score_budget": 360,
         }
         return [], meta
 
@@ -54,9 +58,22 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
         },
     )
 
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.collect_source_freshness",
+        lambda *_a, **_k: {
+            "predictions_cache_last_updated_utc": "2026-01-01T12:00:00+00:00",
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.compute_board_data_as_of",
+        lambda sf: ("2026-01-01T12:00:00+00:00", ["predictions_cache_last_updated_utc"]),
+    )
+
     out = get_trading_opportunity_board(db, 1, include_research=False, include_debug=False)
     assert out["ok"] is True
     assert "generated_at" in out
+    assert out.get("data_as_of") is not None
+    assert "source_freshness" in out
     assert out["no_trade_now"] is True
     assert "tiers" in out
     assert out["tiers"]["actionable_now"] == []

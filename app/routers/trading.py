@@ -26,7 +26,7 @@ from ..services import trading_scheduler
 from ..services import ticker_universe
 from ..services import broker_service
 from ..services import broker_manager
-from .trading_sub import ai_router, broker_router, data_provider_router, web3_router
+from .trading_sub import ai_router, broker_router, data_provider_router, inspect_router, web3_router
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
@@ -44,6 +44,7 @@ from ..services import backtest_service as bt_svc
 
 router = APIRouter(tags=["trading"])
 router.include_router(ai_router)
+router.include_router(inspect_router)
 router.include_router(broker_router)
 router.include_router(data_provider_router)
 router.include_router(web3_router)
