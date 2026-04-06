@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import logging
 import threading
+import time
+from collections.abc import Callable
 from datetime import datetime, timedelta
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -20,6 +22,32 @@ _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
 
+def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
+    """Run a scheduler callback with structured logs; swallow exceptions after logging.
+
+    APScheduler must not crash the process on job failure; failures are recorded
+    with ``logger.exception`` and a duration field for ops triage.
+    """
+    t0 = time.monotonic()
+    logger.info("[scheduler_job] job_id=%s phase=start", job_id)
+    try:
+        fn()
+    except Exception:
+        dur_ms = int((time.monotonic() - t0) * 1000)
+        logger.exception(
+            "[scheduler_job] job_id=%s phase=fail duration_ms=%s",
+            job_id,
+            dur_ms,
+        )
+        return
+    dur_ms = int((time.monotonic() - t0) * 1000)
+    logger.info(
+        "[scheduler_job] job_id=%s phase=ok duration_ms=%s",
+        job_id,
+        dur_ms,
+    )
+
+
 def _run_daily_prescreen_job():
     """Persist global prescreen candidates (~2 AM America/Los_Angeles)."""
     from ..config import settings as _settings
@@ -27,18 +55,18 @@ def _run_daily_prescreen_job():
     if not getattr(_settings, "brain_prescreen_scheduler_enabled", True):
         return
 
-    from ..db import SessionLocal
-    from .trading.prescreen_job import run_daily_prescreen_job as _prescreen_run
+    def _work() -> None:
+        from ..db import SessionLocal
+        from .trading.prescreen_job import run_daily_prescreen_job as _prescreen_run
 
-    logger.info("[scheduler] Daily prescreen job starting")
-    db = SessionLocal()
-    try:
-        result = _prescreen_run(db)
-        logger.info("[scheduler] Daily prescreen result: %s", result)
-    except Exception as e:
-        logger.error("[scheduler] Daily prescreen failed: %s", e)
-    finally:
-        db.close()
+        db = SessionLocal()
+        try:
+            result = _prescreen_run(db)
+            logger.info("[scheduler] Daily prescreen result: %s", result)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("daily_prescreen", _work)
 
 
 def _run_daily_market_scan_job():
@@ -52,34 +80,36 @@ def _run_daily_market_scan_job():
     from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
     from .trading.scanner import clear_scanner_caches, run_full_market_scan
 
-    logger.info("[scheduler] Daily market scan job starting")
-    db = SessionLocal()
-    _uid = getattr(_settings, "brain_default_user_id", None)
-    job_id = brain_batch_job_begin(db, "daily_market_scan", user_id=_uid)
-    db.commit()
-    try:
-        results = run_full_market_scan(db, _uid, use_full_universe=True)
-        brain_batch_job_finish(
-            db,
-            job_id,
-            ok=True,
-            meta={
-                "tickers_scored": len(results),
-                "user_id": _uid,
-            },
-        )
+    def _work() -> None:
+        db = SessionLocal()
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        job_id = brain_batch_job_begin(db, "daily_market_scan", user_id=_uid)
         db.commit()
-        logger.info("[scheduler] Daily market scan done: %s scored", len(results))
-    except Exception as e:
-        logger.error("[scheduler] Daily market scan failed: %s", e)
         try:
-            brain_batch_job_finish(db, job_id, ok=False, error=str(e))
+            results = run_full_market_scan(db, _uid, use_full_universe=True)
+            brain_batch_job_finish(
+                db,
+                job_id,
+                ok=True,
+                meta={
+                    "tickers_scored": len(results),
+                    "user_id": _uid,
+                },
+            )
             db.commit()
-        except Exception:
-            logger.exception("[scheduler] Failed to record daily_market_scan batch job failure")
-    finally:
-        clear_scanner_caches()
-        db.close()
+            logger.info("[scheduler] Daily market scan done: %s scored", len(results))
+        except Exception as e:
+            logger.error("[scheduler] Daily market scan failed: %s", e)
+            try:
+                brain_batch_job_finish(db, job_id, ok=False, error=str(e))
+                db.commit()
+            except Exception:
+                logger.exception("[scheduler] Failed to record daily_market_scan batch job failure")
+        finally:
+            clear_scanner_caches()
+            db.close()
+
+    run_scheduler_job_guarded("daily_market_scan", _work)
 
 
 def _run_brain_market_snapshot_job():
@@ -94,79 +124,87 @@ def _run_brain_market_snapshot_job():
     from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish
     from .trading import learning as _learning
 
-    _uid = getattr(_settings, "brain_default_user_id", None)
-    db = SessionLocal()
-    jid = None
-    try:
-        jid = brain_batch_job_begin(db, JOB_BRAIN_MARKET_SNAPSHOTS, user_id=_uid)
-        db.commit()
-        out = _learning.run_scheduled_market_snapshots(db, _uid)
-        brain_batch_job_finish(db, jid, ok=True, payload_json=out, meta={})
-        db.commit()
-        logger.info(
-            "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",
-            out.get("snapshots_taken_daily"),
-            out.get("intraday_snapshots_taken"),
-            out.get("universe_size"),
-        )
-    except Exception as e:
-        logger.warning("[scheduler] brain_market_snapshots failed: %s", e, exc_info=True)
-        if jid:
-            try:
-                brain_batch_job_finish(db, jid, ok=False, error=str(e))
-                db.commit()
-            except Exception:
-                logger.exception("[scheduler] brain_market_snapshots batch finish failed")
-    finally:
-        db.close()
+    def _work() -> None:
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        db = SessionLocal()
+        jid = None
+        try:
+            jid = brain_batch_job_begin(db, JOB_BRAIN_MARKET_SNAPSHOTS, user_id=_uid)
+            db.commit()
+            out = _learning.run_scheduled_market_snapshots(db, _uid)
+            brain_batch_job_finish(db, jid, ok=True, payload_json=out, meta={})
+            db.commit()
+            logger.info(
+                "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",
+                out.get("snapshots_taken_daily"),
+                out.get("intraday_snapshots_taken"),
+                out.get("universe_size"),
+            )
+        except Exception as e:
+            logger.warning("[scheduler] brain_market_snapshots failed: %s", e, exc_info=True)
+            if jid:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] brain_market_snapshots batch finish failed")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("brain_market_snapshots", _work)
 
 
 def _run_paper_trade_check_job():
     """Check open paper trades for stop/target/expiry exits."""
-    from ..db import SessionLocal
 
-    db = SessionLocal()
-    try:
+    def _work() -> None:
+        from ..db import SessionLocal
         from .trading.paper_trading import check_paper_exits
-        result = check_paper_exits(db)
-        if result.get("closed", 0) > 0:
-            logger.info("[scheduler] Paper trades: checked %d, closed %d",
-                        result["checked"], result["closed"])
-    except Exception as e:
-        logger.error("[scheduler] Paper trade check failed: %s", e)
-    finally:
-        db.close()
+
+        db = SessionLocal()
+        try:
+            result = check_paper_exits(db)
+            if result.get("closed", 0) > 0:
+                logger.info("[scheduler] Paper trades: checked %d, closed %d",
+                            result["checked"], result["closed"])
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("paper_trade_check", _work)
 
 
 def _run_data_retention_job():
     """Daily sweep: archive old snapshots, prune stale batch job payloads."""
-    from ..db import SessionLocal
 
-    logger.info("[scheduler] Data retention sweep starting")
-    db = SessionLocal()
-    try:
+    def _work() -> None:
+        from ..db import SessionLocal
         from .trading.data_retention import run_retention_policy
-        results = run_retention_policy(db)
-        logger.info("[scheduler] Data retention done: %s", results)
-    except Exception as e:
-        logger.error("[scheduler] Data retention failed: %s", e)
-    finally:
-        db.close()
+
+        logger.info("[scheduler] Data retention sweep starting")
+        db = SessionLocal()
+        try:
+            results = run_retention_policy(db)
+            logger.info("[scheduler] Data retention done: %s", results)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("data_retention", _work)
 
 
 def _run_weekly_review_job():
     """Weekly performance review job."""
     from ..db import SessionLocal
-    from . import trading_service as ts
+    from .trading.public_api import weekly_performance_review as _weekly_review
 
-    logger.info("[scheduler] Starting weekly review")
-    db = SessionLocal()
-    try:
-        ts.weekly_performance_review(db, user_id=None)
-    except Exception as e:
-        logger.error(f"[scheduler] Weekly review failed: {e}")
-    finally:
-        db.close()
+    def _work() -> None:
+        logger.info("[scheduler] Starting weekly review")
+        db = SessionLocal()
+        try:
+            _weekly_review(db, user_id=None)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("weekly_review", _work)
 
 
 def _run_broker_sync_job():
@@ -176,18 +214,20 @@ def _run_broker_sync_job():
     if not broker_service.is_connected():
         return
 
-    from ..db import SessionLocal
-    logger.info("[scheduler] Starting Robinhood order + position sync")
-    db = SessionLocal()
-    try:
-        order_result = broker_service.sync_orders_to_db(db, user_id=None)
-        logger.info(f"[scheduler] Order sync result: {order_result}")
-        pos_result = broker_service.sync_positions_to_db(db, user_id=None)
-        logger.info(f"[scheduler] Position sync result: {pos_result}")
-    except Exception as e:
-        logger.error(f"[scheduler] Broker sync failed: {e}")
-    finally:
-        db.close()
+    def _work() -> None:
+        from ..db import SessionLocal
+
+        logger.info("[scheduler] Starting Robinhood order + position sync")
+        db = SessionLocal()
+        try:
+            order_result = broker_service.sync_orders_to_db(db, user_id=None)
+            logger.info(f"[scheduler] Order sync result: {order_result}")
+            pos_result = broker_service.sync_positions_to_db(db, user_id=None)
+            logger.info(f"[scheduler] Position sync result: {pos_result}")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("broker_sync", _work)
 
 
 def _run_price_monitor_job():
@@ -195,15 +235,16 @@ def _run_price_monitor_job():
     from ..db import SessionLocal
     from .trading.alerts import run_price_monitor
 
-    logger.info("[scheduler] Starting price monitor check")
-    db = SessionLocal()
-    try:
-        result = run_price_monitor(db, user_id=None)
-        logger.info(f"[scheduler] Price monitor result: {result}")
-    except Exception as e:
-        logger.error(f"[scheduler] Price monitor failed: {e}")
-    finally:
-        db.close()
+    def _work() -> None:
+        logger.info("[scheduler] Starting price monitor check")
+        db = SessionLocal()
+        try:
+            result = run_price_monitor(db, user_id=None)
+            logger.info(f"[scheduler] Price monitor result: {result}")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("price_monitor", _work)
 
 
 def _run_pattern_imminent_job():
@@ -222,54 +263,57 @@ def _run_pattern_imminent_job():
     if not getattr(_settings, "pattern_imminent_alert_enabled", True):
         return
 
-    logger.info("[scheduler] Pattern imminent breakout scan starting")
-    db = SessionLocal()
-    jid = None
-    t_wall = _t.time()
-    try:
-        _uid = getattr(_settings, "brain_default_user_id", None)
-        jid = brain_batch_job_begin(db, JOB_PATTERN_IMMINENT_SCANNER, _uid)
-        db.commit()
+    def _work() -> None:
+        logger.info("[scheduler] Pattern imminent breakout scan starting")
+        db = SessionLocal()
+        jid = None
+        t_wall = _t.time()
+        try:
+            _uid = getattr(_settings, "brain_default_user_id", None)
+            jid = brain_batch_job_begin(db, JOB_PATTERN_IMMINENT_SCANNER, _uid)
+            db.commit()
 
-        result = run_pattern_imminent_scan(db, user_id=_uid)
-        logger.info("[scheduler] Pattern imminent result: %s", result)
+            result = run_pattern_imminent_scan(db, user_id=_uid)
+            logger.info("[scheduler] Pattern imminent result: %s", result)
 
-        duration = round(_t.time() - t_wall, 1)
-        if not result.get("ok", True):
+            duration = round(_t.time() - t_wall, 1)
+            if not result.get("ok", True):
+                brain_batch_job_finish(
+                    db,
+                    jid,
+                    ok=False,
+                    error=str(result.get("reason") or "pattern imminent failed"),
+                    meta={"duration_s": duration},
+                    payload_json=dict(result),
+                )
+                db.commit()
+                return
+
             brain_batch_job_finish(
                 db,
                 jid,
-                ok=False,
-                error=str(result.get("reason") or "pattern imminent failed"),
-                meta={"duration_s": duration},
+                ok=True,
+                meta={
+                    "duration_s": duration,
+                    "alerts_sent": result.get("alerts_sent", 0),
+                    "tickers_scored": result.get("tickers_scored", 0),
+                    "candidates": result.get("candidates", 0),
+                },
                 payload_json=dict(result),
             )
             db.commit()
-            return
+        except Exception as e:
+            logger.error("[scheduler] Pattern imminent scan failed: %s", e)
+            if jid:
+                try:
+                    brain_batch_job_finish(db, jid, ok=False, error=str(e))
+                    db.commit()
+                except Exception:
+                    logger.exception("[scheduler] pattern_imminent batch_job_finish failed")
+        finally:
+            db.close()
 
-        brain_batch_job_finish(
-            db,
-            jid,
-            ok=True,
-            meta={
-                "duration_s": duration,
-                "alerts_sent": result.get("alerts_sent", 0),
-                "tickers_scored": result.get("tickers_scored", 0),
-                "candidates": result.get("candidates", 0),
-            },
-            payload_json=dict(result),
-        )
-        db.commit()
-    except Exception as e:
-        logger.error("[scheduler] Pattern imminent scan failed: %s", e)
-        if jid:
-            try:
-                brain_batch_job_finish(db, jid, ok=False, error=str(e))
-                db.commit()
-            except Exception:
-                logger.exception("[scheduler] pattern_imminent batch_job_finish failed")
-    finally:
-        db.close()
+    run_scheduler_job_guarded("pattern_imminent_scanner", _work)
 
 
 _crypto_alert_cooldown: dict[str, float] = {}

@@ -24,6 +24,26 @@ from ..yf_session import (
 
 logger = logging.getLogger(__name__)
 
+def _log_ohlcv_outcome(
+    ticker: str,
+    interval: str,
+    *,
+    provider: str,
+    reason: str,
+    row_count: int | None = None,
+) -> None:
+    rc = row_count if row_count is not None else "n/a"
+    logger.debug(
+        "[market_data_ohlcv] ticker=%s interval=%s provider=%s reason=%s row_count=%s",
+        ticker,
+        interval,
+        provider,
+        reason,
+        rc,
+    )
+
+
+
 # --- Massive (primary) ---
 _massive_available = False
 try:
@@ -184,18 +204,33 @@ def fetch_ohlcv(
                 start=_start_str, end=_end_str,
             )
             if bars:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="massive", reason="ok", row_count=len(bars),
+                )
                 return bars
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
             if not _massive_dead:
                 logger.debug(f"[market_data] Massive returned empty for {ticker}, falling back")
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="massive", reason="empty_try_fallback", row_count=0,
+                )
         except Exception as e:
             logger.warning(f"[market_data] Massive OHLCV failed for {ticker}: {e}")
+            _log_ohlcv_outcome(
+                ticker, interval, provider="massive", reason="error", row_count=0,
+            )
 
     if _massive_dead:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
+        )
         return []
 
     if not fb:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="none", reason="fallback_disabled", row_count=0,
+        )
         return []
 
     # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
@@ -206,14 +241,26 @@ def fetch_ohlcv(
                 start=_start_str, end=_end_str,
             )
             if bars:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="polygon", reason="ok", row_count=len(bars),
+                )
                 return bars
             logger.debug(f"[market_data] Polygon returned empty for {ticker}, falling back to yfinance")
+            _log_ohlcv_outcome(
+                ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
+            )
         except Exception as e:
             logger.warning(f"[market_data] Polygon OHLCV failed for {ticker}: {e}")
+            _log_ohlcv_outcome(
+                ticker, interval, provider="polygon", reason="error", row_count=0,
+            )
 
     # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
     _is_crypto = ticker.upper().endswith("-USD")
     if _is_crypto:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="yfinance", reason="skipped_crypto_list_path", row_count=0,
+        )
         return []
 
     if _start_str:
@@ -223,6 +270,9 @@ def fetch_ohlcv(
         df = _yf_history(ticker, period=period, interval=interval)
 
     if df.empty:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="yfinance", reason="empty", row_count=0,
+        )
         return []
 
     records: list[dict[str, Any]] = []
@@ -236,6 +286,9 @@ def fetch_ohlcv(
             "close": round(float(row["Close"]), 4),
             "volume": int(row["Volume"]),
         })
+    _log_ohlcv_outcome(
+        ticker, interval, provider="yfinance", reason="ok", row_count=len(records),
+    )
     return records
 
 
@@ -305,16 +358,32 @@ def fetch_ohlcv_df(
                 start=_start_str, end=_end_str,
             )
             if not df.empty:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="massive", reason="ok", row_count=len(df),
+                )
                 return _store_and_return(df)
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
+            else:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="massive", reason="empty_try_fallback", row_count=0,
+                )
         except Exception as e:
             logger.warning(f"[market_data] Massive DF failed for {ticker}: {e}")
+            _log_ohlcv_outcome(
+                ticker, interval, provider="massive", reason="error", row_count=0,
+            )
 
     if _massive_dead:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
+        )
         return pd.DataFrame()
 
     if not fb:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="none", reason="fallback_disabled", row_count=0,
+        )
         return pd.DataFrame()
 
     # --- Polygon path (secondary) — still try for *-USD when Massive returned empty ---
@@ -325,13 +394,25 @@ def fetch_ohlcv_df(
                 start=_start_str, end=_end_str,
             )
             if not df.empty:
+                _log_ohlcv_outcome(
+                    ticker, interval, provider="polygon", reason="ok", row_count=len(df),
+                )
                 return _store_and_return(df)
+            _log_ohlcv_outcome(
+                ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
+            )
         except Exception as e:
             logger.warning(f"[market_data] Polygon DF failed for {ticker}: {e}")
+            _log_ohlcv_outcome(
+                ticker, interval, provider="polygon", reason="error", row_count=0,
+            )
 
     # --- yfinance fallback (skip crypto: symbols rarely match Massive/Polygon) ---
     _is_crypto = ticker.upper().endswith("-USD")
     if _is_crypto:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="yfinance", reason="skipped_crypto_df_path", row_count=0,
+        )
         return pd.DataFrame()
 
     if _start_str:
@@ -339,7 +420,16 @@ def fetch_ohlcv_df(
     else:
         period = _clamp_period(interval, period)
         df = _yf_history(ticker, period=period, interval=interval)
-    return _store_and_return(df if df is not None else pd.DataFrame())
+    _df = df if df is not None else pd.DataFrame()
+    if _df.empty:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="yfinance", reason="empty", row_count=0,
+        )
+    else:
+        _log_ohlcv_outcome(
+            ticker, interval, provider="yfinance", reason="ok", row_count=len(_df),
+        )
+    return _store_and_return(_df)
 
 
 def fetch_ohlcv_batch(

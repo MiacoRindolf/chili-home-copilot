@@ -303,7 +303,7 @@ def dispatch_alert(
 
     try:
         if sms_is_configured() and tier in (TIER_A, TIER_B):
-            sent = send_sms(message)
+            sent = send_sms(message, tier=tier)
             sent_via = ("twilio" if sent else "sms_failed")
             if sent:
                 logger.info(f"[alerts] Sent {alert_type} alert for {ticker}: {message[:80]}")
@@ -339,8 +339,12 @@ def dispatch_alert(
                 "trade_type": trade_type,
                 "duration_estimate": duration_estimate,
             })
-        except Exception:
-            pass
+        except Exception as _bc_err:
+            logger.debug(
+                "[alerts] broadcast_alert_sync failed: %s",
+                _bc_err,
+                exc_info=True,
+            )
     except Exception as e:
         logger.error(f"[alerts] dispatch_alert DB error: {e}")
         try:

@@ -1,5 +1,9 @@
 """Trading package — re-exports all public functions for backward compatibility.
 
+**New code:** prefer stable symbols from ``app.services.trading.public_api`` where
+listed; avoid new imports of underscore-prefixed names from this package or
+``trading_service``.
+
 The original monolithic ``trading_service.py`` has been split into focused modules:
 
 - ``market_data``  — OHLCV, quotes, search, technical indicators
