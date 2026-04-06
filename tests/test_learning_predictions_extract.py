@@ -17,12 +17,13 @@ def test_learning_facade_wires_prediction_helpers() -> None:
     assert L._get_current_predictions_impl.__code__ is not LP._get_current_predictions_impl.__code__
 
 
-def test_compute_prediction_stays_on_learning_module() -> None:
+def test_compute_prediction_reexported_from_learning_predictions() -> None:
     from app.services.trading import learning as L
     from app.services.trading import learning_predictions as LP
 
     assert hasattr(L, "compute_prediction")
-    assert not hasattr(LP, "compute_prediction")
+    assert hasattr(LP, "compute_prediction")
+    assert L.compute_prediction is LP.compute_prediction
 
 
 def test_prediction_row_keys_stable() -> None:

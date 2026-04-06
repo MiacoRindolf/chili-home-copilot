@@ -4725,6 +4725,10 @@ def _validate_live_prices(
     return validated
 
 
+# Public alias for routers (avoid importing underscore helpers from outside the package).
+validate_live_prices = _validate_live_prices
+
+
 def smart_pick(
     db: Session, user_id: int | None,
     message: str | None = None,

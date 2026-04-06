@@ -28,7 +28,8 @@ def main() -> int:
     from app.config import settings
     from app.db import SessionLocal
     from app.models.trading import MarketSnapshot
-    from app.services.trading.learning import compute_prediction, mine_row_to_indicator_payload
+    from app.services.trading.learning import mine_row_to_indicator_payload
+    from app.services.trading.learning_predictions import compute_prediction
     from app.services.trading.snapshot_bar_ops import normalize_bar_start_utc, upsert_market_snapshot
 
     ap = argparse.ArgumentParser()

@@ -51,6 +51,112 @@ def predict_confidence(score: float) -> int:
     return min(100, int(abs(score) * 10))
 
 
+def compute_prediction(indicator_data: dict) -> float:
+    """Compute a directional prediction score from indicator data.
+
+    Returns a score from -10 (strongly bearish) to +10 (strongly bullish).
+    Each signal contributes a weighted vote. The final score is the sum
+    clamped to [-10, +10].
+
+    Signals used (with weights):
+      RSI (2.0), MACD histogram (1.5), MACD crossover (1.0),
+      EMA alignment (1.5), Bollinger Band position (1.0),
+      Stochastic (1.0), ADX trend strength (0.5), Volume (0.5)
+    """
+    score = 0.0
+
+    rsi_data = indicator_data.get("rsi", {})
+    macd_data = indicator_data.get("macd", {})
+    bb_data = indicator_data.get("bbands", {})
+    stoch_data = indicator_data.get("stoch", {})
+    adx_data = indicator_data.get("adx", {})
+    ema20_data = indicator_data.get("ema_20", {})
+    ema50_data = indicator_data.get("ema_50", {})
+    ema100_data = indicator_data.get("ema_100", {})
+    sma20_data = indicator_data.get("sma_20", {})
+    obv_data = indicator_data.get("obv", {})
+    atr_data = indicator_data.get("atr", {})
+
+    rsi = rsi_data.get("value") if rsi_data else None
+    if rsi is not None:
+        if rsi < 25:
+            score += 2.0
+        elif rsi < 35:
+            score += 1.5
+        elif rsi < 45:
+            score += 0.5
+        elif rsi > 75:
+            score -= 2.0
+        elif rsi > 65:
+            score -= 1.5
+        elif rsi > 55:
+            score -= 0.5
+
+    macd_hist = macd_data.get("histogram") if macd_data else None
+    macd_line = macd_data.get("macd") if macd_data else None
+    macd_sig = macd_data.get("signal") if macd_data else None
+    if macd_hist is not None:
+        if macd_hist > 0:
+            score += min(1.5, macd_hist * 10)
+        else:
+            score -= min(1.5, abs(macd_hist) * 10)
+    if macd_line is not None and macd_sig is not None:
+        if macd_line > macd_sig:
+            score += 1.0
+        elif macd_line < macd_sig:
+            score -= 1.0
+
+    e20 = ema20_data.get("value") if ema20_data else None
+    e50 = ema50_data.get("value") if ema50_data else None
+    e100 = ema100_data.get("value") if ema100_data else None
+    sma20 = sma20_data.get("value") if sma20_data else None
+    if e20 is not None and e50 is not None and e100 is not None:
+        if e20 > e50 > e100:
+            score += 1.5
+        elif e20 < e50 < e100:
+            score -= 1.5
+        elif e20 > e50:
+            score += 0.5
+        elif e20 < e50:
+            score -= 0.5
+
+    bb_upper = bb_data.get("upper") if bb_data else None
+    bb_lower = bb_data.get("lower") if bb_data else None
+    if bb_upper and bb_lower and bb_upper > bb_lower:
+        bb_range = bb_upper - bb_lower
+        if sma20 is not None:
+            bb_pos = (sma20 - bb_lower) / bb_range
+        elif e20 is not None:
+            bb_pos = (e20 - bb_lower) / bb_range
+        else:
+            bb_pos = 0.5
+        if bb_pos < 0.15:
+            score += 1.0
+        elif bb_pos < 0.3:
+            score += 0.5
+        elif bb_pos > 0.85:
+            score -= 1.0
+        elif bb_pos > 0.7:
+            score -= 0.5
+
+    stoch_k = stoch_data.get("k") if stoch_data else None
+    if stoch_k is not None:
+        if stoch_k < 20:
+            score += 1.0
+        elif stoch_k < 30:
+            score += 0.5
+        elif stoch_k > 80:
+            score -= 1.0
+        elif stoch_k > 70:
+            score -= 0.5
+
+    adx_val = adx_data.get("adx") if adx_data else None
+    if adx_val is not None and adx_val > 25:
+        score *= 1.0 + min(0.5, (adx_val - 25) / 50)
+
+    return max(-10.0, min(10.0, round(score, 2)))
+
+
 def _build_prediction_tickers(db: Session, explicit: list[str] | None) -> list[str]:
     """Build a diverse ticker list for predictions from multiple sources."""
     if explicit:

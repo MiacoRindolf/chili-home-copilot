@@ -65,3 +65,38 @@ def test_trading_public_api_weekly_performance_review() -> None:
     from app.services.trading import public_api
 
     assert callable(public_api.weekly_performance_review)
+
+
+def test_trading_public_api_prediction_surface() -> None:
+    from app.services.trading import public_api
+
+    assert callable(public_api.compute_prediction)
+    assert callable(public_api.predict_direction)
+    assert callable(public_api.predict_confidence)
+    assert callable(public_api.get_current_predictions)
+    assert callable(public_api.refresh_promoted_prediction_cache)
+
+
+def test_dispatch_alert_passes_tier_a_for_target_hit(db, monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_send(message: str, tier: str = "A") -> bool:
+        captured["tier"] = tier
+        captured["message"] = message
+        return True
+
+    monkeypatch.setattr("app.services.sms_service.send_sms", fake_send)
+    monkeypatch.setattr("app.services.sms_service.is_configured", lambda: True)
+    monkeypatch.setattr("app.routers.trading._broadcast_alert_sync", lambda _p: None)
+
+    from app.services.trading.alerts import TARGET_HIT, dispatch_alert
+
+    dispatch_alert(
+        db,
+        user_id=1,
+        alert_type=TARGET_HIT,
+        ticker="SPY",
+        message="unit test target hit",
+        skip_throttle=True,
+    )
+    assert captured.get("tier") == "A"

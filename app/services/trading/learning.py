@@ -38,11 +38,13 @@ from .learning_cycle_architecture import (
     apply_learning_cycle_step_status_progress,
     count_cycle_progress_steps,
 )
+from .learning_cycle_steps import load_prescreen_scan_and_universe, run_secondary_miners_phase
 
 from .learning_predictions import (
     _build_prediction_tickers,
     _get_current_predictions_impl as _lp_get_current_predictions_impl,
     _indicator_data_to_flat_snapshot,
+    compute_prediction,
     predict_confidence,
     predict_direction,
 )
@@ -4674,113 +4676,7 @@ def _extract_hypotheses_from_reflection(text: str) -> list[dict]:
     return hypotheses[:10]
 
 
-# ── Multi-Signal Prediction Engine ────────────────────────────────────
-
-def compute_prediction(indicator_data: dict) -> float:
-    """Compute a directional prediction score from indicator data.
-
-    Returns a score from -10 (strongly bearish) to +10 (strongly bullish).
-    Each signal contributes a weighted vote. The final score is the sum
-    clamped to [-10, +10].
-
-    Signals used (with weights):
-      RSI (2.0), MACD histogram (1.5), MACD crossover (1.0),
-      EMA alignment (1.5), Bollinger Band position (1.0),
-      Stochastic (1.0), ADX trend strength (0.5), Volume (0.5)
-    """
-    score = 0.0
-
-    rsi_data = indicator_data.get("rsi", {})
-    macd_data = indicator_data.get("macd", {})
-    bb_data = indicator_data.get("bbands", {})
-    stoch_data = indicator_data.get("stoch", {})
-    adx_data = indicator_data.get("adx", {})
-    ema20_data = indicator_data.get("ema_20", {})
-    ema50_data = indicator_data.get("ema_50", {})
-    ema100_data = indicator_data.get("ema_100", {})
-    sma20_data = indicator_data.get("sma_20", {})
-    obv_data = indicator_data.get("obv", {})
-    atr_data = indicator_data.get("atr", {})
-
-    rsi = rsi_data.get("value") if rsi_data else None
-    if rsi is not None:
-        if rsi < 25:
-            score += 2.0
-        elif rsi < 35:
-            score += 1.5
-        elif rsi < 45:
-            score += 0.5
-        elif rsi > 75:
-            score -= 2.0
-        elif rsi > 65:
-            score -= 1.5
-        elif rsi > 55:
-            score -= 0.5
-
-    macd_hist = macd_data.get("histogram") if macd_data else None
-    macd_line = macd_data.get("macd") if macd_data else None
-    macd_sig = macd_data.get("signal") if macd_data else None
-    if macd_hist is not None:
-        if macd_hist > 0:
-            score += min(1.5, macd_hist * 10)
-        else:
-            score -= min(1.5, abs(macd_hist) * 10)
-    if macd_line is not None and macd_sig is not None:
-        if macd_line > macd_sig:
-            score += 1.0
-        elif macd_line < macd_sig:
-            score -= 1.0
-
-    e20 = ema20_data.get("value") if ema20_data else None
-    e50 = ema50_data.get("value") if ema50_data else None
-    e100 = ema100_data.get("value") if ema100_data else None
-    sma20 = sma20_data.get("value") if sma20_data else None
-    if e20 is not None and e50 is not None and e100 is not None:
-        if e20 > e50 > e100:
-            score += 1.5
-        elif e20 < e50 < e100:
-            score -= 1.5
-        elif e20 > e50:
-            score += 0.5
-        elif e20 < e50:
-            score -= 0.5
-
-    bb_upper = bb_data.get("upper") if bb_data else None
-    bb_lower = bb_data.get("lower") if bb_data else None
-    if bb_upper and bb_lower and bb_upper > bb_lower:
-        bb_mid = (bb_upper + bb_lower) / 2
-        bb_range = bb_upper - bb_lower
-        if sma20 is not None:
-            bb_pos = (sma20 - bb_lower) / bb_range
-        elif e20 is not None:
-            bb_pos = (e20 - bb_lower) / bb_range
-        else:
-            bb_pos = 0.5
-        if bb_pos < 0.15:
-            score += 1.0
-        elif bb_pos < 0.3:
-            score += 0.5
-        elif bb_pos > 0.85:
-            score -= 1.0
-        elif bb_pos > 0.7:
-            score -= 0.5
-
-    stoch_k = stoch_data.get("k") if stoch_data else None
-    if stoch_k is not None:
-        if stoch_k < 20:
-            score += 1.0
-        elif stoch_k < 30:
-            score += 0.5
-        elif stoch_k > 80:
-            score -= 1.0
-        elif stoch_k > 70:
-            score -= 0.5
-
-    adx_val = adx_data.get("adx") if adx_data else None
-    if adx_val is not None and adx_val > 25:
-        score *= 1.0 + min(0.5, (adx_val - 25) / 50)
-
-    return max(-10.0, min(10.0, round(score, 2)))
+# ── Multi-Signal Prediction Engine (compute_prediction in learning_predictions) ──
 
 
 def run_promoted_pattern_fast_eval(db: Session) -> dict[str, Any]:
@@ -7387,7 +7283,6 @@ def run_learning_cycle(
     Daily prescreen, market scan, and **market snapshots** default to APScheduler; set
     ``BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE=1`` to take snapshots inside this call again.
     """
-    from .scanner import build_snapshot_ticker_universe
     from .journal import daily_market_journal, check_signal_events
 
     _shutting_down.clear()  # allow new cycle (e.g. after worker was stopped)
@@ -7560,30 +7455,8 @@ def run_learning_cycle(
         )
 
         # Prescreen + full scan are batch jobs (scheduler); hydrate report from DB only.
-        from sqlalchemy import func as _sql_func
-
-        from .prescreen_job import count_active_global_candidates, get_latest_prescreen_summary
-        _summary = get_latest_prescreen_summary(db)
-        report["prescreen_candidates"] = count_active_global_candidates(db)
-        report["prescreen_sources"] = _summary.get("source_map") or {}
-        report["prescreen_snapshot_id"] = _summary.get("snapshot_id")
-        report["prescreen_fallback_inline"] = False
-        _cutoff = datetime.utcnow() - timedelta(hours=48)
-        _scan_n = int(
-            db.query(_sql_func.count(ScanResult.id))
-            .filter(ScanResult.user_id == user_id)
-            .filter(ScanResult.scanned_at >= _cutoff)
-            .scalar()
-            or 0,
-        )
-        report["tickers_scored"] = _scan_n
-        report["tickers_scanned"] = _scan_n
-
-        # Universe for mining / backfill (same as snapshot job uses)
-        top_tickers, _snap_drv = build_snapshot_ticker_universe(db, user_id)
-        report["snapshot_driver"] = _snap_drv.get("snapshot_driver")
-        if _snap_drv.get("fallback"):
-            report["snapshot_driver_fallback"] = _snap_drv["fallback"]
+        _pre_updates, top_tickers, _ = load_prescreen_scan_and_universe(db, user_id)
+        report.update(_pre_updates)
         _learning_status["tickers_processed"] = len(top_tickers)
 
         report["snapshots_taken_daily"] = 0
@@ -7744,121 +7617,24 @@ def run_learning_cycle(
         _commit_step()
 
         # Steps 11–18: Secondary miners (optional — disable for faster cycles)
-        if getattr(settings, "brain_secondary_miners_on_cycle", True):
-            # Step 8c: Intraday breakout pattern mining (15m data)
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start_id = time.time()
-            # graph-node: c_secondary/intraday_hv
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "intraday_hv")
-            intra_result = mine_intraday_patterns(db, user_id, cycle_budget)
-            hv_result = mine_high_vol_regime_patterns(db, user_id, cycle_budget)
-            report["intraday_discoveries"] = intra_result.get("discoveries", 0)
-            report["high_vol_discoveries"] = hv_result.get("discoveries", 0)
-            _bump_cycle_step()
-            _step_time(
-                "intraday_mining",
-                step_start_id,
-                f"compression {intra_result.get('discoveries', 0)} / high_vol {hv_result.get('discoveries', 0)} "
-                f"from {intra_result.get('rows_mined', 0)} + {hv_result.get('rows_mined', 0)} bars",
-            )
-            _commit_step()
-
-            # Refine patterns (parameter sweeping)
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/refine
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "refine")
-            refine_result = refine_patterns(db, user_id)
-            report["patterns_refined"] = refine_result.get("refined", 0)
-            _bump_cycle_step()
-            _step_time("refine", step_start,
-                        f"{refine_result.get('refined', 0)} patterns refined")
-            _commit_step()
-
-            # Exit optimization learning
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/exit
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "exit")
-            exit_result = learn_exit_optimization(db, user_id)
-            report["exit_adjustments"] = exit_result.get("adjustments", 0)
-            _bump_cycle_step()
-            _step_time("exit_optimization", step_start,
-                        f"{exit_result.get('adjustments', 0)} adjustments")
-            _commit_step()
-
-            # Fakeout pattern mining
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/fakeout
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "fakeout")
-            fakeout_result = mine_fakeout_patterns(db, user_id)
-            report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
-            _bump_cycle_step()
-            _step_time("fakeout_mining", step_start,
-                        f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
-            _commit_step()
-
-            # Position sizing feedback
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/sizing
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "sizing")
-            sizing_result = tune_position_sizing(db, user_id)
-            report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
-            _bump_cycle_step()
-            _step_time("position_sizing", step_start,
-                        f"{sizing_result.get('adjustments', 0)} sizing adjustments")
-            _commit_step()
-
-            # Inter-alert learning
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/inter_alert
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "inter_alert")
-            inter_result = learn_inter_alert_patterns(db, user_id)
-            report["inter_alert_insights"] = inter_result.get("insights", 0)
-            _bump_cycle_step()
-            _step_time("inter_alert", step_start,
-                        f"{inter_result.get('insights', 0)} inter-alert insights")
-            _commit_step()
-
-            # Timeframe performance learning
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/timeframe
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "timeframe")
-            tf_result = learn_timeframe_performance(db, user_id)
-            report["timeframe_insights"] = tf_result.get("insights", 0)
-            _bump_cycle_step()
-            _step_time("timeframe_learning", step_start,
-                        f"{tf_result.get('insights', 0)} timeframe insights")
-            _commit_step()
-
-            # Signal synergy mining
-            if _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            step_start = time.time()
-            # graph-node: c_secondary/synergy
-            apply_learning_cycle_step_status(_learning_status, "c_secondary", "synergy")
-            synergy_result = mine_signal_synergies(db, user_id)
-            report["synergies_found"] = synergy_result.get("synergies_found", 0)
-            _bump_cycle_step()
-            _step_time("synergy_mining", step_start,
-                        f"{synergy_result.get('synergies_found', 0)} synergies found")
-            _commit_step()
-        else:
-            report["secondary_miners_skipped"] = True
+        def _mark_secondary_skipped() -> None:
+            nonlocal _cycle_step
             _cycle_step += 8
             _learning_status["steps_completed"] = _cycle_step
-            logger.info("[learning] Secondary miners skipped (brain_secondary_miners_on_cycle=false)")
+
+        run_secondary_miners_phase(
+            db,
+            user_id,
+            settings=settings,
+            cycle_budget=cycle_budget,
+            report=report,
+            learning_status=_learning_status,
+            bump_cycle_step=_bump_cycle_step,
+            step_time=_step_time,
+            commit_step=_commit_step,
+            shutting_down_is_set=_shutting_down.is_set,
+            mark_secondary_skipped=_mark_secondary_skipped,
+        )
 
         report["brain_resource_budget"] = cycle_budget.to_report_dict()
 
