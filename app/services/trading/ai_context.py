@@ -349,7 +349,7 @@ def build_ai_context(
     try:
         from .pattern_ml import get_meta_learner, extract_pattern_features
         from .pattern_engine import get_active_patterns, evaluate_patterns_with_strength
-        from .learning import _indicator_data_to_flat_snapshot
+        from .learning_predictions import _indicator_data_to_flat_snapshot
         full_indicators_for_pred = futures["indicators"].result(timeout=1) if "indicators" in futures else {}
         ind_flat = {}
         for ind_name, records in full_indicators_for_pred.items():

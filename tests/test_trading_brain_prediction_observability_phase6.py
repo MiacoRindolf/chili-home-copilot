@@ -1,4 +1,4 @@
-"""Phase 6: bounded chili_prediction_ops INFO line (flag-gated) + phase5 read metadata."""
+﻿"""Phase 6: bounded chili_prediction_ops INFO line (flag-gated) + phase5 read metadata."""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ def _run_get_current_predictions_impl_stub(
     with patch("app.services.trading.pattern_engine.get_active_patterns", return_value=[fake_pat]), patch(
         "app.services.trading.market_data.fetch_quotes_batch", return_value={"TST": {"price": 100.0}}
     ), patch(
-        "app.services.trading.learning._predict_single_ticker", return_value=_minimal_prediction_row()
+        "app.services.trading.learning_predictions._predict_single_ticker", return_value=_minimal_prediction_row()
     ), patch("app.services.trading.market_data.get_vix", return_value=15.0), patch(
         "app.services.trading.market_data.get_volatility_regime", return_value={"regime": "normal"}
     ), patch("app.services.trading.pattern_ml.get_meta_learner", return_value=ml):

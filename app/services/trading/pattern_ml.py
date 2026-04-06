@@ -209,7 +209,7 @@ def retro_evaluate_snapshot(
 
     Used to build training rows from ``MarketSnapshot`` records.
     """
-    from .learning import _indicator_data_to_flat_snapshot
+    from .learning_predictions import _indicator_data_to_flat_snapshot
 
     if isinstance(indicator_data_json, str):
         try:

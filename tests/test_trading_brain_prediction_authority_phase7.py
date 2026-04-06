@@ -1,4 +1,4 @@
-"""Phase 7: explicit vs implicit caller contract for mirror read authority (hardening only)."""
+﻿"""Phase 7: explicit vs implicit caller contract for mirror read authority (hardening only)."""
 
 from __future__ import annotations
 
@@ -74,7 +74,7 @@ def test_impl_coerces_explicit_false_when_tickers_none_or_empty(
         lambda _batch: {"TST": {"price": 100.0}},
     )
     monkeypatch.setattr(
-        "app.services.trading.learning._predict_single_ticker",
+        "app.services.trading.learning_predictions._predict_single_ticker",
         lambda *a, **k: {
             "ticker": "TST",
             "price": 100.0,
