@@ -22,6 +22,7 @@ from .trading.research_integrity import (
 from ..config import settings
 from ..models.trading import BacktestResult, ScanPattern
 from .trading.research_kpis import build_research_kpis
+from .trading.scan_pattern_label_alignment import strategy_label_aligns_scan_pattern_name
 
 logger = logging.getLogger(__name__)
 
@@ -602,11 +603,17 @@ def save_backtest(
     *,
     insight_id: int | None = None,
     scan_pattern_id: int | None = None,
+    backtest_row_id: int | None = None,
 ) -> BacktestResult:
     """Persist a backtest result to the database.
 
     If a record for the same (insight, ticker, strategy) already exists the
     existing row is **updated** instead of creating a duplicate.
+
+    When ``backtest_row_id`` is set (rerun / evidence row), that primary key is updated
+    if it belongs to ``insight_id`` and matches the result ticker/strategy. Otherwise
+    the natural-key lookup uses the same ordering as Pattern Evidence (trade_count,
+    ran_at) so duplicates do not leave the displayed representative row stale.
     """
     ticker = result.get("ticker", "")
     strategy = result.get("strategy", "")
@@ -659,18 +666,62 @@ def save_backtest(
         params_obj["research_integrity"] = result.get("research_integrity")
     if resolved_sp_id is not None and isinstance(params_obj.get("data_provenance"), dict):
         params_obj["data_provenance"]["scan_pattern_id"] = int(resolved_sp_id)
+    # Keep top-level window fields in sync with data_provenance for evidence Period column.
+    _dp = params_obj.get("data_provenance")
+    if isinstance(_dp, dict):
+        for _k in ("ohlc_bars", "chart_time_from", "chart_time_to", "period", "interval"):
+            if params_obj.get(_k) is None and _dp.get(_k) is not None:
+                params_obj[_k] = _dp[_k]
     params_json = json.dumps(params_obj)
 
     if insight_id:
-        existing = (
-            db.query(BacktestResult)
-            .filter(
-                BacktestResult.related_insight_id == insight_id,
-                BacktestResult.ticker == ticker,
-                BacktestResult.strategy_name == strategy,
+        existing: BacktestResult | None = None
+        _t_u = (ticker or "").strip().upper()
+        # Explicit row id (rerun / evidence): do not require strategy string equality — DB column is 100 chars
+        # and result["strategy"] may be the full ScanPattern.name, so == often failed and updates missed the UI row.
+        if backtest_row_id is not None:
+            row = db.get(BacktestResult, int(backtest_row_id))
+            if row is not None and int(row.related_insight_id or 0) == int(insight_id):
+                if (row.ticker or "").strip().upper() == _t_u:
+                    if resolved_sp_id is None or row.scan_pattern_id is None:
+                        existing = row
+                    elif int(row.scan_pattern_id) == int(resolved_sp_id):
+                        existing = row
+        if existing is None:
+            strat = (strategy or "").strip()
+            key100 = strat[:100] if strat else ""
+            cands = (
+                db.query(BacktestResult)
+                .filter(
+                    BacktestResult.related_insight_id == int(insight_id),
+                    BacktestResult.ticker == ticker,
+                )
+                .order_by(
+                    BacktestResult.trade_count.desc().nullslast(),
+                    BacktestResult.ran_at.desc().nullslast(),
+                    BacktestResult.id.desc(),
+                )
+                .all()
             )
-            .first()
-        )
+            for r in cands:
+                rsn = (r.strategy_name or "").strip()
+                if strategy_label_aligns_scan_pattern_name(rsn, strat):
+                    existing = r
+                    break
+            if existing is None and key100:
+                for r in cands:
+                    if (r.strategy_name or "").strip() == key100:
+                        existing = r
+                        break
+            if existing is None and resolved_sp_id is not None:
+                sp_match = [
+                    r
+                    for r in cands
+                    if r.scan_pattern_id is not None
+                    and int(r.scan_pattern_id) == int(resolved_sp_id)
+                ]
+                if len(sp_match) == 1:
+                    existing = sp_match[0]
         if existing:
             existing.return_pct = ret_pct
             existing.win_rate = wr
@@ -680,6 +731,9 @@ def save_backtest(
             existing.equity_curve = json.dumps(eq)
             existing.params = params_json
             existing.scan_pattern_id = int(resolved_sp_id) if resolved_sp_id is not None else None
+            # Was missing: updates never advanced ran_at, so evidence dedupe (max trade_count, ran_at)
+            # kept picking a duplicate row with a newer timestamp while the rerun target stayed stale.
+            existing.ran_at = datetime.utcnow()
             if result.get("oos_win_rate") is not None:
                 _ow = normalize_win_rate_for_db(_sanitize_float(result["oos_win_rate"]))
                 existing.oos_win_rate = float(_ow) if _ow is not None else None

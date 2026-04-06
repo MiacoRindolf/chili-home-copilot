@@ -423,6 +423,7 @@ def _select_tickers(
     ticker_scope: str = "universal",
     scope_tickers: list[str] | None = None,
     asset_class: str | None = None,
+    priority_tickers: list[str] | None = None,
 ) -> list[str]:
     """Build a ticker pool for backtesting, respecting the pattern's scope.
 
@@ -432,6 +433,9 @@ def _select_tickers(
 
     When ``asset_class`` / context restricts to crypto or stocks only, exploration
     and prescreened samples stay within that universe.
+
+    ``priority_tickers`` are added first (e.g. stale / low-trade stored rows) so they survive
+    ``pool[:target_count]`` truncation when the pool is larger than the batch size.
     """
     universe = effective_backtest_asset_universe(asset_class, ctx)
     pool: list[str] = []
@@ -443,6 +447,10 @@ def _select_tickers(
         if ticker not in pool_set:
             pool.append(ticker)
             pool_set.add(ticker)
+
+    if priority_tickers:
+        for t in priority_tickers:
+            _add(t)
 
     for t in ctx["mentioned_tickers"]:
         _add(t)
@@ -547,6 +555,76 @@ def _select_tickers(
         pass
 
     return pool[:target_count]
+
+
+def priority_tickers_from_stored_backtests_for_refresh(
+    db: Session,
+    *,
+    insight_id: int,
+    scan_pattern_id: int,
+    pattern_name: str,
+    max_tickers: int,
+    stale_trade_cap: int,
+    stale_days: int,
+) -> list[str]:
+    """Tickers whose stored ``BacktestResult`` rows look stale or under-traded for this insight.
+
+    Used by the scheduled queue so ``smart_backtest_insight`` revisits tickers that already have
+    evidence rows but would otherwise be skipped for weeks (random 40–60 ticker sample).
+
+    Rows must match ``scan_pattern_id`` and ``strategy_name`` must align with ``ScanPattern.name``
+    (same rule as Pattern Evidence).
+    """
+    from datetime import datetime, timedelta
+
+    from ...models.trading import BacktestResult
+    from .scan_pattern_label_alignment import strategy_label_aligns_scan_pattern_name
+
+    pn = (pattern_name or "").strip()
+    if max_tickers <= 0:
+        return []
+    cutoff = datetime.utcnow() - timedelta(days=max(1, int(stale_days)))
+
+    rows = (
+        db.query(BacktestResult)
+        .filter(
+            BacktestResult.related_insight_id == int(insight_id),
+            BacktestResult.scan_pattern_id == int(scan_pattern_id),
+        )
+        .all()
+    )
+    stale_cap = int(stale_trade_cap)
+    candidates: list[tuple[int, datetime, str]] = []
+    for bt in rows:
+        if pn and not strategy_label_aligns_scan_pattern_name(bt.strategy_name, pn):
+            continue
+        t = (bt.ticker or "").strip().upper()
+        if not t:
+            continue
+        tc = int(bt.trade_count or 0)
+        ra = bt.ran_at
+        is_stale = (
+            tc <= stale_cap
+            or ra is None
+            or ra < cutoff
+        )
+        if not is_stale:
+            continue
+        # Sort key: lowest trades first, then oldest run
+        sort_ra = ra or datetime(1970, 1, 1)
+        candidates.append((tc, sort_ra, t))
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    out: list[str] = []
+    seen: set[str] = set()
+    for _tc, _ra, t in candidates:
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= max_tickers:
+            break
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -752,6 +830,7 @@ def smart_backtest_insight(
     period: str | None = None,
     target_tickers: int = 40,
     update_confidence: bool = True,
+    priority_tickers: list[str] | None = None,
 ) -> dict[str, Any]:
     """Run diversified backtests for a single TradingInsight.
 
@@ -823,6 +902,7 @@ def smart_backtest_insight(
         ctx, db=db, insight_id=insight.id, target_count=target_tickers,
         ticker_scope=_scope, scope_tickers=_scope_tickers,
         asset_class=_asset_class,
+        priority_tickers=priority_tickers,
     )
 
     if linked:
@@ -897,29 +977,26 @@ def smart_backtest_insight(
                     losses += 1
 
     if total > 0:
-        # Recompute win/loss from ALL linked BacktestResult records so
-        # card and detail views always agree.
+        # Deduped trade-weighted tallies — same definition as Brain / evidence panel.
         try:
-            from ...models.trading import BacktestResult as _BT2
-            all_linked = (
-                db.query(_BT2.return_pct, _BT2.trade_count)
-                .filter(
-                    _BT2.related_insight_id == insight.id,
-                    _BT2.trade_count > 0,
-                )
-                .all()
+            from .insight_backtest_panel_sync import (
+                sync_insight_backtest_tallies_from_evidence_panel,
             )
-            all_wins = sum(1 for r in all_linked if (r[0] or 0) > 0)
-            all_losses = len(all_linked) - all_wins
-            insight.win_count = all_wins
-            insight.loss_count = all_losses
+
+            panel = sync_insight_backtest_tallies_from_evidence_panel(db, insight)
         except Exception:
             insight.win_count = wins
             insight.loss_count = losses
+            panel = {"bt_win_rate": None}
         insight.evidence_count = (insight.evidence_count or 0) + total
 
         if update_confidence and total >= 3:
-            bt_win_rate = wins / total
+            p_wr = panel.get("bt_win_rate") if isinstance(panel, dict) else None
+            bt_win_rate = (
+                float(p_wr) / 100.0
+                if p_wr is not None
+                else wins / max(1, total)
+            )
             old_conf = insight.confidence
             new_conf = old_conf * 0.7 + bt_win_rate * 0.3
             insight.confidence = round(min(0.95, max(0.1, new_conf)), 3)

@@ -116,18 +116,18 @@ def _dedup_backtests():
 
             db.flush()
 
+            from .services.trading.insight_backtest_panel_sync import (
+                sync_insight_backtest_tallies_from_evidence_panel,
+            )
+
             for ins_id in insight_ids:
                 ins = db.get(TradingInsight, ins_id)
                 if not ins:
                     continue
-                bts = (
-                    db.query(_BT)
-                    .filter(_BT.related_insight_id == ins_id)
-                    .all()
-                )
-                with_trades = [b for b in bts if (b.trade_count or 0) > 0]
-                ins.win_count = sum(1 for b in with_trades if (b.return_pct or 0) > 0)
-                ins.loss_count = len(with_trades) - ins.win_count
+                try:
+                    sync_insight_backtest_tallies_from_evidence_panel(db, ins)
+                except Exception:
+                    _log.exception("[dedup] panel sync failed for insight %s", ins_id)
                 ins.evidence_count = max(1, ins.evidence_count or 1)
 
             db.commit()

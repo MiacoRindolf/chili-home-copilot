@@ -96,23 +96,19 @@ def run_cross_asset_backtest_cleanup(db: Session) -> dict[str, Any]:
     db.flush()
     stats["backtests_deleted"] = deleted
 
-    # Recompute win/loss for touched insights
+    # Recompute win/loss for touched insights (panel definition: deduped, trade-weighted).
+    from .insight_backtest_panel_sync import sync_insight_backtest_tallies_from_evidence_panel
+
     for ins_id in affected_insights:
         ins = db.get(TradingInsight, ins_id)
         if not ins:
             continue
-        bts = (
-            db.query(BacktestResult)
-            .filter(
-                BacktestResult.related_insight_id == ins_id,
-                BacktestResult.trade_count > 0,
+        try:
+            sync_insight_backtest_tallies_from_evidence_panel(db, ins)
+        except Exception:
+            logger.exception(
+                "[asset_cleanup] insight_backtest_panel_sync failed for insight %s", ins_id
             )
-            .all()
-        )
-        wins = sum(1 for r in bts if (r.return_pct or 0) > 0)
-        losses = len(bts) - wins
-        ins.win_count = wins
-        ins.loss_count = losses
         stats["insights_recomputed"] += 1
 
     if affected_insights or deleted:

@@ -20,6 +20,9 @@ from ...prompts import load_prompt
 from ...services import trading_service as ts
 from ...services import trading_scheduler
 from ...services import ticker_universe
+from ...services.trading.scan_pattern_label_alignment import (
+    strategy_label_aligns_scan_pattern_name,
+)
 from ...services.trading.backtest_metrics import (
     backtest_win_rate_db_to_display_pct,
     normalize_win_rate_for_db,
@@ -103,6 +106,41 @@ def api_brain_performance(request: Request, db: Session = Depends(get_db)):
     from ...services.trading.portfolio import get_performance_dashboard
     data = get_performance_dashboard(db, ctx["user_id"])
     return JSONResponse(data)
+
+
+@router.get("/api/trading/opportunity-board")
+def api_trading_opportunity_board(
+    request: Request,
+    db: Session = Depends(get_db),
+    debug: int = Query(0, ge=0, le=1),
+    include_research: int = Query(0, ge=0, le=1),
+    max_tier_a: int | None = Query(None, ge=1, le=100),
+    max_tier_b: int | None = Query(None, ge=1, le=100),
+    max_tier_c: int | None = Query(None, ge=1, le=100),
+    max_tier_d: int | None = Query(None, ge=1, le=100),
+):
+    """Tiered manual-trading opportunity surface (shared scoring with imminent alerts)."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.opportunity_board import get_trading_opportunity_board
+
+    caps: dict[str, int] = {}
+    if max_tier_a is not None:
+        caps["A"] = max_tier_a
+    if max_tier_b is not None:
+        caps["B"] = max_tier_b
+    if max_tier_c is not None:
+        caps["C"] = max_tier_c
+    if max_tier_d is not None:
+        caps["D"] = max_tier_d
+
+    data = get_trading_opportunity_board(
+        db,
+        ctx["user_id"],
+        include_research=bool(include_research),
+        include_debug=(debug == 1),
+        max_per_tier=caps or None,
+    )
+    return JSONResponse(to_jsonable(data))
 
 
 @router.get("/api/trading/brain/data-health")
@@ -862,21 +900,40 @@ def _sibling_insight_ids_for_pattern(
     scan_pattern_id: int | None,
     sp_resolved_id: int | None,
 ) -> list[int]:
-    """Insight ids that share the same ScanPattern (for backtest linkage)."""
+    """Insight ids that share the same ``scan_pattern_id`` (FK sibling pool for backtests)."""
     from ...models.trading import TradingInsight
 
     sid = scan_pattern_id or sp_resolved_id
     if not sid:
         return [primary_insight_id]
     ids = [
-        r[0]
+        int(r[0])
         for r in db.query(TradingInsight.id)
-        .filter(TradingInsight.scan_pattern_id == sid)
+        .filter(TradingInsight.scan_pattern_id == int(sid))
         .all()
     ]
     if primary_insight_id not in ids:
         ids = [*ids, primary_insight_id]
-    return ids
+    return sorted(set(ids))
+
+
+def _evidence_representative_backtest(
+    rows: list[Any],
+) -> Any:
+    """When several stored runs share (ticker, strategy_name), prefer rows with trades over 0-trade reruns."""
+    if not rows:
+        raise ValueError("rows required")
+    from datetime import datetime as _dt
+
+    epoch = _dt(1970, 1, 1)
+
+    def _sort_key(b: Any) -> tuple[int, float]:
+        tc = int(getattr(b, "trade_count", None) or 0)
+        ra = getattr(b, "ran_at", None) or epoch
+        ts = ra.timestamp() if hasattr(ra, "timestamp") else 0.0
+        return (tc, ts)
+
+    return max(rows, key=_sort_key)
 
 
 def _evidence_backtest_asset_universe(
@@ -961,20 +1018,28 @@ def _period_display_from_stored_params(params_raw: Any) -> str | None:
         return None
     if not isinstance(p, dict):
         return None
+    dp = p.get("data_provenance")
+    if not isinstance(dp, dict):
+        dp = {}
     parts: list[str] = []
-    per = p.get("period")
-    iv = p.get("interval")
+    per = p.get("period") or dp.get("period")
+    iv = p.get("interval") or dp.get("interval")
     if per:
         parts.append(str(per))
     if iv:
         parts.append(str(iv))
     nb = p.get("ohlc_bars")
+    if nb is None and dp.get("ohlc_bars") is not None:
+        nb = dp.get("ohlc_bars")
     if nb is not None:
         try:
             parts.append(f"{int(nb)} bars")
         except (TypeError, ValueError):
             pass
     cf, ct = p.get("chart_time_from"), p.get("chart_time_to")
+    if (cf is None or ct is None) and dp.get("chart_time_from") is not None:
+        cf = dp.get("chart_time_from")
+        ct = dp.get("chart_time_to")
     if cf is not None and ct is not None:
         try:
             from datetime import datetime, timezone
@@ -990,6 +1055,25 @@ def _period_display_from_stored_params(params_raw: Any) -> str | None:
     return " · ".join(parts) if parts else None
 
 
+def _evidence_backtest_matches_scan_pattern(bt, scan_pattern_id: int | None) -> bool:
+    """Include only rows with a non-null ``scan_pattern_id`` matching the evidence pattern.
+
+    Rows whose ``strategy_name`` does not match the linked ``ScanPattern.name`` are excluded
+    in ``_compute_deduped_backtest_win_stats``; conflicting rows should be deleted in DB
+    (see ``scripts/delete_backtests_scan_pattern_strategy_mismatch.py``) so the learning cycle
+    can replace them.
+    """
+    if scan_pattern_id is None:
+        return True
+    row_sp = getattr(bt, "scan_pattern_id", None)
+    if row_sp is None:
+        return False
+    try:
+        return int(row_sp) == int(scan_pattern_id)
+    except (TypeError, ValueError):
+        return False
+
+
 def _compute_deduped_backtest_win_stats(
     db: Session,
     sibling_insight_ids: list[int],
@@ -1000,19 +1084,34 @@ def _compute_deduped_backtest_win_stats(
 ) -> dict:
     """Backtest list + win stats for the pattern evidence modal.
 
-    Sibling-linked BacktestResult rows only (latest per ticker/strategy within the recent window).
+    ``sibling_insight_ids`` should be **one id** (the opened insight): rows are keyed in DB by
+    ``(related_insight_id, ticker, strategy_name)``. Pooling multiple insights that share a
+    ``scan_pattern_id`` merged divergent runs per ticker and made metrics look random.
+    When ``scan_pattern_id`` is set, rows must match that FK and ``strategy_name`` must align
+    with ``ScanPattern.name``.
 
     Aggregate **win_rate** / W–L in the header matches the per-row **win_rate** columns (simulated
     trades): trade-weighted across deduped rows, not ``return_pct > 0`` (a backtest can lose money
     while still showing a partial trade win rate).
     """
-    from ...models.trading import BacktestResult
+    from ...models.trading import BacktestResult, ScanPattern
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
     from ...services.trading.research_kpis import parse_kpis_from_backtest_params
 
+    from collections import defaultdict
+
     backtests_out: list[dict] = []
     deduped_bt: list[BacktestResult] = []
-    seen_bt_keys: set[tuple[str, str]] = set()
+    _pattern_name_for_label: str | None = None
+    if scan_pattern_id is not None:
+        _spn_row = (
+            db.query(ScanPattern.name)
+            .filter(ScanPattern.id == int(scan_pattern_id))
+            .first()
+        )
+        if _spn_row and (_spn_row[0] or "").strip():
+            _pattern_name_for_label = str(_spn_row[0]).strip()
+
     try:
         linked_bts = (
             db.query(BacktestResult)
@@ -1021,21 +1120,24 @@ def _compute_deduped_backtest_win_stats(
             .limit(linked_limit)
             .all()
         )
+        _cand: list[BacktestResult] = []
         for bt in linked_bts:
             if asset_universe == "crypto" and not _is_crypto_bt(bt.ticker or ""):
                 continue
             if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
                 continue
-            if (
-                scan_pattern_id is not None
-                and bt.scan_pattern_id is not None
-                and int(bt.scan_pattern_id) != int(scan_pattern_id)
+            if not _evidence_backtest_matches_scan_pattern(bt, scan_pattern_id):
+                continue
+            if _pattern_name_for_label and not strategy_label_aligns_scan_pattern_name(
+                bt.strategy_name, _pattern_name_for_label
             ):
                 continue
-            dedup_key = (bt.ticker or "", bt.strategy_name or "")
-            if dedup_key in seen_bt_keys:
-                continue
-            seen_bt_keys.add(dedup_key)
+            _cand.append(bt)
+        _by_dk: dict[tuple[str, str], list[BacktestResult]] = defaultdict(list)
+        for bt in _cand:
+            _by_dk[(bt.ticker or "", bt.strategy_name or "")].append(bt)
+        for _dk in sorted(_by_dk.keys(), key=lambda k: (k[0], k[1])):
+            bt = _evidence_representative_backtest(_by_dk[_dk])
             deduped_bt.append(bt)
             pdisp = _period_display_from_stored_params(bt.params)
             if not pdisp:
@@ -1117,15 +1219,25 @@ def _deduped_win_rate_progress_series(
     asset_universe: str = "all",
     scan_pattern_id: int | None = None,
 ) -> list[dict]:
-    """Chronological win-rate series over sibling-linked backtests only (no global padding).
+    """Chronological win-rate series for the same insight-linked backtest pool as the panel.
 
     Uses the same recent row pool as the panel: newest ``row_limit`` runs, then replayed in time
     order. State is updated for every run (including 0-trade). Win rate is **trade-weighted** over
     deduped tickers (same formula as ``_compute_deduped_backtest_win_stats``). Last point aligns
     with that panel for the same replayed pool.
     """
-    from ...models.trading import BacktestResult
+    from ...models.trading import BacktestResult, ScanPattern
     from ...services.trading.market_data import is_crypto as _is_crypto_bt
+
+    _pn_prog: str | None = None
+    if scan_pattern_id is not None:
+        _r = (
+            db.query(ScanPattern.name)
+            .filter(ScanPattern.id == int(scan_pattern_id))
+            .first()
+        )
+        if _r and (_r[0] or "").strip():
+            _pn_prog = str(_r[0]).strip()
 
     points: list[dict] = []
     try:
@@ -1147,17 +1259,21 @@ def _deduped_win_rate_progress_series(
             continue
         if asset_universe == "stocks" and _is_crypto_bt(bt.ticker or ""):
             continue
-        if (
-            scan_pattern_id is not None
-            and bt.scan_pattern_id is not None
-            and int(bt.scan_pattern_id) != int(scan_pattern_id)
+        if not _evidence_backtest_matches_scan_pattern(bt, scan_pattern_id):
+            continue
+        if _pn_prog and not strategy_label_aligns_scan_pattern_name(
+            bt.strategy_name, _pn_prog
         ):
             continue
         ran_at = bt.ran_at
         if not ran_at:
             continue
         key = (bt.ticker or "", bt.strategy_name or "")
-        state[key] = bt
+        prev = state.get(key)
+        if prev is None:
+            state[key] = bt
+        else:
+            state[key] = _evidence_representative_backtest([prev, bt])
         with_trades = [v for v in state.values() if (v.trade_count or 0) > 0]
         total_t = sum(int(v.trade_count or 0) for v in with_trades)
         if total_t > 0:
@@ -1228,36 +1344,9 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
                 sectors.append(sec)
         return sectors
 
-    # Batch prefetch: avoid per-insight LearningEvent + sibling-id queries (was ~2s × N → 524 timeouts).
+    # Batch prefetch LearningEvents (avoid N+1). Backtests are **per insight row** only — pooling
+    # all insights that share a scan_pattern_id mixed divergent stored rows per ticker.
     _insight_ids = [int(i.id) for i in all_insights]
-    _sp_ids_for_siblings = {
-        int(i.scan_pattern_id) for i in all_insights if i.scan_pattern_id is not None
-    }
-    _sibling_ids_by_sp: dict[int, list[int]] = {}
-    if _sp_ids_for_siblings:
-        _sib_rows = (
-            db.query(TradingInsight.id, TradingInsight.scan_pattern_id)
-            .filter(TradingInsight.scan_pattern_id.in_(_sp_ids_for_siblings))
-            .all()
-        )
-        _tmp_sib: dict[int, list[int]] = defaultdict(list)
-        for iid, spid in _sib_rows:
-            if spid is not None:
-                _tmp_sib[int(spid)].append(int(iid))
-        _sibling_ids_by_sp = {k: sorted(set(v)) for k, v in _tmp_sib.items()}
-
-    def _sibling_ids_batched(
-        primary_insight_id: int,
-        scan_pid: int | None,
-        sp_resolved: int | None,
-    ) -> list[int]:
-        sid = scan_pid or sp_resolved
-        if not sid:
-            return [primary_insight_id]
-        ids = list(_sibling_ids_by_sp.get(int(sid), []))
-        if primary_insight_id not in ids:
-            ids = [*ids, primary_insight_id]
-        return ids
 
     _le_by_insight: dict[int, list[str]] = defaultdict(list)
     if _insight_ids:
@@ -1300,8 +1389,7 @@ def api_learned_patterns(request: Request, db: Session = Depends(get_db)):
             sp_resolved = int(raw_sid)
         else:
             sp_resolved = _resolve_scan_pattern_id_for_insight(db, ins)
-        scan_pid = getattr(ins, "scan_pattern_id", None)
-        sibs = _sibling_ids_batched(ins.id, scan_pid, sp_resolved)
+        sibs = [int(ins.id)]
         _le_descs = _le_by_insight.get(int(ins.id), [])
         _bt_univ = _evidence_backtest_asset_universe(
             db,
@@ -1514,9 +1602,8 @@ def _api_pattern_evidence_response(
 
     desc = insight.pattern_description or ""
     sp_resolved_id = _resolve_scan_pattern_id_for_insight(db, insight)
-    sibling_ids = _sibling_insight_ids_for_pattern(
-        db, pattern_id, getattr(insight, "scan_pattern_id", None), sp_resolved_id
-    )
+    # One Brain card = one TradingInsight; backtests are stored per (insight, ticker, strategy).
+    sibling_ids = [int(pattern_id)]
 
     # 1. Learning events linked to this insight
     events = (
@@ -1618,6 +1705,28 @@ def _api_pattern_evidence_response(
         db, sibling_ids, asset_universe=_ev_univ,
         scan_pattern_id=sp_resolved_id,
     )
+    if bt_win_rate is not None and (bt_wins + bt_losses) > 0:
+        _sync_tail = {
+            "win_rate": bt_win_rate,
+            "wins": bt_wins,
+            "losses": bt_losses,
+            "deduped_runs": int(panel.get("bt_runs_with_trades") or 0),
+            "simulated_trades": int(panel.get("bt_total_trades") or 0),
+        }
+        if win_rate_progress:
+            _last_pt = win_rate_progress[-1]
+            win_rate_progress[-1] = {**_last_pt, **_sync_tail}
+        else:
+            from datetime import datetime, timezone
+
+            _now = datetime.now(timezone.utc)
+            win_rate_progress = [
+                {
+                    "time": int(_now.timestamp()),
+                    "ran_at": _now.isoformat(),
+                    **_sync_tail,
+                }
+            ]
 
     pattern_display = (
         _sync_win_stats_in_description(desc, bt_win_rate, bt_wins, bt_losses)
@@ -1796,12 +1905,8 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
     ctx = get_identity_ctx(request, db)
     if ctx.get("is_guest"):
         return JSONResponse({"ok": False, "error": "Sign in required"}, status_code=401)
-    from ...models.trading import BacktestResult, TradingInsight, ScanPattern
-    from ...services.backtest_service import (
-        backtest_pattern,
-        get_brain_backtest_window,
-        save_backtest,
-    )
+    from ...models.trading import BacktestResult, TradingInsight
+    from ...services.trading.stored_backtest_rerun import rerun_stored_backtest_by_id
 
     bt = db.query(BacktestResult).filter(BacktestResult.id == bt_id).first()
     if not bt:
@@ -1815,75 +1920,71 @@ def api_rerun_stored_backtest(bt_id: int, request: Request, db: Session = Depend
     if ins and not _access_backtest_row(ctx, db, bt, ins):
         return JSONResponse({"ok": False, "error": "Access denied"}, status_code=404)
 
-    sp_id = bt.scan_pattern_id or (getattr(ins, "scan_pattern_id", None) if ins else None)
-    if not sp_id:
-        return JSONResponse({"ok": False, "error": "No ScanPattern linked to this backtest"}, status_code=400)
-    p = db.query(ScanPattern).get(sp_id)
-    if not p:
-        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    out = rerun_stored_backtest_by_id(db, bt_id)
+    if not out.get("ok"):
+        err = out.get("error", "backtest failed")
+        code = 404 if err in ("Backtest not found", "Pattern not found") else 400
+        return JSONResponse(to_jsonable({"ok": False, "error": err}), status_code=code)
+    return JSONResponse(to_jsonable(out))
 
-    tf = getattr(p, "timeframe", "1d") or "1d"
-    use_period, use_interval = get_brain_backtest_window(tf)
-    ohlc_start: str | None = None
-    ohlc_end: str | None = None
-    try:
-        pr = json.loads(bt.params) if isinstance(bt.params, str) else dict(bt.params or {})
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pr = {}
-    if isinstance(pr, dict):
-        if pr.get("interval"):
-            use_interval = str(pr["interval"]).strip()
-        if pr.get("period"):
-            use_period = str(pr["period"]).strip()
-        ctf, ctt = pr.get("chart_time_from"), pr.get("chart_time_to")
-        if ctf is not None and ctt is not None:
-            try:
-                from datetime import datetime, timezone
 
-                ohlc_start = datetime.fromtimestamp(
-                    int(float(ctf)), tz=timezone.utc,
-                ).strftime("%Y-%m-%d")
-                ohlc_end = datetime.fromtimestamp(
-                    int(float(ctt)), tz=timezone.utc,
-                ).strftime("%Y-%m-%d")
-            except (TypeError, ValueError, OSError):
-                ohlc_start, ohlc_end = None, None
+@router.post("/api/trading/learn/patterns/{insight_id}/rerun-stored-backtests")
+def api_rerun_all_stored_backtests_for_insight(
+    insight_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int | None = Query(
+        None,
+        ge=1,
+        le=500,
+        description="Optional cap on how many listed rows to rerun (default: all).",
+    ),
+):
+    """Re-run every deduped backtest row shown in Pattern Evidence for this insight.
 
-    from ...config import settings
-
-    result = backtest_pattern(
-        ticker=bt.ticker,
-        pattern_name=p.name,
-        rules_json=p.rules_json,
-        interval=use_interval,
-        period=use_period,
-        exit_config=getattr(p, "exit_config", None),
-        cash=100_000.0,
-        commission=float(settings.backtest_commission),
-        spread=float(settings.backtest_spread),
-        ohlc_start=ohlc_start,
-        ohlc_end=ohlc_end,
+    Uses each row's saved period / OHLC window (same as single-row **Rerun**). Work runs
+    in a **background thread** so the HTTP request returns immediately; watch server logs
+    for ``[rerun_all_insight]`` progress, then reload Pattern Evidence.
+    """
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        return JSONResponse({"ok": False, "error": "Sign in required"}, status_code=401)
+    from ...models.trading import TradingInsight
+    from ...services.trading.stored_backtest_rerun import (
+        collect_evidence_listed_backtest_ids,
+        spawn_insight_stored_backtests_rerun_thread,
     )
-    if not result.get("ok"):
+
+    ins = db.get(TradingInsight, int(insight_id))
+    if not ins:
+        return JSONResponse({"ok": False, "error": "Insight not found"}, status_code=404)
+
+    ids, err = collect_evidence_listed_backtest_ids(db, int(insight_id), limit=limit)
+    if err:
+        return JSONResponse({"ok": False, "error": err}, status_code=404)
+    if not ids:
         return JSONResponse(
-            {"ok": False, "error": result.get("error", "backtest failed")},
+            {
+                "ok": False,
+                "error": "No stored backtests match this insight / pattern filters",
+            },
             status_code=400,
         )
 
-    uid = ins.user_id if ins else bt.user_id
-    rec = save_backtest(
-        db, uid, result,
-        insight_id=bt.related_insight_id,
-        scan_pattern_id=int(sp_id),
+    spawn_insight_stored_backtests_rerun_thread(int(insight_id), limit=limit)
+    return JSONResponse(
+        to_jsonable(
+            {
+                "ok": True,
+                "queued": len(ids),
+                "insight_id": int(insight_id),
+                "message": (
+                    "Reruns started in the background. Reload Pattern Evidence when server "
+                    "logs show [rerun_all_insight] done (may take many minutes for 100+ rows)."
+                ),
+            }
+        )
     )
-    ran_at = getattr(rec, "ran_at", None)
-    out = {
-        **result,
-        "ok": True,
-        "backtest_id": rec.id,
-        "ran_at": ran_at.isoformat() if ran_at else None,
-    }
-    return JSONResponse(to_jsonable(out))
 
 
 @router.post("/api/trading/learn/backtest/{bt_id}/refresh")

@@ -544,6 +544,293 @@ class TestPortfolioAPI:
         assert resp.status_code == 200
 
 
+class TestSaveBacktestRowTargeting:
+    def test_save_backtest_updates_exact_row_when_duplicates(self, db):
+        """Natural-key .first() was arbitrary; reruns must hit the evidence row id."""
+        from app.services.backtest_service import save_backtest
+
+        user, _tok = _make_paired(db)
+        sp = ScanPattern(
+            name="DupStrat",
+            description="d",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="DupStrat — t",
+            confidence=0.5,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        old = BacktestResult(
+            user_id=user.id,
+            ticker="SOFI",
+            strategy_name="DupStrat",
+            return_pct=1.0,
+            win_rate=0.5,
+            trade_count=1,
+            related_insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            ran_at=now,
+        )
+        new = BacktestResult(
+            user_id=user.id,
+            ticker="SOFI",
+            strategy_name="DupStrat",
+            return_pct=5.0,
+            win_rate=0.9,
+            trade_count=4,
+            related_insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            ran_at=now,
+        )
+        db.add(old)
+        db.add(new)
+        db.commit()
+        db.refresh(old)
+        db.refresh(new)
+        result = {
+            "ok": True,
+            "ticker": "SOFI",
+            "strategy": "DupStrat",
+            "return_pct": 99.0,
+            "win_rate": 0.5,
+            "trade_count": 7,
+            "equity_curve": [],
+            "period": "2y",
+            "interval": "1d",
+        }
+        rec = save_backtest(
+            db,
+            user.id,
+            result,
+            insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            backtest_row_id=old.id,
+        )
+        assert rec.id == old.id
+        assert int(rec.trade_count or 0) == 7
+        db.refresh(new)
+        assert float(new.return_pct or 0) == 5.0
+        assert int(new.trade_count or 0) == 4
+
+    def test_save_backtest_row_id_ignores_full_vs_truncated_strategy(self, db):
+        """Rerun must update by pk even when result strategy is longer than String(100)."""
+        from app.services.backtest_service import save_backtest
+
+        user, _tok = _make_paired(db)
+        sp = ScanPattern(
+            name="Trunc",
+            description="d",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="Trunc — t",
+            confidence=0.5,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        long_strat = "S" * 120
+        short_strat = long_strat[:100]
+        row = BacktestResult(
+            user_id=user.id,
+            ticker="IBM",
+            strategy_name=short_strat,
+            return_pct=1.0,
+            win_rate=0.5,
+            trade_count=1,
+            related_insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            ran_at=datetime.utcnow(),
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        result = {
+            "ok": True,
+            "ticker": "IBM",
+            "strategy": long_strat,
+            "return_pct": 12.0,
+            "win_rate": 0.4,
+            "trade_count": 9,
+            "equity_curve": [],
+            "period": "1y",
+            "interval": "1d",
+        }
+        rec = save_backtest(
+            db,
+            user.id,
+            result,
+            insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            backtest_row_id=row.id,
+        )
+        assert rec.id == row.id
+        assert int(rec.trade_count or 0) == 9
+
+    def test_save_backtest_advances_ran_at_on_update(self, db):
+        """Updates must bump ran_at or evidence dedupe keeps an old duplicate as representative."""
+        import time
+
+        from app.services.backtest_service import save_backtest
+
+        user, _tok = _make_paired(db)
+        sp = ScanPattern(
+            name="RanAtP",
+            description="d",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="RanAtP — t",
+            confidence=0.5,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        row = BacktestResult(
+            user_id=user.id,
+            ticker="XOM",
+            strategy_name="RanAtP",
+            return_pct=1.0,
+            win_rate=0.5,
+            trade_count=1,
+            related_insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            ran_at=datetime.utcnow(),
+        )
+        db.add(row)
+        db.commit()
+        db.refresh(row)
+        old_ran = row.ran_at
+        time.sleep(0.05)
+        result = {
+            "ok": True,
+            "ticker": "XOM",
+            "strategy": "RanAtP",
+            "return_pct": 2.0,
+            "win_rate": 0.6,
+            "trade_count": 3,
+            "equity_curve": [],
+            "period": "1y",
+            "interval": "1d",
+        }
+        save_backtest(
+            db,
+            user.id,
+            result,
+            insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            backtest_row_id=row.id,
+        )
+        db.refresh(row)
+        assert row.ran_at is not None and old_ran is not None
+        assert row.ran_at > old_ran
+
+
+class TestQueueStoredBacktestRefresh:
+    """Queue worker prepends stale / low-trade stored tickers before random sampling."""
+
+    def test_priority_tickers_prefers_stale_low_trade(self, db):
+        from datetime import timedelta
+
+        from app.services.trading.backtest_engine import (
+            priority_tickers_from_stored_backtests_for_refresh,
+        )
+
+        user, _tok = _make_paired(db)
+        sp = ScanPattern(
+            name="StaleP",
+            description="t",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="StaleP — x",
+            confidence=0.5,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        old = now - timedelta(days=30)
+        for ticker, tc, ra in (
+            ("FRESH", 20, now),
+            ("LOW1", 1, now),
+            ("ZERO", 0, now),
+            ("OLDHI", 50, old),
+        ):
+            db.add(
+                BacktestResult(
+                    user_id=user.id,
+                    ticker=ticker,
+                    strategy_name="StaleP",
+                    return_pct=1.0,
+                    win_rate=0.5,
+                    trade_count=tc,
+                    related_insight_id=ins.id,
+                    scan_pattern_id=sp.id,
+                    ran_at=ra,
+                )
+            )
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="SKIPME",
+                strategy_name="WrongName",
+                return_pct=0.0,
+                win_rate=0.0,
+                trade_count=0,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.commit()
+        out = priority_tickers_from_stored_backtests_for_refresh(
+            db,
+            insight_id=ins.id,
+            scan_pattern_id=sp.id,
+            pattern_name="StaleP",
+            max_tickers=10,
+            stale_trade_cap=2,
+            stale_days=14,
+        )
+        assert "ZERO" in out and "LOW1" in out
+        assert "OLDHI" in out
+        assert "FRESH" not in out
+        assert "SKIPME" not in out
+        assert out.index("ZERO") < out.index("LOW1")
+
+
 class TestBrainAPI:
     def test_brain_stats(self, db, client):
         user, token = _make_paired(db)
@@ -756,7 +1043,7 @@ class TestBrainAPI:
             BacktestResult(
                 user_id=user.id,
                 ticker="AAA-USD",
-                strategy_name="s1",
+                strategy_name="EvTradeWR",
                 return_pct=-10.0,
                 win_rate=0.5,
                 trade_count=10,
@@ -769,7 +1056,7 @@ class TestBrainAPI:
             BacktestResult(
                 user_id=user.id,
                 ticker="BBB-USD",
-                strategy_name="s1",
+                strategy_name="EvTradeWR",
                 return_pct=-5.0,
                 win_rate=0.3,
                 trade_count=10,
@@ -794,6 +1081,117 @@ class TestBrainAPI:
         rows = {b["ticker"]: b for b in j["backtests"]}
         assert rows["AAA-USD"]["win_rate"] == 50.0
         assert rows["BBB-USD"]["win_rate"] == 30.0
+
+    def test_pattern_evidence_excludes_null_scan_pattern_orphans(self, db, client):
+        """Legacy rows saved without scan_pattern_id must not appear (wrong strategy labels)."""
+        from datetime import datetime
+
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="TightRangeLike",
+            description="test",
+            rules_json='{"conditions":[]}',
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="TightRangeLike — composable",
+            confidence=0.7,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="SOFI",
+                strategy_name="TightRangeLike",
+                return_pct=1.0,
+                win_rate=0.5,
+                trade_count=4,
+                related_insight_id=ins.id,
+                scan_pattern_id=sp.id,
+                ran_at=now,
+            )
+        )
+        db.add(
+            BacktestResult(
+                user_id=user.id,
+                ticker="SOFI",
+                strategy_name="Momentum Breakout",
+                return_pct=136.2,
+                win_rate=1.0,
+                trade_count=4,
+                related_insight_id=ins.id,
+                scan_pattern_id=None,
+                ran_at=now,
+            )
+        )
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        j = client.get(f"/api/trading/learn/patterns/{ins.id}/evidence").json()
+        assert j["ok"] is True
+        tickers_strats = [(b["ticker"], b["strategy_name"]) for b in j["backtests"]]
+        assert ("SOFI", "TightRangeLike") in tickers_strats
+        assert ("SOFI", "Momentum Breakout") not in tickers_strats
+        assert j["insight"]["win_rate"] == 50.0
+
+    def test_rerun_all_stored_backtests_guest_blocked(self, db, client):
+        resp = client.post("/api/trading/learn/patterns/1/rerun-stored-backtests")
+        assert resp.status_code == 401
+
+    def test_rerun_all_stored_backtests_endpoint_queues_rows(self, db, client):
+        """Queued count matches deduped evidence rows (work runs in a background thread)."""
+        from datetime import datetime
+
+        user, token = _make_paired(db)
+        sp = ScanPattern(
+            name="BatchRerunPat",
+            description="test",
+            rules_json="{}",
+            origin="user",
+        )
+        db.add(sp)
+        db.commit()
+        db.refresh(sp)
+        ins = TradingInsight(
+            user_id=user.id,
+            scan_pattern_id=sp.id,
+            pattern_description="BatchRerunPat — test",
+            confidence=0.7,
+            evidence_count=1,
+        )
+        db.add(ins)
+        db.commit()
+        db.refresh(ins)
+        now = datetime.utcnow()
+        for ticker in ("AAA", "BBB"):
+            db.add(
+                BacktestResult(
+                    user_id=user.id,
+                    ticker=ticker,
+                    strategy_name="BatchRerunPat",
+                    return_pct=1.0,
+                    win_rate=0.5,
+                    trade_count=2,
+                    related_insight_id=ins.id,
+                    scan_pattern_id=sp.id,
+                    ran_at=now,
+                )
+            )
+        db.commit()
+        client.cookies.set(DEVICE_COOKIE_NAME, token)
+        resp = client.post(f"/api/trading/learn/patterns/{ins.id}/rerun-stored-backtests")
+        assert resp.status_code == 200
+        j = resp.json()
+        assert j["ok"] is True
+        assert j["queued"] == 2
 
     @patch("app.services.backtest_service._fetch_ohlcv_df")
     def test_benchmark_walk_forward_evaluate_smoke(self, mock_fetch):

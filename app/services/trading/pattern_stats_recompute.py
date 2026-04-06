@@ -101,8 +101,9 @@ def recompute_scan_pattern_stats(engine: Engine) -> None:
 
 
 def refresh_trading_insight_backtest_counts(db: Session) -> int:
-    """Set win_count / loss_count from BacktestResult rows per insight (related_insight_id)."""
+    """Set win_count / loss_count from the same deduped trade-weighted panel as Brain evidence."""
     from ...models.trading import BacktestResult, TradingInsight
+    from .insight_backtest_panel_sync import sync_insight_backtest_tallies_from_evidence_panel
 
     ids = [
         r[0]
@@ -116,15 +117,13 @@ def refresh_trading_insight_backtest_counts(db: Session) -> int:
         ins = db.get(TradingInsight, int(iid))
         if not ins:
             continue
-        bts = (
-            db.query(BacktestResult)
-            .filter(BacktestResult.related_insight_id == ins.id)
-            .all()
-        )
-        with_trades = [b for b in bts if (b.trade_count or 0) > 0]
-        wins = sum(1 for b in with_trades if (b.return_pct or 0) > 0)
-        ins.win_count = wins
-        ins.loss_count = len(with_trades) - wins
+        try:
+            sync_insight_backtest_tallies_from_evidence_panel(db, ins)
+        except Exception:
+            logger.exception(
+                "[pattern_stats_recompute] panel sync failed for insight %s", iid
+            )
+            continue
         updated += 1
     if updated:
         db.commit()

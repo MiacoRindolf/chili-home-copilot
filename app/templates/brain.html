@@ -1047,6 +1047,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
           </div>
         </div>
+        <div class="bsb-row" id="bsb-opp-summary-row" style="flex-wrap:wrap;gap:6px;align-items:center;padding-top:6px;margin-top:4px;border-top:1px solid var(--border)">
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-a" title="Scroll to Opportunity Board">Actionable: —</a>
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-b" title="Scroll to Opportunity Board">Watch soon: —</a>
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-c" title="Scroll to Opportunity Board">Watch today: —</a>
+          <span class="bsb-meta" id="opp-chip-refresh" style="font-size:10px">Board: —</span>
+        </div>
       </div>
 
       <!-- AI Learning Report (floating, hidden until triggered) -->
@@ -1080,6 +1086,40 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
         </div>
       </div>
 
+      <div class="brain-section" id="brain-opportunity-board">
+        <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309">
+          Data may be outdated — tap Refresh. Server age exceeded stale threshold.
+        </div>
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F3AF;</span> Opportunity Board
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">Manual desk view — tiers use the same composite math as imminent alerts.</span>
+          <button type="button" onclick="loadOpportunityBoard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="opp-operator-strip" style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
+          <span id="opp-op-sum">Loading opportunity board…</span>
+        </div>
+        <div id="opp-no-trade" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:10px;padding:10px;border:1px dashed var(--border);border-radius:8px"></div>
+        <div id="opp-tier-a-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#22c55e;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier A — Actionable now</div>
+          <div id="opp-tier-a"></div>
+          <button type="button" id="opp-more-a" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('A')">Show more</button>
+        </div>
+        <div id="opp-tier-b-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#38bdf8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier B — Watch soon</div>
+          <div id="opp-tier-b"></div>
+          <button type="button" id="opp-more-b" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('B')">Show more</button>
+        </div>
+        <div id="opp-tier-c-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#a78bfa;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier C — Watch today / context</div>
+          <div id="opp-tier-c"></div>
+          <button type="button" id="opp-more-c" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('C')">Show more</button>
+        </div>
+        <div id="opp-tier-d-wrap" style="display:none;margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D — Research only</div>
+          <div id="opp-tier-d"></div>
+        </div>
+      </div>
+
       <div class="brain-section">
         <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
           <span class="bs-icon">&#x1F52E;</span> Live Predictions
@@ -1105,6 +1145,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
           <button class="bdd-tab" data-bdd="ops" onclick="switchDeepDiveTab('ops')">Ops</button>
           <button class="bdd-tab" data-bdd="research" onclick="switchDeepDiveTab('research')">Research</button>
           <button class="bdd-tab" data-bdd="analytics" onclick="switchDeepDiveTab('analytics')">Analytics</button>
+          <button class="bdd-tab" data-bdd="debug" onclick="switchDeepDiveTab('debug')">Debug</button>
         </div>
         <div class="bdd-content" id="bdd-content">
 
@@ -1294,6 +1335,13 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div id="bdd-analytics-content" style="font-size:11px;color:var(--text-muted)">
               <p style="padding:12px;text-align:center">Select the Analytics tab to load pattern attribution, signal hit rates, and paper trading results.</p>
             </div>
+          </div>
+
+          <!-- Debug: opportunity-board raw + skip reasons (not default operator view) -->
+          <div class="bdd-panel" id="bdd-debug" style="display:none">
+            <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Opportunity board API with <code>debug=1</code> (suppressions, skip counts). Scheduler / imminent dry-run: Ops tab or <code>POST /api/trading/alerts/run-pattern-imminent?dry_run=1</code>.</p>
+            <button type="button" class="bw-ctrl-btn" onclick="loadOpportunityBoardDebug()">Load debug JSON</button>
+            <pre id="bdd-debug-opp-json" style="margin-top:10px;font-size:10px;max-height:480px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word">Not loaded.</pre>
           </div>
 
         </div><!-- .bdd-content -->
@@ -1814,7 +1862,7 @@ function _renderEvWrProgress(series) {
   if (!wrap || !el) return;
   wrap.style.display = 'block';
   if (!series || series.length === 0) {
-    el.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:8px">No sibling-linked backtest history yet (run backtests from this pattern).</div>';
+    el.innerHTML = '<div style="padding:12px;font-size:11px;color:var(--text-muted);text-align:center;border:1px dashed var(--border);border-radius:8px">No stored backtests for this insight yet (queue or run backtests for this card).</div>';
     return;
   }
   var chartData = series.map(function(pt) { return { time: pt.time, value: pt.win_rate }; });
@@ -2987,6 +3035,36 @@ function evTradeAnalyticsMl() {
     .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
 }
 
+/** Re-run every deduped stored backtest row for this insight (background job on server). */
+function evRerunAllListedBacktests() {
+  var iid = window._currentEvidencePatternId;
+  var out = document.getElementById('ev-trade-analytics-out');
+  if (!iid) {
+    if (out) { out.style.display = 'block'; out.textContent = 'Evidence not loaded yet — wait for the modal to finish loading.'; }
+    return;
+  }
+  var badge = document.getElementById('ev-badge-backtests');
+  var n = badge ? String(badge.textContent || '').trim() : '';
+  if (!confirm(
+    'Re-run every backtest row listed under the Backtests tab for this insight?\n\n' +
+    'Each row uses its saved period/OHLC window and current ScanPattern rules (same as expanding a row chart).\n\n' +
+    'Runs in the background; 100+ tickers can take many minutes. Watch server logs for [rerun_all_insight], then reopen this modal.\n\n' +
+    'Backtests tab count: ' + (n || '?')
+  )) return;
+  if (out) { out.style.display = 'block'; out.textContent = 'Queuing reruns…'; }
+  fetch('/api/trading/learn/patterns/' + iid + '/rerun-stored-backtests', { method: 'POST' })
+    .then(parseFetchJson)
+    .then(function(d){
+      if (!out) return;
+      if (d.ok) {
+        out.textContent = 'Queued ' + (d.queued || 0) + ' reruns.\n' + (d.message || '');
+      } else {
+        out.textContent = 'Error: ' + (d.error || JSON.stringify(d));
+      }
+    })
+    .catch(function(err){ if (out) out.textContent = 'Request failed: ' + (err && err.message ? err.message : 'unknown'); });
+}
+
 /* ── Deep Dive tab switching + lazy loading ──── */
 var _bddLoaded = {};
 var _bddActiveTab = null;
@@ -3159,6 +3237,7 @@ function loadBrainDashboard() {
   /* Zone 2: Playbook + P&L + Predictions + Tradeable */
   loadPlaybook();
   loadPerfDashboard();
+  loadOpportunityBoard();
   loadBrainPredictions();
   loadTradeablePatterns();
 
@@ -3672,6 +3751,140 @@ function loadNearTradeableCandidates() {
   });
 }
 
+window._oppTierCaps = { A: null, B: null, C: null, D: null };
+window._oppLastPayload = null;
+
+function oppExpandTier(t) {
+  var prev = (window._oppLastPayload && window._oppLastPayload.applied_tier_caps) || {};
+  var base = prev[t] || (t === 'A' ? 3 : t === 'B' ? 5 : t === 'C' ? 8 : 12);
+  var cur = window._oppTierCaps[t];
+  window._oppTierCaps[t] = cur ? Math.min(80, cur + Math.max(2, Math.floor(base))) : Math.min(80, base * 2);
+  loadOpportunityBoard();
+}
+
+function loadOpportunityBoardDebug() {
+  var pre = document.getElementById('bdd-debug-opp-json');
+  if (!pre) return;
+  pre.textContent = 'Loading…';
+  var qs = ['debug=1', 'include_research=1'];
+  ['a', 'b', 'c', 'd'].forEach(function(lc) {
+    var T = lc.toUpperCase();
+    var v = window._oppTierCaps[T];
+    if (v) qs.push('max_tier_' + lc + '=' + encodeURIComponent(v));
+  });
+  fetch('/api/trading/opportunity-board?' + qs.join('&')).then(parseFetchJson).then(function(d) {
+    pre.textContent = JSON.stringify(d, null, 2);
+  }).catch(function(e) {
+    pre.textContent = 'Error: ' + (e && e.message ? e.message : String(e));
+  });
+}
+
+function loadOpportunityBoard() {
+  var qs = [];
+  ['a', 'b', 'c', 'd'].forEach(function(lc) {
+    var T = lc.toUpperCase();
+    var v = window._oppTierCaps[T];
+    if (v) qs.push('max_tier_' + lc + '=' + encodeURIComponent(v));
+  });
+  var qstr = qs.length ? ('?' + qs.join('&')) : '';
+  var strip = document.getElementById('opp-operator-strip');
+  if (strip) strip.innerHTML = '<span id="opp-op-sum">Loading opportunity board…</span>';
+  fetch('/api/trading/opportunity-board' + qstr).then(parseFetchJson).then(function(d) {
+    window._oppLastPayload = d;
+    if (!d || !d.ok) {
+      if (strip) strip.innerHTML = '<span style="color:var(--text-muted)">Board unavailable.</span>';
+      return;
+    }
+    var os = d.operator_summary || {};
+    var ca = document.getElementById('opp-chip-a');
+    var cb = document.getElementById('opp-chip-b');
+    var cc = document.getElementById('opp-chip-c');
+    var cr = document.getElementById('opp-chip-refresh');
+    if (ca) ca.textContent = 'Actionable: ' + (os.actionable_count != null ? os.actionable_count : '—');
+    if (cb) cb.textContent = 'Watch soon: ' + (os.watch_soon_count != null ? os.watch_soon_count : '—');
+    if (cc) cc.textContent = 'Watch today: ' + (os.watch_today_count != null ? os.watch_today_count : '—');
+    if (cr) cr.textContent = 'Refreshed: ' + (os.last_refresh_utc || d.generated_at || '—');
+
+    var sumEl = document.getElementById('opp-op-sum');
+    if (sumEl) {
+      var parts = [];
+      parts.push('<strong>Actionable:</strong> ' + (os.actionable_count != null ? os.actionable_count : '—'));
+      parts.push('<strong>Watch soon:</strong> ' + (os.watch_soon_count != null ? os.watch_soon_count : '—'));
+      parts.push('<strong>Watch today:</strong> ' + (os.watch_today_count != null ? os.watch_today_count : '—'));
+      parts.push('<strong>No-trade now:</strong> ' + (os.no_trade_now ? 'yes' : 'no'));
+      parts.push('<strong>Last refresh (UTC):</strong> ' + escHtml(String(os.last_refresh_utc || d.generated_at || '—')));
+      if (os.session_line) parts.push('<strong>Session:</strong> ' + escHtml(String(os.session_line)));
+      sumEl.innerHTML = parts.join(' <span style="color:var(--border)">|</span> ');
+    }
+
+    var ban = document.getElementById('opp-stale-banner');
+    if (ban) ban.style.display = d.is_stale ? 'block' : 'none';
+
+    var nt = document.getElementById('opp-no-trade');
+    if (nt) {
+      if (os.no_trade_now && d.no_trade_summary_lines && d.no_trade_summary_lines.length) {
+        nt.style.display = 'block';
+        nt.innerHTML = '<div style="font-weight:700;margin-bottom:4px;color:var(--text)">Why nothing actionable (Tier A)</div><ul style="margin:0;padding-left:18px">' +
+          d.no_trade_summary_lines.map(function(line) { return '<li>' + escHtml(String(line)) + '</li>'; }).join('') + '</ul>';
+      } else {
+        nt.style.display = 'none';
+        nt.innerHTML = '';
+      }
+    }
+
+    function cardHtml(it) {
+      var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + escHtml(String(it.ticker || '')) + '</div>';
+      var sub = [];
+      if (it.pattern_name) sub.push(escHtml(String(it.pattern_name)));
+      if (it.composite != null) sub.push('comp ' + it.composite);
+      if (it.feature_coverage != null) sub.push('cov ' + it.feature_coverage);
+      if (it.eta_label) sub.push(escHtml(String(it.eta_label)));
+      var predBadge = '';
+      if (it.also_in_live_predictions) {
+        predBadge = ' <a href="#brain-predictions" style="font-size:9px;color:#818cf8;font-weight:600;text-decoration:none">In live predictions ↓</a>';
+      }
+      var why = '';
+      if (it.why_here) why += '<div style="margin-top:6px;font-size:10px;color:var(--text-secondary);line-height:1.45">' + escHtml(String(it.why_here)) + '</div>';
+      if (it.why_not_higher_tier) why += '<div style="margin-top:4px;font-size:9px;color:var(--text-muted)">Tier note: ' + escHtml(String(it.why_not_higher_tier)) + '</div>';
+      if (it.main_risk) why += '<div style="margin-top:4px;font-size:9px;color:#b45309">Risk: ' + escHtml(String(it.main_risk)) + '</div>';
+      return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--bg)">' + head +
+        '<div style="font-size:10px;color:var(--text-muted)">' + sub.join(' · ') + predBadge + '</div>' + why + '</div>';
+    }
+
+    function fillTier(id, items, moreId, hmKey) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      if (!items || !items.length) {
+        el.innerHTML = '<div style="font-size:10px;color:var(--text-muted);font-style:italic">None right now.</div>';
+      } else {
+        el.innerHTML = items.map(cardHtml).join('');
+      }
+      var moreBtn = document.getElementById(moreId);
+      if (moreBtn) moreBtn.style.display = (d.has_more && d.has_more[hmKey]) ? 'inline-block' : 'none';
+    }
+
+    var T = d.tiers || {};
+    fillTier('opp-tier-a', T.actionable_now, 'opp-more-a', 'A');
+    fillTier('opp-tier-b', T.watch_soon, 'opp-more-b', 'B');
+    fillTier('opp-tier-c', T.watch_today, 'opp-more-c', 'C');
+
+    var dw = document.getElementById('opp-tier-d-wrap');
+    var dd = document.getElementById('opp-tier-d');
+    if (dw && dd) {
+      var ro = T.research_only || [];
+      if (ro.length) {
+        dw.style.display = 'block';
+        dd.innerHTML = ro.map(cardHtml).join('');
+      } else {
+        dw.style.display = 'none';
+        dd.innerHTML = '';
+      }
+    }
+  }).catch(function() {
+    if (strip) strip.innerHTML = '<span style="color:var(--text-muted)">Failed to load opportunity board.</span>';
+  });
+}
+
 function loadBrainPredictions() {
   var container = document.getElementById('brain-predictions'); if (!container) return;
   container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:12px"><div class="brain-pulse"></div> Computing predictions...</div>';
@@ -3971,7 +4184,7 @@ function renderPatterns() {
     if (p.oos_trade_count != null && p.oos_trade_count > 0) oosTitle += ' OOS trades: ' + p.oos_trade_count + '.';
     var tradesStr = hasSimTrades ? String(btTrades) : '—';
     var evidenceStrip = '<div class="pc-evidence-strip">' +
-      '<span class="pc-pill' + (hasSimTrades ? '' : ' pc-pill-muted') + '" title="Total simulated trades across deduped backtests (sibling-linked insights, one row per ticker).">' +
+      '<span class="pc-pill' + (hasSimTrades ? '' : ' pc-pill-muted') + '" title="Simulated trades across stored backtests for this insight (one row per ticker/strategy).">' +
         'Trades <b>' + tradesStr + '</b></span>' +
       '<span class="pc-pill' + (ddStr !== '—' ? '' : ' pc-pill-muted') + '" title="Worst max drawdown among those backtests (most negative %).">' +
         'Max DD <b>' + ddStr + '</b></span>' +
@@ -4171,11 +4384,12 @@ function showPatternDetail(patternId) {
     '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsLoad()">Load analytics</button>' +
     '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsPropose()">Propose hypotheses</button>' +
     '<button type="button" class="btn btn-sm" style="font-size:10px" onclick="evTradeAnalyticsMl()">Train ML (rows)</button>' +
+    '<button type="button" class="btn btn-sm" style="font-size:10px;font-weight:600" onclick="evRerunAllListedBacktests()" title="Re-run each row in the Backtests tab with current rules and each row&#39;s saved window">Rerun all listed BTs</button>' +
     '</div>' +
     '<pre id="ev-trade-analytics-out" style="display:none;margin-top:8px;max-height:220px;overflow:auto;white-space:pre-wrap;font-size:10px;color:var(--text-muted);border:1px solid var(--border);border-radius:4px;padding:6px;background:var(--bg)"></pre>' +
     '</div>';
   html += '<div id="ev-wr-progress-wrap" style="display:none;margin-top:10px">' +
-    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> — sibling-linked backtests only (latest per ticker/strategy in the recent window). Aggregate WR is <strong>trade-weighted</strong> (matches per-row win rate columns), not “% of backtests with positive return.” Last point matches the header.</div>' +
+    '<div style="font-size:10px;color:var(--text-muted);margin-bottom:4px"><strong>Win rate over time</strong> — stored backtests for <strong>this insight</strong> (latest per ticker/strategy in the recent window). Aggregate WR is <strong>trade-weighted</strong> (matches per-row win rate columns), not “% of backtests with positive return.” Re-runs replace the row for that ticker/strategy. Last point matches the header.</div>' +
     '<div id="ev-wr-progress-chart" style="height:140px;width:100%"></div></div>';
   if (p.example_tickers && p.example_tickers.length) {
     html += '<div style="margin-top:8px;display:flex;gap:4px;flex-wrap:wrap">';
@@ -4303,9 +4517,12 @@ function _renderComputedStats(cs) {
 
   if (cs.backtest_avg_win_rate != null) {
     var bwrColor = cs.backtest_avg_win_rate >= 50 ? '#22c55e' : '#ef4444';
-    var runLabel = (cs.backtest_count || 0) + ' runs';
-    if (cs.backtest_total_displayed != null && cs.backtest_total_displayed > (cs.backtest_count || 0)) {
-      runLabel = (cs.backtest_count || 0) + '/' + cs.backtest_total_displayed + ' with trades';
+    var runLabel = (cs.backtest_count || 0) + ' deduped runs w/ trades';
+    if (cs.backtest_total_displayed != null) {
+      runLabel += ' · ' + (cs.backtest_total_displayed || 0) + ' rows listed';
+    }
+    if (cs.backtest_simulated_trades != null && cs.backtest_simulated_trades > 0) {
+      runLabel += ' · ' + cs.backtest_simulated_trades + ' sim trades (W/L in header)';
     }
     cards.push('<div style="padding:5px 8px;background:rgba(59,130,246,.06);border:1px solid rgba(59,130,246,.12);border-radius:6px;text-align:center;flex:1">' +
       '<div style="font-size:13px;font-weight:700;color:' + bwrColor + '">' + cs.backtest_avg_win_rate + '%</div>' +

@@ -1448,16 +1448,21 @@ def api_alert_settings():
 
 
 @router.post("/api/trading/alerts/run-pattern-imminent")
-def api_run_pattern_imminent_scan(request: Request, db: Session = Depends(get_db)):
+def api_run_pattern_imminent_scan(
+    request: Request,
+    db: Session = Depends(get_db),
+    dry_run: bool | None = Query(None),
+):
     """Run the ScanPattern imminent-breakout scan once; returns diagnostics (candidates, skip counts).
 
     Use this to verify the job is working without waiting for the 15-minute scheduler.
     Alerts are still written via ``dispatch_alert`` (DB + SMS/Telegram when configured).
+    Pass ``dry_run=1`` to compute candidates and summary without dispatch or BreakoutAlert insert.
     """
     ctx = get_identity_ctx(request, db)
     from ..services.trading.pattern_imminent_alerts import run_pattern_imminent_scan
 
-    result = run_pattern_imminent_scan(db, ctx["user_id"])
+    result = run_pattern_imminent_scan(db, ctx["user_id"], dry_run=dry_run)
     return JSONResponse(result)
 
 

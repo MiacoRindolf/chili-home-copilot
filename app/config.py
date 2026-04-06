@@ -365,6 +365,13 @@ class Settings(BaseSettings):
     brain_prescreen_max_total: int = 3000
     brain_queue_prescreen_period: str = "3mo"
     brain_queue_prescreen_min_win_rate_pct: float = 45.0
+    # Queue ``smart_backtest_insight`` normally samples only ``brain_queue_target_tickers`` random tickers
+    # and marks the pattern tested for ~``brain_retest_interval_days`` — stored evidence rows for other
+    # tickers were never refreshed. When True, prepend tickers whose stored rows look stale or under-traded.
+    brain_queue_priority_stored_refresh: bool = True
+    brain_queue_stored_refresh_max_tickers: int = 40
+    brain_queue_stored_stale_trade_cap: int = 2  # refresh if stored trade_count <= this (captures 0–2 trade rows)
+    brain_queue_stored_stale_days: int = 14  # refresh if ran_at older than this (UTC)
 
     # Live vs research: downgrade patterns when realized win rate lags research OOS materially.
     brain_live_depromotion_enabled: bool = False
@@ -410,6 +417,39 @@ class Settings(BaseSettings):
     pattern_imminent_scope_tickers_cap: int = 32
     pattern_imminent_evaluable_ratio_floor: float = 0.35
     pattern_imminent_eta_scale_k: float = 1.5
+    # Imminent: main Telegram uses stricter coverage than board shortcut path.
+    pattern_imminent_min_feature_coverage_main: float = 0.45
+    pattern_imminent_min_composite_main: float = 0.42
+    pattern_imminent_allow_evaluable_shortcut: bool = True
+    pattern_imminent_max_per_ticker_per_run: int = 2
+    pattern_imminent_max_per_pattern_per_run: int = 3
+    pattern_imminent_research_mode: bool = False
+    pattern_imminent_research_nearmiss_log: bool = False
+    pattern_imminent_debug_dry_run: bool = False
+    pattern_imminent_use_prescreener_universe: bool = True
+    pattern_imminent_use_predictions_universe: bool = True
+    pattern_imminent_use_scanner_universe: bool = True
+    pattern_imminent_max_prescreener_tickers: int = 80
+    pattern_imminent_max_prediction_tickers: int = 40
+    pattern_imminent_max_scanner_tickers: int = 50
+
+    # Opportunity board + shared composite weights (see opportunity_scoring.py).
+    opportunity_board_stale_seconds: int = 180
+    opportunity_tier_a_min_composite: float = 0.48
+    opportunity_tier_a_min_coverage: float = 0.5
+    opportunity_tier_b_min_composite: float = 0.38
+    opportunity_tier_b_min_coverage: float = 0.35
+    opportunity_tier_b_max_eta_hours: float = 4.0
+    opportunity_tier_c_min_composite: float = 0.28
+    opportunity_max_tier_a: int = 3
+    opportunity_max_tier_b: int = 5
+    opportunity_max_tier_c: int = 8
+    opportunity_max_tier_d: int = 12
+    opportunity_weight_readiness: float = 0.28
+    opportunity_weight_coverage: float = 0.22
+    opportunity_weight_pattern_quality: float = 0.22
+    opportunity_weight_risk_reward: float = 0.13
+    opportunity_weight_eta: float = 0.15
 
     @field_validator("database_url")
     @classmethod

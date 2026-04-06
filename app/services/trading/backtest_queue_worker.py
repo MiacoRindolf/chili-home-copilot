@@ -60,6 +60,29 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
 
         hydrate_scan_pattern_rules_json(db, pattern, insight)
         db.refresh(pattern)
+
+        prio: list[str] = []
+        if getattr(settings, "brain_queue_priority_stored_refresh", True):
+            from .backtest_engine import priority_tickers_from_stored_backtests_for_refresh
+
+            prio = priority_tickers_from_stored_backtests_for_refresh(
+                db,
+                insight_id=int(insight.id),
+                scan_pattern_id=int(pattern.id),
+                pattern_name=str(pattern.name or ""),
+                max_tickers=int(getattr(settings, "brain_queue_stored_refresh_max_tickers", 40)),
+                stale_trade_cap=int(getattr(settings, "brain_queue_stored_stale_trade_cap", 2)),
+                stale_days=int(getattr(settings, "brain_queue_stored_stale_days", 14)),
+            )
+            if prio:
+                logger.info(
+                    "[backtest_queue] stored_refresh_priority pattern_id=%s insight_id=%s n=%d sample=%s",
+                    pattern.id,
+                    insight.id,
+                    len(prio),
+                    prio[:8],
+                )
+
         _tier = (getattr(pattern, "queue_tier", None) or "full").strip().lower()
         _prescreen = bool(getattr(settings, "brain_queue_prescreen_enabled", False))
         if _prescreen and _tier == "prescreen":
@@ -71,6 +94,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                 ),
                 update_confidence=True,
                 period=getattr(settings, "brain_queue_prescreen_period", "3mo"),
+                priority_tickers=prio if prio else None,
             )
             total = result.get("total", 0)
             wins = result.get("wins", 0)
@@ -122,6 +146,7 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
             insight,
             target_tickers=max(20, getattr(settings, "brain_queue_target_tickers", 50)),
             update_confidence=True,
+            priority_tickers=prio if prio else None,
         )
         total = result.get("total", 0)
         wins = result.get("wins", 0)
