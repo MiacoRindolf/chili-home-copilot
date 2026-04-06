@@ -620,6 +620,8 @@ def get_trading_opportunity_board(
         "is_stale": is_stale,
         "stale_threshold_seconds": stale_sec,
         "freshness_degraded": freshness_unknown,
+        # True when board gather hit per-request score/universe caps (not an error; UI should say "sampled").
+        "board_truncated": bool(meta.get("board_eval_budget_hit")),
         "session_context": {**sess, "crypto_context": crypto_ctx},
         "operator_summary": op_sum,
         "no_trade_now": no_trade,

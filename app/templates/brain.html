@@ -1087,13 +1087,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       </div>
 
       <div class="brain-section" id="brain-opportunity-board">
-        <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309">
-          Data may be outdated — tap Refresh. Server age exceeded stale threshold.
-        </div>
+        <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309"></div>
+        <div id="opp-refresh-failed-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);font-size:11px;color:#b91c1c"></div>
         <div class="brain-section-title" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
           <span class="bs-icon">&#x1F3AF;</span> Opportunity Board
           <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">Manual desk view — tiers use the same composite math as imminent alerts.</span>
-          <button type="button" onclick="loadOpportunityBoard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+          <button type="button" onclick="loadOpportunityBoard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600" title="Reload board from server">Manual refresh</button>
         </div>
         <div id="opp-operator-strip" style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
           <span id="opp-op-sum">Loading opportunity board…</span>
@@ -1343,7 +1342,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
             <div id="bdd-inspect-health-card" style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:10px;background:var(--bg-secondary, rgba(0,0,0,.03))">
               <div style="font-weight:700;margin-bottom:6px">Inspect health</div>
               <div id="bdd-inspect-health-body" style="color:var(--text-muted)">Open this tab to load.</div>
-              <button type="button" class="bw-ctrl-btn" style="margin-top:8px" onclick="loadInspectHealthCard()">Refresh inspect health</button>
+              <button type="button" class="bw-ctrl-btn" style="margin-top:8px" onclick="loadInspectHealthCard()" title="Reload /api/trading/inspect/health">Manual refresh (inspect health)</button>
             </div>
             <button type="button" class="bw-ctrl-btn" onclick="loadOpportunityBoardDebug()">Load debug JSON</button>
             <pre id="bdd-debug-opp-json" style="margin-top:10px;font-size:10px;max-height:480px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word">Not loaded.</pre>
@@ -3255,6 +3254,9 @@ function loadBrainDashboard() {
     pollLearningStatus().catch(function(){});
   }, 3000);
 
+  /* Opportunity board: soft auto-refresh while tab visible (no overlap with in-flight; see loadOpportunityBoard) */
+  _schedOppBoardSoftAutoRefresh();
+
   /* Tradeable auto-refresh */
   if (window._tradeablePatternsInterval) clearInterval(window._tradeablePatternsInterval);
   window._tradeablePatternsInterval = setInterval(function() { loadTradeablePatterns(); }, 120000);
@@ -3265,8 +3267,15 @@ function loadBrainDashboard() {
 }
 
 function _loadRegimeChip() {
-  fetch('/api/trading/brain/thesis').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
+  fetch('/api/trading/brain/thesis').then(parseFetchJson).then(function(d) {
+    if (!d.ok) {
+      var chip0 = document.getElementById('bsb-regime');
+      if (chip0) {
+        chip0.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis unavailable</span>';
+        chip0.className = 'bsb-chip';
+      }
+      return;
+    }
     window._brainThesisData = d;
     var chip = document.getElementById('bsb-regime');
     if (!chip) return;
@@ -3308,8 +3317,15 @@ function _loadRegimeChip() {
       if (d.total_predictions) mp.push(d.accuracy + '% accuracy (' + d.total_predictions + ')');
       metaEl.innerHTML = mp.join(' &middot; ');
     }
-  }).catch(function(){});
-  fetch('/api/trading/brain/volatility').then(function(r){return r.json();}).then(function(v) {
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    var chipE = document.getElementById('bsb-regime');
+    if (chipE) {
+      chipE.innerHTML = '<span style="font-size:10px;color:var(--text-muted)">Thesis failed</span><br/><span style="font-size:8px;opacity:.85">' + hint + '</span>';
+      chipE.className = 'bsb-chip';
+    }
+  });
+  fetch('/api/trading/brain/volatility').then(parseFetchJson).then(function(v) {
     if (!v.ok) return;
     window._brainVixData = v;
     var chip = document.getElementById('bsb-regime');
@@ -3322,7 +3338,13 @@ function _loadRegimeChip() {
       var rc2 = {low:'#22c55e', normal:'#f59e0b', elevated:'#f97316', extreme:'#ef4444', unknown:'#6b7280'};
       stanceEl.innerHTML += ' <span style="font-size:9px;padding:1px 6px;border-radius:8px;background:' + (rc2[v.regime]||'#6b7280') + '20;color:' + (rc2[v.regime]||'#6b7280') + ';font-weight:700;vertical-align:middle">VIX ' + (v.vix||'?') + ' ' + (v.label||'') + '</span>';
     }
-  }).catch(function(){});
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    var chipV = document.getElementById('bsb-regime');
+    if (chipV) {
+      chipV.innerHTML += '<br/><span style="font-size:8px;opacity:.85;color:#b45309">Volatility failed: ' + hint + '</span>';
+    }
+  });
 }
 
 /* ── Research sub-tab data helpers ───────────── */
@@ -3545,7 +3567,7 @@ function loadPlaybook() {
   if (!el) return;
   el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Generating playbook…</div>';
   fetch('/api/trading/brain/playbook', {credentials:'same-origin'})
-    .then(function(r){return r.json();})
+    .then(parseFetchJson)
     .then(function(d) {
       if (!d.ok) { el.innerHTML = '<div style="padding:12px;text-align:center">No playbook data.</div>'; return; }
       var html = '';
@@ -3595,7 +3617,10 @@ function loadPlaybook() {
       html += '<div style="font-size:9px;color:var(--text-muted);margin-top:8px;text-align:right">Generated: ' + (d.generated_at || '') + '</div>';
       el.innerHTML = html;
     })
-    .catch(function() { el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to generate playbook.</div>'; });
+    .catch(function(err) {
+      var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+      el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to generate playbook.<br/><span style="font-size:10px;opacity:.85">' + hint + '</span></div>';
+    });
 }
 
 function loadPerfDashboard() {
@@ -3603,7 +3628,7 @@ function loadPerfDashboard() {
   if (!el) return;
   el.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading…</div>';
   fetch('/api/trading/brain/performance', {credentials:'same-origin'})
-    .then(function(r){return r.json();})
+    .then(parseFetchJson)
     .then(function(d) {
       if (!d.ok) { el.innerHTML = '<div style="padding:12px;text-align:center">No performance data yet.</div>'; return; }
       var o = d.overall || {};
@@ -3646,7 +3671,10 @@ function loadPerfDashboard() {
       }
       el.innerHTML = html;
     })
-    .catch(function() { el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to load performance data.</div>'; });
+    .catch(function(err) {
+      var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+      el.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">Failed to load performance data.<br/><span style="font-size:10px;opacity:.85">' + hint + '</span></div>';
+    });
 }
 function _perfCard(label, value, color) {
   return '<div style="background:var(--card-bg, rgba(30,30,40,.6));border:1px solid var(--border);border-radius:8px;padding:8px 10px;text-align:center">'
@@ -3659,7 +3687,7 @@ function loadTradeablePatterns() {
   var container = document.getElementById('brain-tradeable-patterns');
   if (!container) return;
   container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading tradeable patterns…</div>';
-  fetch('/api/trading/brain/tradeable-patterns').then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/trading/brain/tradeable-patterns').then(parseFetchJson).then(function(d) {
     if (!d.ok || !d.patterns) {
       container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Could not load tradeable patterns.</div>';
       return;
@@ -3719,8 +3747,9 @@ function loadTradeablePatterns() {
     });
     html += '</div>';
     container.innerHTML = html;
-  }).catch(function() {
-    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load.</div>';
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load tradeable patterns.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></div>';
   });
 }
 
@@ -3728,7 +3757,7 @@ function loadNearTradeableCandidates() {
   var el = document.getElementById('brain-near-tradeable-candidates');
   if (!el) return;
   el.innerHTML = '<span style="color:var(--text-muted)">Loading…</span>';
-  fetch('/api/trading/brain/tradeable-patterns?include_candidates=true&limit=12').then(function(r) { return r.json(); }).then(function(d) {
+  fetch('/api/trading/brain/tradeable-patterns?include_candidates=true&limit=12').then(parseFetchJson).then(function(d) {
     if (!d.ok || !d.patterns) {
       el.innerHTML = '<span style="color:var(--text-muted)">Could not load candidates.</span>';
       return;
@@ -3753,14 +3782,62 @@ function loadNearTradeableCandidates() {
     });
     html += '</div>';
     el.innerHTML = html;
-  }).catch(function() {
-    el.innerHTML = '<span style="color:var(--text-muted)">Failed to load.</span>';
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    el.innerHTML = '<span style="color:var(--text-muted)">Failed to load candidates.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></span>';
   });
 }
 
 window._oppTierCaps = { A: null, B: null, C: null, D: null };
 window._oppLastPayload = null;
+window._oppBoardLastGoodPayload = null;
 var OPP_BOARD_FETCH_TIMEOUT_MS = 75000;
+var OPP_BOARD_SOFT_REFRESH_MS = 180000; /* 3 min — visible tab only */
+window._oppBoardInFlight = false;
+window._oppBoardFetchAbort = null;
+
+function _schedOppBoardSoftAutoRefresh() {
+  if (window._oppBoardSoftRefreshInterval) clearInterval(window._oppBoardSoftRefreshInterval);
+  window._oppBoardSoftRefreshInterval = setInterval(function() {
+    if (document.visibilityState !== 'visible') return;
+    loadOpportunityBoard({ auto: true, silent: true });
+  }, OPP_BOARD_SOFT_REFRESH_MS);
+}
+
+function hideOppRefreshFailedBanner() {
+  var f = document.getElementById('opp-refresh-failed-banner');
+  if (f) { f.style.display = 'none'; f.innerHTML = ''; }
+}
+
+function showOppRefreshFailedBanner(msg) {
+  var f = document.getElementById('opp-refresh-failed-banner');
+  if (!f) return;
+  f.style.display = 'block';
+  f.innerHTML = '<span style="vertical-align:middle">' + escHtml(msg) + '</span>' +
+    ' <button type="button" class="bw-ctrl-btn" style="margin-left:8px;vertical-align:middle" onclick="loadOpportunityBoard()">Retry</button>';
+}
+
+function updateOppBoardTrustBanners(d) {
+  var ban = document.getElementById('opp-stale-banner');
+  if (!ban || !d) return;
+  var parts = [];
+  if (d.is_stale) {
+    parts.push('Data age exceeds your stale threshold — verify feeds or use Inspect health before acting.');
+  }
+  if (d.freshness_degraded || !d.data_as_of) {
+    parts.push('Freshness is unknown or incomplete — do not treat this board as fully current.');
+  }
+  if (d.board_truncated) {
+    parts.push('Board sampled with limits — some pattern×ticker candidates may be omitted.');
+  }
+  if (parts.length) {
+    ban.style.display = 'block';
+    ban.innerHTML = parts.map(function(p) { return '<div style="margin-bottom:4px">' + escHtml(p) + '</div>'; }).join('');
+  } else {
+    ban.style.display = 'none';
+    ban.innerHTML = '';
+  }
+}
 
 function setOppStatusChips(actionable, watchSoon, watchToday, refreshLine, chipState) {
   var ca = document.getElementById('opp-chip-a');
@@ -3844,7 +3921,157 @@ function loadOpportunityBoardDebug() {
   });
 }
 
-function loadOpportunityBoard() {
+function renderOpportunityBoardFromPayload(d) {
+  if (!d || d.ok === false) return;
+  var os = d.operator_summary || {};
+  var refShort = (os.last_refresh_utc || d.generated_at || '—').toString();
+  if (refShort.length > 24) refShort = refShort.slice(0, 22) + '…';
+  setOppStatusChips(
+    os.actionable_count != null ? os.actionable_count : '0',
+    os.watch_soon_count != null ? os.watch_soon_count : '0',
+    os.watch_today_count != null ? os.watch_today_count : '0',
+    'Board: ' + refShort,
+    ''
+  );
+
+  var sumEl = document.getElementById('opp-op-sum');
+  if (sumEl) {
+    var parts = [];
+    parts.push('<strong>Actionable:</strong> ' + (os.actionable_count != null ? os.actionable_count : '0'));
+    parts.push('<strong>Watch soon:</strong> ' + (os.watch_soon_count != null ? os.watch_soon_count : '0'));
+    parts.push('<strong>Watch today:</strong> ' + (os.watch_today_count != null ? os.watch_today_count : '0'));
+    parts.push('<strong>No-trade now:</strong> ' + (os.no_trade_now ? 'yes' : 'no'));
+    parts.push('<strong>Generated (UTC):</strong> ' + escHtml(String(d.generated_at || '—')));
+    if (d.data_as_of) parts.push('<strong>Data as of (UTC):</strong> ' + escHtml(String(d.data_as_of)));
+    else parts.push('<strong>Data as of (UTC):</strong> <span style="color:#b45309">unknown</span>');
+    if (d.age_seconds != null) parts.push('<strong>Data age (s):</strong> ' + escHtml(String(d.age_seconds)));
+    else parts.push('<strong>Data age (s):</strong> <span style="color:#b45309">unknown</span>');
+    if (d.is_stale) parts.push('<span style="color:#b45309;font-weight:700">STALE</span>');
+    if (d.freshness_degraded || !d.data_as_of) parts.push('<span style="color:#b45309;font-weight:700">FRESHNESS DEGRADED</span>');
+    if (d.board_truncated) parts.push('<span style="color:#b45309;font-weight:700">SAMPLED / TRUNCATED</span>');
+    if (os.session_line) parts.push('<strong>Session:</strong> ' + escHtml(String(os.session_line)));
+    parts.push('<button type="button" class="bw-ctrl-btn" style="margin-left:6px" onclick="loadOpportunityBoard()" title="Reload from server">Manual refresh</button>');
+    sumEl.innerHTML = parts.join(' <span style="color:var(--border)">|</span> ');
+  }
+
+  updateOppBoardTrustBanners(d);
+
+  var nt = document.getElementById('opp-no-trade');
+  if (nt) {
+    if (os.no_trade_now && d.no_trade_summary_lines && d.no_trade_summary_lines.length) {
+      nt.style.display = 'block';
+      nt.innerHTML = '<div style="font-weight:700;margin-bottom:4px;color:var(--text)">Why nothing actionable (Tier A)</div><ul style="margin:0;padding-left:18px">' +
+        d.no_trade_summary_lines.map(function(line) { return '<li>' + escHtml(String(line)) + '</li>'; }).join('') + '</ul>';
+    } else {
+      nt.style.display = 'none';
+      nt.innerHTML = '';
+    }
+  }
+
+  function cardHtml(it) {
+    var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + escHtml(String(it.ticker || '')) + '</div>';
+    var sub = [];
+    if (it.pattern_name) sub.push(escHtml(String(it.pattern_name)));
+    if (it.source_strength) sub.push('evidence: ' + escHtml(String(it.source_strength)));
+    if (it.composite != null) sub.push('comp ' + it.composite);
+    if (it.feature_coverage != null) sub.push('cov ' + it.feature_coverage);
+    if (it.eta_label) sub.push(escHtml(String(it.eta_label)));
+    var predBadge = '';
+    if (it.also_in_live_predictions) {
+      predBadge = ' <a href="#brain-predictions" style="font-size:9px;color:#818cf8;font-weight:600;text-decoration:none">In live predictions ↓</a>';
+    }
+    var why = '';
+    if (it.why_here) why += '<div style="margin-top:6px;font-size:10px;color:var(--text-secondary);line-height:1.45">' + escHtml(String(it.why_here)) + '</div>';
+    if (it.why_not_higher_tier) why += '<div style="margin-top:4px;font-size:9px;color:var(--text-muted)">Tier note: ' + escHtml(String(it.why_not_higher_tier)) + '</div>';
+    if (it.main_risk) why += '<div style="margin-top:4px;font-size:9px;color:#b45309">Risk: ' + escHtml(String(it.main_risk)) + '</div>';
+    return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--bg)">' + head +
+      '<div style="font-size:10px;color:var(--text-muted)">' + sub.join(' · ') + predBadge + '</div>' + why + '</div>';
+  }
+
+  function fillTier(id, items, moreId, hmKey) {
+    var el = document.getElementById(id);
+    if (!el) return;
+    if (!items || !items.length) {
+      el.innerHTML = '<div style="font-size:10px;color:var(--text-muted);font-style:italic">None right now.</div>';
+    } else {
+      el.innerHTML = items.map(cardHtml).join('');
+    }
+    var moreBtn = document.getElementById(moreId);
+    if (moreBtn) moreBtn.style.display = (d.has_more && d.has_more[hmKey]) ? 'inline-block' : 'none';
+  }
+
+  var T = d.tiers || {};
+  fillTier('opp-tier-a', T.actionable_now, 'opp-more-a', 'A');
+  fillTier('opp-tier-b', T.watch_soon, 'opp-more-b', 'B');
+  fillTier('opp-tier-c', T.watch_today, 'opp-more-c', 'C');
+
+  var dw = document.getElementById('opp-tier-d-wrap');
+  var dd = document.getElementById('opp-tier-d');
+  if (dw && dd) {
+    var ro = T.research_only || [];
+    if (ro.length) {
+      dw.style.display = 'block';
+      dd.innerHTML = ro.map(cardHtml).join('');
+    } else {
+      dw.style.display = 'none';
+      dd.innerHTML = '';
+    }
+  }
+}
+
+function _oppHandleBoardFetchFailure(msg, code) {
+  var strip = document.getElementById('opp-operator-strip');
+  function showBoardErrorFullClear(m, c) {
+    hideOppRefreshFailedBanner();
+    var ban = document.getElementById('opp-stale-banner');
+    if (ban) { ban.style.display = 'none'; ban.innerHTML = ''; }
+    setOppStatusChips('—', '—', '—', 'Board: error', 'error');
+    if (strip) {
+      strip.innerHTML = '<div id="opp-op-sum"><span style="color:#b45309">' + escHtml(m) + '</span>' +
+        (c ? ' <code style="font-size:9px;color:var(--text-muted)">' + escHtml(c) + '</code>' : '') +
+        ' <button type="button" class="bw-ctrl-btn" style="margin-left:8px" onclick="loadOpportunityBoard()">Retry</button></div>';
+    }
+    ['opp-tier-a', 'opp-tier-b', 'opp-tier-c'].forEach(function(tid) {
+      var el = document.getElementById(tid);
+      if (el) el.innerHTML = '<div style="font-size:10px;color:var(--text-muted)">Could not load — Retry above.</div>';
+    });
+    var dw = document.getElementById('opp-tier-d-wrap');
+    var dd = document.getElementById('opp-tier-d');
+    if (dw) dw.style.display = 'none';
+    if (dd) dd.innerHTML = '';
+    var nt = document.getElementById('opp-no-trade');
+    if (nt) { nt.style.display = 'none'; nt.innerHTML = ''; }
+  }
+
+  if (window._oppBoardLastGoodPayload) {
+    renderOpportunityBoardFromPayload(window._oppBoardLastGoodPayload);
+    showOppRefreshFailedBanner('Refresh failed; showing last successful board. ' + msg + (code ? ' (' + code + ')' : ''));
+    var os = window._oppBoardLastGoodPayload.operator_summary || {};
+    var refShort = (os.last_refresh_utc || window._oppBoardLastGoodPayload.generated_at || '—').toString();
+    if (refShort.length > 24) refShort = refShort.slice(0, 22) + '…';
+    setOppStatusChips(
+      os.actionable_count != null ? os.actionable_count : '0',
+      os.watch_soon_count != null ? os.watch_soon_count : '0',
+      os.watch_today_count != null ? os.watch_today_count : '0',
+      'Board: refresh failed — last OK ' + refShort,
+      'error'
+    );
+  } else {
+    showBoardErrorFullClear(msg, code);
+  }
+}
+
+function loadOpportunityBoard(opts) {
+  opts = opts || {};
+  if (window._oppBoardInFlight && opts.auto) return;
+
+  if (window._oppBoardFetchAbort) {
+    try { window._oppBoardFetchAbort.abort(); } catch (eAbort0) {}
+  }
+  var ctrl = new AbortController();
+  window._oppBoardFetchAbort = ctrl;
+  window._oppBoardInFlight = true;
+
   var qs = [];
   ['a', 'b', 'c', 'd'].forEach(function(lc) {
     var T = lc.toUpperCase();
@@ -3854,150 +4081,48 @@ function loadOpportunityBoard() {
   var qstr = qs.length ? ('?' + qs.join('&')) : '';
   var strip = document.getElementById('opp-operator-strip');
 
-  function showBoardError(msg, code) {
-    setOppStatusChips('—', '—', '—', 'Board: error', 'error');
-    if (strip) {
-      strip.innerHTML = '<div id="opp-op-sum"><span style="color:#b45309">' + escHtml(msg) + '</span>' +
-        (code ? ' <code style="font-size:9px;color:var(--text-muted)">' + escHtml(code) + '</code>' : '') +
-        ' <button type="button" class="bw-ctrl-btn" style="margin-left:8px" onclick="loadOpportunityBoard()">Retry</button></div>';
-    }
-    ['opp-tier-a', 'opp-tier-b', 'opp-tier-c'].forEach(function(tid) {
-      var el = document.getElementById(tid);
-      if (el) el.innerHTML = '<div style="font-size:10px;color:var(--text-muted)">Could not load — Retry above.</div>';
-    });
+  if (!opts.silent) {
+    hideOppRefreshFailedBanner();
+    setOppStatusChips('…', '…', '…', 'Board: loading…', 'loading');
+    if (strip) strip.innerHTML = '<span id="opp-op-sum">Loading opportunity board…</span>';
   }
 
-  setOppStatusChips('…', '…', '…', 'Board: loading…', 'loading');
-  if (strip) strip.innerHTML = '<span id="opp-op-sum">Loading opportunity board…</span>';
-
-  var ctrl = new AbortController();
   var to = setTimeout(function() { try { ctrl.abort(); } catch (e1) {} }, OPP_BOARD_FETCH_TIMEOUT_MS);
 
   fetch('/api/trading/opportunity-board' + qstr, { signal: ctrl.signal }).then(parseFetchJson).then(function(d) {
     clearTimeout(to);
+    if (window._oppBoardFetchAbort !== ctrl) return;
     window._oppLastPayload = d;
     if (!d || d.ok === false) {
-      showBoardError((d && d.message) ? String(d.message) : 'Board unavailable.', d && d.error ? String(d.error) : 'ok_false');
+      _oppHandleBoardFetchFailure((d && d.message) ? String(d.message) : 'Board unavailable.', d && d.error ? String(d.error) : 'ok_false');
       return;
     }
-    var os = d.operator_summary || {};
-    var refShort = (os.last_refresh_utc || d.generated_at || '—').toString();
-    if (refShort.length > 24) refShort = refShort.slice(0, 22) + '…';
-    setOppStatusChips(
-      os.actionable_count != null ? os.actionable_count : '0',
-      os.watch_soon_count != null ? os.watch_soon_count : '0',
-      os.watch_today_count != null ? os.watch_today_count : '0',
-      'Board: ' + refShort,
-      ''
-    );
-
-    var sumEl = document.getElementById('opp-op-sum');
-    if (sumEl) {
-      var parts = [];
-      parts.push('<strong>Actionable:</strong> ' + (os.actionable_count != null ? os.actionable_count : '0'));
-      parts.push('<strong>Watch soon:</strong> ' + (os.watch_soon_count != null ? os.watch_soon_count : '0'));
-      parts.push('<strong>Watch today:</strong> ' + (os.watch_today_count != null ? os.watch_today_count : '0'));
-      parts.push('<strong>No-trade now:</strong> ' + (os.no_trade_now ? 'yes' : 'no'));
-      parts.push('<strong>Generated (UTC):</strong> ' + escHtml(String(d.generated_at || '—')));
-      if (d.data_as_of) parts.push('<strong>Data as of (UTC):</strong> ' + escHtml(String(d.data_as_of)));
-      if (d.age_seconds != null) parts.push('<strong>Data age (s):</strong> ' + escHtml(String(d.age_seconds)));
-      if (d.is_stale) parts.push('<span style="color:#b45309;font-weight:700">STALE</span>');
-      if (os.session_line) parts.push('<strong>Session:</strong> ' + escHtml(String(os.session_line)));
-      parts.push('<button type="button" class="bw-ctrl-btn" style="margin-left:6px" onclick="loadOpportunityBoard()">Refresh</button>');
-      sumEl.innerHTML = parts.join(' <span style="color:var(--border)">|</span> ');
-    }
-
-    var ban = document.getElementById('opp-stale-banner');
-    if (ban) {
-      if (d.is_stale) {
-        ban.style.display = 'block';
-        ban.textContent = 'Feeds look stale versus threshold (see data age). Verify with Inspect health or refresh predictions/scanner.';
-      } else if (d.freshness_degraded) {
-        ban.style.display = 'block';
-        ban.textContent = 'Could not derive full data_as_of from sources — treat rows as context only.';
-      } else {
-        ban.style.display = 'none';
-      }
-    }
-
-    var nt = document.getElementById('opp-no-trade');
-    if (nt) {
-      if (os.no_trade_now && d.no_trade_summary_lines && d.no_trade_summary_lines.length) {
-        nt.style.display = 'block';
-        nt.innerHTML = '<div style="font-weight:700;margin-bottom:4px;color:var(--text)">Why nothing actionable (Tier A)</div><ul style="margin:0;padding-left:18px">' +
-          d.no_trade_summary_lines.map(function(line) { return '<li>' + escHtml(String(line)) + '</li>'; }).join('') + '</ul>';
-      } else {
-        nt.style.display = 'none';
-        nt.innerHTML = '';
-      }
-    }
-
-    function cardHtml(it) {
-      var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + escHtml(String(it.ticker || '')) + '</div>';
-      var sub = [];
-      if (it.pattern_name) sub.push(escHtml(String(it.pattern_name)));
-      if (it.source_strength) sub.push('evidence: ' + escHtml(String(it.source_strength)));
-      if (it.composite != null) sub.push('comp ' + it.composite);
-      if (it.feature_coverage != null) sub.push('cov ' + it.feature_coverage);
-      if (it.eta_label) sub.push(escHtml(String(it.eta_label)));
-      var predBadge = '';
-      if (it.also_in_live_predictions) {
-        predBadge = ' <a href="#brain-predictions" style="font-size:9px;color:#818cf8;font-weight:600;text-decoration:none">In live predictions ↓</a>';
-      }
-      var why = '';
-      if (it.why_here) why += '<div style="margin-top:6px;font-size:10px;color:var(--text-secondary);line-height:1.45">' + escHtml(String(it.why_here)) + '</div>';
-      if (it.why_not_higher_tier) why += '<div style="margin-top:4px;font-size:9px;color:var(--text-muted)">Tier note: ' + escHtml(String(it.why_not_higher_tier)) + '</div>';
-      if (it.main_risk) why += '<div style="margin-top:4px;font-size:9px;color:#b45309">Risk: ' + escHtml(String(it.main_risk)) + '</div>';
-      return '<div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--bg)">' + head +
-        '<div style="font-size:10px;color:var(--text-muted)">' + sub.join(' · ') + predBadge + '</div>' + why + '</div>';
-    }
-
-    function fillTier(id, items, moreId, hmKey) {
-      var el = document.getElementById(id);
-      if (!el) return;
-      if (!items || !items.length) {
-        el.innerHTML = '<div style="font-size:10px;color:var(--text-muted);font-style:italic">None right now.</div>';
-      } else {
-        el.innerHTML = items.map(cardHtml).join('');
-      }
-      var moreBtn = document.getElementById(moreId);
-      if (moreBtn) moreBtn.style.display = (d.has_more && d.has_more[hmKey]) ? 'inline-block' : 'none';
-    }
-
-    var T = d.tiers || {};
-    fillTier('opp-tier-a', T.actionable_now, 'opp-more-a', 'A');
-    fillTier('opp-tier-b', T.watch_soon, 'opp-more-b', 'B');
-    fillTier('opp-tier-c', T.watch_today, 'opp-more-c', 'C');
-
-    var dw = document.getElementById('opp-tier-d-wrap');
-    var dd = document.getElementById('opp-tier-d');
-    if (dw && dd) {
-      var ro = T.research_only || [];
-      if (ro.length) {
-        dw.style.display = 'block';
-        dd.innerHTML = ro.map(cardHtml).join('');
-      } else {
-        dw.style.display = 'none';
-        dd.innerHTML = '';
-      }
-    }
+    window._oppBoardLastGoodPayload = d;
+    hideOppRefreshFailedBanner();
+    renderOpportunityBoardFromPayload(d);
   }).catch(function(err) {
     clearTimeout(to);
+    if (window._oppBoardFetchAbort !== ctrl) return;
     var msg = 'Failed to load opportunity board.';
     if (err && err.name === 'AbortError') msg = 'Board request timed out — server may be busy.';
     else if (err && err.message) msg = err.message;
-    showBoardError(msg, 'fetch_error');
+    _oppHandleBoardFetchFailure(msg, 'fetch_error');
+  }).finally(function() {
+    if (window._oppBoardFetchAbort === ctrl) window._oppBoardInFlight = false;
   });
 }
 
 function loadBrainPredictions() {
   var container = document.getElementById('brain-predictions'); if (!container) return;
   container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:12px"><div class="brain-pulse"></div> Computing predictions...</div>';
-  fetch('/api/trading/brain/predictions').then(function(r){return r.json();}).then(function(d) {
+  fetch('/api/trading/brain/predictions').then(parseFetchJson).then(function(d) {
     if (!d.ok || !d.predictions || !d.predictions.length) { container.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">No predictions yet. Run a scan first.</div>'; return; }
     window._brainPredictions = d.predictions; _predShowAll = false;
     _renderPredCards(container, d.predictions);
-  }).catch(function() { container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load.</div>'; });
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load predictions.<br/><span style="font-size:10px;opacity:.85">' + hint + '</span></div>';
+  });
 }
 
 function _renderPredCards(container, preds) {

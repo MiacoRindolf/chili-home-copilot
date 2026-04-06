@@ -73,6 +73,7 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
     assert out["ok"] is True
     assert "generated_at" in out
     assert out.get("data_as_of") is not None
+    assert out.get("board_truncated") is False
     assert "source_freshness" in out
     assert out["no_trade_now"] is True
     assert "tiers" in out
@@ -83,3 +84,57 @@ def test_opportunity_board_empty_shape(monkeypatch) -> None:
     out_dbg = get_trading_opportunity_board(db, 1, include_debug=True)
     assert "debug" in out_dbg
     assert "skip_reasons" in out_dbg["debug"]
+
+
+def test_opportunity_board_truncated_when_budget_hit(monkeypatch) -> None:
+    db = MagicMock()
+
+    def _gather(*_a, **_k):
+        meta = {
+            "patterns_active": 0,
+            "patterns_with_tickers_evaluated": 0,
+            "global_ticker_universe": 0,
+            "universe_by_source": {},
+            "tickers_scored": 0,
+            "skip_reasons": {},
+            "top_suppressed": [],
+            "equity_session_open": True,
+            "for_opportunity_board": True,
+            "board_eval_budget_hit": True,
+            "board_per_pattern_cap": 10,
+            "board_score_budget": 360,
+        }
+        return [], meta
+
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.gather_imminent_candidate_rows",
+        _gather,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.get_current_predictions",
+        lambda *_a, **_k: [],
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.us_stock_session_open",
+        lambda *_a, **_k: True,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.describe_us_session_context",
+        lambda *_a, **_k: {
+            "us_session": "regular_hours",
+            "label": "US stocks: regular session",
+            "equity_evaluation_active": True,
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.collect_source_freshness",
+        lambda *_a, **_k: {"predictions_cache_last_updated_utc": "2026-01-01T12:00:00+00:00"},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.opportunity_board.compute_board_data_as_of",
+        lambda sf: ("2026-01-01T12:00:00+00:00", ["predictions_cache_last_updated_utc"]),
+    )
+
+    out = get_trading_opportunity_board(db, 1, include_research=False, include_debug=False)
+    assert out["ok"] is True
+    assert out.get("board_truncated") is True

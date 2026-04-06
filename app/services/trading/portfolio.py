@@ -209,8 +209,14 @@ def get_trade_stats_by_source(db: Session, user_id: int | None) -> dict[str, Any
 def get_daily_pnl(
     db: Session, user_id: int | None,
     start_date: datetime, end_date: datetime,
+    *,
+    include_day_trades: bool = True,
 ) -> list[dict[str, Any]]:
-    """Daily P&L and trade count for calendar. Groups by exit_date (UTC date)."""
+    """Daily P&L and trade count for calendar. Groups by exit_date (UTC date).
+
+    *include_day_trades*: when False, omit per-day ``trades`` lists (smaller JSON for Brain
+    performance widget, which only charts date + pnl).
+    """
     from collections import defaultdict
 
     closed = db.query(Trade).filter(
@@ -231,15 +237,17 @@ def get_daily_pnl(
     for day in sorted(by_date.keys()):
         trades = by_date[day]
         pnl = sum(t.pnl or 0.0 for t in trades)
-        result.append({
+        row: dict[str, Any] = {
             "date": day,
             "trade_count": len(trades),
             "pnl": round(pnl, 2),
-            "trades": [
+        }
+        if include_day_trades:
+            row["trades"] = [
                 {"id": t.id, "ticker": t.ticker, "direction": t.direction, "pnl": round(t.pnl or 0, 2)}
                 for t in trades
-            ],
-        })
+            ]
+        result.append(row)
     return result
 
 
@@ -254,8 +262,10 @@ def get_performance_dashboard(
     stats = get_trade_stats(db, user_id)
     by_source = get_trade_stats_by_source(db, user_id)
 
-    # 30-day daily P&L
-    daily = get_daily_pnl(db, user_id, now - timedelta(days=30), now)
+    # 30-day daily P&L (omit per-day trade rows — Brain UI only needs date + pnl for the sparkline)
+    daily = get_daily_pnl(
+        db, user_id, now - timedelta(days=30), now, include_day_trades=False
+    )
 
     # Per-pattern attribution via scan_pattern_id
     closed_with_sp = db.query(Trade).filter(
