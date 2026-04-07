@@ -122,6 +122,22 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tbn-edge-pipeline {
   stroke-opacity: 0.18; stroke-width: 1.8; stroke-dasharray: 6 5;
 }
+.tbn-edge-neural-excite {
+  stroke: rgba(34, 197, 94, 0.55); stroke-width: 1.5; stroke-opacity: 0.55;
+}
+.tbn-edge-neural-inhibit {
+  stroke: rgba(248, 113, 113, 0.65); stroke-width: 1.6; stroke-opacity: 0.5;
+  stroke-dasharray: 4 4;
+}
+.tbn-edge-pulse { animation: tbn-edge-pulse-anim 1.1s ease-out 1; }
+@keyframes tbn-edge-pulse-anim {
+  0% { stroke-opacity: 0.95; stroke-width: 3.2; }
+  100% { stroke-opacity: 0.35; stroke-width: 1.4; }
+}
+.tbn-neural-observer .tbn-node-circle { stroke: rgba(148, 163, 184, 0.85); stroke-width: 1.2; stroke-dasharray: 3 3; }
+.tbn-neural-stale .tbn-node-circle { opacity: 0.38; filter: grayscale(0.35); }
+.tbn-graph-mode-row { display: flex; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); }
+.tbn-graph-mode-row select { font-size: 10px; padding: 2px 6px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); }
 .tbn-node { cursor: pointer; }
 .tbn-tier-step .tbn-node-label {
   font-size: 8px; font-weight: 600; fill: var(--text-muted);
@@ -930,6 +946,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 {% block content %}
 <script type="application/json" id="trading-brain-network-data">{{ trading_brain_network_graph | default({"ok": false, "nodes": [], "edges": []}, true) | tojson }}</script>
+<script>
+window.__CHILI_BRAIN_GRAPH__ = {{ {"neural_mesh_enabled": trading_brain_neural_mesh_enabled|default(false), "effective_graph_mode": trading_brain_graph_effective_mode|default("legacy")} | tojson }};
+</script>
 <div class="b-header">
   <div style="display:flex;align-items:center;gap:8px">
     <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:none" title="Back to domain hub">&#8592; All domains</button>
@@ -970,6 +989,17 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
       <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
         <div class="tbn-hint-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
           <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Graph mirrors <code style="font-size:9px">run_learning_cycle</code> phase order; dashed links are pipeline flow.</p>
+          <div id="tbn-graph-mode-wrap" class="tbn-graph-mode-row" style="display:none" title="Neural mesh requires TRADING_BRAIN_NEURAL_MESH_ENABLED">
+            <label for="tbn-graph-mode">View</label>
+            <select id="tbn-graph-mode" aria-label="Graph view mode">
+              <option value="legacy">Legacy pipeline</option>
+              <option value="neural">Neural mesh</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="tbn-live-activations" />
+              Live
+            </label>
+          </div>
           <input type="text" id="tbn-search" placeholder="Search nodes..." style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;width:140px" />
           <button type="button" id="tbn-reset-view" title="Reset zoom & pan" style="padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Reset</button>
           <button type="button" class="tbn-refresh-graph" id="tbn-refresh-graph" title="Reload graph from server">Refresh graph</button>
@@ -2320,6 +2350,73 @@ function initTradingBrainNetworkGraph() {
   if (!vp || !gEdges || !gNodes) return;
   _tradingBrainNetworkInited = true;
 
+  var _tbnLiveTimer = null;
+  var _tbnEdgeDomByKey = {};
+
+  function tbnGraphFetchUrl() {
+    var wrap = document.getElementById('tbn-graph-mode-wrap');
+    var sel = document.getElementById('tbn-graph-mode');
+    var neuralOn = wrap && wrap.style.display !== 'none' && sel && sel.value === 'neural';
+    return neuralOn ? '/api/trading/brain/graph?mode=neural' : '/api/brain/trading/network-graph';
+  }
+
+  function tbnRestartLivePoll() {
+    if (_tbnLiveTimer) {
+      clearInterval(_tbnLiveTimer);
+      _tbnLiveTimer = null;
+    }
+    var liveCb = document.getElementById('tbn-live-activations');
+    var wrap = document.getElementById('tbn-graph-mode-wrap');
+    var sel = document.getElementById('tbn-graph-mode');
+    if (!liveCb || !liveCb.checked) return;
+    if (!wrap || wrap.style.display === 'none' || !sel || sel.value !== 'neural') return;
+    _tbnLiveTimer = setInterval(function() {
+      var netPane = document.getElementById('trading-brain-pane-network');
+      if (!netPane || netPane.style.display === 'none') return;
+      fetch('/api/trading/brain/graph/activations?limit=25', { credentials: 'same-origin' })
+        .then(function(r) { return r.json(); })
+        .then(function(d) {
+          if (!d || !d.ok || !d.activations) return;
+          d.activations.forEach(function(ev) {
+            var sid = ev.source_node_id;
+            if (!sid) return;
+            Object.keys(_tbnEdgeDomByKey).forEach(function(key) {
+              if (key.indexOf(sid + '->') !== 0) return;
+              var line = _tbnEdgeDomByKey[key];
+              if (!line) return;
+              line.classList.remove('tbn-edge-pulse');
+              void line.offsetWidth;
+              line.classList.add('tbn-edge-pulse');
+            });
+          });
+        })
+        .catch(function() {});
+    }, 3800);
+  }
+
+  (function tbnInitGraphModeUi() {
+    var wrap = document.getElementById('tbn-graph-mode-wrap');
+    var sel = document.getElementById('tbn-graph-mode');
+    var cfg = window.__CHILI_BRAIN_GRAPH__ || {};
+    if (!wrap || !sel) return;
+    if (!cfg.neural_mesh_enabled) return;
+    wrap.style.display = 'flex';
+    var saved = null;
+    try { saved = localStorage.getItem('chili_tbn_graph_mode'); } catch (e1) {}
+    if (saved === 'neural' || saved === 'legacy') {
+      sel.value = saved;
+    } else {
+      sel.value = (cfg.effective_graph_mode === 'neural') ? 'neural' : 'legacy';
+    }
+    sel.onchange = function() {
+      try { localStorage.setItem('chili_tbn_graph_mode', sel.value); } catch (e2) {}
+      tbnRefreshTradingBrainNetworkGraph();
+      tbnRestartLivePoll();
+    };
+    var liveCb = document.getElementById('tbn-live-activations');
+    if (liveCb) liveCb.onchange = function() { tbnRestartLivePoll(); };
+  })();
+
   var dragging = false;
   var px = 0;
   var py = 0;
@@ -2520,12 +2617,165 @@ function initTradingBrainNetworkGraph() {
     return [a, b];
   }
 
+  function tbnOpenNeuralNodeDetailFromApi(nodeId, anchorEl) {
+    var p = document.getElementById('tbn-node-detail');
+    var titleEl = document.getElementById('tbn-node-detail-title');
+    var body = document.getElementById('tbn-node-detail-body');
+    if (!p || !titleEl || !body) return;
+    titleEl.textContent = 'Loading\u2026';
+    body.innerHTML = '';
+    p.classList.add('tbn-node-detail-open');
+    p.setAttribute('aria-hidden', 'false');
+    fetch('/api/trading/brain/graph/nodes/' + encodeURIComponent(nodeId), { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        if (!d || !d.ok || !d.node) throw new Error('bad');
+        var nd = d.node;
+        titleEl.textContent = nd.label || nd.id;
+        var parts = [];
+        parts.push('<dt class="tbn-node-detail-sr-only">Summary</dt><dd class="tbn-node-detail-section-dd">');
+        parts.push('<div style="font-size:10px;line-height:1.45">');
+        parts.push('<div><strong>type</strong> ' + escHtml(String(nd.node_type || '')) + ' &middot; <strong>layer</strong> ' + escHtml(String(nd.layer)) + '</div>');
+        parts.push('<div><strong>activation</strong> ' + escHtml(String(nd.activation_score)) + ' &middot; <strong>confidence</strong> ' + escHtml(String(nd.confidence)) + '</div>');
+        parts.push('<div><strong>threshold</strong> ' + escHtml(String(nd.fire_threshold)) + ' &middot; <strong>cooldown_s</strong> ' + escHtml(String(nd.cooldown_seconds)) + '</div>');
+        parts.push('<div><strong>last_fired</strong> ' + escHtml(String(nd.last_fired_at || '\u2014')) + '</div>');
+        parts.push('<div><strong>staleness</strong> ' + escHtml(String(nd.staleness_at || '\u2014')) + '</div>');
+        parts.push('</div></dd>');
+        var ib = nd.inbound_edges || [];
+        var ob = nd.outbound_edges || [];
+        parts.push('<dt class="tbn-node-detail-sr-only">Edges</dt><dd class="tbn-node-detail-section-dd"><pre style="margin:0;font-size:9px;white-space:pre-wrap">');
+        parts.push('in: ' + ib.length + ' / out: ' + ob.length + '\n');
+        ib.slice(0, 8).forEach(function(e) {
+          parts.push('\u2190 ' + escHtml(e.from) + ' [' + escHtml(e.signal_type) + '/' + escHtml(e.polarity) + ']\n');
+        });
+        ob.slice(0, 8).forEach(function(e) {
+          parts.push('\u2192 ' + escHtml(e.to) + ' [' + escHtml(e.signal_type) + '/' + escHtml(e.polarity) + ']\n');
+        });
+        parts.push('</pre></dd>');
+        var rf = nd.recent_fires || [];
+        parts.push('<dt class="tbn-node-detail-sr-only">Recent fires</dt><dd class="tbn-node-detail-section-dd"><pre style="margin:0;font-size:9px">');
+        if (!rf.length) parts.push('\u2014');
+        else rf.slice(0, 6).forEach(function(f) {
+          parts.push(escHtml(String(f.fired_at)) + ' act=' + escHtml(String(f.activation_score)) + '\n');
+        });
+        parts.push('</pre></dd>');
+        body.innerHTML = parts.join('');
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            tbnPositionNodeDetailPanel(p, anchorEl);
+          });
+        });
+      })
+      .catch(function() {
+        titleEl.textContent = 'Node';
+        body.textContent = 'Could not load node detail.';
+      });
+  }
+
+  function tbnRenderNeuralGraphData(data) {
+    _tbnEdgeDomByKey = {};
+    gEdges.innerHTML = '';
+    gNodes.innerHTML = '';
+    var nodeMap = {};
+    data.nodes.forEach(function(n) { nodeMap[n.id] = n; });
+    data.edges.forEach(function(edge) {
+      var a = nodeMap[edge.from];
+      var b = nodeMap[edge.to];
+      if (!a || !b) return;
+      var line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+      line.setAttribute('x1', String(a.x));
+      line.setAttribute('y1', String(a.y));
+      line.setAttribute('x2', String(b.x));
+      line.setAttribute('y2', String(b.y));
+      var ec = 'tbn-edge tbn-edge-neural-excite';
+      if (edge.polarity === 'inhibitory') ec = 'tbn-edge tbn-edge-neural-inhibit';
+      line.setAttribute('class', ec);
+      line.setAttribute('data-edge-from', edge.from);
+      line.setAttribute('data-edge-to', edge.to);
+      _tbnEdgeDomByKey[edge.from + '->' + edge.to] = line;
+      gEdges.appendChild(line);
+    });
+    var hintEl = document.getElementById('tbn-hint-text');
+    if (hintEl && data.meta && data.meta.description) {
+      hintEl.innerHTML = 'Neural mesh: rings = cognitive layer; green excitatory / red dashed inhibitory. <span style="opacity:.85">' +
+        escHtml(data.meta.description).slice(0, 160) + (data.meta.description.length > 160 ? '\u2026' : '') + '</span>';
+    }
+    var leg = document.getElementById('tbn-legend');
+    if (leg) {
+      leg.innerHTML = '<span style="color:var(--accent)">Neural</span> '
+        + '<span><span style="display:inline-block;width:14px;height:2px;background:rgba(34,197,94,.7);vertical-align:middle"></span> Excite</span>'
+        + '<span><span style="display:inline-block;width:14px;height:2px;background:rgba(248,113,113,.7);vertical-align:middle;border-bottom:1px dashed"></span> Inhibit</span>'
+        + '<span style="border-left:1px solid var(--border);padding-left:8px">Observers: dashed ring</span>';
+    }
+    data.nodes.forEach(function(n) {
+      var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+      var gcl = 'tbn-node tbn-neural-node';
+      if (n.is_observer) gcl += ' tbn-neural-observer';
+      if (n.stale) gcl += ' tbn-neural-stale';
+      g.setAttribute('class', gcl);
+      g.setAttribute('data-node-id', n.id);
+      g.setAttribute('transform', 'translate(' + n.x + ',' + n.y + ')');
+      var act = typeof n.activation_score === 'number' ? n.activation_score : parseFloat(n.activation_score) || 0;
+      var conf = typeof n.confidence === 'number' ? n.confidence : parseFloat(n.confidence) || 0;
+      var r = 7 + Math.min(16, act * 22) + Math.min(6, conf * 5);
+      var circ = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circ.setAttribute('r', String(r));
+      circ.setAttribute('class', 'tbn-node-circle');
+      var glow = Math.min(0.95, 0.25 + act * 0.85);
+      circ.setAttribute('fill', 'rgba(99,102,241,' + (0.25 + conf * 0.35) + ')');
+      circ.setAttribute('stroke', 'rgba(167,139,250,' + glow + ')');
+      circ.setAttribute('stroke-width', '1.5');
+      var t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
+      t.textContent = (n.label || n.id) + '\nL' + n.layer + ' act=' + act.toFixed(2);
+      g.appendChild(t);
+      g.appendChild(circ);
+      var text = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+      text.setAttribute('class', 'tbn-node-label');
+      text.setAttribute('y', String(r + 12));
+      text.setAttribute('text-anchor', 'middle');
+      var lab = n.label || n.id;
+      if (lab.length > 22) lab = lab.slice(0, 20) + '\u2026';
+      text.textContent = lab;
+      g.appendChild(text);
+      g.addEventListener('mousedown', function(e) { e.stopPropagation(); });
+      g.addEventListener('click', function(e) {
+        e.stopPropagation();
+        tbnOpenNeuralNodeDetailFromApi(n.id, g);
+      });
+      gNodes.appendChild(g);
+    });
+    var vw = vp.clientWidth || 800;
+    var vh = vp.clientHeight || 480;
+    var sc = _tbnState.scale;
+    _tbnState.tx = (vw - 1600 * sc) / 2;
+    _tbnState.ty = (vh - 950 * sc) / 2;
+    _tbnApplyStage();
+    tbnRestartLivePoll();
+  }
+
   function tbnRenderGraphData(data) {
     gEdges.innerHTML = '';
     gNodes.innerHTML = '';
     if (!data || !data.ok || !data.nodes || !data.edges) {
       tbnShowGraphError();
       return;
+    }
+    if (data.meta && data.meta.view === 'neural') {
+      tbnRenderNeuralGraphData(data);
+      return;
+    }
+    var leg = document.getElementById('tbn-legend');
+    if (leg) {
+      leg.innerHTML = '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a78bfa;vertical-align:middle"></span> Root</span>'
+        + '<span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#60a5fa;vertical-align:middle"></span> Cluster</span>'
+        + '<span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;vertical-align:middle"></span> Step</span>'
+        + '<span style="border-left:2px dashed var(--accent);padding-left:6px">Pipeline</span>'
+        + '<span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#22c55e;vertical-align:middle"></span> Running</span>'
+        + '<span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#f59e0b;vertical-align:middle"></span> Pending</span>';
+    }
+    if (_tbnLiveTimer) {
+      clearInterval(_tbnLiveTimer);
+      _tbnLiveTimer = null;
     }
     var nodeMap = {};
     data.nodes.forEach(function(n) { nodeMap[n.id] = n; });
@@ -2633,7 +2883,7 @@ function initTradingBrainNetworkGraph() {
     tbnCloseNodeDetail();
     var btn = document.getElementById('tbn-refresh-graph');
     if (btn) btn.disabled = true;
-    fetch('/api/brain/trading/network-graph', { credentials: 'same-origin' })
+    fetch(tbnGraphFetchUrl(), { credentials: 'same-origin' })
       .then(function(r) {
         if (!r.ok) throw new Error('http ' + r.status);
         return r.json();
@@ -2661,29 +2911,27 @@ function initTradingBrainNetworkGraph() {
   if (tbnRefreshBtn) tbnRefreshBtn.onclick = function() { tbnRefreshTradingBrainNetworkGraph(); };
 
   var embedded = tbnParseEmbeddedGraph();
-  if (embedded && embedded.ok && embedded.nodes && embedded.edges) {
-    tbnRenderGraphData(embedded);
-  } else {
-    fetch('/api/brain/trading/network-graph', { credentials: 'same-origin' })
-      .then(function(r) {
-        if (!r.ok) throw new Error('http ' + r.status);
-        return r.json();
-      })
-      .then(function(d) {
-        if (d && d.ok && d.nodes && d.edges) {
-          tbnRenderGraphData(d);
-        } else {
-          var again = tbnParseEmbeddedGraph();
-          if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
-          else tbnShowGraphError();
-        }
-      })
-      .catch(function() {
-        var again = tbnParseEmbeddedGraph();
-        if (again && again.ok && again.nodes && again.edges) tbnRenderGraphData(again);
-        else tbnShowGraphError();
-      });
-  }
+  fetch(tbnGraphFetchUrl(), { credentials: 'same-origin' })
+    .then(function(r) {
+      if (!r.ok) throw new Error('http ' + r.status);
+      return r.json();
+    })
+    .then(function(d) {
+      if (d && d.ok && d.nodes && d.edges) {
+        tbnRenderGraphData(d);
+      } else if (embedded && embedded.ok && embedded.nodes && embedded.edges) {
+        tbnRenderGraphData(embedded);
+      } else {
+        tbnShowGraphError();
+      }
+    })
+    .catch(function() {
+      if (embedded && embedded.ok && embedded.nodes && embedded.edges) {
+        tbnRenderGraphData(embedded);
+      } else {
+        tbnShowGraphError();
+      }
+    });
 
   // Reset view button
   var resetBtn = document.getElementById('tbn-reset-view');

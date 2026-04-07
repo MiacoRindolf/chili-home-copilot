@@ -29,6 +29,7 @@ from ..services.project_brain import registry as pb_registry
 from ..services.project_brain import learning as pb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
 from ..services.trading.brain_network_graph import get_trading_brain_network_graph
+from ..services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
 from ..models import (
     BrainBatchJob,
     ReasoningAnticipation,
@@ -72,6 +73,8 @@ def brain_page(
             "planner_task_id": planner_task_id,
             "planner_project_id": planner_project_id,
             "trading_brain_network_graph": get_trading_brain_network_graph(),
+            "trading_brain_neural_mesh_enabled": mesh_enabled(),
+            "trading_brain_graph_effective_mode": effective_graph_mode(),
         },
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).

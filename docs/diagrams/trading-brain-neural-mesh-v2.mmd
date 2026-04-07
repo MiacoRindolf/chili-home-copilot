@@ -1,0 +1,44 @@
+flowchart TB
+  subgraph L1 [Layer1_Sensory]
+    S1[Market_snapshots]
+    S2[Intraday_crypto]
+  end
+  subgraph L2 [Layer2_Features]
+    F1[Volatility]
+    F2[Momentum]
+  end
+  subgraph L3 [Layer3_LatentHub]
+    B[Event_bus_router]
+    R[Regime_inference]
+    C[Contradiction_tracker]
+  end
+  subgraph L4 [Layer4_Pattern]
+    P[Pattern_discovery]
+  end
+  subgraph L5 [Layer5_Evidence]
+    E[Backtest_evidence]
+  end
+  subgraph L6 [Layer6_ActionObservers]
+    A[Signal_surfacing]
+    O[Journal_observer]
+  end
+  subgraph L7 [Layer7_Meta]
+    M[Decay_policy]
+    RW[Edge_reweight]
+  end
+  S1 -->|excite_snapshot| B
+  S2 -->|excite_snapshot| B
+  B -->|state_tick| F1
+  F1 -->|feature_signal| R
+  F2 -->|feature_signal| R
+  R -->|regime_shift| P
+  P -->|pattern_candidate| E
+  E -->|evidence_ok_excite| A
+  R -->|regime_shift| C
+  C -->|inhibit_contradict| A
+  R -->|observer| O
+  M -->|decay_tick| B
+  RW -.->|reweight_loop| E
+  subgraph Obs [Observer_flow]
+    O
+  end

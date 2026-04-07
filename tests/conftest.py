@@ -105,10 +105,13 @@ def fastapi_app():
 
 def _truncate_app_tables() -> None:
     """Remove row data between tests; keep schema_version so migrations are not re-run."""
+    # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
+    # do not need to re-seed the graph definition every time.
+    _skip_truncate = frozenset({"schema_version", "brain_graph_nodes", "brain_graph_edges"})
     names = [
         f'"{t.name}"'
         for t in Base.metadata.sorted_tables
-        if t.name != "schema_version"
+        if t.name not in _skip_truncate
     ]
     if not names:
         return

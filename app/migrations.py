@@ -3065,6 +3065,336 @@ def _migration_085_brain_worker_learning_live_json(conn) -> None:
     conn.commit()
 
 
+def _migration_086_trading_brain_neural_mesh(conn) -> None:
+    """Trading Brain v2: Postgres-backed neural mesh (nodes, edges, activation queue, states)."""
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_nodes (
+                    id VARCHAR(80) PRIMARY KEY,
+                    domain TEXT NOT NULL DEFAULT 'trading',
+                    graph_version INTEGER NOT NULL DEFAULT 1,
+                    node_type TEXT NOT NULL,
+                    layer INTEGER NOT NULL,
+                    label TEXT NOT NULL,
+                    fire_threshold DOUBLE PRECISION NOT NULL DEFAULT 0.55,
+                    cooldown_seconds INTEGER NOT NULL DEFAULT 120,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    is_observer BOOLEAN NOT NULL DEFAULT FALSE,
+                    display_meta JSONB,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_graph_nodes_domain_ver_type "
+                "ON brain_graph_nodes (domain, graph_version, node_type)"
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_brain_graph_nodes_layer ON brain_graph_nodes (layer)"))
+        conn.commit()
+
+    if "brain_graph_edges" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_edges (
+                    id SERIAL PRIMARY KEY,
+                    source_node_id VARCHAR(80) NOT NULL REFERENCES brain_graph_nodes(id) ON DELETE CASCADE,
+                    target_node_id VARCHAR(80) NOT NULL REFERENCES brain_graph_nodes(id) ON DELETE CASCADE,
+                    signal_type TEXT NOT NULL DEFAULT '*',
+                    weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    polarity TEXT NOT NULL DEFAULT 'excitatory',
+                    delay_ms INTEGER NOT NULL DEFAULT 0,
+                    decay_half_life_seconds INTEGER,
+                    gate_config JSONB,
+                    min_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                    graph_version INTEGER NOT NULL DEFAULT 1,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT ck_brain_graph_edges_polarity CHECK (polarity IN ('excitatory', 'inhibitory'))
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_graph_edges_src_en "
+                "ON brain_graph_edges (source_node_id, enabled)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_graph_edges_tgt_en "
+                "ON brain_graph_edges (target_node_id, enabled)"
+            )
+        )
+        conn.commit()
+
+    if "brain_node_states" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_node_states (
+                    node_id VARCHAR(80) PRIMARY KEY REFERENCES brain_graph_nodes(id) ON DELETE CASCADE,
+                    activation_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    local_state JSONB,
+                    last_fired_at TIMESTAMP,
+                    staleness_at TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.commit()
+
+    if "brain_activation_events" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_activation_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    source_node_id VARCHAR(80) REFERENCES brain_graph_nodes(id) ON DELETE SET NULL,
+                    cause TEXT NOT NULL,
+                    payload JSONB,
+                    confidence_delta DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    propagation_depth INTEGER NOT NULL DEFAULT 0,
+                    correlation_id TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    processed_at TIMESTAMP,
+                    status TEXT NOT NULL DEFAULT 'pending',
+                    CONSTRAINT ck_brain_activation_events_status CHECK (
+                        status IN ('pending', 'processing', 'done', 'dead')
+                    )
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_activation_events_status_created "
+                "ON brain_activation_events (status, created_at)"
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX ix_brain_activation_events_correlation ON brain_activation_events (correlation_id)")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_activation_events_pending_partial ON brain_activation_events (created_at) "
+                "WHERE status = 'pending'"
+            )
+        )
+        conn.commit()
+
+    if "brain_fire_log" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_fire_log (
+                    id BIGSERIAL PRIMARY KEY,
+                    node_id VARCHAR(80) NOT NULL REFERENCES brain_graph_nodes(id) ON DELETE CASCADE,
+                    fired_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    activation_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    correlation_id TEXT,
+                    summary TEXT
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_brain_fire_log_node_fired ON brain_fire_log (node_id, fired_at DESC)"
+            )
+        )
+        conn.commit()
+
+    if "brain_graph_snapshots" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_snapshots (
+                    id BIGSERIAL PRIMARY KEY,
+                    graph_version INTEGER NOT NULL,
+                    domain TEXT NOT NULL,
+                    snapshot_json JSONB NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX ix_brain_graph_snapshots_domain_ver ON brain_graph_snapshots (domain, graph_version)")
+        )
+        conn.commit()
+
+    if "brain_graph_metrics" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_metrics (
+                    domain TEXT NOT NULL,
+                    graph_version INTEGER NOT NULL,
+                    metric_key TEXT NOT NULL,
+                    value_num DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    extra JSONB,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (domain, graph_version, metric_key)
+                )
+                """
+            )
+        )
+        conn.commit()
+
+    # Idempotent seed for v1 trading mesh (ON CONFLICT DO NOTHING on nodes)
+    gv = 1
+    dom = "trading"
+    existing = conn.execute(
+        text("SELECT COUNT(*) FROM brain_graph_nodes WHERE domain = :d AND graph_version = :g"),
+        {"d": dom, "g": gv},
+    ).scalar()
+    if existing and int(existing) > 0:
+        conn.commit()
+        return
+
+    nodes_seed = [
+        ("nm_snap_daily", 1, "sensory_snapshot", "Market snapshots (daily)", False, 0.45, 30),
+        ("nm_snap_intraday", 1, "sensory_snapshot", "Intraday snapshots", False, 0.45, 30),
+        ("nm_snap_crypto", 1, "sensory_snapshot", "Crypto snapshots", False, 0.45, 30),
+        ("nm_universe_scan", 1, "sensory_universe", "Universe / prescreen", False, 0.5, 300),
+        ("nm_volatility", 2, "feature_volatility", "Volatility state", False, 0.5, 60),
+        ("nm_momentum", 2, "feature_momentum", "Momentum state", False, 0.5, 60),
+        ("nm_anomaly", 2, "feature_anomaly", "Anomaly detectors", False, 0.55, 120),
+        ("nm_event_bus", 3, "latent_event_bus", "Event bus / activation router", False, 0.35, 15),
+        ("nm_working_memory", 3, "latent_working_memory", "Working memory", False, 0.5, 45),
+        ("nm_regime", 3, "latent_regime", "Regime inference", False, 0.5, 90),
+        ("nm_contradiction", 3, "latent_contradiction", "Contradiction tracker", False, 0.5, 60),
+        ("nm_pattern_disc", 4, "pattern_discovery", "Pattern discovery", False, 0.55, 180),
+        ("nm_similarity", 4, "pattern_similarity", "Similarity search", False, 0.6, 300),
+        ("nm_evidence_bt", 5, "evidence_backtest", "Backtest evidence", False, 0.55, 120),
+        ("nm_evidence_replay", 5, "evidence_replay", "Scenario replay", False, 0.6, 240),
+        ("nm_action_signals", 6, "action_signals", "Signal surfacing", False, 0.6, 30),
+        ("nm_action_alerts", 6, "action_alerts", "Alert candidates", False, 0.6, 30),
+        ("nm_observer_journal", 6, "observer_journal", "Journal observer", True, 0.4, 60),
+        ("nm_observer_playbook", 6, "observer_playbook", "Playbook observer", True, 0.4, 120),
+        ("nm_meta_reweight", 7, "meta_reweight", "Edge / threshold tuning", False, 0.65, 600),
+        ("nm_meta_decay", 7, "meta_decay_policy", "Decay policy", False, 0.5, 300),
+    ]
+    for nid, layer, ntype, label, is_obs, fth, cd in nodes_seed:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            ),
+            {
+                "id": nid,
+                "domain": dom,
+                "gv": gv,
+                "ntype": ntype,
+                "layer": layer,
+                "label": label,
+                "fth": fth,
+                "cd": cd,
+                "is_obs": is_obs,
+            },
+        )
+
+    edges_seed = [
+        ("nm_snap_daily", "nm_event_bus", "snapshot_refresh", 1.0, "excitatory", None),
+        ("nm_snap_intraday", "nm_event_bus", "snapshot_refresh", 1.0, "excitatory", None),
+        ("nm_snap_crypto", "nm_event_bus", "snapshot_refresh", 0.9, "excitatory", None),
+        ("nm_event_bus", "nm_volatility", "state_tick", 0.85, "excitatory", None),
+        ("nm_volatility", "nm_regime", "feature_signal", 0.9, "excitatory", None),
+        ("nm_momentum", "nm_regime", "feature_signal", 0.75, "excitatory", None),
+        ("nm_regime", "nm_contradiction", "state_tick", 0.6, "excitatory", None),
+        ("nm_regime", "nm_pattern_disc", "regime_shift", 0.8, "excitatory", None),
+        ("nm_pattern_disc", "nm_evidence_bt", "pattern_candidate", 0.85, "excitatory", None),
+        ("nm_evidence_bt", "nm_action_signals", "evidence_ok", 0.9, "excitatory", None),
+        ("nm_contradiction", "nm_action_signals", "contradict", 0.95, "inhibitory", None),
+        ("nm_regime", "nm_observer_journal", "regime_shift", 0.4, "excitatory", None),
+        ("nm_meta_decay", "nm_working_memory", "decay_tick", 0.5, "excitatory", '{"apply_decay_strength": 0.15}'),
+        ("nm_universe_scan", "nm_event_bus", "universe_tick", 0.7, "excitatory", None),
+    ]
+    for src, tgt, sig, w, pol, gcfg in edges_seed:
+        if gcfg is None:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO brain_graph_edges (
+                        source_node_id, target_node_id, signal_type, weight, polarity,
+                        delay_ms, min_confidence, enabled, graph_version, gate_config,
+                        created_at, updated_at
+                    ) VALUES (
+                        :src, :tgt, :sig, :w, :pol,
+                        0, 0.0, TRUE, :gv, NULL,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+            )
+        else:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO brain_graph_edges (
+                        source_node_id, target_node_id, signal_type, weight, polarity,
+                        delay_ms, min_confidence, enabled, graph_version, gate_config,
+                        created_at, updated_at
+                    ) VALUES (
+                        :src, :tgt, :sig, :w, :pol,
+                        0, 0.0, TRUE, :gv, CAST(:gcfg AS jsonb),
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    )
+                    """
+                ),
+                {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "gcfg": gcfg},
+            )
+
+    for nid, _, _, _, _, _, _ in nodes_seed:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    conn.execute(
+        text(
+            """
+            UPDATE brain_graph_nodes SET enabled = FALSE WHERE id IN (
+                'nm_universe_scan', 'nm_anomaly', 'nm_similarity', 'nm_evidence_replay', 'nm_action_alerts'
+            )
+            """
+        )
+    )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -3152,6 +3482,7 @@ MIGRATIONS = [
     ("083_backtest_win_rate_scale_cleanup", _migration_083_backtest_win_rate_scale_cleanup),
     ("084_align_backtest_scan_pattern_from_insight", _migration_084_align_backtest_scan_pattern_from_insight),
     ("085_brain_worker_learning_live_json", _migration_085_brain_worker_learning_live_json),
+    ("086_trading_brain_neural_mesh", _migration_086_trading_brain_neural_mesh),
 ]
 
 

@@ -1,5 +1,14 @@
-# Full stack: postgres + ollama + CHILI app + Brain HTTP + brain worker (optional delegation to Brain).
-# See docs/DOCKER_FULL_STACK.md
+# CHILI full stack — see docs/DOCKER_FULL_STACK.md
+#
+# Logical groups (single file, no extra infra for neural mesh v1):
+#   1) Foundation: postgres, ollama
+#   2) App / control plane: chili (FastAPI), brain (HTTP delegate)
+#   3) Orchestration: scheduler-worker (APScheduler + market snapshots, etc.)
+#   4) Neural processing: brain-worker — ``lean-cycle`` (full learning cycle + optional Postgres
+#      activation batch when TRADING_BRAIN_NEURAL_MESH_ENABLED=1). For queue-only soak use
+#      ``--mode activation-loop`` (see scripts/brain_worker.py).
+#   5) Specialized execution (profile ``workers``): mining-worker, backtest-worker, fast-scan-worker
+#      — each uses the matching ``brain_worker.py --mode`` (mining / backtest / fast-scan).
 services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
@@ -107,7 +116,8 @@ services:
       ollama:
         condition: service_healthy
 
-  # Lean learning cycle worker (default mode). Runs periodic evaluation: backfill, evolve, ML, proposals.
+  # Neural processing (default): full ``run_learning_cycle`` + subtasks; optional neural mesh batch
+  # after each successful cycle when TRADING_BRAIN_NEURAL_MESH_ENABLED=1.
   brain-worker:
     image: chili-app:local
     command: ["python", "scripts/brain_worker.py", "--mode", "lean-cycle", "--interval", "5"]

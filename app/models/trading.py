@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
@@ -506,7 +506,121 @@ class BrainBatchJob(Base):
     status: str = Column(String(24), nullable=False, default="running")
     started_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at: Optional[datetime] = Column(DateTime, nullable=True)
-    error_message: Optional[str] = Column(Text, nullable=True)
+    error_message: Optional[datetime] = Column(Text, nullable=True)
     meta_json: Optional[dict] = Column(JSONB, nullable=True)
     payload_json: Optional[dict] = Column(JSONB, nullable=True)
     user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+
+class BrainGraphNode(Base):
+    """Trading Brain neural mesh: static node definition (per domain / graph_version)."""
+
+    __tablename__ = "brain_graph_nodes"
+
+    id: str = Column(String(80), primary_key=True)
+    domain: str = Column(String(32), nullable=False, default="trading", index=True)
+    graph_version: int = Column(Integer, nullable=False, default=1)
+    node_type: str = Column(String(64), nullable=False)
+    layer: int = Column(Integer, nullable=False, index=True)
+    label: str = Column(String(256), nullable=False)
+    fire_threshold: float = Column(Float, nullable=False, default=0.55)
+    cooldown_seconds: int = Column(Integer, nullable=False, default=120)
+    enabled: bool = Column(Boolean, nullable=False, default=True)
+    version: int = Column(Integer, nullable=False, default=1)
+    is_observer: bool = Column(Boolean, nullable=False, default=False)
+    display_meta: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BrainGraphEdge(Base):
+    """Directed edge between mesh nodes (excitatory / inhibitory)."""
+
+    __tablename__ = "brain_graph_edges"
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    source_node_id: str = Column(String(80), ForeignKey("brain_graph_nodes.id", ondelete="CASCADE"), nullable=False)
+    target_node_id: str = Column(String(80), ForeignKey("brain_graph_nodes.id", ondelete="CASCADE"), nullable=False)
+    signal_type: str = Column(String(64), nullable=False, default="*")
+    weight: float = Column(Float, nullable=False, default=1.0)
+    polarity: str = Column(String(16), nullable=False, default="excitatory")
+    delay_ms: int = Column(Integer, nullable=False, default=0)
+    decay_half_life_seconds: Optional[int] = Column(Integer, nullable=True)
+    gate_config: Optional[dict] = Column(JSONB, nullable=True)
+    min_confidence: float = Column(Float, nullable=False, default=0.0)
+    enabled: bool = Column(Boolean, nullable=False, default=True)
+    graph_version: int = Column(Integer, nullable=False, default=1)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BrainNodeState(Base):
+    """Runtime activation / confidence for a mesh node."""
+
+    __tablename__ = "brain_node_states"
+
+    node_id: str = Column(String(80), ForeignKey("brain_graph_nodes.id", ondelete="CASCADE"), primary_key=True)
+    activation_score: float = Column(Float, nullable=False, default=0.0)
+    confidence: float = Column(Float, nullable=False, default=0.5)
+    local_state: Optional[dict] = Column(JSONB, nullable=True)
+    last_fired_at: Optional[datetime] = Column(DateTime, nullable=True)
+    staleness_at: Optional[datetime] = Column(DateTime, nullable=True)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BrainActivationEvent(Base):
+    """Postgres-backed activation queue row."""
+
+    __tablename__ = "brain_activation_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    source_node_id: Optional[str] = Column(
+        String(80), ForeignKey("brain_graph_nodes.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    cause: str = Column(String(128), nullable=False)
+    payload: Optional[dict] = Column(JSONB, nullable=True)
+    confidence_delta: float = Column(Float, nullable=False, default=0.0)
+    propagation_depth: int = Column(Integer, nullable=False, default=0)
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    processed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    status: str = Column(String(16), nullable=False, default="pending", index=True)
+
+
+class BrainFireLog(Base):
+    """Append-only log when a node fires."""
+
+    __tablename__ = "brain_fire_log"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    node_id: str = Column(String(80), ForeignKey("brain_graph_nodes.id", ondelete="CASCADE"), nullable=False, index=True)
+    fired_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    activation_score: float = Column(Float, nullable=False, default=0.0)
+    confidence: float = Column(Float, nullable=False, default=0.0)
+    correlation_id: Optional[str] = Column(String(64), nullable=True)
+    summary: Optional[str] = Column(Text, nullable=True)
+
+
+class BrainGraphSnapshot(Base):
+    """Optional full-graph JSON snapshots for audit / debug."""
+
+    __tablename__ = "brain_graph_snapshots"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    graph_version: int = Column(Integer, nullable=False)
+    domain: str = Column(String(32), nullable=False)
+    snapshot_json: dict = Column(JSONB, nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BrainGraphMetric(Base):
+    """Keyed counters / gauges for mesh observability."""
+
+    __tablename__ = "brain_graph_metrics"
+
+    domain: str = Column(String(32), primary_key=True)
+    graph_version: int = Column(Integer, primary_key=True)
+    metric_key: str = Column(String(64), primary_key=True)
+    value_num: float = Column(Float, nullable=False, default=0.0)
+    extra: Optional[dict] = Column(JSONB, nullable=True)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)

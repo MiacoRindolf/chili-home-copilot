@@ -6,8 +6,9 @@ import logging
 import re
 from typing import Any, Literal, cast
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, Field
 from sqlalchemy import and_, func as sa_func, or_, text
 from sqlalchemy.orm import Session
 
@@ -91,6 +92,196 @@ def _get_trading_prompt() -> str:
 
 
 # ── AI Analysis ────────────────────────────────────────────────────────
+
+
+class _NeuralMeshPublishBody(BaseModel):
+    source_node_id: str | None = None
+    cause: str = "manual_debug"
+    confidence_delta: float = Field(0.25, ge=-1.0, le=1.0)
+    signal_type: str = "snapshot_refresh"
+
+
+@router.get("/api/trading/brain/graph/config")
+def api_trading_brain_graph_config(request: Request, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...config import settings
+    from ...services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "trading_brain_neural_mesh_enabled": bool(
+                getattr(settings, "trading_brain_neural_mesh_enabled", False)
+            ),
+            "trading_brain_graph_mode_setting": getattr(settings, "trading_brain_graph_mode", "neural"),
+            "effective_graph_mode": effective_graph_mode(),
+        }
+    )
+
+
+@router.get("/api/trading/brain/graph")
+def api_trading_brain_graph(
+    request: Request,
+    db: Session = Depends(get_db),
+    mode: str | None = Query(None, description="legacy | neural (default: server policy)"),
+):
+    get_identity_ctx(request, db)
+    from ...services.trading.brain_network_graph import get_trading_brain_network_graph
+    from ...services.trading.brain_neural_mesh.projection import build_neural_graph_projection
+    from ...services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
+
+    want = (mode or "").strip().lower() or None
+    eff = effective_graph_mode()
+    resolved = want or eff
+    if resolved == "neural":
+        if not mesh_enabled():
+            return JSONResponse(
+                {"ok": False, "error": "neural_mesh_disabled", "hint": "Set TRADING_BRAIN_NEURAL_MESH_ENABLED=1"},
+                status_code=403,
+            )
+        return JSONResponse(build_neural_graph_projection(db))
+    return JSONResponse(get_trading_brain_network_graph())
+
+
+@router.get("/api/trading/brain/graph/nodes/{node_id}")
+def api_trading_brain_graph_node(request: Request, node_id: str, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.brain_neural_mesh.projection import build_node_detail
+
+    detail = build_node_detail(db, node_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="node_not_found")
+    return JSONResponse({"ok": True, "node": detail})
+
+
+@router.get("/api/trading/brain/graph/edges/{edge_id}")
+def api_trading_brain_graph_edge(request: Request, edge_id: int, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.brain_neural_mesh.projection import build_edge_detail
+
+    detail = build_edge_detail(db, edge_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="edge_not_found")
+    return JSONResponse({"ok": True, "edge": detail})
+
+
+@router.get("/api/trading/brain/graph/activations")
+def api_trading_brain_graph_activations(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(40, ge=1, le=200),
+    since_iso: str | None = Query(None, description="UTC ISO timestamp filter"),
+):
+    get_identity_ctx(request, db)
+    from datetime import datetime
+
+    from ...services.trading.brain_neural_mesh.projection import list_recent_activations
+
+    since_dt = None
+    if since_iso:
+        try:
+            since_dt = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
+        except Exception:
+            since_dt = None
+    rows = list_recent_activations(db, limit=limit, since=since_dt)
+    return JSONResponse({"ok": True, "activations": rows})
+
+
+@router.get("/api/trading/brain/graph/metrics")
+def api_trading_brain_graph_metrics(request: Request, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.brain_neural_mesh.metrics import get_counters, read_metrics_map
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "db_metrics": read_metrics_map(db),
+            "session_counters": {
+                "events_published": get_counters().events_published,
+                "events_processed": get_counters().events_processed,
+                "node_fires": get_counters().node_fires,
+                "suppressions": get_counters().suppressions,
+                "inhibitions": get_counters().inhibitions,
+            },
+        }
+    )
+
+
+@router.post("/api/trading/brain/graph/publish")
+def api_trading_brain_graph_publish(
+    request: Request,
+    db: Session = Depends(get_db),
+    body: _NeuralMeshPublishBody | None = Body(default=None),
+):
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        raise HTTPException(status_code=403, detail="guest_forbidden")
+    from ...services.trading.brain_neural_mesh.metrics import get_counters
+    from ...services.trading.brain_neural_mesh.repository import enqueue_activation
+    from ...services.trading.brain_neural_mesh.schema import mesh_enabled
+
+    if not mesh_enabled():
+        raise HTTPException(status_code=403, detail="neural_mesh_disabled")
+    b = body or _NeuralMeshPublishBody()
+    import uuid
+
+    cid = str(uuid.uuid4())
+    eid = enqueue_activation(
+        db,
+        source_node_id=b.source_node_id,
+        cause=b.cause,
+        payload={"signal_type": b.signal_type},
+        confidence_delta=b.confidence_delta,
+        propagation_depth=0,
+        correlation_id=cid,
+    )
+    get_counters().note_publish(1)
+    db.commit()
+    return JSONResponse({"ok": True, "event_id": eid, "correlation_id": cid})
+
+
+@router.post("/api/trading/brain/graph/propagate")
+def api_trading_brain_graph_propagate(
+    request: Request,
+    db: Session = Depends(get_db),
+    dry_run: int = Query(0, ge=0, le=1),
+    source_node_id: str | None = Query(None),
+    confidence_delta: float = Query(0.2),
+):
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        raise HTTPException(status_code=403, detail="guest_forbidden")
+    from ...services.trading.brain_neural_mesh.activation_runner import (
+        run_activation_batch,
+        run_propagation_dry_run,
+    )
+    from ...services.trading.brain_neural_mesh.schema import mesh_enabled
+
+    if not mesh_enabled():
+        raise HTTPException(status_code=403, detail="neural_mesh_disabled")
+    if dry_run:
+        out: dict = {}
+        try:
+            with db.begin_nested():
+                import uuid
+
+                out = run_propagation_dry_run(
+                    db,
+                    source_node_id=source_node_id,
+                    confidence_delta=confidence_delta,
+                    propagation_depth=0,
+                    correlation_id=str(uuid.uuid4()),
+                    payload={"signal_type": "*"},
+                )
+                raise RuntimeError("__dry_run_rollback__")
+        except RuntimeError as e:
+            if str(e) != "__dry_run_rollback__":
+                raise
+        return JSONResponse({"ok": True, "dry_run": True, "simulated": out})
+    summary = run_activation_batch(db, time_budget_sec=3.0, max_events=16)
+    db.commit()
+    return JSONResponse({"ok": True, "dry_run": False, **summary})
+
 
 @router.get("/api/trading/brain/stats")
 def api_brain_stats(request: Request, db: Session = Depends(get_db)):

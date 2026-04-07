@@ -133,6 +133,18 @@ def _run_brain_market_snapshot_job():
             db.commit()
             out = _learning.run_scheduled_market_snapshots(db, _uid)
             brain_batch_job_finish(db, jid, ok=True, payload_json=out, meta={})
+            try:
+                from .trading.brain_neural_mesh.publisher import publish_market_snapshots_refreshed
+
+                publish_market_snapshots_refreshed(
+                    db,
+                    meta={
+                        "daily": out.get("snapshots_taken_daily"),
+                        "intraday": out.get("intraday_snapshots_taken"),
+                    },
+                )
+            except Exception as _nm_e:
+                logger.debug("[scheduler] neural mesh snapshot publish skipped: %s", _nm_e)
             db.commit()
             logger.info(
                 "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",

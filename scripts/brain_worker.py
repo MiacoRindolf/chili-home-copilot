@@ -1,27 +1,23 @@
 """
-CHILI Brain Worker - Continuous Learning Loop
+CHILI Brain Worker — multi-mode trading brain process.
 
-Runs as a separate process, continuously executing the FULL learning cycle:
-- Pre-filter market (Massive.com)
-- Deep score candidates
-- (Snapshots via scheduler job ``brain_market_snapshots`` unless BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE=1)
-- Backfill future returns
-- Decay stale insights
-- Mine patterns
-- Backtest patterns
-- Validate hypotheses
-- Learn from breakout outcomes
-- Specialized mining (intraday, fakeout, synergy) — optional via settings
-- Pattern evolution
-- Journal, signals, ML training
+Modes (``--mode``) are dispatched explicitly in ``main()``:
 
-Status is written to data/brain_worker_status.json for monitoring.
-Control via signal files in data/ directory (stop, pause, wake to skip idle sleep).
+- ``lean-cycle`` (default): full ``run_learning_cycle`` loop + subtasks between cycles.
+  When ``TRADING_BRAIN_NEURAL_MESH_ENABLED=1``, also runs a short Postgres activation
+  batch after each successful cycle.
+- ``activation-loop``: neural mesh event queue only (dev/soak); no full learning cycle.
+- ``mining``: repeated ``mine_patterns`` passes (Compose ``mining-worker``).
+- ``backtest``: drains the ScanPattern backtest queue via the fast-backtest subtask.
+- ``fast-scan``: repeated ``run_pattern_imminent_scan`` (Compose ``fast-scan-worker``).
 
-Default --interval is 5 minutes when the backtest queue is empty (1 minute breather when queue has work).
+Previously, non-default modes were accepted by argparse but still ran ``lean-cycle``;
+that is fixed.
+
+Status: data/brain_worker_status.json. Signals: data/brain_worker_stop|pause|wake.
 
 Usage:
-    python scripts/brain_worker.py [--interval MINUTES] [--once]
+    python scripts/brain_worker.py [--mode MODE] [--interval MINUTES] [--once]
 """
 import sys
 import os
@@ -646,14 +642,339 @@ def _cleanup_on_exit():
     logger.info("[brain] Cleanup: lock released")
 
 
+def _maybe_run_neural_activation_batch() -> None:
+    """Postgres neural mesh: bounded activation batch (no new infra)."""
+    try:
+        from app.config import settings as _settings
+
+        if not getattr(_settings, "trading_brain_neural_mesh_enabled", False):
+            return
+    except Exception:
+        return
+    db = SessionLocal()
+    try:
+        from app.services.trading.brain_neural_mesh import run_activation_batch
+
+        summary = run_activation_batch(db, time_budget_sec=2.5, max_events=24)
+        db.commit()
+        if summary.get("processed"):
+            logger.info("[brain] neural mesh batch %s", summary)
+    except Exception as e:
+        logger.warning("[brain] neural activation batch failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
+def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    """Default: full learning cycle + idle sleep policy."""
+    while True:
+        while check_pause_signal():
+            status.status = "paused"
+            status.set_step("Paused", "Waiting for resume...")
+            logger.info("[brain] Paused, waiting for resume signal...")
+            _db_heartbeat_tick()
+            time.sleep(10)
+
+        status.status = "running"
+
+        logger.info("[brain] Starting learning cycle")
+        cycle_start = time.time()
+
+        cycle_stats: dict = {}
+        max_retries = 2
+        for attempt in range(max_retries + 1):
+            try:
+                cycle_stats = run_learning_cycle(status)
+
+                status.totals["cycles_completed"] += 1
+                for key in [
+                    "tickers_scanned",
+                    "snapshots_taken",
+                    "patterns_mined",
+                    "patterns_tested",
+                    "queue_patterns_processed",
+                    "hypotheses_validated",
+                    "hypotheses_challenged",
+                    "patterns_spawned",
+                    "patterns_evolved",
+                    "patterns_variant_promoted",
+                    "patterns_pruned",
+                    "insights_decayed",
+                ]:
+                    status.totals[key] += cycle_stats.get(key, 0)
+
+                cycle_duration = time.time() - cycle_start
+                cycle_stats["duration_seconds"] = round(cycle_duration, 1)
+                status.last_cycle = cycle_stats
+
+                logger.info(
+                    f"[brain] Cycle completed in {cycle_duration:.1f}s | "
+                    f"Scanned: {cycle_stats.get('tickers_scanned', 0)}, "
+                    f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
+                    f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"
+                )
+
+                try:
+                    sub_results = run_subtasks(status)
+                    if sub_results:
+                        cycle_stats["subtasks"] = sub_results
+                except Exception as sub_e:
+                    logger.warning("[brain] Subtask sweep failed: %s", sub_e)
+
+                try:
+                    _maybe_run_neural_activation_batch()
+                except Exception as _ne:
+                    logger.warning("[brain] neural batch after cycle skipped: %s", _ne)
+
+                break
+
+            except Exception as e:
+                error_str = str(e).lower()
+                is_db_locked = "database is locked" in error_str or "locked" in error_str
+
+                if is_db_locked and attempt < max_retries:
+                    wait_time = 30 * (attempt + 1)
+                    logger.warning(
+                        f"[brain] Database locked, waiting {wait_time}s before retry {attempt + 1}/{max_retries}"
+                    )
+                    status.set_step("Waiting", f"Database locked, retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                    continue
+
+                logger.error(f"[brain] Cycle failed (attempt {attempt + 1}): {e}")
+                import traceback
+
+                traceback.print_exc()
+                status.set_step("Error", f"Cycle failed: {str(e)[:50]}...")
+                cycle_stats = {}
+                break
+
+        if args.once:
+            logger.info("[brain] Single cycle mode, exiting")
+            break
+
+        if check_stop_signal() or _check_db_stop_idle():
+            logger.info("[brain] Stop signal received, shutting down")
+            break
+
+        if _consume_wake_queued_during_cycle(status) or check_any_wake():
+            logger.info("[brain] Wake after cycle — skipping idle sleep")
+            continue
+
+        queue_pending = cycle_stats.get("queue_pending", 0)
+        patterns_tested = int(cycle_stats.get("patterns_tested", 0) or 0)
+        exploration_added = int(cycle_stats.get("queue_exploration_added", 0) or 0)
+        try:
+            live_pending, _ = _get_live_queue_status()
+            if live_pending > 0:
+                queue_pending = live_pending
+        except Exception as e:
+            logger.warning(f"[brain] Could not re-check queue before sleep: {e}")
+
+        should_short_sleep = queue_pending > 0 or patterns_tested > 0 or exploration_added > 0
+
+        if should_short_sleep:
+            sleep_seconds = 60
+            if queue_pending > 0:
+                idle_msg = f"{queue_pending} pattern(s) due for retest. Continuing in 1 minute."
+                log_msg = f"[brain] Retest queue: {queue_pending} pending. Continuing in 1 minute"
+            elif patterns_tested > 0:
+                idle_msg = f"Ran {patterns_tested} backtest(s) this cycle. Continuing in 1 minute."
+                log_msg = f"[brain] Backtests ran ({patterns_tested}); short sleep before next cycle"
+            else:
+                idle_msg = f"Exploration queued {exploration_added} pattern(s). Continuing in 1 minute."
+                log_msg = f"[brain] Exploration fill ({exploration_added}); short sleep before next cycle"
+            status.set_step("Idle", idle_msg)
+            logger.info(log_msg)
+        else:
+            sleep_seconds = args.interval * 60
+            status.set_step(
+                "Idle",
+                f"No retest due and no backtests this cycle. Next in {args.interval} min.",
+            )
+            logger.info(f"[brain] Retest queue clear and idle cycle. Sleeping {args.interval} minutes")
+
+        status.save()
+
+        remaining = sleep_seconds
+        stop_during_idle_sleep = False
+        while remaining > 0:
+            if check_stop_signal() or _check_db_stop_idle():
+                logger.info("[brain] Stop signal received during sleep")
+                stop_during_idle_sleep = True
+                break
+            if check_any_wake():
+                logger.info("[brain] Wake during idle sleep — starting next cycle now")
+                break
+            _db_heartbeat_tick()
+            chunk = min(5, remaining)
+            time.sleep(chunk)
+            remaining -= chunk
+
+        if stop_during_idle_sleep:
+            logger.info("[brain] Shutting down after stop during idle")
+            break
+
+
+def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    """Neural mesh queue consumer only (requires TRADING_BRAIN_NEURAL_MESH_ENABLED)."""
+    logger.info("[brain] activation-loop mode — processing neural mesh events")
+    nap = max(1, min(30, int(args.interval) if args.interval else 2))
+    while True:
+        while check_pause_signal():
+            status.status = "paused"
+            status.set_step("Paused", "Neural mesh paused...")
+            _db_heartbeat_tick()
+            time.sleep(10)
+        if check_stop_signal() or _check_db_stop_idle():
+            break
+        status.status = "running"
+        status.set_step("NeuralActivation", "Draining activation queue...")
+        db = SessionLocal()
+        try:
+            from app.services.trading.brain_neural_mesh import run_activation_batch
+
+            summary = run_activation_batch(db, time_budget_sec=float(min(8, nap * 2)), max_events=48)
+            db.commit()
+            if summary.get("processed"):
+                logger.info("[brain] activation-loop %s", summary)
+        except Exception as e:
+            logger.warning("[brain] activation-loop batch failed: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+        status.save()
+        if args.once:
+            break
+        _db_heartbeat_tick()
+        time.sleep(float(nap))
+
+
+def _run_mining_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    from app.config import settings as _settings
+
+    uid = getattr(_settings, "brain_default_user_id", None)
+    sleep_s = max(60, int(args.interval) * 60)
+    while True:
+        if check_pause_signal():
+            status.status = "paused"
+            status.set_step("Paused", "Mining paused...")
+            _db_heartbeat_tick()
+            time.sleep(10)
+            continue
+        if check_stop_signal() or _check_db_stop_idle():
+            break
+        status.status = "running"
+        status.set_step("Mining", "mine_patterns batch...")
+        db = SessionLocal()
+        try:
+            from app.services.trading.learning import mine_patterns
+
+            mine_patterns(db, uid)
+            db.commit()
+            logger.info("[brain] mining mode: mine_patterns pass committed")
+        except Exception as e:
+            logger.warning("[brain] mining mode failed: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+        status.save()
+        if args.once:
+            break
+        _sleep_chunked(sleep_s, status)
+
+
+def _run_backtest_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    sleep_s = max(30, min(300, int(args.interval) * 60 if args.interval else 60))
+    while True:
+        if check_pause_signal():
+            status.status = "paused"
+            status.set_step("Paused", "Backtest worker paused...")
+            _db_heartbeat_tick()
+            time.sleep(10)
+            continue
+        if check_stop_signal() or _check_db_stop_idle():
+            break
+        status.status = "running"
+        try:
+            _run_subtask_fast_backtest(status)
+        except Exception as e:
+            logger.warning("[brain] backtest mode subtask failed: %s", e)
+        status.save()
+        if args.once:
+            break
+        _sleep_chunked(sleep_s, status)
+
+
+def _run_fast_scan_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    from app.config import settings as _settings
+
+    uid = getattr(_settings, "brain_default_user_id", None)
+    sleep_s = max(60, min(600, int(args.interval) * 60 if args.interval else 120))
+    while True:
+        if check_pause_signal():
+            status.status = "paused"
+            status.set_step("Paused", "Fast-scan paused...")
+            _db_heartbeat_tick()
+            time.sleep(10)
+            continue
+        if check_stop_signal() or _check_db_stop_idle():
+            break
+        status.status = "running"
+        status.set_step("FastScan", "pattern imminent scan...")
+        db = SessionLocal()
+        try:
+            from app.services.trading.pattern_imminent_alerts import run_pattern_imminent_scan
+
+            run_pattern_imminent_scan(db, user_id=uid)
+            db.commit()
+        except Exception as e:
+            logger.warning("[brain] fast-scan mode failed: %s", e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+        status.save()
+        if args.once:
+            break
+        _sleep_chunked(sleep_s, status)
+
+
+def _sleep_chunked(total_seconds: int, status: BrainWorkerStatus) -> None:
+    remaining = int(total_seconds)
+    while remaining > 0:
+        if check_stop_signal() or _check_db_stop_idle():
+            return
+        if check_any_wake():
+            return
+        _db_heartbeat_tick()
+        chunk = min(10, remaining)
+        time.sleep(chunk)
+        remaining -= chunk
+
+
 def main():
     global _global_status
     
     parser = argparse.ArgumentParser(description="CHILI Brain Worker")
     parser.add_argument(
-        "--mode", type=str, default="lean-cycle",
-        choices=["lean-cycle", "mining", "backtest", "fast-scan"],
-        help="Worker mode (default: lean-cycle)",
+        "--mode",
+        type=str,
+        default="lean-cycle",
+        choices=["lean-cycle", "activation-loop", "mining", "backtest", "fast-scan"],
+        help="Worker mode (default: lean-cycle). activation-loop = neural mesh queue only.",
     )
     parser.add_argument(
         "--interval", type=int, default=DEFAULT_CYCLE_INTERVAL,
@@ -714,167 +1035,18 @@ def main():
         db_boot.close()
     
     try:
-        while True:
-            # Check for pause
-            while check_pause_signal():
-                status.status = "paused"
-                status.set_step("Paused", "Waiting for resume...")
-                logger.info("[brain] Paused, waiting for resume signal...")
-                _db_heartbeat_tick()
-                time.sleep(10)
-            
-            status.status = "running"
-            
-            # Run learning cycle
-            logger.info("[brain] Starting learning cycle")
-            cycle_start = time.time()
-            
-            cycle_stats = {}
-            max_retries = 2
-            for attempt in range(max_retries + 1):
-                try:
-                    cycle_stats = run_learning_cycle(status)
-                    
-                    # Update totals
-                    status.totals["cycles_completed"] += 1
-                    for key in ["tickers_scanned", "snapshots_taken", "patterns_mined", 
-                               "patterns_tested", "queue_patterns_processed",
-                               "hypotheses_validated", "hypotheses_challenged", 
-                               "patterns_spawned", "patterns_evolved", "patterns_variant_promoted",
-                               "patterns_pruned", "insights_decayed"]:
-                        status.totals[key] += cycle_stats.get(key, 0)
-                    
-                    cycle_duration = time.time() - cycle_start
-                    cycle_stats["duration_seconds"] = round(cycle_duration, 1)
-                    status.last_cycle = cycle_stats
-                    
-                    logger.info(
-                        f"[brain] Cycle completed in {cycle_duration:.1f}s | "
-                        f"Scanned: {cycle_stats.get('tickers_scanned', 0)}, "
-                        f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
-                        f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"
-                    )
-
-                    # Run subtasks between cycles
-                    try:
-                        sub_results = run_subtasks(status)
-                        if sub_results:
-                            cycle_stats["subtasks"] = sub_results
-                    except Exception as sub_e:
-                        logger.warning("[brain] Subtask sweep failed: %s", sub_e)
-
-                    break  # Success, exit retry loop
-                    
-                except Exception as e:
-                    error_str = str(e).lower()
-                    is_db_locked = "database is locked" in error_str or "locked" in error_str
-                    
-                    if is_db_locked and attempt < max_retries:
-                        wait_time = 30 * (attempt + 1)  # 30s, 60s
-                        logger.warning(f"[brain] Database locked, waiting {wait_time}s before retry {attempt + 1}/{max_retries}")
-                        status.set_step("Waiting", f"Database locked, retrying in {wait_time}s...")
-                        time.sleep(wait_time)
-                        continue
-                    
-                    logger.error(f"[brain] Cycle failed (attempt {attempt + 1}): {e}")
-                    import traceback
-                    traceback.print_exc()
-                    
-                    # On final failure, set error status but don't crash
-                    status.set_step("Error", f"Cycle failed: {str(e)[:50]}...")
-                    cycle_stats = {}
-                    break
-            
-            if args.once:
-                logger.info("[brain] Single cycle mode, exiting")
-                break
-            
-            # Check for stop signal (file or DB)
-            if check_stop_signal() or _check_db_stop_idle():
-                logger.info("[brain] Stop signal received, shutting down")
-                break
-
-            # Wake queued during the long cycle (peeked in DB poll) or file/DB after cycle
-            if _consume_wake_queued_during_cycle(status) or check_any_wake():
-                logger.info("[brain] Wake after cycle — skipping idle sleep")
-                continue
-            
-            # Sleep policy: DB "pending" ignores exploration-eligible patterns, so also treat
-            # productive backtests this cycle (and exploration fill) as "keep cycling soon".
-            queue_pending = cycle_stats.get("queue_pending", 0)
-            patterns_tested = int(cycle_stats.get("patterns_tested", 0) or 0)
-            exploration_added = int(cycle_stats.get("queue_exploration_added", 0) or 0)
-            try:
-                live_pending, _ = _get_live_queue_status()
-                if live_pending > 0:
-                    queue_pending = live_pending
-            except Exception as e:
-                logger.warning(f"[brain] Could not re-check queue before sleep: {e}")
-
-            should_short_sleep = (
-                queue_pending > 0
-                or patterns_tested > 0
-                or exploration_added > 0
-            )
-
-            if should_short_sleep:
-                sleep_seconds = 60  # 1 minute breather
-                if queue_pending > 0:
-                    idle_msg = (
-                        f"{queue_pending} pattern(s) due for retest. Continuing in 1 minute."
-                    )
-                    log_msg = (
-                        f"[brain] Retest queue: {queue_pending} pending. Continuing in 1 minute"
-                    )
-                elif patterns_tested > 0:
-                    idle_msg = (
-                        f"Ran {patterns_tested} backtest(s) this cycle. Continuing in 1 minute."
-                    )
-                    log_msg = (
-                        f"[brain] Backtests ran ({patterns_tested}); short sleep before next cycle"
-                    )
-                else:
-                    idle_msg = (
-                        f"Exploration queued {exploration_added} pattern(s). Continuing in 1 minute."
-                    )
-                    log_msg = (
-                        f"[brain] Exploration fill ({exploration_added}); short sleep before next cycle"
-                    )
-                status.set_step("Idle", idle_msg)
-                logger.info(log_msg)
-            else:
-                sleep_seconds = args.interval * 60
-                status.set_step(
-                    "Idle",
-                    f"No retest due and no backtests this cycle. Next in {args.interval} min.",
-                )
-                logger.info(
-                    f"[brain] Retest queue clear and idle cycle. Sleeping {args.interval} minutes"
-                )
-            
-            status.save()
-            
-            # Sleep in short chunks with stop / wake checks (wake skips remaining idle sleep)
-            remaining = sleep_seconds
-            stop_during_idle_sleep = False
-            while remaining > 0:
-                if check_stop_signal() or _check_db_stop_idle():
-                    logger.info("[brain] Stop signal received during sleep")
-                    stop_during_idle_sleep = True
-                    break
-                if check_any_wake():
-                    logger.info("[brain] Wake during idle sleep — starting next cycle now")
-                    break
-                _db_heartbeat_tick()
-                # Shorter chunks = faster response to brain_worker_wake (UI "Run next cycle")
-                chunk = min(5, remaining)
-                time.sleep(chunk)
-                remaining -= chunk
-
-            if stop_during_idle_sleep:
-                logger.info("[brain] Shutting down after stop during idle")
-                break
-    
+        if args.mode == "lean-cycle":
+            _run_lean_cycle_loop(args, status)
+        elif args.mode == "activation-loop":
+            _run_activation_loop(args, status)
+        elif args.mode == "mining":
+            _run_mining_loop(args, status)
+        elif args.mode == "backtest":
+            _run_backtest_loop(args, status)
+        elif args.mode == "fast-scan":
+            _run_fast_scan_loop(args, status)
+        else:
+            logger.error("[brain] Unknown mode %r", args.mode)
     finally:
         status.clear()
         logger.info("[brain] Brain Worker stopped")

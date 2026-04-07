@@ -7896,6 +7896,18 @@ def run_learning_cycle(
         f"[learning] Learning cycle finished in {elapsed:.0f}s "
         f"(provider={report.get('data_provider', 'unknown')}): {report}"
     )
+    if not interrupted and not report.get("error"):
+        try:
+            from .brain_neural_mesh import publisher as _nm_pub
+
+            _nm_pub.publish_learning_cycle_completed(db, elapsed_s=float(elapsed))
+            db.commit()
+        except Exception as _nm_e:
+            logger.warning("[learning] neural mesh cycle publish failed (ignored): %s", _nm_e)
+            try:
+                db.rollback()
+            except Exception:
+                pass
     return {"ok": True, **report}
 
 
