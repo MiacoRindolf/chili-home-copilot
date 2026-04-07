@@ -168,7 +168,7 @@ async def api_broker_connect(
     if broker not in ("robinhood", "coinbase"):
         return JSONResponse({"ok": False, "status": "error", "message": f"Unknown broker: {broker!r}. Send {{\"broker\": \"robinhood\"}} or {{\"broker\": \"coinbase\"}}."})
 
-    user_id, _ = _ensure_user_id(db, identity, request)
+    user_id, new_token = _ensure_user_id(db, identity, request)
     credentials = get_broker_credentials(db, user_id, broker) if user_id else None
 
     if not credentials:
@@ -179,22 +179,42 @@ async def api_broker_connect(
             env_has = coinbase_service._credentials_configured()
 
         if not env_has:
-            return JSONResponse({
+            resp = JSONResponse({
                 "ok": False,
                 "status": "needs_credentials",
                 "message": "No credentials found. Click to set up your account.",
                 "brokers": broker_manager.get_all_broker_statuses(),
             })
+            if new_token:
+                resp.set_cookie(
+                    DEVICE_COOKIE_NAME,
+                    new_token,
+                    max_age=60 * 60 * 24 * 365 * 2,
+                    httponly=True,
+                    samesite="lax",
+                    secure=request.url.scheme == "https",
+                )
+            return resp
 
     result = broker_manager.connect_broker(broker, credentials=credentials)
     statuses = broker_manager.get_all_broker_statuses()
     statuses["robinhood"]["has_credentials"] = has_broker_credentials(db, user_id, "robinhood")
     statuses["coinbase"]["has_credentials"] = has_broker_credentials(db, user_id, "coinbase")
-    return JSONResponse({
+    resp = JSONResponse({
         "ok": result.get("status") == "connected",
         **result,
         "brokers": statuses,
     })
+    if new_token:
+        resp.set_cookie(
+            DEVICE_COOKIE_NAME,
+            new_token,
+            max_age=60 * 60 * 24 * 365 * 2,
+            httponly=True,
+            samesite="lax",
+            secure=request.url.scheme == "https",
+        )
+    return resp
 
 
 @router.post("/api/trading/broker/verify")

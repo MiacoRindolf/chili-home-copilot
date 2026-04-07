@@ -19,7 +19,7 @@ The repo `docker-compose.yml` defines a **`postgres`** service and wires the **`
 
 - Port **5433** on the host maps to Postgres **5432** inside Compose so a separate PostgreSQL on **5432** does not conflict.
 - The `chili` service **`environment`** entry for `DATABASE_URL` overrides any `DATABASE_URL` in `.env` when using Compose, so the app always resolves the `postgres` hostname on the Docker network.
-- Data persists in the **`postgres_data`** volume until you run `docker compose down -v`.
+- Data persists under host paths **`D:/CHILI-Docker/postgres`**, **`D:/CHILI-Docker/chili-data`**, and **`D:/CHILI-Docker/ollama`** (bind mounts in `docker-compose.yml`). `docker compose down` does not remove that data; deleting those folders would.
 
 Use **`bash scripts/docker-setup.sh`** to start Postgres + Ollama, wait for health, pull models, start CHILI, and run RAG ingest.
 

@@ -9720,7 +9720,7 @@ function signOut() {
 }
 
 function loadBrokerStatus() {
-  fetch('/api/trading/broker/status').then(function(r){return r.json();}).then(function(d) {
+  fetch('/api/trading/broker/status', { credentials: 'same-origin' }).then(function(r){return r.json();}).then(function(d) {
     if (!d.ok || !d.brokers) return;
     var anyConnected = false;
 
@@ -9774,6 +9774,7 @@ function connectBrokerByName(broker) {
   fetch('/api/trading/broker/connect', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
     body: JSON.stringify({ broker: broker })
   }).then(function(r){return r.json();}).then(function(d) {
       if (d.ok) {
@@ -9866,6 +9867,7 @@ function saveBrokerCredentials() {
   fetch('/api/trading/broker/credentials', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
     body: JSON.stringify(body)
   }).then(function(r) { return r.json(); }).then(function(d) {
     btn.disabled = false;
@@ -9916,7 +9918,7 @@ function _startApprovalPolling() {
       document.getElementById('sms-error').textContent = 'Timed out waiting for approval. Try again.';
       return;
     }
-    fetch('/api/trading/broker/poll').then(function(r){return r.json();}).then(function(d) {
+    fetch('/api/trading/broker/poll', { credentials: 'same-origin' }).then(function(r){return r.json();}).then(function(d) {
       if (d.ok) {
         clearInterval(_approvalPollTimer);
         _approvalPollTimer = null;
@@ -9978,6 +9980,7 @@ function verifySmsCode() {
   fetch('/api/trading/broker/verify', {
     method: 'POST',
     headers: {'Content-Type': 'application/json'},
+    credentials: 'same-origin',
     body: JSON.stringify({ code: code })
   }).then(function(r){return r.json();}).then(function(d) {
     btn.disabled = false;
@@ -10006,7 +10009,7 @@ function syncAllBrokers() {
     if (tradesTabSyncBtn) { tradesTabSyncBtn.textContent = v ? 'Syncing...' : 'Sync Brokers'; tradesTabSyncBtn.disabled = v; }
   }
   setSyncing(true);
-  fetch('/api/trading/broker/sync', { method: 'POST' })
+  fetch('/api/trading/broker/sync', { method: 'POST', credentials: 'same-origin' })
     .then(function(r){return r.json();})
     .then(function(d) {
       setSyncing(false);
@@ -10039,8 +10042,8 @@ function loadBrokerPortfolio() {
   var listEl = document.getElementById('broker-positions-list');
 
   Promise.all([
-    fetch('/api/trading/broker/portfolio').then(function(r){return r.json();}),
-    fetch('/api/trading/broker/positions').then(function(r){return r.json();})
+    fetch('/api/trading/broker/portfolio', { credentials: 'same-origin' }).then(function(r){return r.json();}),
+    fetch('/api/trading/broker/positions', { credentials: 'same-origin' }).then(function(r){return r.json();})
   ]).then(function(results) {
     var portData = results[0];
     var posData = results[1];
@@ -11174,7 +11177,7 @@ async function _handleLiquidationIntent() {
 
   try {
     var addrKey = networkKey + '_' + target.symbol.toLowerCase();
-    var resp = await fetch('/api/trading/broker/deposit-address?broker=coinbase&network=' + encodeURIComponent(addrKey));
+    var resp = await fetch('/api/trading/broker/deposit-address?broker=coinbase&network=' + encodeURIComponent(addrKey), { credentials: 'same-origin' });
     var data = await resp.json();
     if (data.ok && data.address) {
       _executeLiquidationFlow(data.address, _scannedTokens);
@@ -11223,6 +11226,7 @@ async function saveDepositAddress() {
     var resp = await fetch('/api/trading/broker/deposit-address', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
+      credentials: 'same-origin',
       body: JSON.stringify({ broker: 'coinbase', network: addrKey, address: addr })
     });
     var data = await resp.json();

@@ -9,6 +9,9 @@
 #      ``--mode activation-loop`` (see scripts/brain_worker.py).
 #   5) Specialized execution (profile ``workers``): mining-worker, backtest-worker, fast-scan-worker
 #      — each uses the matching ``brain_worker.py --mode`` (mining / backtest / fast-scan).
+#
+# Persistent data: Postgres, Ollama, and /app/data bind to D:/CHILI-Docker/{postgres,ollama,chili-data} so large state
+# lives off C:. Change these paths if your drive letter or folder differs.
 services:
   postgres:
     # Keep in sync with typical dev installs (e.g. local Postgres 16); simplifies pg_dump/restore.
@@ -20,7 +23,7 @@ services:
       POSTGRES_PASSWORD: chili
       POSTGRES_DB: chili
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - D:/CHILI-Docker/postgres:/var/lib/postgresql/data
     ports:
       # Host port 5433 avoids clashing with a local PostgreSQL on 5432.
       # From the host: postgresql://chili:chili@localhost:5433/chili
@@ -37,7 +40,7 @@ services:
     ports:
       - "11434:11434"
     volumes:
-      - ollama_data:/root/.ollama
+      - D:/CHILI-Docker/ollama:/root/.ollama
     # ollama image has no curl/wget; use CLI against the local daemon
     healthcheck:
       test: ["CMD", "ollama", "list"]
@@ -80,7 +83,7 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./docs:/app/docs
       # LOCAL DEV — mount Python package so scheduler/WS-off fixes apply without ``docker build``.
       - ./app:/app/app
@@ -112,7 +115,7 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
     depends_on:
       postgres:
         condition: service_healthy
@@ -139,7 +142,7 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
     depends_on:
       chili:
@@ -174,7 +177,7 @@ services:
       - DATABASE_MAX_OVERFLOW=6
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
     depends_on:
       postgres:
@@ -208,7 +211,7 @@ services:
       - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_QUEUE_PROCESS_CAP:-8}
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
     depends_on:
       postgres:
@@ -240,7 +243,7 @@ services:
       - DATABASE_MAX_OVERFLOW=4
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
     depends_on:
       postgres:
@@ -277,15 +280,10 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
-      - chili_data:/app/data
+      - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
         condition: service_healthy
-
-volumes:
-  ollama_data:
-  chili_data:
-  postgres_data:
