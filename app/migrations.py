@@ -3510,6 +3510,49 @@ def _migration_087_neural_mesh_seed_expand_v15(conn) -> None:
     conn.commit()
 
 
+def _migration_088_backtest_param_sets(conn) -> None:
+    """Deduplicated param/provenance payloads (hash-keyed); optional FK from trading_backtests."""
+    tables = _tables(conn)
+    if "trading_backtest_param_sets" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_backtest_param_sets (
+                    id SERIAL PRIMARY KEY,
+                    param_hash VARCHAR(64) NOT NULL UNIQUE,
+                    params_json JSONB NOT NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_backtest_param_sets_created "
+                "ON trading_backtest_param_sets (created_at DESC)"
+            )
+        )
+    if "trading_backtests" in _tables(conn):
+        bt_cols = _columns(conn, "trading_backtests")
+        if "param_set_id" not in bt_cols:
+            conn.execute(
+                text(
+                    """
+                    ALTER TABLE trading_backtests
+                    ADD COLUMN param_set_id INTEGER
+                    REFERENCES trading_backtest_param_sets(id) ON DELETE SET NULL
+                    """
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_trading_backtests_param_set_id "
+                    "ON trading_backtests (param_set_id)"
+                )
+            )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -3599,6 +3642,7 @@ MIGRATIONS = [
     ("085_brain_worker_learning_live_json", _migration_085_brain_worker_learning_live_json),
     ("086_trading_brain_neural_mesh", _migration_086_trading_brain_neural_mesh),
     ("087_neural_mesh_seed_expand_v15", _migration_087_neural_mesh_seed_expand_v15),
+    ("088_backtest_param_sets", _migration_088_backtest_param_sets),
 ]
 
 

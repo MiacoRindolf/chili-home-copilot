@@ -1359,19 +1359,20 @@ def _compute_deduped_backtest_win_stats(
         _by_dk: dict[tuple[str, str], list[BacktestResult]] = defaultdict(list)
         for bt in _cand:
             _by_dk[(bt.ticker or "", bt.strategy_name or "")].append(bt)
+        from ...services.trading.backtest_param_sets import materialize_backtest_params
+
         for _dk in sorted(_by_dk.keys(), key=lambda k: (k[0], k[1])):
             bt = _evidence_representative_backtest(_by_dk[_dk])
             deduped_bt.append(bt)
-            pdisp = _period_display_from_stored_params(bt.params)
+            _mp = materialize_backtest_params(db, bt)
+            pdisp = _period_display_from_stored_params(_mp)
             if not pdisp:
                 try:
-                    raw = bt.params
-                    pr = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                    if isinstance(pr, dict) and pr.get("period"):
-                        pdisp = str(pr["period"])
-                except (json.JSONDecodeError, TypeError, ValueError):
+                    if isinstance(_mp, dict) and _mp.get("period"):
+                        pdisp = str(_mp["period"])
+                except (TypeError, ValueError):
                     pdisp = None
-            _kpis = parse_kpis_from_backtest_params(bt.params)
+            _kpis = parse_kpis_from_backtest_params(_mp)
             _wr_ui = backtest_win_rate_db_to_display_pct(bt.win_rate)
             backtests_out.append({
                 "id": bt.id,
@@ -1383,7 +1384,7 @@ def _compute_deduped_backtest_win_stats(
                 "max_drawdown": bt.max_drawdown,
                 "trade_count": bt.trade_count,
                 "ran_at": bt.ran_at.isoformat() if bt.ran_at else None,
-                "params": bt.params,
+                "params": _mp,
                 "period_display": pdisp or "--",
                 "relevance": 100,
                 "kpis": _kpis,
@@ -2033,6 +2034,8 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
     except Exception:
         pass
 
+    from ...services.trading.backtest_param_sets import materialize_backtest_params
+
     return JSONResponse({
         "ok": True,
         "id": bt.id,
@@ -2044,7 +2047,7 @@ def api_get_stored_backtest(bt_id: int, request: Request, db: Session = Depends(
         "sharpe": float(bt.sharpe) if bt.sharpe is not None else None,
         "max_drawdown": float(bt.max_drawdown) if bt.max_drawdown is not None else None,
         "equity_curve": eq,
-        "params": bt.params,
+        "params": materialize_backtest_params(db, bt),
     })
 
 
@@ -2240,13 +2243,10 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
     if body.get("equity_curve") is not None:
         bt.equity_curve = json.dumps(body["equity_curve"]) if isinstance(body["equity_curve"], list) else body["equity_curve"]
 
+    from ...services.trading.backtest_param_sets import get_or_create_backtest_param_set, materialize_backtest_params
+
     # Merge chart window metadata from client (same run as stats) so stored params match the mini-chart.
-    try:
-        curp: dict[str, Any] = (
-            json.loads(bt.params) if isinstance(bt.params, str) else dict(bt.params or {})
-        ) if bt.params else {}
-    except (json.JSONDecodeError, TypeError, ValueError):
-        curp = {}
+    curp = materialize_backtest_params(db, bt)
     params_merged = False
     if isinstance(body.get("params"), dict):
         for k, v in body["params"].items():
@@ -2263,18 +2263,21 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
                 params_merged = True
     if params_merged:
         bt.params = json.dumps(curp)
+        sid = get_or_create_backtest_param_set(db, curp)
+        if sid is not None:
+            bt.param_set_id = int(sid)
 
     bt.ran_at = dt.utcnow()
     db.commit()
     db.refresh(bt)
 
-    pdisp = _period_display_from_stored_params(bt.params)
+    _mp = materialize_backtest_params(db, bt)
+    pdisp = _period_display_from_stored_params(_mp)
     if not pdisp:
         try:
-            pr = json.loads(bt.params) if isinstance(bt.params, str) else (bt.params or {})
-            if isinstance(pr, dict) and pr.get("period"):
-                pdisp = str(pr["period"])
-        except (json.JSONDecodeError, TypeError, ValueError):
+            if isinstance(_mp, dict) and _mp.get("period"):
+                pdisp = str(_mp["period"])
+        except (TypeError, ValueError):
             pdisp = None
 
     return JSONResponse({
@@ -2287,7 +2290,7 @@ async def api_refresh_backtest(bt_id: int, request: Request, db: Session = Depen
         "trade_count": bt.trade_count,
         "ran_at": bt.ran_at.isoformat(),
         "period_display": pdisp or "--",
-        "params": bt.params,
+        "params": _mp,
     })
 
 

@@ -428,9 +428,10 @@ def build_ai_context(
         for bt in backtests:
             kpi_bits = ""
             try:
+                from .backtest_param_sets import materialize_backtest_params
                 from .research_kpis import parse_kpis_from_backtest_params
 
-                k = parse_kpis_from_backtest_params(bt.params) or {}
+                k = parse_kpis_from_backtest_params(materialize_backtest_params(db, bt)) or {}
                 so = k.get("sortino_ratio")
                 ir = k.get("information_ratio")
                 ca = k.get("calmar_ratio")

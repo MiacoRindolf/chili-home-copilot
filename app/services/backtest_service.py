@@ -673,6 +673,9 @@ def save_backtest(
             if params_obj.get(_k) is None and _dp.get(_k) is not None:
                 params_obj[_k] = _dp[_k]
     params_json = json.dumps(params_obj)
+    from .trading.backtest_param_sets import get_or_create_backtest_param_set
+
+    param_set_id = get_or_create_backtest_param_set(db, params_obj)
 
     if insight_id:
         existing: BacktestResult | None = None
@@ -730,6 +733,8 @@ def save_backtest(
             existing.trade_count = tc
             existing.equity_curve = json.dumps(eq)
             existing.params = params_json
+            if param_set_id is not None:
+                existing.param_set_id = int(param_set_id)
             existing.scan_pattern_id = int(resolved_sp_id) if resolved_sp_id is not None else None
             # Was missing: updates never advanced ran_at, so evidence dedupe (max trade_count, ran_at)
             # kept picking a duplicate row with a newer timestamp while the rerun target stayed stale.
@@ -766,6 +771,7 @@ def save_backtest(
         ticker=ticker,
         strategy_name=strategy,
         params=params_json,
+        param_set_id=int(param_set_id) if param_set_id is not None else None,
         return_pct=ret_pct,
         win_rate=wr,
         sharpe=sharpe,

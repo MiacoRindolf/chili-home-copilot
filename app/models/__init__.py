@@ -28,6 +28,7 @@ from .coding_task import (
 from .marketplace import MarketplaceModule
 from .trading import (
     AlertHistory,
+    BacktestParamSet,
     BacktestResult,
     BrainActivationEvent,
     BrainBatchJob,
@@ -147,6 +148,7 @@ __all__ = [
     "PatternTradeRow",
     "PatternEvidenceHypothesis",
     "ScanResult",
+    "BacktestParamSet",
     "BacktestResult",
     "MarketSnapshot",
     "LearningCycleAiReport",

@@ -104,6 +104,21 @@ class ScanResult(Base):
     scanned_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BacktestParamSet(Base):
+    """Deduplicated canonical backtest params / provenance JSON (hash-keyed).
+
+    Rows in ``trading_backtests`` keep a shadow copy in ``params`` for compatibility;
+    ``param_set_id`` references one shared payload when the canonical hash matches.
+    """
+
+    __tablename__ = "trading_backtest_param_sets"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    param_hash: str = Column(String(64), nullable=False, unique=True, index=True)
+    params_json: dict = Column(JSONB, nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class BacktestResult(Base):
     """Stored backtest run results for strategy comparison."""
     __tablename__ = "trading_backtests"
@@ -113,6 +128,12 @@ class BacktestResult(Base):
     ticker: str = Column(String(20), nullable=False)
     strategy_name: str = Column(String(100), nullable=False)
     params: Optional[dict] = Column(JSONB, nullable=True)
+    param_set_id: Optional[int] = Column(
+        Integer,
+        ForeignKey("trading_backtest_param_sets.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     return_pct: float = Column(Float, nullable=False, default=0.0)
     win_rate: float = Column(Float, nullable=False, default=0.0)
     sharpe: Optional[float] = Column(Float, nullable=True)

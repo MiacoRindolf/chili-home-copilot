@@ -1,7 +1,6 @@
 """Re-run stored BacktestResult rows with the same window/params as the saved row."""
 from __future__ import annotations
 
-import json
 import logging
 import threading
 from typing import Any
@@ -45,10 +44,9 @@ def rerun_stored_backtest_by_id(db: Session, bt_id: int) -> dict[str, Any]:
     use_period, use_interval = get_brain_backtest_window(tf)
     ohlc_start: str | None = None
     ohlc_end: str | None = None
-    try:
-        pr = json.loads(bt.params) if isinstance(bt.params, str) else dict(bt.params or {})
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pr = {}
+    from .backtest_param_sets import materialize_backtest_params
+
+    pr = materialize_backtest_params(db, bt)
     if isinstance(pr, dict):
         if pr.get("interval"):
             use_interval = str(pr["interval"]).strip()
