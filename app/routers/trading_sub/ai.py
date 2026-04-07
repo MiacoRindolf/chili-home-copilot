@@ -104,19 +104,10 @@ class _NeuralMeshPublishBody(BaseModel):
 @router.get("/api/trading/brain/graph/config")
 def api_trading_brain_graph_config(request: Request, db: Session = Depends(get_db)):
     get_identity_ctx(request, db)
-    from ...config import settings
-    from ...services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
+    from ...services.trading.brain_neural_mesh.schema import desk_graph_boot_config
 
-    return JSONResponse(
-        {
-            "ok": True,
-            "trading_brain_neural_mesh_enabled": bool(
-                getattr(settings, "trading_brain_neural_mesh_enabled", False)
-            ),
-            "trading_brain_graph_mode_setting": getattr(settings, "trading_brain_graph_mode", "neural"),
-            "effective_graph_mode": effective_graph_mode(),
-        }
-    )
+    body = {"ok": True, **desk_graph_boot_config()}
+    return JSONResponse(body)
 
 
 @router.get("/api/trading/brain/graph")
@@ -184,7 +175,35 @@ def api_trading_brain_graph_activations(
         except Exception:
             since_dt = None
     rows = list_recent_activations(db, limit=limit, since=since_dt)
-    return JSONResponse({"ok": True, "activations": rows})
+    from ...services.trading.brain_neural_mesh.waves import group_activation_events_into_waves
+
+    waves = group_activation_events_into_waves(rows, time_window_sec=2.0)
+    return JSONResponse({"ok": True, "activations": rows, "waves": waves})
+
+
+@router.get("/api/trading/brain/graph/live-overlay")
+def api_trading_brain_graph_live_overlay(
+    request: Request,
+    db: Session = Depends(get_db),
+    activation_limit: int = Query(80, ge=1, le=300),
+    time_window_sec: float = Query(2.0, ge=0.5, le=10.0),
+):
+    get_identity_ctx(request, db)
+    from ...services.trading.brain_neural_mesh.projection import build_live_activation_overlay
+    from ...services.trading.brain_neural_mesh.schema import mesh_enabled
+
+    if not mesh_enabled():
+        return JSONResponse(
+            {"ok": False, "error": "neural_mesh_disabled", "hint": "Set TRADING_BRAIN_NEURAL_MESH_ENABLED=1"},
+            status_code=403,
+        )
+    return JSONResponse(
+        build_live_activation_overlay(
+            db,
+            activation_limit=activation_limit,
+            time_window_sec=time_window_sec,
+        )
+    )
 
 
 @router.get("/api/trading/brain/graph/metrics")

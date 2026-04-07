@@ -63,6 +63,21 @@ def test_enqueue_and_activation_batch(db: Session) -> None:
 
 
 @pytest.mark.usefixtures("db")
+def test_neural_node_detail_includes_activation_wave_fields(db: Session) -> None:
+    from app.services.trading.brain_neural_mesh.projection import build_node_detail
+
+    bus = db.query(BrainGraphNode).filter(BrainGraphNode.id == "nm_event_bus").one_or_none()
+    if bus is None:
+        pytest.skip("migration 086 neural mesh seed not present")
+    detail = build_node_detail(db, "nm_event_bus")
+    assert detail is not None
+    assert "in_last_activation_wave" in detail
+    assert "activation_wave_id" in detail
+    assert "activation_wave_correlation_id" in detail
+    assert isinstance(detail["in_last_activation_wave"], bool)
+
+
+@pytest.mark.usefixtures("db")
 def test_neural_projection_shape(db: Session) -> None:
     if db.query(BrainGraphNode).count() == 0:
         pytest.skip("no mesh nodes")
@@ -76,6 +91,10 @@ def test_neural_projection_shape(db: Session) -> None:
     assert "layer" in n0
     e0 = data["edges"][0]
     assert e0.get("polarity") in ("excitatory", "inhibitory")
+    assert "layer_labels" in data["meta"]
+    assert data["meta"]["layer_labels"].get("1") == "Sensory"
+    assert data["meta"]["layer_labels"].get("7") == "Meta-Learning / Reweighting"
+    assert "layer_label" in data["nodes"][0]
 
 
 def test_brain_worker_lists_activation_loop_mode() -> None:

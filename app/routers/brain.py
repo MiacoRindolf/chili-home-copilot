@@ -29,7 +29,7 @@ from ..services.project_brain import registry as pb_registry
 from ..services.project_brain import learning as pb_learning
 from ..services.reasoning_brain import proactive_chat as rb_chat
 from ..services.trading.brain_network_graph import get_trading_brain_network_graph
-from ..services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
+from ..services.trading.brain_neural_mesh.schema import desk_graph_boot_config
 from ..models import (
     BrainBatchJob,
     ReasoningAnticipation,
@@ -64,6 +64,8 @@ def brain_page(
     planner_project_id: int | None = Query(default=None, ge=1),
 ):
     ctx = get_identity_ctx(request, db)
+    desk = desk_graph_boot_config()
+    neural_first_paint = bool(desk.get("mesh_enabled") and desk.get("effective_graph_mode") == "neural")
     resp = request.app.state.templates.TemplateResponse(
         request, "brain.html",
         {
@@ -72,9 +74,8 @@ def brain_page(
             "user_name": ctx["user_name"],
             "planner_task_id": planner_task_id,
             "planner_project_id": planner_project_id,
-            "trading_brain_network_graph": get_trading_brain_network_graph(),
-            "trading_brain_neural_mesh_enabled": mesh_enabled(),
-            "trading_brain_graph_effective_mode": effective_graph_mode(),
+            "trading_brain_desk_config": desk,
+            "trading_brain_neural_first_paint": neural_first_paint,
         },
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from datetime import datetime, timedelta
 from typing import Any, Optional
 
@@ -15,20 +14,51 @@ from ....models.trading import (
     BrainGraphNode,
     BrainNodeState,
 )
+from .layout_neural_graph import (
+    MARGIN,
+    VIEWPORT_H,
+    VIEWPORT_W,
+    compute_neural_positions,
+    truncate_neural_label,
+)
 from .repository import nodes_for_domain
 from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION
+from .waves import derive_overlay_hot_pulse_from_waves, group_activation_events_into_waves
+
+NEURAL_LAYOUT_VERSION = 2
+
+# Layer indices: 1 = outer ring (sensory), 7 = inner (meta-learning).
+NEURAL_LAYER_LABELS: dict[int, str] = {
+    1: "Sensory",
+    2: "Feature Extraction",
+    3: "Latent Market State",
+    4: "Pattern / Association",
+    5: "Evidence / Verification",
+    6: "Action / Expression",
+    7: "Meta-Learning / Reweighting",
+}
 
 
-def _ring_radius(layer: int) -> float:
-    """Layer 1 outermost; layer 7 inner (near center hub)."""
-    return 52.0 + (8 - min(max(layer, 1), 7)) * 58.0
+def neural_layer_labels_meta() -> dict[str, str]:
+    """String keys for JSON (layer number as str)."""
+    return {str(k): v for k, v in sorted(NEURAL_LAYER_LABELS.items())}
 
 
-def _place_on_ring(idx: int, n: int, radius: float, phase: float) -> tuple[float, float]:
-    if n <= 0:
-        return 0.0, 0.0
-    angle = phase + (2 * math.pi * idx) / max(n, 1)
-    return radius * math.cos(angle), radius * math.sin(angle)
+def _node_cooling(
+    last_fired_at: Optional[datetime],
+    cooldown_seconds: int,
+    *,
+    now: datetime,
+) -> bool:
+    if last_fired_at is None or cooldown_seconds <= 0:
+        return False
+    return (now - last_fired_at).total_seconds() < float(cooldown_seconds)
+
+
+def _node_stale_flag(staleness_at: Optional[datetime], *, now: datetime, stale_after_sec: float) -> bool:
+    if staleness_at is None:
+        return False
+    return (now - staleness_at).total_seconds() > stale_after_sec
 
 
 def build_neural_graph_projection(
@@ -36,8 +66,6 @@ def build_neural_graph_projection(
     *,
     domain: str = DEFAULT_DOMAIN,
     graph_version: int = DEFAULT_GRAPH_VERSION,
-    center_x: float = 400.0,
-    center_y: float = 400.0,
     stale_after_sec: float = 480.0,
 ) -> dict[str, Any]:
     nodes_orm = list(nodes_for_domain(db, domain=domain, graph_version=graph_version))
@@ -53,53 +81,51 @@ def build_neural_graph_projection(
     )
 
     now = datetime.utcnow()
-    by_layer: dict[int, list[BrainGraphNode]] = {}
-    for n in nodes_orm:
-        by_layer.setdefault(n.layer, []).append(n)
+
+    nodes_min = [
+        {"id": n.id, "layer": int(n.layer), "is_observer": bool(n.is_observer)}
+        for n in sorted(nodes_orm, key=lambda x: x.id)
+    ]
+    pos_map, layout_meta = compute_neural_positions(nodes_min)
 
     out_nodes: list[dict[str, Any]] = []
-    phase_by_layer: dict[int, float] = {L: (L * 0.37) for L in by_layer}
-
-    # Slight offset for hub nodes (layer 3) so no single king coordinates
-    hub_ids = {"nm_event_bus", "nm_working_memory", "nm_regime", "nm_contradiction"}
-
-    for layer, nlist in sorted(by_layer.items(), key=lambda x: -x[0]):
-        nlist.sort(key=lambda x: x.id)
-        r = _ring_radius(layer)
-        for i, node in enumerate(nlist):
-            if node.id in hub_ids and layer == 3:
-                ox, oy = _place_on_ring(i, len(nlist), r * 0.45, phase_by_layer[layer])
-                x, y = center_x + ox * 0.85, center_y + oy * 0.85
-            else:
-                ox, oy = _place_on_ring(i, len(nlist), r, phase_by_layer[layer])
-                x, y = center_x + ox, center_y + oy
-            st = states.get(node.id)
-            act = float(st.activation_score) if st else 0.0
-            conf = float(st.confidence) if st else 0.5
-            stale = False
-            if st and st.staleness_at:
-                stale = (now - st.staleness_at).total_seconds() > stale_after_sec
-            recent_fire = None
-            if st and st.last_fired_at:
-                recent_fire = st.last_fired_at.isoformat()
-            out_nodes.append(
-                {
-                    "id": node.id,
-                    "label": node.label,
-                    "layer": node.layer,
-                    "node_type": node.node_type,
-                    "activation_score": act,
-                    "confidence": conf,
-                    "stale": stale,
-                    "enabled": node.enabled,
-                    "is_observer": node.is_observer,
-                    "fire_threshold": float(node.fire_threshold),
-                    "cooldown_seconds": int(node.cooldown_seconds),
-                    "last_fired_at": recent_fire,
-                    "x": round(x, 2),
-                    "y": round(y, 2),
-                }
-            )
+    for node in sorted(nodes_orm, key=lambda x: x.id):
+        xy = pos_map.get(node.id)
+        if not xy:
+            continue
+        x, y = xy
+        st = states.get(node.id)
+        act = float(st.activation_score) if st else 0.0
+        conf = float(st.confidence) if st else 0.5
+        stale = _node_stale_flag(st.staleness_at if st else None, now=now, stale_after_sec=stale_after_sec)
+        recent_fire = st.last_fired_at.isoformat() if st and st.last_fired_at else None
+        cooling = _node_cooling(
+            st.last_fired_at if st else None,
+            int(node.cooldown_seconds),
+            now=now,
+        )
+        layer_label = NEURAL_LAYER_LABELS.get(int(node.layer), f"Layer {node.layer}")
+        out_nodes.append(
+            {
+                "id": node.id,
+                "label": node.label,
+                "label_short": truncate_neural_label(node.label or "", 20),
+                "layer": node.layer,
+                "layer_label": layer_label,
+                "node_type": node.node_type,
+                "activation_score": act,
+                "confidence": conf,
+                "stale": stale,
+                "cooling": cooling,
+                "enabled": node.enabled,
+                "is_observer": node.is_observer,
+                "fire_threshold": float(node.fire_threshold),
+                "cooldown_seconds": int(node.cooldown_seconds),
+                "last_fired_at": recent_fire,
+                "x": round(x, 2),
+                "y": round(y, 2),
+            }
+        )
 
     out_edges: list[dict[str, Any]] = []
     for e in edges_orm:
@@ -119,6 +145,18 @@ def build_neural_graph_projection(
         "view": "neural",
         "domain": domain,
         "graph_version": graph_version,
+        "layout_version": NEURAL_LAYOUT_VERSION,
+        "viewport": {
+            "w": VIEWPORT_W,
+            "h": VIEWPORT_H,
+            "margin": float(MARGIN),
+            "cx": VIEWPORT_W / 2.0,
+            "cy": VIEWPORT_H / 2.0,
+        },
+        "bounds": layout_meta["bounds"],
+        "ring_radii_draw": layout_meta.get("ring_radii_draw", []),
+        "layer_ring_cues": layout_meta.get("layer_ring_cues", []),
+        "layer_labels": neural_layer_labels_meta(),
         "description": (
             "Event-driven neural mesh: rings by cognitive layer; hub nodes share the center band. "
             "Edges carry typed signals; inhibitory edges reduce downstream activation."
@@ -161,6 +199,31 @@ def build_node_detail(
         .limit(fire_limit)
         .all()
     )
+    now = datetime.utcnow()
+    stale_after = 480.0
+    stale = _node_stale_flag(st.staleness_at if st else None, now=now, stale_after_sec=stale_after)
+    cooling = _node_cooling(st.last_fired_at if st else None, int(node.cooldown_seconds), now=now)
+
+    def _pc(edges: list) -> dict[str, int]:
+        o = {"excitatory": 0, "inhibitory": 0, "other": 0}
+        for e in edges:
+            pol = (getattr(e, "polarity", None) or "").lower()
+            if pol == "inhibitory":
+                o["inhibitory"] += 1
+            elif pol == "excitatory":
+                o["excitatory"] += 1
+            else:
+                o["other"] += 1
+        return o
+
+    ib_pc = _pc(inbound)
+    ob_pc = _pc(outbound)
+    last_wave_id = fires[0].correlation_id if fires and getattr(fires[0], "correlation_id", None) else None
+
+    ov_events = list_recent_activations(db, limit=80)
+    ov_waves = group_activation_events_into_waves(ov_events, time_window_sec=2.0)
+    hot_overlay, _, last_act_wave = derive_overlay_hot_pulse_from_waves(ov_waves, {})
+
     return {
         "id": node.id,
         "label": node.label,
@@ -175,6 +238,15 @@ def build_node_detail(
         "local_state": st.local_state if st and st.local_state else {},
         "last_fired_at": st.last_fired_at.isoformat() if st and st.last_fired_at else None,
         "staleness_at": st.staleness_at.isoformat() if st and st.staleness_at else None,
+        "stale": stale,
+        "cooling": cooling,
+        "layer_label": NEURAL_LAYER_LABELS.get(int(node.layer), f"Layer {node.layer}"),
+        "edge_polarity_inbound": ib_pc,
+        "edge_polarity_outbound": ob_pc,
+        "last_wave_correlation_id": last_wave_id,
+        "in_last_activation_wave": bool(node.id in hot_overlay),
+        "activation_wave_id": (last_act_wave.get("wave_id") if last_act_wave else None),
+        "activation_wave_correlation_id": (last_act_wave.get("correlation_id") if last_act_wave else None),
         "inbound_edges": [
             {
                 "id": e.id,
@@ -259,3 +331,35 @@ def list_recent_activations(
         }
         for r in rows
     ]
+
+
+def build_live_activation_overlay(
+    db: Session,
+    *,
+    graph_version: int = DEFAULT_GRAPH_VERSION,
+    activation_limit: int = 80,
+    time_window_sec: float = 2.0,
+) -> dict[str, Any]:
+    """Summarize recent activation waves for the desk (hot nodes + edge pulse keys)."""
+    events = list_recent_activations(db, limit=activation_limit, since=None)
+    waves = group_activation_events_into_waves(events, time_window_sec=time_window_sec)
+
+    edges_orm = (
+        db.query(BrainGraphEdge)
+        .filter(BrainGraphEdge.graph_version == graph_version, BrainGraphEdge.enabled.is_(True))
+        .all()
+    )
+    outbound: dict[str, list[str]] = {}
+    for e in edges_orm:
+        outbound.setdefault(e.source_node_id, []).append(e.target_node_id)
+
+    hot, pulse_keys, last_wave = derive_overlay_hot_pulse_from_waves(waves, outbound)
+
+    return {
+        "ok": True,
+        "hot_node_ids": hot,
+        "edge_pulse_keys": pulse_keys,
+        "last_wave": last_wave,
+        "waves": waves[:12],
+        "wave_count": len(waves),
+    }

@@ -3395,6 +3395,121 @@ def _migration_086_trading_brain_neural_mesh(conn) -> None:
     conn.commit()
 
 
+def _migration_087_neural_mesh_seed_expand_v15(conn) -> None:
+    """Add focused v1.5 neural mesh nodes (high-value coverage); idempotent."""
+    if "brain_graph_nodes" not in _tables(conn):
+        return
+    gv = 1
+    dom = "trading"
+    nodes = [
+        ("nm_liquidity_state", 2, "feature_liquidity", "Liquidity state", False, 0.5, 90),
+        ("nm_breadth_state", 2, "feature_breadth", "Breadth state", False, 0.5, 90),
+        ("nm_intermarket_state", 2, "feature_intermarket", "Intermarket state", False, 0.5, 120),
+        ("nm_active_thesis_state", 3, "latent_thesis", "Active thesis state", False, 0.52, 120),
+        ("nm_confidence_accumulator", 3, "latent_confidence", "Confidence accumulator", False, 0.5, 60),
+        ("nm_memory_freshness", 3, "latent_memory_fresh", "Memory freshness state", False, 0.48, 90),
+        ("nm_evidence_quality", 5, "evidence_quality", "Evidence quality scorer", False, 0.55, 120),
+        ("nm_counterfactual_challenger", 5, "evidence_counterfactual", "Counterfactual challenger", False, 0.52, 180),
+        ("nm_contradiction_verifier", 5, "evidence_contradiction", "Contradiction verifier", False, 0.54, 90),
+        ("nm_risk_gate", 6, "action_risk_gate", "Risk gate", False, 0.58, 45),
+        ("nm_sizing_policy", 6, "action_sizing", "Sizing policy", False, 0.56, 60),
+        ("nm_threshold_tuner", 7, "meta_threshold", "Threshold tuner", False, 0.62, 600),
+        ("nm_promotion_demotion_monitor", 7, "meta_promotion", "Promotion/demotion monitor", False, 0.55, 300),
+    ]
+    for nid, layer, ntype, label, is_obs, fth, cd in nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid,
+                "domain": dom,
+                "gv": gv,
+                "ntype": ntype,
+                "layer": layer,
+                "label": label,
+                "fth": fth,
+                "cd": cd,
+                "is_obs": is_obs,
+            },
+        )
+
+    for nid, _, _, _, _, _, _ in nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    edges = [
+        ("nm_event_bus", "nm_liquidity_state", "state_tick", 0.72, "excitatory"),
+        ("nm_event_bus", "nm_breadth_state", "state_tick", 0.72, "excitatory"),
+        ("nm_event_bus", "nm_intermarket_state", "state_tick", 0.7, "excitatory"),
+        ("nm_liquidity_state", "nm_regime", "feature_signal", 0.78, "excitatory"),
+        ("nm_breadth_state", "nm_regime", "feature_signal", 0.78, "excitatory"),
+        ("nm_intermarket_state", "nm_regime", "feature_signal", 0.76, "excitatory"),
+        ("nm_regime", "nm_active_thesis_state", "state_tick", 0.7, "excitatory"),
+        ("nm_working_memory", "nm_confidence_accumulator", "state_tick", 0.65, "excitatory"),
+        ("nm_meta_decay", "nm_memory_freshness", "decay_tick", 0.45, "excitatory"),
+        ("nm_pattern_disc", "nm_evidence_quality", "pattern_candidate", 0.55, "excitatory"),
+        ("nm_evidence_bt", "nm_evidence_quality", "evidence_ok", 0.52, "excitatory"),
+        ("nm_evidence_bt", "nm_counterfactual_challenger", "state_tick", 0.5, "excitatory"),
+        ("nm_contradiction", "nm_contradiction_verifier", "state_tick", 0.72, "excitatory"),
+        ("nm_evidence_bt", "nm_contradiction_verifier", "state_tick", 0.55, "excitatory"),
+        ("nm_evidence_bt", "nm_risk_gate", "evidence_ok", 0.76, "excitatory"),
+        ("nm_risk_gate", "nm_action_signals", "state_tick", 0.82, "excitatory"),
+        ("nm_regime", "nm_sizing_policy", "state_tick", 0.62, "excitatory"),
+        ("nm_sizing_policy", "nm_action_signals", "state_tick", 0.68, "excitatory"),
+        ("nm_meta_reweight", "nm_threshold_tuner", "state_tick", 0.58, "excitatory"),
+        ("nm_threshold_tuner", "nm_meta_decay", "state_tick", 0.42, "excitatory"),
+        ("nm_pattern_disc", "nm_promotion_demotion_monitor", "pattern_candidate", 0.46, "excitatory"),
+        ("nm_evidence_bt", "nm_promotion_demotion_monitor", "evidence_ok", 0.42, "excitatory"),
+    ]
+    for src, tgt, sig, w, pol in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.graph_version = :gv AND e.signal_type = :sig
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+        )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -3483,6 +3598,7 @@ MIGRATIONS = [
     ("084_align_backtest_scan_pattern_from_insight", _migration_084_align_backtest_scan_pattern_from_insight),
     ("085_brain_worker_learning_live_json", _migration_085_brain_worker_learning_live_json),
     ("086_trading_brain_neural_mesh", _migration_086_trading_brain_neural_mesh),
+    ("087_neural_mesh_seed_expand_v15", _migration_087_neural_mesh_seed_expand_v15),
 ]
 
 

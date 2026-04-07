@@ -76,6 +76,9 @@ services:
       # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
       # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
       - CHILI_SCHEDULER_ROLE=none
+      # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
+      - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
+      - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
       - chili_data:/app/data
       - ./docs:/app/docs
@@ -133,6 +136,8 @@ services:
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
+      - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
       - chili_data:/app/data
       - ./app:/app/app
@@ -269,6 +274,8 @@ services:
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
+      - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
+      - TRADING_BRAIN_GRAPH_MODE=neural
     volumes:
       - chili_data:/app/data
       - ./app:/app/app
