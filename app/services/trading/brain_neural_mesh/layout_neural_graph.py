@@ -24,7 +24,9 @@ CORE_RING_RADIUS: dict[int, float] = {
 }
 
 # Hubs sit on a small diamond/square — not on the crowded L3 ring.
-HUB_IDS = frozenset({"nm_event_bus", "nm_working_memory", "nm_regime", "nm_contradiction"})
+HUB_IDS = frozenset(
+    {"nm_event_bus", "nm_working_memory", "nm_regime", "nm_contradiction", "nm_momentum_crypto_intel"}
+)
 HUB_DISTANCE_FROM_CENTER = 54.0
 # Observers sit outside the core ring for their layer.
 OBSERVER_RADIAL_OUTSET = 48.0

@@ -1,0 +1,381 @@
+{% extends "base.html" %}
+{% block title %}CHILI Trading Automation{% endblock %}
+
+{% block head_extra %}
+<style>
+.ta-wrap { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+.ta-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--bg-header);
+  flex-wrap: wrap;
+}
+.ta-header h1 { font-size: 15px; font-weight: 700; margin: 0; }
+.ta-header nav { display: flex; gap: 4px; flex-wrap: wrap; align-items: center; }
+.ta-header nav a {
+  color: var(--text-secondary); text-decoration: none; padding: 5px 12px; font-size: 11px;
+  border-radius: 6px; font-weight: 500;
+}
+.ta-header nav a:hover { color: var(--accent); background: rgba(99,102,241,.06); }
+.ta-header nav a.ta-active { color: var(--accent); background: rgba(99,102,241,.08); }
+.ta-body { flex: 1; display: grid; grid-template-columns: 1fr 340px; gap: 0; min-height: 0; }
+@media (max-width: 960px) { .ta-body { grid-template-columns: 1fr; } }
+.ta-main { padding: 12px 14px; overflow-y: auto; border-right: 1px solid var(--border); }
+.ta-side { padding: 12px; overflow-y: auto; background: var(--bg-header); }
+.ta-strip {
+  display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 12px; margin-bottom: 12px;
+  border-radius: 10px; border: 1px solid var(--border); background: var(--bg-header); font-size: 11px;
+}
+.ta-strip span { color: var(--text-muted); }
+.ta-strip b { color: var(--text); }
+.ta-note {
+  font-size: 11px; color: var(--text-secondary); padding: 8px 10px; margin-bottom: 12px;
+  border-left: 3px solid var(--accent); background: rgba(99,102,241,.06); border-radius: 0 8px 8px 0;
+}
+.ta-section-title { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); margin: 0 0 8px; }
+.ta-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: 10px; }
+.ta-table { width: 100%; border-collapse: collapse; font-size: 11px; }
+.ta-table th { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); color: var(--text-secondary); font-weight: 600; }
+.ta-table td { padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+.ta-table tr { cursor: pointer; }
+.ta-table tr:hover { background: rgba(99,102,241,.05); }
+.ta-table tr.ta-sel { background: rgba(99,102,241,.1); }
+.ta-badge {
+  display: inline-block; font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 4px;
+  text-transform: uppercase; border: 1px solid var(--border);
+}
+.ta-badge.draft { border-color: #6366f1; color: #818cf8; }
+.ta-badge.pending { border-color: #f59e0b; color: #fbbf24; }
+.ta-badge.armed { border-color: #dc2626; color: #f87171; }
+.ta-badge.done { opacity: .65; }
+.ta-badge.risk-ok { border-color: #15803d; color: #4ade80; }
+.ta-badge.risk-warn { border-color: #ca8a04; color: #facc15; }
+.ta-badge.risk-block { border-color: #b91c1c; color: #f87171; }
+.ta-badge.risk-unknown { opacity: .7; }
+.ta-btn {
+  font-size: 10px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600; margin-right: 6px; margin-top: 4px;
+}
+.ta-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ta-btn-danger { border-color: #b91c1c; color: #f87171; }
+.ta-events { font-size: 10px; max-height: 280px; overflow-y: auto; }
+.ta-ev-row { padding: 6px 0; border-bottom: 1px solid var(--border); }
+.ta-ev-type { font-weight: 700; color: var(--accent); }
+.ta-detail { font-size: 11px; line-height: 1.45; }
+.ta-detail h4 { margin: 0 0 8px; font-size: 13px; }
+.ta-detail pre {
+  font-size: 10px; background: var(--code-bg); padding: 8px; border-radius: 8px; overflow-x: auto; max-height: 160px;
+}
+.ta-empty { color: var(--text-muted); font-size: 12px; padding: 24px; text-align: center; }
+.ta-future { opacity: .45; pointer-events: none; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ta-wrap">
+  <header class="ta-header">
+    <h1>&#x1F916; Trading Automation</h1>
+    <nav>
+      <a href="/">Home</a>
+      <a href="/chat">Chat</a>
+      <a href="/trading">Trading</a>
+      <a href="/trading/automation" class="ta-active">Automation</a>
+    </nav>
+  </header>
+
+  <div class="ta-body">
+    <main class="ta-main">
+      <div id="ta-guest" class="ta-empty" style="display:none">Sign in to view automation sessions.</div>
+      <div id="ta-app" style="display:none">
+        <div class="ta-note" id="ta-limitations"></div>
+        <div class="ta-strip" id="ta-summary-strip"></div>
+        <div class="ta-strip" id="ta-neural-strip"></div>
+        <div style="margin-bottom:10px">
+          <button type="button" class="ta-btn" onclick="taLoadAll()">Refresh</button>
+          <label style="font-size:11px;margin-left:8px;color:var(--text-secondary)">
+            <input type="checkbox" id="ta-inc-arch" onchange="taLoadSessions()"/> Show archived
+          </label>
+        </div>
+        <h2 class="ta-section-title">Active / pending sessions</h2>
+        <div class="ta-table-wrap">
+          <table class="ta-table" id="ta-sessions-table">
+            <thead>
+              <tr>
+                <th>ID</th><th>Symbol</th><th>Strategy</th><th>Mode</th><th>State</th><th>Risk</th><th>Updated</th>
+              </tr>
+            </thead>
+            <tbody id="ta-sessions-body"></tbody>
+          </table>
+        </div>
+        <p class="ta-empty" id="ta-sessions-empty" style="display:none">No sessions yet. Use Trading → Momentum panel to create a draft or arm flow.</p>
+
+        <h2 class="ta-section-title" style="margin-top:20px">Recent events (global)</h2>
+        <div class="ta-events" id="ta-events-feed"></div>
+      </div>
+    </main>
+    <aside class="ta-side">
+      <h2 class="ta-section-title">Session detail</h2>
+      <div id="ta-detail" class="ta-detail">
+        <p class="ta-empty">Select a session row.</p>
+      </div>
+      <div style="margin-top:16px">
+        <button type="button" class="ta-btn ta-future" disabled title="Phase 7+">Pause runner (future)</button>
+        <button type="button" class="ta-btn ta-future" disabled title="Phase 7+">Start runner (future)</button>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(function() {
+  var IS_GUEST = {{ is_guest | tojson }};
+  var selectedId = null;
+
+  function esc(s) {
+    if (s == null) return '';
+    var d = document.createElement('div');
+    d.textContent = String(s);
+    return d.innerHTML;
+  }
+
+  function taStateBadgeClass(st) {
+    if (st === 'draft' || st === 'queued' || st === 'watching') return 'draft';
+    if (st === 'queued_live' || st === 'watching_live') return 'draft';
+    if (st === 'live_arm_pending' || st === 'entry_candidate' || st === 'pending_entry') return 'pending';
+    if (st === 'live_entry_candidate' || st === 'live_pending_entry') return 'pending';
+    if (st === 'armed_pending_runner' || st === 'entered' || st === 'scaling_out' || st === 'trailing' || st === 'bailout')
+      return 'armed';
+    if (st === 'live_entered' || st === 'live_scaling_out' || st === 'live_trailing' || st === 'live_bailout') return 'armed';
+    if (st === 'exited' || st === 'cooldown' || st === 'finished') return 'done';
+    if (st === 'live_exited' || st === 'live_cooldown' || st === 'live_finished') return 'done';
+    if (st === 'error' || st === 'live_error') return 'armed';
+    if (st === 'live_cancelled') return 'done';
+    return 'done';
+  }
+
+  function taRiskBadgeClass(sev) {
+    if (sev === 'block') return 'risk-block';
+    if (sev === 'warn') return 'risk-warn';
+    if (sev === 'ok') return 'risk-ok';
+    return 'risk-unknown';
+  }
+
+  window.taLoadAll = function() {
+    taLoadSummary();
+    taLoadSessions();
+    taLoadEvents();
+    if (selectedId) taLoadDetail(selectedId);
+  };
+
+  function taLoadSummary() {
+    if (IS_GUEST) return;
+    fetch('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(s) {
+        var el = document.getElementById('ta-summary-strip');
+        if (!el) return;
+        var gov = s.governance || {};
+        var kill = gov.kill_switch_active ? ('ON' + (gov.kill_switch_reason ? ': ' + String(gov.kill_switch_reason).slice(0, 48) : '')) : 'off';
+        var pq = s.paper_runner_queued != null ? s.paper_runner_queued : '—';
+        var pa = s.paper_runner_active != null ? s.paper_runner_active : '—';
+        var lq = s.live_runner_queued != null ? s.live_runner_queued : '—';
+        var la = s.live_runner_active != null ? s.live_runner_active : '—';
+        el.innerHTML =
+          '<span>Total <b>' + esc(s.total_sessions) + '</b></span>' +
+          '<span>Drafts <b>' + esc(s.pending_paper_drafts) + '</b></span>' +
+          '<span>Paper queued <b>' + esc(pq) + '</b></span>' +
+          '<span>Paper active <b>' + esc(pa) + '</b></span>' +
+          '<span>Live queued <b>' + esc(lq) + '</b></span>' +
+          '<span>Live active <b>' + esc(la) + '</b></span>' +
+          '<span>Live arm pending <b>' + esc(s.pending_live_arms) + '</b></span>' +
+          '<span>Armed (no runner) <b>' + esc(s.armed_awaiting_runner) + '</b></span>' +
+          '<span>Kill switch <b>' + esc(kill) + '</b></span>' +
+          '<span>Last event <b>' + esc(s.last_event_ts || '—') + '</b></span>';
+        var n = document.getElementById('ta-neural-strip');
+        if (n) {
+          n.innerHTML =
+            '<span>Mesh <b>' + (s.mesh_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Momentum neural <b>' + (s.momentum_neural_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Coinbase adapter <b>' + (s.coinbase_spot_adapter_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Strict freshness <b>' + (s.coinbase_strict_freshness ? 'on' : 'off') + '</b></span>' +
+            '<span>Paper runner <b>' + (s.paper_runner_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Paper sched <b>' + (s.paper_runner_scheduler_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Live runner <b>' + (s.live_runner_enabled ? 'on' : 'off') + '</b></span>' +
+            '<span>Live sched <b>' + (s.live_runner_scheduler_enabled ? 'on' : 'off') + '</b></span>';
+        }
+        var lim = document.getElementById('ta-limitations');
+        if (lim && s.limitations_note) lim.textContent = s.limitations_note;
+      })
+      .catch(function() {});
+  }
+
+  window.taLoadSessions = function() {
+    if (IS_GUEST) return;
+    var inc = document.getElementById('ta-inc-arch');
+    var q = '?limit=100';
+    if (inc && inc.checked) q += '&include_archived=true';
+    fetch('/api/trading/momentum/automation/sessions' + q, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var tbody = document.getElementById('ta-sessions-body');
+        var empty = document.getElementById('ta-sessions-empty');
+        if (!tbody) return;
+        var rows = d.sessions || [];
+        tbody.innerHTML = '';
+        if (!rows.length) {
+          if (empty) empty.style.display = 'block';
+          return;
+        }
+        if (empty) empty.style.display = 'none';
+        rows.forEach(function(row) {
+          var tr = document.createElement('tr');
+          tr.dataset.id = row.id;
+          if (selectedId === row.id) tr.className = 'ta-sel';
+          var rs = row.risk_status || {};
+          var rsev = rs.severity || 'unknown';
+          var rg = rs.governance_inhibit ? ' · gov' : '';
+          var pe = row.paper_execution || {};
+          var le = row.live_execution || {};
+          var ptag = (pe.in_position || le.in_position) ? ' · pos' : '';
+          tr.innerHTML =
+            '<td>' + esc(row.id) + '</td>' +
+            '<td>' + esc(row.symbol) + '</td>' +
+            '<td>' + esc((row.variant && row.variant.label) || row.variant_id) + '</td>' +
+            '<td>' + esc(row.mode) + '</td>' +
+            '<td><span class="ta-badge ' + taStateBadgeClass(row.state) + '">' + esc(row.state) + '</span></td>' +
+            '<td><span class="ta-badge ' + taRiskBadgeClass(rsev) + '" title="' + esc((rs.reasons || []).join('; ')) + '">' +
+            esc(String(rsev).toUpperCase()) + esc(rg) + esc(ptag) + '</span></td>' +
+            '<td>' + esc(row.updated_at || '') + '</td>';
+          tr.onclick = function() {
+            selectedId = row.id;
+            document.querySelectorAll('#ta-sessions-body tr').forEach(function(x) { x.classList.remove('ta-sel'); });
+            tr.classList.add('ta-sel');
+            taLoadDetail(row.id);
+          };
+          tbody.appendChild(tr);
+        });
+      })
+      .catch(function() {});
+  };
+
+  function taLoadDetail(id) {
+    fetch('/api/trading/momentum/automation/sessions/' + id, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var box = document.getElementById('ta-detail');
+        if (!box) return;
+        var s = d.session || {};
+        var evs = d.events || [];
+        var html = '<h4>' + esc(s.symbol) + ' · ' + esc((s.variant && s.variant.label) || '') + '</h4>';
+        html += '<p><b>State:</b> ' + esc(s.state) + '</p>';
+        html += '<p>' + esc(s.status_summary || '') + '</p>';
+        html += '<p><b>Mode:</b> ' + esc(s.mode) + ' · <b>Venue:</b> ' + esc(s.venue) + '</p>';
+        var rs = s.risk_status || {};
+        var dg = (d.governance || {});
+        html += '<p><b>Risk:</b> <span class="ta-badge ' + taRiskBadgeClass(rs.severity) + '">' +
+          esc(String(rs.severity || 'unknown').toUpperCase()) + '</span>';
+        if (dg.kill_switch_active) html += ' · <span style="color:#f87171">Kill switch</span>';
+        html += '</p>';
+        if (rs.reasons && rs.reasons.length) {
+          html += '<ul style="margin:4px 0 8px 16px;font-size:10px">';
+          rs.reasons.forEach(function(x) { html += '<li>' + esc(x) + '</li>'; });
+          html += '</ul>';
+        }
+        var pex = s.paper_execution || {};
+        if (pex && (pex.tick_count != null || pex.in_position)) {
+          html += '<p><b>Paper sim:</b> ticks ' + esc(pex.tick_count) +
+            ' · mid ' + esc(pex.last_mid) + ' · PnL est $' + esc(pex.realized_pnl_usd) + '</p>';
+          if (pex.in_position) {
+            html += '<p style="font-size:10px">Entry ' + esc(pex.entry_price) + ' · stop ' + esc(pex.stop_price) +
+              ' · tgt ' + esc(pex.target_price) + '</p>';
+          }
+        }
+        var lex = s.live_execution || {};
+        if (lex && (lex.tick_count != null || lex.entry_order_id || lex.in_position)) {
+          html += '<p><b>Live exec:</b> ticks ' + esc(lex.tick_count) +
+            ' · entry ord ' + esc(lex.entry_order_id || '—') + ' · PnL $' + esc(lex.realized_pnl_usd) + '</p>';
+          if (lex.in_position) {
+            html += '<p style="font-size:10px">Avg entry ' + esc(lex.avg_entry_price) + ' · qty ' + esc(lex.quantity) + '</p>';
+          }
+        }
+        var mf = s.momentum_feedback;
+        if (mf && mf.outcome_class) {
+          html += '<p><b>Neural feedback recorded:</b> <code>' + esc(mf.outcome_class) + '</code>' +
+            (mf.return_bps != null ? ' · return bps ' + esc(mf.return_bps) : '') +
+            (mf.realized_pnl_usd != null ? ' · PnL $' + esc(mf.realized_pnl_usd) : '') + '</p>';
+        }
+        html += '<p style="font-size:10px;color:var(--text-muted)">corr: ' + esc(s.correlation_id || '—') + '</p>';
+        html += '<p style="font-size:10px"><a href="/brain?domain=trading">Trading brain · neural mesh &amp; momentum desk</a></p>';
+        if (d.viability_snapshot) {
+          html += '<p><b>Viability snapshot:</b></p><pre>' + esc(JSON.stringify(d.viability_snapshot, null, 2)) + '</pre>';
+        }
+        html += '<p><b>Risk snapshot (summary):</b></p><pre>' + esc(JSON.stringify(s.risk_snapshot_summary || {}, null, 2)) + '</pre>';
+        html += '<p><b>Events</b></p><div class="ta-events">';
+        evs.forEach(function(e) {
+          html += '<div class="ta-ev-row"><span class="ta-ev-type">' + esc(e.event_type) + '</span> ' + esc(e.ts) +
+            '<br/><span style="color:var(--text-muted)">' + esc(JSON.stringify(e.payload_summary || {})) + '</span></div>';
+        });
+        html += '</div>';
+        var cancellable = ['draft','queued','live_arm_pending','armed_pending_runner','idle'].indexOf(s.state) >= 0;
+        var archivable = ['cancelled','expired','draft'].indexOf(s.state) >= 0;
+        html += '<div style="margin-top:10px">';
+        if (cancellable) {
+          html += '<button type="button" class="ta-btn ta-btn-danger" onclick="taCancel(' + s.id + ')">Cancel session</button>';
+        }
+        if (archivable) {
+          html += '<button type="button" class="ta-btn" onclick="taArchive(' + s.id + ')">Archive</button>';
+        }
+        html += '</div>';
+        box.innerHTML = html;
+      })
+      .catch(function() {
+        var box = document.getElementById('ta-detail');
+        if (box) box.innerHTML = '<p class="ta-empty">Failed to load detail.</p>';
+      });
+  }
+
+  window.taCancel = function(id) {
+    if (!confirm('Cancel this session?')) return;
+    fetch('/api/trading/momentum/automation/sessions/' + id + '/cancel', { method: 'POST', credentials: 'same-origin' })
+      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(x) {
+        if (!x.ok) alert(x.j.detail || 'Cancel failed');
+        taLoadAll();
+      });
+  };
+
+  window.taArchive = function(id) {
+    if (!confirm('Archive this session? It will be hidden unless you show archived.')) return;
+    fetch('/api/trading/momentum/automation/sessions/' + id + '/archive', { method: 'POST', credentials: 'same-origin' })
+      .then(function(r) { return r.json().then(function(j) { return { ok: r.ok, j: j }; }); })
+      .then(function(x) {
+        if (!x.ok) alert(x.j.detail || 'Archive failed');
+        taLoadAll();
+      });
+  };
+
+  function taLoadEvents() {
+    if (IS_GUEST) return;
+    fetch('/api/trading/momentum/automation/events?limit=30', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var el = document.getElementById('ta-events-feed');
+        if (!el) return;
+        var rows = d.events || [];
+        if (!rows.length) { el.innerHTML = '<p class="ta-empty">No events yet.</p>'; return; }
+        el.innerHTML = rows.map(function(e) {
+          return '<div class="ta-ev-row"><span class="ta-ev-type">' + esc(e.event_type) + '</span> sess #' + esc(e.session_id) +
+            ' · ' + esc(e.ts) + '</div>';
+        }).join('');
+      })
+      .catch(function() {});
+  }
+
+  if (IS_GUEST) {
+    document.getElementById('ta-guest').style.display = 'block';
+  } else {
+    document.getElementById('ta-app').style.display = 'block';
+    taLoadAll();
+  }
+})();
+</script>
+{% endblock %}

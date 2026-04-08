@@ -185,6 +185,56 @@ def _run_paper_trade_check_job():
     run_scheduler_job_guarded("paper_trade_check", _work)
 
 
+def _run_momentum_paper_runner_batch_job():
+    """Advance queued/active momentum *paper* automation sessions (simulated only; Phase 7)."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from .trading.momentum_neural.paper_runner import run_paper_runner_batch
+
+        if not _settings.chili_momentum_paper_runner_enabled:
+            return
+        if not _settings.chili_momentum_paper_runner_scheduler_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            results = run_paper_runner_batch(db, limit=30)
+            db.commit()
+            if results:
+                logger.info("[scheduler] Momentum paper runner: ticked %d session(s)", len(results))
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("momentum_paper_runner_batch", _work)
+
+
+def _run_momentum_live_runner_batch_job():
+    """Advance queued/active momentum *live* automation sessions (real Coinbase orders — Phase 8)."""
+
+    def _work() -> None:
+        from ..config import settings as _settings
+        from ..db import SessionLocal
+        from .trading.momentum_neural.live_runner import run_live_runner_batch
+
+        if not _settings.chili_momentum_live_runner_enabled:
+            return
+        if not _settings.chili_momentum_live_runner_scheduler_enabled:
+            return
+
+        db = SessionLocal()
+        try:
+            results = run_live_runner_batch(db, limit=15)
+            db.commit()
+            if results:
+                logger.info("[scheduler] Momentum live runner: ticked %d session(s)", len(results))
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("momentum_live_runner_batch", _work)
+
+
 def _run_data_retention_job():
     """Daily sweep: archive old snapshots, prune stale batch job payloads."""
 
@@ -1430,6 +1480,38 @@ def start_scheduler():
                 name="Paper trade exit check (every 15min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+        if (
+            include_web_light
+            and settings.chili_momentum_paper_runner_enabled
+            and settings.chili_momentum_paper_runner_scheduler_enabled
+        ):
+            _pr_m = max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
+            _scheduler.add_job(
+                _run_momentum_paper_runner_batch_job,
+                trigger=IntervalTrigger(minutes=_pr_m),
+                id="momentum_paper_runner_batch",
+                name=f"Momentum paper automation runner (every {_pr_m}min, simulated)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=55),
+            )
+
+        if (
+            include_web_light
+            and settings.chili_momentum_live_runner_enabled
+            and settings.chili_momentum_live_runner_scheduler_enabled
+        ):
+            _lr_m = max(2, int(settings.chili_momentum_live_runner_scheduler_interval_minutes))
+            _scheduler.add_job(
+                _run_momentum_live_runner_batch_job,
+                trigger=IntervalTrigger(minutes=_lr_m),
+                id="momentum_live_runner_batch",
+                name=f"Momentum live automation runner (every {_lr_m}min; real orders)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=65),
             )
 
         # Data retention: archive old snapshots, prune payloads daily at 3:30 AM

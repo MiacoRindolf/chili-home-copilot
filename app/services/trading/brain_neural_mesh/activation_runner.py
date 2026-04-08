@@ -72,6 +72,12 @@ def run_activation_batch(
                 inhibitions += pr.inhibitions_applied
                 suppressions += pr.suppressions
                 downstream += pr.downstream_events
+                try:
+                    from ..momentum_neural.pipeline import maybe_run_momentum_neural_tick
+
+                    maybe_run_momentum_neural_tick(db, ev, graph_version=graph_version)
+                except Exception as mom_e:
+                    _log.warning("%s momentum neural tick failed: %s", LOG_PREFIX, mom_e)
                 mark_event_status(db, int(ev.id), "done", processed_at=datetime.utcnow())
                 processed += 1
             except Exception as e:

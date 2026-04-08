@@ -122,6 +122,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .t-toolbar {
   display: flex; align-items: center; gap: 4px; padding: 5px 10px;
   background: var(--bg-header); flex-wrap: wrap;
+  position: sticky; top: 0; z-index: 90;
 }
 .t-toolbar .ticker-display { font-weight: 800; font-size: 14px; min-width: 50px; letter-spacing: .3px; cursor: pointer; }
 .t-toolbar .ticker-display:hover { color: var(--accent); }
@@ -717,6 +718,97 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   background: var(--bg); color: var(--text-muted); cursor: pointer; transition: all .12s; font-weight: 500;
 }
 .learn-btn:hover { background: #8b5cf6; color: #fff; border-color: #8b5cf6; }
+
+/* ── Momentum viable strategies (Phase 4, server data only) ── */
+.mm-mode-bar {
+  display: inline-flex; align-items: center; gap: 2px; margin-left: 8px;
+  padding: 2px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary, #1e1e2e);
+  vertical-align: middle;
+}
+.mm-mode-bar span { font-size: 9px; color: var(--text-muted); margin-right: 4px; text-transform: uppercase; letter-spacing: .4px; }
+.mm-mode-btn {
+  font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 6px; border: 1px solid transparent;
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.mm-mode-btn.active { background: rgba(99,102,241,.25); color: var(--accent); border-color: rgba(99,102,241,.35); }
+.mm-mode-btn.mm-live.active {
+  background: #b91c1c; color: #fff; border-color: #7f1d1d;
+  box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.35);
+}
+.mm-panel {
+  border-bottom: 1px solid var(--border); background: var(--bg-header);
+  max-height: 220px; overflow-y: auto; flex-shrink: 0;
+}
+.mm-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 10px; border-bottom: 1px solid var(--border);
+}
+.mm-panel-head h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); margin: 0; }
+.mm-panel-head button {
+  font-size: 10px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;
+}
+.mm-panel-head button:hover { border-color: var(--accent); color: var(--accent); }
+.mm-panel-body { padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.mm-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
+  padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+  font-size: 11px;
+}
+.mm-row-title { font-weight: 700; color: var(--text); }
+.mm-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.mm-badge {
+  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 4px; text-transform: uppercase;
+  background: var(--bg-header); border: 1px solid var(--border); color: var(--text-secondary);
+}
+.mm-badge.ok { border-color: #15803d; color: #22c55e; }
+.mm-badge.no { opacity: .55; }
+.mm-badge.venue { border-color: #2563eb; color: #60a5fa; }
+.mm-meta { color: var(--text-muted); font-size: 10px; margin-top: 4px; line-height: 1.35; }
+.mm-actions { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.mm-actions button {
+  font-size: 10px; padding: 5px 8px; border-radius: 6px; border: none; cursor: pointer; font-weight: 700;
+}
+.mm-btn-paper { background: var(--accent); color: #fff; }
+.mm-btn-live { background: #7f1d1d; color: #fff; }
+.mm-btn-live:disabled { opacity: .45; cursor: not-allowed; }
+.mm-btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+.mm-warn { color: #f97316; font-size: 10px; margin-top: 4px; }
+.mm-modal-backdrop {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 12000;
+  align-items: center; justify-content: center; padding: 16px;
+}
+.mm-modal-backdrop.open { display: flex; }
+.mm-modal {
+  background: var(--bg-card, #1f2937); border: 1px solid var(--border); border-radius: 12px;
+  max-width: 420px; width: 100%; padding: 16px; box-shadow: 0 16px 48px rgba(0,0,0,.4);
+}
+.mm-modal h4 { margin: 0 0 10px; font-size: 14px; color: var(--text); }
+.mm-modal .mm-modal-body { font-size: 12px; color: var(--text-secondary); line-height: 1.45; max-height: 280px; overflow-y: auto; }
+.mm-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.mm-modal-actions button { padding: 8px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; border: none; }
+.mm-modal-cancel { background: var(--bg-header); color: var(--text); border: 1px solid var(--border) !important; }
+.mm-modal-confirm { background: #b91c1c; color: #fff; }
+
+/* Automation HUD mirror (Phase 5; optional) */
+.ch-auto-hud {
+  position: fixed; bottom: 14px; right: 14px; z-index: 11000;
+  width: 220px; max-width: calc(100vw - 28px);
+  border-radius: 12px; border: 1px solid var(--border); background: var(--bg-header);
+  box-shadow: 0 8px 28px rgba(0,0,0,.25); font-size: 10px; overflow: hidden;
+}
+.ch-auto-hud.ch-collapsed .ch-auto-hud-body { display: none; }
+.ch-auto-hud-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
+  padding: 6px 8px; background: var(--bg); border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.ch-auto-hud-head strong { font-size: 11px; }
+.ch-auto-hud-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ch-auto-hud-dot.ok { background: #22c55e; }
+.ch-auto-hud-dot.warn { background: #eab308; }
+.ch-auto-hud-dot.bad { background: #ef4444; }
+.ch-auto-hud-body { padding: 8px; line-height: 1.35; color: var(--text-secondary); }
+.ch-auto-hud-body a { color: var(--accent); font-weight: 700; }
 
 /* ── Ticker detail + news strip ─────────────────────────────────────────── */
 .ticker-detail-section {
@@ -2203,6 +2295,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
     <a href="/">Home</a>
     <a href="/chat">Chat</a>
     <a href="/trading" style="color:var(--accent)">Trading</a>
+    <a href="/trading/automation">Automation</a>
     <a href="/trading-backup">Trading backup</a>
     <a href="/brain">Brain</a>
     {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
@@ -2274,6 +2367,11 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <div class="toolbar-search-results" id="toolbar-search-results"></div>
       </div>
       <span id="live-dot" class="live-dot disconnected" title="Live stream status"></span>
+      <div class="mm-mode-bar" id="mm-mode-bar" title="Paper vs live operator mode (neural mesh automation; not learning-cycle). Live requires explicit confirm.">
+        <span>Mode</span>
+        <button type="button" class="mm-mode-btn" id="mm-mode-paper" onclick="_setMomentumUiMode('paper')">Paper</button>
+        <button type="button" class="mm-mode-btn mm-live" id="mm-mode-live" onclick="_setMomentumUiMode('live')">Live</button>
+      </div>
       <span class="price-display" id="price-label"></span>
       <span class="tb-divider"></span>
       <div class="interval-picker-wrap" role="group" aria-label="Chart interval">
@@ -2305,6 +2403,15 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         </div>
       </div>
       <div id="ticker-news-cards" class="ticker-news-row"></div>
+    </div>
+
+    <div id="momentum-viable-panel" class="mm-panel" style="display:none" aria-label="Momentum viable strategies">
+      <div class="mm-panel-head">
+        <h3>Momentum Viable Strategies</h3>
+        <p class="mm-meta" style="margin:0 0 8px 0;font-size:10px;line-height:1.35;opacity:.88">Neural mesh + DB viability (execution: coinbase_spot). Paper and live are separate paths.</p>
+        <button type="button" id="mm-neural-refresh-btn" onclick="_momentumNeuralRefresh()">Neural refresh</button>
+      </div>
+      <div id="mm-panel-body" class="mm-panel-body"></div>
     </div>
 
     <!-- Indicator toggles -->
@@ -2999,7 +3106,33 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 <!-- Real-time alert toasts -->
 <div id="alert-toast-container"></div>
 
+{% if automation_hud_enabled and not is_guest %}
+<div id="ch-auto-hud" class="ch-auto-hud" aria-label="Automation summary">
+  <div class="ch-auto-hud-head" onclick="_toggleAutomationHud()" title="Click to expand/collapse">
+    <span style="display:flex;align-items:center;gap:6px"><span id="ch-auto-hud-dot" class="ch-auto-hud-dot ok"></span><strong>Auto</strong></span>
+    <span id="ch-auto-hud-chev" style="opacity:.6">&#x25BC;</span>
+  </div>
+  <div class="ch-auto-hud-body" id="ch-auto-hud-body">
+    <div id="ch-auto-hud-lines">Loading…</div>
+    <div style="margin-top:6px"><a href="/trading/automation">Open Automation</a></div>
+  </div>
+</div>
+{% endif %}
+
+<!-- Momentum live arm confirmation (Phase 4 — two-step; no auto execution) -->
+<div id="mm-live-modal" class="mm-modal-backdrop" onclick="if(event.target===this)_closeMomentumLiveModal()">
+  <div class="mm-modal" onclick="event.stopPropagation()">
+    <h4>Confirm live arm</h4>
+    <div id="mm-live-modal-body" class="mm-modal-body"></div>
+    <div class="mm-modal-actions">
+      <button type="button" class="mm-modal-cancel" onclick="_closeMomentumLiveModal()">Cancel</button>
+      <button type="button" class="mm-modal-confirm" id="mm-live-modal-confirm" onclick="_confirmMomentumLiveArm()">I understand — confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
+var CHILI_TRADING_IS_GUEST = {{ is_guest | tojson }};
 /* ── Smart price formatting ────────────────────── */
 function smartPrice(v, isCrypto) {
   if (v == null || isNaN(v)) return '--';
@@ -3365,6 +3498,7 @@ document.addEventListener('DOMContentLoaded', function() {
   _initPaneDrag();
   buildIndicatorPanel();
   _syncIntervalUi(currentInterval);
+  _initAutomationHud();
   loadStrategies().then(function() {
     var _urlParams = new URLSearchParams(window.location.search);
     if (_urlParams.get('tab') !== 'backtest') return;
@@ -3482,6 +3616,7 @@ function _initFromBrain() {
     loadTickerDetail(currentTicker);
     loadTickerNews(currentTicker);
     loadSignals();
+    if (typeof _chiliMomentumOnSymbolChange === 'function') _chiliMomentumOnSymbolChange(currentTicker);
   }
 
   fetch('/api/trading/watchlist').then(function(r){return r.json();}).then(function(d) {
@@ -5196,6 +5331,245 @@ function changeInterval(v) {
   if (_multiViewActive && currentTicker) loadMultiCharts(currentTicker);
 }
 
+/* ── Momentum viable panel (Phase 4; server-side eligibility only) ── */
+var _chiliMomentumUiMode = sessionStorage.getItem('chili_momentum_ui_mode') || 'paper';
+var _mmPendingArm = null;
+
+function _setMomentumUiMode(m) {
+  _chiliMomentumUiMode = (m === 'live') ? 'live' : 'paper';
+  sessionStorage.setItem('chili_momentum_ui_mode', _chiliMomentumUiMode);
+  _syncMomentumModePill();
+  if (currentTicker) _loadMomentumViable(currentTicker);
+}
+function _syncMomentumModePill() {
+  var paper = document.getElementById('mm-mode-paper');
+  var live = document.getElementById('mm-mode-live');
+  if (paper) paper.classList.toggle('active', _chiliMomentumUiMode === 'paper');
+  if (live) live.classList.toggle('active', _chiliMomentumUiMode === 'live');
+}
+
+function _momentumNeuralRefresh() {
+  if (CHILI_TRADING_IS_GUEST) { alert('Sign in to request a neural refresh.'); return; }
+  if (!currentTicker) return;
+  fetch('/api/trading/momentum/refresh', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: currentTicker, execution_family: 'coinbase_spot' })
+  }).then(function(r) {
+    if (r.status === 403) { alert('Sign in required.'); return null; }
+    return r.json();
+  }).then(function(d) {
+    if (!d) return;
+    if (!d.accepted) alert('Refresh not queued: ' + (d.reason || 'unknown'));
+    else _loadMomentumViable(currentTicker);
+  }).catch(function() { alert('Refresh failed'); });
+}
+
+function _loadMomentumViable(symbol) {
+  var panel = document.getElementById('momentum-viable-panel');
+  var body = document.getElementById('mm-panel-body');
+  if (!panel || !body) return;
+  if (!symbol) { panel.style.display = 'none'; return; }
+  panel.style.display = 'block';
+  body.innerHTML = '<div class="mm-meta">Loading viable strategies…</div>';
+  var mode = _chiliMomentumUiMode === 'live' ? 'live' : 'paper';
+  fetch('/api/trading/momentum/viable?symbol=' + encodeURIComponent(symbol) + '&mode=' + encodeURIComponent(mode))
+    .then(function(r) { return r.json(); })
+    .then(_renderMomentumViable)
+    .catch(function() { body.innerHTML = '<div class="mm-warn">Failed to load.</div>'; });
+}
+
+function _renderMomentumViable(d) {
+  var body = document.getElementById('mm-panel-body');
+  if (!body) return;
+  var rows = d.strategies || [];
+  window._mmDetailRows = rows;
+  var gw = [];
+  if (d.warnings && d.warnings.length) gw.push.apply(gw, d.warnings);
+  var html = '';
+  if (gw.length) html += '<div class="mm-warn">' + gw.map(function(w) { return escHtml(String(w)); }).join(' · ') + '</div>';
+  if (!rows.length) {
+    html += '<div class="mm-meta">No viable rows yet for this symbol. Try Neural refresh or wait for a mesh tick.</div>';
+    body.innerHTML = html;
+    return;
+  }
+  rows.forEach(function(s, idx) {
+    var act = s.actions || {};
+    var canP = !!act.can_run_paper;
+    var canL = !!act.can_arm_live;
+    html += '<div class="mm-row">';
+    html += '<div><div class="mm-row-title">' + escHtml(s.label || s.family || ('variant ' + s.variant_id)) + '</div>';
+    html += '<div class="mm-badges">';
+    html += '<span class="mm-badge venue">' + escHtml(String(s.execution_family || 'coinbase_spot')) + '</span>';
+    html += '<span class="mm-badge ' + (canP ? 'ok' : 'no') + '">paper</span>';
+    html += '<span class="mm-badge ' + (canL ? 'ok' : 'no') + '">live</span>';
+    html += '<span class="mm-badge">score ' + escHtml(String(s.viability_score)) + '</span>';
+    if (s.regime_fit) html += '<span class="mm-badge">' + escHtml(String(s.regime_fit)) + '</span>';
+    html += '</div>';
+    html += '<div class="mm-meta">Fresh: ' + escHtml(String(s.freshness_ts || '')) + ' · ' + escHtml(String(s.source_layer || '')) + '</div>';
+    if (s.rationale) html += '<div class="mm-meta">' + escHtml(String(s.rationale)) + '</div>';
+    if (s.entry_style) html += '<div class="mm-meta">Entry: ' + escHtml(String(s.entry_style)) + '</div>';
+    if (s.stop_logic) html += '<div class="mm-meta">Stop: ' + escHtml(String(s.stop_logic)) + '</div>';
+    if (s.exit_logic) html += '<div class="mm-meta">Exit: ' + escHtml(String(s.exit_logic)) + '</div>';
+    var ws = s.warnings || [];
+    if (ws.length) html += '<div class="mm-warn">' + ws.map(function(w) { return escHtml(String(w)); }).join(' · ') + '</div>';
+    var rs = s.recent_sessions || {};
+    html += '<div class="mm-meta">Sessions 7d — paper: ' + (rs.sessions_7d_paper || 0) + ', live: ' + (rs.sessions_7d_live || 0) + '</div>';
+    html += '</div><div class="mm-actions">';
+    if (!CHILI_TRADING_IS_GUEST) {
+      html += '<button type="button" class="mm-btn-paper" ' + (canP ? '' : 'disabled ') + 'onclick="_momentumRunPaper(' + s.variant_id + ')">Run Paper</button>';
+      html += '<button type="button" class="mm-btn-live" ' + (canL ? '' : 'disabled ') + 'onclick="_momentumArmLive(' + s.variant_id + ')">Arm Live</button>';
+    } else {
+      html += '<span class="mm-meta">Sign in for Run Paper / Arm Live</span>';
+    }
+    html += '<button type="button" class="mm-btn-ghost" onclick="_mmShowDetail(' + idx + ')">View details</button>';
+    html += '</div></div>';
+  });
+  body.innerHTML = html;
+}
+
+function _mmShowDetail(i) {
+  var r = window._mmDetailRows && window._mmDetailRows[i];
+  if (r) alert(JSON.stringify(r, null, 2));
+}
+
+function _momentumRunPaper(vid) {
+  if (CHILI_TRADING_IS_GUEST || !currentTicker) return;
+  fetch('/api/trading/momentum/run-paper', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: currentTicker, variant_id: vid, execution_family: 'coinbase_spot' })
+  }).then(function(r) {
+    return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+  }).then(function(x) {
+    if (!x.ok) {
+      var det = x.j.detail;
+      alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+    } else alert(x.j.message || 'OK');
+  });
+}
+
+function _momentumArmLive(vid) {
+  if (CHILI_TRADING_IS_GUEST || !currentTicker) return;
+  fetch('/api/trading/momentum/arm-live', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ symbol: currentTicker, variant_id: vid, execution_family: 'coinbase_spot' })
+  }).then(function(r) {
+    return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+  }).then(function(x) {
+    if (!x.ok) {
+      var det = x.j.detail;
+      alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+      return;
+    }
+    _mmPendingArm = { token: x.j.arm_token, sessionId: x.j.session_id, payload: x.j.confirmation };
+    _openMomentumLiveModal(x.j);
+  });
+}
+
+function _openMomentumLiveModal(j) {
+  var el = document.getElementById('mm-live-modal');
+  var b = document.getElementById('mm-live-modal-body');
+  if (!el || !b) return;
+  var c = j.confirmation || {};
+  var wlines = (c.warnings || []).map(function(w) { return escHtml(String(w)); }).join('<br/>');
+  b.innerHTML =
+    '<p><b>Symbol:</b> ' + escHtml(String(c.symbol || '')) + '</p>' +
+    '<p><b>Live eligible:</b> ' + escHtml(String(c.live_eligible)) + '</p>' +
+    '<p><b>Viability:</b> ' + escHtml(String(c.viability_score != null ? c.viability_score : '')) + '</p>' +
+    '<p><b>Freshness:</b> ' + escHtml(String(c.freshness_ts || '')) + '</p>' +
+    (wlines ? '<p><b>Warnings:</b><br/>' + wlines + '</p>' : '') +
+    '<p><b>' + escHtml(String(c.disclaimer || '')) + '</b></p>';
+  el.classList.add('open');
+}
+
+function _closeMomentumLiveModal() {
+  var el = document.getElementById('mm-live-modal');
+  if (el) el.classList.remove('open');
+}
+
+function _confirmMomentumLiveArm() {
+  if (!_mmPendingArm || !_mmPendingArm.token) { _closeMomentumLiveModal(); return; }
+  fetch('/api/trading/momentum/confirm-live-arm', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ arm_token: _mmPendingArm.token, confirm: true })
+  }).then(function(r) {
+    return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+  }).then(function(x) {
+    _closeMomentumLiveModal();
+    if (!x.ok) {
+      var det = x.j.detail;
+      alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+    } else alert(x.j.message || 'Confirmed');
+    _mmPendingArm = null;
+    if (currentTicker) _loadMomentumViable(currentTicker);
+  });
+}
+
+function _chiliMomentumOnSymbolChange(symbol) {
+  _syncMomentumModePill();
+  if (!symbol) {
+    var p = document.getElementById('momentum-viable-panel');
+    if (p) p.style.display = 'none';
+    return;
+  }
+  _loadMomentumViable(symbol);
+  if (!CHILI_TRADING_IS_GUEST) {
+    fetch('/api/trading/momentum/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: symbol, execution_family: 'coinbase_spot' })
+    }).then(function() {}).catch(function() {});
+  }
+}
+
+var _automationHudTimer = null;
+function _toggleAutomationHud() {
+  var h = document.getElementById('ch-auto-hud');
+  if (!h) return;
+  h.classList.toggle('ch-collapsed');
+  try { localStorage.setItem('chili_auto_hud_collapsed', h.classList.contains('ch-collapsed') ? '1' : '0'); } catch (e) {}
+  var chev = document.getElementById('ch-auto-hud-chev');
+  if (chev) chev.textContent = h.classList.contains('ch-collapsed') ? '\u25B6' : '\u25BC';
+}
+function _paintAutomationHud(s) {
+  var lines = document.getElementById('ch-auto-hud-lines');
+  var dot = document.getElementById('ch-auto-hud-dot');
+  if (!lines || !dot) return;
+  var pend = (s.pending_live_arms || 0) + (s.pending_paper_drafts || 0);
+  var armed = s.armed_awaiting_runner || 0;
+  lines.innerHTML =
+    'Mode UI: <b>' + (typeof _chiliMomentumUiMode !== 'undefined' ? _chiliMomentumUiMode : 'paper') + '</b><br/>' +
+    'Pending: <b>' + pend + '</b> · Armed: <b>' + armed + '</b><br/>' +
+    'Last event: <b>' + (s.last_event_ts ? String(s.last_event_ts).slice(0, 19) : '\u2014') + '</b>';
+  dot.className = 'ch-auto-hud-dot';
+  if (!s.mesh_enabled || !s.momentum_neural_enabled) dot.classList.add('bad');
+  else if (pend > 0 || armed > 0) dot.classList.add('warn');
+  else dot.classList.add('ok');
+}
+function _initAutomationHud() {
+  var h = document.getElementById('ch-auto-hud');
+  if (!h) return;
+  try {
+    if (localStorage.getItem('chili_auto_hud_collapsed') === '1') {
+      h.classList.add('ch-collapsed');
+      var chev = document.getElementById('ch-auto-hud-chev');
+      if (chev) chev.textContent = '\u25B6';
+    }
+  } catch (e) {}
+  function tick() {
+    fetch('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(_paintAutomationHud)
+      .catch(function() {});
+  }
+  tick();
+  if (_automationHudTimer) clearInterval(_automationHudTimer);
+  _automationHudTimer = setInterval(tick, 60000);
+}
+
 var _selectDebounce = null;
 function selectTicker(t) {
   _detachUserPriceAlertLines();
@@ -5226,6 +5600,7 @@ function selectTicker(t) {
     if (_multiViewActive) loadMultiCharts(currentTicker);
     loadTickerDetail(currentTicker);
     loadTickerNews(currentTicker);
+    if (typeof _chiliMomentumOnSymbolChange === 'function') _chiliMomentumOnSymbolChange(currentTicker);
   }, 200);
   if (window.innerWidth <= 768) closeAllDrawers();
 }

@@ -26,7 +26,7 @@ from ..services import trading_scheduler
 from ..services import ticker_universe
 from ..services import broker_service
 from ..services import broker_manager
-from .trading_sub import ai_router, broker_router, data_provider_router, inspect_router, web3_router
+from .trading_sub import ai_router, broker_router, data_provider_router, inspect_router, momentum_api, web3_router
 from ..schemas.trading import (
     AnalyzeRequest,
     BacktestRequest,
@@ -44,6 +44,7 @@ from ..services import backtest_service as bt_svc
 
 router = APIRouter(tags=["trading"])
 router.include_router(ai_router)
+router.include_router(momentum_api.router)
 router.include_router(inspect_router)
 router.include_router(broker_router)
 router.include_router(data_provider_router)
@@ -148,6 +149,7 @@ def _trading_page_response(
     *,
     template_name: str,
     page_title: str,
+    extra_context: dict | None = None,
 ):
     ctx = get_identity_ctx(request, db)
     # Brain Worker handles all learning cycles - no auto-trigger on page load
@@ -162,16 +164,21 @@ def _trading_page_response(
     from ..config import settings as _s
     google_configured = bool(_s.google_client_id and _s.google_client_secret)
 
+    tmpl_ctx: dict = {
+        "title": page_title,
+        "is_guest": ctx["is_guest"],
+        "user_name": ctx["user_name"],
+        "avatar_url": avatar_url,
+        "google_configured": google_configured,
+        "automation_hud_enabled": bool(getattr(_s, "chili_trading_automation_hud_enabled", True)),
+    }
+    if extra_context:
+        tmpl_ctx.update(extra_context)
+
     return request.app.state.templates.TemplateResponse(
         request,
         template_name,
-        {
-            "title": page_title,
-            "is_guest": ctx["is_guest"],
-            "user_name": ctx["user_name"],
-            "avatar_url": avatar_url,
-            "google_configured": google_configured,
-        },
+        tmpl_ctx,
     )
 
 
@@ -179,6 +186,18 @@ def _trading_page_response(
 def trading_page(request: Request, db: Session = Depends(get_db)):
     return _trading_page_response(
         request, db, template_name="trading.html", page_title="Trading"
+    )
+
+
+@router.get("/trading/automation", response_class=HTMLResponse)
+def trading_automation_page(request: Request, db: Session = Depends(get_db)):
+    """Momentum automation monitor (Phase 5 — sessions/events only; no runner)."""
+    return _trading_page_response(
+        request,
+        db,
+        template_name="trading_automation.html",
+        page_title="Trading Automation",
+        extra_context={"automation_page": True},
     )
 
 

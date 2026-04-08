@@ -405,4 +405,7 @@ requirements.txt         # Pinned Python dependencies
 
 - [TOOLING.md](docs/TOOLING.md) — Tool-calling architecture, guardrail layers, and observability design
 - [momentum-trading-strategy.txt](docs/momentum-trading-strategy.txt) — CHILI's evolving trading strategy (brain-tested)
+- [MOMENTUM_NEURAL_ARCHITECTURE.md](docs/MOMENTUM_NEURAL_ARCHITECTURE.md) — Neural-native momentum automation (not learning-cycle)
+- [MOMENTUM_NEURAL_RUNBOOK.md](docs/MOMENTUM_NEURAL_RUNBOOK.md) — Flags, migrations, pytest slices, prod safety
+- [MOMENTUM_NEURAL_TEST_MATRIX.md](docs/MOMENTUM_NEURAL_TEST_MATRIX.md) — Phase-to-test mapping
 - [modules.md](docs/modules.md) — Module system & marketplace documentation

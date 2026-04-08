@@ -298,6 +298,195 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("TRADING_BRAIN_GRAPH_MODE"),
     )
 
+    # Coinbase/crypto momentum intelligence (neural mesh only — not learning-cycle).
+    chili_momentum_neural_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEURAL_ENABLED"),
+    )
+    # Closed-loop automation outcomes → neural evolution (Phase 9; durable rows + viability hints).
+    chili_momentum_neural_feedback_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_NEURAL_FEEDBACK_ENABLED"),
+    )
+
+    # Coinbase spot venue adapter (execution layer; neural momentum may consume readiness only).
+    chili_coinbase_spot_adapter_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_COINBASE_SPOT_ADAPTER_ENABLED"),
+    )
+    chili_coinbase_ws_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_COINBASE_WS_ENABLED"),
+    )
+    chili_coinbase_strict_freshness: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_COINBASE_STRICT_FRESHNESS"),
+    )
+    chili_coinbase_market_data_max_age_sec: float = Field(
+        default=15.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_COINBASE_MARKET_DATA_MAX_AGE_SEC"),
+    )
+
+    # Trading automation monitor: optional collapsible HUD on /trading (Phase 5).
+    chili_trading_automation_hud_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_TRADING_AUTOMATION_HUD_ENABLED"),
+    )
+
+    # Momentum automation risk policy (config-backed; Phase 6 — pre-runner gates).
+    chili_momentum_risk_max_daily_loss_usd: float = Field(
+        default=250.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_DAILY_LOSS_USD", "CHILI_MOMENTUM_RISK_MAX_DAILY_LOSS_USD"),
+    )
+    chili_momentum_risk_max_loss_per_trade_usd: float = Field(
+        default=50.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_LOSS_PER_TRADE_USD", "CHILI_MOMENTUM_RISK_MAX_LOSS_PER_TRADE_USD"),
+    )
+    chili_momentum_risk_max_concurrent_sessions: int = Field(
+        default=6,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_SESSIONS"),
+    )
+    chili_momentum_risk_max_concurrent_live_sessions: int = Field(
+        default=1,
+        ge=1,
+        le=20,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_CONCURRENT_LIVE_SESSIONS", "CHILI_MOMENTUM_RISK_MAX_CONCURRENT_LIVE_SESSIONS"),
+    )
+    chili_momentum_risk_max_concurrent_positions: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_CONCURRENT_POSITIONS"),
+    )
+    chili_momentum_risk_max_notional_per_trade_usd: float = Field(
+        default=500.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_NOTIONAL_PER_TRADE_USD"),
+    )
+    chili_momentum_risk_max_position_size_base: float = Field(
+        default=1_000_000.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_POSITION_SIZE_BASE"),
+    )
+    chili_momentum_risk_max_spread_bps_paper: float = Field(
+        default=28.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_PAPER"),
+    )
+    chili_momentum_risk_max_spread_bps_live: float = Field(
+        default=12.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_SPREAD_BPS", "CHILI_MOMENTUM_RISK_MAX_SPREAD_BPS_LIVE"),
+    )
+    chili_momentum_risk_max_estimated_slippage_bps: float = Field(
+        default=18.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_ESTIMATED_SLIPPAGE_BPS", "CHILI_MOMENTUM_RISK_MAX_ESTIMATED_SLIPPAGE_BPS"),
+    )
+    chili_momentum_risk_max_fee_to_target_ratio: float = Field(
+        default=0.35,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_MAX_FEE_TO_TARGET_RATIO"),
+    )
+    chili_momentum_risk_max_hold_seconds: int = Field(
+        default=86_400,
+        ge=60,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_MAX_HOLD_SECONDS", "CHILI_MOMENTUM_RISK_MAX_HOLD_SECONDS"),
+    )
+    chili_momentum_risk_cooldown_after_stopout_seconds: int = Field(
+        default=300,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_COOLDOWN_AFTER_STOPOUT_SECONDS"),
+    )
+    chili_momentum_risk_cooldown_after_cancel_seconds: int = Field(
+        default=60,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_COOLDOWN_AFTER_CANCEL_SECONDS"),
+    )
+    chili_momentum_risk_viability_max_age_seconds: float = Field(
+        default=600.0,
+        ge=30.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_VIABILITY_MAX_AGE_SECONDS"),
+    )
+    chili_momentum_risk_stale_market_data_max_age_sec: float = Field(
+        default=30.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_STALE_MARKET_DATA_MAX_AGE_SEC"),
+    )
+    chili_momentum_risk_require_live_eligible: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REQUIRE_LIVE_ELIGIBLE"),
+    )
+    chili_momentum_risk_require_fresh_viability: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REQUIRE_FRESH_VIABILITY"),
+    )
+    chili_momentum_risk_require_strict_coinbase_freshness: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_REQUIRE_STRICT_COINBASE_FRESHNESS"),
+    )
+    chili_momentum_risk_disable_live_if_governance_inhibit: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_DISABLE_LIVE_IF_GOVERNANCE_INHIBIT"),
+    )
+    chili_momentum_risk_block_paper_when_kill_switch: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_BLOCK_PAPER_WHEN_KILL_SWITCH"),
+    )
+    chili_momentum_risk_auto_expire_pending_live_arm_seconds: float = Field(
+        default=900.0,
+        ge=60.0,
+        le=86_400.0,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_AUTO_EXPIRE_PENDING_LIVE_ARM_SECONDS"),
+    )
+
+    # Phase 7 — simulated paper automation runner (no live orders).
+    chili_momentum_paper_runner_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_RUNNER_ENABLED"),
+    )
+    chili_momentum_paper_runner_scheduler_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED"),
+    )
+    chili_momentum_paper_runner_dev_tick_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_RUNNER_DEV_TICK_ENABLED"),
+    )
+
+    # Phase 8 — guarded live Coinbase spot runner (real orders; off by default).
+    chili_momentum_live_runner_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_ENABLED"),
+    )
+    chili_momentum_live_runner_scheduler_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED"),
+    )
+    chili_momentum_live_runner_dev_tick_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_DEV_TICK_ENABLED"),
+    )
+    # APScheduler interval when paper/live runner batch jobs are registered (minutes; jobs still require *_scheduler_enabled).
+    chili_momentum_paper_runner_scheduler_interval_minutes: int = Field(
+        default=3,
+        ge=2,
+        le=1440,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_INTERVAL_MINUTES"),
+    )
+    chili_momentum_live_runner_scheduler_interval_minutes: int = Field(
+        default=2,
+        ge=2,
+        le=1440,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_MINUTES"),
+    )
+
     brain_market_snapshot_scheduler_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED"),

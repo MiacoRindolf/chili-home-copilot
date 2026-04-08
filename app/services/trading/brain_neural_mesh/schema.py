@@ -43,4 +43,6 @@ def desk_graph_boot_config() -> dict[str, Any]:
         "recommended_graph_url": "/api/trading/brain/graph",
         "legacy_graph_url": "/api/brain/trading/network-graph",
         "silent_legacy_fallback": silent_legacy,
+        # Phase 10: neural momentum desk read-model (intel / viability / evolution summaries).
+        "momentum_neural_desk_url": "/api/trading/brain/momentum/desk",
     }

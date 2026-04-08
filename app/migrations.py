@@ -3553,6 +3553,389 @@ def _migration_088_backtest_param_sets(conn) -> None:
     conn.commit()
 
 
+def _migration_089_momentum_neural_mesh(conn) -> None:
+    """Neural-mesh nodes/edges for Coinbase/crypto momentum intelligence (Phase 1). Idempotent."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+    gv = 1
+    dom = "trading"
+    nodes = [
+        (
+            "nm_momentum_crypto_intel",
+            4,
+            "momentum_crypto_intel",
+            "Crypto momentum intelligence",
+            False,
+            0.52,
+            45,
+            {"role": "momentum_intel_hub", "execution_family": "coinbase_spot"},
+        ),
+        (
+            "nm_momentum_viability_pool",
+            5,
+            "momentum_viability",
+            "Momentum viability pool",
+            True,
+            0.5,
+            90,
+            {"role": "momentum_viability", "observer": True},
+        ),
+        (
+            "nm_momentum_evolution_trace",
+            7,
+            "momentum_evolution",
+            "Momentum evolution trace",
+            True,
+            0.52,
+            300,
+            {"role": "momentum_evolution", "observer": True},
+        ),
+    ]
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid,
+                "domain": dom,
+                "gv": gv,
+                "ntype": ntype,
+                "layer": layer,
+                "label": label,
+                "fth": fth,
+                "cd": cd,
+                "is_obs": is_obs,
+                "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    edges = [
+        ("nm_event_bus", "nm_momentum_crypto_intel", "momentum_context_refresh", 0.88, "excitatory"),
+        ("nm_momentum_crypto_intel", "nm_momentum_viability_pool", "momentum_scored", 0.82, "excitatory"),
+        ("nm_momentum_crypto_intel", "nm_momentum_evolution_trace", "momentum_scored", 0.55, "excitatory"),
+        ("nm_momentum", "nm_momentum_crypto_intel", "feature_signal", 0.7, "excitatory"),
+    ]
+    for src, tgt, sig, w, pol in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+        )
+
+    conn.commit()
+
+
+def _migration_090_momentum_neural_persistence(conn) -> None:
+    """Momentum strategy variants, symbol viability, automation session/event (Phase 2 neural backing)."""
+    if "momentum_strategy_variants" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE momentum_strategy_variants (
+                    id SERIAL PRIMARY KEY,
+                    family VARCHAR(64) NOT NULL,
+                    variant_key VARCHAR(64) NOT NULL,
+                    version INTEGER NOT NULL DEFAULT 1,
+                    label VARCHAR(256) NOT NULL,
+                    params_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    is_active BOOLEAN NOT NULL DEFAULT TRUE,
+                    execution_family VARCHAR(32) NOT NULL DEFAULT 'coinbase_spot',
+                    scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_momentum_strategy_variant_fkv UNIQUE (family, variant_key, version)
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_msv_family ON momentum_strategy_variants (family)"))
+        conn.execute(text("CREATE INDEX ix_msv_variant_key ON momentum_strategy_variants (variant_key)"))
+        conn.execute(
+            text("CREATE INDEX ix_msv_scan_pattern ON momentum_strategy_variants (scan_pattern_id)")
+        )
+
+    if "momentum_symbol_viability" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE momentum_symbol_viability (
+                    id SERIAL PRIMARY KEY,
+                    symbol VARCHAR(36) NOT NULL,
+                    variant_id INTEGER NOT NULL REFERENCES momentum_strategy_variants(id) ON DELETE CASCADE,
+                    viability_score DOUBLE PRECISION NOT NULL,
+                    paper_eligible BOOLEAN NOT NULL DEFAULT TRUE,
+                    live_eligible BOOLEAN NOT NULL DEFAULT FALSE,
+                    freshness_ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    regime_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    execution_readiness_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    explain_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    evidence_window_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    source_node_id VARCHAR(80),
+                    correlation_id VARCHAR(64),
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_momentum_symbol_viability_sym_var UNIQUE (symbol, variant_id)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_msvi_symbol_updated ON momentum_symbol_viability (symbol, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_msvi_variant_updated ON momentum_symbol_viability (variant_id, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_msvi_symbol_live_updated "
+                "ON momentum_symbol_viability (symbol, live_eligible, updated_at DESC)"
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_msvi_freshness ON momentum_symbol_viability (freshness_ts)"))
+        conn.execute(text("CREATE INDEX ix_msvi_corr ON momentum_symbol_viability (correlation_id)"))
+
+    if "trading_automation_sessions" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_automation_sessions (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    venue VARCHAR(32) NOT NULL DEFAULT 'coinbase',
+                    execution_family VARCHAR(32) NOT NULL DEFAULT 'coinbase_spot',
+                    mode VARCHAR(16) NOT NULL DEFAULT 'paper',
+                    symbol VARCHAR(36) NOT NULL,
+                    variant_id INTEGER NOT NULL REFERENCES momentum_strategy_variants(id) ON DELETE RESTRICT,
+                    state VARCHAR(32) NOT NULL DEFAULT 'idle',
+                    risk_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    correlation_id VARCHAR(64),
+                    source_node_id VARCHAR(80),
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TIMESTAMP,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_tas_user ON trading_automation_sessions (user_id)"))
+        conn.execute(text("CREATE INDEX ix_tas_symbol ON trading_automation_sessions (symbol)"))
+        conn.execute(text("CREATE INDEX ix_tas_variant ON trading_automation_sessions (variant_id)"))
+        conn.execute(text("CREATE INDEX ix_tas_corr ON trading_automation_sessions (correlation_id)"))
+
+    if "trading_automation_events" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_automation_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL REFERENCES trading_automation_sessions(id) ON DELETE CASCADE,
+                    ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    event_type VARCHAR(64) NOT NULL,
+                    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    correlation_id VARCHAR(64),
+                    source_node_id VARCHAR(80)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX ix_tae_session_ts ON trading_automation_events (session_id, ts)")
+        )
+        conn.execute(
+            text("CREATE INDEX ix_tae_event_type_ts ON trading_automation_events (event_type, ts)")
+        )
+
+    # Idempotent seed: Phase 1 family slugs (variant_key == family for v1).
+    seed = [
+        ("impulse_breakout", "Impulse breakout"),
+        ("micro_pullback_continuation", "1m micro pullback continuation"),
+        ("rolling_range_high_breakout", "Rolling range high breakout"),
+        ("breakout_reclaim", "Breakout reclaim"),
+        ("vwap_reclaim_continuation", "VWAP reclaim continuation"),
+        ("ema_reclaim_continuation", "EMA reclaim continuation"),
+        ("compression_expansion_breakout", "Compression to expansion breakout"),
+        ("momentum_follow_through_scalp", "Momentum follow-through scalp"),
+        ("failed_breakout_bailout", "Failed breakout bailout"),
+        ("no_follow_through_exit", "No-follow-through / exhaustion exit"),
+    ]
+    for family, label in seed:
+        conn.execute(
+            text(
+                """
+                INSERT INTO momentum_strategy_variants (
+                    family, variant_key, version, label, params_json, is_active, execution_family,
+                    created_at, updated_at
+                ) VALUES (
+                    :family, :family, 1, :label, '{}'::jsonb, TRUE, 'coinbase_spot',
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (family, variant_key, version) DO NOTHING
+                """
+            ),
+            {"family": family, "label": label},
+        )
+
+    # If SQLAlchemy create_all created bare tables before migrations, ensure indexes exist.
+    if "momentum_strategy_variants" in _tables(conn):
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_msv_family ON momentum_strategy_variants (family)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_msv_variant_key ON momentum_strategy_variants (variant_key)")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_msv_scan_pattern ON momentum_strategy_variants (scan_pattern_id)"
+            )
+        )
+    if "momentum_symbol_viability" in _tables(conn):
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_msvi_symbol_updated "
+                "ON momentum_symbol_viability (symbol, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_msvi_variant_updated "
+                "ON momentum_symbol_viability (variant_id, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_msvi_symbol_live_updated "
+                "ON momentum_symbol_viability (symbol, live_eligible, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_msvi_freshness ON momentum_symbol_viability (freshness_ts)")
+        )
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_msvi_corr ON momentum_symbol_viability (correlation_id)")
+        )
+    if "trading_automation_sessions" in _tables(conn):
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tas_user ON trading_automation_sessions (user_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tas_symbol ON trading_automation_sessions (symbol)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tas_variant ON trading_automation_sessions (variant_id)"))
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tas_corr ON trading_automation_sessions (correlation_id)"))
+    if "trading_automation_events" in _tables(conn):
+        conn.execute(
+            text("CREATE INDEX IF NOT EXISTS ix_tae_session_ts ON trading_automation_events (session_id, ts)")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tae_event_type_ts ON trading_automation_events (event_type, ts)"
+            )
+        )
+
+    conn.commit()
+
+
+def _migration_091_momentum_automation_outcomes(conn) -> None:
+    """Closed-loop automation outcomes for neural evolution (Phase 9)."""
+    if "momentum_automation_outcomes" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE momentum_automation_outcomes (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL UNIQUE
+                        REFERENCES trading_automation_sessions(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    variant_id INTEGER NOT NULL REFERENCES momentum_strategy_variants(id) ON DELETE RESTRICT,
+                    symbol VARCHAR(36) NOT NULL,
+                    mode VARCHAR(16) NOT NULL,
+                    execution_family VARCHAR(32) NOT NULL DEFAULT 'coinbase_spot',
+                    terminal_state VARCHAR(32) NOT NULL,
+                    terminal_at TIMESTAMP NOT NULL,
+                    outcome_class VARCHAR(48) NOT NULL,
+                    realized_pnl_usd DOUBLE PRECISION,
+                    return_bps DOUBLE PRECISION,
+                    hold_seconds INTEGER,
+                    exit_reason VARCHAR(64),
+                    regime_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    readiness_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    admission_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    governance_context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    extracted_summary_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    evidence_weight DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+                    contributes_to_evolution BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_mao_variant_created ON momentum_automation_outcomes (variant_id, created_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_mao_symbol_mode_created ON momentum_automation_outcomes (symbol, mode, created_at)"
+            )
+        )
+        conn.execute(
+            text("CREATE INDEX ix_mao_user_created ON momentum_automation_outcomes (user_id, created_at)")
+        )
+        conn.execute(
+            text("CREATE INDEX ix_mao_terminal_at ON momentum_automation_outcomes (terminal_at)")
+        )
+        conn.execute(
+            text("CREATE INDEX ix_mao_outcome_class ON momentum_automation_outcomes (outcome_class)")
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -3643,6 +4026,9 @@ MIGRATIONS = [
     ("086_trading_brain_neural_mesh", _migration_086_trading_brain_neural_mesh),
     ("087_neural_mesh_seed_expand_v15", _migration_087_neural_mesh_seed_expand_v15),
     ("088_backtest_param_sets", _migration_088_backtest_param_sets),
+    ("089_momentum_neural_mesh", _migration_089_momentum_neural_mesh),
+    ("090_momentum_neural_persistence", _migration_090_momentum_neural_persistence),
+    ("091_momentum_automation_outcomes", _migration_091_momentum_automation_outcomes),
 ]
 
 

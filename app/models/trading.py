@@ -3,7 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    Column,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 
@@ -645,3 +657,132 @@ class BrainGraphMetric(Base):
     value_num: float = Column(Float, nullable=False, default=0.0)
     extra: Optional[dict] = Column(JSONB, nullable=True)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class MomentumStrategyVariant(Base):
+    """Versioned momentum strategy family row (neural momentum / automation; not learning-cycle)."""
+
+    __tablename__ = "momentum_strategy_variants"
+    __table_args__ = (
+        UniqueConstraint("family", "variant_key", "version", name="uq_momentum_strategy_variant_fkv"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    family: str = Column(String(64), nullable=False, index=True)
+    variant_key: str = Column(String(64), nullable=False, index=True)
+    version: int = Column(Integer, nullable=False, default=1)
+    label: str = Column(String(256), nullable=False)
+    params_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    is_active: bool = Column(Boolean, nullable=False, default=True)
+    execution_family: str = Column(String(32), nullable=False, default="coinbase_spot")
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class MomentumSymbolViability(Base):
+    """Durable symbol × variant viability snapshot (backing store; BrainNodeState stays hot path)."""
+
+    __tablename__ = "momentum_symbol_viability"
+    __table_args__ = (
+        UniqueConstraint("symbol", "variant_id", name="uq_momentum_symbol_viability_sym_var"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    symbol: str = Column(String(36), nullable=False, index=True)
+    variant_id: int = Column(
+        Integer, ForeignKey("momentum_strategy_variants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    viability_score: float = Column(Float, nullable=False)
+    paper_eligible: bool = Column(Boolean, nullable=False, default=True)
+    live_eligible: bool = Column(Boolean, nullable=False, default=False)
+    freshness_ts: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    execution_readiness_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    explain_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    evidence_window_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class TradingAutomationSession(Base):
+    """Automation runner session (persistence only in Phase 2 — no runner logic here)."""
+
+    __tablename__ = "trading_automation_sessions"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    venue: str = Column(String(32), nullable=False, default="coinbase")
+    execution_family: str = Column(String(32), nullable=False, default="coinbase_spot")
+    mode: str = Column(String(16), nullable=False, default="paper")
+    symbol: str = Column(String(36), nullable=False, index=True)
+    variant_id: int = Column(
+        Integer, ForeignKey("momentum_strategy_variants.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    state: str = Column(String(32), nullable=False, default="idle")
+    risk_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
+    started_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    ended_at: Optional[datetime] = Column(DateTime, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class TradingAutomationEvent(Base):
+    """Append-only automation audit trail."""
+
+    __tablename__ = "trading_automation_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: int = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ts: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    event_type: str = Column(String(64), nullable=False, index=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
+
+
+class MomentumAutomationOutcome(Base):
+    """Durable closed-loop outcome row for neural evolution (Phase 9); one row per automation session."""
+
+    __tablename__ = "momentum_automation_outcomes"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_momentum_automation_outcome_session"),
+        Index("ix_mao_variant_created", "variant_id", "created_at"),
+        Index("ix_mao_symbol_mode_created", "symbol", "mode", "created_at"),
+        Index("ix_mao_user_created", "user_id", "created_at"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    session_id: int = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    variant_id: int = Column(
+        Integer, ForeignKey("momentum_strategy_variants.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    symbol: str = Column(String(36), nullable=False, index=True)
+    mode: str = Column(String(16), nullable=False, index=True)
+    execution_family: str = Column(String(32), nullable=False, default="coinbase_spot")
+    terminal_state: str = Column(String(32), nullable=False)
+    terminal_at: datetime = Column(DateTime, nullable=False, index=True)
+    outcome_class: str = Column(String(48), nullable=False, index=True)
+    realized_pnl_usd: Optional[float] = Column(Float, nullable=True)
+    return_bps: Optional[float] = Column(Float, nullable=True)
+    hold_seconds: Optional[int] = Column(Integer, nullable=True)
+    exit_reason: Optional[str] = Column(String(64), nullable=True)
+    regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    readiness_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    admission_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    governance_context_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    extracted_summary_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    evidence_weight: float = Column(Float, nullable=False, default=1.0)
+    contributes_to_evolution: bool = Column(Boolean, nullable=False, default=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)

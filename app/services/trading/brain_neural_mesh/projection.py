@@ -24,8 +24,14 @@ from .layout_neural_graph import (
 from .repository import nodes_for_domain
 from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION
 from .waves import derive_overlay_hot_pulse_from_waves, group_activation_events_into_waves
+from ..momentum_neural.brain_desk_summary import (
+    MOMENTUM_GRAPH_NODE_IDS,
+    build_momentum_neural_graph_context,
+)
 
 NEURAL_LAYOUT_VERSION = 2
+# Bumped when neural graph node payload shape changes materially (Phase 10 momentum desk previews).
+NEURAL_PROJECTION_SCHEMA_VERSION = 3
 
 # Layer indices: 1 = outer ring (sensory), 7 = inner (meta-learning).
 NEURAL_LAYER_LABELS: dict[int, str] = {
@@ -82,6 +88,12 @@ def build_neural_graph_projection(
 
     now = datetime.utcnow()
 
+    momentum_ctx: dict[str, Any] = {}
+    try:
+        momentum_ctx = build_momentum_neural_graph_context(db)
+    except Exception:
+        momentum_ctx = {}
+
     nodes_min = [
         {"id": n.id, "layer": int(n.layer), "is_observer": bool(n.is_observer)}
         for n in sorted(nodes_orm, key=lambda x: x.id)
@@ -105,27 +117,41 @@ def build_neural_graph_projection(
             now=now,
         )
         layer_label = NEURAL_LAYER_LABELS.get(int(node.layer), f"Layer {node.layer}")
-        out_nodes.append(
-            {
-                "id": node.id,
-                "label": node.label,
-                "label_short": truncate_neural_label(node.label or "", 20),
-                "layer": node.layer,
-                "layer_label": layer_label,
-                "node_type": node.node_type,
-                "activation_score": act,
-                "confidence": conf,
-                "stale": stale,
-                "cooling": cooling,
-                "enabled": node.enabled,
-                "is_observer": node.is_observer,
-                "fire_threshold": float(node.fire_threshold),
-                "cooldown_seconds": int(node.cooldown_seconds),
-                "last_fired_at": recent_fire,
-                "x": round(x, 2),
-                "y": round(y, 2),
+        nd: dict[str, Any] = {
+            "id": node.id,
+            "label": node.label,
+            "label_short": truncate_neural_label(node.label or "", 20),
+            "layer": node.layer,
+            "layer_label": layer_label,
+            "node_type": node.node_type,
+            "activation_score": act,
+            "confidence": conf,
+            "stale": stale,
+            "cooling": cooling,
+            "enabled": node.enabled,
+            "is_observer": node.is_observer,
+            "fire_threshold": float(node.fire_threshold),
+            "cooldown_seconds": int(node.cooldown_seconds),
+            "last_fired_at": recent_fire,
+            "x": round(x, 2),
+            "y": round(y, 2),
+        }
+        ls = st.local_state if st and isinstance(st.local_state, dict) else None
+        if ls and ls.get("momentum_neural_version"):
+            nd["momentum_preview"] = {
+                "last_tick_utc": ls.get("last_tick_utc"),
+                "top_preview": ls.get("top_preview") or ls.get("viability_rows"),
+                "correlation_id": ls.get("correlation_id"),
             }
-        )
+        if node.id in MOMENTUM_GRAPH_NODE_IDS and momentum_ctx.get("nodes"):
+            card = momentum_ctx["nodes"].get(node.id)
+            if isinstance(card, dict):
+                nd["momentum_desk"] = {
+                    "subtitle": card.get("subtitle"),
+                    "title": card.get("title"),
+                    "role": card.get("role"),
+                }
+        out_nodes.append(nd)
 
     out_edges: list[dict[str, Any]] = []
     for e in edges_orm:
@@ -141,11 +167,13 @@ def build_neural_graph_projection(
             }
         )
 
+    panel = momentum_ctx.get("momentum_panel") if isinstance(momentum_ctx.get("momentum_panel"), dict) else {}
     meta = {
         "view": "neural",
         "domain": domain,
         "graph_version": graph_version,
         "layout_version": NEURAL_LAYOUT_VERSION,
+        "projection_schema_version": NEURAL_PROJECTION_SCHEMA_VERSION,
         "viewport": {
             "w": VIEWPORT_W,
             "h": VIEWPORT_H,
@@ -159,8 +187,16 @@ def build_neural_graph_projection(
         "layer_labels": neural_layer_labels_meta(),
         "description": (
             "Event-driven neural mesh: rings by cognitive layer; hub nodes share the center band. "
-            "Edges carry typed signals; inhibitory edges reduce downstream activation."
+            "Edges carry typed signals; inhibitory edges reduce downstream activation. "
+            "Momentum crypto intel, viability pool, and evolution trace are neural-native (not learning-cycle)."
         ),
+        "momentum_desk": {
+            "version": momentum_ctx.get("version") or 0,
+            "headline": panel.get("headline"),
+            "badges": momentum_ctx.get("badges"),
+            "paper_vs_live_30d": panel.get("paper_vs_live_30d"),
+            "links": panel.get("links"),
+        },
     }
     return {"ok": True, "meta": meta, "nodes": out_nodes, "edges": out_edges}
 
@@ -224,7 +260,7 @@ def build_node_detail(
     ov_waves = group_activation_events_into_waves(ov_events, time_window_sec=2.0)
     hot_overlay, _, last_act_wave = derive_overlay_hot_pulse_from_waves(ov_waves, {})
 
-    return {
+    out: dict[str, Any] = {
         "id": node.id,
         "label": node.label,
         "node_type": node.node_type,
@@ -280,6 +316,17 @@ def build_node_detail(
             for f in fires
         ],
     }
+
+    if node_id in MOMENTUM_GRAPH_NODE_IDS:
+        try:
+            mctx = build_momentum_neural_graph_context(db)
+            out["momentum_desk_card"] = mctx.get("nodes", {}).get(node_id, {})
+            out["momentum_badges"] = mctx.get("badges", {})
+            out["momentum_panel"] = mctx.get("momentum_panel", {})
+        except Exception:
+            out["momentum_desk_card"] = {"error": "momentum_context_unavailable"}
+
+    return out
 
 
 def build_edge_detail(db: Session, edge_id: int) -> Optional[dict[str, Any]]:

@@ -134,6 +134,54 @@ def api_trading_brain_graph(
     return JSONResponse(get_trading_brain_network_graph())
 
 
+# ── Neural momentum desk (Phase 10 — read-only; not learning-cycle) ─────────
+
+
+@router.get("/api/trading/brain/momentum/desk")
+def api_trading_brain_momentum_desk(request: Request, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.brain_desk_summary import get_momentum_brain_desk_payload
+
+    return JSONResponse(get_momentum_brain_desk_payload(db))
+
+
+@router.get("/api/trading/brain/momentum/summary")
+def api_trading_brain_momentum_summary(request: Request, db: Session = Depends(get_db)):
+    """Alias of desk payload for brain UX consumers."""
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.brain_desk_summary import get_momentum_brain_desk_payload
+
+    return JSONResponse(get_momentum_brain_desk_payload(db))
+
+
+@router.get("/api/trading/brain/momentum/variants")
+def api_trading_brain_momentum_variants(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(14, ge=1, le=90),
+):
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.brain_desk_summary import get_momentum_variants_brain_summary
+
+    return JSONResponse(get_momentum_variants_brain_summary(db, days=days))
+
+
+@router.get("/api/trading/brain/momentum/feedback-summary")
+def api_trading_brain_momentum_feedback_summary(request: Request, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.brain_desk_summary import get_momentum_feedback_brain_summary
+
+    return JSONResponse(get_momentum_feedback_brain_summary(db))
+
+
+@router.get("/api/trading/brain/momentum/evolution-trace")
+def api_trading_brain_momentum_evolution_trace(request: Request, db: Session = Depends(get_db)):
+    get_identity_ctx(request, db)
+    from ...services.trading.momentum_neural.brain_desk_summary import get_momentum_evolution_trace_summary
+
+    return JSONResponse(get_momentum_evolution_trace_summary(db))
+
+
 @router.get("/api/trading/brain/graph/nodes/{node_id}")
 def api_trading_brain_graph_node(request: Request, node_id: str, db: Session = Depends(get_db)):
     get_identity_ctx(request, db)

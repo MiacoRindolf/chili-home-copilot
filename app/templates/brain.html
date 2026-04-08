@@ -1119,6 +1119,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
             </svg>
           </div>
         </div>
+        <div id="tbn-momentum-desk-panel" class="tbn-momentum-desk-panel" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;border-top:1px solid var(--border);background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
         <div id="tbn-node-detail" class="tbn-node-detail" role="dialog" aria-labelledby="tbn-node-detail-title" aria-hidden="true">
           <div class="tbn-node-detail-inner">
             <div class="tbn-node-detail-header">
@@ -1138,6 +1139,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
         <span style="display:block;margin-top:6px;font-size:10px;color:var(--text-muted)">Neural mesh is enabled — activation batches and queue activity are reflected on Network with Live.</span>
         {% endif %}
       </div>
+      <div id="tb-momentum-neural-strip" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
 
       <!-- ═══ ZONE 1: STATUS BAR ═══ -->
       <div class="brain-status-bar" id="brain-status-bar">
@@ -1924,6 +1926,49 @@ function escHtml(s) {
   var d = document.createElement('div'); d.textContent = s; return d.innerHTML;
 }
 
+/** Phase 10: neural momentum desk strip on Trading → Runtime (read-only API). */
+function tbRefreshMomentumNeuralStrip() {
+  var el = document.getElementById('tb-momentum-neural-strip');
+  if (!el) return;
+  fetch('/api/trading/brain/momentum/desk', { credentials: 'same-origin' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (!d || !d.ok) {
+        el.style.display = 'none';
+        return;
+      }
+      el.style.display = 'block';
+      var panel = d.momentum_panel || {};
+      var pv = panel.paper_vs_live_30d || {};
+      var pap = pv.paper || {};
+      var liv = pv.live || {};
+      var bd = d.badges || {};
+      var parts = [];
+      parts.push('<strong style="color:var(--text)">Momentum (neural)</strong> — ');
+      parts.push(escHtml(panel.headline || 'Desk'));
+      parts.push(' <span style="color:var(--text-muted)">|</span> ');
+      parts.push('30d paper <strong>' + escHtml(String(pap.n || 0)) + '</strong>');
+      if (pap.mean_return_bps != null) parts.push(' avg bps ' + escHtml(String(pap.mean_return_bps)));
+      parts.push(' · live <strong>' + escHtml(String(liv.n || 0)) + '</strong>');
+      if (liv.mean_return_bps != null) parts.push(' avg bps ' + escHtml(String(liv.mean_return_bps)));
+      if (pv.live_sample_caution) {
+        parts.push(' <span style="color:#f59e0b;font-weight:600">live sample low</span>');
+      }
+      parts.push('<br/><span style="font-size:9px;color:var(--text-muted)">');
+      parts.push('mesh ' + (bd.neural_mesh_on ? 'on' : 'off'));
+      parts.push(' · momentum ' + (bd.momentum_neural_on ? 'on' : 'off'));
+      parts.push(' · feedback ' + (bd.feedback_enabled ? 'on' : 'off'));
+      if (bd.governance_kill_switch) parts.push(' · <span style="color:#f87171">kill switch</span>');
+      parts.push(' · <a href="/trading#momentum" style="color:var(--accent)">Trading momentum</a>');
+      parts.push(' · <a href="/trading/automation" style="color:var(--accent)">Automation</a>');
+      parts.push('</span>');
+      el.innerHTML = parts.join('');
+    })
+    .catch(function() {
+      el.style.display = 'none';
+    });
+}
+
 function openBrainModal(title, bodyHtml, footerHtml, footerClass, showPineHeaderTools) {
   document.getElementById('brain-modal-title').textContent = title;
   document.getElementById('brain-modal-body').innerHTML = bodyHtml;
@@ -2192,7 +2237,8 @@ function updateBrainWorkerUI(data) {
   document.getElementById('bw-stat-decayed').textContent = totals.insights_decayed || 0;
 
   var lastCycle = data.last_cycle || {};
-  var durationSec = lastCycle.duration_seconds ?? lastCycle.elapsed_s;
+  /* ES5-safe nullish: avoid ?? (ES2020) — breaks script parse on older engines. */
+  var durationSec = (lastCycle.duration_seconds != null) ? lastCycle.duration_seconds : lastCycle.elapsed_s;
   var stepTimings = lastCycle.step_timings || {};
   var timingsLabel = document.getElementById('bw-last-cycle-timings');
   var stepsEl = document.getElementById('bw-step-timings');
@@ -2425,6 +2471,7 @@ function setTradingBrainSubtab(which) {
   }
   if (asst) asst.style.display = isOut ? '' : 'none';
   if (!isOut) initTradingBrainNetworkGraph();
+  if (isOut && typeof tbRefreshMomentumNeuralStrip === 'function') tbRefreshMomentumNeuralStrip();
 }
 
 var _tradingBrainNetworkInited = false;
@@ -2601,6 +2648,11 @@ function initTradingBrainNetworkGraph() {
   }, { passive: false });
 
   function tbnShowGraphError() {
+    var mpErr = document.getElementById('tbn-momentum-desk-panel');
+    if (mpErr) {
+      mpErr.style.display = 'none';
+      mpErr.innerHTML = '';
+    }
     gEdges.innerHTML = '';
     gNodes.innerHTML = '';
     var err = document.createElementNS('http://www.w3.org/2000/svg', 'text');
@@ -2613,6 +2665,11 @@ function initTradingBrainNetworkGraph() {
   }
 
   function tbnShowNeuralGraphUnavailable(detail) {
+    var mpNv = document.getElementById('tbn-momentum-desk-panel');
+    if (mpNv) {
+      mpNv.style.display = 'none';
+      mpNv.innerHTML = '';
+    }
     gEdges.innerHTML = '';
     gNodes.innerHTML = '';
     var g = document.createElementNS('http://www.w3.org/2000/svg', 'g');
@@ -2779,6 +2836,119 @@ function initTradingBrainNetworkGraph() {
     return [a, b];
   }
 
+  /** Phase 10: compact momentum node detail from projection API (read-model). */
+  function tbnMomentumDeskCardHtml(card) {
+    if (!card || typeof card !== 'object' || card.error) return '';
+    var role = card.role || '';
+    var rows = [];
+    rows.push('<div style="border:1px solid var(--border);border-radius:6px;padding:8px;margin-bottom:8px;background:var(--bg);max-width:100%">');
+    rows.push('<div style="font-weight:700;color:var(--accent)">' + escHtml(card.title || 'Momentum') + '</div>');
+    rows.push('<div style="font-size:9px;color:var(--text-muted);margin-bottom:6px">' + escHtml(card.subtitle || '') + '</div>');
+    function line(k, v) {
+      if (v == null || v === '') return;
+      rows.push('<div style="font-size:10px"><strong>' + escHtml(k) + '</strong> ' + escHtml(String(v)) + '</div>');
+    }
+    if (role === 'momentum_crypto_intel') {
+      line('Execution family', card.execution_family);
+      line('Neural active', card.neural_active ? 'yes' : 'no');
+      line('Last tick (hot)', card.last_tick_utc);
+      line('Symbols evaluated', card.symbols_evaluated_count);
+      line('Regime hint', card.regime_session_hint);
+      line('Top family hint', card.top_family_hint);
+      line('Corr (tail)', card.correlation_id_tail);
+    } else if (role === 'momentum_viability_pool') {
+      line('Hot last tick', card.hot_last_tick_utc);
+      line('Hot rows (preview cap)', card.hot_row_count);
+      line('DB viability rows', card.durable_row_count);
+      line('Live-eligible', card.live_eligible_count);
+      line('Paper-only', card.paper_only_count);
+      line('Fresh last 24h', card.fresh_last_24h_count);
+      if (card.top_durable_lines && card.top_durable_lines.length) {
+        rows.push('<div style="margin-top:4px;font-size:9px"><strong>Top durable</strong><br/>' +
+          card.top_durable_lines.map(function(l) { return escHtml(String(l)); }).join('<br/>') + '</div>');
+      }
+    } else if (role === 'momentum_evolution_trace') {
+      line('Latest feedback (hot)', card.latest_feedback_at_utc);
+      line('30d paper outcomes', card.paper_30d_n);
+      line('30d live outcomes', card.live_30d_n);
+      line('Paper mean bps (30d)', card.paper_mean_bps_30d);
+      line('Live mean bps (30d)', card.live_mean_bps_30d);
+      line('Feedback loop', card.feedback_loop_active ? 'active' : 'inactive');
+      line('Trace tail length', card.feedback_trace_tail);
+      if (card.live_sample_low) {
+        rows.push('<div style="color:#f59e0b;font-size:9px;font-weight:600">Live sample low — treat live stats cautiously</div>');
+      }
+      if (card.mix_top && card.mix_top.length) {
+        rows.push('<div style="margin-top:4px;font-size:9px"><strong>Outcome mix (30d)</strong> ' +
+          card.mix_top.map(function(m) { return escHtml(String(m.outcome_class)) + ':' + escHtml(String(m.n)); }).join(' · ') +
+          '</div>');
+      }
+      if (card.best_variant && card.best_variant.label) {
+        var bv = card.best_variant;
+        rows.push('<div style="font-size:9px"><strong>Best variant</strong> ' + escHtml(String(bv.label)) +
+          (bv.avg_return_bps != null ? ' · avg bps ' + escHtml(String(bv.avg_return_bps)) : '') + '</div>');
+      }
+      if (card.weakest_variant && card.weakest_variant.label) {
+        var wv = card.weakest_variant;
+        rows.push('<div style="font-size:9px"><strong>Weakest variant</strong> ' + escHtml(String(wv.label)) +
+          (wv.avg_return_bps != null ? ' · avg bps ' + escHtml(String(wv.avg_return_bps)) : '') + '</div>');
+      }
+    } else {
+      rows.push('<div style="font-size:9px;color:var(--text-muted)">Momentum desk preview</div>');
+    }
+    rows.push('</div>');
+    return rows.join('');
+  }
+
+  function tbnFillMomentumDeskPanel(data) {
+    var panelEl = document.getElementById('tbn-momentum-desk-panel');
+    if (!panelEl) return;
+    var md = data && data.meta && data.meta.momentum_desk;
+    if (!md) {
+      panelEl.style.display = 'none';
+      panelEl.innerHTML = '';
+      return;
+    }
+    panelEl.style.display = 'block';
+    var bd = md.badges || {};
+    var pv = md.paper_vs_live_30d || {};
+    var pap = pv.paper || {};
+    var liv = pv.live || {};
+    var links = md.links || {};
+    var html = [];
+    html.push('<div style="font-weight:600;color:var(--text);margin-bottom:4px">Momentum · neural desk</div>');
+    html.push('<div style="color:var(--text-secondary);margin-bottom:6px;font-size:10px">' + escHtml(md.headline || '') + '</div>');
+    html.push('<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:6px;font-size:9px">');
+    function pill(txt, ok, bad) {
+      var col = bad ? '#f87171' : (ok ? '#22c55e' : 'var(--text-muted)');
+      html.push('<span style="padding:2px 6px;border-radius:4px;border:1px solid var(--border);color:' + col + '">' + escHtml(txt) + '</span>');
+    }
+    pill('mesh ' + (bd.neural_mesh_on ? 'on' : 'off'), bd.neural_mesh_on);
+    pill('momentum ' + (bd.momentum_neural_on ? 'on' : 'off'), bd.momentum_neural_on);
+    pill('feedback ' + (bd.feedback_enabled ? 'on' : 'off'), bd.feedback_enabled);
+    if (bd.governance_kill_switch) pill('kill switch', false, true);
+    if (bd.live_sample_low) pill('live sample low', false, false);
+    if (bd.outcomes_table_present === false) pill('outcomes table missing', false, false);
+    html.push('</div>');
+    html.push('<div style="font-size:9px;color:var(--text-muted)">');
+    html.push('<strong>Paper 30d</strong> n=' + escHtml(String(pap.n != null ? pap.n : 0)));
+    if (pap.mean_return_bps != null) html.push(' · mean bps ' + escHtml(String(pap.mean_return_bps)));
+    html.push(' <span style="opacity:.5">|</span> ');
+    html.push('<strong>Live 30d</strong> n=' + escHtml(String(liv.n != null ? liv.n : 0)));
+    if (liv.mean_return_bps != null) html.push(' · mean bps ' + escHtml(String(liv.mean_return_bps)));
+    if (pv.live_sample_caution) html.push(' <span style="color:#f59e0b;font-weight:600">(live sample caution)</span>');
+    html.push('</div>');
+    if (links.trading_momentum || links.automation) {
+      html.push('<div style="margin-top:6px;font-size:9px">');
+      if (links.trading_momentum) html.push('<a href="' + escHtml(links.trading_momentum) + '" style="color:var(--accent)">Trading momentum</a>');
+      if (links.trading_momentum && links.automation) html.push(' · ');
+      if (links.automation) html.push('<a href="' + escHtml(links.automation) + '" style="color:var(--accent)">Automation</a>');
+      html.push('</div>');
+    }
+    html.push('<div style="margin-top:4px;font-size:8px;opacity:.75">Neural-native (not learning-cycle). Counts from durable tables; ticks from hot node state.</div>');
+    panelEl.innerHTML = html.join('');
+  }
+
   function tbnOpenNeuralNodeDetailFromApi(nodeId, anchorEl) {
     var p = document.getElementById('tbn-node-detail');
     var titleEl = document.getElementById('tbn-node-detail-title');
@@ -2795,6 +2965,13 @@ function initTradingBrainNetworkGraph() {
         var nd = d.node;
         titleEl.textContent = nd.label || nd.id;
         var parts = [];
+        var mcard = nd.momentum_desk_card;
+        if (mcard && typeof mcard === 'object') {
+          var mh = tbnMomentumDeskCardHtml(mcard);
+          if (mh) {
+            parts.push('<dt class="tbn-node-detail-sr-only">Momentum desk</dt><dd class="tbn-node-detail-section-dd">' + mh + '</dd>');
+          }
+        }
         parts.push('<dt class="tbn-node-detail-sr-only">Summary</dt><dd class="tbn-node-detail-section-dd">');
         parts.push('<div style="font-size:10px;line-height:1.45">');
         parts.push('<div><strong>type</strong> ' + escHtml(String(nd.node_type || '')) + ' &middot; <strong>layer</strong> ' + escHtml(String(nd.layer)) + ' ' + escHtml(String(nd.layer_label || '')) + '</div>');
@@ -2845,7 +3022,13 @@ function initTradingBrainNetworkGraph() {
 
   var TBN_NEURAL_VW = 1600;
   var TBN_NEURAL_VH = 950;
-  var TBN_HUB_IDS = { nm_event_bus: 1, nm_working_memory: 1, nm_regime: 1, nm_contradiction: 1 };
+  var TBN_HUB_IDS = {
+    nm_event_bus: 1,
+    nm_working_memory: 1,
+    nm_regime: 1,
+    nm_contradiction: 1,
+    nm_momentum_crypto_intel: 1,
+  };
 
   function tbnNeuralQuadPath(x1, y1, x2, y2, k) {
     var mx = (x1 + x2) * 0.5;
@@ -3012,7 +3195,12 @@ function initTradingBrainNetworkGraph() {
       circ.setAttribute('stroke', 'rgba(167,139,250,' + glow + ')');
       circ.setAttribute('stroke-width', isHub ? '1.35' : '1.5');
       var t = document.createElementNS('http://www.w3.org/2000/svg', 'title');
-      t.textContent = (n.label || n.id) + '\n' + (n.layer_label || ('L' + n.layer)) + ' act=' + act.toFixed(2);
+      var tipLines = [
+        (n.label || n.id),
+        (n.layer_label || ('L' + n.layer)) + ' act=' + act.toFixed(2),
+      ];
+      if (n.momentum_desk && n.momentum_desk.subtitle) tipLines.push(String(n.momentum_desk.subtitle));
+      t.textContent = tipLines.join('\n');
       g.appendChild(t);
       g.appendChild(circ);
       g.addEventListener('mousedown', function(e) { e.stopPropagation(); });
@@ -3078,6 +3266,7 @@ function initTradingBrainNetworkGraph() {
       }
     }
     tbnNeuralFitCamera(vp, data.meta && data.meta.bounds ? data.meta.bounds : null);
+    tbnFillMomentumDeskPanel(data);
     tbnRestartLivePoll();
   }
 
@@ -3098,6 +3287,7 @@ function initTradingBrainNetworkGraph() {
       return;
     }
     _tbnNeuralView = false;
+    tbnFillMomentumDeskPanel({});
     window.__TBN_LAST_NEURAL_BOUNDS__ = null;
     var leg = document.getElementById('tbn-legend');
     if (leg) {
@@ -8944,15 +9134,16 @@ function brainApplyHandoffLaunchParamOnce() {
 
 /* ── Init ─────────────────────────────────────── */
 document.addEventListener('DOMContentLoaded', function() {
-  renderBrainHubCards().finally(function() {
-    brainApplyInitialView();
-    initBrainPlannerHandoffBridge();
-    brainApplyHandoffLaunchParamOnce();
-    loadBrainDashboard();
-    updateSidebarStatus();
-    startBwPolling();
-    initTradingBrainAssistant();
-  });
+  /* Hub boot: do not gate status bar / subsystems on /api/brain/domains — a slow or hanging
+     domains fetch would leave the hub stuck on "Checking status..." with an empty grid. */
+  renderBrainHubCards();
+  brainApplyInitialView();
+  initBrainPlannerHandoffBridge();
+  brainApplyHandoffLaunchParamOnce();
+  loadBrainDashboard();
+  updateSidebarStatus();
+  startBwPolling();
+  initTradingBrainAssistant();
 });
 </script>
 {% endblock %}

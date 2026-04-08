@@ -48,6 +48,16 @@ def _credentials_configured() -> bool:
     return bool(settings.coinbase_api_key and settings.coinbase_api_secret)
 
 
+def coinbase_sdk_and_credentials_configured() -> bool:
+    """True if ``coinbase-advanced-py`` is installed and env/keys are set (no live ping)."""
+    return bool(_cb_available and _credentials_configured())
+
+
+def get_coinbase_rest_client() -> Any | None:
+    """Authenticated Advanced Trade REST client, or ``None`` (used by ``CoinbaseSpotAdapter``)."""
+    return _get_client()
+
+
 def _get_client():
     global _client
     if _client is not None:
