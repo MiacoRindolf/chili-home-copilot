@@ -970,6 +970,67 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   display: flex; align-items: center; gap: 8px; justify-content: space-between;
 }
 
+/* ── Operator desk (Trading runtime) ─────────── */
+.desk-runtime-details { margin-bottom: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-header); }
+.desk-runtime-details > summary {
+  cursor: pointer; font-size: 11px; font-weight: 700; color: var(--text-secondary);
+  padding: 8px 12px; list-style: none;
+}
+.desk-runtime-details > summary::-webkit-details-marker { display: none; }
+.desk-runtime-details[open] > summary { border-bottom: 1px solid var(--border); }
+.desk-runtime-details .brain-status-bar { border: none; margin: 0; border-radius: 0; }
+.operator-desk-hero {
+  border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; margin-bottom: 14px;
+  background: linear-gradient(135deg, rgba(139,92,246,.08), rgba(99,102,241,.04));
+}
+.odh-top { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px; justify-content: space-between; }
+.odh-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.odh-badge {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em;
+  padding: 4px 10px; border-radius: 20px; border: 1px solid var(--border); background: var(--bg-header);
+}
+.odh-badge.health-healthy { border-color: rgba(34,197,94,.45); color: #16a34a; }
+.odh-badge.health-partial { border-color: rgba(245,158,11,.5); color: #d97706; }
+.odh-badge.health-stale { border-color: rgba(234,179,8,.55); color: #a16207; }
+.odh-badge.health-offline { border-color: rgba(107,114,128,.5); color: #6b7280; }
+.odh-badge.health-empty { border-color: rgba(148,163,184,.45); color: #64748b; }
+.odh-thesis-line { font-size: 13px; font-weight: 600; color: var(--text); line-height: 1.45; margin-top: 10px; max-width: 920px; }
+.odh-summary-line { font-size: 11px; color: var(--text-secondary); line-height: 1.5; margin-top: 8px; max-width: 920px; }
+.odh-fresh-row { font-size: 10px; color: var(--text-muted); margin-top: 8px; display: flex; flex-wrap: wrap; gap: 10px; }
+.odh-top3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-top: 14px; }
+.odh-card {
+  border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--bg-header);
+  text-align: left; cursor: default;
+}
+.odh-card .odh-eng { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--accent); margin-bottom: 4px; }
+.odh-card .odh-tk { font-size: 14px; font-weight: 800; color: var(--text); }
+.odh-card .odh-act { font-size: 10px; font-weight: 700; margin-top: 6px; color: #22c55e; }
+.odh-evidence-strip {
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px; border: 1px dashed rgba(139,92,246,.35);
+  background: rgba(139,92,246,.04); font-size: 10px; line-height: 1.5; color: var(--text-secondary);
+}
+.odh-trust-panel {
+  margin-top: 12px; padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-secondary, rgba(0,0,0,.03)); font-size: 10px; color: var(--text-muted); line-height: 1.55;
+}
+.odh-trust-panel strong { color: var(--text); font-weight: 600; }
+.desk-help-details { font-size: 10px; color: var(--text-muted); margin-bottom: 10px; }
+.desk-help-details summary { cursor: pointer; font-weight: 600; color: var(--text-secondary); }
+.spec-movers-section { margin-bottom: 16px; }
+.spec-mover-card {
+  border: 1px solid rgba(249,115,22,.35); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+  background: rgba(249,115,22,.06);
+}
+.spec-mover-card .sm-head { font-weight: 800; font-size: 12px; color: var(--text); }
+.spec-mover-card .sm-sub { font-size: 10px; color: var(--text-secondary); margin-top: 4px; line-height: 1.45; }
+.opp-engine-pill {
+  display: inline-block; font-size: 9px; font-weight: 700; padding: 2px 8px; border-radius: 8px;
+  margin-right: 6px; vertical-align: middle;
+}
+.opp-pill-core { background: rgba(34,197,94,.15); color: #15803d; }
+.opp-pill-spec { background: rgba(249,115,22,.18); color: #c2410c; }
+.opp-pill-ctx { background: rgba(99,102,241,.12); color: #4f46e5; }
+
 /* ── Edge Grid (Zone 2) ─────────────────────── */
 .brain-edge-grid {
   display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px;
@@ -1132,16 +1193,39 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
       </div>
       <div id="trading-brain-pane-output" class="trading-brain-pane" role="tabpanel" aria-labelledby="tb-tab-runtime" aria-hidden="false" style="overflow-y:auto">
       <div class="trading-main-content">
-      <div class="tb-runtime-intro" style="font-size:11px;line-height:1.5;color:var(--text-secondary);margin:0 0 12px 0;padding:10px 12px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(0,0,0,.03))">
-        <strong style="color:var(--text)">Runtime and orchestration</strong> — this tab is the desk surface: <strong>brain worker</strong>, <strong>learning-cycle</strong> progress when the runner is active, and <strong>market outputs</strong> (playbook, performance, opportunities). It is <em>not</em> the neural topology.
-        The <strong>Network</strong> tab shows the mesh graph; turn on <strong>Live</strong> there to watch <strong>activation waves</strong> (several nodes can pulse together).
-        {% if trading_brain_neural_first_paint|default(false) %}
-        <span style="display:block;margin-top:6px;font-size:10px;color:var(--text-muted)">Neural mesh is enabled — activation batches and queue activity are reflected on Network with Live.</span>
-        {% endif %}
-      </div>
+      <details class="desk-help-details">
+        <summary>How to read this desk</summary>
+        <div style="margin-top:8px;line-height:1.55;padding:8px 0">
+          <strong>Operator desk</strong> (top) answers: alive?, thesis, freshness, top trades, and whether each idea is a <em>repeatable edge</em> or <em>speculative momentum</em>.
+          <strong>Repeatable edges</strong> use promoted pattern imminent rules (Tier A–C). <strong>Explosive movers</strong> are a separate heuristic plane over scanner history — the brain can “see” them without treating them as core-quality setups.
+          Open <strong>Runtime &amp; worker controls</strong> for Start/Stop/Wake; use <strong>Network</strong> for the neural mesh graph. Research, cycles, and inspect JSON live under <strong>Deep dive</strong> tabs.
+        </div>
+      </details>
       <div id="tb-momentum-neural-strip" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
 
-      <!-- ═══ ZONE 1: STATUS BAR ═══ -->
+      <!-- ═══ OPERATOR DESK (above the fold) ═══ -->
+      <div class="operator-desk-hero" id="operator-desk-hero" aria-label="Operator desk summary">
+        <div class="odh-top">
+          <div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px">Trading operator desk</div>
+            <div class="odh-badges" id="odh-badges-row">
+              <span class="odh-badge health-offline" id="odh-health-badge">Loading…</span>
+              <span class="odh-badge" id="odh-worker-badge">Worker: …</span>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted);text-align:right;max-width:280px;line-height:1.45" id="odh-governance-hint"></div>
+        </div>
+        <div class="odh-thesis-line" id="odh-thesis-line">Loading market thesis…</div>
+        <div class="odh-summary-line" id="odh-operator-narrative">Synthesizing session context and opportunity tiers…</div>
+        <div class="odh-fresh-row" id="odh-fresh-row"></div>
+        <div class="odh-top3" id="odh-top3"><div class="odh-card"><div class="odh-eng">—</div><div class="odh-tk">Loading…</div></div></div>
+        <div class="odh-evidence-strip" id="odh-evidence-strip" aria-live="polite">Evidence strip loads after the opportunity board.</div>
+        <div class="odh-trust-panel" id="odh-trust-panel"><strong>Trust &amp; freshness</strong> — waiting for worker and board timestamps…</div>
+      </div>
+
+      <!-- ═══ ZONE 1: STATUS BAR (secondary — expandable) ═══ -->
+      <details class="desk-runtime-details" id="desk-runtime-details">
+        <summary>Runtime &amp; worker controls (Start / Stop / Wake / queue)</summary>
       <div class="brain-status-bar" id="brain-status-bar">
         <div class="bsb-row">
           <div class="bsb-left">
@@ -1180,6 +1264,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
           <span class="bsb-meta" id="opp-chip-refresh" style="font-size:10px">Board: —</span>
         </div>
       </div>
+      </details>
 
       <!-- AI Learning Report (floating, hidden until triggered) -->
       <div class="brain-reflection-box" id="brain-reflection">
@@ -1216,8 +1301,8 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
         <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309"></div>
         <div id="opp-refresh-failed-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);font-size:11px;color:#b91c1c"></div>
         <div class="brain-section-title" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
-          <span class="bs-icon">&#x1F3AF;</span> Opportunity Board
-          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">Manual desk view — tiers use the same composite math as imminent alerts.</span>
+          <span class="bs-icon">&#x1F3AF;</span> Repeatable edges (opportunity board)
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">Tier A–C = core pattern imminent engine (same composite math as imminent alerts). Badges show engine vs context-only rows.</span>
           <button type="button" onclick="loadOpportunityBoard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600" title="Reload board from server">Manual refresh</button>
         </div>
         <div id="opp-operator-strip" style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
@@ -1243,6 +1328,15 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
           <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D — Research only</div>
           <div id="opp-tier-d"></div>
         </div>
+      </div>
+
+      <div class="brain-section spec-movers-section" id="speculative-movers-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F680;</span> Explosive / speculative movers
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:520px;line-height:1.35">Separate <strong>speculative momentum engine</strong> — heuristic scan history, not promoted pattern quality. Shown so fast movers do not “disappear”; still avoid blind chasing when extension risk is high.</span>
+        </div>
+        <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0;line-height:1.45" id="spec-movers-methodology"></p>
+        <div id="spec-movers-body" style="font-size:11px;color:var(--text-muted)">Loads with the opportunity board…</div>
       </div>
 
       <div class="brain-section">
@@ -2315,7 +2409,14 @@ function _updateBwCycleChart() {
 
 function loadBrainWorkerStatus() {
   return fetch('/api/trading/brain/worker/status').then(function(r){return r.json();}).then(function(d) {
-    if (d.ok) updateBrainWorkerUI(d);
+    if (d.ok) {
+      updateBrainWorkerUI(d);
+      try { window._deskWorkerSnapshot = d; } catch (eDw) {}
+    }
+    if (typeof renderOperatorDeskTrustStrip === 'function') renderOperatorDeskTrustStrip();
+    if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
+      renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
+    }
   }).catch(function(){});
 }
 
@@ -4040,6 +4141,9 @@ function _loadRegimeChip() {
       return;
     }
     window._brainThesisData = d;
+    if (typeof renderOperatorDeskFromBoard === 'function' && window._oppBoardLastGoodPayload) {
+      renderOperatorDeskFromBoard(window._oppBoardLastGoodPayload);
+    }
     var chip = document.getElementById('bsb-regime');
     if (!chip) return;
     var icons = {bullish:'&#x1F7E2;', bearish:'&#x1F534;', neutral:'&#x1F7E1;'};
@@ -4667,6 +4771,176 @@ function oppExpandTier(t) {
   loadOpportunityBoard();
 }
 
+function _odhPillClass(eng) {
+  if (eng === 'core_repeatable_edge') return 'opp-pill-core';
+  return 'opp-pill-ctx';
+}
+
+function renderOperatorDeskTrustStrip() {
+  var el = document.getElementById('odh-trust-panel');
+  if (!el) return;
+  var w = window._deskWorkerSnapshot || {};
+  var lc = w.last_cycle || {};
+  var parts = [];
+  parts.push('<div><strong>Worker:</strong> ' + escHtml(w.status || 'unknown') + '</div>');
+  if (lc.completed) parts.push('<div><strong>Last learning cycle:</strong> ' + escHtml(String(lc.completed)) + '</div>');
+  var bd = window._oppBoardLastGoodPayload;
+  if (bd) {
+    parts.push('<div><strong>Opportunity board generated:</strong> ' + escHtml(String(bd.generated_at || '—')) + '</div>');
+    parts.push('<div><strong>Board data as-of:</strong> ' + escHtml(String(bd.data_as_of || 'unknown')) + '</div>');
+  } else {
+    parts.push('<div><strong>Opportunity board:</strong> not loaded yet</div>');
+  }
+  parts.push('<div><strong>Live predictions:</strong> refresh in section below (on-demand).</div>');
+  parts.push('<div><strong>Promoted patterns list:</strong> refresh in Tradeable Patterns (on-demand).</div>');
+  el.innerHTML = '<strong>Trust &amp; freshness</strong><br/>' + parts.join('');
+}
+
+function renderOperatorDeskHealthBadges(d, top3) {
+  var health = 'healthy';
+  if (d && (d.is_stale || d.freshness_degraded)) health = 'stale';
+  var w = window._deskWorkerSnapshot || {};
+  var ws = w.status || 'stopped';
+  if (ws !== 'running') health = (health === 'healthy') ? 'partial' : health;
+  var hasOpp = top3 && top3.length > 0;
+  if (d && !hasOpp && health === 'healthy') health = 'empty';
+
+  var healthEl = document.getElementById('odh-health-badge');
+  if (healthEl) {
+    healthEl.className = 'odh-badge health-' + health;
+    var labels = { healthy: 'Healthy', partial: 'Partial', stale: 'Stale', offline: 'Offline', empty: 'Empty' };
+    healthEl.textContent = labels[health] || health;
+  }
+  var wb = document.getElementById('odh-worker-badge');
+  if (wb) {
+    wb.textContent = 'Worker: ' + ws;
+    wb.className = 'odh-badge' + (ws === 'running' ? ' health-healthy' : '');
+  }
+}
+
+function renderSpeculativeMoversPanel(spec) {
+  var meth = document.getElementById('spec-movers-methodology');
+  var body = document.getElementById('spec-movers-body');
+  if (!meth || !body) return;
+  if (!spec) {
+    body.textContent = 'No speculative payload.';
+    return;
+  }
+  meth.textContent = spec.methodology_note || '';
+  if (!spec.ok && spec.error) {
+    body.innerHTML = '<span style="color:#b45309">' + escHtml(String(spec.error)) + '</span>';
+    return;
+  }
+  var items = spec.items || [];
+  if (!items.length) {
+    body.innerHTML = '<div style="font-style:italic;color:var(--text-muted)">No explosive-profile scanner rows matched the heuristic gate (scanner history may be quiet).</div>';
+    return;
+  }
+  body.innerHTML = items.map(function(m) {
+    var lines = (m.why_not_core_promoted || []).map(function(x) { return '<li>' + escHtml(String(x)) + '</li>'; }).join('');
+    return '<div class="spec-mover-card"><div class="sm-head">' + escHtml(String(m.ticker || '')) + ' · ' + escHtml(String(m.move_type_label || 'Speculative')) + '</div>' +
+      '<div class="sm-sub">' + escHtml(String(m.why_interesting || '')) + '</div>' +
+      '<div class="sm-sub" style="color:#9a3412;font-weight:600">' + escHtml(String(m.operator_hint || '')) + '</div>' +
+      '<div class="sm-sub"><strong>Why not promoted to core:</strong><ul style="margin:4px 0 0 16px;padding:0">' + lines + '</ul></div></div>';
+  }).join('');
+}
+
+function _fetchDeskGovernanceHint() {
+  var el = document.getElementById('odh-governance-hint');
+  if (!el || el._govLoaded) return;
+  el._govLoaded = true;
+  fetch('/api/trading/brain/governance').then(parseFetchJson).then(function(g) {
+    if (!g || !g.kill_switch) { el.textContent = ''; return; }
+    if (g.kill_switch.active) {
+      el.innerHTML = '<span style="color:#dc2626;font-weight:700">Kill switch ON</span><br/><span style="font-size:9px">' + escHtml(String(g.kill_switch.reason || '')) + '</span>';
+    } else {
+      el.textContent = 'Governance: kill switch off.';
+    }
+  }).catch(function() { el.textContent = ''; });
+}
+
+function renderOperatorDeskFromBoard(d) {
+  if (!d || d.ok === false) return;
+  var T = d.tiers || {};
+  var pool = [].concat(T.actionable_now || [], T.watch_soon || [], T.watch_today || []);
+  var top3 = pool.slice(0, 3);
+
+  var th = window._brainThesisData || {};
+  var thesisLine = document.getElementById('odh-thesis-line');
+  if (thesisLine) {
+    if (th.thesis) {
+      var plain = String(th.thesis).replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+      thesisLine.textContent = plain.length > 240 ? plain.slice(0, 237) + '…' : plain;
+    } else {
+      thesisLine.textContent = 'Market thesis loads from the brain API — if this stays empty, check auth or server logs.';
+    }
+  }
+
+  var nar = document.getElementById('odh-operator-narrative');
+  if (nar) {
+    var parts = [];
+    var os = d.operator_summary || {};
+    if (os.session_line) parts.push(String(os.session_line));
+    if (th.stance) parts.push('Stance: ' + th.stance + '.');
+    if (d.is_stale) parts.push('Feeds look stale versus your threshold — verify before acting.');
+    else if (d.data_as_of) parts.push('Composite board freshness is bounded by data-as-of below.');
+    if (!parts.length) parts.push('Use Tier A–C for repeatable edges; explosive movers are isolated in the panel below.');
+    nar.textContent = parts.join(' ');
+  }
+
+  var fr = document.getElementById('odh-fresh-row');
+  if (fr) {
+    var bits = [];
+    bits.push('Board: ' + (d.generated_at || '—'));
+    bits.push('Data as-of: ' + (d.data_as_of || 'unknown'));
+    if (d.age_seconds != null) bits.push('Age ~' + Math.round(d.age_seconds) + 's');
+    var sf = d.source_freshness || {};
+    var sk = Object.keys(sf);
+    for (var i = 0; i < Math.min(5, sk.length); i++) {
+      var k = sk[i];
+      var v = sf[k];
+      if (v && typeof v === 'object' && v.timestamp) bits.push(k + ': ' + String(v.timestamp));
+    }
+    fr.innerHTML = bits.map(function(b) { return '<span>' + escHtml(b) + '</span>'; }).join('');
+  }
+
+  var t3 = document.getElementById('odh-top3');
+  if (t3) {
+    if (!top3.length) {
+      t3.innerHTML = '<div class="odh-card"><div class="odh-eng">Core repeatable edge</div><div class="odh-tk">No tiered opportunities</div><div class="odh-act" style="color:var(--text-muted)">Run learning cycles or relax tier caps — see board section.</div></div>';
+    } else {
+      t3.innerHTML = top3.map(function(it) {
+        var eng = it.opportunity_engine || 'context_unknown';
+        var engLabel = eng === 'core_repeatable_edge' ? 'Core repeatable edge engine' : (eng === 'prediction_context' ? 'Prediction context' : 'Auxiliary context');
+        var pill = '<span class="opp-engine-pill ' + _odhPillClass(eng) + '">' + escHtml(String(it.setup_type_badge || 'Setup')) + '</span> ';
+        var act = it.next_action_label || 'Watch';
+        var pat = it.pattern_name ? escHtml(String(it.pattern_name)) : '—';
+        return '<div class="odh-card"><div class="odh-eng">' + pill + escHtml(engLabel) + '</div><div class="odh-tk">' + escHtml(String(it.ticker || '')) + '</div>' +
+          '<div style="font-size:10px;color:var(--text-muted);margin-top:4px">' + pat + '</div>' +
+          '<div class="odh-act">' + escHtml(String(act)) + '</div></div>';
+      }).join('');
+    }
+  }
+
+  var ev = document.getElementById('odh-evidence-strip');
+  if (ev) {
+    var c1 = th.thesis ? 'Thesis present — bias trades accordingly.' : 'Thesis not loaded yet.';
+    var c2 = top3.length && top3[0].why_here ? String(top3[0].why_here).slice(0, 160) : 'No primary opportunity narrative.';
+    var c3 = top3.length && top3[0].main_risk ? String(top3[0].main_risk).slice(0, 140) : (d.is_stale ? 'Stale data — invalidation is time-based.' : 'Use normal risk limits.');
+    var engSrc = top3.length ? (top3[0].opportunity_engine || '') : '';
+    var plane = engSrc === 'core_repeatable_edge' ? 'Core repeatable edge engine' : 'Auxiliary / context signal';
+    ev.innerHTML = '<div><strong>Confirming context:</strong> ' + escHtml(c1) + '</div>' +
+      '<div style="margin-top:4px"><strong>Strongest desk note:</strong> ' + escHtml(c2) + '</div>' +
+      '<div style="margin-top:4px"><strong>Primary risk:</strong> ' + escHtml(c3) + '</div>' +
+      '<div style="margin-top:4px"><strong>Plane:</strong> ' + escHtml(plane) + (d.is_stale ? ' · <span style="color:#b45309">Stale</span>' : '') + '</div>';
+  }
+
+  renderOperatorDeskTrustStrip();
+  renderOperatorDeskHealthBadges(d, top3);
+  renderSpeculativeMoversPanel(d.speculative_movers);
+  _fetchDeskGovernanceHint();
+}
+
 function loadOpportunityBoardDebug() {
   var pre = document.getElementById('bdd-debug-opp-json');
   if (!pre) return;
@@ -4732,9 +5006,16 @@ function renderOpportunityBoardFromPayload(d) {
   }
 
   function cardHtml(it) {
-    var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + escHtml(String(it.ticker || '')) + '</div>';
+    var eng = it.opportunity_engine || '';
+    var pill = '';
+    if (it.setup_type_badge) {
+      pill = '<span class="opp-engine-pill ' + _odhPillClass(eng) + '" style="margin-bottom:4px">' + escHtml(String(it.setup_type_badge)) + '</span> ';
+    }
+    var head = '<div style="font-weight:700;font-size:11px;color:var(--text)">' + pill + escHtml(String(it.ticker || '')) +
+      ' <span style="font-size:9px;color:var(--accent);font-weight:700">' + escHtml(String(it.next_action_label || '')) + '</span></div>';
     var sub = [];
     if (it.pattern_name) sub.push(escHtml(String(it.pattern_name)));
+    if (it.opportunity_engine) sub.push('engine: ' + escHtml(String(it.opportunity_engine)));
     if (it.source_strength) sub.push('evidence: ' + escHtml(String(it.source_strength)));
     if (it.composite != null) sub.push('comp ' + it.composite);
     if (it.feature_coverage != null) sub.push('cov ' + it.feature_coverage);
@@ -4780,6 +5061,8 @@ function renderOpportunityBoardFromPayload(d) {
       dd.innerHTML = '';
     }
   }
+
+  renderOperatorDeskFromBoard(d);
 }
 
 function _oppHandleBoardFetchFailure(msg, code) {
@@ -4882,6 +5165,7 @@ function loadBrainPredictions() {
     if (!d.ok || !d.predictions || !d.predictions.length) { container.innerHTML = '<div style="padding:12px;text-align:center;color:var(--text-muted)">No predictions yet. Run a scan first.</div>'; return; }
     window._brainPredictions = d.predictions; _predShowAll = false;
     _renderPredCards(container, d.predictions);
+    if (typeof renderOperatorDeskTrustStrip === 'function') renderOperatorDeskTrustStrip();
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
     container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load predictions.<br/><span style="font-size:10px;opacity:.85">' + hint + '</span></div>';

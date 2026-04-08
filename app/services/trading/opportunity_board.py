@@ -21,9 +21,68 @@ from .pattern_imminent_alerts import (
     us_stock_session_open,
 )
 from .prescreen_job import load_active_global_candidate_tickers
+from .speculative_momentum_surface import build_speculative_momentum_slice
 from .trading_source_freshness import collect_source_freshness, compute_board_data_as_of
 
 logger = logging.getLogger(__name__)
+
+# Explicit engine ids (UI + future mesh hooks). Core tiers use the pattern-imminent plane.
+OPPORTUNITY_ENGINE_CORE = "core_repeatable_edge"
+OPPORTUNITY_ENGINE_PREDICTION = "prediction_context"
+OPPORTUNITY_ENGINE_SCANNER = "scanner_context"
+OPPORTUNITY_ENGINE_UNIVERSE = "universe_context"
+OPPORTUNITY_ENGINE_PATTERN_RESEARCH = "pattern_research"
+
+
+def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
+    """Add operator-desk metadata without changing ranking or tier membership."""
+    for it in candidates:
+        srcs = it.get("sources") or []
+        tier = str(it.get("tier") or "")
+        if "pattern_imminent" in srcs:
+            eng = OPPORTUNITY_ENGINE_CORE
+            badge = "Core Edge"
+        elif "pattern_research" in srcs:
+            eng = OPPORTUNITY_ENGINE_PATTERN_RESEARCH
+            badge = "Research only"
+        elif "live_predictions" in srcs:
+            eng = OPPORTUNITY_ENGINE_PREDICTION
+            badge = "Prediction context"
+        elif "scanner" in srcs:
+            eng = OPPORTUNITY_ENGINE_SCANNER
+            badge = "Scanner snapshot"
+        elif "prescreener" in srcs:
+            eng = OPPORTUNITY_ENGINE_UNIVERSE
+            badge = "Universe watch"
+        else:
+            eng = "context_unknown"
+            badge = "Context"
+
+        it["opportunity_engine"] = eng
+        it["setup_type_badge"] = badge
+        it["next_action_label"] = {
+            "A": "Act now",
+            "B": "Watch soon",
+            "C": "Watch today",
+            "D": "Research only",
+        }.get(tier, "Watch")
+
+        comp = it.get("composite")
+        it["core_edge_score"] = round(float(comp), 4) if comp is not None else None
+        scn = it.get("scanner_score")
+        it["speculative_momentum_score"] = (
+            round(min(1.0, float(scn) / 10.0), 4) if scn is not None else None
+        )
+        if eng == OPPORTUNITY_ENGINE_CORE:
+            it["repeatability_confidence"] = round(0.75 + 0.02 * min(5.0, float(comp or 0)), 4)
+            it["primary_scoring_plane"] = "core_repeatable_edge"
+        else:
+            it["repeatability_confidence"] = 0.35
+            it["primary_scoring_plane"] = "auxiliary_context"
+        it["extension_risk"] = None
+        it["execution_risk"] = None
+        it["structural_confirmation"] = None
+        it["spread_liquidity_quality"] = None
 
 
 def _prediction_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -605,6 +664,26 @@ def get_trading_opportunity_board(
         "data_freshness_unknown": freshness_unknown,
     }
 
+    _annotate_desk_fields(tier_a)
+    _annotate_desk_fields(tier_b)
+    _annotate_desk_fields(tier_c)
+    _annotate_desk_fields(tier_d)
+
+    speculative_envelope: dict[str, Any]
+    try:
+        speculative_envelope = build_speculative_momentum_slice(db, limit=12)
+    except Exception as e:
+        logger.warning("[opportunity_board] speculative slice failed: %s", e)
+        speculative_envelope = {
+            "ok": False,
+            "engine": "speculative_momentum",
+            "items": [],
+            "generated_at": iso,
+            "error": str(e),
+            "methodology": "heuristic_scan_result_inference",
+            "methodology_note": "Speculative momentum slice failed — see error.",
+        }
+
     out: dict[str, Any] = {
         "ok": True,
         "generated_at": iso,
@@ -642,6 +721,8 @@ def get_trading_opportunity_board(
         "has_more": {"A": more_a, "B": more_b, "C": more_c},
         "applied_tier_caps": {"A": max_a, "B": max_b, "C": max_c, "D": max_d},
         "source_stats": meta.get("universe_by_source", {}),
+        # Isolated plane for explosive / speculative movers (not merged into tier scoring).
+        "speculative_movers": speculative_envelope,
     }
     if include_debug:
         out["debug"] = {
