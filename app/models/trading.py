@@ -727,6 +727,9 @@ class TradingAutomationSession(Base):
     risk_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
     source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
+    source_paper_session_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     started_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at: Optional[datetime] = Column(DateTime, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

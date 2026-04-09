@@ -161,6 +161,7 @@ def create_trading_automation_session(
     risk_snapshot_json: Optional[dict[str, Any]] = None,
     correlation_id: Optional[str] = None,
     source_node_id: Optional[str] = None,
+    source_paper_session_id: Optional[int] = None,
 ) -> TradingAutomationSession:
     """Minimal session constructor for tests / future runner (no FSM logic)."""
     sess = TradingAutomationSession(
@@ -174,6 +175,7 @@ def create_trading_automation_session(
         risk_snapshot_json=dict(risk_snapshot_json or {}),
         correlation_id=correlation_id,
         source_node_id=source_node_id,
+        source_paper_session_id=source_paper_session_id,
         started_at=datetime.utcnow(),
     )
     db.add(sess)

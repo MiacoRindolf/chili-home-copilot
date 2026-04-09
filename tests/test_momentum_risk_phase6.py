@@ -155,7 +155,15 @@ def test_get_risk_evaluate_route_paired(paired_client, db: Session) -> None:
     assert "checks" in body
 
 
-def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Session) -> None:
+def test_confirm_live_arm_blocked_if_kill_switch_after_arm(paired_client, db: Session, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.operator_readiness.get_all_broker_statuses",
+        lambda: {
+            "robinhood": {"connected": False},
+            "coinbase": {"connected": True, "configured": True},
+            "metamask": {"connected": False},
+        },
+    )
     vid, _ = _seed_live_eligible_row(db, symbol="CFK-USD")
     db.commit()
     c, _user = paired_client

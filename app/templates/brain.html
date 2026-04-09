@@ -1071,12 +1071,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 {% endblock %}
 
 {% block content %}
+{% set _bd = brain_initial_domain|default('hub') %}
 <script>
 window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
+window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 </script>
 <div class="b-header">
   <div style="display:flex;align-items:center;gap:8px">
-    <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:none" title="Back to domain hub">&#8592; All domains</button>
+    <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:{% if _bd != 'hub' %}inline-block{% else %}none{% endif %}" title="Back to domain hub">&#8592; All domains</button>
     <h1>&#x1F9E0; Chili Brain</h1>
   </div>
   <nav>
@@ -1092,10 +1094,10 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
 </div>
 
 <div class="b-body">
-  <div class="b-main">
+  <div class="b-main" data-brain-initial-domain="{{ _bd }}" data-trading-boot="{% if _bd == 'trading' %}immediate{% else %}deferred{% endif %}">
 
     <!-- Domain hub (default entry) -->
-    <div id="domain-hub">
+    <div id="domain-hub" style="display:{% if _bd == 'hub' %}flex{% else %}none{% endif %}">
       <div class="b-hub-intro">
         <h2>Brain domains</h2>
         <p>Pick a domain to open its desk. Status dots show when a learning cycle is running.</p>
@@ -1105,7 +1107,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
     </div>
 
     <!-- ═══ Trading Domain ═══ -->
-    <div id="domain-trading" style="display:none">
+    <div id="domain-trading" style="display:{% if _bd == 'trading' %}flex{% else %}none{% endif %}">
       <div class="tb-tabstrip" role="tablist" aria-label="Trading brain view">
         <button type="button" class="tb-tab" role="tab" aria-selected="false" data-tb-tab="network" id="tb-tab-network" onclick="setTradingBrainSubtab('network')">Network</button>
         <button type="button" class="tb-tab active" role="tab" aria-selected="true" data-tb-tab="runtime" id="tb-tab-runtime" onclick="setTradingBrainSubtab('runtime')">Runtime</button>
@@ -1226,6 +1228,11 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
       <!-- ═══ ZONE 1: STATUS BAR (secondary — expandable) ═══ -->
       <details class="desk-runtime-details" id="desk-runtime-details">
         <summary>Runtime &amp; worker controls (Start / Stop / Wake / queue)</summary>
+        <div style="font-size:10px;color:var(--text-muted);margin:0 0 10px 0;padding:8px 10px;line-height:1.45;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
+          <strong>Learning / research only:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> learning cycle — not momentum paper or live order execution.
+          For momentum operator sessions (run paper, arm live, confirm, monitor), use
+          <a href="/trading" style="color:var(--accent)">Trading</a> and <a href="/trading/automation" style="color:var(--accent)">Automation</a>.
+        </div>
       <div class="brain-status-bar" id="brain-status-bar">
         <div class="bsb-row">
           <div class="bsb-left">
@@ -1601,7 +1608,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
     </div>
 
     <!-- ═══ Project Domain ═══ -->
-    <div id="domain-project" style="display:none">
+    <div id="domain-project" style="display:{% if _bd == 'project' %}block{% else %}none{% endif %}">
       <div class="b-main-header">
         <h2>Project Brain</h2>
         <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
@@ -1899,7 +1906,11 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
           <button onclick="loadAgentMessageFeed()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
         </div>
         <div class="msg-feed" id="agent-msg-feed">
-          <div style="font-size:11px;color:var(--text-muted)">Switch to the Project domain to see agent messages...</div>
+          {% if _bd == 'project' %}
+          <div style="font-size:11px;color:var(--text-muted)">Loading agent messages...</div>
+          {% else %}
+          <div style="font-size:11px;color:var(--text-muted)" data-agent-feed-off-project="1">Switch to the Project domain to see agent messages...</div>
+          {% endif %}
         </div>
       </div>
 
@@ -1907,7 +1918,7 @@ window.__CHILI_TBN_DESK__ = {{ trading_brain_desk_config|default({})|tojson }};
     </div>
 
     <!-- ═══ Reasoning Domain ═══ -->
-    <div id="domain-reasoning" style="display:none">
+    <div id="domain-reasoning" style="display:{% if _bd == 'reasoning' %}block{% else %}none{% endif %}">
       <div class="b-main-header">
         <h2>Reasoning Brain</h2>
         <span id="reasoning-status-info" style="font-size:10px;color:var(--text-muted)"></span>
@@ -4826,7 +4837,9 @@ function renderSpeculativeMoversPanel(spec) {
     body.textContent = 'No speculative payload.';
     return;
   }
-  meth.textContent = spec.methodology_note || '';
+  meth.textContent = (spec.methodology_note || '') + (spec.engine_version != null
+    ? ' · Engine v' + escHtml(String(spec.engine_version)) + ' (' + escHtml(String(spec.methodology || '')) + ')'
+    : '');
   if (!spec.ok && spec.error) {
     body.innerHTML = '<span style="color:#b45309">' + escHtml(String(spec.error)) + '</span>';
     return;
@@ -4838,7 +4851,19 @@ function renderSpeculativeMoversPanel(spec) {
   }
   body.innerHTML = items.map(function(m) {
     var lines = (m.why_not_core_promoted || []).map(function(x) { return '<li>' + escHtml(String(x)) + '</li>'; }).join('');
+    var clusterMeta = '';
+    if (m.cluster_id || m.cluster_label) {
+      clusterMeta = '<div class="sm-sub" style="font-size:9px;color:var(--text-muted)">Cluster: <code style="font-size:9px">' +
+        escHtml(String(m.cluster_id || '')) + '</code> · ' + escHtml(String(m.cluster_label || m.move_type_label || '')) + '</div>';
+    }
+    var sigLine = '';
+    var an = m.active_nodes || [];
+    if (an.length) {
+      var sigs = an.slice(0, 4).map(function(n) { return escHtml(String(n.node_id || '').replace(/^nm_sm_/, '')) + ' ' + (n.score != null ? '(' + n.score + ')' : ''); }).join(', ');
+      sigLine = '<div class="sm-sub" style="font-size:9px;color:var(--text-secondary)">Signals: ' + sigs + (an.length > 4 ? '…' : '') + '</div>';
+    }
     return '<div class="spec-mover-card"><div class="sm-head">' + escHtml(String(m.ticker || '')) + ' · ' + escHtml(String(m.move_type_label || 'Speculative')) + '</div>' +
+      clusterMeta + sigLine +
       '<div class="sm-sub">' + escHtml(String(m.why_interesting || '')) + '</div>' +
       '<div class="sm-sub" style="color:#9a3412;font-weight:600">' + escHtml(String(m.operator_hint || '')) + '</div>' +
       '<div class="sm-sub"><strong>Why not promoted to core:</strong><ul style="margin:4px 0 0 16px;padding:0">' + lines + '</ul></div></div>';
@@ -6610,10 +6635,21 @@ function triggerDeepStudy() {
 /* ══════════════════════════════════════════════════
    Code Brain JavaScript
    ══════════════════════════════════════════════════ */
-var _activeDomain = null;
+var _activeDomain = (typeof window.__CHILI_BRAIN_INITIAL_DOMAIN__ === 'string')
+  ? window.__CHILI_BRAIN_INITIAL_DOMAIN__
+  : null;
 var _projectDashboardLoaded = false;
 var _reasoningDashboardLoaded = false;
+var _tradingDashboardBootstrapped = false;
 var _activeProjectLens = 'architect'; /* kept for compat */
+
+function brainBootstrapTradingDesk() {
+  if (_tradingDashboardBootstrapped) return;
+  _tradingDashboardBootstrapped = true;
+  loadBrainDashboard();
+  initTradingBrainAssistant();
+  startBwPolling();
+}
 
 function brainSetUrlDomain(which) {
   try {
@@ -6737,6 +6773,9 @@ function switchDomain(domain, opts) {
 
   if (!opts.skipUrl) brainSetUrlDomain(domain);
 
+  if (domain === 'trading') {
+    brainBootstrapTradingDesk();
+  }
   if (domain === 'project' && !_projectDashboardLoaded) {
     _projectDashboardLoaded = true;
     initProjectAgentBar();
@@ -6751,24 +6790,23 @@ function switchDomain(domain, opts) {
 }
 
 function brainApplyInitialView() {
-  var plannerSkipHub = brainHandoffPlannerTaskId() != null || brainHandoffPlannerProjectId() != null;
-  if (plannerSkipHub) {
-    switchDomain('project', { skipUrl: true });
-    brainSetUrlDomain('project');
-    return;
-  }
-  var raw = brainReadUrlDomainString();
-  if (raw === 'hub' || raw === '__invalid__') {
-    showBrainHub({ skipUrl: true });
-    brainSetUrlDomain('hub');
-    return;
-  }
-  if (raw === 'jobs') {
+  var server = (typeof window.__CHILI_BRAIN_INITIAL_DOMAIN__ === 'string')
+    ? window.__CHILI_BRAIN_INITIAL_DOMAIN__
+    : 'hub';
+  /* Client-only: jobs bookmark without server redirect */
+  if (brainReadUrlDomainString() === 'jobs') {
     window.location.replace('/app/jobs');
     return;
   }
-  if (raw === 'trading' || raw === 'project' || raw === 'reasoning') {
-    switchDomain(raw, { skipUrl: true });
+  if (server === 'hub') {
+    showBrainHub({ skipUrl: true });
+    if (brainReadUrlDomainString() === '__invalid__') {
+      brainSetUrlDomain('hub');
+    }
+    return;
+  }
+  if (server === 'trading' || server === 'project' || server === 'reasoning') {
+    switchDomain(server, { skipUrl: true });
     return;
   }
   showBrainHub({ skipUrl: true });
@@ -7111,22 +7149,46 @@ function _loadSecurityRisk(agentName) {
 
 /* ── Agent message feed ───────────────────────── */
 function loadAgentMessageFeed() {
-  fetch('/api/brain/project/messages').then(function(r){return r.json();}).then(function(d) {
-    if (!d.ok) return;
-    var el = document.getElementById('agent-msg-feed');
-    if (!el) return;
-    var msgs = d.messages || [];
-    if (!msgs.length) { el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No inter-agent messages yet. Run an agent cycle.</div>'; return; }
-    el.innerHTML = msgs.slice(0, 30).map(function(m) {
-      var ts = m.created_at ? timeSince(new Date(m.created_at)) + ' ago' : '';
-      var ack = m.acknowledged ? '' : ' style="background:rgba(139,92,246,.04)"';
-      return '<div class="msg-feed-row"' + ack + '>' +
-        '<span class="msg-feed-agents">' + m.from + ' &#x2192; ' + m.to + '</span>' +
-        '<span class="msg-feed-type">' + m.type + '</span>' +
-        '<span class="msg-feed-time">' + ts + '</span>' +
-      '</div>';
-    }).join('');
-  });
+  var el = document.getElementById('agent-msg-feed');
+  if (!el) return;
+  if (_activeDomain !== 'project') {
+    el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)" data-agent-feed-off-project="1">Switch to the Project domain to see agent messages...</div>';
+    return;
+  }
+  el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">Loading agent messages...</div>';
+  fetch('/api/brain/project/messages', { credentials: 'same-origin' })
+    .then(function(r) {
+      return r.json().then(function(d) {
+        return { ok: r.ok, d: d };
+      }, function() {
+        return { ok: false, d: null };
+      });
+    })
+    .then(function(res) {
+      if (!el || _activeDomain !== 'project') return;
+      if (!res.ok || !res.d || res.d.ok !== true) {
+        el.innerHTML = '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load agent messages. Try Refresh.</div>';
+        return;
+      }
+      var msgs = res.d.messages || [];
+      if (!msgs.length) {
+        el.innerHTML = '<div style="font-size:11px;color:var(--text-muted)">No inter-agent messages yet. Run an agent cycle.</div>';
+        return;
+      }
+      el.innerHTML = msgs.slice(0, 30).map(function(m) {
+        var ts = m.created_at ? timeSince(new Date(m.created_at)) + ' ago' : '';
+        var ack = m.acknowledged ? '' : ' style="background:rgba(139,92,246,.04)"';
+        return '<div class="msg-feed-row"' + ack + '>' +
+          '<span class="msg-feed-agents">' + m.from + ' &#x2192; ' + m.to + '</span>' +
+          '<span class="msg-feed-type">' + m.type + '</span>' +
+          '<span class="msg-feed-time">' + ts + '</span>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function() {
+      if (!el || _activeDomain !== 'project') return;
+      el.innerHTML = '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load agent messages (network error). Try Refresh.</div>';
+    });
 }
 
 /* ── Global Project Brain actions ─────────────── */
@@ -9424,10 +9486,10 @@ document.addEventListener('DOMContentLoaded', function() {
   brainApplyInitialView();
   initBrainPlannerHandoffBridge();
   brainApplyHandoffLaunchParamOnce();
-  loadBrainDashboard();
+  if (_activeDomain === 'trading') {
+    brainBootstrapTradingDesk();
+  }
   updateSidebarStatus();
-  startBwPolling();
-  initTradingBrainAssistant();
 });
 </script>
 {% endblock %}

@@ -41,6 +41,15 @@ class MomentumConfirmLiveArmBody(BaseModel):
     confirm: bool = Field(..., description="Must be true — explicit operator confirmation.")
 
 
+class MomentumPromotePaperBody(BaseModel):
+    paper_session_id: int = Field(..., ge=1, description="Paper automation session to promote into live arm flow.")
+    execution_family: Optional[str] = Field(
+        default=None,
+        max_length=32,
+        description="Optional override; defaults to paper session execution_family.",
+    )
+
+
 class MomentumPaperRunnerTickBody(BaseModel):
     session_id: int = Field(..., ge=1, description="Paper automation session to advance one tick.")
 

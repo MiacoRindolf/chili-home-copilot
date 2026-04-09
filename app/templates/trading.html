@@ -750,6 +750,17 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
 }
 .mm-panel-head button:hover { border-color: var(--accent); color: var(--accent); }
 .mm-panel-body { padding: 6px 10px 10px; display: flex; flex-direction: column; gap: 8px; }
+.mm-operator-strip { max-height: 200px; }
+.mm-operator-strip .mm-op-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 10px;
+  font-size: 10px; color: var(--text-secondary); line-height: 1.35;
+}
+.mm-operator-strip .mm-op-grid b { color: var(--text); font-weight: 700; }
+.mm-op-warn {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45); color: var(--text); font-size: 10px;
+}
+.mm-op-events { margin-top: 6px; font-size: 9px; color: var(--text-muted); max-height: 48px; overflow-y: auto; }
 .mm-row {
   display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
   padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
@@ -2414,6 +2425,16 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       <div id="mm-panel-body" class="mm-panel-body"></div>
     </div>
 
+    <div id="mm-operator-strip" class="mm-panel mm-operator-strip" style="display:none" aria-label="Momentum operator status">
+      <div class="mm-panel-head">
+        <h3>Momentum operator</h3>
+        <a href="/trading/automation" style="font-size:10px;color:var(--accent)">Full automation</a>
+      </div>
+      <div id="mm-operator-body" class="mm-panel-body">
+        <div class="mm-meta">Select a ticker to load session focus.</div>
+      </div>
+    </div>
+
     <!-- Indicator toggles -->
     <div class="ind-panel" id="ind-panel"></div>
 
@@ -3499,6 +3520,7 @@ document.addEventListener('DOMContentLoaded', function() {
   buildIndicatorPanel();
   _syncIntervalUi(currentInterval);
   _initAutomationHud();
+  _kickMomentumOperatorPoll();
   loadStrategies().then(function() {
     var _urlParams = new URLSearchParams(window.location.search);
     if (_urlParams.get('tab') !== 'backtest') return;
@@ -5339,7 +5361,10 @@ function _setMomentumUiMode(m) {
   _chiliMomentumUiMode = (m === 'live') ? 'live' : 'paper';
   sessionStorage.setItem('chili_momentum_ui_mode', _chiliMomentumUiMode);
   _syncMomentumModePill();
-  if (currentTicker) _loadMomentumViable(currentTicker);
+  if (currentTicker) {
+    _loadMomentumViable(currentTicker);
+    _loadMomentumOperatorStrip(currentTicker);
+  }
 }
 function _syncMomentumModePill() {
   var paper = document.getElementById('mm-mode-paper');
@@ -5387,6 +5412,10 @@ function _renderMomentumViable(d) {
   var gw = [];
   if (d.warnings && d.warnings.length) gw.push.apply(gw, d.warnings);
   var html = '';
+  var ors = d.operator_readiness || {};
+  if (_chiliMomentumUiMode === 'live' && ors && ors.broker_ready_for_live === false) {
+    html += '<div class="mm-op-warn">Live UI mode: Coinbase broker is <b>not connected</b>. Arm live / confirm require a ready broker path.</div>';
+  }
   if (gw.length) html += '<div class="mm-warn">' + gw.map(function(w) { return escHtml(String(w)); }).join(' · ') + '</div>';
   if (!rows.length) {
     html += '<div class="mm-meta">No viable rows yet for this symbol. Try Neural refresh or wait for a mesh tick.</div>';
@@ -5417,8 +5446,8 @@ function _renderMomentumViable(d) {
     html += '<div class="mm-meta">Sessions 7d — paper: ' + (rs.sessions_7d_paper || 0) + ', live: ' + (rs.sessions_7d_live || 0) + '</div>';
     html += '</div><div class="mm-actions">';
     if (!CHILI_TRADING_IS_GUEST) {
-      html += '<button type="button" class="mm-btn-paper" ' + (canP ? '' : 'disabled ') + 'onclick="_momentumRunPaper(' + s.variant_id + ')">Run Paper</button>';
-      html += '<button type="button" class="mm-btn-live" ' + (canL ? '' : 'disabled ') + 'onclick="_momentumArmLive(' + s.variant_id + ')">Arm Live</button>';
+      html += '<button type="button" class="mm-btn-paper" ' + (canP ? '' : 'disabled ') + 'title="' + escHtml(String((act.paper_action_blocked_reason || ''))) + '" onclick="_momentumRunPaper(' + s.variant_id + ')">Run Paper</button>';
+      html += '<button type="button" class="mm-btn-live" ' + (canL ? '' : 'disabled ') + 'title="' + escHtml(String((act.live_action_blocked_reason || ''))) + '" onclick="_momentumArmLive(' + s.variant_id + ')">Arm Live</button>';
     } else {
       html += '<span class="mm-meta">Sign in for Run Paper / Arm Live</span>';
     }
@@ -5502,9 +5531,25 @@ function _confirmMomentumLiveArm() {
     if (!x.ok) {
       var det = x.j.detail;
       alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
-    } else alert(x.j.message || 'Confirmed');
+    } else {
+      var j = x.j || {};
+      var lines = [
+        j.message || 'Confirmed',
+        'canonical: ' + (j.canonical_operator_state || ''),
+        'armed_only: ' + String(j.armed_only),
+        'runner_ready: ' + String(j.runner_ready),
+        'broker_ready: ' + String(j.broker_ready),
+        'scheduler_ready: ' + String(j.scheduler_ready),
+        'blocked_reason: ' + String(j.blocked_reason || ''),
+        'next: ' + String(j.next_action_required || '')
+      ];
+      alert(lines.join('\n'));
+    }
     _mmPendingArm = null;
-    if (currentTicker) _loadMomentumViable(currentTicker);
+    if (currentTicker) {
+      _loadMomentumViable(currentTicker);
+      _loadMomentumOperatorStrip(currentTicker);
+    }
   });
 }
 
@@ -5513,9 +5558,12 @@ function _chiliMomentumOnSymbolChange(symbol) {
   if (!symbol) {
     var p = document.getElementById('momentum-viable-panel');
     if (p) p.style.display = 'none';
+    var os = document.getElementById('mm-operator-strip');
+    if (os) os.style.display = 'none';
     return;
   }
   _loadMomentumViable(symbol);
+  _loadMomentumOperatorStrip(symbol);
   if (!CHILI_TRADING_IS_GUEST) {
     fetch('/api/trading/momentum/refresh', {
       method: 'POST',
@@ -5523,6 +5571,68 @@ function _chiliMomentumOnSymbolChange(symbol) {
       body: JSON.stringify({ symbol: symbol, execution_family: 'coinbase_spot' })
     }).then(function() {}).catch(function() {});
   }
+}
+
+function _loadMomentumOperatorStrip(symbol) {
+  var strip = document.getElementById('mm-operator-strip');
+  var body = document.getElementById('mm-operator-body');
+  if (!strip || !body) return;
+  if (!symbol) { strip.style.display = 'none'; return; }
+  strip.style.display = 'block';
+  if (CHILI_TRADING_IS_GUEST) {
+    body.innerHTML = '<div class="mm-meta">Sign in to load momentum session focus and readiness.</div>';
+    return;
+  }
+  body.innerHTML = '<div class="mm-meta">Loading operator status…</div>';
+  fetch('/api/trading/momentum/operator/current-session?symbol=' + encodeURIComponent(symbol), { credentials: 'same-origin' })
+    .then(function(r) { return r.json(); })
+    .then(_paintMomentumOperatorStrip)
+    .catch(function() { body.innerHTML = '<div class="mm-warn">Operator status failed to load.</div>'; });
+}
+
+function _paintMomentumOperatorStrip(d) {
+  var body = document.getElementById('mm-operator-body');
+  if (!body) return;
+  var r = d.operator_readiness || {};
+  var fs = d.focus_session;
+  var html = '<div class="mm-op-grid">';
+  html += '<div>Broker <b>' + (r.broker_ready_for_live ? 'ready' : 'not ready') + '</b></div>';
+  html += '<div>Paper runner <b>' + (r.paper_runner_enabled ? 'on' : 'off') + '</b></div>';
+  html += '<div>Live runner <b>' + (r.live_runner_enabled ? 'on' : 'off') + '</b></div>';
+  html += '<div>Paper sched <b>' + (r.paper_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
+  html += '<div>Live sched <b>' + (r.live_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
+  html += '<div>Neural <b>' + (r.momentum_neural_enabled ? 'on' : 'off') + '</b></div>';
+  html += '<div>Family <b>' + escHtml(String(r.execution_family || '')) + '</b> ' + (r.execution_family_implemented ? '✓' : '✗') + '</div>';
+  html += '</div>';
+  if (fs) {
+    var canon = fs.canonical_operator_state || fs.state;
+    html += '<div class="mm-meta" style="margin-top:8px"><b>Focus</b> #' + escHtml(String(fs.id)) + ' · ' + escHtml(fs.symbol || '') + ' · <span style="color:var(--accent)">' + escHtml(String(canon)) + '</span> · raw <code style="font-size:9px">' + escHtml(String(fs.state || '')) + '</code> · ' + escHtml(String(fs.mode || '')) + '</div>';
+    if (fs.phase_hint) html += '<div class="mm-meta">phase_hint: ' + escHtml(String(fs.phase_hint)) + '</div>';
+    if (fs.blocked_reason) html += '<div class="mm-op-warn">blocked_reason: ' + escHtml(String(fs.blocked_reason)) + '</div>';
+    html += '<div class="mm-meta">' + escHtml(String(fs.next_action_required || '')) + '</div>';
+    if (fs.is_armed_only_live) html += '<div class="mm-op-warn">Live is armed/queued only — not actively executing until the runner advances.</div>';
+    if (fs.source_paper_brief && fs.source_paper_brief.id) {
+      html += '<div class="mm-meta">Promoted from paper session #' + escHtml(String(fs.source_paper_brief.id)) + '</div>';
+    }
+    var evp = d.events_preview || [];
+    if (evp.length) {
+      html += '<div class="mm-op-events">' + evp.slice(0, 5).map(function(e) {
+        return escHtml(String(e.event_type || '')) + ' @ ' + escHtml(String((e.ts || '').slice(0, 19)));
+      }).join(' · ') + '</div>';
+    }
+  } else {
+    html += '<div class="mm-meta" style="margin-top:8px">No active/pending automation session for this symbol. Use Run paper or Arm live above, or open <a href="/trading/automation" style="color:var(--accent)">Automation</a>.</div>';
+  }
+  body.innerHTML = html;
+}
+
+var _mmOpTimer = null;
+function _kickMomentumOperatorPoll() {
+  if (_mmOpTimer) clearInterval(_mmOpTimer);
+  _mmOpTimer = setInterval(function() {
+    if (CHILI_TRADING_IS_GUEST || !currentTicker) return;
+    _loadMomentumOperatorStrip(currentTicker);
+  }, 25000);
 }
 
 var _automationHudTimer = null;

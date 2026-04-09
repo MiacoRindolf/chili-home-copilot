@@ -127,7 +127,19 @@ def test_arm_live_not_eligible_forbidden(paired_client, db: Session) -> None:
     assert r.status_code == 403
 
 
-def test_arm_then_confirm_creates_armed_session(paired_client, db: Session) -> None:
+def _patch_broker_ready(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.operator_readiness.get_all_broker_statuses",
+        lambda: {
+            "robinhood": {"connected": False, "label": "Robinhood"},
+            "coinbase": {"connected": True, "configured": True, "label": "Coinbase Advanced"},
+            "metamask": {"connected": False, "label": "MetaMask"},
+        },
+    )
+
+
+def test_arm_then_confirm_creates_armed_session(paired_client, db: Session, monkeypatch) -> None:
+    _patch_broker_ready(monkeypatch)
     vid, _ = _seed_live_eligible_row(db, symbol="ARM-USD")
     c, user = paired_client
     r1 = c.post(
@@ -143,7 +155,10 @@ def test_arm_then_confirm_creates_armed_session(paired_client, db: Session) -> N
         json={"arm_token": tok, "confirm": True},
     )
     assert r2.status_code == 200
-    assert r2.json().get("state") == "armed_pending_runner"
+    body = r2.json()
+    assert body.get("state") == "armed_pending_runner"
+    assert body.get("canonical_operator_state") == "armed_pending_runner"
+    assert body.get("broker_ready") is True
 
     sess = (
         db.query(TradingAutomationSession)

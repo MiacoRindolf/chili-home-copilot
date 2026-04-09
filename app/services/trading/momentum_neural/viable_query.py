@@ -12,7 +12,8 @@ from sqlalchemy.orm import Session
 from ....config import settings
 from ....models.trading import BrainNodeState, MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from ..brain_neural_mesh.schema import mesh_enabled
-from ..execution_family_registry import momentum_execution_seam_meta
+from ..execution_family_registry import is_momentum_automation_implemented, momentum_execution_seam_meta
+from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
 from .persistence import _variant_id_for_family
 
@@ -183,11 +184,73 @@ def _session_summary(
     rows = q.all()
     paper_n = sum(1 for r in rows if r.mode == "paper")
     live_n = sum(1 for r in rows if r.mode == "live")
-    armed = sum(1 for r in rows if r.state in ("armed_pending_runner", "live_arm_pending", "live_confirmed"))
+    armed = sum(
+        1
+        for r in rows
+        if r.state
+        in (
+            "armed_pending_runner",
+            "live_arm_pending",
+            "queued_live",
+        )
+    )
     return {
         "sessions_7d_paper": paper_n,
         "sessions_7d_live": live_n,
         "sessions_7d_armed_or_pending": armed,
+    }
+
+
+def _strategy_action_flags(
+    *,
+    paper_eligible: bool,
+    live_eligible: bool,
+    execution_family: str,
+    operator_readiness: dict[str, Any],
+) -> dict[str, Any]:
+    ef_ok = is_momentum_automation_implemented(execution_family)
+    gov_p = bool(operator_readiness.get("governance_blocks_paper"))
+    gov_l = bool(operator_readiness.get("governance_blocks_live"))
+    neural = bool(operator_readiness.get("momentum_neural_enabled"))
+    broker = bool(operator_readiness.get("broker_ready_for_live"))
+    exec_r = bool(operator_readiness.get("execution_ready"))
+
+    can_run_paper = bool(paper_eligible) and ef_ok and neural and not gov_p
+    can_arm_live = bool(live_eligible) and ef_ok and neural and not gov_l and broker and exec_r
+
+    return {
+        "can_run_paper": can_run_paper,
+        "can_arm_live": can_arm_live,
+        "paper_action_blocked_reason": None
+        if can_run_paper
+        else (
+            "not_paper_eligible"
+            if not paper_eligible
+            else "governance_kill_switch"
+            if gov_p
+            else "momentum_neural_disabled"
+            if not neural
+            else "execution_family_not_implemented"
+            if not ef_ok
+            else "unknown"
+        ),
+        "live_action_blocked_reason": None
+        if can_arm_live
+        else (
+            "not_live_eligible"
+            if not live_eligible
+            else "governance_kill_switch"
+            if gov_l
+            else "momentum_neural_disabled"
+            if not neural
+            else "broker_not_ready"
+            if not broker
+            else "execution_not_ready"
+            if not exec_r
+            else "execution_family_not_implemented"
+            if not ef_ok
+            else "unknown"
+        ),
     }
 
 
@@ -211,6 +274,7 @@ def build_viable_strategies_payload(
         "coinbase_adapter_enabled": bool(settings.chili_coinbase_spot_adapter_enabled),
         "execution_seam": momentum_execution_seam_meta(),
     }
+    operator_readiness = build_momentum_operator_readiness(execution_family="coinbase_spot", symbol=sym)
 
     if not sym:
         return {
@@ -221,6 +285,7 @@ def build_viable_strategies_payload(
             "strategies": [],
             "warnings": ["missing_symbol"],
             "neural_status": neural_status,
+            "operator_readiness": operator_readiness,
         }
 
     live_readiness_overlay: dict[str, Any] = {}
@@ -242,6 +307,7 @@ def build_viable_strategies_payload(
             "strategies": [],
             "warnings": warnings,
             "neural_status": neural_status,
+            "operator_readiness": operator_readiness,
         }
 
     hot_rows, hot_ts = _hot_rows_for_symbol(db, sym)
@@ -297,6 +363,13 @@ def build_viable_strategies_payload(
             )
             s = strategies[-1]
             s["recent_sessions"] = _session_summary(db, user_id=user_id, symbol=sym, variant_id=int(vrow.id))
+            or_loc = build_momentum_operator_readiness(execution_family=s.get("execution_family") or "coinbase_spot", symbol=sym)
+            s["actions"] = _strategy_action_flags(
+                paper_eligible=bool(s.get("paper_eligible")),
+                live_eligible=bool(s.get("live_eligible")),
+                execution_family=str(s.get("execution_family") or "coinbase_spot"),
+                operator_readiness=or_loc,
+            )
         return {
             "symbol": sym,
             "refreshed_at": refreshed_at,
@@ -305,6 +378,7 @@ def build_viable_strategies_payload(
             "strategies": strategies,
             "warnings": warnings,
             "neural_status": neural_status,
+            "operator_readiness": operator_readiness,
         }
 
     source = "db"
@@ -314,6 +388,13 @@ def build_viable_strategies_payload(
     for ms, variant in pairs:
         row = _merge_row(db, sym, ms, variant, hot_idx, hot_ts, live_readiness_overlay)
         row["recent_sessions"] = _session_summary(db, user_id=user_id, symbol=sym, variant_id=int(variant.id))
+        or_loc = build_momentum_operator_readiness(execution_family=row.get("execution_family") or "coinbase_spot", symbol=sym)
+        row["actions"] = _strategy_action_flags(
+            paper_eligible=bool(row.get("paper_eligible")),
+            live_eligible=bool(row.get("live_eligible")),
+            execution_family=str(row.get("execution_family") or "coinbase_spot"),
+            operator_readiness=or_loc,
+        )
         strategies.append(row)
 
     return {
@@ -324,4 +405,5 @@ def build_viable_strategies_payload(
         "strategies": strategies,
         "warnings": warnings,
         "neural_status": neural_status,
+        "operator_readiness": operator_readiness,
     }

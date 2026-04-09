@@ -15,6 +15,7 @@ from ...schemas.momentum_operator import (
     MomentumConfirmLiveArmBody,
     MomentumLiveRunnerTickBody,
     MomentumPaperRunnerTickBody,
+    MomentumPromotePaperBody,
     MomentumRefreshBody,
     MomentumRunPaperBody,
 )
@@ -23,6 +24,7 @@ from ...services.trading.momentum_neural.operator_actions import (
     confirm_live_arm,
     create_paper_draft_session,
     enqueue_symbol_refresh,
+    promote_paper_session_to_live_arm,
 )
 from ...services.trading.momentum_neural.risk_evaluator import evaluate_proposed_momentum_automation
 from ...services.trading.momentum_neural.risk_policy import resolve_effective_risk_policy
@@ -34,9 +36,11 @@ from ...services.trading.momentum_neural.automation_query import (
     automation_summary,
     cancel_automation_session,
     get_automation_session_detail,
+    get_operator_session_focus,
     list_automation_events,
     list_automation_sessions,
 )
+from ...services.trading.momentum_neural.operator_readiness import build_momentum_operator_readiness
 from ...services.trading.execution_family_registry import execution_family_capabilities
 from ...services.trading.momentum_neural.feedback_query import (
     aggregate_outcome_counts_by_execution_family,
@@ -65,6 +69,12 @@ def _http_detail_from_operator_result(result: dict[str, Any]) -> Any:
             "error": err,
             "message": result.get("message"),
             "risk_evaluation": result.get("risk_evaluation"),
+        }
+    if err == "broker_not_ready":
+        return {
+            "error": err,
+            "message": result.get("message"),
+            "operator_readiness": result.get("operator_readiness"),
         }
     return result.get("message") or err or "operator_error"
 
@@ -196,10 +206,69 @@ def post_momentum_confirm_live_arm(
             raise HTTPException(status_code=410, detail=result.get("message") or err)
         if err == "risk_blocked":
             raise HTTPException(status_code=400, detail=_http_detail_from_operator_result(result))
+        if err == "broker_not_ready":
+            raise HTTPException(status_code=409, detail=_http_detail_from_operator_result(result))
         code = 400
         raise HTTPException(status_code=code, detail=result.get("message") or err)
     db.commit()
     return result
+
+
+@router.post("/promote-paper")
+def post_momentum_promote_paper(
+    request: Request,
+    body: MomentumPromotePaperBody,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Strict promotion: eligible paper session → new live_arm_pending session (lineage FK)."""
+    _, uid = _require_user(request, db)
+    result = promote_paper_session_to_live_arm(
+        db,
+        user_id=uid,
+        paper_session_id=body.paper_session_id,
+        execution_family=body.execution_family,
+    )
+    if not result.get("ok"):
+        err = result.get("error")
+        if err == "not_found":
+            raise HTTPException(status_code=404, detail=result.get("message") or err)
+        if err == "not_live_eligible":
+            raise HTTPException(status_code=403, detail=result.get("message") or err)
+        if err == "risk_blocked":
+            raise HTTPException(status_code=400, detail=_http_detail_from_operator_result(result))
+        if err in ("paper_completed_stale", "paper_not_promotable", "paper_state_not_promotable"):
+            raise HTTPException(status_code=400, detail=result.get("message") or err)
+        if err == "execution_family_not_implemented":
+            raise HTTPException(status_code=400, detail=result.get("message") or err)
+        raise HTTPException(status_code=400, detail=result.get("message") or err)
+    db.commit()
+    return result
+
+
+@router.get("/operator/readiness")
+def get_momentum_operator_readiness(
+    symbol: Optional[str] = Query(None, max_length=36),
+    execution_family: str = Query("coinbase_spot", max_length=32),
+) -> dict[str, Any]:
+    """Shared readiness truth (no auth — no user-specific secrets)."""
+    return {
+        "ok": True,
+        "operator_readiness": build_momentum_operator_readiness(
+            execution_family=execution_family,
+            symbol=symbol.strip().upper() if symbol else None,
+        ),
+    }
+
+
+@router.get("/operator/current-session")
+def get_momentum_operator_current_session(
+    request: Request,
+    db: Session = Depends(get_db),
+    symbol: Optional[str] = Query(None, max_length=36),
+) -> dict[str, Any]:
+    """Latest focus session + readiness for paired user."""
+    _, uid = _require_user(request, db)
+    return get_operator_session_focus(db, user_id=uid, symbol=symbol)
 
 
 # ── Risk policy (Phase 6 — read-only) ───────────────────────────────────────

@@ -27,10 +27,12 @@ from .operator_actions import (
 from .paper_fsm import (
     STATE_BAILOUT,
     STATE_COOLDOWN,
+    STATE_CANCELLED,
     STATE_ENTERED,
     STATE_ENTRY_CANDIDATE,
     STATE_ERROR,
     STATE_EXITED,
+    STATE_EXPIRED,
     STATE_FINISHED,
     STATE_PENDING_ENTRY,
     STATE_SCALING_OUT,
@@ -58,6 +60,17 @@ from .live_runner import summarize_live_execution
 from .paper_runner import summarize_paper_execution
 from .risk_evaluator import summarize_risk_from_snapshot
 from .risk_policy import effective_policy_summary
+from .operator_readiness import (
+    blocked_reason_for_session,
+    build_momentum_operator_readiness,
+    next_action_required,
+)
+from .session_lifecycle import (
+    canonical_operator_state,
+    is_armed_only_live,
+    is_live_orders_active,
+    phase_hint,
+)
 
 _log = logging.getLogger(__name__)
 
@@ -269,6 +282,45 @@ def _session_warnings(sess: TradingAutomationSession) -> list[str]:
     return w
 
 
+_LIVE_TERMINAL_FOR_FOCUS = frozenset({STATE_LIVE_FINISHED, STATE_LIVE_CANCELLED, STATE_LIVE_ERROR})
+_PAPER_TERMINAL_FOR_FOCUS = frozenset({STATE_FINISHED, STATE_CANCELLED, STATE_EXPIRED, STATE_ERROR})
+
+
+def operator_fields_for_session(sess: TradingAutomationSession, readiness: dict[str, Any]) -> dict[str, Any]:
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    canon = canonical_operator_state(mode=sess.mode, state=sess.state, risk_snapshot_json=snap)
+    hint = phase_hint(mode=sess.mode, state=sess.state, risk_snapshot_json=snap)
+    blocked = blocked_reason_for_session(mode=sess.mode, readiness=readiness, canonical_state=canon)
+    nxt = next_action_required(
+        mode=sess.mode,
+        state=sess.state,
+        canonical_state=canon,
+        readiness=readiness,
+        blocked=blocked,
+    )
+    return {
+        "canonical_operator_state": canon,
+        "phase_hint": hint,
+        "blocked_reason": blocked,
+        "next_action_required": nxt,
+        "is_armed_only_live": is_armed_only_live(mode=sess.mode, state=sess.state),
+        "is_live_orders_active": is_live_orders_active(mode=sess.mode, state=sess.state),
+    }
+
+
+def _focus_priority(sess: TradingAutomationSession) -> tuple[int, float]:
+    if sess.state == STATE_ARCHIVED:
+        return (2, 0.0)
+    if sess.mode == "live" and sess.state not in _LIVE_TERMINAL_FOR_FOCUS:
+        ts = (sess.updated_at or sess.started_at or datetime.utcnow()).timestamp()
+        return (0, -ts)
+    if sess.mode == "paper" and sess.state not in _PAPER_TERMINAL_FOR_FOCUS:
+        ts = (sess.updated_at or sess.started_at or datetime.utcnow()).timestamp()
+        return (1, -ts)
+    ts = (sess.updated_at or sess.started_at or datetime.utcnow()).timestamp()
+    return (2, -ts)
+
+
 def list_automation_sessions(
     db: Session,
     *,
@@ -290,6 +342,7 @@ def list_automation_sessions(
             "paper_runner_active": 0,
             "live_runner_queued": 0,
             "live_runner_active": 0,
+            "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
         }
 
     expire_stale_live_arm_sessions(db, user_id=user_id)
@@ -321,33 +374,39 @@ def list_automation_sessions(
         ):
             counts[int(sid)] = int(cnt)
 
+    rd_cache: dict[str, dict[str, Any]] = {}
     sessions_out: list[dict[str, Any]] = []
     for sess, var in rows:
-        sessions_out.append(
-            {
-                "id": sess.id,
-                "symbol": sess.symbol,
-                "variant_id": sess.variant_id,
-                "variant": _variant_brief(var),
-                "strategy_family": var.family,
-                "mode": sess.mode,
-                "venue": sess.venue,
-                "execution_family": sess.execution_family,
-                "state": sess.state,
-                "created_at": sess.created_at.isoformat() if sess.created_at else None,
-                "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
-                "started_at": sess.started_at.isoformat() if sess.started_at else None,
-                "ended_at": sess.ended_at.isoformat() if sess.ended_at else None,
-                "correlation_id": sess.correlation_id,
-                "source_node_id": sess.source_node_id,
-                "event_count": counts.get(sess.id, 0),
-                "status_summary": _status_summary(sess.state),
-                "warnings": _session_warnings(sess),
-                "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
-                "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
-                "live_execution": summarize_live_execution(sess.risk_snapshot_json),
-            }
-        )
+        ef = (sess.execution_family or "coinbase_spot").strip().lower()
+        if ef not in rd_cache:
+            rd_cache[ef] = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
+        op_fields = operator_fields_for_session(sess, rd_cache[ef])
+        row = {
+            "id": sess.id,
+            "symbol": sess.symbol,
+            "variant_id": sess.variant_id,
+            "variant": _variant_brief(var),
+            "strategy_family": var.family,
+            "mode": sess.mode,
+            "venue": sess.venue,
+            "execution_family": sess.execution_family,
+            "state": sess.state,
+            "created_at": sess.created_at.isoformat() if sess.created_at else None,
+            "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
+            "started_at": sess.started_at.isoformat() if sess.started_at else None,
+            "ended_at": sess.ended_at.isoformat() if sess.ended_at else None,
+            "correlation_id": sess.correlation_id,
+            "source_node_id": sess.source_node_id,
+            "source_paper_session_id": getattr(sess, "source_paper_session_id", None),
+            "event_count": counts.get(sess.id, 0),
+            "status_summary": _status_summary(sess.state),
+            "warnings": _session_warnings(sess),
+            "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
+            "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
+            "live_execution": summarize_live_execution(sess.risk_snapshot_json),
+        }
+        row.update(op_fields)
+        sessions_out.append(row)
 
     return {
         "sessions": sessions_out,
@@ -355,6 +414,7 @@ def list_automation_sessions(
         "governance": governance_strip(),
         "risk_policy_summary": effective_policy_summary(),
         "limitations_note": LIMITATIONS_NOTE,
+        "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
     }
 
 
@@ -413,31 +473,57 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
     except Exception:
         momentum_feedback = None
 
+    ef = (sess.execution_family or "coinbase_spot").strip().lower()
+    readiness = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
+    op_fields = operator_fields_for_session(sess, readiness)
+
+    src_id = getattr(sess, "source_paper_session_id", None)
+    source_paper_brief = None
+    if src_id:
+        src = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.id == int(src_id), TradingAutomationSession.user_id == user_id)
+            .one_or_none()
+        )
+        if src:
+            source_paper_brief = {
+                "id": src.id,
+                "symbol": src.symbol,
+                "mode": src.mode,
+                "state": src.state,
+                "updated_at": src.updated_at.isoformat() if src.updated_at else None,
+            }
+
+    session_dict = {
+        "id": sess.id,
+        "symbol": sess.symbol,
+        "variant_id": sess.variant_id,
+        "variant": _variant_brief(var),
+        "strategy_family": var.family,
+        "mode": sess.mode,
+        "venue": sess.venue,
+        "execution_family": sess.execution_family,
+        "state": sess.state,
+        "created_at": sess.created_at.isoformat() if sess.created_at else None,
+        "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
+        "started_at": sess.started_at.isoformat() if sess.started_at else None,
+        "ended_at": sess.ended_at.isoformat() if sess.ended_at else None,
+        "correlation_id": sess.correlation_id,
+        "source_node_id": sess.source_node_id,
+        "source_paper_session_id": src_id,
+        "source_paper_brief": source_paper_brief,
+        "risk_snapshot_summary": risk_summary,
+        "status_summary": _status_summary(sess.state),
+        "warnings": _session_warnings(sess),
+        "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
+        "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
+        "live_execution": summarize_live_execution(sess.risk_snapshot_json),
+        "momentum_feedback": momentum_feedback,
+    }
+    session_dict.update(op_fields)
+
     return {
-        "session": {
-            "id": sess.id,
-            "symbol": sess.symbol,
-            "variant_id": sess.variant_id,
-            "variant": _variant_brief(var),
-            "strategy_family": var.family,
-            "mode": sess.mode,
-            "venue": sess.venue,
-            "execution_family": sess.execution_family,
-            "state": sess.state,
-            "created_at": sess.created_at.isoformat() if sess.created_at else None,
-            "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
-            "started_at": sess.started_at.isoformat() if sess.started_at else None,
-            "ended_at": sess.ended_at.isoformat() if sess.ended_at else None,
-            "correlation_id": sess.correlation_id,
-            "source_node_id": sess.source_node_id,
-            "risk_snapshot_summary": risk_summary,
-            "status_summary": _status_summary(sess.state),
-            "warnings": _session_warnings(sess),
-            "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
-            "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
-            "live_execution": summarize_live_execution(sess.risk_snapshot_json),
-            "momentum_feedback": momentum_feedback,
-        },
+        "session": session_dict,
         "events": [
             {
                 "id": ev.id,
@@ -454,6 +540,7 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "governance": governance_strip(),
         "risk_policy_summary": effective_policy_summary(),
         "limitations_note": LIMITATIONS_NOTE,
+        "operator_readiness": readiness,
     }
 
 
@@ -462,6 +549,111 @@ def _payload_summary(payload: Any) -> dict[str, Any]:
         return {}
     keys = ("symbol", "variant_id", "reason", "note", "arm_token_prefix", "hello")
     return {k: payload[k] for k in keys if k in payload}
+
+
+def get_operator_session_focus(
+    db: Session,
+    *,
+    user_id: int,
+    symbol: Optional[str] = None,
+) -> dict[str, Any]:
+    """Latest session the operator should care about + shared readiness (coinbase_spot default path)."""
+    base_readiness = build_momentum_operator_readiness(execution_family="coinbase_spot", symbol=symbol)
+    if not _tables_present(db):
+        return {
+            "ok": True,
+            "operator_readiness": base_readiness,
+            "focus_session": None,
+            "events_preview": [],
+            "session_lifecycle_doc": None,
+        }
+
+    expire_stale_live_arm_sessions(db, user_id=user_id)
+
+    q = db.query(TradingAutomationSession).filter(
+        TradingAutomationSession.user_id == user_id,
+        TradingAutomationSession.state != STATE_ARCHIVED,
+    )
+    if symbol:
+        q = q.filter(TradingAutomationSession.symbol == symbol.strip().upper())
+    rows = q.all()
+    if not rows:
+        return {
+            "ok": True,
+            "operator_readiness": base_readiness,
+            "focus_session": None,
+            "events_preview": [],
+            "session_lifecycle_doc": None,
+        }
+
+    focus = min(rows, key=_focus_priority)
+    ef = (focus.execution_family or "coinbase_spot").strip().lower()
+    readiness = build_momentum_operator_readiness(execution_family=ef, symbol=focus.symbol)
+
+    ev_rows = (
+        db.query(TradingAutomationEvent)
+        .filter(TradingAutomationEvent.session_id == focus.id)
+        .order_by(TradingAutomationEvent.ts.desc())
+        .limit(8)
+        .all()
+    )
+    preview = [
+        {
+            "id": ev.id,
+            "ts": ev.ts.isoformat() if ev.ts else None,
+            "event_type": ev.event_type,
+            "payload_summary": _payload_summary(ev.payload_json),
+        }
+        for ev in ev_rows
+    ]
+
+    src_id = getattr(focus, "source_paper_session_id", None)
+    source_paper_brief = None
+    if src_id:
+        src = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.id == int(src_id), TradingAutomationSession.user_id == user_id)
+            .one_or_none()
+        )
+        if src:
+            source_paper_brief = {
+                "id": src.id,
+                "symbol": src.symbol,
+                "mode": src.mode,
+                "state": src.state,
+                "updated_at": src.updated_at.isoformat() if src.updated_at else None,
+            }
+
+    snap = focus.risk_snapshot_json if isinstance(focus.risk_snapshot_json, dict) else {}
+    op = operator_fields_for_session(focus, readiness)
+    from .session_lifecycle import session_state_machine_doc
+
+    focus_out = {
+        "id": focus.id,
+        "symbol": focus.symbol,
+        "variant_id": focus.variant_id,
+        "mode": focus.mode,
+        "venue": focus.venue,
+        "execution_family": focus.execution_family,
+        "state": focus.state,
+        "source_paper_session_id": src_id,
+        "source_paper_brief": source_paper_brief,
+        "created_at": focus.created_at.isoformat() if focus.created_at else None,
+        "updated_at": focus.updated_at.isoformat() if focus.updated_at else None,
+        "last_transition_at": focus.updated_at.isoformat() if focus.updated_at else None,
+        "risk_status": summarize_risk_from_snapshot(focus.risk_snapshot_json),
+        "paper_execution": summarize_paper_execution(snap),
+        "live_execution": summarize_live_execution(snap),
+        **op,
+    }
+
+    return {
+        "ok": True,
+        "operator_readiness": readiness,
+        "focus_session": focus_out,
+        "events_preview": preview,
+        "session_lifecycle_doc": session_state_machine_doc(),
+    }
 
 
 def list_automation_events(
@@ -522,6 +714,7 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
                 "limitations_note": LIMITATIONS_NOTE,
                 "governance": governance_strip(),
                 "risk_policy_summary": effective_policy_summary(),
+                "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
             }
         )
         return out
@@ -576,6 +769,7 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
             "limitations_note": LIMITATIONS_NOTE,
             "governance": governance_strip(),
             "risk_policy_summary": effective_policy_summary(),
+            "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
         }
     )
     return summary

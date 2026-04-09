@@ -3669,6 +3669,201 @@ def _migration_089_momentum_neural_mesh(conn) -> None:
     conn.commit()
 
 
+def _migration_092_speculative_momentum_neural_subgraph(conn) -> None:
+    """Neural-mesh observer subgraph for speculative momentum engine (graph-native identity)."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+    gv = 1
+    dom = "trading"
+    nodes = [
+        (
+            "nm_speculative_momentum_hub",
+            4,
+            "speculative_momentum_hub",
+            "Speculative momentum hub",
+            False,
+            0.52,
+            60,
+            {"role": "speculative_momentum_hub", "engine": "speculative_momentum"},
+        ),
+        (
+            "nm_sm_volume_expansion",
+            5,
+            "speculative_signal",
+            "Abnormal volume expansion",
+            True,
+            0.5,
+            90,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "volume"},
+        ),
+        (
+            "nm_sm_squeeze_pressure",
+            5,
+            "speculative_signal",
+            "Squeeze / halt pressure",
+            True,
+            0.5,
+            90,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "squeeze"},
+        ),
+        (
+            "nm_sm_event_impulse",
+            5,
+            "speculative_signal",
+            "Event / flow impulse",
+            True,
+            0.5,
+            120,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "event"},
+        ),
+        (
+            "nm_sm_extension_risk",
+            5,
+            "speculative_signal",
+            "Extension / blow-off risk",
+            True,
+            0.5,
+            90,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "extension"},
+        ),
+        (
+            "nm_sm_execution_risk",
+            5,
+            "speculative_signal",
+            "Execution / liquidity stress",
+            True,
+            0.5,
+            90,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "execution"},
+        ),
+        (
+            "nm_sm_vwap_pullback",
+            5,
+            "speculative_signal",
+            "VWAP / pullback structure",
+            True,
+            0.5,
+            120,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "vwap_pullback"},
+        ),
+        (
+            "nm_sm_exhaustion",
+            5,
+            "speculative_signal",
+            "Exhaustion / failed continuation",
+            True,
+            0.5,
+            120,
+            {"role": "speculative_signal", "engine": "speculative_momentum", "signal": "exhaustion"},
+        ),
+    ]
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid,
+                "domain": dom,
+                "gv": gv,
+                "ntype": ntype,
+                "layer": layer,
+                "label": label,
+                "fth": fth,
+                "cd": cd,
+                "is_obs": is_obs,
+                "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    edges = [
+        ("nm_event_bus", "nm_speculative_momentum_hub", "speculative_context_tick", 0.75, "excitatory"),
+        ("nm_sm_volume_expansion", "nm_speculative_momentum_hub", "speculative_signal", 0.72, "excitatory"),
+        ("nm_sm_squeeze_pressure", "nm_speculative_momentum_hub", "speculative_signal", 0.78, "excitatory"),
+        ("nm_sm_event_impulse", "nm_speculative_momentum_hub", "speculative_signal", 0.74, "excitatory"),
+        ("nm_sm_extension_risk", "nm_speculative_momentum_hub", "speculative_signal", 0.76, "excitatory"),
+        ("nm_sm_execution_risk", "nm_speculative_momentum_hub", "speculative_signal", 0.7, "excitatory"),
+        ("nm_sm_vwap_pullback", "nm_speculative_momentum_hub", "speculative_signal", 0.65, "excitatory"),
+        ("nm_sm_exhaustion", "nm_speculative_momentum_hub", "speculative_signal", 0.68, "excitatory"),
+    ]
+    for src, tgt, sig, w, pol in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+        )
+
+    conn.commit()
+
+
+def _migration_093_automation_session_promotion_lineage(conn) -> None:
+    """FK from live-candidate sessions back to originating paper session (audit lineage)."""
+    if "trading_automation_sessions" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "trading_automation_sessions")
+    if "source_paper_session_id" not in cols:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE trading_automation_sessions
+                ADD COLUMN source_paper_session_id INTEGER
+                REFERENCES trading_automation_sessions(id) ON DELETE SET NULL
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tas_source_paper "
+                "ON trading_automation_sessions (source_paper_session_id)"
+            )
+        )
+    conn.commit()
+
+
 def _migration_090_momentum_neural_persistence(conn) -> None:
     """Momentum strategy variants, symbol viability, automation session/event (Phase 2 neural backing)."""
     if "momentum_strategy_variants" not in _tables(conn):
@@ -4029,6 +4224,8 @@ MIGRATIONS = [
     ("089_momentum_neural_mesh", _migration_089_momentum_neural_mesh),
     ("090_momentum_neural_persistence", _migration_090_momentum_neural_persistence),
     ("091_momentum_automation_outcomes", _migration_091_momentum_automation_outcomes),
+    ("092_speculative_momentum_neural_subgraph", _migration_092_speculative_momentum_neural_subgraph),
+    ("093_automation_session_promotion_lineage", _migration_093_automation_session_promotion_lineage),
 ]
 
 

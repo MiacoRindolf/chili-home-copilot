@@ -87,6 +87,7 @@
       <div id="ta-guest" class="ta-empty" style="display:none">Sign in to view automation sessions.</div>
       <div id="ta-app" style="display:none">
         <div class="ta-note" id="ta-limitations"></div>
+        <p class="ta-meta" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px 0">Detailed monitor for the same operator truth as <a href="/trading">Trading</a> (canonical states are derived from persisted FSM).</p>
         <div class="ta-strip" id="ta-summary-strip"></div>
         <div class="ta-strip" id="ta-neural-strip"></div>
         <div style="margin-bottom:10px">
@@ -100,7 +101,7 @@
           <table class="ta-table" id="ta-sessions-table">
             <thead>
               <tr>
-                <th>ID</th><th>Symbol</th><th>Strategy</th><th>Mode</th><th>State</th><th>Risk</th><th>Updated</th>
+                <th>ID</th><th>Symbol</th><th>Strategy</th><th>Mode</th><th>Canonical</th><th>State</th><th>Risk</th><th>Updated</th>
               </tr>
             </thead>
             <tbody id="ta-sessions-body"></tbody>
@@ -236,11 +237,13 @@
           var pe = row.paper_execution || {};
           var le = row.live_execution || {};
           var ptag = (pe.in_position || le.in_position) ? ' · pos' : '';
+          var canon = row.canonical_operator_state || row.state;
           tr.innerHTML =
             '<td>' + esc(row.id) + '</td>' +
             '<td>' + esc(row.symbol) + '</td>' +
             '<td>' + esc((row.variant && row.variant.label) || row.variant_id) + '</td>' +
             '<td>' + esc(row.mode) + '</td>' +
+            '<td><span class="ta-badge draft" title="Derived label">' + esc(canon) + '</span></td>' +
             '<td><span class="ta-badge ' + taStateBadgeClass(row.state) + '">' + esc(row.state) + '</span></td>' +
             '<td><span class="ta-badge ' + taRiskBadgeClass(rsev) + '" title="' + esc((rs.reasons || []).join('; ')) + '">' +
             esc(String(rsev).toUpperCase()) + esc(rg) + esc(ptag) + '</span></td>' +
@@ -266,7 +269,13 @@
         var s = d.session || {};
         var evs = d.events || [];
         var html = '<h4>' + esc(s.symbol) + ' · ' + esc((s.variant && s.variant.label) || '') + '</h4>';
-        html += '<p><b>State:</b> ' + esc(s.state) + '</p>';
+        html += '<p><b>State:</b> ' + esc(s.state) + ' · <b>Canonical:</b> ' + esc(s.canonical_operator_state || '') + '</p>';
+        if (s.phase_hint) html += '<p><b>phase_hint:</b> ' + esc(s.phase_hint) + '</p>';
+        if (s.blocked_reason) html += '<p style="color:#f59e0b"><b>blocked_reason:</b> ' + esc(s.blocked_reason) + '</p>';
+        if (s.next_action_required) html += '<p><b>next_action:</b> ' + esc(s.next_action_required) + '</p>';
+        if (s.source_paper_brief && s.source_paper_brief.id) {
+          html += '<p><b>Source paper:</b> #' + esc(s.source_paper_brief.id) + ' (' + esc(s.source_paper_brief.state || '') + ')</p>';
+        }
         html += '<p>' + esc(s.status_summary || '') + '</p>';
         html += '<p><b>Mode:</b> ' + esc(s.mode) + ' · <b>Venue:</b> ' + esc(s.venue) + '</p>';
         var rs = s.risk_status || {};
