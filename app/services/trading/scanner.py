@@ -12,6 +12,7 @@ from typing import Any
 import pandas as pd
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ..yf_session import get_history as _yf_history, get_fundamentals, batch_download
 from .market_data import (
     fetch_quote, fetch_ohlcv_df, fetch_ohlcv_batch, fetch_quotes_batch,
@@ -41,7 +42,11 @@ from ta.volatility import BollingerBands, AverageTrueRange
 
 _shutting_down = threading.Event()
 _CPU_COUNT = _os.cpu_count() or 4
-_MAX_SCAN_WORKERS = min(64, max(16, _CPU_COUNT * 2))
+_scan_cap = getattr(settings, "brain_scan_max_workers", None)
+try:
+    _MAX_SCAN_WORKERS = max(1, int(_scan_cap)) if _scan_cap is not None else min(64, max(16, _CPU_COUNT * 2))
+except (TypeError, ValueError):
+    _MAX_SCAN_WORKERS = min(64, max(16, _CPU_COUNT * 2))
 
 _top_picks_cache: dict[str, Any] = {"picks": [], "ts": 0.0}
 _TOP_PICKS_TTL = 300  # 5 minutes — data doesn't change meaningfully faster
@@ -4838,4 +4843,3 @@ End with portfolio allocation advice and any general market context warnings.
             for p in top_picks
         ],
     }
-

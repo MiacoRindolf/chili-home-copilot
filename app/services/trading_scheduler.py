@@ -11,6 +11,7 @@ import time
 from collections.abc import Callable
 from datetime import datetime, timedelta
 
+from apscheduler.executors.pool import ThreadPoolExecutor as APSchedulerThreadPoolExecutor
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
@@ -1266,14 +1267,23 @@ def start_scheduler():
         emit_worker_heartbeat = role == "worker" or (
             role == "all" and _hb_env in ("1", "true", "yes", "on")
         )
+        scheduler_workers = max(
+            1,
+            int(getattr(settings, "chili_scheduler_executor_workers", 2) or 2),
+        )
 
-        _scheduler = BackgroundScheduler(daemon=True)
+        _scheduler = BackgroundScheduler(
+            daemon=True,
+            executors={"default": APSchedulerThreadPoolExecutor(max_workers=scheduler_workers)},
+            job_defaults={"coalesce": True},
+        )
         logger.info(
-            "[scheduler] Role=%s (heavy_scan_jobs=%s web_jobs=%s emit_heartbeat=%s)",
+            "[scheduler] Role=%s (heavy_scan_jobs=%s web_jobs=%s emit_heartbeat=%s scheduler_workers=%s)",
             role,
             include_heavy,
             include_web_light,
             emit_worker_heartbeat,
+            scheduler_workers,
         )
 
         if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):

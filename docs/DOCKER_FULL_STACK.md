@@ -24,6 +24,7 @@ docker compose up --build
 - **Database URL inside Compose:** services use `postgresql://chili:chili@postgres:5432/chili` (overrides host `.env` for DB host).
 - **Shared secrets:** set `CHILI_BRAIN_INTERNAL_SECRET` in `.env` for Brain ↔ worker delegation (match `BRAIN_INTERNAL_SECRET` / brain client).
 - **TLS:** the `chili` service sets **`CHILI_TLS=1` in `docker-compose.yml`** (not taken from host `.env`), so the app always speaks **HTTPS** on 8000 unless you override with `docker compose run -e CHILI_TLS=0` or a compose override. Previously, `CHILI_TLS=${CHILI_TLS:-1}` could pick up **`CHILI_TLS=0` from the project `.env`** and serve plain HTTP while the browser used `https://` → **`PR_END_OF_FILE_ERROR`**. The `brain` service stays HTTP between containers unless you add your own reverse proxy or mTLS.
+- **Heavy-worker throttles:** `docker-compose.yml` now sets safer defaults for `brain-worker`, `backtest-worker`, and `scheduler-worker` so they do not exhaust the host socket pool during Massive fetch bursts. Override with envs such as `BRAIN_WORKER_MEMORY_LIMIT`, `SCHEDULER_WORKER_MEMORY_LIMIT`, `BRAIN_SCAN_MAX_WORKERS`, `BRAIN_IO_WORKERS_HIGH`, `CHILI_SCHEDULER_EXECUTOR_WORKERS`, or `MASSIVE_MAX_RPS` when you want to tune further.
 
 ### Firefox: `PR_END_OF_FILE_ERROR` on `https://localhost:8000`
 

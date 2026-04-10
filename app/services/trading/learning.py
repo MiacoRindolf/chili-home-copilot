@@ -17,6 +17,7 @@ import pandas as pd
 from sqlalchemy.orm import Session
 from sqlalchemy import func
 
+from ...config import settings
 from ...models.trading import (
     LearningEvent, MarketSnapshot, ScanResult, TradingInsight, Trade,
 )
@@ -57,9 +58,30 @@ def _get_current_predictions_impl(*args, **kwargs):
 logger = logging.getLogger(__name__)
 
 _CPU_COUNT = os.cpu_count() or 4
-_IO_WORKERS_HIGH = min(80, max(24, _CPU_COUNT * 3))  # IO-heavy data fetching (64 GB / 32 cores)
-_IO_WORKERS_MED = min(48, max(16, _CPU_COUNT * 2))   # mixed IO/CPU work
-_IO_WORKERS_LOW = min(32, max(10, _CPU_COUNT))        # lighter parallel tasks
+
+
+def _worker_cap(setting_name: str, default: int) -> int:
+    raw = getattr(settings, setting_name, None)
+    if raw is None:
+        return default
+    try:
+        return max(1, int(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+_IO_WORKERS_HIGH = _worker_cap(
+    "brain_io_workers_high",
+    min(80, max(24, _CPU_COUNT * 3)),
+)  # IO-heavy data fetching
+_IO_WORKERS_MED = _worker_cap(
+    "brain_io_workers_med",
+    min(48, max(16, _CPU_COUNT * 2)),
+)  # mixed IO/CPU work
+_IO_WORKERS_LOW = _worker_cap(
+    "brain_io_workers_low",
+    min(32, max(10, _CPU_COUNT)),
+)  # lighter parallel tasks
 
 _shutting_down = threading.Event()
 

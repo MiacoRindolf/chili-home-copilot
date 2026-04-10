@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
     brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps
+    brain_scan_max_workers: int | None = None  # cap scanner thread pools (None = CPU-based default)
+    brain_io_workers_high: int | None = None   # cap high-volume market-data fetch pools
+    brain_io_workers_med: int | None = None    # cap mixed IO/CPU fetch pools
+    brain_io_workers_low: int | None = None    # cap lighter background pools
     # Queue step executor: threads (default, GIL-limited) or process (true multi-core; see docs/BRAIN_BACKTEST_QUEUE_MULTIPROCESS_PLAN.md)
     brain_queue_backtest_executor: str = "threads"  # threads | process
     brain_queue_process_cap: int | None = None  # max process pool workers (None = use brain_backtest_parallel)
@@ -280,6 +284,10 @@ class Settings(BaseSettings):
     chili_scheduler_role: str = Field(
         default="all",
         validation_alias=AliasChoices("CHILI_SCHEDULER_ROLE"),
+    )
+    chili_scheduler_executor_workers: int = Field(
+        default=2,
+        validation_alias=AliasChoices("CHILI_SCHEDULER_EXECUTOR_WORKERS"),
     )
 
     # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).

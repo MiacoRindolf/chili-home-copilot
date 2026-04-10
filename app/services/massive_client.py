@@ -151,12 +151,14 @@ def _mount_massive_adapters(sess: requests.Session) -> None:
 
     pc = max(10, int(getattr(settings, "massive_http_pool_connections", 128)))
     pm = max(pc, int(getattr(settings, "massive_http_pool_maxsize", 512)))
-    adapter = HTTPAdapter(pool_connections=pc, pool_maxsize=pm)
+    # Block when the pool is saturated so worker bursts queue instead of opening
+    # unbounded sockets that can exhaust the host networking stack.
+    adapter = HTTPAdapter(pool_connections=pc, pool_maxsize=pm, pool_block=True)
     sess.mount("https://", adapter)
     sess.mount("http://", adapter)
     logger.info(
-        "[massive] HTTP pool api.massive.com: pool_connections=%s pool_maxsize=%s "
-        "(raise MASSIVE_HTTP_* if you still see urllib3 'pool is full')",
+        "[massive] HTTP pool api.massive.com: pool_connections=%s pool_maxsize=%s pool_block=true "
+        "(raise MASSIVE_HTTP_* if requests are queuing too aggressively)",
         pc,
         pm,
     )
