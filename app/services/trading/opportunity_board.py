@@ -21,7 +21,7 @@ from .pattern_imminent_alerts import (
     us_stock_session_open,
 )
 from .prescreen_job import load_active_global_candidate_tickers
-from .speculative_momentum_surface import build_speculative_momentum_slice
+from .speculative_momentum_engine import build_speculative_momentum_slice
 from .trading_source_freshness import collect_source_freshness, compute_board_data_as_of
 
 logger = logging.getLogger(__name__)
@@ -44,7 +44,7 @@ def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
             badge = "Core Edge"
         elif "pattern_research" in srcs:
             eng = OPPORTUNITY_ENGINE_PATTERN_RESEARCH
-            badge = "Research only"
+            badge = "Pattern incubation"
         elif "live_predictions" in srcs:
             eng = OPPORTUNITY_ENGINE_PREDICTION
             badge = "Prediction context"
@@ -64,7 +64,7 @@ def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
             "A": "Act now",
             "B": "Watch soon",
             "C": "Watch today",
-            "D": "Research only",
+            "D": "Incubate",
         }.get(tier, "Watch")
 
         comp = it.get("composite")

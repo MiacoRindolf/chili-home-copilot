@@ -1,0 +1,39 @@
+---
+description: Stay aligned with user intent; do not skip constraints or substitute your own plan (Composer-friendly).
+alwaysApply: true
+---
+
+# User alignment (no unilateral drift)
+
+## Read the user as authority
+
+1. **Treat the latest user message as binding** together with explicit constraints from earlier in the thread (scope, "do not", "only", file paths, phase freeze). If something conflicts, **stop and ask one clarifying question** instead of picking a side silently.
+2. **Do not optimize for speed by dropping requirements.** Partial delivery is only OK when the user explicitly accepts a cut (e.g. "defer migration").
+3. **Quote or restate constraints** you are following when starting non-trivial work (one short bullet list is enough).
+
+## Composer / smaller models
+
+1. **Prefer a short plan + execution** over jumping straight to code when the ask has multiple parts. Check off items visibly (todos or numbered steps).
+2. **If uncertain**, say what is ambiguous and propose **defaults as questions**, not as silent choices.
+3. **Do not replace** the user's goal with a "cleaner" goal (e.g. fixing only the symptom they mentioned when they asked for root-cause + policy).
+
+## Before coding
+
+1. **Grep or read** the real call path; do not invent APIs or column names.
+2. **If the user attached a plan or checklist**, implement **that** unless they explicitly change it.
+
+## Anti-patterns (explicit)
+
+- Implementing a subset of the request without saying what was deferred.
+- Ignoring "optional", "phased", or "do not touch X" instructions.
+- Deciding unilaterally that UI-only or backend-only is "enough" without user agreement.
+
+## When the model skipped something (recovery)
+
+If you notice prior work missed a user constraint: **acknowledge the gap**, fix forward in smallest scope, and **list what was missing** so the user trusts the process again.
+
+## Plan checklist honesty
+
+1. **Do not tell the user “all todos are done”** unless the **plan file YAML** (e.g. `.cursor/plans/*.plan.md`) shows those items as `completed` — update the file in the same session.
+2. **Operational steps** (diagnose, recompute, regeneration, audits): when the user says **run them**, **run the scripts/commands in this environment** and report output (see `chili-agent-execution-quality.mdc` — Run repo scripts). Do not substitute “you should run …” for execution when the shell can run them.
+3. If you only implemented part of a todo (e.g. migration with scale fix but not linkage repair), the plan must say so in that todo’s `content` and status must reflect reality (`pending` or split todos).

@@ -338,6 +338,7 @@ def _cooldown_active(
         .filter(
             AlertHistory.alert_type == PATTERN_BREAKOUT_IMMINENT,
             AlertHistory.ticker == ticker,
+            AlertHistory.success.is_(True),
             AlertHistory.created_at >= cutoff,
         )
     )
@@ -666,6 +667,7 @@ def run_pattern_imminent_scan(
     )
 
     sent = 0
+    delivery_failed = 0
     skipped_cd = 0
     per_ticker: dict[str, int] = {}
     per_pattern: dict[int, int] = {}
@@ -703,8 +705,9 @@ def run_pattern_imminent_scan(
             + (f"{sigs}" if sigs else "")
         )
 
+        delivered = do_dry
         if not do_dry:
-            dispatch_alert(
+            delivered = dispatch_alert(
                 db,
                 user_id,
                 PATTERN_BREAKOUT_IMMINENT,
@@ -716,26 +719,30 @@ def run_pattern_imminent_scan(
                 scan_pattern_id=pat.id,
                 confidence=min(0.95, 0.55 + 0.5 * float(c["composite"])),
             )
-            try:
-                _insert_imminent_breakout_alert(
-                    db,
-                    user_id,
-                    pat,
-                    ticker,
-                    sc,
-                    c["flat"],
-                    composite=float(c["composite"]),
-                    score_breakdown=dict(c["score_breakdown"]),
-                    readiness=float(c["readiness"]),
-                    coverage_ratio=float(c["coverage_ratio"]),
-                    eta_lo=float(c["eta_lo"]),
-                    eta_hi=float(c["eta_hi"]),
-                )
-            except Exception as e:
-                logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
+            if delivered:
+                try:
+                    _insert_imminent_breakout_alert(
+                        db,
+                        user_id,
+                        pat,
+                        ticker,
+                        sc,
+                        c["flat"],
+                        composite=float(c["composite"]),
+                        score_breakdown=dict(c["score_breakdown"]),
+                        readiness=float(c["readiness"]),
+                        coverage_ratio=float(c["coverage_ratio"]),
+                        eta_lo=float(c["eta_lo"]),
+                        eta_hi=float(c["eta_hi"]),
+                    )
+                except Exception as e:
+                    logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
+            else:
+                delivery_failed += 1
         per_ticker[ticker] = per_ticker.get(ticker, 0) + 1
         per_pattern[pat.id] = per_pattern.get(pat.id, 0) + 1
-        sent += 1
+        if delivered:
+            sent += 1
 
     summary: dict[str, Any] = {
         **meta,
@@ -743,6 +750,7 @@ def run_pattern_imminent_scan(
         "dry_run": do_dry,
         "candidates": len(candidates),
         "alerts_sent": sent,
+        "delivery_failed": delivery_failed,
         "cooldown_skipped": skipped_cd,
         "diversity_skipped": diversity_skipped,
         "us_session_context": describe_us_session_context(),

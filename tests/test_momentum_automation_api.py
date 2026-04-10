@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
+import pytest
 from sqlalchemy.orm import Session
 
 from app.models.core import User
@@ -27,6 +28,8 @@ from app.services.trading.momentum_neural.persistence import (
     ensure_momentum_strategy_variants,
 )
 
+pytestmark = pytest.mark.usefixtures("_asgi_test_client")
+
 
 def _variant(db: Session) -> MomentumStrategyVariant:
     ensure_momentum_strategy_variants(db)
@@ -35,7 +38,8 @@ def _variant(db: Session) -> MomentumStrategyVariant:
 
 
 def _uid(db: Session) -> int:
-    u = User(name="AutoMonTest")
+    stamp = datetime.utcnow().strftime("%Y%m%d%H%M%S%f")
+    u = User(name=f"AutoMonTest-{stamp}")
     db.add(u)
     db.commit()
     db.refresh(u)
@@ -72,6 +76,12 @@ def test_list_sessions_shape_and_event_count(db: Session) -> None:
     assert row["variant"]["label"]
     assert "risk_status" in row
     assert "severity" in row["risk_status"]
+    assert row["lane"] == "simulation"
+    assert "thesis" in row
+    assert "execution_readiness" in row
+    assert "data_binding" in row
+    assert "data_fidelity" in row
+    assert "chart_levels" in row
 
 
 def test_session_detail_joins_variant(db: Session) -> None:
@@ -87,6 +97,9 @@ def test_session_detail_joins_variant(db: Session) -> None:
     assert d["session"]["symbol"] == "T3-USD"
     assert d["session"]["variant"]["family"] == "impulse_breakout"
     assert len(d["events"]) >= 1
+    assert "simulated_fills" in d
+    assert "data_binding" in d["session"]
+    assert "lane" in d["session"]
 
 
 def test_list_events_filter(db: Session) -> None:
@@ -177,7 +190,13 @@ def test_automation_routes_guest_403(client) -> None:
 def test_trading_automation_page_loads(client) -> None:
     r = client.get("/trading/automation")
     assert r.status_code == 200
-    assert b"Trading Automation" in r.content or b"automation" in r.content.lower()
+    assert b"Trading Autopilot" in r.content or b"automation" in r.content.lower()
+
+
+def test_trading_autopilot_page_loads(client) -> None:
+    r = client.get("/trading/autopilot")
+    assert r.status_code == 200
+    assert b"Trading Autopilot" in r.content
 
 
 def test_automation_routes_paired_shape(paired_client, db: Session) -> None:
@@ -201,11 +220,15 @@ def test_automation_routes_paired_shape(paired_client, db: Session) -> None:
     assert r2.status_code == 200
     rows = r2.json().get("sessions") or []
     assert isinstance(rows, list)
+    assert rows and "lane" in rows[0]
+    assert "data_binding" in rows[0]
+    assert "simulated_pnl" in rows[0]
 
     sid = rows[0]["id"]
     r3 = c.get(f"/api/trading/momentum/automation/sessions/{sid}")
     assert r3.status_code == 200
     assert "events" in r3.json()
+    assert "simulated_fills" in r3.json()
 
     r4 = c.get("/api/trading/momentum/automation/events?limit=5")
     assert r4.status_code == 200

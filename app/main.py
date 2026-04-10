@@ -1,5 +1,6 @@
 """CHILI Home Copilot - FastAPI application entry point."""
 import logging
+import os
 import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -48,20 +49,28 @@ if sys.platform == "win32":
             return True
     logging.getLogger("asyncio").addFilter(_WinErrorFilter())
 
-Base.metadata.create_all(bind=engine)
-run_migrations(engine)
+# Under pytest, conftest sets CHILI_PYTEST=1 before importing this module. Skip all DB work
+# here so ``app.main`` import does not open connections or take locks; the ``db`` fixture
+# runs create_all + migrations, then truncates — avoiding self-deadlock with TRUNCATE.
+_under_pytest = (os.environ.get("CHILI_PYTEST") or "").strip().lower() in ("1", "true", "yes")
+if not _under_pytest:
+    Base.metadata.create_all(bind=engine)
+    run_migrations(engine)
 
-try:
-    from .services.trading.pattern_engine import (
-        seed_builtin_patterns as _seed_builtin,
-        seed_community_patterns as _seed_community,
-    )
-    _seed_db = SessionLocal()
-    _seed_builtin(_seed_db)
-    _seed_community(_seed_db)
-    _seed_db.close()
-except Exception:
-    pass
+# Builtin pattern seeding queries scan_patterns; can block if another process holds locks.
+# Tests truncate app tables per case; callers that need ScanPattern rows insert them.
+if not _under_pytest:
+    try:
+        from .services.trading.pattern_engine import (
+            seed_builtin_patterns as _seed_builtin,
+            seed_community_patterns as _seed_community,
+        )
+        _seed_db = SessionLocal()
+        _seed_builtin(_seed_db)
+        _seed_community(_seed_db)
+        _seed_db.close()
+    except Exception:
+        pass
 
 _backfill_state: dict = {"running": False, "total": 0, "done": 0, "filled": 0}
 
@@ -495,6 +504,11 @@ def _run_deferred_startup() -> None:
     import threading
 
     _log = logging.getLogger("chili.startup")
+    if _under_pytest:
+        _log.info(
+            "[startup] CHILI_PYTEST: skipping deferred startup (broker restore, DB maintenance, scheduler)"
+        )
+        return
     try:
         from .config import settings as _settings
 
@@ -684,20 +698,23 @@ for mod in enabled_modules:
         app.include_router(mod.router)
 
 # Third-party marketplace modules (installed under data/modules/).
-try:
-    db = SessionLocal()
+# Same lock-contention issue as pattern seed: importing app while another process
+# holds DB locks can block here indefinitely. Tests do not need dynamic modules.
+if not _under_pytest:
     try:
-        enabled_third_party = (
-            db.query(MarketplaceModule)
-            .filter(MarketplaceModule.enabled.is_(True))
-            .all()
-        )
-        for m in enabled_third_party:
-            root = Path(m.local_path)
-            if root.exists() and root.is_dir():
-                load_third_party_module(app, root)
-    finally:
-        db.close()
-except Exception:
-    # Fail-soft on marketplace load; core app must still boot.
-    pass
+        db = SessionLocal()
+        try:
+            enabled_third_party = (
+                db.query(MarketplaceModule)
+                .filter(MarketplaceModule.enabled.is_(True))
+                .all()
+            )
+            for m in enabled_third_party:
+                root = Path(m.local_path)
+                if root.exists() and root.is_dir():
+                    load_third_party_module(app, root)
+        finally:
+            db.close()
+    except Exception:
+        # Fail-soft on marketplace load; core app must still boot.
+        pass

@@ -1,0 +1,431 @@
+{% extends "base.html" %}
+{% block title %}Trading Autopilot{% endblock %}
+
+{% block head_extra %}
+<script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+.ap-wrap { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+.ap-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-header); flex-wrap: wrap;
+}
+.ap-title h1 { margin: 0; font-size: 18px; font-weight: 700; }
+.ap-title p { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); max-width: 760px; }
+.ap-nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.ap-nav a {
+  color: var(--text-secondary); text-decoration: none; padding: 6px 12px; border-radius: 7px; font-size: 11px; font-weight: 600;
+}
+.ap-nav a:hover { color: var(--accent); background: rgba(99,102,241,.06); }
+.ap-nav a.ap-active { color: var(--accent); background: rgba(99,102,241,.1); }
+.ap-shell { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 0; }
+@media (max-width: 1100px) { .ap-shell { grid-template-columns: 1fr; } }
+.ap-main { min-height: 0; overflow-y: auto; padding: 14px 16px 24px; }
+.ap-side { min-height: 0; overflow-y: auto; padding: 14px 14px 24px; border-left: 1px solid var(--border); background: var(--bg-header); }
+.ap-banner {
+  margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(99,102,241,.22);
+  background: linear-gradient(135deg, rgba(99,102,241,.08), rgba(34,197,94,.05)); font-size: 11px; color: var(--text-secondary);
+}
+.ap-strip {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;
+  margin-bottom: 14px;
+}
+.ap-stat {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-header); padding: 10px 12px;
+}
+.ap-stat label { display: block; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.ap-stat b { font-size: 17px; color: var(--text); }
+.ap-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
+.ap-toolbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.ap-btn {
+  font-size: 11px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-header);
+  color: var(--text); cursor: pointer; font-weight: 600;
+}
+.ap-btn:hover { border-color: var(--accent); color: var(--accent); }
+.ap-muted { font-size: 11px; color: var(--text-secondary); }
+.ap-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;
+}
+.ap-card {
+  border: 1px solid var(--border); border-radius: 14px; background: var(--bg-header); padding: 14px;
+  cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s;
+}
+.ap-card:hover { border-color: rgba(99,102,241,.35); transform: translateY(-1px); box-shadow: 0 10px 26px rgba(0,0,0,.08); }
+.ap-card.ap-selected { border-color: rgba(99,102,241,.55); box-shadow: 0 0 0 1px rgba(99,102,241,.16); }
+.ap-card-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
+.ap-symbol { font-size: 18px; font-weight: 700; color: var(--text); }
+.ap-strategy { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
+.ap-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
+.ap-badge {
+  display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 999px; font-size: 9px;
+  text-transform: uppercase; letter-spacing: .05em; font-weight: 700; border: 1px solid var(--border); color: var(--text-secondary);
+}
+.ap-badge.simulation { border-color: #6366f1; color: #818cf8; }
+.ap-badge.live-armed { border-color: #f59e0b; color: #fbbf24; }
+.ap-badge.live { border-color: #22c55e; color: #4ade80; }
+.ap-badge.warn { border-color: #f59e0b; color: #fbbf24; }
+.ap-badge.block { border-color: #ef4444; color: #f87171; }
+.ap-thesis { font-size: 11px; line-height: 1.5; color: var(--text); min-height: 52px; }
+.ap-meta {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; margin-top: 10px;
+  font-size: 10px; color: var(--text-secondary);
+}
+.ap-meta div strong { display: block; margin-bottom: 2px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-size: 9px; }
+.ap-empty {
+  padding: 28px; border: 1px dashed var(--border); border-radius: 14px; text-align: center; font-size: 12px; color: var(--text-muted);
+}
+.ap-side h2 { margin: 0 0 10px; font-size: 13px; font-weight: 700; }
+.ap-panel {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg); padding: 12px; margin-bottom: 12px;
+}
+.ap-detail-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; font-size: 10px; color: var(--text-secondary); }
+.ap-detail-row div strong { display: block; font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
+.ap-chart { height: 240px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: #0f172a; }
+.ap-list { display: grid; gap: 8px; font-size: 10px; }
+.ap-log {
+  padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-header);
+}
+.ap-log b { color: var(--accent); }
+.ap-fill-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.ap-fill-table th, .ap-fill-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="ap-wrap">
+  <header class="ap-header">
+    <div class="ap-title">
+      <h1>Trading Autopilot</h1>
+      <p>Simulation-first runtime for watching CHILI trade in motion: lane, thesis, readiness, provider truth, and session audit stay visible while live execution remains explicitly gated.</p>
+    </div>
+    <nav class="ap-nav">
+      <a href="/">Home</a>
+      <a href="/trading">Trading</a>
+      <a href="/trading/autopilot" class="ap-active">Autopilot</a>
+      <a href="/brain?domain=trading">Brain</a>
+    </nav>
+  </header>
+
+  <div class="ap-shell">
+    <main class="ap-main">
+      {% if automation_legacy_alias %}
+      <div class="ap-banner">Trading Automation compatibility path: this legacy URL now opens the Autopilot runtime surface while keeping the existing momentum automation APIs and session identifiers intact.</div>
+      {% else %}
+      <div class="ap-banner">Brain decides and learns. Postgres records durable truth. Autopilot reads runtime state, simulated fills, and provider fidelity without bypassing kill switch, broker readiness, or operator confirmation.</div>
+      {% endif %}
+
+      <div class="ap-strip" id="ap-summary-strip"></div>
+      <div class="ap-toolbar">
+        <div class="ap-toolbar-left">
+          <button type="button" class="ap-btn" onclick="apLoadAll()">Refresh</button>
+          <label class="ap-muted"><input type="checkbox" id="ap-show-archived" onchange="apLoadSessions()"> Show archived</label>
+        </div>
+        <div class="ap-muted" id="ap-limitations"></div>
+      </div>
+
+      <div id="ap-guest" class="ap-empty" style="display:none">Sign in to inspect active Autopilot sessions.</div>
+      <div id="ap-grid" class="ap-grid"></div>
+      <div id="ap-empty" class="ap-empty" style="display:none">No Autopilot sessions yet. Use Trading to run paper or arm live, then watch the runtime surface here.</div>
+    </main>
+
+    <aside class="ap-side">
+      <div class="ap-panel">
+        <h2>Selected Session</h2>
+        <div id="ap-selected-meta" class="ap-muted">Pick a runtime card to inspect chart, fills, and event audit.</div>
+      </div>
+      <div class="ap-panel">
+        <div id="ap-chart" class="ap-chart"></div>
+      </div>
+      <div class="ap-panel">
+        <h2>Session Detail</h2>
+        <div id="ap-detail"></div>
+      </div>
+      <div class="ap-panel">
+        <h2>Recent Events</h2>
+        <div id="ap-events" class="ap-list"></div>
+      </div>
+      <div class="ap-panel">
+        <h2>Simulated Fills</h2>
+        <div id="ap-fills" class="ap-muted">Select a session to see simulated entries, exits, stops, and replay markers.</div>
+      </div>
+    </aside>
+  </div>
+</div>
+
+<script>
+(function() {
+  var IS_GUEST = {{ is_guest | tojson }};
+  var LEGACY_ALIAS = {{ automation_legacy_alias | default(false) | tojson }};
+  var AUTO_PATH = {{ autopilot_route_path | default('/trading/autopilot') | tojson }};
+  var apSelectedId = null;
+  var apChart = null;
+  var apSeries = null;
+
+  function esc(v) {
+    if (v == null) return '';
+    var d = document.createElement('div');
+    d.textContent = String(v);
+    return d.innerHTML;
+  }
+
+  function pct(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return 'n/a';
+    if (n <= 1) n = n * 100;
+    return Math.round(n) + '%';
+  }
+
+  function money(v) {
+    var n = Number(v);
+    if (!isFinite(n)) return 'n/a';
+    return (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
+  }
+
+  function runtimeLabel(runtime) {
+    var sec = runtime && runtime.seconds;
+    if (!sec && sec !== 0) return 'n/a';
+    if (sec < 60) return sec + 's';
+    if (sec < 3600) return Math.floor(sec / 60) + 'm';
+    return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
+  }
+
+  function initChart() {
+    var el = document.getElementById('ap-chart');
+    if (!el || typeof LightweightCharts === 'undefined') return;
+    if (apChart) return;
+    apChart = LightweightCharts.createChart(el, {
+      layout: { background: { color: '#0f172a' }, textColor: '#cbd5e1' },
+      grid: { vertLines: { color: 'rgba(148,163,184,0.08)' }, horzLines: { color: 'rgba(148,163,184,0.08)' } },
+      rightPriceScale: { borderColor: 'rgba(148,163,184,0.18)' },
+      timeScale: { borderColor: 'rgba(148,163,184,0.18)' },
+      crosshair: { mode: 0 }
+    });
+    apSeries = apChart.addCandlestickSeries({
+      upColor: '#22c55e',
+      downColor: '#ef4444',
+      wickUpColor: '#22c55e',
+      wickDownColor: '#ef4444',
+      borderVisible: false
+    });
+  }
+
+  function apBadge(text, cls) {
+    return '<span class="ap-badge ' + esc(cls || '') + '">' + esc(text) + '</span>';
+  }
+
+  function apRiskBadge(readiness) {
+    var sev = readiness && readiness.severity;
+    if (!sev && readiness && readiness.operator_readiness && readiness.operator_readiness.live_ready === false) sev = 'warn';
+    return apBadge(sev || 'unknown', sev || '');
+  }
+
+  window.apLoadAll = function() {
+    if (IS_GUEST) return;
+    apLoadSummary();
+    apLoadSessions();
+    if (apSelectedId) apLoadDetail(apSelectedId);
+  };
+
+  function apLoadSummary() {
+    fetch('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var strip = document.getElementById('ap-summary-strip');
+        if (!strip) return;
+        var gov = d.governance || {};
+        var lanes = d.lanes || {};
+        strip.innerHTML =
+          '<div class="ap-stat"><label>Runtime Sessions</label><b>' + esc(d.total_sessions || 0) + '</b></div>' +
+          '<div class="ap-stat"><label>Simulation</label><b>' + esc(lanes.simulation || 0) + '</b></div>' +
+          '<div class="ap-stat"><label>Live Armed</label><b>' + esc(lanes["live-armed"] || 0) + '</b></div>' +
+          '<div class="ap-stat"><label>Live Active</label><b>' + esc(lanes.live || 0) + '</b></div>' +
+          '<div class="ap-stat"><label>Kill Switch</label><b>' + esc(gov.kill_switch_active ? 'ON' : 'Off') + '</b></div>' +
+          '<div class="ap-stat"><label>Last Event</label><b style="font-size:12px">' + esc(d.last_event_ts || 'n/a') + '</b></div>';
+        var lim = document.getElementById('ap-limitations');
+        if (lim) lim.textContent = d.limitations_note || '';
+      })
+      .catch(function() {});
+  }
+
+  function apCardHtml(row) {
+    var bind = row.data_binding || {};
+    var fidelity = row.data_fidelity || {};
+    return '' +
+      '<div class="ap-card-top">' +
+        '<div><div class="ap-symbol">' + esc(row.symbol) + '</div><div class="ap-strategy">' + esc((row.variant && row.variant.label) || row.strategy_family || 'Strategy') + '</div></div>' +
+        '<div>' + apBadge(row.lane || 'simulation', row.lane || 'simulation') + '</div>' +
+      '</div>' +
+      '<div class="ap-badges">' +
+        apBadge(row.state || 'idle', '') +
+        apBadge(String(fidelity.simulation_fidelity || 'provider_sim').replace(/_/g, ' '), '') +
+        apRiskBadge(row.execution_readiness || {}) +
+      '</div>' +
+      '<div class="ap-thesis">' + esc(row.thesis || 'Awaiting next bounded decision update.') + '</div>' +
+      '<div class="ap-meta">' +
+        '<div><strong>Runtime</strong>' + esc(runtimeLabel(row.runtime || {})) + '</div>' +
+        '<div><strong>Confidence</strong>' + esc(pct(row.confidence)) + '</div>' +
+        '<div><strong>Position</strong>' + esc(row.current_position_state || 'flat') + '</div>' +
+        '<div><strong>Last action</strong>' + esc(row.last_action || row.state) + '</div>' +
+        '<div><strong>Sim P&L</strong>' + esc(money(row.simulated_pnl)) + '</div>' +
+        '<div><strong>Trades</strong>' + esc(row.trade_count || 0) + '</div>' +
+        '<div><strong>Provider</strong>' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + '</div>' +
+        '<div><strong>Exchange</strong>' + esc(bind.source_of_truth_exchange || row.venue || 'consolidated') + '</div>' +
+      '</div>';
+  }
+
+  window.apLoadSessions = function() {
+    if (IS_GUEST) return;
+    var q = '?limit=100';
+    var chk = document.getElementById('ap-show-archived');
+    if (chk && chk.checked) q += '&include_archived=true';
+    fetch('/api/trading/momentum/automation/sessions' + q, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var grid = document.getElementById('ap-grid');
+        var empty = document.getElementById('ap-empty');
+        if (!grid) return;
+        var rows = d.sessions || [];
+        grid.innerHTML = '';
+        if (!rows.length) {
+          if (empty) empty.style.display = 'block';
+          return;
+        }
+        if (empty) empty.style.display = 'none';
+        rows.forEach(function(row) {
+          var card = document.createElement('div');
+          card.className = 'ap-card' + (apSelectedId === row.id ? ' ap-selected' : '');
+          card.innerHTML = apCardHtml(row);
+          card.onclick = function() {
+            apSelectedId = row.id;
+            apLoadSessions();
+            apLoadDetail(row.id);
+          };
+          grid.appendChild(card);
+        });
+        if (!apSelectedId && rows[0]) {
+          apSelectedId = rows[0].id;
+          apLoadSessions();
+          apLoadDetail(apSelectedId);
+        }
+      })
+      .catch(function() {});
+  };
+
+  function apRenderMarkers(fills) {
+    return (fills || []).filter(function(fill) { return fill.ts && fill.price; }).map(function(fill) {
+      var pos = fill.action && fill.action.indexOf('enter') === 0 ? 'belowBar' : 'aboveBar';
+      var shape = fill.action && fill.action.indexOf('enter') === 0 ? 'arrowUp' : 'arrowDown';
+      var color = fill.action && fill.action.indexOf('enter') === 0 ? '#22c55e' : '#ef4444';
+      return {
+        time: Math.floor(Date.parse(fill.ts) / 1000),
+        position: pos,
+        color: color,
+        shape: shape,
+        text: fill.reason || fill.action
+      };
+    });
+  }
+
+  function apLoadChart(symbol, fills) {
+    initChart();
+    if (!apChart || !apSeries || !symbol) return;
+    fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(symbol) + '&interval=5m&period=1d', { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var rows = d.data || [];
+        var formatted = rows.map(function(row) {
+          return {
+            time: Math.floor(Date.parse(row.time || row.date || row.timestamp) / 1000),
+            open: Number(row.open),
+            high: Number(row.high),
+            low: Number(row.low),
+            close: Number(row.close)
+          };
+        }).filter(function(row) { return isFinite(row.time) && isFinite(row.open) && isFinite(row.close); });
+        apSeries.setData(formatted);
+        if (typeof apSeries.setMarkers === 'function') {
+          apSeries.setMarkers(apRenderMarkers(fills));
+        }
+        apChart.timeScale().fitContent();
+      })
+      .catch(function() {});
+  }
+
+  function apDetailMeta(session) {
+    return '' +
+      '<div class="ap-detail-row">' +
+        '<div><strong>Lane</strong>' + esc(session.lane || 'simulation') + '</div>' +
+        '<div><strong>Runtime</strong>' + esc(runtimeLabel(session.runtime || {})) + '</div>' +
+        '<div><strong>Last action</strong>' + esc(session.last_action || session.state) + '</div>' +
+        '<div><strong>Position</strong>' + esc(session.current_position_state || 'flat') + '</div>' +
+        '<div><strong>Sim P&L</strong>' + esc(money(session.simulated_pnl)) + '</div>' +
+        '<div><strong>Trades</strong>' + esc(session.trade_count || 0) + '</div>' +
+      '</div>';
+  }
+
+  window.apLoadDetail = function(id) {
+    fetch('/api/trading/momentum/automation/sessions/' + id, { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(function(d) {
+        var session = d.session || {};
+        var fills = d.simulated_fills || [];
+        var meta = document.getElementById('ap-selected-meta');
+        if (meta) {
+          meta.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--text)">' + esc(session.symbol || 'Session') + '</div>' +
+            '<div class="ap-muted" style="margin-top:4px">' + esc((session.variant && session.variant.label) || '') + ' · ' + esc((session.data_fidelity || {}).simulation_fidelity || '') + '</div>' +
+            '<div style="margin-top:10px">' + apDetailMeta(session) + '</div>';
+        }
+        var detail = document.getElementById('ap-detail');
+        if (detail) {
+          var bind = session.data_binding || {};
+          var levels = session.chart_levels || {};
+          detail.innerHTML =
+            '<div class="ap-list">' +
+              '<div class="ap-log"><b>Thesis</b><div style="margin-top:4px">' + esc(session.thesis || 'Awaiting bounded update.') + '</div></div>' +
+              '<div class="ap-log"><b>Execution readiness</b><div style="margin-top:4px">' + esc(JSON.stringify(session.execution_readiness || {}, null, 2)) + '</div></div>' +
+              '<div class="ap-log"><b>Data binding</b><div style="margin-top:4px">Discovery: ' + esc(bind.discovery_provider || 'massive') + ' · Chart: ' + esc(bind.chart_provider || 'massive') + ' · Truth: ' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + (bind.source_of_truth_exchange ? ' · ' + esc(bind.source_of_truth_exchange) : '') + '</div></div>' +
+              '<div class="ap-log"><b>Chart levels</b><div style="margin-top:4px">Entry ' + esc(levels.entry || 'n/a') + ' · Stop ' + esc(levels.stop || 'n/a') + ' · Target ' + esc(levels.target || 'n/a') + ' · Last ' + esc(levels.last_price || 'n/a') + '</div></div>' +
+            '</div>';
+        }
+        var events = document.getElementById('ap-events');
+        if (events) {
+          var evRows = d.events || [];
+          events.innerHTML = evRows.length ? evRows.map(function(ev) {
+            return '<div class="ap-log"><b>' + esc(ev.event_type) + '</b><div style="margin-top:4px">' + esc(ev.ts || '') + '</div><div style="margin-top:4px">' + esc(JSON.stringify(ev.payload_summary || {})) + '</div></div>';
+          }).join('') : '<div class="ap-muted">No events yet.</div>';
+        }
+        var fillsEl = document.getElementById('ap-fills');
+        if (fillsEl) {
+          if (!fills.length) {
+            fillsEl.innerHTML = '<div class="ap-muted">No simulated fills recorded yet.</div>';
+          } else {
+            fillsEl.innerHTML =
+              '<table class="ap-fill-table"><thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Qty</th><th>P&L</th><th>Reason</th></tr></thead><tbody>' +
+              fills.map(function(fill) {
+                return '<tr><td>' + esc(fill.ts || '') + '</td><td>' + esc(fill.action || '') + '</td><td>' + esc(fill.price || '') + '</td><td>' + esc(fill.quantity || '') + '</td><td>' + esc(fill.pnl_usd == null ? '' : money(fill.pnl_usd)) + '</td><td>' + esc(fill.reason || '') + '</td></tr>';
+              }).join('') +
+              '</tbody></table>';
+          }
+        }
+        apLoadChart(session.symbol, fills);
+      })
+      .catch(function() {});
+  };
+
+  function boot() {
+    if (IS_GUEST) {
+      var guest = document.getElementById('ap-guest');
+      if (guest) guest.style.display = 'block';
+      return;
+    }
+    apLoadAll();
+    window.setInterval(function() {
+      apLoadSummary();
+      apLoadSessions();
+      if (apSelectedId) apLoadDetail(apSelectedId);
+    }, 15000);
+  }
+
+  boot();
+})();
+</script>
+{% endblock %}

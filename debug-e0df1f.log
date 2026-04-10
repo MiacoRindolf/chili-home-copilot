@@ -1,0 +1,8 @@
+{"sessionId": "e0df1f", "hypothesisId": "H5", "location": "main_module", "message": "import_and_routers_complete", "data": {}, "timestamp": 1775367169057}
+{"sessionId": "e0df1f", "hypothesisId": "H1", "location": "lifespan", "message": "startup_begin", "data": {}, "timestamp": 1775367171043}
+{"sessionId": "e0df1f", "hypothesisId": "H1", "location": "lifespan", "message": "deferred_thread_begin", "data": {}, "timestamp": 1775367171952}
+{"sessionId": "e0df1f", "hypothesisId": "H1", "location": "lifespan", "message": "before_yield_ready", "data": {"elapsed_ms": 909.5, "deferred_in_background": true}, "timestamp": 1775367171952}
+{"sessionId": "e0df1f", "hypothesisId": "H0", "location": "trading_sub.ai.api_learned_patterns", "message": "handler_entered", "data": {"runId": "post-fix"}, "timestamp": 1775367171981}
+{"sessionId": "e0df1f", "hypothesisId": "H1", "location": "trading_sub.ai.api_learned_patterns", "message": "insights_for_user", "data": {"user_id": 1, "is_guest": false, "insights_count": 0, "db_fingerprint": "postgresql://localhost:5433/chili_test", "elapsed_ms": 14, "runId": "post-fix"}, "timestamp": 1775367171991}
+{"sessionId": "e0df1f", "hypothesisId": "H2", "location": "trading_sub.ai.api_learned_patterns", "message": "scan_patterns_preloaded", "data": {"scan_pattern_count": 0, "elapsed_ms": 14, "runId": "post-fix"}, "timestamp": 1775367171995}
+{"sessionId": "e0df1f", "hypothesisId": "H4", "location": "trading_sub.ai.api_learned_patterns", "message": "response_ready", "data": {"total_active": 0, "total_demoted": 0, "elapsed_total_ms": 14, "runId": "post-fix"}, "timestamp": 1775367171997}

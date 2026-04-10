@@ -1,0 +1,247 @@
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773423876251}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773423876460}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773423882975}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773423889098}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773424097560}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773424097776}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424104124}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424110183}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773424342908}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773424343111}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424349060}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424356118}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773424546230}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773424546439}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424550384}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773424571510}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425074595}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425074810}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425078671}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425078874}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425092453}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425096946}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425323661}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425323869}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425340067}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425352349}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425533931}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425534140}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425542175}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425546139}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425575329}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425575546}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425579603}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425585703}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425720674}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425720888}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425726486}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425733500}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773425863414}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773425863616}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425869643}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773425875702}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426019261}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426019462}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426025490}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426032290}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426152258}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426152466}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426156075}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426165228}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426276159}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426276364}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426280546}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426286559}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426385420}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426385628}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426389533}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426401595}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426505936}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426506152}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426510167}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426547012}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426547214}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426553426}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426559149}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773426741568}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773426741771}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426747785}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773426753431}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427000618}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427000832}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427006729}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427012729}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427089482}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427089696}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427096387}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427100532}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427103305}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427103507}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427108750}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427115230}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427197341}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427197543}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427206589}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427206805}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427215878}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427234523}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773427847290}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773427847500}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427860844}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773427862156}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773428722436}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773428722651}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773428727495}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773428756603}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773428819259}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773428819470}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773428824857}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773428825061}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773430446933}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773430447139}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773430455525}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773430466504}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773433097443}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773433097659}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773433369182}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773433369397}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773433571920}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773433572137}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"Failed to fetch"},"timestamp":1773433811806}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"Failed to fetch"},"timestamp":1773433811823}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773433870124}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773433870337}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"Failed to fetch"},"timestamp":1773434209316}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"Failed to fetch"},"timestamp":1773434209325}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773434234989}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773434235204}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773434358392}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773434358606}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773434811723}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773434811937}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"Failed to fetch"},"timestamp":1773434993557}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"Failed to fetch"},"timestamp":1773434993557}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773435279258}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773435279464}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773435645556}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773435645760}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"Failed to fetch"},"timestamp":1773435723808}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"Failed to fetch"},"timestamp":1773435723808}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773436079697}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773436079911}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773436211997}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773436212199}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773436549734}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773436603230}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773436603230}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773436604959}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773436605162}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773436706091}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773436926196}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773436929313}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773436944163}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773437008537}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773437330428}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773437330631}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773437331375}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773437331376}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773437335075}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773437335278}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773437488838}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773437520852}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773437706408}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773437706609}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773437825296}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773437835065}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773438163959}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773438164175}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438279182}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438283775}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773438319037}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773438319817}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773438388116}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773438388116}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773438389778}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773438389994}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438497283}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438509702}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773438593492}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773438593706}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773438624683}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773438624683}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773438626328}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773438626543}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438760512}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773438777594}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773441683142}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773441683345}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773441827946}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773441827947}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773441829668}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773441829869}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773442481467}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773442495244}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773442858430}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773442858645}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773442989501}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773442998724}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773448087066}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773448087280}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773448172685}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773448182312}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773448266699}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773448266915}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773448535382}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773448550288}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773449105167}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773449105381}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773449171216}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773449171216}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773449173293}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773449173495}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773449236341}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773449236341}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773449237990}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773449238203}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773449318290}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773449325080}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773449831683}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773449831898}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773449939631}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773449946373}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773450039155}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773450039365}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773450075599}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773450082242}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773450085681}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773450085896}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773450127167}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773450161309}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451408352}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451408554}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451659003}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451659003}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451660643}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451660874}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451768523}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451768523}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451770267}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451770484}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451908075}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451908075}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451909773}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451909989}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451917709}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451917710}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451923699}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451923915}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451942474}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773451942474}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773451950777}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773451950992}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773452088883}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"NetworkError when attempting to fetch resource."},"timestamp":1773452088883}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4193","message":"runDaytradeScan-start","data":{},"timestamp":1773452090601}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-all","location":"trading.html:4227","message":"runBreakoutScan-start","data":{},"timestamp":1773452090816}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-daytrade","location":"trading.html:4219","message":"runDaytradeScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773453008542}
+{"sessionId":"09998c","runId":"pre-fix","hypothesisId":"H-breakouts","location":"trading.html:4252","message":"runBreakoutScan-error","data":{"error":"_cachedScanTickers is not defined"},"timestamp":1773453018813}

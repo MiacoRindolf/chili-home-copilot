@@ -35,3 +35,6 @@ localhost+2-key.pem
 
 # local route dumps (scripts/_dump_routes.py)
 routes_dump.txt
+
+# large local refresh logs
+backtest_refresh_scheduled.log

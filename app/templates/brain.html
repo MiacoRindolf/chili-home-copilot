@@ -850,6 +850,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .tba-msg-bubble p { margin: 0 0 6px; }
 .tba-msg-bubble p:last-child { margin-bottom: 0; }
 .tba-msg-bubble ul, .tba-msg-bubble ol { margin: 4px 0; padding-left: 20px; }
+.tba-rec-grid { display: grid; gap: 8px; margin-top: 10px; }
+.tba-rec-card {
+  border: 1px solid rgba(99,102,241,.22); border-radius: 10px; background: rgba(99,102,241,.04);
+  padding: 10px 12px;
+}
+.tba-rec-top { display: flex; justify-content: space-between; gap: 8px; align-items: center; margin-bottom: 6px; }
+.tba-rec-action {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 10px; font-weight: 700;
+  text-transform: uppercase; letter-spacing: .05em; color: var(--accent);
+}
+.tba-rec-conf { font-size: 10px; color: var(--text-muted); }
+.tba-rec-thesis { font-size: 11px; color: var(--text); margin-bottom: 6px; line-height: 1.45; }
+.tba-rec-meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px 10px; font-size: 10px; color: var(--text-secondary); margin-top: 6px; }
+.tba-rec-meta div strong { color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-size: 9px; display: block; margin-bottom: 1px; }
+.tba-rec-list { margin: 6px 0 0 16px; font-size: 10px; color: var(--text-secondary); }
+.tba-rec-list li { margin: 2px 0; }
+.tba-rec-missing { margin-top: 8px; font-size: 10px; color: #f59e0b; }
+.tba-rec-fidelity { margin-top: 8px; font-size: 10px; color: var(--text-muted); }
 .tba-msg-role { font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: .5px; color: var(--text-muted); margin-bottom: 4px; }
 .tba-input-row { display: flex; flex-direction: column; gap: 8px; }
 .tba-input {
@@ -1229,9 +1247,9 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <details class="desk-runtime-details" id="desk-runtime-details">
         <summary>Runtime &amp; worker controls (Start / Stop / Wake / queue)</summary>
         <div style="font-size:10px;color:var(--text-muted);margin:0 0 10px 0;padding:8px 10px;line-height:1.45;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
-          <strong>Learning / research only:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> learning cycle — not momentum paper or live order execution.
-          For momentum operator sessions (run paper, arm live, confirm, monitor), use
-          <a href="/trading" style="color:var(--accent)">Trading</a> and <a href="/trading/automation" style="color:var(--accent)">Automation</a>.
+          <strong>Learning-cycle controls:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> learning cycle.
+          Actionable trade recommendations and runtime operations stay policy-gated through
+          <a href="/trading" style="color:var(--accent)">Trading</a> and <a href="/trading/autopilot" style="color:var(--accent)">Autopilot</a>.
         </div>
       <div class="brain-status-bar" id="brain-status-bar">
         <div class="bsb-row">
@@ -1332,7 +1350,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
           <button type="button" id="opp-more-c" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('C')">Show more</button>
         </div>
         <div id="opp-tier-d-wrap" style="display:none;margin-bottom:12px">
-          <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D — Research only</div>
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D — Pattern incubation</div>
           <div id="opp-tier-d"></div>
         </div>
       </div>
@@ -1584,10 +1602,10 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <aside class="tba-panel" id="trading-brain-assistant-section">
         <div class="tba-panel-header">&#x1F916; Trading Brain Assistant</div>
         <div class="tba-panel-body">
-          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask about worker status, queue, patterns, evolution — and evidence quality (OOS, drawdown, sample size). Grounded in the trading DB.</p>
+          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask for market stance, trade ideas, execution readiness, operator focus, and what would change the current thesis. Recommendations are grounded in the live trading snapshot and stay execution-gated.</p>
           <div class="tba-chips" id="tba-chips">
-            <button type="button" class="tba-chip" data-msg="What is the worker doing?">What is the worker doing?</button>
-            <button type="button" class="tba-chip" data-msg="Backtest queue status">Backtest queue status</button>
+            <button type="button" class="tba-chip" data-msg="What is the current market thesis?">Current market thesis</button>
+            <button type="button" class="tba-chip" data-msg="Give me the top actionable setup right now.">Top actionable setup</button>
             <button type="button" class="tba-chip" data-msg="What should we evolve next?">What should we evolve next?</button>
             <button type="button" class="tba-chip" data-msg="Which learned patterns have the strongest evidence (trade count, OOS, drawdown)?">Strongest pattern evidence</button>
             <button type="button" class="tba-chip" data-msg="Explain how CHILI separates in-sample vs out-of-sample in pattern backtests and what to trust.">IS vs OOS in backtests</button>
@@ -2065,7 +2083,7 @@ function tbRefreshMomentumNeuralStrip() {
       parts.push(' · feedback ' + (bd.feedback_enabled ? 'on' : 'off'));
       if (bd.governance_kill_switch) parts.push(' · <span style="color:#f87171">kill switch</span>');
       parts.push(' · <a href="/trading#momentum" style="color:var(--accent)">Trading momentum</a>');
-      parts.push(' · <a href="/trading/automation" style="color:var(--accent)">Automation</a>');
+      parts.push(' · <a href="/trading/autopilot" style="color:var(--accent)">Autopilot</a>');
       parts.push('</span>');
       el.innerHTML = parts.join('');
     })
@@ -2484,6 +2502,54 @@ function boostPattern(patternId, buttonEl) {
 
 var _tbaMessages = [];
 
+function _tbaPct(v) {
+  var n = Number(v);
+  if (!isFinite(n)) return 'n/a';
+  if (n <= 1) n = n * 100;
+  return Math.round(n) + '%';
+}
+
+function _tbaText(v) {
+  return v == null ? '' : escHtml(String(v));
+}
+
+function _tbaRenderRecommendations(m) {
+  if (!m || !Array.isArray(m.recommendations) || !m.recommendations.length) return '';
+  var html = ['<div class="tba-rec-grid">'];
+  m.recommendations.forEach(function(rec) {
+    var rationale = Array.isArray(rec.rationale) ? rec.rationale : [];
+    var missing = Array.isArray(rec.missing_context) ? rec.missing_context : [];
+    html.push('<div class="tba-rec-card">');
+    html.push('<div class="tba-rec-top"><div class="tba-rec-action">' + _tbaText(rec.action || 'wait') + ' · ' + _tbaText(rec.symbol || rec.market || 'market') + '</div><div class="tba-rec-conf">Confidence ' + _tbaPct(rec.confidence) + '</div></div>');
+    html.push('<div class="tba-rec-thesis">' + _tbaText(rec.thesis) + '</div>');
+    if (rationale.length) {
+      html.push('<ul class="tba-rec-list">');
+      rationale.forEach(function(item) { html.push('<li>' + _tbaText(item) + '</li>'); });
+      html.push('</ul>');
+    }
+    html.push('<div class="tba-rec-meta">');
+    html.push('<div><strong>Entry</strong>' + _tbaText(rec.entry || 'Wait for trigger') + '</div>');
+    html.push('<div><strong>Invalidation</strong>' + _tbaText(rec.invalidation || rec.risk_note || 'Monitor risk gates') + '</div>');
+    html.push('<div><strong>Exit logic</strong>' + _tbaText(rec.exit_logic || 'Adaptive exit') + '</div>');
+    html.push('<div><strong>Timeframe</strong>' + _tbaText(rec.timeframe || 'Active desk') + '</div>');
+    html.push('<div><strong>Sizing</strong>' + _tbaText(rec.sizing_guidance || 'Use policy-bound sizing') + '</div>');
+    html.push('<div><strong>Change trigger</strong>' + _tbaText(rec.what_would_change || 'New contrary signal or readiness change') + '</div>');
+    html.push('</div>');
+    if (rec.execution_readiness) {
+      html.push('<div class="tba-rec-fidelity"><strong style="color:var(--text-muted)">Execution readiness:</strong> ' + _tbaText(rec.execution_readiness.status || rec.execution_readiness.reason || JSON.stringify(rec.execution_readiness)) + '</div>');
+    }
+    if (missing.length) {
+      html.push('<div class="tba-rec-missing"><strong>Missing context:</strong> ' + _tbaText(missing.join(', ')) + '</div>');
+    }
+    if (rec.source_of_truth_provider || rec.source_of_truth_exchange) {
+      html.push('<div class="tba-rec-fidelity"><strong style="color:var(--text-muted)">Market truth:</strong> ' + _tbaText(rec.source_of_truth_provider || 'provider') + (_tbaText(rec.source_of_truth_exchange) ? ' · ' + _tbaText(rec.source_of_truth_exchange) : '') + '</div>');
+    }
+    html.push('</div>');
+  });
+  html.push('</div>');
+  return html.join('');
+}
+
 function _tbaRenderMessages() {
   var container = document.getElementById('tba-messages');
   if (!container) return;
@@ -2500,6 +2566,12 @@ function _tbaRenderMessages() {
       try { bubble.innerHTML = marked.parse(m.content || ''); } catch(e) { bubble.textContent = m.content || ''; }
     } else {
       bubble.textContent = m.content || '';
+    }
+    if (m.role === 'assistant') {
+      bubble.innerHTML += _tbaRenderRecommendations(m);
+      if (Array.isArray(m.missing_context) && m.missing_context.length) {
+        bubble.innerHTML += '<div class="tba-rec-missing"><strong>Snapshot gaps:</strong> ' + _tbaText(m.missing_context.join(', ')) + '</div>';
+      }
     }
     wrap.appendChild(roleEl);
     wrap.appendChild(bubble);
@@ -2536,8 +2608,14 @@ function _tbaSend() {
     var container = document.getElementById('tba-messages');
     var loading = container && container.querySelector('.tba-loading');
     if (loading && loading.closest('.tba-msg')) loading.closest('.tba-msg').remove();
-    if (d.ok && d.reply) {
-      _tbaMessages.push({ role: 'assistant', content: d.reply });
+    if (d.ok && (d.reply || (Array.isArray(d.recommendations) && d.recommendations.length))) {
+      _tbaMessages.push({
+        role: 'assistant',
+        content: d.reply || 'Structured recommendation ready.',
+        recommendations: d.recommendations || [],
+        missing_context: d.missing_context || [],
+        snapshot_at: d.snapshot_at || null
+      });
       _tbaRenderMessages();
     } else {
       _tbaMessages.push({ role: 'assistant', content: d.error || 'Sorry, I could not reply. Check that the LLM is configured in settings.' });
@@ -3054,7 +3132,7 @@ function initTradingBrainNetworkGraph() {
       html.push('<div style="margin-top:6px;font-size:9px">');
       if (links.trading_momentum) html.push('<a href="' + escHtml(links.trading_momentum) + '" style="color:var(--accent)">Trading momentum</a>');
       if (links.trading_momentum && links.automation) html.push(' · ');
-      if (links.automation) html.push('<a href="' + escHtml(links.automation) + '" style="color:var(--accent)">Automation</a>');
+      if (links.automation) html.push('<a href="' + escHtml(links.automation) + '" style="color:var(--accent)">Autopilot</a>');
       html.push('</div>');
     }
     html.push('<div style="margin-top:4px;font-size:8px;opacity:.75">Neural-native (not learning-cycle). Counts from durable tables; ticks from hot node state.</div>');

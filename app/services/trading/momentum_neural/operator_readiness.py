@@ -5,10 +5,10 @@ from __future__ import annotations
 from typing import Any, Optional
 
 from ....config import settings
+from app.services.broker_manager import get_all_broker_statuses
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import is_momentum_automation_implemented, normalize_execution_family
 from ..governance import get_kill_switch_status
-from ...broker_manager import get_all_broker_statuses
 
 
 def _scheduler_includes_web_light() -> bool:

@@ -2306,7 +2306,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
     <a href="/">Home</a>
     <a href="/chat">Chat</a>
     <a href="/trading" style="color:var(--accent)">Trading</a>
-    <a href="/trading/automation">Automation</a>
+    <a href="/trading/autopilot">Autopilot</a>
     <a href="/trading-backup">Trading backup</a>
     <a href="/brain">Brain</a>
     {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
@@ -2428,7 +2428,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
     <div id="mm-operator-strip" class="mm-panel mm-operator-strip" style="display:none" aria-label="Momentum operator status">
       <div class="mm-panel-head">
         <h3>Momentum operator</h3>
-        <a href="/trading/automation" style="font-size:10px;color:var(--accent)">Full automation</a>
+        <a href="/trading/autopilot" style="font-size:10px;color:var(--accent)">Autopilot runtime</a>
       </div>
       <div id="mm-operator-body" class="mm-panel-body">
         <div class="mm-meta">Select a ticker to load session focus.</div>
@@ -3135,7 +3135,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   </div>
   <div class="ch-auto-hud-body" id="ch-auto-hud-body">
     <div id="ch-auto-hud-lines">Loading…</div>
-    <div style="margin-top:6px"><a href="/trading/automation">Open Automation</a></div>
+    <div style="margin-top:6px"><a href="/trading/autopilot">Open Autopilot</a></div>
   </div>
 </div>
 {% endif %}
@@ -5621,7 +5621,7 @@ function _paintMomentumOperatorStrip(d) {
       }).join(' · ') + '</div>';
     }
   } else {
-    html += '<div class="mm-meta" style="margin-top:8px">No active/pending automation session for this symbol. Use Run paper or Arm live above, or open <a href="/trading/automation" style="color:var(--accent)">Automation</a>.</div>';
+    html += '<div class="mm-meta" style="margin-top:8px">No active/pending automation session for this symbol. Use Run paper or Arm live above, or open <a href="/trading/autopilot" style="color:var(--accent)">Autopilot</a>.</div>';
   }
   body.innerHTML = html;
 }

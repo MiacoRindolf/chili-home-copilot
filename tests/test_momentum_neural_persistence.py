@@ -6,14 +6,25 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
-from app.models.trading import MomentumStrategyVariant, MomentumSymbolViability
+from app.models.trading import (
+    MomentumStrategyVariant,
+    MomentumSymbolViability,
+    TradingAutomationRuntimeSnapshot,
+    TradingAutomationSessionBinding,
+    TradingAutomationSimulatedFill,
+)
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
 from app.services.trading.momentum_neural.persistence import (
     append_trading_automation_event,
+    append_trading_automation_simulated_fill,
+    build_runtime_snapshot_values,
     create_trading_automation_session,
+    default_session_binding,
     ensure_momentum_strategy_variants,
     persist_neural_momentum_tick,
+    upsert_trading_automation_runtime_snapshot,
+    upsert_trading_automation_session_binding,
 )
 from app.services.trading.momentum_neural.viability import score_viability
 from app.services.trading.momentum_neural.variants import get_family
@@ -116,3 +127,55 @@ def test_automation_session_and_event(db: Session) -> None:
     assert ev.session_id == sess.id
     assert ev.correlation_id == "evt-corr"
     assert ev.source_node_id == "nm_test"
+
+
+def test_runtime_snapshot_binding_and_fill_tables(db: Session) -> None:
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    sess = create_trading_automation_session(
+        db,
+        symbol="ETH-USD",
+        variant_id=v.id,
+        state="queued",
+        mode="paper",
+        correlation_id="rt-corr",
+        source_node_id="nm_test",
+        risk_snapshot_json={"momentum_risk": {"allowed": True}},
+    )
+    values = build_runtime_snapshot_values(sess, variant=v, trade_count=0)
+    upsert_trading_automation_runtime_snapshot(db, session_id=sess.id, values=values)
+    upsert_trading_automation_session_binding(
+        db,
+        session_id=sess.id,
+        values=default_session_binding(
+            venue=sess.venue,
+            mode=sess.mode,
+            execution_family=sess.execution_family,
+            quote_source="massive",
+        ),
+    )
+    append_trading_automation_simulated_fill(
+        db,
+        session_id=sess.id,
+        symbol=sess.symbol,
+        lane="simulation",
+        action="enter_long",
+        fill_type="entry",
+        quantity=1.25,
+        price=2500.0,
+        reference_price=2498.0,
+        fees_usd=1.0,
+        position_state_before="flat",
+        position_state_after="long",
+        reason="test_entry",
+    )
+    db.commit()
+
+    snap = db.query(TradingAutomationRuntimeSnapshot).filter_by(session_id=sess.id).one()
+    binding = db.query(TradingAutomationSessionBinding).filter_by(session_id=sess.id).one()
+    fill = db.query(TradingAutomationSimulatedFill).filter_by(session_id=sess.id).one()
+    assert snap.symbol == "ETH-USD"
+    assert snap.lane == "simulation"
+    assert binding.discovery_provider == "massive"
+    assert fill.action == "enter_long"

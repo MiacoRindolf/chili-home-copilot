@@ -16,14 +16,18 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import LearningEvent, ScanPattern, TradingInsight
+from ...models.reasoning_brain import ReasoningUserModel
 from .backtest_metrics import backtest_win_rate_db_to_display_pct
 from .backtest_queue import get_queue_status
+from .ai_context import generate_market_thesis
+from .momentum_neural.automation_query import automation_summary, get_operator_session_focus
+from .opportunity_board import get_trading_opportunity_board
 
 logger = logging.getLogger(__name__)
 
 _BRAIN_WORKER_STATUS_FILE = Path("data/brain_worker_status.json")
 _SNAPSHOT_CACHE_TTL = 45  # seconds
-_snapshot_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+_snapshot_cache: dict[tuple[int, str], tuple[float, dict[str, Any]]] = {}
 _snapshot_cache_lock = threading.Lock()
 
 PATTERNS_SUMMARY_LIMIT = 25
@@ -162,6 +166,59 @@ def _extract_keyword_from_message(message: str) -> str | None:
     return None
 
 
+def _decision_context(db: Session, user_id: int | None) -> dict[str, Any]:
+    if user_id is None:
+        return {}
+    row = (
+        db.query(ReasoningUserModel)
+        .filter(ReasoningUserModel.user_id == int(user_id), ReasoningUserModel.active.is_(True))
+        .order_by(ReasoningUserModel.created_at.desc())
+        .first()
+    )
+    if not row:
+        return {}
+    return {
+        "decision_style": row.decision_style,
+        "risk_tolerance": row.risk_tolerance,
+        "communication_prefs": row.communication_prefs,
+        "active_goals": row.active_goals,
+    }
+
+
+def _opportunity_board_summary(db: Session, user_id: int | None) -> dict[str, Any]:
+    try:
+        board = get_trading_opportunity_board(
+            db,
+            user_id,
+            include_research=False,
+            max_per_tier={"A": 2, "B": 3, "C": 3, "D": 0},
+        )
+    except Exception as e:
+        logger.debug("[brain_assistant_context] opportunity board failed: %s", e)
+        return {}
+    tiers = board.get("tiers") if isinstance(board, dict) else {}
+    out: dict[str, Any] = {
+        "freshness": board.get("freshness") if isinstance(board, dict) else {},
+        "top_by_tier": {},
+    }
+    if isinstance(tiers, dict):
+        for tier, rows in tiers.items():
+            if not isinstance(rows, list):
+                continue
+            out["top_by_tier"][tier] = [
+                {
+                    "ticker": r.get("ticker"),
+                    "signal": r.get("signal"),
+                    "setup_type_badge": r.get("setup_type_badge"),
+                    "next_action_label": r.get("next_action_label"),
+                    "opportunity_engine": r.get("opportunity_engine"),
+                }
+                for r in rows[:3]
+                if isinstance(r, dict)
+            ]
+    return out
+
+
 def build_snapshot(
     db: Session,
     user_id: int | None,
@@ -169,7 +226,8 @@ def build_snapshot(
     use_cache: bool = True,
 ) -> dict[str, Any]:
     """Build a compact snapshot for the Trading Brain Assistant (read-only, no get_brain_stats)."""
-    cache_key = user_id if user_id is not None else 0
+    keyword = _extract_keyword_from_message(user_message or "") if user_message else None
+    cache_key = (user_id if user_id is not None else 0, keyword or "__default__")
     if use_cache:
         with _snapshot_cache_lock:
             entry = _snapshot_cache.get(cache_key)
@@ -182,9 +240,23 @@ def build_snapshot(
     queue = get_queue_status(db)
     worker = _read_worker_status()
     activity = _recent_activity(db)
-    keyword = _extract_keyword_from_message(user_message or "") if user_message else None
     patterns = _patterns_summary(db, user_id, keyword_filter=keyword)
     insights = _insights_summary(db, user_id)
+    market_thesis = {}
+    try:
+        market_thesis = generate_market_thesis(db, user_id)
+    except Exception as e:
+        logger.debug("[brain_assistant_context] market thesis failed: %s", e)
+    automation_ctx = {}
+    automation_focus = {}
+    try:
+        if user_id is not None:
+            automation_ctx = automation_summary(db, user_id=int(user_id))
+            automation_focus = get_operator_session_focus(db, user_id=int(user_id))
+    except Exception as e:
+        logger.debug("[brain_assistant_context] automation snapshot failed: %s", e)
+    decision_ctx = _decision_context(db, user_id)
+    opportunity_ctx = _opportunity_board_summary(db, user_id)
 
     snapshot = {
         "backtest_queue": queue,
@@ -201,6 +273,11 @@ def build_snapshot(
         "patterns_summary": patterns,
         "patterns_keyword": keyword,
         "insights": insights,
+        "market_thesis": market_thesis,
+        "automation_summary": automation_ctx,
+        "automation_focus": automation_focus,
+        "decision_context": decision_ctx,
+        "opportunity_board": opportunity_ctx,
         "snapshot_at": datetime.utcnow().isoformat() + "Z",
     }
 

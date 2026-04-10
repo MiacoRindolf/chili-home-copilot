@@ -1,0 +1,33 @@
+---
+description: Prefer data/DB correction over API guards when symptoms are contaminated linkage or wrong FKs
+alwaysApply: true
+---
+
+# Data First, Code Second (CHILI)
+
+## Self-check (learned the hard way)
+
+When the user sees **wrong rows mixed under one entity** (e.g. Pattern Evidence showing backtests whose **labels** don’t match the opened pattern), the agent **defaulted to filtering in routers/templates** instead of asking: **is `scan_pattern_id` / FK wrong in Postgres?**
+
+That was a mistake: **application filters hide corruption**, add branching and tests, and **don’t fix other consumers** (reports, SQL, future UIs). The **proper fix** is usually **data repair**: correct FKs, split or create `scan_patterns` rows, one-shot scripts, migrations, then optional aggregate recompute.
+
+## Discipline
+
+1. **Classify the bug**
+   - **Contaminated or mis-keyed persisted data** → plan **DB/script/migration** first.
+   - **Pure presentation of correct data** → UI/schema only.
+
+2. **Before editing `app/routers/`, `app/services/`, or templates** for “wrong rows showing,” verify whether stored **FKs or denormalized fields** are inconsistent with the source of truth (`scan_pattern_id`, `strategy_name`, etc.).
+
+3. **Run repair/diagnostic scripts yourself** in this environment (`conda run -n chili-env python scripts/...` from repo root). Paste **real stdout/stderr and exit code**. Do not tell the user to run them unless blocked (no DB URL, permissions).
+
+4. **Scripts must be runnable**: include `if __name__ == "__main__": raise SystemExit(main())` (or equivalent) so `python scripts/foo.py` actually executes `main()`.
+
+5. **API guards** are acceptable only as **temporary safety** or **invariant enforcement** after data is clean — not as the primary fix for linkage bugs unless the product explicitly requires hiding bad data forever.
+
+## Examples
+
+| Symptom | Prefer | Avoid as sole fix |
+|--------|--------|-------------------|
+| Mixed `strategy_name` under one pattern card | `scripts/repair_*`, SQL fix, new `scan_patterns` id + `UPDATE trading_backtests` | Long router filters on name |
+| Stale aggregates after repair | `scripts/recompute_pattern_stats.py` | Recomputing only in memory in one endpoint |

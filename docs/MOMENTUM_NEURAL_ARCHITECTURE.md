@@ -10,7 +10,7 @@ This document describes the **Coinbase spot + neural mesh** momentum system. It 
 ## 2. Surface split
 
 - **Brain** (`/brain`, neural graph): momentum intel, viability pool, evolution/feedback visibility (read-model).
-- **Trading** (`/trading`, `/trading/automation`): operator UX — viable strategies, paper/live arm, automation monitor.
+- **Trading** (`/trading`, `/trading/autopilot`, legacy `/trading/automation`): operator UX — viable strategies, paper/live arm, bounded runtime monitoring, and Autopilot inspection.
 
 ## 3. Strategy vs execution
 

@@ -9,11 +9,12 @@ import logging
 from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ..deps import get_db, get_identity_ctx
+from ..schemas.trading import TradingBrainAssistantChatResponse
 from ..services import trading_service as ts
 from ..services.code_brain import learning as cb_learning
 from ..services.code_brain import indexer as cb_indexer
@@ -47,6 +48,41 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["brain"])
 
+_ALLOWED_BRAIN_DOMAINS = frozenset({"hub", "trading", "project", "reasoning"})
+
+
+def _normalize_brain_domain_query(request: Request) -> str:
+    """Map ?domain= to hub | trading | project | reasoning. Unknown → hub."""
+    raw = (request.query_params.get("domain") or "").strip().lower()
+    if raw == "code":
+        return "project"
+    if raw == "jobs":
+        return "jobs"  # caller redirects
+    if raw in _ALLOWED_BRAIN_DOMAINS:
+        return raw
+    if raw == "":
+        return ""
+    return "__invalid__"
+
+
+def _brain_initial_domain_for_request(
+    request: Request,
+    planner_task_id: int | None,
+    planner_project_id: int | None,
+) -> str:
+    """URL `domain` wins when set; planner params select project only when domain is omitted."""
+    norm = _normalize_brain_domain_query(request)
+    if norm == "jobs":
+        return "jobs"
+    if norm in ("trading", "project", "reasoning", "hub"):
+        return norm
+    if norm == "__invalid__":
+        return "hub"
+    # No domain param (or empty): planner handoff deep links default to project desk
+    if planner_task_id is not None or planner_project_id is not None:
+        return "project"
+    return "hub"
+
 
 @router.get("/api/v1/brain/users")
 def legacy_api_v1_brain_users():
@@ -63,6 +99,12 @@ def brain_page(
     planner_task_id: int | None = Query(default=None, ge=1),
     planner_project_id: int | None = Query(default=None, ge=1),
 ):
+    brain_initial_domain = _brain_initial_domain_for_request(
+        request, planner_task_id, planner_project_id
+    )
+    if brain_initial_domain == "jobs":
+        return RedirectResponse(url="/app/jobs", status_code=302)
+
     ctx = get_identity_ctx(request, db)
     desk = desk_graph_boot_config()
     neural_first_paint = bool(desk.get("mesh_enabled") and desk.get("effective_graph_mode") == "neural")
@@ -74,6 +116,7 @@ def brain_page(
             "user_name": ctx["user_name"],
             "planner_task_id": planner_task_id,
             "planner_project_id": planner_project_id,
+            "brain_initial_domain": brain_initial_domain,
             "trading_brain_desk_config": desk,
             "trading_brain_neural_first_paint": neural_first_paint,
         },
@@ -300,6 +343,10 @@ def api_brain_trading_assistant_chat(
         include_pattern_search=body.include_pattern_search,
         refresh=body.refresh,
     )
+    try:
+        result = TradingBrainAssistantChatResponse(**result).model_dump()
+    except Exception:
+        pass
     status = 200 if result.get("ok") else 400
     return JSONResponse(result, status_code=status)
 

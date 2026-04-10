@@ -307,8 +307,9 @@ def send_sms(message: str, tier: str = "A") -> bool:
         return False
 
     any_sent = False
+    telegram_enabled = _has_telegram() and _should_send("telegram", tier)
 
-    if _has_telegram() and _should_send("telegram", tier):
+    if telegram_enabled:
         if _send_via_telegram(message):
             any_sent = True
         else:
@@ -322,7 +323,10 @@ def send_sms(message: str, tier: str = "A") -> bool:
         if _send_via_push(message):
             any_sent = True
 
-    if settings.sms_phone and _should_send("sms", tier):
+    # Telegram is the active human-alert path for now. When it is enabled for
+    # the tier, skip carrier delivery instead of double-sending or falling
+    # back to Twilio/email-to-SMS.
+    if not telegram_enabled and settings.sms_phone and _should_send("sms", tier):
         if _has_twilio():
             if _send_via_twilio(message):
                 any_sent = True

@@ -18,9 +18,21 @@ from typing import Any, Callable, Optional
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from ....models.trading import MomentumSymbolViability, MomentumStrategyVariant, TradingAutomationSession
+from ....models.trading import (
+    MomentumSymbolViability,
+    MomentumStrategyVariant,
+    TradingAutomationSession,
+    TradingAutomationSimulatedFill,
+)
 from ..execution_family_registry import normalize_execution_family, momentum_runner_supports_execution_family
-from .persistence import append_trading_automation_event
+from .persistence import (
+    append_trading_automation_event,
+    append_trading_automation_simulated_fill,
+    build_runtime_snapshot_values,
+    default_session_binding,
+    upsert_trading_automation_runtime_snapshot,
+    upsert_trading_automation_session_binding,
+)
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY
 from .paper_execution import (
@@ -92,6 +104,85 @@ def _emit(
         correlation_id=sess.correlation_id,
         source_node_id="momentum_paper_runner",
     )
+
+
+def _sync_runtime_snapshot(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    via: MomentumSymbolViability | None = None,
+) -> None:
+    try:
+        variant = (
+            db.query(MomentumStrategyVariant)
+            .filter(MomentumStrategyVariant.id == int(sess.variant_id))
+            .one_or_none()
+        )
+        trade_count = int(
+            db.query(TradingAutomationSimulatedFill)
+            .filter(TradingAutomationSimulatedFill.session_id == int(sess.id))
+            .count()
+        )
+        values = build_runtime_snapshot_values(
+            sess,
+            variant=variant,
+            viability=via,
+            trade_count=trade_count,
+        )
+        pe = (sess.risk_snapshot_json or {}).get(KEY_PAPER_EXEC) if isinstance(sess.risk_snapshot_json, dict) else {}
+        quote_source = pe.get("last_quote_source") if isinstance(pe, dict) else None
+        upsert_trading_automation_runtime_snapshot(db, session_id=int(sess.id), values=values)
+        upsert_trading_automation_session_binding(
+            db,
+            session_id=int(sess.id),
+            values=default_session_binding(
+                venue=sess.venue,
+                mode=sess.mode,
+                execution_family=sess.execution_family,
+                quote_source=quote_source,
+            ),
+        )
+    except Exception:
+        _log.debug("paper runtime snapshot sync skipped for session %s", sess.id, exc_info=True)
+
+
+def _record_sim_fill(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    action: str,
+    fill_type: str,
+    price: float | None,
+    quantity: float | None,
+    reference_price: float | None = None,
+    fees_usd: float | None = None,
+    pnl_usd: float | None = None,
+    position_state_before: str | None = None,
+    position_state_after: str | None = None,
+    reason: str | None = None,
+    marker_json: Optional[dict[str, Any]] = None,
+) -> None:
+    try:
+        append_trading_automation_simulated_fill(
+            db,
+            session_id=int(sess.id),
+            symbol=sess.symbol,
+            lane="simulation",
+            action=action,
+            fill_type=fill_type,
+            side="long",
+            quantity=quantity,
+            price=price,
+            reference_price=reference_price,
+            fees_usd=fees_usd,
+            pnl_usd=pnl_usd,
+            position_state_before=position_state_before,
+            position_state_after=position_state_after,
+            reason=reason,
+            marker_json=marker_json,
+        )
+    except Exception:
+        _log.debug("paper simulated fill audit skipped for session %s", sess.id, exc_info=True)
 
 
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
@@ -316,6 +407,20 @@ def tick_paper_session(
                 pe["last_exit_price"] = exit_px
                 pe["last_exit_reason"] = "risk_block_forced_exit"
                 pe["position"] = None
+                _record_sim_fill(
+                    db,
+                    sess,
+                    action="forced_exit",
+                    fill_type="exit",
+                    price=exit_px,
+                    quantity=qty,
+                    reference_price=mid,
+                    pnl_usd=pnl,
+                    position_state_before="long",
+                    position_state_after="flat",
+                    reason="risk_block",
+                    marker_json={"stop": pos.get("stop_price"), "target": pos.get("target_price")},
+                )
             pe["last_tick_utc"] = utc_iso()
             _commit_pe(sess, pe)
             _safe_transition(db, sess, STATE_EXITED)
@@ -325,6 +430,7 @@ def tick_paper_session(
                 "paper_exit_filled",
                 {"reason": "risk_block", "price": pe.get("last_exit_price")},
             )
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "blocked": True, "risk_evaluation": ev}
 
@@ -343,6 +449,7 @@ def tick_paper_session(
         _safe_transition(db, sess, STATE_WATCHING)
         _emit(db, sess, "paper_runner_started", {"symbol": sess.symbol, "variant_id": sess.variant_id})
         _emit(db, sess, "paper_watch_started", {"mid": mid, "quote_source": quote_src})
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -355,6 +462,7 @@ def tick_paper_session(
                 "paper_entry_candidate_detected",
                 {"viability_score": via.viability_score, "mid": mid},
             )
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -365,6 +473,7 @@ def tick_paper_session(
         else:
             _safe_transition(db, sess, STATE_PENDING_ENTRY)
             _emit(db, sess, "paper_entry_submitted", {"mid": mid})
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -372,6 +481,7 @@ def tick_paper_session(
         if float(via.viability_score or 0) < 0.48 or not via.paper_eligible:
             _safe_transition(db, sess, STATE_WATCHING)
             _emit(db, sess, "paper_watch_started", {"reason": "entry_aborted"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -399,6 +509,20 @@ def tick_paper_session(
         pe["reference_mid_at_entry"] = ref_mid
         _safe_transition(db, sess, STATE_ENTERED)
         _commit_pe(sess, pe)
+        _record_sim_fill(
+            db,
+            sess,
+            action="enter_long",
+            fill_type="entry",
+            price=entry_px,
+            quantity=qty,
+            reference_price=ref_mid,
+            fees_usd=fees,
+            position_state_before="flat",
+            position_state_after="long",
+            reason="entry_fill",
+            marker_json={"entry": entry_px, "stop": stop_px, "target": target_px},
+        )
         _emit(
             db,
             sess,
@@ -412,6 +536,7 @@ def tick_paper_session(
                 "target": target_px,
             },
         )
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -420,6 +545,7 @@ def tick_paper_session(
         if not isinstance(pos, dict):
             _safe_transition(db, sess, STATE_ERROR)
             _emit(db, sess, "paper_error", {"reason": "position_missing"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": False, "error": "position_missing"}
 
@@ -443,7 +569,22 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            _record_sim_fill(
+                db,
+                sess,
+                action="exit_long",
+                fill_type="exit",
+                price=exit_px,
+                quantity=qty,
+                reference_price=mid,
+                pnl_usd=pnl,
+                position_state_before="long",
+                position_state_after="flat",
+                reason="bailout",
+                marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+            )
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "bailout"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -451,6 +592,7 @@ def tick_paper_session(
         if float(via.viability_score or 0) < 0.38:
             _safe_transition(db, sess, STATE_BAILOUT)
             _emit(db, sess, "paper_bailout", {"viability_score": via.viability_score, "bid": bid})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -462,7 +604,22 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            _record_sim_fill(
+                db,
+                sess,
+                action="exit_long",
+                fill_type="exit",
+                price=exit_px,
+                quantity=qty,
+                reference_price=mid,
+                pnl_usd=pnl,
+                position_state_before="long",
+                position_state_after="flat",
+                reason="max_hold",
+                marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+            )
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "max_hold"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -474,13 +631,29 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            _record_sim_fill(
+                db,
+                sess,
+                action="exit_long",
+                fill_type="exit",
+                price=exit_px,
+                quantity=qty,
+                reference_price=mid,
+                pnl_usd=pnl,
+                position_state_before="long",
+                position_state_after="flat",
+                reason="stop",
+                marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+            )
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "stop"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_ENTERED and exit_px >= target_px * 0.995:
             _safe_transition(db, sess, STATE_SCALING_OUT)
             _emit(db, sess, "paper_partial_exit", {"price": exit_px, "note": "target_zone"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -492,13 +665,29 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            _record_sim_fill(
+                db,
+                sess,
+                action="exit_long",
+                fill_type="exit",
+                price=exit_px,
+                quantity=qty,
+                reference_price=mid,
+                pnl_usd=pnl,
+                position_state_before="long",
+                position_state_after="flat",
+                reason="target",
+                marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+            )
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "target"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_ENTERED and exit_px >= entry * 1.008:
             _safe_transition(db, sess, STATE_TRAILING)
             _emit(db, sess, "paper_runner_started", {"note": "trail_armed", "bid": bid})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -512,10 +701,26 @@ def tick_paper_session(
                 pe["position"] = None
                 _safe_transition(db, sess, STATE_EXITED)
                 _commit_pe(sess, pe)
+                _record_sim_fill(
+                    db,
+                    sess,
+                    action="exit_long",
+                    fill_type="exit",
+                    price=exit_px,
+                    quantity=qty,
+                    reference_price=mid,
+                    pnl_usd=pnl,
+                    position_state_before="long",
+                    position_state_after="flat",
+                    reason="trail_stop",
+                    marker_json={"entry": entry, "stop": trail_stop, "target": target_px},
+                )
                 _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "trail_stop"})
+            _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -532,6 +737,7 @@ def tick_paper_session(
         _safe_transition(db, sess, STATE_COOLDOWN)
         _commit_pe(sess, pe)
         _emit(db, sess, "paper_cooldown_started", {"until_utc": pe["cooldown_until_utc"]})
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
@@ -545,9 +751,11 @@ def tick_paper_session(
             sess.ended_at = _utcnow()
             _safe_transition(db, sess, STATE_FINISHED)
             _emit(db, sess, "paper_finished", {"realized_pnl_usd": pe.get("realized_pnl_usd")})
+        _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+    _sync_runtime_snapshot(db, sess, via=via)
     db.flush()
     return {"ok": True, "session_id": sess.id, "state": sess.state}
 

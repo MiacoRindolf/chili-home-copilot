@@ -124,7 +124,12 @@ It makes the system safer, more predictable, and easier to test.
 
 ## Trading AI Architecture
 
-CHILI's trading module (`app/services/trading/`) extends the core "LLM plans, code executes" pattern into a full trading analysis system:
+CHILI's trading module (`app/services/trading/`) extends the platform's typed-contract architecture into an AI-native trading system:
+
+- models analyze, recommend, decide, and adapt inside typed, policy-bound lanes
+- deterministic services validate, constrain, execute, audit, and can veto
+- Brain owns learning, thesis formation, and recommendation quality
+- Autopilot owns runtime reading and inspection, not strategy logic
 
 ### AI Analyze Flow
 

@@ -1,0 +1,12 @@
+feat(brain): thorough learning cycle overhaul + 11 Cursor rules
+
+Complete trading brain refactor: structured mining with rules_json DSL,
+lifecycle state machine, backtest/live parity via indicator_core.py,
+ensemble promotion gates, alpha decay monitoring, paper trading,
+risk management (Kelly/drawdown breaker), governance (kill switch/approval),
+regime detection, multi-timeframe consensus, intraday signals, daily playbook,
+ML model registry, execution quality tracking, and brain.html UI enhancements.
+
+Added 14 new service modules, 4 new DB tables (migrations 066-069),
+1 parity test suite, and 17 Cursor rule files covering agent behavior
+and trading brain domain knowledge.

@@ -1,0 +1,12 @@
+---
+description: Agent runs commands, migrations, and scripts; reports findings instead of delegating checklists to the user.
+alwaysApply: true
+---
+
+# Execute, Do Not Delegate
+
+When the user’s goal can be achieved in this environment (tests, scripts, Docker, DB backup/restore, HTTP to local dev, grep, small Python one-offs), **do it yourself** and **report concrete results** (exit codes, counts, log excerpts, file paths).
+
+- Do **not** default to “you should run X” or long manual checklists when you have shell/network access.
+- **Exceptions:** production-only actions, secrets the user must enter, or operations that require their physical device—state the blocker briefly, then do everything else you can.
+- After execution, summarize **what ran**, **outcome**, and **evidence** (paths, numbers), not a generic recap of options.

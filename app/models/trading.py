@@ -752,6 +752,101 @@ class TradingAutomationEvent(Base):
     source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
 
 
+class TradingAutomationRuntimeSnapshot(Base):
+    """Current-state read model for the Autopilot runtime dashboard."""
+
+    __tablename__ = "trading_automation_runtime_snapshots"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_trading_automation_runtime_snapshot_session"),
+        Index("ix_tars_user_updated", "user_id", "updated_at"),
+        Index("ix_tars_lane_state", "lane", "state"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    session_id: int = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    symbol: str = Column(String(36), nullable=False, index=True)
+    mode: str = Column(String(16), nullable=False, default="paper")
+    lane: str = Column(String(24), nullable=False, default="simulation", index=True)
+    state: str = Column(String(32), nullable=False, default="idle", index=True)
+    strategy_family: Optional[str] = Column(String(64), nullable=True, index=True)
+    strategy_label: Optional[str] = Column(String(256), nullable=True)
+    thesis: Optional[str] = Column(Text, nullable=True)
+    confidence: Optional[float] = Column(Float, nullable=True)
+    conviction: Optional[float] = Column(Float, nullable=True)
+    current_position_state: Optional[str] = Column(String(24), nullable=True)
+    last_action: Optional[str] = Column(String(64), nullable=True)
+    runtime_seconds: Optional[int] = Column(Integer, nullable=True)
+    simulated_pnl_usd: Optional[float] = Column(Float, nullable=True)
+    trade_count: int = Column(Integer, nullable=False, default=0)
+    last_price: Optional[float] = Column(Float, nullable=True)
+    execution_readiness_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    latest_levels_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    metrics_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+
+
+class TradingAutomationSessionBinding(Base):
+    """Per-session market-data/provider truth binding for Autopilot."""
+
+    __tablename__ = "trading_automation_session_bindings"
+    __table_args__ = (
+        UniqueConstraint("session_id", name="uq_trading_automation_session_binding_session"),
+        Index("ix_tasb_truth_provider", "source_of_truth_provider", "source_of_truth_exchange"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    session_id: int = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="CASCADE"), nullable=False, unique=True, index=True
+    )
+    discovery_provider: Optional[str] = Column(String(32), nullable=True)
+    chart_provider: Optional[str] = Column(String(32), nullable=True)
+    signal_provider: Optional[str] = Column(String(32), nullable=True)
+    source_of_truth_provider: Optional[str] = Column(String(32), nullable=True)
+    source_of_truth_exchange: Optional[str] = Column(String(32), nullable=True)
+    bar_builder: Optional[str] = Column(String(48), nullable=True)
+    latency_class: Optional[str] = Column(String(48), nullable=True)
+    simulation_fidelity: Optional[str] = Column(String(48), nullable=True)
+    gating_reason: Optional[str] = Column(Text, nullable=True)
+    meta_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False, index=True)
+
+
+class TradingAutomationSimulatedFill(Base):
+    """Append-only simulated order/fill audit for paper/runtime replay."""
+
+    __tablename__ = "trading_automation_simulated_fills"
+    __table_args__ = (
+        Index("ix_tasf_session_ts", "session_id", "ts"),
+        Index("ix_tasf_symbol_ts", "symbol", "ts"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    session_id: int = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    ts: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    symbol: str = Column(String(36), nullable=False, index=True)
+    lane: str = Column(String(24), nullable=False, default="simulation")
+    side: Optional[str] = Column(String(16), nullable=True)
+    action: str = Column(String(32), nullable=False)
+    fill_type: Optional[str] = Column(String(32), nullable=True)
+    quantity: Optional[float] = Column(Float, nullable=True)
+    price: Optional[float] = Column(Float, nullable=True)
+    reference_price: Optional[float] = Column(Float, nullable=True)
+    fees_usd: Optional[float] = Column(Float, nullable=True)
+    pnl_usd: Optional[float] = Column(Float, nullable=True)
+    position_state_before: Optional[str] = Column(String(24), nullable=True)
+    position_state_after: Optional[str] = Column(String(24), nullable=True)
+    reason: Optional[str] = Column(String(64), nullable=True)
+    marker_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class MomentumAutomationOutcome(Base):
     """Durable closed-loop outcome row for neural evolution (Phase 9); one row per automation session."""
 

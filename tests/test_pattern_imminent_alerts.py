@@ -2,11 +2,16 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 
+from app.models.trading import AlertHistory
+from app.services.trading.alerts import PATTERN_BREAKOUT_IMMINENT
 from app.services.trading.pattern_imminent_alerts import (
+    _cooldown_active,
     estimate_breakout_eta_hours,
     evaluate_imminent_readiness,
     format_eta_range,
+    run_pattern_imminent_scan,
     timeframe_to_hours_per_step,
     us_stock_session_open,
 )
@@ -92,3 +97,82 @@ def test_evaluate_imminent_two_evaluable_low_ratio_ok() -> None:
 def test_us_stock_session_open_saturday_utc() -> None:
     sat = datetime(2026, 3, 21, 14, 0, 0, tzinfo=timezone.utc)
     assert us_stock_session_open(sat) is False
+
+
+def test_cooldown_ignores_failed_imminent_delivery(db) -> None:
+    row = AlertHistory(
+        user_id=1,
+        alert_type=PATTERN_BREAKOUT_IMMINENT,
+        ticker="SPY",
+        message="failed delivery",
+        scan_pattern_id=52,
+        sent_via="sms_failed",
+        success=False,
+    )
+    db.add(row)
+    db.commit()
+
+    assert _cooldown_active(db, 1, "SPY", 52, 3.0) is False
+
+    row.success = True
+    db.commit()
+
+    assert _cooldown_active(db, 1, "SPY", 52, 3.0) is True
+
+
+def test_run_pattern_imminent_scan_does_not_count_failed_delivery_as_sent(
+    db,
+    monkeypatch,
+) -> None:
+    inserted: list[tuple[str, int]] = []
+
+    pattern = SimpleNamespace(
+        id=52,
+        name="Promoted VCP",
+        description="Test imminent pattern",
+    )
+    candidate = {
+        "pattern": pattern,
+        "ticker": "AAOI",
+        "eta_lo": 0.5,
+        "eta_hi": 1.0,
+        "score": {
+            "price": 100.0,
+            "entry_price": 101.0,
+            "stop_loss": 97.5,
+            "take_profit": 110.0,
+            "signals": ["Tight range", "Volume building"],
+        },
+        "trade_type": "swing",
+        "duration_estimate": "2-5 days",
+        "hold_label": "2-5 days",
+        "composite": 0.71,
+        "readiness": 0.82,
+        "flat": {"price": 100.0},
+        "score_breakdown": {"quality": 0.7},
+        "coverage_ratio": 0.75,
+    }
+
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.gather_imminent_candidate_rows",
+        lambda *args, **kwargs: ([candidate], {"patterns_active": 1, "tickers_scored": 1}),
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._cooldown_active",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts.dispatch_alert",
+        lambda *args, **kwargs: False,
+    )
+    monkeypatch.setattr(
+        "app.services.trading.pattern_imminent_alerts._insert_imminent_breakout_alert",
+        lambda db, user_id, pat, ticker, *args, **kwargs: inserted.append((ticker, pat.id)),
+    )
+
+    result = run_pattern_imminent_scan(db, user_id=1)
+
+    assert result["candidates"] == 1
+    assert result["alerts_sent"] == 0
+    assert result["delivery_failed"] == 1
+    assert inserted == []

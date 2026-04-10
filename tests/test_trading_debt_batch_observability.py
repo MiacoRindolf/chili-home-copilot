@@ -100,3 +100,37 @@ def test_dispatch_alert_passes_tier_a_for_target_hit(db, monkeypatch: pytest.Mon
         skip_throttle=True,
     )
     assert captured.get("tier") == "A"
+
+
+def test_send_sms_uses_telegram_and_skips_carrier_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    monkeypatch.setattr("app.services.sms_service.settings.alerts_enabled", True)
+    monkeypatch.setattr("app.services.sms_service.settings.sms_phone", "5551234567")
+    monkeypatch.setattr("app.services.sms_service._has_telegram", lambda: True)
+    monkeypatch.setattr(
+        "app.services.sms_service._should_send",
+        lambda channel, tier: channel in {"telegram", "sms"},
+    )
+    monkeypatch.setattr(
+        "app.services.sms_service._send_via_telegram",
+        lambda message: calls.append("telegram") or True,
+    )
+    monkeypatch.setattr("app.services.sms_service._has_discord", lambda: False)
+    monkeypatch.setattr("app.services.sms_service._has_twilio", lambda: True)
+    monkeypatch.setattr(
+        "app.services.sms_service._send_via_twilio",
+        lambda message: calls.append("twilio") or True,
+    )
+    monkeypatch.setattr("app.services.sms_service._has_email_gateway", lambda: True)
+    monkeypatch.setattr(
+        "app.services.sms_service._send_via_email_gateway",
+        lambda message: calls.append("email_gateway") or True,
+    )
+
+    from app.services.sms_service import send_sms
+
+    assert send_sms("telegram only", tier="A") is True
+    assert calls == ["telegram"]

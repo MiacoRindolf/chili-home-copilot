@@ -1,0 +1,11 @@
+﻿============================= test session starts =============================
+platform win32 -- Python 3.11.14, pytest-9.0.2, pluggy-1.6.0 -- C:\Users\rindo\miniconda3\envs\chili-env\python.exe
+cachedir: .pytest_cache
+rootdir: C:\dev\chili-home-copilot
+plugins: anyio-4.12.1
+collecting ... collected 25 items
+
+tests/test_momentum_operator_workflow.py::test_operator_readiness_route PASSED [  4%]
+tests/test_momentum_operator_workflow.py::test_canonical_maps_paper_queued PASSED [  8%]
+tests/test_momentum_operator_workflow.py::test_list_sessions_includes_canonical ERROR [ 12%]
+tests/test_momentum_operator_workflow.py::test_promote_paper_to_live_arm_lineage ERROR [ 16%]

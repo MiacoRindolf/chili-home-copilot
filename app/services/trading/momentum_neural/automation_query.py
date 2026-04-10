@@ -14,7 +14,10 @@ from ....models.trading import (
     MomentumStrategyVariant,
     MomentumSymbolViability,
     TradingAutomationEvent,
+    TradingAutomationRuntimeSnapshot,
     TradingAutomationSession,
+    TradingAutomationSessionBinding,
+    TradingAutomationSimulatedFill,
 )
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..governance import get_kill_switch_status
@@ -71,6 +74,7 @@ from .session_lifecycle import (
     is_live_orders_active,
     phase_hint,
 )
+from .persistence import build_runtime_snapshot_values, default_session_binding
 
 _log = logging.getLogger(__name__)
 
@@ -139,6 +143,14 @@ def _tables_present(db: Session) -> bool:
     except Exception:
         return False
     return "trading_automation_sessions" in names
+
+
+def _table_exists(db: Session, name: str) -> bool:
+    try:
+        bind = db.get_bind()
+        return name in set(sa_inspect(bind).get_table_names())
+    except Exception:
+        return False
 
 
 def _parse_expires(snap: dict[str, Any]) -> Optional[datetime]:
@@ -308,6 +320,30 @@ def operator_fields_for_session(sess: TradingAutomationSession, readiness: dict[
     }
 
 
+def _serialize_binding(binding: TradingAutomationSessionBinding | None, *, sess: TradingAutomationSession, quote_source: str | None = None, blocked_reason: str | None = None) -> dict[str, Any]:
+    if binding is None:
+        return default_session_binding(
+            venue=sess.venue,
+            mode=sess.mode,
+            execution_family=sess.execution_family,
+            quote_source=quote_source,
+            gating_reason=blocked_reason,
+        )
+    meta_json = binding.meta_json if isinstance(binding.meta_json, dict) else {}
+    return {
+        "discovery_provider": binding.discovery_provider,
+        "chart_provider": binding.chart_provider,
+        "signal_provider": binding.signal_provider,
+        "source_of_truth_provider": binding.source_of_truth_provider,
+        "source_of_truth_exchange": binding.source_of_truth_exchange,
+        "bar_builder": binding.bar_builder,
+        "latency_class": binding.latency_class,
+        "simulation_fidelity": binding.simulation_fidelity,
+        "gating_reason": blocked_reason or binding.gating_reason,
+        "meta_json": meta_json,
+    }
+
+
 def _focus_priority(sess: TradingAutomationSession) -> tuple[int, float]:
     if sess.state == STATE_ARCHIVED:
         return (2, 0.0)
@@ -365,6 +401,10 @@ def list_automation_sessions(
     rows = q.limit(min(max(limit, 1), 500)).all()
     ids = [int(s[0].id) for s in rows]
     counts: dict[int, int] = {}
+    fill_counts: dict[int, int] = {}
+    fills_present = _table_exists(db, "trading_automation_simulated_fills")
+    runtime_present = _table_exists(db, "trading_automation_runtime_snapshots")
+    binding_present = _table_exists(db, "trading_automation_session_bindings")
     if ids:
         for sid, cnt in (
             db.query(TradingAutomationEvent.session_id, func.count(TradingAutomationEvent.id))
@@ -373,6 +413,46 @@ def list_automation_sessions(
             .all()
         ):
             counts[int(sid)] = int(cnt)
+        if fills_present:
+            for sid, cnt in (
+                db.query(TradingAutomationSimulatedFill.session_id, func.count(TradingAutomationSimulatedFill.id))
+                .filter(TradingAutomationSimulatedFill.session_id.in_(ids))
+                .group_by(TradingAutomationSimulatedFill.session_id)
+                .all()
+            ):
+                fill_counts[int(sid)] = int(cnt)
+
+    runtime_map: dict[int, TradingAutomationRuntimeSnapshot] = {}
+    binding_map: dict[int, TradingAutomationSessionBinding] = {}
+    if ids:
+        if runtime_present:
+            for row in (
+                db.query(TradingAutomationRuntimeSnapshot)
+                .filter(TradingAutomationRuntimeSnapshot.session_id.in_(ids))
+                .all()
+            ):
+                runtime_map[int(row.session_id)] = row
+        if binding_present:
+            for row in (
+                db.query(TradingAutomationSessionBinding)
+                .filter(TradingAutomationSessionBinding.session_id.in_(ids))
+                .all()
+            ):
+                binding_map[int(row.session_id)] = row
+
+    symbols = [str(s[0].symbol) for s in rows]
+    variant_ids = [int(s[0].variant_id) for s in rows]
+    viability_map: dict[tuple[str, int], MomentumSymbolViability] = {}
+    if symbols and variant_ids:
+        for via in (
+            db.query(MomentumSymbolViability)
+            .filter(
+                MomentumSymbolViability.symbol.in_(symbols),
+                MomentumSymbolViability.variant_id.in_(variant_ids),
+            )
+            .all()
+        ):
+            viability_map[(str(via.symbol), int(via.variant_id))] = via
 
     rd_cache: dict[str, dict[str, Any]] = {}
     sessions_out: list[dict[str, Any]] = []
@@ -381,6 +461,35 @@ def list_automation_sessions(
         if ef not in rd_cache:
             rd_cache[ef] = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
         op_fields = operator_fields_for_session(sess, rd_cache[ef])
+        via = viability_map.get((str(sess.symbol), int(sess.variant_id)))
+        runtime_values = build_runtime_snapshot_values(
+            sess,
+            variant=var,
+            viability=via,
+            trade_count=fill_counts.get(int(sess.id), 0),
+            execution_readiness={
+                "operator_readiness": rd_cache[ef],
+                "blocked_reason": op_fields.get("blocked_reason"),
+            },
+        )
+        runtime_row = runtime_map.get(int(sess.id))
+        binding_payload = _serialize_binding(
+            binding_map.get(int(sess.id)),
+            sess=sess,
+            quote_source=(runtime_row.metrics_json if runtime_row and isinstance(runtime_row.metrics_json, dict) else {}).get("paper_execution", {}).get("last_quote_source"),
+            blocked_reason=op_fields.get("blocked_reason"),
+        )
+        data_fidelity = {
+            "lane": runtime_values.get("lane"),
+            "simulation_fidelity": binding_payload.get("simulation_fidelity"),
+            "latency_class": binding_payload.get("latency_class"),
+            "source_of_truth_provider": binding_payload.get("source_of_truth_provider"),
+            "source_of_truth_exchange": binding_payload.get("source_of_truth_exchange"),
+        }
+        runtime_payload = {
+            "seconds": runtime_values.get("runtime_seconds"),
+            "started_at": sess.started_at.isoformat() if sess.started_at else None,
+        }
         row = {
             "id": sess.id,
             "symbol": sess.symbol,
@@ -404,6 +513,19 @@ def list_automation_sessions(
             "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
             "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
             "live_execution": summarize_live_execution(sess.risk_snapshot_json),
+            "lane": runtime_values.get("lane"),
+            "runtime": runtime_payload,
+            "thesis": runtime_values.get("thesis"),
+            "confidence": runtime_values.get("confidence"),
+            "conviction": runtime_values.get("conviction"),
+            "current_position_state": runtime_values.get("current_position_state"),
+            "last_action": runtime_values.get("last_action"),
+            "execution_readiness": runtime_values.get("execution_readiness_json"),
+            "data_binding": binding_payload,
+            "data_fidelity": data_fidelity,
+            "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
+            "trade_count": runtime_values.get("trade_count"),
+            "chart_levels": runtime_values.get("latest_levels_json"),
         }
         row.update(op_fields)
         sessions_out.append(row)
@@ -464,6 +586,14 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
 
     risk = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
     risk_summary = {k: risk[k] for k in list(risk.keys())[:24]}
+    via_full = (
+        db.query(MomentumSymbolViability)
+        .filter(
+            MomentumSymbolViability.symbol == sess.symbol,
+            MomentumSymbolViability.variant_id == sess.variant_id,
+        )
+        .one_or_none()
+    )
 
     momentum_feedback = None
     try:
@@ -476,6 +606,35 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
     ef = (sess.execution_family or "coinbase_spot").strip().lower()
     readiness = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
     op_fields = operator_fields_for_session(sess, readiness)
+    fill_rows = []
+    if _table_exists(db, "trading_automation_simulated_fills"):
+        fill_rows = (
+            db.query(TradingAutomationSimulatedFill)
+            .filter(TradingAutomationSimulatedFill.session_id == sess.id)
+            .order_by(TradingAutomationSimulatedFill.ts.desc())
+            .limit(40)
+            .all()
+        )
+    binding_row = None
+    if _table_exists(db, "trading_automation_session_bindings"):
+        binding_row = (
+            db.query(TradingAutomationSessionBinding)
+            .filter(TradingAutomationSessionBinding.session_id == sess.id)
+            .one_or_none()
+        )
+    runtime_values = build_runtime_snapshot_values(
+        sess,
+        variant=var,
+        viability=via_full,
+        trade_count=len(fill_rows),
+        execution_readiness={"operator_readiness": readiness, "blocked_reason": op_fields.get("blocked_reason")},
+    )
+    binding_payload = _serialize_binding(
+        binding_row,
+        sess=sess,
+        quote_source=(runtime_values.get("metrics_json") or {}).get("paper_execution", {}).get("last_quote_source"),
+        blocked_reason=op_fields.get("blocked_reason"),
+    )
 
     src_id = getattr(sess, "source_paper_session_id", None)
     source_paper_brief = None
@@ -519,6 +678,27 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
         "live_execution": summarize_live_execution(sess.risk_snapshot_json),
         "momentum_feedback": momentum_feedback,
+        "lane": runtime_values.get("lane"),
+        "runtime": {
+            "seconds": runtime_values.get("runtime_seconds"),
+            "started_at": sess.started_at.isoformat() if sess.started_at else None,
+        },
+        "thesis": runtime_values.get("thesis"),
+        "confidence": runtime_values.get("confidence"),
+        "conviction": runtime_values.get("conviction"),
+        "current_position_state": runtime_values.get("current_position_state"),
+        "last_action": runtime_values.get("last_action"),
+        "execution_readiness": runtime_values.get("execution_readiness_json"),
+        "data_binding": binding_payload,
+        "data_fidelity": {
+            "simulation_fidelity": binding_payload.get("simulation_fidelity"),
+            "latency_class": binding_payload.get("latency_class"),
+            "source_of_truth_provider": binding_payload.get("source_of_truth_provider"),
+            "source_of_truth_exchange": binding_payload.get("source_of_truth_exchange"),
+        },
+        "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
+        "trade_count": runtime_values.get("trade_count"),
+        "chart_levels": runtime_values.get("latest_levels_json"),
     }
     session_dict.update(op_fields)
 
@@ -534,6 +714,26 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
                 "source_node_id": ev.source_node_id,
             }
             for ev in events
+        ],
+        "simulated_fills": [
+            {
+                "id": row.id,
+                "ts": row.ts.isoformat() if row.ts else None,
+                "lane": row.lane,
+                "action": row.action,
+                "fill_type": row.fill_type,
+                "side": row.side,
+                "quantity": row.quantity,
+                "price": row.price,
+                "reference_price": row.reference_price,
+                "fees_usd": row.fees_usd,
+                "pnl_usd": row.pnl_usd,
+                "position_state_before": row.position_state_before,
+                "position_state_after": row.position_state_after,
+                "reason": row.reason,
+                "marker_json": row.marker_json if isinstance(row.marker_json, dict) else {},
+            }
+            for row in fill_rows
         ],
         "viability_snapshot": viability_brief,
         "neural": neural_config_strip(),
@@ -770,6 +970,11 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
             "governance": governance_strip(),
             "risk_policy_summary": effective_policy_summary(),
             "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
+            "lanes": {
+                "simulation": pending_draft + paper_queued + paper_active,
+                "live-armed": pending_arm + armed,
+                "live": live_queued + live_active,
+            },
         }
     )
     return summary

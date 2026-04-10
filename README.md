@@ -38,7 +38,7 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
  └──────────────────────────────────────────────┘
 ```
 
-**Key design principle: "LLM plans, code executes."** The model chooses an action via strict JSON; application code validates the schema and performs the database operation. The LLM never touches state directly.
+**Core platform principle:** models operate through typed contracts and policy-bound lanes. In trading, models may analyze, recommend, decide, and adapt; deterministic systems still validate, constrain, execute, audit, and can veto.
 
 ## Features
 
@@ -46,6 +46,9 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - **Full-featured trading terminal** at `/trading` with interactive charts (LightweightCharts), watchlist, portfolio, and journal
 - **AI Analyze**: One-click streaming AI analysis of any ticker with rich context (indicators, fundamentals, patterns, market pulse) — powered by free-tier LLM cascade (Groq → Gemini → OpenAI last resort)
 - **AI Brain**: Self-learning pattern discovery engine that mines market snapshots, tests hypotheses, and evolves scoring weights over time
+  - **AI-native trading system with bounded autonomous decisioning and audited execution**
+  - Brain forms market theses, generates actionable trade recommendations, and feeds bounded execution lanes
+  - `/trading/autopilot` is the runtime surface for simulation-first live operational reading, provider truth, fills, and readiness
   - 30+ technical indicators (RSI, MACD, EMA stack, Bollinger Bands, Stochastic, ADX, ATR, etc.)
   - **News sentiment analysis** via VADER — aggregated sentiment scored per ticker and used in pattern mining
   - **Fundamental data integration** — P/E ratio, market cap fed into ML features and pattern discovery
@@ -322,7 +325,7 @@ requirements.txt         # Pinned Python dependencies
 
 | Decision | Rationale |
 |----------|-----------|
-| **LLM plans, code executes** | Prevents the model from directly mutating state. Makes actions auditable, testable, and safe to retry. |
+| **Typed, policy-bound model lanes** | Models can recommend and decide inside typed envelopes; deterministic services validate, constrain, execute, audit, and can veto. |
 | **Strict Pydantic schemas with `extra="forbid"`** | Rejects any unexpected fields from the LLM, preventing prompt injection from smuggling extra parameters. |
 | **Discriminated union validation** | Each action type has its own schema with typed fields. A `mark_chore_done` with `id=0` or a birthday with an invalid date is caught before execution. |
 | **Guest enforcement before execution** | Write-action blocking happens before any DB call, not after. An early bug taught us this -- the fix is architecturally important. |
@@ -409,3 +412,17 @@ requirements.txt         # Pinned Python dependencies
 - [MOMENTUM_NEURAL_RUNBOOK.md](docs/MOMENTUM_NEURAL_RUNBOOK.md) — Flags, migrations, pytest slices, prod safety
 - [MOMENTUM_NEURAL_TEST_MATRIX.md](docs/MOMENTUM_NEURAL_TEST_MATRIX.md) — Phase-to-test mapping
 - [modules.md](docs/modules.md) — Module system & marketplace documentation
+
+## Trading Positioning
+
+**GitHub / README**
+
+Chili's trading domain is an AI-native trading system whose learning brain forms market theses, generates actionable trade decisions, and drives bounded execution through audited risk controls.
+
+**Recruiter / technical**
+
+I built an AI trading platform with a learning decision layer, structured recommendation engines, domain-specific orchestration, and policy-bound live execution.
+
+**Investor / founder**
+
+This is not a chatbot sitting on top of a broker. It is an AI decision layer for trading: it learns market behavior, forms trade theses, and converts them into auditable, risk-bounded execution.

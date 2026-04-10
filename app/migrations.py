@@ -4131,6 +4131,131 @@ def _migration_091_momentum_automation_outcomes(conn) -> None:
     conn.commit()
 
 
+def _migration_094_trading_autopilot_runtime(conn) -> None:
+    """Autopilot runtime read models and simulated fill audit (additive, production-safe)."""
+    tables = _tables(conn)
+
+    if "trading_automation_runtime_snapshots" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_automation_runtime_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL UNIQUE
+                        REFERENCES trading_automation_sessions(id) ON DELETE CASCADE,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    symbol VARCHAR(36) NOT NULL,
+                    mode VARCHAR(16) NOT NULL DEFAULT 'paper',
+                    lane VARCHAR(24) NOT NULL DEFAULT 'simulation',
+                    state VARCHAR(32) NOT NULL DEFAULT 'idle',
+                    strategy_family VARCHAR(64),
+                    strategy_label VARCHAR(256),
+                    thesis TEXT,
+                    confidence DOUBLE PRECISION,
+                    conviction DOUBLE PRECISION,
+                    current_position_state VARCHAR(24),
+                    last_action VARCHAR(64),
+                    runtime_seconds INTEGER,
+                    simulated_pnl_usd DOUBLE PRECISION,
+                    trade_count INTEGER NOT NULL DEFAULT 0,
+                    last_price DOUBLE PRECISION,
+                    execution_readiness_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    latest_levels_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tars_user_updated "
+                "ON trading_automation_runtime_snapshots (user_id, updated_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tars_lane_state "
+                "ON trading_automation_runtime_snapshots (lane, state)"
+            )
+        )
+
+    if "trading_automation_session_bindings" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_automation_session_bindings (
+                    id SERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL UNIQUE
+                        REFERENCES trading_automation_sessions(id) ON DELETE CASCADE,
+                    discovery_provider VARCHAR(32),
+                    chart_provider VARCHAR(32),
+                    signal_provider VARCHAR(32),
+                    source_of_truth_provider VARCHAR(32),
+                    source_of_truth_exchange VARCHAR(32),
+                    bar_builder VARCHAR(48),
+                    latency_class VARCHAR(48),
+                    simulation_fidelity VARCHAR(48),
+                    gating_reason TEXT,
+                    meta_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tasb_truth_provider "
+                "ON trading_automation_session_bindings (source_of_truth_provider, source_of_truth_exchange)"
+            )
+        )
+
+    if "trading_automation_simulated_fills" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_automation_simulated_fills (
+                    id BIGSERIAL PRIMARY KEY,
+                    session_id INTEGER NOT NULL
+                        REFERENCES trading_automation_sessions(id) ON DELETE CASCADE,
+                    ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    symbol VARCHAR(36) NOT NULL,
+                    lane VARCHAR(24) NOT NULL DEFAULT 'simulation',
+                    side VARCHAR(16),
+                    action VARCHAR(32) NOT NULL,
+                    fill_type VARCHAR(32),
+                    quantity DOUBLE PRECISION,
+                    price DOUBLE PRECISION,
+                    reference_price DOUBLE PRECISION,
+                    fees_usd DOUBLE PRECISION,
+                    pnl_usd DOUBLE PRECISION,
+                    position_state_before VARCHAR(24),
+                    position_state_after VARCHAR(24),
+                    reason VARCHAR(64),
+                    marker_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tasf_session_ts "
+                "ON trading_automation_simulated_fills (session_id, ts DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_tasf_symbol_ts "
+                "ON trading_automation_simulated_fills (symbol, ts DESC)"
+            )
+        )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4226,6 +4351,7 @@ MIGRATIONS = [
     ("091_momentum_automation_outcomes", _migration_091_momentum_automation_outcomes),
     ("092_speculative_momentum_neural_subgraph", _migration_092_speculative_momentum_neural_subgraph),
     ("093_automation_session_promotion_lineage", _migration_093_automation_session_promotion_lineage),
+    ("094_trading_autopilot_runtime", _migration_094_trading_autopilot_runtime),
 ]
 
 

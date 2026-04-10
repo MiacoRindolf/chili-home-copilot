@@ -55,7 +55,10 @@ from .trading import (
     StrategyProposal,
     Trade,
     TradingAutomationEvent,
+    TradingAutomationRuntimeSnapshot,
     TradingAutomationSession,
+    TradingAutomationSessionBinding,
+    TradingAutomationSimulatedFill,
     TradingHypothesis,
     TradingInsight,
     TradingInsightEvidence,
@@ -165,6 +168,9 @@ __all__ = [
     "MomentumSymbolViability",
     "TradingAutomationSession",
     "TradingAutomationEvent",
+    "TradingAutomationRuntimeSnapshot",
+    "TradingAutomationSessionBinding",
+    "TradingAutomationSimulatedFill",
     "BrainBatchJob",
     "BrainGraphNode",
     "BrainGraphEdge",
@@ -209,4 +215,3 @@ __all__ = [
     "BrainPredictionSnapshot",
     "BrainPredictionLine",
 ]
-

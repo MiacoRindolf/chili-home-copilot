@@ -191,13 +191,35 @@ def trading_page(request: Request, db: Session = Depends(get_db)):
 
 @router.get("/trading/automation", response_class=HTMLResponse)
 def trading_automation_page(request: Request, db: Session = Depends(get_db)):
-    """Momentum automation monitor (Phase 5 — sessions/events only; no runner)."""
+    """Compatibility path for the Autopilot runtime surface."""
     return _trading_page_response(
         request,
         db,
-        template_name="trading_automation.html",
-        page_title="Trading Automation",
-        extra_context={"automation_page": True},
+        template_name="trading_autopilot.html",
+        page_title="Trading Autopilot",
+        extra_context={
+            "automation_page": True,
+            "autopilot_page": True,
+            "automation_legacy_alias": True,
+            "autopilot_route_path": "/trading/automation",
+        },
+    )
+
+
+@router.get("/trading/autopilot", response_class=HTMLResponse)
+def trading_autopilot_page(request: Request, db: Session = Depends(get_db)):
+    """Simulation-first trading runtime surface for live operational reading."""
+    return _trading_page_response(
+        request,
+        db,
+        template_name="trading_autopilot.html",
+        page_title="Trading Autopilot",
+        extra_context={
+            "automation_page": True,
+            "autopilot_page": True,
+            "automation_legacy_alias": False,
+            "autopilot_route_path": "/trading/autopilot",
+        },
     )
 
 

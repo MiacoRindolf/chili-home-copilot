@@ -10,11 +10,14 @@ loads for ``client``. Pure unit tests with no DB fixture skip DB setup.
 """
 from __future__ import annotations
 
+import json
 import os
+import time
 from pathlib import Path
 
 import pytest
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from fastapi.testclient import TestClient
 
@@ -64,12 +67,40 @@ def _ensure_postgres_test_url() -> str:
 
 _ensure_postgres_test_url()
 
+# Skip heavy / lock-prone module-level pattern seeding in app.main when the test client
+# imports the app (see app.main). Pytest truncates tables per test; momentum tests seed
+# variants via ensure_momentum_strategy_variants, not ScanPattern builtins.
+os.environ["CHILI_PYTEST"] = "1"
+# Avoid APScheduler + most deferred-startup DB maintenance during TestClient runs (reduces
+# concurrent DB sessions when pytest shares a dev database with Docker Compose).
+os.environ.setdefault("CHILI_SCHEDULER_ROLE", "none")
+
 # Engine + models only — no ``app.main`` at import. The full app loads when
 # ``client`` / ``fastapi_app`` is used (routers, scheduler hooks, pattern seeds).
 from app.db import Base, engine  # noqa: E402
 from app.deps import get_db  # noqa: E402
 from app.models import User, Device  # noqa: E402
 from app.pairing import DEVICE_COOKIE_NAME  # noqa: E402
+
+_AGENT_DEBUG_LOG = Path(__file__).resolve().parents[1] / "debug-42a690.log"
+
+
+def _agent_ndjson(*, hypothesis_id: str, location: str, message: str, data: dict | None = None) -> None:
+    # #region agent log
+    payload = {
+        "sessionId": "42a690",
+        "hypothesisId": hypothesis_id,
+        "location": location,
+        "message": message,
+        "timestamp": int(time.time() * 1000),
+        "data": data or {},
+    }
+    try:
+        with open(_AGENT_DEBUG_LOG, "a", encoding="utf-8") as f:
+            f.write(json.dumps(payload, default=str) + "\n")
+    except OSError:
+        pass
+    # #endregion
 
 
 _schema_initialized = False
@@ -94,13 +125,81 @@ def fastapi_app():
     import sys
 
     sys.stderr.write(
-        "pytest: loading app.main (routers + pattern seeds; schema already applied)...\n"
+        "pytest: loading app.main (routers; schema via db fixture when CHILI_PYTEST=1)...\n"
     )
     sys.stderr.flush()
     from app.main import app as _app
 
-    _schema_initialized = True
     return _app
+
+
+@pytest.fixture(scope="session")
+def _asgi_test_client(fastapi_app):
+    """Single Starlette TestClient for the whole session (Windows: avoids WinError 10055).
+
+    Opening ``with TestClient(app)`` per test spawns a new asyncio loop + socketpair each
+    time; under load Windows can exhaust ephemeral buffers (10055).
+    """
+    # #region agent log
+    _agent_ndjson(
+        hypothesis_id="H1",
+        location="conftest.py:_asgi_test_client",
+        message="session TestClient __enter__ (expect once per pytest session)",
+        data={},
+    )
+    # #endregion
+    with TestClient(fastapi_app) as c:
+        # #region agent log
+        _agent_ndjson(
+            hypothesis_id="H1",
+            location="conftest.py:_asgi_test_client",
+            message="session TestClient entered OK",
+            data={},
+        )
+        # #endregion
+        yield c
+
+
+def _evict_idle_in_transaction_peers() -> None:
+    """Pytest only: end *idle-in-transaction* client backends (not all peers).
+
+    Broad ``pg_terminate_backend`` on every client wipes pooled connections and can
+    destabilize Postgres when many short-lived poolers reconnect. Only IIT sessions
+    typically block ``TRUNCATE ... CASCADE`` indefinitely.
+    """
+    if not (os.environ.get("CHILI_PYTEST") or "").strip():
+        return
+    import sys
+
+    try:
+        with engine.begin() as conn:
+            rows = conn.execute(
+                text(
+                    "SELECT pid, pg_terminate_backend(pid) AS killed "
+                    "FROM pg_stat_activity "
+                    "WHERE datname = current_database() "
+                    "AND pid <> pg_backend_pid() "
+                    "AND backend_type = 'client backend' "
+                    "AND state = 'idle in transaction'"
+                )
+            ).fetchall()
+        nk = sum(1 for _pid, killed in rows if killed)
+        if nk:
+            sys.stderr.write(
+                "pytest: terminated %d idle-in-transaction peer session(s)\n" % nk
+            )
+            sys.stderr.flush()
+    except Exception:
+        pass
+
+
+def _truncate_lock_recoverable(exc: BaseException) -> bool:
+    """True when TRUNCATE failed due to PostgreSQL lock timeout / contention."""
+    orig = getattr(exc, "orig", None)
+    if orig is not None and orig.__class__.__name__ == "LockNotAvailable":
+        return True
+    low = str(exc).lower()
+    return "locknotavailable" in low.replace(" ", "") or "lock timeout" in low
 
 
 def _truncate_app_tables() -> None:
@@ -116,13 +215,46 @@ def _truncate_app_tables() -> None:
     if not names:
         return
     stmt = text(f"TRUNCATE {', '.join(names)} RESTART IDENTITY CASCADE")
-    with engine.begin() as conn:
-        conn.execute(stmt)
+    attempts = max(1, int(os.environ.get("CHILI_PYTEST_TRUNCATE_ATTEMPTS", "6")))
+    lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
+    for attempt in range(attempts):
+        _evict_idle_in_transaction_peers()
+        try:
+            with engine.begin() as conn:
+                conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
+                conn.execute(stmt)
+            # #region agent log
+            if attempt:
+                _agent_ndjson(
+                    hypothesis_id="H5",
+                    location="conftest.py:_truncate_app_tables",
+                    message="TRUNCATE succeeded after retry",
+                    data={"attempt": attempt + 1},
+                )
+            # #endregion
+            return
+        except OperationalError as e:
+            if not _truncate_lock_recoverable(e) or attempt + 1 >= attempts:
+                raise
+            # #region agent log
+            _agent_ndjson(
+                hypothesis_id="H5",
+                location="conftest.py:_truncate_app_tables",
+                message="TRUNCATE lock contention, will retry",
+                data={"attempt": attempt + 1, "max": attempts},
+            )
+            # #endregion
+            time.sleep(0.4 * (attempt + 1))
 
 
 @pytest.fixture()
 def db():
-    """Yield a DB session; tables are truncated before/after so each test is isolated."""
+    """Yield a DB session; tables are truncated at test start.
+
+    We do not TRUNCATE again in ``finally``: the session-scoped ASGI ``TestClient`` keeps
+    the app lifespan open; post-test truncate races request/engine cleanup and caused
+    teardown errors (lock timeout) after PASSED.
+    """
     _bootstrap_test_schema()
     _truncate_app_tables()
     SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)
@@ -131,11 +263,10 @@ def db():
         yield session
     finally:
         session.close()
-        _truncate_app_tables()
 
 
 @pytest.fixture()
-def client(db, fastapi_app):
+def client(db, fastapi_app, _asgi_test_client):
     """FastAPI TestClient wired to the same PostgreSQL database as ``db``."""
 
     def _override_get_db():
@@ -144,9 +275,20 @@ def client(db, fastapi_app):
         finally:
             pass
 
+    # #region agent log
+    _agent_ndjson(
+        hypothesis_id="H2",
+        location="conftest.py:client",
+        message="client fixture bind db override + clear cookies",
+        data={"client_id": id(_asgi_test_client)},
+    )
+    # #endregion
     fastapi_app.dependency_overrides[get_db] = _override_get_db
-    with TestClient(fastapi_app) as c:
-        yield c
+    try:
+        _asgi_test_client.cookies.clear()
+    except Exception:
+        pass
+    yield _asgi_test_client
     fastapi_app.dependency_overrides.clear()
 
 
@@ -155,8 +297,15 @@ def paired_client(db, client):
     """TestClient with a cookie representing a paired (non-guest) user."""
     user = User(name="TestUser")
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
+    # #region agent log
+    _agent_ndjson(
+        hypothesis_id="H4",
+        location="conftest.py:paired_client",
+        message="user flushed (PK set) without post-commit refresh",
+        data={"user_id": getattr(user, "id", None)},
+    )
+    # #endregion
 
     token = "test-device-token-abc123"
     db.add(

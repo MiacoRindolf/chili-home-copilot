@@ -12,8 +12,11 @@ from app.models.core import User
 from app.models.trading import (
     MomentumStrategyVariant,
     TradingAutomationEvent,
+    TradingAutomationRuntimeSnapshot,
     TradingAutomationSession,
+    TradingAutomationSimulatedFill,
 )
+from app.models.trading import MomentumSymbolViability
 from app.services.trading.momentum_neural.context import build_momentum_regime_context
 from app.services.trading.momentum_neural.features import ExecutionReadinessFeatures
 from app.services.trading.momentum_neural.operator_actions import create_paper_draft_session
@@ -232,3 +235,33 @@ def test_paper_events_emitted(monkeypatch, db: Session) -> None:
     db.commit()
     types = {e.event_type for e in db.query(TradingAutomationEvent).filter_by(session_id=sid).all()}
     assert "paper_runner_started" in types or "paper_runner_queued" in types
+
+
+def test_paper_runner_writes_runtime_snapshot_and_sim_fill(monkeypatch, db: Session) -> None:
+    monkeypatch.setattr(settings, "chili_momentum_paper_runner_enabled", True)
+    vid, _ = _seed_live_eligible_row(db, symbol="SIM-USD")
+    via = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == "SIM-USD", MomentumSymbolViability.variant_id == vid)
+        .one()
+    )
+    via.viability_score = 0.95
+    via.paper_eligible = True
+    db.commit()
+    uid = _uid(db, "sim")
+    r = create_paper_draft_session(db, user_id=uid, symbol="SIM-USD", variant_id=vid)
+    sid = r["session_id"]
+    db.commit()
+
+    def qfn(_s: str) -> dict:
+        return {"mid": 125.0, "bid": 124.95, "ask": 125.05, "source": "massive"}
+
+    for _ in range(6):
+        tick_paper_session(db, sid, quote_fn=qfn)
+        db.commit()
+
+    snap = db.query(TradingAutomationRuntimeSnapshot).filter_by(session_id=sid).one_or_none()
+    assert snap is not None
+    assert snap.lane == "simulation"
+    fills = db.query(TradingAutomationSimulatedFill).filter_by(session_id=sid).all()
+    assert fills, "expected at least one simulated fill after forced high-viability entry path"

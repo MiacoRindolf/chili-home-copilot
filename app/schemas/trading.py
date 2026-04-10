@@ -154,3 +154,34 @@ class SmartPickRequest(BaseModel):
 class PickRecheckRequest(BaseModel):
     ticker: str = Field(..., max_length=20)
     entry_price: float = Field(..., gt=0)
+
+
+class TradingBrainRecommendation(BaseModel):
+    action: str = Field(..., min_length=1, max_length=24)
+    symbol: Optional[str] = Field(None, max_length=36)
+    market: Optional[str] = Field(None, max_length=64)
+    thesis: str = Field(..., min_length=1)
+    rationale: list[str] = Field(default_factory=list)
+    entry: Optional[str] = None
+    invalidation: Optional[str] = None
+    exit_logic: Optional[str] = None
+    timeframe: Optional[str] = Field(None, max_length=64)
+    confidence: Optional[float] = Field(None, ge=0.0, le=1.0)
+    risk_note: Optional[str] = None
+    sizing_guidance: Optional[str] = None
+    execution_readiness: Optional[dict[str, Any]] = None
+    what_would_change: Optional[str] = None
+    missing_context: list[str] = Field(default_factory=list)
+    source_of_truth_provider: Optional[str] = Field(None, max_length=32)
+    source_of_truth_exchange: Optional[str] = Field(None, max_length=32)
+
+
+class TradingBrainAssistantChatResponse(BaseModel):
+    ok: bool
+    reply: str = ""
+    error: Optional[str] = None
+    recommendations: list[TradingBrainRecommendation] = Field(default_factory=list)
+    missing_context: list[str] = Field(default_factory=list)
+    snapshot_at: Optional[str] = None
+    execution_readiness: Optional[dict[str, Any]] = None
+    data_fidelity: Optional[dict[str, Any]] = None
