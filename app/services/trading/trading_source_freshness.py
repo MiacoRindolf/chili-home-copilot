@@ -13,6 +13,14 @@ from .batch_job_constants import JOB_PATTERN_IMMINENT_SCANNER
 
 logger = logging.getLogger(__name__)
 
+BOARD_FRESHNESS_KEYS: tuple[str, ...] = (
+    "scan_results_latest_utc",
+    "prescreen_snapshot_finished_latest_utc",
+    "prescreen_candidate_last_seen_latest_utc",
+    "imminent_job_ok_latest_utc",
+    "predictions_cache_last_updated_utc",
+)
+
 
 def _aware_utc(dt: datetime | None) -> datetime | None:
     if dt is None:
@@ -88,20 +96,18 @@ def collect_source_freshness(db: Session) -> dict[str, Any]:
     return out
 
 
-def compute_board_data_as_of(source_freshness: dict[str, Any]) -> tuple[str | None, list[str]]:
+def compute_board_data_as_of(
+    source_freshness: dict[str, Any],
+    *,
+    keys: list[str] | tuple[str, ...] | None = None,
+) -> tuple[str | None, list[str]]:
     """Return (data_as_of_iso_utc, keys_used_in_min).
 
     ``data_as_of`` = min(non-null source timestamps), all parsed as UTC-aware.
     """
-    keys = [
-        "scan_results_latest_utc",
-        "prescreen_snapshot_finished_latest_utc",
-        "prescreen_candidate_last_seen_latest_utc",
-        "imminent_job_ok_latest_utc",
-        "predictions_cache_last_updated_utc",
-    ]
+    keys_to_consider = tuple(keys or BOARD_FRESHNESS_KEYS)
     parsed: list[tuple[datetime, str]] = []
-    for k in keys:
+    for k in keys_to_consider:
         raw = source_freshness.get(k)
         if not raw or not isinstance(raw, str):
             continue

@@ -20,3 +20,18 @@ def test_compute_board_data_as_of_empty() -> None:
     dao, keys = compute_board_data_as_of({})
     assert dao is None
     assert keys == []
+
+
+def test_compute_board_data_as_of_can_scope_to_selected_keys() -> None:
+    sf = {
+        "scan_results_latest_utc": "2026-04-01T00:00:00+00:00",
+        "prescreen_snapshot_finished_latest_utc": "2026-04-05T00:00:00+00:00",
+        "imminent_job_ok_latest_utc": "2026-04-06T00:00:00+00:00",
+    }
+    dao, keys = compute_board_data_as_of(
+        sf,
+        keys=("prescreen_snapshot_finished_latest_utc", "imminent_job_ok_latest_utc"),
+    )
+    assert dao is not None
+    assert dao.startswith("2026-04-05")
+    assert keys == ["prescreen_snapshot_finished_latest_utc"]

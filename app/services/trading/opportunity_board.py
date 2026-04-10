@@ -33,6 +33,20 @@ OPPORTUNITY_ENGINE_SCANNER = "scanner_context"
 OPPORTUNITY_ENGINE_UNIVERSE = "universe_context"
 OPPORTUNITY_ENGINE_PATTERN_RESEARCH = "pattern_research"
 
+_CORE_BOARD_FRESHNESS_KEYS: tuple[str, ...] = (
+    "prescreen_snapshot_finished_latest_utc",
+    "prescreen_candidate_last_seen_latest_utc",
+    "imminent_job_ok_latest_utc",
+)
+
+_SOURCE_FRESHNESS_KEY_MAP: dict[str, tuple[str, ...]] = {
+    "pattern_imminent": _CORE_BOARD_FRESHNESS_KEYS,
+    "scan_pattern": _CORE_BOARD_FRESHNESS_KEYS,
+    "prescreener": ("prescreen_candidate_last_seen_latest_utc",),
+    "scanner": ("scan_results_latest_utc",),
+    "live_predictions": ("predictions_cache_last_updated_utc",),
+}
+
 
 def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
     """Add operator-desk metadata without changing ranking or tier membership."""
@@ -92,6 +106,30 @@ def _prediction_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         if t:
             out[t] = r
     return out
+
+
+def _effective_board_freshness_keys(
+    *,
+    predictions: list[dict[str, Any]],
+    candidate_groups: list[list[dict[str, Any]]],
+) -> list[str]:
+    """Return freshness keys that materially shaped the current board render."""
+    ordered = list(_CORE_BOARD_FRESHNESS_KEYS)
+    seen = set(ordered)
+
+    if predictions:
+        seen.add("predictions_cache_last_updated_utc")
+        ordered.append("predictions_cache_last_updated_utc")
+
+    for group in candidate_groups:
+        for item in group:
+            for src in item.get("sources") or []:
+                for key in _SOURCE_FRESHNESS_KEY_MAP.get(str(src), ()):
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    ordered.append(key)
+    return ordered
 
 
 def _pattern_row_to_candidate(
@@ -517,7 +555,6 @@ def get_trading_opportunity_board(
 
     # Freshness: grounded on DB + prediction cache times, not HTTP request duration.
     source_freshness = collect_source_freshness(db)
-    data_as_of, data_as_of_min_keys = compute_board_data_as_of(source_freshness)
 
     rows, meta = gather_imminent_candidate_rows(
         db,
@@ -634,6 +671,15 @@ def get_trading_opportunity_board(
             "Board scoring stopped early to stay within latency caps — some patterns were not fully evaluated."
         )
 
+    effective_freshness_keys = _effective_board_freshness_keys(
+        predictions=predictions,
+        candidate_groups=[tier_a, tier_b, tier_c, tier_d],
+    )
+    data_as_of, data_as_of_min_keys = compute_board_data_as_of(
+        source_freshness,
+        keys=effective_freshness_keys,
+    )
+
     stale_sec = int(settings.opportunity_board_stale_seconds)
     now_utc = datetime.now(timezone.utc)
     freshness_unknown = data_as_of is None
@@ -690,9 +736,11 @@ def get_trading_opportunity_board(
         # data_as_of: conservative UTC instant — board narrative cannot be newer than this.
         "data_as_of": data_as_of,
         "data_as_of_explanation": (
-            "Minimum (stalest) of non-null source timestamps in source_freshness; "
-            "the composite board is not fresher than its weakest feed."
+            "Minimum (stalest) of the non-null freshness keys that materially fed "
+            "this rendered board; the composite board is not fresher than its weakest "
+            "relevant source."
         ),
+        "data_as_of_considered_keys": effective_freshness_keys,
         "data_as_of_min_keys": data_as_of_min_keys,
         "source_freshness": source_freshness,
         "age_seconds": round(age_sec, 3) if age_sec is not None else None,
