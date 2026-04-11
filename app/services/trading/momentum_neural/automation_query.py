@@ -29,6 +29,7 @@ from ..execution_family_registry import (
     normalize_execution_family,
     resolve_live_spot_adapter_factory,
 )
+from ..execution_robustness import merge_repeatable_edge_robustness_into_readiness
 from ..governance import get_kill_switch_status
 from .operator_actions import (
     STATE_ARMED_PENDING_RUNNER,
@@ -642,13 +643,14 @@ def list_automation_sessions(
         ):
             viability_map[(str(via.symbol), int(via.variant_id))] = via
 
-    rd_cache: dict[str, dict[str, Any]] = {}
     sessions_out: list[dict[str, Any]] = []
     for sess, var in rows:
         ef = (sess.execution_family or "coinbase_spot").strip().lower()
-        if ef not in rd_cache:
-            rd_cache[ef] = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
-        op_fields = operator_fields_for_session(sess, rd_cache[ef])
+        rd = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
+        rd = merge_repeatable_edge_robustness_into_readiness(
+            rd, db, scan_pattern_id=getattr(var, "scan_pattern_id", None)
+        )
+        op_fields = operator_fields_for_session(sess, rd)
         paused = is_operator_paused(sess.risk_snapshot_json)
         pause_info = operator_pause_info(sess.risk_snapshot_json)
         runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
@@ -659,7 +661,7 @@ def list_automation_sessions(
             viability=via,
             trade_count=fill_counts.get(int(sess.id), 0),
             execution_readiness={
-                "operator_readiness": rd_cache[ef],
+                "operator_readiness": rd,
                 "blocked_reason": op_fields.get("blocked_reason"),
             },
         )
@@ -725,6 +727,11 @@ def list_automation_sessions(
             "strategy_params_summary": summarize_strategy_params(var.params_json),
             "refinement_info": _variant_refinement_info(var),
             "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
+            "repeatable_edge_readiness": {
+                "execution_robustness": rd.get("repeatable_edge_execution_robustness"),
+                "live_not_recommended": rd.get("repeatable_edge_live_not_recommended"),
+                "live_not_recommended_reason": rd.get("repeatable_edge_live_not_recommended_reason"),
+            },
         }
         row.update(op_fields)
         sessions_out.append(row)
@@ -804,6 +811,9 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
 
     ef = (sess.execution_family or "coinbase_spot").strip().lower()
     readiness = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
+    readiness = merge_repeatable_edge_robustness_into_readiness(
+        readiness, db, scan_pattern_id=getattr(var, "scan_pattern_id", None)
+    )
     op_fields = operator_fields_for_session(sess, readiness)
     paused = is_operator_paused(sess.risk_snapshot_json)
     pause_info = operator_pause_info(sess.risk_snapshot_json)
@@ -909,6 +919,11 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "strategy_params_summary": summarize_strategy_params(var.params_json),
         "refinement_info": _variant_refinement_info(var),
         "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
+        "repeatable_edge_readiness": {
+            "execution_robustness": readiness.get("repeatable_edge_execution_robustness"),
+            "live_not_recommended": readiness.get("repeatable_edge_live_not_recommended"),
+            "live_not_recommended_reason": readiness.get("repeatable_edge_live_not_recommended_reason"),
+        },
     }
     session_dict.update(op_fields)
 
@@ -999,6 +1014,16 @@ def get_operator_session_focus(
     focus = min(rows, key=_focus_priority)
     ef = (focus.execution_family or "coinbase_spot").strip().lower()
     readiness = build_momentum_operator_readiness(execution_family=ef, symbol=focus.symbol)
+    vrow = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.id == int(focus.variant_id))
+        .one_or_none()
+    )
+    readiness = merge_repeatable_edge_robustness_into_readiness(
+        readiness,
+        db,
+        scan_pattern_id=getattr(vrow, "scan_pattern_id", None) if vrow else None,
+    )
 
     ev_rows = (
         db.query(TradingAutomationEvent)
@@ -1054,6 +1079,11 @@ def get_operator_session_focus(
         "risk_status": summarize_risk_from_snapshot(focus.risk_snapshot_json),
         "paper_execution": summarize_paper_execution(snap),
         "live_execution": summarize_live_execution(snap),
+        "repeatable_edge_readiness": {
+            "execution_robustness": readiness.get("repeatable_edge_execution_robustness"),
+            "live_not_recommended": readiness.get("repeatable_edge_live_not_recommended"),
+            "live_not_recommended_reason": readiness.get("repeatable_edge_live_not_recommended_reason"),
+        },
         **op,
     }
 

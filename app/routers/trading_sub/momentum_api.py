@@ -45,6 +45,7 @@ from ...services.trading.momentum_neural.automation_query import (
     run_automation_session,
     stop_automation_session,
 )
+from ...services.trading.execution_robustness import merge_repeatable_edge_robustness_into_readiness
 from ...services.trading.momentum_neural.operator_readiness import build_momentum_operator_readiness
 from ...services.trading.execution_family_registry import execution_family_capabilities
 from ...services.trading.momentum_neural.feedback_query import (
@@ -265,17 +266,25 @@ def post_momentum_promote_paper(
 
 @router.get("/operator/readiness")
 def get_momentum_operator_readiness(
+    db: Session = Depends(get_db),
     symbol: Optional[str] = Query(None, max_length=36),
     execution_family: str = Query("coinbase_spot", max_length=32),
+    scan_pattern_id: Optional[int] = Query(None, ge=1),
 ) -> dict[str, Any]:
-    """Shared readiness truth (no auth — no user-specific secrets)."""
-    return {
-        "ok": True,
-        "operator_readiness": build_momentum_operator_readiness(
-            execution_family=execution_family,
-            symbol=symbol.strip().upper() if symbol else None,
-        ),
-    }
+    """Shared readiness truth (no auth — no user-specific secrets).
+
+    Optional ``scan_pattern_id`` merges repeatable-edge ``execution_robustness`` from
+    ``ScanPattern.oos_validation_json`` into the payload (no separate readiness system).
+    """
+    rd = build_momentum_operator_readiness(
+        execution_family=execution_family,
+        symbol=symbol.strip().upper() if symbol else None,
+    )
+    if scan_pattern_id is not None:
+        rd = merge_repeatable_edge_robustness_into_readiness(
+            rd, db, scan_pattern_id=int(scan_pattern_id)
+        )
+    return {"ok": True, "operator_readiness": rd}
 
 
 @router.get("/operator/current-session")

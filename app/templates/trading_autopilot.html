@@ -1013,6 +1013,41 @@
     return '<div class="ap-callout block"><strong>Watchouts</strong>' + esc(parts.join(' | ')) + '</div>';
   }
 
+  function renderRepeatableEdgeReadiness(row) {
+    var re = row.repeatable_edge_readiness;
+    if (!re || typeof re !== 'object') return '';
+    var er = re.execution_robustness;
+    var parts = [];
+    if (re.live_not_recommended) {
+      parts.push(
+        'Live not recommended'
+        + (re.live_not_recommended_reason
+          ? ' (' + String(re.live_not_recommended_reason).replace(/_/g, ' ') + ')'
+          : '')
+      );
+    }
+    if (er && typeof er === 'object') {
+      if (er.skip_reason) {
+        parts.push('Execution robustness skipped: ' + String(er.skip_reason).replace(/_/g, ' '));
+      } else {
+        if (er.robustness_tier != null) parts.push('Robustness: ' + String(er.robustness_tier));
+        if (er.provider_truth_mode != null) parts.push('Truth: ' + String(er.provider_truth_mode).replace(/_/g, ' '));
+        if (er.fill_rate != null) {
+          var fr = Number(er.fill_rate);
+          parts.push('Fill ' + (isFinite(fr) ? (Math.round(fr * 1000) / 10 + '%') : String(er.fill_rate)));
+        }
+        if (er.avg_realized_slippage_bps != null) parts.push('Slippage ' + String(er.avg_realized_slippage_bps) + ' bps');
+        if (er.readiness_impact_flags && er.readiness_impact_flags.length) {
+          parts.push('Flags: ' + er.readiness_impact_flags.map(function(f) { return String(f).replace(/_/g, ' '); }).join(', '));
+        }
+      }
+    }
+    if (!parts.length) return '';
+    return '<div class="ap-callout" style="border-color:rgba(251,191,36,.35);background:rgba(251,191,36,.06)"><strong>Linked repeatable-edge pattern</strong>'
+      + esc(parts.join(' | '))
+      + '</div>';
+  }
+
   function renderSessionControlButton(sessionId, action, meta) {
     meta = meta || {};
     var cls = 'ap-btn';
@@ -1075,6 +1110,7 @@
       + '          <strong>Thesis</strong>' + esc(row.thesis || 'Awaiting next bounded decision update.')
       + '        </div>'
       + renderSessionWarningCallout(row, readiness, runner)
+      + renderRepeatableEdgeReadiness(row)
       + '        <div class="ap-session-chart-wrap">'
       + '          <div class="ap-chart-head">'
       + '            <div class="ap-muted">Live candlestick replay with simulated buy and sell markers.</div>'

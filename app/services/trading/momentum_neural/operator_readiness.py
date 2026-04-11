@@ -118,6 +118,9 @@ def blocked_reason_for_session(
                 return "paper_runner_disabled"
             return "paper_scheduler_not_running"
     if m == "live":
+        re_block = readiness.get("_repeatable_edge_block_live")
+        if re_block:
+            return str(re_block)
         if readiness.get("governance_blocks_live"):
             return "governance_kill_switch"
         if canonical_state in ("armed_pending_runner", "queued_live") and not readiness.get("live_runner_enabled"):
@@ -156,6 +159,8 @@ def next_action_required(
         return "This execution family is not implemented for automation (coinbase_spot only today)."
     if blocked == "momentum_neural_disabled":
         return "Enable CHILI_MOMENTUM_NEURAL_ENABLED."
+    if blocked == "execution_robustness_critical":
+        return "Linked scan pattern execution robustness is critical — live blocked by policy."
 
     if canonical_state == "live_arm_pending":
         return "Confirm live arm in the modal or cancel the pending session."

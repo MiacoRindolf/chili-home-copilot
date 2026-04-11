@@ -4197,6 +4197,28 @@ function _liveDriftLine(p) {
   return '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.35" title="Phase 3 live/paper drift vs research (display only)">Live drift: ' + parts.join(' Â· ') + '</div>';
 }
 
+function _executionRobustnessLine(p) {
+  var s = p.execution_robustness_summary;
+  if (!s || typeof s !== 'object') return '';
+  var parts = [];
+  if (s.skip_reason) {
+    parts.push('skipped: ' + escHtml(String(s.skip_reason).replace(/_/g, ' ')));
+  } else {
+    if (s.robustness_tier != null) parts.push('tier ' + escHtml(String(s.robustness_tier)));
+    if (s.provider_truth_mode != null) parts.push('truth ' + escHtml(String(s.provider_truth_mode).replace(/_/g, ' ')));
+    if (s.fill_rate != null) {
+      var fr = Number(s.fill_rate);
+      parts.push('fill ' + escHtml(String(isFinite(fr) ? Math.round(fr * 1000) / 10 : s.fill_rate)) + '%');
+    }
+    if (s.avg_realized_slippage_bps != null) parts.push('slip ' + escHtml(String(s.avg_realized_slippage_bps)) + ' bps');
+    if (s.readiness_impact_flags && s.readiness_impact_flags.length) {
+      parts.push('flags ' + escHtml(s.readiness_impact_flags.join(', ').replace(/_/g, ' ')));
+    }
+  }
+  if (!parts.length) return '';
+  return '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.35" title="Phase 4 execution robustness from linked trades (display only)">Execution: ' + parts.join(' Â· ') + '</div>';
+}
+
 function loadTradeablePatterns() {
   var container = document.getElementById('brain-tradeable-patterns');
   if (!container) return;
@@ -4256,6 +4278,7 @@ function loadTradeablePatterns() {
       }
       var phase2Line = _phase2ResearchLine(p.oos_validation);
       var driftLine = _liveDriftLine(p);
+      var execLine = _executionRobustnessLine(p);
       var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
       html += '<div class="tp-tradeable-card">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px;line-height:1.35">' + name + '</div>' +
@@ -4270,6 +4293,7 @@ function loadTradeablePatterns() {
         edgeLine +
         phase2Line +
         driftLine +
+        execLine +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
       '</div>';
     });
@@ -4328,12 +4352,14 @@ function loadResearchEdgePatterns() {
       }
       var phase2Line = _phase2ResearchLine(p.oos_validation);
       var driftLine = _liveDriftLine(p);
+      var execLineRe = _executionRobustnessLine(p);
       html += '<div class="tp-tradeable-card">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.35">' + name + '</div>' +
         '<div style="font-size:9px;color:var(--text-secondary)">lifecycle <strong style="color:var(--accent)">' + life + '</strong> Â· ' + promo + '</div>' +
         body +
         phase2Line +
         driftLine +
+        execLineRe +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
         '</div>';
     });

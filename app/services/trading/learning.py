@@ -7979,6 +7979,13 @@ def run_learning_cycle(
             except Exception as e:
                 logger.warning("[learning] live drift refresh failed: %s", e)
                 report["live_drift"] = {"ok": False, "error": str(e)}
+            try:
+                from .execution_robustness import run_execution_robustness_refresh
+
+                report["execution_robustness"] = run_execution_robustness_refresh(db)
+            except Exception as e:
+                logger.warning("[learning] execution robustness refresh failed: %s", e)
+                report["execution_robustness"] = {"ok": False, "error": str(e)}
 
         # Step 14: Finalize + log
         # graph-node: c_meta/finalize

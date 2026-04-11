@@ -617,6 +617,18 @@ class Settings(BaseSettings):
     brain_live_drift_auto_challenged_enabled: bool = False
     brain_live_drift_auto_challenged_max_p_like: float = 0.02
 
+    # Phase 4: execution robustness from linked Trade rows (repeatable-edge promoted/live).
+    brain_execution_robustness_enabled: bool = False
+    brain_execution_robustness_window_days: int = 120
+    brain_execution_robustness_min_orders: int = 5
+    brain_execution_robustness_warn_fill_rate: float = 0.65
+    brain_execution_robustness_critical_fill_rate: float = 0.45
+    brain_execution_robustness_warn_slippage_bps: float = 35.0
+    brain_execution_robustness_critical_slippage_bps: float = 65.0
+    brain_execution_robustness_live_not_recommended: bool = True
+    brain_execution_robustness_flag_weak_truth_live: bool = True
+    brain_execution_robustness_hard_block_live_enabled: bool = False
+
     # When a pattern is promoted, initialize paper_book_json for optional shadow tracking.
     brain_paper_book_on_promotion: bool = False
 
