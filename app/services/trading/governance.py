@@ -15,6 +15,8 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ...config import settings
+
 logger = logging.getLogger(__name__)
 
 # ── Kill Switch ───────────────────────────────────────────────────────
@@ -215,6 +217,7 @@ def request_pattern_to_live(
     paper trades, it is auto-approved.
     """
     from ...models.trading import ScanPattern, PaperTrade
+    from .portfolio_allocator import build_pattern_allocation_state
 
     pattern = db.query(ScanPattern).filter(ScanPattern.id == pattern_id).first()
     if not pattern:
@@ -234,6 +237,19 @@ def request_pattern_to_live(
             ),
         }
 
+    allocation = build_pattern_allocation_state(
+        db,
+        pattern,
+        user_id=getattr(pattern, "user_id", None),
+        context="pattern_to_live",
+    )
+    if (
+        not allocation.get("allowed_if_enforced", True)
+        and bool(getattr(settings, "brain_allocator_live_hard_block_enabled", False))
+    ):
+        db.commit()
+        return {"approved": False, "reason": allocation.get("blocked_reason") or "allocator_blocked", "allocation": allocation}
+
     if auto_approve_paper_profitable:
         paper_trades = db.query(PaperTrade).filter(
             PaperTrade.scan_pattern_id == pattern_id,
@@ -252,17 +268,20 @@ def request_pattern_to_live(
                         "approved": True,
                         "auto": True,
                         "reason": f"Paper profitable: {wr:.0f}% WR, ${total_pnl:.2f} P&L ({len(paper_trades)} trades)",
+                        "allocation": allocation,
                     }
                 except Exception as e:
                     return {"approved": False, "reason": f"lifecycle transition failed: {e}"}
 
-    return submit_for_approval("pattern_to_live", {
+    out = submit_for_approval("pattern_to_live", {
         "pattern_id": pattern_id,
         "pattern_name": pattern.name,
         "lifecycle_stage": pattern.lifecycle_stage,
         "confidence": pattern.confidence,
         "oos_win_rate": pattern.oos_win_rate,
     })
+    out["allocation"] = allocation
+    return out
 
 
 def get_governance_dashboard() -> dict[str, Any]:

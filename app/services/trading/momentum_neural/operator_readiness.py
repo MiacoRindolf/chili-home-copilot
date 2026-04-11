@@ -121,6 +121,9 @@ def blocked_reason_for_session(
         re_block = readiness.get("_repeatable_edge_block_live")
         if re_block:
             return str(re_block)
+        alloc_block = readiness.get("_allocator_block_live")
+        if alloc_block:
+            return str(alloc_block)
         if readiness.get("governance_blocks_live"):
             return "governance_kill_switch"
         if canonical_state in ("armed_pending_runner", "queued_live") and not readiness.get("live_runner_enabled"):
@@ -161,6 +164,14 @@ def next_action_required(
         return "Enable CHILI_MOMENTUM_NEURAL_ENABLED."
     if blocked == "execution_robustness_critical":
         return "Linked scan pattern execution robustness is critical — live blocked by policy."
+    if blocked == "same_ticker_conflict":
+        return "Portfolio allocator sees an existing same-symbol live bet with better or equivalent quality."
+    if blocked == "sector_cap":
+        return "Portfolio allocator hit the sector concentration cap for this live request."
+    if blocked == "correlation_bucket_cap":
+        return "Portfolio allocator hit the correlation bucket cap for this live request."
+    if blocked == "quality_stack_critical":
+        return "Allocator suppressed this candidate because drift and execution quality are both critical."
 
     if canonical_state == "live_arm_pending":
         return "Confirm live arm in the modal or cancel the pending session."

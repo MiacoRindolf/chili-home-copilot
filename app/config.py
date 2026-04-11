@@ -616,6 +616,14 @@ class Settings(BaseSettings):
     brain_live_drift_confidence_cap: float = 0.95
     brain_live_drift_auto_challenged_enabled: bool = False
     brain_live_drift_auto_challenged_max_p_like: float = 0.02
+    brain_live_drift_v2_enabled: bool = True
+    brain_live_drift_shadow_mode: bool = True
+    brain_live_drift_v2_warn_expectancy_ratio: float = 0.7
+    brain_live_drift_v2_critical_expectancy_ratio: float = 0.4
+    brain_live_drift_v2_warn_profit_factor: float = 1.0
+    brain_live_drift_v2_critical_profit_factor: float = 0.8
+    brain_live_drift_v2_warn_slippage_bps: float = 25.0
+    brain_live_drift_v2_critical_slippage_bps: float = 45.0
 
     # Phase 4: execution robustness from linked Trade rows (repeatable-edge promoted/live).
     brain_execution_robustness_enabled: bool = False
@@ -628,6 +636,10 @@ class Settings(BaseSettings):
     brain_execution_robustness_live_not_recommended: bool = True
     brain_execution_robustness_flag_weak_truth_live: bool = True
     brain_execution_robustness_hard_block_live_enabled: bool = False
+    brain_execution_robustness_v2_enabled: bool = True
+    brain_execution_robustness_shadow_mode: bool = True
+    brain_execution_robustness_v2_live_not_recommended: bool = False
+    brain_execution_robustness_v2_hard_block_live_enabled: bool = False
 
     # When a pattern is promoted, initialize paper_book_json for optional shadow tracking.
     brain_paper_book_on_promotion: bool = False
@@ -654,6 +666,12 @@ class Settings(BaseSettings):
 
     # Portfolio: max simultaneous open longs per coarse sector (0 = disabled).
     brain_max_open_per_sector: int = 0
+    brain_max_correlated_positions: int = 0
+    brain_allocator_enabled: bool = True
+    brain_allocator_shadow_mode: bool = True
+    brain_allocator_live_soft_block_enabled: bool = False
+    brain_allocator_live_hard_block_enabled: bool = False
+    brain_allocator_incumbent_score_margin: float = 0.08
 
     # Imminent ScanPattern breakout alerts (scheduler + pattern_imminent_alerts).
     pattern_imminent_alert_enabled: bool = True

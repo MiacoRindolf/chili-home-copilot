@@ -435,6 +435,7 @@ def is_cb_terminal(cb_state: str | None) -> bool:
 def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Reconcile local trades with broker_source='coinbase' against Coinbase."""
     from ..models.trading import Trade, StrategyProposal
+    from .trading.execution_audit import normalize_coinbase_order_event, record_execution_event
 
     if not is_connected():
         return {"synced": 0, "filled": 0, "cancelled": 0, "errors": 0}
@@ -461,26 +462,31 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
             cb_state = (cb_order.get("status") or "").lower()
             now = datetime.utcnow()
-
-            trade.broker_status = cb_state
+            normalized = normalize_coinbase_order_event(
+                order={**cb_order, "order_id": trade.broker_order_id},
+                trade=trade,
+                event_type="status",
+            )
+            normalized.setdefault("submitted_at", getattr(trade, "submitted_at", None) or now)
+            normalized.setdefault("acknowledged_at", now)
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                **normalized,
+            )
             trade.last_broker_sync = now
 
             if cb_state == "filled":
-                trade.status = "open"
-                avg_price = _safe_float(cb_order.get("average_filled_price"))
-                if avg_price:
-                    trade.avg_fill_price = avg_price
-                    trade.entry_price = avg_price
-                filled_qty = _safe_float(cb_order.get("filled_size"))
-                if filled_qty:
-                    trade.quantity = filled_qty
-                trade.filled_at = now
                 filled += 1
-                logger.info(f"[coinbase] Order {trade.broker_order_id} for {trade.ticker} FILLED @ ${avg_price}")
+                logger.info(
+                    f"[coinbase] Order {trade.broker_order_id} for {trade.ticker} FILLED @ ${trade.avg_fill_price}"
+                )
                 _update_proposal_on_fill(db, trade)
 
             elif cb_state in _CB_TERMINAL_STATES and cb_state != "filled":
-                trade.status = "cancelled"
                 cancelled += 1
                 logger.info(f"[coinbase] Order {trade.broker_order_id} for {trade.ticker} {cb_state}")
                 _update_proposal_on_cancel(db, trade, cb_state)

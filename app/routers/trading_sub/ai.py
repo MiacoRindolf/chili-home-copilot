@@ -612,8 +612,15 @@ def api_tradeable_patterns(
         )
 
     rows = q.limit(lim).all()
-    from ...services.trading.execution_robustness import execution_robustness_summary as _execution_robustness_summary
-    from ...services.trading.live_drift import live_drift_summary as _live_drift_summary
+    from ...services.trading.execution_robustness import (
+        execution_robustness_summary as _execution_robustness_summary,
+        execution_robustness_v2_summary as _execution_robustness_v2_summary,
+    )
+    from ...services.trading.live_drift import (
+        live_drift_summary as _live_drift_summary,
+        live_drift_v2_summary as _live_drift_v2_summary,
+    )
+    from ...services.trading.pattern_validation_projection import read_pattern_validation_projection
 
     sp_ids = [p.id for p in rows]
     kpi_by_sp = _research_kpi_summary_for_scan_patterns(db, sp_ids)
@@ -655,10 +662,7 @@ def api_tradeable_patterns(
         oos_val = getattr(p, "oos_validation_json", None) or {}
         if not isinstance(oos_val, dict):
             oos_val = {}
-
-        ee = oos_val.get("edge_evidence") if isinstance(oos_val, dict) else None
-        _ld = oos_val.get("live_drift") if isinstance(oos_val.get("live_drift"), dict) else None
-        _er = oos_val.get("execution_robustness") if isinstance(oos_val.get("execution_robustness"), dict) else None
+        projection = read_pattern_validation_projection(p)
         out.append(
             {
                 "id": p.id,
@@ -679,9 +683,12 @@ def api_tradeable_patterns(
                 "bench_passes_gate": bench_pass,
                 "bench_stress_passes_gate": stress_pass,
                 "oos_validation": oos_val,
-                "edge_evidence": ee if isinstance(ee, dict) else None,
-                "live_drift_summary": _live_drift_summary(_ld),
-                "execution_robustness_summary": _execution_robustness_summary(_er),
+                "edge_evidence": projection.edge_evidence or None,
+                "live_drift_summary": _live_drift_summary(projection.live_drift),
+                "live_drift_v2_summary": _live_drift_v2_summary(projection.live_drift_v2),
+                "execution_robustness_summary": _execution_robustness_summary(projection.execution_robustness),
+                "execution_robustness_v2_summary": _execution_robustness_v2_summary(projection.execution_robustness_v2),
+                "allocation_state": projection.allocation_state or None,
                 "queue_tier": getattr(p, "queue_tier", None),
                 "linked_insight_id": insight_by_sp.get(p.id),
                 "research_kpi_summary": kpi_by_sp.get(p.id),
@@ -742,15 +749,22 @@ def api_research_edge_patterns(
             if spid is not None and spid not in insight_by_sp:
                 insight_by_sp[int(spid)] = int(iid)
 
-    from ...services.trading.execution_robustness import execution_robustness_summary as _execution_robustness_summary_re
-    from ...services.trading.live_drift import live_drift_summary as _live_drift_summary_re
+    from ...services.trading.execution_robustness import (
+        execution_robustness_summary as _execution_robustness_summary_re,
+        execution_robustness_v2_summary as _execution_robustness_v2_summary_re,
+    )
+    from ...services.trading.live_drift import (
+        live_drift_summary as _live_drift_summary_re,
+        live_drift_v2_summary as _live_drift_v2_summary_re,
+    )
+    from ...services.trading.pattern_validation_projection import read_pattern_validation_projection
 
     out = []
     for p in rows:
         oos_val = getattr(p, "oos_validation_json", None) or {}
         if not isinstance(oos_val, dict):
             oos_val = {}
-        ee = oos_val.get("edge_evidence")
+        projection = read_pattern_validation_projection(p)
         oos_wr = p.oos_win_rate
         if oos_wr is None and p.win_rate is not None:
             display_wr = round(float(p.win_rate) * 100.0, 1)
@@ -761,8 +775,6 @@ def api_research_edge_patterns(
             )
             wr_source = "oos" if oos_wr is not None else None
         tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
-        _ldr = oos_val.get("live_drift") if isinstance(oos_val.get("live_drift"), dict) else None
-        _err = oos_val.get("execution_robustness") if isinstance(oos_val.get("execution_robustness"), dict) else None
         out.append(
             {
                 "id": p.id,
@@ -772,10 +784,13 @@ def api_research_edge_patterns(
                 "display_win_rate_pct": display_wr,
                 "display_wr_source": wr_source,
                 "trade_count_for_gate": int(tc or 0),
-                "edge_evidence": ee if isinstance(ee, dict) else None,
+                "edge_evidence": projection.edge_evidence or None,
                 "oos_validation": oos_val,
-                "live_drift_summary": _live_drift_summary_re(_ldr),
-                "execution_robustness_summary": _execution_robustness_summary_re(_err),
+                "live_drift_summary": _live_drift_summary_re(projection.live_drift),
+                "live_drift_v2_summary": _live_drift_v2_summary_re(projection.live_drift_v2),
+                "execution_robustness_summary": _execution_robustness_summary_re(projection.execution_robustness),
+                "execution_robustness_v2_summary": _execution_robustness_v2_summary_re(projection.execution_robustness_v2),
+                "allocation_state": projection.allocation_state or None,
                 "linked_insight_id": insight_by_sp.get(p.id),
             }
         )

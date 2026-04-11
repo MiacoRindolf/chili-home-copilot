@@ -1287,6 +1287,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     local status, fill price, and timestamps accordingly.
     """
     from ..models.trading import Trade, StrategyProposal
+    from .trading.execution_audit import normalize_robinhood_order_event, record_execution_event
 
     if not is_connected():
         return {"synced": 0, "filled": 0, "cancelled": 0, "errors": 0}
@@ -1324,21 +1325,25 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 continue
 
             rh_state = (rh_order.get("state") or "").lower()
-            new_status = map_rh_status(rh_state)
             now = datetime.utcnow()
-
-            trade.broker_status = rh_state
+            normalized = normalize_robinhood_order_event(
+                order={**rh_order, "id": trade.broker_order_id},
+                trade=trade,
+                event_type="status",
+            )
+            normalized.setdefault("submitted_at", getattr(trade, "submitted_at", None) or now)
+            normalized.setdefault("acknowledged_at", now)
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                **normalized,
+            )
             trade.last_broker_sync = now
 
             if rh_state == "filled":
-                trade.status = "open"
-                trade.avg_fill_price = _safe_float(rh_order.get("average_price"))
-                if trade.avg_fill_price:
-                    trade.entry_price = trade.avg_fill_price
-                filled_qty = _safe_float(rh_order.get("cumulative_quantity"))
-                if filled_qty:
-                    trade.quantity = filled_qty
-                trade.filled_at = now
                 try:
                     from .trading.tca_service import apply_tca_on_trade_fill
 
@@ -1376,10 +1381,21 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             if not rh_order:
                 continue
             rh_state = (rh_order.get("state") or "").lower()
-            trade.broker_status = rh_state
             trade.last_broker_sync = datetime.utcnow()
+            normalized = normalize_robinhood_order_event(
+                order={**rh_order, "id": trade.broker_order_id},
+                trade=trade,
+                event_type="status",
+            )
+            record_execution_event(
+                db,
+                user_id=trade.user_id,
+                ticker=trade.ticker,
+                trade=trade,
+                scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+                **normalized,
+            )
             if rh_state in ("cancelled", "canceled", "rejected", "failed"):
-                trade.status = "cancelled"
                 cancelled += 1
                 synced += 1
                 logger.info(

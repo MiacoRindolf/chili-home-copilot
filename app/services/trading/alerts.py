@@ -846,6 +846,7 @@ def approve_proposal(
     """Approve a proposal and execute via the best available broker."""
     from ...models.trading import StrategyProposal
     from sqlalchemy import or_
+    from .portfolio_allocator import build_proposal_allocation_decision
 
     q = db.query(StrategyProposal).filter(StrategyProposal.id == proposal_id)
     if user_id is not None:
@@ -861,6 +862,19 @@ def approve_proposal(
         db.commit()
         return {"ok": False, "error": "Proposal has expired"}
 
+    allocation = build_proposal_allocation_decision(db, proposal, user_id=user_id)
+    if (
+        not allocation.get("allowed_if_enforced", True)
+        and bool(getattr(settings, "brain_allocator_live_hard_block_enabled", False))
+    ):
+        proposal.allocation_decision_json = dict(allocation)
+        db.commit()
+        return {
+            "ok": False,
+            "error": allocation.get("blocked_reason") or "allocator_blocked",
+            "allocation": allocation,
+        }
+
     proposal.status = "approved"
     proposal.reviewed_at = datetime.utcnow()
     db.commit()
@@ -871,6 +885,7 @@ def approve_proposal(
         "ok": True,
         "proposal": _proposal_to_dict(proposal),
         "execution": execution,
+        "allocation": allocation,
     }
 
 
@@ -1222,6 +1237,11 @@ def _execute_proposal(
     """
     from ..broker_manager import place_buy_order, map_status, get_best_broker_for, is_any_connected
     from ...models.trading import Trade
+    from .execution_audit import (
+        normalize_coinbase_order_event,
+        normalize_robinhood_order_event,
+        record_execution_event,
+    )
 
     _prop_spid = _scan_pattern_id_from_proposal(proposal)
 
@@ -1257,6 +1277,7 @@ def _execute_proposal(
             proposal.quantity = 1
 
     target_broker = broker or get_best_broker_for(ticker)
+    now = datetime.utcnow()
 
     if not is_any_connected() or target_broker == "manual":
         trade = Trade(
@@ -1268,6 +1289,15 @@ def _execute_proposal(
             status="open",
             broker_source="manual",
             scan_pattern_id=_prop_spid,
+            strategy_proposal_id=proposal.id,
+            filled_quantity=quantity,
+            remaining_quantity=0.0,
+            submitted_at=now,
+            acknowledged_at=now,
+            first_fill_at=now,
+            last_fill_at=now,
+            filled_at=now,
+            avg_fill_price=proposal.entry_price,
             tca_reference_entry_price=float(proposal.entry_price),
             indicator_snapshot=json.dumps({
                 "stop_loss": proposal.stop_loss,
@@ -1283,6 +1313,31 @@ def _execute_proposal(
         proposal.status = "executed"
         proposal.executed_at = datetime.utcnow()
         proposal.trade_id = trade.id
+        record_execution_event(
+            db,
+            user_id=user_id,
+            ticker=ticker,
+            trade=trade,
+            proposal=proposal,
+            scan_pattern_id=_prop_spid,
+            venue="manual",
+            execution_family="manual_equity",
+            broker_source="manual",
+            order_id=f"manual-proposal-{proposal.id}",
+            event_type="fill",
+            status="filled",
+            requested_quantity=float(quantity or 0),
+            cumulative_filled_quantity=float(quantity or 0),
+            last_fill_quantity=float(quantity or 0),
+            average_fill_price=float(proposal.entry_price),
+            submitted_at=now,
+            acknowledged_at=now,
+            first_fill_at=now,
+            last_fill_at=now,
+            event_at=now,
+            reference_price=float(proposal.entry_price),
+            payload_json={"source": "manual_proposal_record"},
+        )
         db.commit()
         return {"status": "recorded", "trade_id": trade.id, "reason": "Broker not connected — trade recorded locally"}
 
@@ -1333,9 +1388,15 @@ def _execute_proposal(
                 broker_source=used_broker,
                 broker_order_id=result.get("order_id"),
                 broker_status=raw_state,
-                last_broker_sync=datetime.utcnow(),
-                filled_at=datetime.utcnow() if is_already_filled else None,
+                last_broker_sync=now,
+                filled_at=now if is_already_filled else None,
                 avg_fill_price=avg_price if is_already_filled else None,
+                filled_quantity=float(quantity or 0) if is_already_filled else 0.0,
+                remaining_quantity=0.0 if is_already_filled else float(quantity or 0),
+                submitted_at=now,
+                acknowledged_at=now,
+                first_fill_at=now if is_already_filled else None,
+                last_fill_at=now if is_already_filled else None,
                 tca_reference_entry_price=float(proposal.entry_price),
                 strategy_proposal_id=proposal.id,
                 scan_pattern_id=_prop_spid,
@@ -1351,6 +1412,38 @@ def _execute_proposal(
             )
             db.add(trade)
             db.flush()
+            raw_order = dict(result.get("raw") or {})
+            if used_broker == "coinbase":
+                normalized = normalize_coinbase_order_event(
+                    order={**raw_order, "order_id": result.get("order_id"), "status": raw_state},
+                    trade=trade,
+                    proposal=proposal,
+                    event_type="fill" if is_already_filled else "submitted",
+                )
+            else:
+                normalized = normalize_robinhood_order_event(
+                    order={**raw_order, "id": result.get("order_id"), "state": raw_state},
+                    trade=trade,
+                    proposal=proposal,
+                    event_type="fill" if is_already_filled else "submitted",
+                )
+            normalized.setdefault("requested_quantity", float(quantity or 0))
+            normalized.setdefault("submitted_at", now)
+            normalized.setdefault("acknowledged_at", now)
+            if is_already_filled:
+                normalized.setdefault("cumulative_filled_quantity", float(quantity or 0))
+                normalized.setdefault("first_fill_at", now)
+                normalized.setdefault("last_fill_at", now)
+                normalized.setdefault("average_fill_price", avg_price or proposal.entry_price)
+            record_execution_event(
+                db,
+                user_id=user_id,
+                ticker=ticker,
+                trade=trade,
+                proposal=proposal,
+                scan_pattern_id=_prop_spid,
+                **normalized,
+            )
             if is_already_filled:
                 try:
                     from .tca_service import apply_tca_on_trade_fill
