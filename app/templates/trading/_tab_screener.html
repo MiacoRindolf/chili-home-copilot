@@ -1,0 +1,113 @@
+      <!-- Screener -->
+      <div class="t-tab-content" id="tab-screener">
+        <div class="scr-type-tabs">
+          <button class="screen-type-btn active" data-stype="swing" onclick="switchScreenType(this,'swing')">Swing</button>
+          <button class="screen-type-btn" data-stype="daytrade" onclick="switchScreenType(this,'daytrade')">Day Trade</button>
+          <button class="screen-type-btn" data-stype="breakouts" onclick="switchScreenType(this,'breakouts')">Breakouts</button>
+          <button class="screen-type-btn" data-stype="momentum" onclick="switchScreenType(this,'momentum')">Momentum</button>
+          <button class="screen-type-btn" data-stype="patterns" onclick="switchScreenType(this,'patterns')">Patterns</button>
+        </div>
+        <div class="screen-panel" id="screen-panel-swing">
+          <div class="scr-action-row">
+            <select id="screen-preset" class="scr-select">
+              <option value="">-- Select a pattern --</option>
+            </select>
+            <button onclick="runScreener()" id="btn-screen" class="sig-btn sig-btn-primary">Scan Market</button>
+            <button onclick="runScreener()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
+            <span id="screen-status" class="sig-status"></span>
+          </div>
+          <div id="screen-desc" class="scr-desc-hint" style="display:none"></div>
+          <div class="scr-filter-bar" id="swing-filter-bar" style="display:none">
+            <div class="scr-filter-chips" id="swing-signal-chips">
+              <button class="scr-chip active" onclick="_setFilter('swing','signal','all',this)">All</button>
+              <button class="scr-chip" onclick="_setFilter('swing','signal','buy',this)">Buy</button>
+              <button class="scr-chip" onclick="_setFilter('swing','signal','sell',this)">Sell</button>
+              <button class="scr-chip" onclick="_setFilter('swing','signal','hold',this)">Hold</button>
+            </div>
+            <input type="number" class="scr-filter-input" placeholder="Min Score" step="0.5" min="0" max="10" onchange="_setFilter('swing','minScore',this.value)">
+            <input type="text" class="scr-filter-input scr-search" placeholder="Search ticker..." oninput="_setFilter('swing','search',this.value)">
+            <span class="scr-result-count" id="swing-count"></span>
+          </div>
+          <div id="screen-results" class="scr-results-area">
+            <div class="scr-empty">Select a pattern above and click "Scan Market" to screen all stocks and crypto.</div>
+          </div>
+        </div>
+        <div class="screen-panel" id="screen-panel-daytrade" style="display:none">
+          <div class="scr-action-row">
+            <button onclick="runDaytradeScan()" id="btn-daytrade" class="sig-btn" style="background:linear-gradient(135deg,#f59e0b,#d97706);color:#fff">Scan Day Trades</button>
+            <button onclick="runDaytradeScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
+            <span id="daytrade-status" class="sig-status"></span>
+          </div>
+          <div class="scr-filter-bar" id="dt-filter-bar" style="display:none">
+            <div class="scr-filter-chips" id="dt-signal-chips">
+              <button class="scr-chip active" onclick="_setFilter('dt','signal','all',this)">All</button>
+              <button class="scr-chip" onclick="_setFilter('dt','signal','long',this)">Long</button>
+              <button class="scr-chip" onclick="_setFilter('dt','signal','short',this)">Short</button>
+            </div>
+            <input type="number" class="scr-filter-input" placeholder="Min Score" step="0.5" min="0" max="10" onchange="_setFilter('dt','minScore',this.value)">
+            <input type="text" class="scr-filter-input scr-search" placeholder="Search ticker..." oninput="_setFilter('dt','search',this.value)">
+            <span class="scr-result-count" id="dt-count"></span>
+          </div>
+          <div id="daytrade-results" class="scr-results-area">
+            <div class="scr-empty">Click "Scan Day Trades" to find intraday opportunities.</div>
+          </div>
+        </div>
+        <!-- Breakouts -->
+        <div class="screen-panel" id="screen-panel-breakouts" style="display:none">
+          <div class="scr-action-row">
+            <button onclick="runBreakoutScan()" id="btn-breakout" class="sig-btn" style="background:linear-gradient(135deg,#10b981,#059669);color:#fff">Scan Breakouts</button>
+            <button onclick="runBreakoutScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
+            <span id="breakout-status" class="sig-status"></span>
+          </div>
+          <div class="scr-filter-bar" id="bo-filter-bar" style="display:none">
+            <div class="scr-filter-chips" id="bo-signal-chips">
+              <button class="scr-chip active" onclick="_setFilter('bo','signal','all',this)">All</button>
+              <button class="scr-chip" onclick="_setFilter('bo','signal','breaking_out',this)">Breaking</button>
+              <button class="scr-chip" onclick="_setFilter('bo','signal','ready',this)">Ready</button>
+              <button class="scr-chip" onclick="_setFilter('bo','signal','watch',this)">Watch</button>
+            </div>
+            <input type="number" class="scr-filter-input" placeholder="Min Score" step="0.5" min="0" max="10" onchange="_setFilter('bo','minScore',this.value)">
+            <input type="text" class="scr-filter-input scr-search" placeholder="Search ticker..." oninput="_setFilter('bo','search',this.value)">
+            <span class="scr-result-count" id="bo-count"></span>
+          </div>
+          <div class="scr-pattern-bar" id="bo-pattern-bar" style="display:none">
+            <span class="scr-pattern-label">Patterns:</span>
+            <button class="scr-pattern-chip" id="pat-rsi-ema" onclick="_togglePattern('rsi_ema_stack',this)" title="RSI &gt; 50 &amp; Price above EMA 20, 50, 100">RSI &gt;50 + EMA Stack</button>
+          </div>
+          <div id="breakout-results" class="scr-results-area">
+            <div class="scr-empty">Click "Scan Breakouts" to find consolidation setups.</div>
+          </div>
+        </div>
+        <!-- Momentum Scanner -->
+        <div class="screen-panel" id="screen-panel-momentum" style="display:none">
+          <div class="scr-action-row">
+            <button onclick="runMomentumScan()" id="btn-momentum" class="sig-btn" style="background:linear-gradient(135deg,#ef4444,#dc2626);color:#fff">Scan Momentum</button>
+            <button onclick="runMomentumScan()" class="scr-refresh-btn" title="Refresh scan">&#x21BB;</button>
+            <span id="momentum-status" class="sig-status"></span>
+          </div>
+          <div id="momentum-results" class="scr-results-area">
+            <div class="scr-empty">Click "Scan Momentum" to find the best intraday setups with strict A+ filters.</div>
+          </div>
+        </div>
+        <!-- Pattern Engine -->
+        <div class="screen-panel" id="screen-panel-patterns" style="display:none">
+          <div class="scr-action-row">
+            <button onclick="_loadPatterns()" class="sig-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2);color:#fff">Refresh Patterns</button>
+            <button onclick="_showSuggestPattern()" class="sig-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);color:#fff;margin-left:6px">+ Suggest Pattern</button>
+            <button onclick="_triggerWebResearch()" id="btn-web-research" class="sig-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a);color:#fff;margin-left:6px">&#x1F310; Research Web</button>
+            <span id="web-research-status" style="font-size:10px;color:var(--text-muted);margin-left:8px;align-self:center"></span>
+      </div>
+          <div id="suggest-pattern-form" style="display:none;margin:10px 0;padding:12px;background:var(--bg);border:1px solid var(--border);border-radius:8px;">
+            <div style="font-size:11px;font-weight:600;margin-bottom:6px;color:var(--text)">Describe your pattern in plain English:</div>
+            <textarea id="suggest-pattern-input" rows="3" style="width:100%;padding:8px;font-size:12px;background:var(--bg-secondary);border:1px solid var(--border);color:var(--text);border-radius:6px;resize:vertical" placeholder="e.g. RSI above 70, price above all EMAs (20, 50, 100), at least 3 retests of resistance, then consolidation with tight range"></textarea>
+            <div style="display:flex;gap:6px;margin-top:6px">
+              <button onclick="_submitSuggestPattern()" class="sig-btn" style="background:var(--accent);color:#fff;font-size:11px;padding:5px 14px">Create Pattern</button>
+              <button onclick="document.getElementById('suggest-pattern-form').style.display='none'" style="background:var(--bg-secondary);border:1px solid var(--border);color:var(--text-muted);font-size:11px;padding:5px 14px;border-radius:6px;cursor:pointer">Cancel</button>
+            </div>
+            <div id="suggest-pattern-status" style="font-size:11px;margin-top:6px;color:var(--text-muted)"></div>
+          </div>
+          <div id="patterns-list" class="scr-results-area">
+            <div class="scr-empty">Loading patterns...</div>
+          </div>
+        </div>
+      </div>

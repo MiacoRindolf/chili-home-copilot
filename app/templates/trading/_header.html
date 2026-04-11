@@ -1,0 +1,19 @@
+<!-- Header -->
+<div class="t-header">
+  <div style="display:flex;align-items:center;gap:8px">
+    <button class="mobile-toggle" onclick="toggleSidebar()" title="Watchlist" aria-label="Toggle watchlist">&#x2630;</button>
+    <h1>&#x1F4C8; CHILI Trading</h1>
+  </div>
+  <nav>
+    <a href="/">Home</a>
+    <a href="/chat">Chat</a>
+    <a href="/trading" style="color:var(--accent)">Trading</a>
+    <a href="/trading/autopilot">Autopilot</a>
+    <a href="/trading-backup">Trading backup</a>
+    <a href="/brain">Brain</a>
+    {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
+  </nav>
+  <div class="t-header-actions">
+    <button id="theme-toggle" onclick="toggleTheme()" style="background:none;border:1px solid var(--border);border-radius:8px;padding:4px 10px;cursor:pointer;color:var(--text);font-size:16px">&#127769;</button>
+  </div>
+</div>

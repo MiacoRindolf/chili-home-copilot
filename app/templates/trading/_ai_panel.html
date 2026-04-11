@@ -1,0 +1,36 @@
+  <!-- Right Panel: Chat (floating drawer) -->
+  <div class="t-ai" id="ai-panel">
+    <div class="ai-resize-handle" id="ai-resize-handle"></div>
+    <div class="t-ai-view-tabs">
+      <span class="ai-view-btn active" style="flex:1;cursor:default">&#x1F4AC; Chat</span>
+      <button class="close-ai" onclick="toggleAiPanel()" aria-label="Close panel">&times;</button>
+    </div>
+
+    <div id="ai-view-chat" class="ai-view active">
+      <div class="ai-quick-actions">
+        <button onclick="askSmartPick()" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x1F4B0; What Should I Buy?</button>
+        <button onclick="runAnalysis()" style="background:linear-gradient(135deg,#6366f1,#8b5cf6)">&#x1F4CA; Analyze Chart</button>
+        <button onclick="askBrainExplain()" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F9E0; Brain Insights</button>
+        <button onclick="_promptPatternSuggest()" style="background:linear-gradient(135deg,#f59e0b,#d97706)">&#x1F4A1; Suggest Pattern</button>
+      </div>
+      <div class="ai-learn-btns">
+        <button onclick="askLearn('What is RSI and how do I use it?')" class="learn-btn">What is RSI?</button>
+        <button onclick="askLearn('Explain this chart to me like I know nothing')" class="learn-btn">Explain Chart</button>
+        <button onclick="askLearn('What is a stop-loss and why do I need one?')" class="learn-btn">Stop-loss?</button>
+        <button onclick="askLearn('What are Bollinger Bands?')" class="learn-btn">Bollinger?</button>
+        <button onclick="askLearn('Teach me about MACD')" class="learn-btn">MACD?</button>
+        <button onclick="askLearn('How do I know when to sell?')" class="learn-btn">When to sell?</button>
+      </div>
+      <div class="ai-msgs-wrap">
+        <div class="ai-msgs" id="ai-msgs"></div>
+        <button class="ai-follow-btn" id="ai-follow-btn" onclick="_aiResumeFollow()">&#x25BC; Follow chat</button>
+      </div>
+      <div id="stop-btn-container"></div>
+      <div class="ai-input">
+        <div class="ticker-ac" id="ticker-ac"></div>
+        <input type="text" id="ai-input" placeholder="Ask about any $TICKER or strategy..." autocomplete="off" />
+        <button onclick="sendAiChat()" id="btn-send">Send</button>
+        <span id="ai-ctx-info" class="ai-ctx-info" title=""></span>
+      </div>
+    </div>
+  </div>

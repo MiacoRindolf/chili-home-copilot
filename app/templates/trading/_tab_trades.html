@@ -1,0 +1,37 @@
+      <!-- Trades -->
+      <div class="t-tab-content" id="tab-trades">
+        <div class="trade-form">
+          <select id="tf-dir"><option value="long">Long</option><option value="short">Short</option></select>
+          <input id="tf-price" type="number" step="0.01" placeholder="Entry $" />
+          <input id="tf-qty" type="number" step="0.01" value="1" placeholder="Qty" />
+          <button onclick="createTrade()">Open Trade</button>
+          <button class="broker-sync-btn" id="trades-tab-sync-btn" onclick="syncAllBrokers()" style="display:none">Sync Brokers</button>
+        </div>
+        <div class="trades-toolbar">
+          <select id="trades-filter-status" onchange="applyTradesFilter()">
+            <option value="all">All Statuses</option>
+            <option value="open" selected>Open</option>
+            <option value="closed">Closed</option>
+            <option value="working">Working</option>
+            <option value="cancelled">Cancelled</option>
+          </select>
+          <label><input type="checkbox" id="trades-filter-rh" onchange="applyTradesFilter()"> Robinhood only</label>
+        </div>
+        <table class="trades"><thead><tr>
+          <th>Ticker</th><th>Source</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th>Actions</th>
+        </tr></thead><tbody id="trades-body"></tbody></table>
+      </div>
+
+      <!-- Sell Dialog -->
+      <div class="sell-dialog-overlay" id="sell-dialog-overlay">
+        <div class="sell-dialog">
+          <h4 id="sell-dialog-title">Sell</h4>
+          <div class="sell-row"><label>Qty</label><input type="number" id="sell-qty" step="0.01" min="0.01" /></div>
+          <div class="sell-row"><label>Limit $</label><input type="number" id="sell-limit" step="0.01" placeholder="Market (blank)" /></div>
+          <div style="font-size:10px;color:var(--text-secondary)" id="sell-dialog-info"></div>
+          <div class="sell-buttons">
+            <button class="btn-cancel" onclick="closeSellDialog()">Cancel</button>
+            <button class="btn-confirm" onclick="confirmSell()">Place Sell</button>
+          </div>
+        </div>
+      </div>

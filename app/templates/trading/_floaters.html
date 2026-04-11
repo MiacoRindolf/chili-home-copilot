@@ -1,0 +1,23 @@
+<!-- Floating AI button -->
+<button class="fab-ai" id="fab-ai" aria-label="Open AI chat">
+  &#x1F916;
+  <span class="badge" id="ai-badge"></span>
+</button>
+
+<!-- Token selector modal -->
+<div class="token-modal-bg" id="token-modal-bg" onclick="_closeTokenModal()">
+  <div class="token-modal" onclick="event.stopPropagation()">
+    <div class="token-modal-header">
+      <h3>Select a token</h3>
+      <button class="token-modal-close" onclick="_closeTokenModal()">&times;</button>
+    </div>
+    <div class="token-modal-search">
+      <input id="token-search-input" placeholder="Search by name or symbol..." oninput="_searchTokens(this.value)">
+    </div>
+    <div class="token-modal-list" id="token-modal-list"></div>
+  </div>
+</div>
+
+<!-- Real-time alert toasts -->
+<div id="alert-toast-container"></div>
+
