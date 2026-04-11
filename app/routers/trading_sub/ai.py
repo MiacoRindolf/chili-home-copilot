@@ -651,6 +651,7 @@ def api_tradeable_patterns(
         if not isinstance(oos_val, dict):
             oos_val = {}
 
+        ee = oos_val.get("edge_evidence") if isinstance(oos_val, dict) else None
         out.append(
             {
                 "id": p.id,
@@ -658,6 +659,7 @@ def api_tradeable_patterns(
                 "description": (p.description or "")[:500] or None,
                 "timeframe": p.timeframe,
                 "asset_class": p.asset_class,
+                "lifecycle_stage": getattr(p, "lifecycle_stage", None),
                 "promotion_status": p.promotion_status,
                 "oos_win_rate": p.oos_win_rate,
                 "oos_avg_return_pct": p.oos_avg_return_pct,
@@ -670,6 +672,7 @@ def api_tradeable_patterns(
                 "bench_passes_gate": bench_pass,
                 "bench_stress_passes_gate": stress_pass,
                 "oos_validation": oos_val,
+                "edge_evidence": ee if isinstance(ee, dict) else None,
                 "queue_tier": getattr(p, "queue_tier", None),
                 "linked_insight_id": insight_by_sp.get(p.id),
                 "research_kpi_summary": kpi_by_sp.get(p.id),
@@ -691,6 +694,75 @@ def api_tradeable_patterns(
             }
         )
     )
+
+
+@router.get("/api/trading/brain/research-edge-patterns")
+def api_research_edge_patterns(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(16, ge=1, le=40),
+):
+    """Repeatable-edge patterns in ``validated`` or ``challenged`` lifecycle (Brain desk research lane).
+
+    Gating for promotion/live remains server-side; this list is for visibility + edge_evidence only.
+    """
+    from ...models.trading import ScanPattern, TradingInsight
+
+    get_identity_ctx(request, db)
+    lim = max(1, min(int(limit), 40))
+    rows = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.lifecycle_stage.in_(("validated", "challenged")),
+        )
+        .order_by(ScanPattern.updated_at.desc().nullslast(), ScanPattern.id.desc())
+        .limit(lim)
+        .all()
+    )
+    sp_ids = [p.id for p in rows]
+    insight_by_sp: dict[int, int] = {}
+    if sp_ids:
+        pairs = (
+            db.query(TradingInsight.scan_pattern_id, TradingInsight.id)
+            .filter(TradingInsight.scan_pattern_id.in_(sp_ids))
+            .order_by(TradingInsight.id.desc())
+            .all()
+        )
+        for spid, iid in pairs:
+            if spid is not None and spid not in insight_by_sp:
+                insight_by_sp[int(spid)] = int(iid)
+
+    out = []
+    for p in rows:
+        oos_val = getattr(p, "oos_validation_json", None) or {}
+        if not isinstance(oos_val, dict):
+            oos_val = {}
+        ee = oos_val.get("edge_evidence")
+        oos_wr = p.oos_win_rate
+        if oos_wr is None and p.win_rate is not None:
+            display_wr = round(float(p.win_rate) * 100.0, 1)
+            wr_source = "in_sample"
+        else:
+            display_wr = float(oos_wr) if oos_wr is not None else None
+            wr_source = "oos" if oos_wr is not None else None
+        tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
+        out.append(
+            {
+                "id": p.id,
+                "name": p.name,
+                "lifecycle_stage": getattr(p, "lifecycle_stage", None),
+                "promotion_status": p.promotion_status,
+                "display_win_rate_pct": display_wr,
+                "display_wr_source": wr_source,
+                "trade_count_for_gate": int(tc or 0),
+                "edge_evidence": ee if isinstance(ee, dict) else None,
+                "oos_validation": oos_val,
+                "linked_insight_id": insight_by_sp.get(p.id),
+            }
+        )
+
+    return JSONResponse(to_jsonable({"ok": True, "patterns": out, "filters": {"limit": lim}}))
 
 
 @router.get("/api/trading/brain/confidence-history")

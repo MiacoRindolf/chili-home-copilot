@@ -5730,6 +5730,7 @@ def test_pattern_hypothesis(
 
     from ...config import settings as _settings_bench
     bench_passes: bool | None = None
+    bench_raw_for_edge: dict[str, Any] | None = None
     if _settings_bench.brain_bench_walk_forward_enabled:
         _bo = (getattr(pattern, "origin", "") or "").strip().lower()
         if _bo in _BRAIN_OOS_GATED_ORIGINS:
@@ -5764,6 +5765,7 @@ def test_pattern_hypothesis(
                         min_bars_per_window=_settings_bench.brain_bench_min_bars_per_window,
                         min_positive_fold_ratio=_settings_bench.brain_bench_min_positive_fold_ratio,
                     )
+                    bench_raw_for_edge = _bench_raw
                     bench_passes = bool(_bench_raw.get("passes_gate"))
                     _bench_store = _trim_bench_walk_forward_for_db(_bench_raw)
                     _bench_store["evaluated_at"] = datetime.utcnow().isoformat() + "Z"
@@ -5834,6 +5836,11 @@ def test_pattern_hypothesis(
         oos_validation_merged["research_integrity_blocked_promotion"] = True
         patch["oos_validation_json"] = oos_validation_merged
 
+    from .edge_evidence import (
+        apply_edge_evidence_veto,
+        build_edge_evidence,
+        resolve_gated_lifecycle_stage,
+    )
     from .lifecycle import (
         lifecycle_stage_from_promotion_status,
         retire,
@@ -5841,9 +5848,69 @@ def test_pattern_hypothesis(
         transition_on_promotion,
     )
 
-    patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(
-        str(patch.get("promotion_status", prom_stat))
-    )
+    _edge_st = _oset
+    _origin_lc = (getattr(pattern, "origin", "") or "").strip().lower()
+    _gated_edge = _origin_lc in _BRAIN_OOS_GATED_ORIGINS
+    edge_veto = False
+    oos_merged = dict(patch.get("oos_validation_json") or oos_validation_merged)
+    if _gated_edge and bool(getattr(_edge_st, "brain_edge_evidence_enabled", True)):
+        _prev_ee = oos_merged.get("edge_evidence")
+        _prev_codes = (
+            (_prev_ee.get("promotion_block_codes") if isinstance(_prev_ee, dict) else None) or []
+        )
+        _ee = build_edge_evidence(
+            mean_is_wr_pct=float(mean_is_wr),
+            is_wrs=list(is_wrs),
+            mean_oos_wr_pct=float(mean_oos_wr) if mean_oos_wr is not None else None,
+            oos_wrs=list(oos_wrs),
+            oos_ticker_hits=int(oos_ticker_hits),
+            tickers_tested=int(total),
+            oos_trade_sum=int(oos_trade_sum),
+            bench_raw=bench_raw_for_edge,
+            n_perm=int(getattr(_edge_st, "brain_edge_evidence_permutations", 400) or 400),
+            seed=int(getattr(_edge_st, "brain_edge_evidence_seed", 42) or 42) + int(pattern.id),
+            prev_block_codes=list(_prev_codes) if _prev_codes else None,
+        )
+        oos_merged["edge_evidence"] = _ee
+        patch["oos_validation_json"] = oos_merged
+        if bool(getattr(_edge_st, "brain_edge_evidence_gate_enabled", False)):
+            edge_veto, _ = apply_edge_evidence_veto(
+                _ee,
+                max_is_perm_p=getattr(_edge_st, "brain_edge_evidence_max_is_perm_p", None),
+                max_oos_perm_p=float(
+                    getattr(_edge_st, "brain_edge_evidence_max_oos_perm_p", 0.2) or 0.2
+                ),
+                max_wf_perm_p=float(
+                    getattr(_edge_st, "brain_edge_evidence_max_wf_perm_p", 0.25) or 0.25
+                ),
+                require_wf_when_available=bool(
+                    getattr(_edge_st, "brain_edge_evidence_require_wf_when_available", False)
+                ),
+            )
+            oos_merged["edge_evidence"] = _ee
+            patch["oos_validation_json"] = oos_merged
+            if edge_veto:
+                patch["promotion_status"] = "pending_oos"
+                patch["active"] = True
+
+    _promo_for_lifecycle = str(patch.get("promotion_status", prom_stat))
+    if _gated_edge and bool(getattr(_edge_st, "brain_edge_evidence_enabled", True)):
+        if bool(getattr(_edge_st, "brain_edge_evidence_gate_enabled", False)):
+            _ls_edge = resolve_gated_lifecycle_stage(
+                promotion_status=_promo_for_lifecycle,
+                edge_gate_ran=True,
+                edge_veto=edge_veto,
+            )
+            patch["lifecycle_stage"] = (
+                _ls_edge
+                if _ls_edge is not None
+                else lifecycle_stage_from_promotion_status(_promo_for_lifecycle)
+            )
+        else:
+            patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(_promo_for_lifecycle)
+    else:
+        patch["lifecycle_stage"] = lifecycle_stage_from_promotion_status(_promo_for_lifecycle)
+
     update_pattern(db, pattern.id, patch)
 
     # Lifecycle FSM transitions based on promotion outcome

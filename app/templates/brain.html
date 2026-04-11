@@ -1188,6 +1188,15 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
         <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
       </div>
 
+      <div class="brain-section" id="brain-research-edge-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F9EA;</span> Edge research lane
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:480px;line-height:1.35">Patterns in <code style="font-size:9px">validated</code> or <code style="font-size:9px">challenged</code> lifecycle with persisted <code style="font-size:9px">edge_evidence</code> (v1 weak-null permutations). Display only; eligibility is enforced server-side.</span>
+          <button type="button" onclick="loadResearchEdgePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-research-edge-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
+      </div>
+
       <!-- â•â•â• ZONE 3: DEEP DIVE (tabbed, lazy-loaded) â•â•â• -->
       <div class="brain-deep-dive" id="brain-deep-dive">
         <div class="bdd-tabs" id="bdd-tabs">
@@ -3699,6 +3708,7 @@ function loadBrainDashboard() {
   loadOpportunityBoard();
   loadBrainPredictions();
   loadTradeablePatterns();
+  loadResearchEdgePatterns();
 
   /* Polling: learning status (status bar only) */
   pollLearningStatus().catch(function(){});
@@ -4187,6 +4197,15 @@ function loadTradeablePatterns() {
       var tf = escHtml(p.timeframe || 'â€”');
       var ac = escHtml(p.asset_class || 'â€”');
       var promo = escHtml((p.promotion_status || '').replace(/</g, ''));
+      var edgeLine = '';
+      if (p.edge_evidence && typeof p.edge_evidence === 'object') {
+        var ee = p.edge_evidence;
+        var isp = ee.in_sample_perm_p != null ? ee.in_sample_perm_p : '--';
+        var wfp = ee.walk_forward_perm_p != null ? ee.walk_forward_perm_p : '--';
+        var tier = ee.evidence_tier != null ? String(ee.evidence_tier) : '--';
+        edgeLine = '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.35" title="v1 weak-null permutation layer (display only; server enforces gates)">' +
+          'Edge evidence (v1 weak-null): tier ' + escHtml(tier) + ', IS p ' + escHtml(String(isp)) + ', WF p ' + escHtml(String(wfp)) + '</div>';
+      }
       var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
       html += '<div class="tp-tradeable-card">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px;line-height:1.35">' + name + '</div>' +
@@ -4198,6 +4217,7 @@ function loadTradeablePatterns() {
           bench +
         '</div>' +
         rk +
+        edgeLine +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
       '</div>';
     });
@@ -4206,6 +4226,66 @@ function loadTradeablePatterns() {
   }).catch(function(err) {
     var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
     container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load tradeable patterns.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></div>';
+  });
+}
+
+function loadResearchEdgePatterns() {
+  var container = document.getElementById('brain-research-edge-patterns');
+  if (!container) return;
+  container.innerHTML = '<div style="display:flex;align-items:center;gap:8px;padding:8px"><div class="brain-pulse"></div> Loading edge research laneâ€¦</div>';
+  fetch('/api/trading/brain/research-edge-patterns').then(parseFetchJson).then(function(d) {
+    if (!d.ok || !d.patterns) {
+      container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Could not load research-edge patterns.</div>';
+      return;
+    }
+    if (!d.patterns.length) {
+      container.innerHTML = '<div style="padding:10px;color:var(--text-muted);line-height:1.5">No patterns in <code style="font-size:9px">validated</code> or <code style="font-size:9px">challenged</code> lifecycle yet. Run hypothesis tests on OOS-gated (web/brain-discovered) patterns with <code style="font-size:9px">brain_edge_evidence_enabled</code>.</div>';
+      return;
+    }
+    var html = '<div class="tp-tradeable-grid">';
+    d.patterns.forEach(function(p) {
+      var ee = p.edge_evidence;
+      var rawName = (p.name || ('Pattern #' + p.id));
+      var name = escHtml(rawName.length > 56 ? rawName.slice(0, 53) + 'â€¦' : rawName);
+      var life = escHtml((p.lifecycle_stage || '').replace(/</g, ''));
+      var promo = escHtml((p.promotion_status || '').replace(/</g, ''));
+      var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
+      var body = '';
+      if (ee && typeof ee === 'object') {
+        var disc = ee.weak_null_disclaimer ? escHtml(String(ee.weak_null_disclaimer)) : '';
+        var wfSrc = ee.walk_forward_evidence_source ? escHtml(String(ee.walk_forward_evidence_source)) : '';
+        var blocks = (ee.promotion_block_codes && ee.promotion_block_codes.length) ? escHtml(ee.promotion_block_codes.join(', ')) : '';
+        body =
+          '<div style="font-size:9px;color:var(--text-secondary);line-height:1.45;margin-top:6px">' +
+            '<div><strong>IS score</strong> ' + escHtml(String(ee.in_sample_score != null ? ee.in_sample_score : '--')) +
+            ' Â· <strong>IS p</strong> ' + escHtml(String(ee.in_sample_perm_p != null ? ee.in_sample_perm_p : '--')) + '</div>' +
+            '<div><strong>WF score</strong> ' + escHtml(String(ee.walk_forward_score != null ? ee.walk_forward_score : '--')) +
+            ' Â· <strong>WF p</strong> ' + escHtml(String(ee.walk_forward_perm_p != null ? ee.walk_forward_perm_p : '--')) +
+            (wfSrc ? ' <span style="color:var(--text-muted)">(' + wfSrc + ')</span>' : '') + '</div>' +
+            '<div style="margin-top:4px"><strong>OOS mean WR %</strong> ' + escHtml(String(ee.oos_mean_wr_pct != null ? ee.oos_mean_wr_pct : '--')) +
+            ' Â· <strong>OOS p</strong> ' + escHtml(String(ee.oos_perm_p != null ? ee.oos_perm_p : '--')) + '</div>' +
+            '<div style="margin-top:4px"><strong>n_eff</strong> ' + escHtml(String(ee.effective_n != null ? ee.effective_n : '--')) +
+            ' Â· <strong>OOS coverage</strong> ' + escHtml(String(ee.oos_coverage != null ? ee.oos_coverage : '--')) +
+            ' Â· <strong>tier</strong> ' + escHtml(String(ee.evidence_tier != null ? ee.evidence_tier : '--')) + '</div>' +
+            (ee.evidence_fresh_at ? '<div style="font-size:8px;color:var(--text-muted);margin-top:4px">Updated ' + escHtml(String(ee.evidence_fresh_at)) + '</div>' : '') +
+            (blocks ? '<div style="font-size:8px;color:var(--text-muted);margin-top:4px">promotion_block_codes: ' + blocks + '</div>' : '') +
+            (disc ? '<div style="font-size:8px;color:var(--text-muted);margin-top:6px;line-height:1.35">' + disc + '</div>' : '') +
+          '</div>';
+      } else {
+        body = '<div style="font-size:9px;color:var(--text-muted);margin-top:6px">No edge_evidence JSON yet for this row.</div>';
+      }
+      html += '<div class="tp-tradeable-card">' +
+        '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.35">' + name + '</div>' +
+        '<div style="font-size:9px;color:var(--text-secondary)">lifecycle <strong style="color:var(--accent)">' + life + '</strong> Â· ' + promo + '</div>' +
+        body +
+        '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
+        '</div>';
+    });
+    html += '</div>';
+    container.innerHTML = html;
+  }).catch(function(err) {
+    var hint = (err && err.message) ? escHtml(String(err.message)) : 'Network or server error.';
+    container.innerHTML = '<div style="padding:8px;color:var(--text-muted)">Failed to load edge research lane.<br/><span style="font-size:9px;opacity:.85">' + hint + '</span></div>';
   });
 }
 
@@ -6137,6 +6217,7 @@ function pollLearningStatus() {
       loadPlaybook();
       loadPerfDashboard();
       loadTradeablePatterns();
+      loadResearchEdgePatterns();
       if (_bddActiveTab === 'research') { _bddLoaded['research'] = false; _loadResearchData(); }
     }
     pipelineSection._wasRunning = learning.running;

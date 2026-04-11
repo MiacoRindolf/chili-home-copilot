@@ -554,6 +554,16 @@ class Settings(BaseSettings):
     # Reject promotion when bootstrap CI lower bound for mean OOS WR is below this (None = skip).
     brain_oos_bootstrap_ci_min_wr: Optional[float] = None
 
+    # Edge-vs-luck (v1 weak-null permutations) for OOS-gated repeatable-edge patterns only.
+    brain_edge_evidence_enabled: bool = True
+    brain_edge_evidence_gate_enabled: bool = False
+    brain_edge_evidence_permutations: int = 400
+    brain_edge_evidence_seed: int = 42
+    brain_edge_evidence_max_is_perm_p: Optional[float] = None
+    brain_edge_evidence_max_oos_perm_p: float = 0.20
+    brain_edge_evidence_max_wf_perm_p: float = 0.25
+    brain_edge_evidence_require_wf_when_available: bool = False
+
     # Two-tier queue: cheap prescreen then full backtest (final OOS gate unchanged).
     brain_queue_prescreen_enabled: bool = True
     brain_queue_prescreen_tickers: int = 6

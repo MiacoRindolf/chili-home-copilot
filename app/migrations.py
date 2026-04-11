@@ -4401,6 +4401,30 @@ def _migration_096_momentum_variant_refinement(conn) -> None:
         conn.rollback()
 
 
+def _migration_097_scan_pattern_lifecycle_challenged(conn) -> None:
+    """Allow lifecycle_stage 'challenged' (edge-vs-luck research gate; not live-eligible)."""
+    tbl = "scan_patterns"
+    if tbl not in _tables(conn):
+        return
+    try:
+        conn.execute(text(f"ALTER TABLE {tbl} DROP CONSTRAINT IF EXISTS chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+    try:
+        conn.execute(
+            text(
+                f"ALTER TABLE {tbl} ADD CONSTRAINT chk_sp_lifecycle CHECK (lifecycle_stage IN ("
+                f"'candidate','backtested','validated','challenged','promoted','live','decayed','retired'"
+                f")) NOT VALID"
+            )
+        )
+        conn.execute(text(f"ALTER TABLE {tbl} VALIDATE CONSTRAINT chk_sp_lifecycle"))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4499,6 +4523,7 @@ MIGRATIONS = [
     ("094_trading_autopilot_runtime", _migration_094_trading_autopilot_runtime),
     ("095_task_workspace_binding", _migration_095_task_workspace_binding),
     ("096_momentum_variant_refinement", _migration_096_momentum_variant_refinement),
+    ("097_scan_pattern_lifecycle_challenged", _migration_097_scan_pattern_lifecycle_challenged),
 ]
 
 

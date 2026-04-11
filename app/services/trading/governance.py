@@ -220,8 +220,19 @@ def request_pattern_to_live(
     if not pattern:
         return {"approved": False, "reason": "pattern_not_found"}
 
-    if pattern.lifecycle_stage not in ("promoted", "backtested"):
-        return {"approved": False, "reason": f"pattern lifecycle is {pattern.lifecycle_stage}, not promotable"}
+    if pattern.lifecycle_stage == "challenged":
+        return {
+            "approved": False,
+            "reason": "pattern lifecycle is challenged (research / weak-null gate); not eligible for live request",
+        }
+    if pattern.lifecycle_stage != "promoted":
+        return {
+            "approved": False,
+            "reason": (
+                f"pattern lifecycle is {pattern.lifecycle_stage}; "
+                "live-readiness path requires promoted"
+            ),
+        }
 
     if auto_approve_paper_profitable:
         paper_trades = db.query(PaperTrade).filter(

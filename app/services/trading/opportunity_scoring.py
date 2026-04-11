@@ -137,6 +137,10 @@ def pattern_quality_score(pat: ScanPattern) -> float:
         tier_boost = 0.25
     elif promo == "promoted":
         tier_boost = 0.2
+    elif life == "validated":
+        tier_boost = 0.1
+    elif life == "challenged":
+        tier_boost = 0.05
     elif life == "backtested":
         tier_boost = 0.08
 
@@ -249,7 +253,7 @@ def scan_pattern_eligible_main_imminent(pat: ScanPattern) -> bool:
 def scan_pattern_eligible_research(pat: ScanPattern) -> bool:
     """Broader: backtested / candidate for Tier D / near-miss."""
     life = (getattr(pat, "lifecycle_stage", None) or "").strip().lower()
-    if life in ("candidate", "backtested", "validated", "promoted", "live"):
+    if life in ("candidate", "backtested", "validated", "challenged", "promoted", "live"):
         return pat.active
     return pat.active
 

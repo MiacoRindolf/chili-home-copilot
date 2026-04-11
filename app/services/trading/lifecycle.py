@@ -1,6 +1,7 @@
 """Strategy lifecycle state machine for ScanPattern.
 
-States: candidate -> backtested -> promoted -> live -> decayed -> retired
+States include ``challenged`` (repeatable-edge research: visible on Brain desk, not live-eligible),
+``validated`` (paper/runtime review when governance allows), ``promoted`` (live-readiness path).
 Each transition is enforced and timestamped.
 """
 from __future__ import annotations
@@ -15,7 +16,16 @@ from ...models.trading import PaperTrade, ScanPattern, StrategyProposal
 
 logger = logging.getLogger(__name__)
 
-VALID_STAGES = ("candidate", "backtested", "validated", "promoted", "live", "decayed", "retired")
+VALID_STAGES = (
+    "candidate",
+    "backtested",
+    "validated",
+    "challenged",
+    "promoted",
+    "live",
+    "decayed",
+    "retired",
+)
 
 
 def lifecycle_stage_from_promotion_status(promotion_status: str | None) -> str:
@@ -48,10 +58,11 @@ def lifecycle_stage_from_promotion_status(promotion_status: str | None) -> str:
     return "candidate"
 
 _ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
-    "candidate":  ("backtested", "retired"),
-    "backtested": ("promoted", "candidate", "retired", "validated"),
-    "validated":  ("promoted", "backtested", "retired", "candidate"),
-    "promoted":   ("live", "decayed", "retired", "backtested"),
+    "candidate":  ("backtested", "retired", "challenged"),
+    "backtested": ("promoted", "candidate", "retired", "validated", "challenged"),
+    "validated":  ("promoted", "backtested", "retired", "candidate", "challenged"),
+    "challenged": ("backtested", "validated", "retired", "candidate", "promoted"),
+    "promoted":   ("live", "decayed", "retired", "backtested", "challenged"),
     "live":       ("decayed", "retired"),
     "decayed":    ("retired", "backtested", "candidate"),
     "retired":    ("candidate",),  # allow resurrection for re-mining
@@ -131,6 +142,9 @@ def _sync_legacy_fields(pattern: ScanPattern, stage: str) -> None:
     elif stage == "validated":
         pattern.promotion_status = "validated"
         pattern.active = True
+    elif stage == "challenged":
+        # Research-only: nuance lives in oos_validation_json.edge_evidence / promotion_block_codes.
+        pattern.active = True
     elif stage == "candidate":
         if pattern.promotion_status in ("retired", "degraded_live"):
             pattern.promotion_status = "candidate"
@@ -150,7 +164,7 @@ def transition_on_backtest(db: Session, pattern: ScanPattern, oos_pass: bool) ->
 def transition_on_promotion(db: Session, pattern: ScanPattern) -> ScanPattern:
     """After passing promotion gates, advance to promoted."""
     current = pattern.lifecycle_stage or "candidate"
-    if current in ("backtested", "candidate"):
+    if current in ("backtested", "candidate", "validated", "challenged"):
         return transition(db, pattern, "promoted", reason="promotion_gates_passed")
     return pattern
 

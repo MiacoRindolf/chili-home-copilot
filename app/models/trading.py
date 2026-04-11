@@ -368,7 +368,8 @@ class ScanPattern(Base):
     oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     queue_tier: str = Column(String(16), nullable=False, default="full")
     paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
-    # Lifecycle FSM: candidate -> backtested -> promoted -> live -> decayed -> retired
+    # Lifecycle FSM: candidate -> backtested -> validated | challenged -> promoted -> live -> decayed -> retired
+    # ``challenged`` = repeatable-edge research (edge_evidence); inspectable, not live-eligible (see governance).
     lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")
     lifecycle_changed_at: Optional[datetime] = Column(DateTime, nullable=True)
     user_id: Optional[int] = Column(
