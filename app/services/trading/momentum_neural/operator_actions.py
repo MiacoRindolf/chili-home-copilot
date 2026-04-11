@@ -108,6 +108,13 @@ def _paper_promotion_gate(paper: TradingAutomationSession) -> tuple[bool, str]:
 
 def _confirm_live_truth_payload(sess: TradingAutomationSession, *, runner_on: bool) -> dict[str, Any]:
     rd = build_momentum_operator_readiness(execution_family=sess.execution_family, symbol=sess.symbol)
+    alloc = sess.allocation_decision_json if isinstance(getattr(sess, "allocation_decision_json", None), dict) else {}
+    if (
+        alloc
+        and not alloc.get("allowed_if_enforced", True)
+        and bool(settings.brain_allocator_live_hard_block_enabled)
+    ):
+        rd["_allocator_block_live"] = str(alloc.get("blocked_reason") or "allocator_blocked")
     snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
     canon = canonical_operator_state(mode=sess.mode, state=sess.state, risk_snapshot_json=snap)
     blocked = blocked_reason_for_session(mode=sess.mode, readiness=rd, canonical_state=canon)
@@ -136,6 +143,7 @@ def _confirm_live_truth_payload(sess: TradingAutomationSession, *, runner_on: bo
         "execution_ready": bool(rd.get("execution_ready")),
         "scheduler_ready": bool(rd.get("live_scheduler_would_run")),
         "is_live_orders_active": is_live_orders_active(mode=sess.mode, state=sess.state),
+        "allocation": alloc or None,
     }
 
 
@@ -306,6 +314,7 @@ def begin_live_arm(
     """Validate live_eligible + risk policy; create pending arm session + token."""
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
+    from ..portfolio_allocator import build_session_allocation_decision
 
     sym = symbol.strip().upper()
     existing = (
@@ -397,6 +406,32 @@ def begin_live_arm(
         correlation_id=str(uuid.uuid4()),
         source_node_id="momentum_operator_api",
     )
+    allocation = build_session_allocation_decision(
+        db,
+        sess,
+        user_id=user_id,
+        context="momentum_live_request",
+    )
+    if (
+        not allocation.get("allowed_if_enforced", True)
+        and bool(settings.brain_allocator_live_hard_block_enabled)
+    ):
+        sess.state = STATE_ERROR
+        sess.updated_at = _utcnow()
+        append_trading_automation_event(
+            db,
+            sess.id,
+            "live_arm_blocked_allocator",
+            {"blocked_reason": allocation.get("blocked_reason")},
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_operator_api",
+        )
+        return {
+            "ok": False,
+            "error": allocation.get("blocked_reason") or "allocator_blocked",
+            "message": "Portfolio allocator blocks live arm for this symbol/variant.",
+            "allocation": allocation,
+        }
     append_trading_automation_event(
         db,
         sess.id,
@@ -424,6 +459,7 @@ def begin_live_arm(
                 "Phase 6 records risk snapshot + operator intent only."
             ),
         },
+        "allocation": allocation,
     }
 
 
@@ -483,6 +519,7 @@ def confirm_live_arm(
 
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
+    from ..portfolio_allocator import build_session_allocation_decision
 
     rd0 = build_momentum_operator_readiness(execution_family=sess.execution_family, symbol=sess.symbol)
     if not rd0.get("broker_ready_for_live"):
@@ -520,6 +557,22 @@ def confirm_live_arm(
     )
     final_snap["arm_confirmed_at_utc"] = _utcnow().isoformat()
     final_snap["arm_confirmed"] = True
+    allocation = build_session_allocation_decision(
+        db,
+        sess,
+        user_id=user_id,
+        context="momentum_live_confirm",
+    )
+    if (
+        not allocation.get("allowed_if_enforced", True)
+        and bool(settings.brain_allocator_live_hard_block_enabled)
+    ):
+        return {
+            "ok": False,
+            "error": allocation.get("blocked_reason") or "allocator_blocked",
+            "message": "Portfolio allocator blocks confirming live arm.",
+            "allocation": allocation,
+        }
 
     runner_on = bool(settings.chili_momentum_live_runner_enabled)
     sess.state = STATE_QUEUED_LIVE if runner_on else STATE_ARMED_PENDING_RUNNER
@@ -552,6 +605,7 @@ def confirm_live_arm(
         "live_runner_enabled": runner_on,
         "message": legacy_msg,
         "risk_evaluation": ev,
+        "allocation": allocation,
         **truth,
     }
 
@@ -566,6 +620,7 @@ def promote_paper_session_to_live_arm(
     """Create live_arm_pending session from an eligible paper session (audit lineage on new row)."""
     if user_id is None:
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
+    from ..portfolio_allocator import build_session_allocation_decision
 
     paper = (
         db.query(TradingAutomationSession)
@@ -671,6 +726,32 @@ def promote_paper_session_to_live_arm(
         source_node_id="momentum_operator_api",
         source_paper_session_id=int(paper.id),
     )
+    allocation = build_session_allocation_decision(
+        db,
+        sess,
+        user_id=user_id,
+        context="momentum_live_request_from_paper",
+    )
+    if (
+        not allocation.get("allowed_if_enforced", True)
+        and bool(settings.brain_allocator_live_hard_block_enabled)
+    ):
+        sess.state = STATE_ERROR
+        sess.updated_at = _utcnow()
+        append_trading_automation_event(
+            db,
+            sess.id,
+            "live_arm_blocked_allocator",
+            {"blocked_reason": allocation.get("blocked_reason")},
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_operator_api",
+        )
+        return {
+            "ok": False,
+            "error": allocation.get("blocked_reason") or "allocator_blocked",
+            "message": "Portfolio allocator blocks live arm for this promoted paper session.",
+            "allocation": allocation,
+        }
     append_trading_automation_event(
         db,
         sess.id,
@@ -713,4 +794,5 @@ def promote_paper_session_to_live_arm(
                 "Confirm to proceed; no orders until runner executes."
             ),
         },
+        "allocation": allocation,
     }

@@ -13,7 +13,9 @@ from app.services.trading.live_drift import (
     binomial_two_sided_p_value,
     build_skip_contract,
     compute_live_drift_contract,
+    compute_live_drift_v2_contract,
     live_drift_summary,
+    live_drift_v2_summary,
     select_primary_runtime,
 )
 
@@ -161,3 +163,66 @@ def test_live_drift_summary_shape():
     assert s["drift_tier"] == "warning"
     assert s["drift_delta"] == -9.0
     assert s["sample_count"] == 12
+
+
+def test_v2_flags_expectancy_collapse_even_with_stable_win_rate():
+    pattern = SimpleNamespace(oos_win_rate=0.55, oos_avg_return_pct=2.0)
+    scorecards = {
+        "live": {
+            "source": "live",
+            "sample_count": 12,
+            "win_rate_pct": 55.0,
+            "expectancy_per_trade_pct": 0.2,
+            "avg_winner_pct": 1.1,
+            "avg_loser_pct": -1.4,
+            "profit_factor": 0.72,
+            "p25_trade_outcome_pct": -1.4,
+            "slippage_burden_bps": 52.0,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "paper": None,
+        "n_live": 12,
+        "n_paper": 0,
+    }
+    c = compute_live_drift_v2_contract(pattern=pattern, oos_val={}, scorecards=scorecards, settings=_settings())
+    assert c["skip_reason"] is None
+    assert c["composite_tier"] == "critical"
+    assert "expectancy_critical" in c["composite_flags"]
+    assert "profit_factor_critical" in c["composite_flags"]
+    assert "slippage_burden_critical" in c["composite_flags"]
+    assert live_drift_v2_summary(c)["primary_runtime_source"] == "live"
+
+
+def test_v2_falls_back_to_paper_when_live_is_sparse():
+    pattern = SimpleNamespace(oos_win_rate=0.6, oos_avg_return_pct=1.5)
+    scorecards = {
+        "live": {
+            "source": "live",
+            "sample_count": 3,
+            "win_rate_pct": 66.0,
+            "expectancy_per_trade_pct": 1.0,
+            "avg_winner_pct": 2.0,
+            "avg_loser_pct": -1.0,
+            "profit_factor": 1.8,
+            "p25_trade_outcome_pct": -0.2,
+            "slippage_burden_bps": 10.0,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "paper": {
+            "source": "paper",
+            "sample_count": 10,
+            "win_rate_pct": 50.0,
+            "expectancy_per_trade_pct": 0.8,
+            "avg_winner_pct": 1.5,
+            "avg_loser_pct": -0.9,
+            "profit_factor": 1.2,
+            "p25_trade_outcome_pct": -0.4,
+            "slippage_burden_bps": None,
+            "freshness_at": "2026-04-10T12:00:00",
+        },
+        "n_live": 3,
+        "n_paper": 10,
+    }
+    c = compute_live_drift_v2_contract(pattern=pattern, oos_val={}, scorecards=scorecards, settings=_settings())
+    assert c["primary_runtime_source"] == "paper"
+    assert c["fallback_used"] is True

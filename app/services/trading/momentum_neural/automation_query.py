@@ -326,6 +326,14 @@ _PAPER_TERMINAL_FOR_FOCUS = frozenset({STATE_FINISHED, STATE_CANCELLED, STATE_EX
 
 
 def operator_fields_for_session(sess: TradingAutomationSession, readiness: dict[str, Any]) -> dict[str, Any]:
+    alloc = sess.allocation_decision_json if isinstance(getattr(sess, "allocation_decision_json", None), dict) else {}
+    if (
+        alloc
+        and not alloc.get("allowed_if_enforced", True)
+        and bool(getattr(settings, "brain_allocator_live_hard_block_enabled", False))
+    ):
+        readiness = dict(readiness or {})
+        readiness["_allocator_block_live"] = str(alloc.get("blocked_reason") or "allocator_blocked")
     snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
     canon = canonical_operator_state(mode=sess.mode, state=sess.state, risk_snapshot_json=snap)
     hint = phase_hint(mode=sess.mode, state=sess.state, risk_snapshot_json=snap)
@@ -729,9 +737,12 @@ def list_automation_sessions(
             "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
             "repeatable_edge_readiness": {
                 "execution_robustness": rd.get("repeatable_edge_execution_robustness"),
+                "execution_robustness_v2": rd.get("repeatable_edge_execution_robustness_v2"),
+                "allocation_state": rd.get("repeatable_edge_allocation_state"),
                 "live_not_recommended": rd.get("repeatable_edge_live_not_recommended"),
                 "live_not_recommended_reason": rd.get("repeatable_edge_live_not_recommended_reason"),
             },
+            "allocation": sess.allocation_decision_json if isinstance(getattr(sess, "allocation_decision_json", None), dict) else {},
         }
         row.update(op_fields)
         sessions_out.append(row)
@@ -921,9 +932,12 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
         "repeatable_edge_readiness": {
             "execution_robustness": readiness.get("repeatable_edge_execution_robustness"),
+            "execution_robustness_v2": readiness.get("repeatable_edge_execution_robustness_v2"),
+            "allocation_state": readiness.get("repeatable_edge_allocation_state"),
             "live_not_recommended": readiness.get("repeatable_edge_live_not_recommended"),
             "live_not_recommended_reason": readiness.get("repeatable_edge_live_not_recommended_reason"),
         },
+        "allocation": sess.allocation_decision_json if isinstance(getattr(sess, "allocation_decision_json", None), dict) else {},
     }
     session_dict.update(op_fields)
 
@@ -1081,9 +1095,12 @@ def get_operator_session_focus(
         "live_execution": summarize_live_execution(snap),
         "repeatable_edge_readiness": {
             "execution_robustness": readiness.get("repeatable_edge_execution_robustness"),
+            "execution_robustness_v2": readiness.get("repeatable_edge_execution_robustness_v2"),
+            "allocation_state": readiness.get("repeatable_edge_allocation_state"),
             "live_not_recommended": readiness.get("repeatable_edge_live_not_recommended"),
             "live_not_recommended_reason": readiness.get("repeatable_edge_live_not_recommended_reason"),
         },
+        "allocation": focus.allocation_decision_json if isinstance(getattr(focus, "allocation_decision_json", None), dict) else {},
         **op,
     }
 

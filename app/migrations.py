@@ -4464,6 +4464,117 @@ def _migration_098_brain_validation_slice_ledger(conn) -> None:
     conn.commit()
 
 
+def _migration_099_execution_audit_and_allocator(conn) -> None:
+    """Execution audit events, trade fill-state columns, and allocator snapshots."""
+    tables = _tables(conn)
+
+    if "trading_trades" in tables:
+        cols = _columns(conn, "trading_trades")
+        trade_cols = {
+            "filled_quantity": "ALTER TABLE trading_trades ADD COLUMN filled_quantity DOUBLE PRECISION",
+            "remaining_quantity": "ALTER TABLE trading_trades ADD COLUMN remaining_quantity DOUBLE PRECISION",
+            "submitted_at": "ALTER TABLE trading_trades ADD COLUMN submitted_at TIMESTAMP",
+            "acknowledged_at": "ALTER TABLE trading_trades ADD COLUMN acknowledged_at TIMESTAMP",
+            "first_fill_at": "ALTER TABLE trading_trades ADD COLUMN first_fill_at TIMESTAMP",
+            "last_fill_at": "ALTER TABLE trading_trades ADD COLUMN last_fill_at TIMESTAMP",
+        }
+        for name, ddl in trade_cols.items():
+            if name not in cols:
+                conn.execute(text(ddl))
+                conn.commit()
+
+    if "trading_proposals" in tables:
+        cols = _columns(conn, "trading_proposals")
+        if "allocation_decision_json" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_proposals "
+                    "ADD COLUMN allocation_decision_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+                )
+            )
+            conn.commit()
+
+    if "trading_automation_sessions" in tables:
+        cols = _columns(conn, "trading_automation_sessions")
+        if "allocation_decision_json" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_automation_sessions "
+                    "ADD COLUMN allocation_decision_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+                )
+            )
+            conn.commit()
+
+    if "trading_execution_events" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_execution_events (
+                    id BIGSERIAL PRIMARY KEY,
+                    user_id INTEGER,
+                    trade_id INTEGER REFERENCES trading_trades(id) ON DELETE CASCADE,
+                    proposal_id INTEGER REFERENCES trading_proposals(id) ON DELETE SET NULL,
+                    automation_session_id INTEGER REFERENCES trading_automation_sessions(id) ON DELETE SET NULL,
+                    scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                    ticker VARCHAR(36),
+                    venue VARCHAR(32),
+                    execution_family VARCHAR(32),
+                    broker_source VARCHAR(32),
+                    order_id VARCHAR(128),
+                    client_order_id VARCHAR(128),
+                    product_id VARCHAR(64),
+                    event_type VARCHAR(32) NOT NULL,
+                    status VARCHAR(32),
+                    requested_quantity DOUBLE PRECISION,
+                    cumulative_filled_quantity DOUBLE PRECISION,
+                    last_fill_quantity DOUBLE PRECISION,
+                    average_fill_price DOUBLE PRECISION,
+                    submitted_at TIMESTAMP,
+                    acknowledged_at TIMESTAMP,
+                    first_fill_at TIMESTAMP,
+                    last_fill_at TIMESTAMP,
+                    event_at TIMESTAMP,
+                    recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    reference_price DOUBLE PRECISION,
+                    best_bid DOUBLE PRECISION,
+                    best_ask DOUBLE PRECISION,
+                    spread_bps DOUBLE PRECISION,
+                    expected_slippage_bps DOUBLE PRECISION,
+                    realized_slippage_bps DOUBLE PRECISION,
+                    submit_to_ack_ms DOUBLE PRECISION,
+                    ack_to_first_fill_ms DOUBLE PRECISION,
+                    payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_execution_events_trade_ts "
+                "ON trading_execution_events (trade_id, recorded_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_execution_events_order_ts "
+                "ON trading_execution_events (broker_source, order_id, recorded_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_execution_events_pattern_ts "
+                "ON trading_execution_events (scan_pattern_id, recorded_at)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_execution_events_event_type "
+                "ON trading_execution_events (event_type)"
+            )
+        )
+        conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4564,6 +4675,7 @@ MIGRATIONS = [
     ("096_momentum_variant_refinement", _migration_096_momentum_variant_refinement),
     ("097_scan_pattern_lifecycle_challenged", _migration_097_scan_pattern_lifecycle_challenged),
     ("098_brain_validation_slice_ledger", _migration_098_brain_validation_slice_ledger),
+    ("099_execution_audit_and_allocator", _migration_099_execution_audit_and_allocator),
 ]
 
 

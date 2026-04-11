@@ -54,6 +54,12 @@ class Trade(Base):
     last_broker_sync: Optional[datetime] = Column(DateTime, nullable=True)
     filled_at: Optional[datetime] = Column(DateTime, nullable=True)
     avg_fill_price: Optional[float] = Column(Float, nullable=True)
+    filled_quantity: Optional[float] = Column(Float, nullable=True)
+    remaining_quantity: Optional[float] = Column(Float, nullable=True)
+    submitted_at: Optional[datetime] = Column(DateTime, nullable=True)
+    acknowledged_at: Optional[datetime] = Column(DateTime, nullable=True)
+    first_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
     # TCA: reference = signal/proposal limit at submit; slippage set when fill is known
     tca_reference_entry_price: Optional[float] = Column(Float, nullable=True)
     tca_entry_slippage_bps: Optional[float] = Column(Float, nullable=True)
@@ -64,6 +70,60 @@ class Trade(Base):
     strategy_proposal_id: Optional[int] = Column(Integer, nullable=True, index=True)
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
+
+
+class TradingExecutionEvent(Base):
+    """Normalized venue execution/order lifecycle audit across brokers."""
+
+    __tablename__ = "trading_execution_events"
+    __table_args__ = (
+        Index("ix_trading_execution_events_trade_ts", "trade_id", "recorded_at"),
+        Index("ix_trading_execution_events_order_ts", "broker_source", "order_id", "recorded_at"),
+        Index("ix_trading_execution_events_pattern_ts", "scan_pattern_id", "recorded_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    trade_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    proposal_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_proposals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    automation_session_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ticker: Optional[str] = Column(String(36), nullable=True, index=True)
+    venue: Optional[str] = Column(String(32), nullable=True, index=True)
+    execution_family: Optional[str] = Column(String(32), nullable=True, index=True)
+    broker_source: Optional[str] = Column(String(32), nullable=True, index=True)
+    order_id: Optional[str] = Column(String(128), nullable=True, index=True)
+    client_order_id: Optional[str] = Column(String(128), nullable=True, index=True)
+    product_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    event_type: str = Column(String(32), nullable=False, index=True)
+    status: Optional[str] = Column(String(32), nullable=True, index=True)
+    requested_quantity: Optional[float] = Column(Float, nullable=True)
+    cumulative_filled_quantity: Optional[float] = Column(Float, nullable=True)
+    last_fill_quantity: Optional[float] = Column(Float, nullable=True)
+    average_fill_price: Optional[float] = Column(Float, nullable=True)
+    submitted_at: Optional[datetime] = Column(DateTime, nullable=True)
+    acknowledged_at: Optional[datetime] = Column(DateTime, nullable=True)
+    first_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_fill_at: Optional[datetime] = Column(DateTime, nullable=True)
+    event_at: Optional[datetime] = Column(DateTime, nullable=True)
+    recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    reference_price: Optional[float] = Column(Float, nullable=True)
+    best_bid: Optional[float] = Column(Float, nullable=True)
+    best_ask: Optional[float] = Column(Float, nullable=True)
+    spread_bps: Optional[float] = Column(Float, nullable=True)
+    expected_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    realized_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    submit_to_ack_ms: Optional[float] = Column(Float, nullable=True)
+    ack_to_first_fill_ms: Optional[float] = Column(Float, nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
 
 
 class JournalEntry(Base):
@@ -340,6 +400,7 @@ class StrategyProposal(Base):
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
     trade_id: Optional[int] = Column(Integer, nullable=True)
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    allocation_decision_json: dict = Column(JSONB, nullable=False, default=lambda: {})
 
 
 class ScanPattern(Base):
@@ -755,6 +816,7 @@ class TradingAutomationSession(Base):
     )
     state: str = Column(String(32), nullable=False, default="idle")
     risk_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    allocation_decision_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
     source_node_id: Optional[str] = Column(String(80), nullable=True, index=True)
     source_paper_session_id: Optional[int] = Column(

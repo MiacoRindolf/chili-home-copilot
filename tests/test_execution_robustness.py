@@ -11,7 +11,9 @@ from app.services.trading import execution_robustness as er_mod
 from app.services.trading.execution_robustness import (
     build_skip_contract,
     compute_execution_robustness_contract,
+    compute_execution_robustness_v2_contract,
     execution_robustness_summary,
+    execution_robustness_v2_summary,
     merge_repeatable_edge_robustness_into_readiness,
 )
 from app.services.trading.momentum_neural.operator_readiness import build_momentum_operator_readiness
@@ -147,6 +149,65 @@ def test_execution_robustness_summary_shape():
     assert s["robustness_tier"] == "warning"
     assert s["fill_rate"] == 0.5
     assert execution_robustness_summary(None) is None
+
+
+def test_compute_v2_healthy_exchange_audited():
+    p = SimpleNamespace(origin="web_discovered")
+    telemetry = dict(
+        n_orders=10,
+        n_filled=9,
+        n_partial=1,
+        n_miss=1,
+        fill_rate=0.9,
+        partial_fill_rate=0.1111,
+        miss_rate=0.1,
+        cancel_reject_rate=0.1,
+        avg_expected_slippage_bps=8.0,
+        avg_realized_slippage_bps=12.0,
+        avg_spread_bps=5.0,
+        latency_p50_ms=250.0,
+        latency_p95_ms=900.0,
+        ack_to_fill_p50_ms=400.0,
+        ack_to_fill_p95_ms=1200.0,
+        provider_truth_mode="exchange_event_audited",
+        dominant_broker_source="coinbase",
+        metric_coverage={"spread_ratio": 1.0, "latency_submit_ack_ratio": 1.0},
+    )
+    c = compute_execution_robustness_v2_contract(pattern=p, telemetry=telemetry, settings_mod=_settings_mod())
+    assert c["skip_reason"] is None
+    assert c["robustness_tier"] == "healthy"
+    assert c["provider_truth_mode"] == "exchange_event_audited"
+    assert c["source_truth_tier"] == "strong"
+    assert execution_robustness_v2_summary(c)["avg_expected_slippage_bps"] == 8.0
+
+
+def test_compute_v2_missing_metrics_downgrades_truth():
+    p = SimpleNamespace(origin="brain_discovered")
+    telemetry = dict(
+        n_orders=6,
+        n_filled=6,
+        n_partial=0,
+        n_miss=0,
+        fill_rate=1.0,
+        partial_fill_rate=0.0,
+        miss_rate=0.0,
+        cancel_reject_rate=0.0,
+        avg_expected_slippage_bps=None,
+        avg_realized_slippage_bps=4.0,
+        avg_spread_bps=None,
+        latency_p50_ms=None,
+        latency_p95_ms=None,
+        ack_to_fill_p50_ms=None,
+        ack_to_fill_p95_ms=None,
+        provider_truth_mode="manual_recorded",
+        dominant_broker_source="manual",
+        metric_coverage={"spread_ratio": 0.0, "latency_submit_ack_ratio": 0.0},
+    )
+    c = compute_execution_robustness_v2_contract(pattern=p, telemetry=telemetry, settings_mod=_settings_mod())
+    assert c["robustness_tier"] == "warning"
+    assert c["source_truth_tier"] == "weak"
+    assert "spread_capture_missing" in c["robustness_flags"]
+    assert "weak_provider_truth" in c["readiness_impact_flags"]
 
 
 def test_merge_repeatable_edge_idempotent_and_clears_block(monkeypatch):
