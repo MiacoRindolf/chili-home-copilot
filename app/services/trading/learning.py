@@ -773,7 +773,7 @@ def take_market_snapshot(db: Session, ticker: str, bar_interval: str = "1d") -> 
         )
         db.commit()
     except Exception:
-        pass
+        logger.debug("[learning] take_market_snapshot: non-critical operation failed", exc_info=True)
 
 
 def _snapshot_data(ticker: str, bar_interval: str = "1d") -> tuple[
@@ -832,7 +832,7 @@ def take_snapshots_parallel(
             try:
                 batch_download(tickers[i:i + BATCH], period=period, interval=bar_interval)
             except Exception:
-                pass
+                logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
 
     _t0 = time.time()
     fetched: list[tuple] = []
@@ -846,7 +846,7 @@ def take_snapshots_parallel(
             try:
                 fetched.append(future.result())
             except Exception:
-                pass
+                logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
             # Progress logging every 100 tickers
             done = len(fetched)
             if done % 100 == 0 or done == total:
@@ -894,7 +894,7 @@ def take_snapshots_parallel(
             )
             count += 1
         except Exception:
-            pass
+            logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
     if count:
         db.commit()
     return count
@@ -954,7 +954,7 @@ def backfill_future_returns(db: Session) -> int:
             try:
                 _bd(tickers[i:i + BATCH], period="1mo", interval="1d")
             except Exception:
-                pass
+                logger.debug("[learning] backfill_future_returns: non-critical operation failed", exc_info=True)
 
     _bf_stats: dict[str, int] = {
         "skip_recent": 0,
@@ -1398,7 +1398,7 @@ def mine_patterns(
                 if t not in mine_tickers:
                     mine_tickers.append(t)
         except Exception:
-            pass
+            logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
     max_mine = int(getattr(settings, "brain_mine_patterns_max_tickers", 1000))
     if max_mine > 0:
@@ -1414,7 +1414,7 @@ def mine_patterns(
                 if iv and iv != "1d":
                     interval_jobs.append((iv, crypto_only))
     except Exception:
-        pass
+        logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
     _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
     _t0 = time.time()
@@ -1850,7 +1850,7 @@ def mine_patterns(
 
             run_regime_gated_mining_checks(all_rows, _check)
     except Exception:
-        pass
+        logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
@@ -2084,7 +2084,7 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
             try:
                 extra_rows.extend(f.result())
             except Exception:
-                pass
+                logger.debug("[learning] seek_pattern_data: non-critical operation failed", exc_info=True)
 
     extra_rows = dedupe_sample_rows(extra_rows)
 
@@ -2407,7 +2407,7 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
             try:
                 rows.extend(f.result())
             except Exception:
-                pass
+                logger.debug("[learning] validate_and_evolve: non-critical operation failed", exc_info=True)
 
     if len(rows) < 30:
         return {"tested": 0, "note": "insufficient data for self-validation"}
@@ -2427,7 +2427,7 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     try:
         _migrate_legacy_hypotheses(db, user_id)
     except Exception:
-        pass
+        logger.debug("[learning] validate_and_evolve: non-critical operation failed", exc_info=True)
 
     # ── Load all testable hypotheses ──
     # Prioritize builtin_seed origin (they have simpler, more testable conditions)
@@ -3824,7 +3824,7 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                 ind = _json.loads(a.indicator_snapshot) if a.indicator_snapshot else {}
                 parsed.append(ind)
             except Exception:
-                pass
+                logger.debug("[learning] mine_fakeout_patterns: non-critical operation failed", exc_info=True)
         return parsed
 
     fakeout_inds = _parse_indicators(fakeouts)
@@ -3868,7 +3868,7 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                     combo = tuple(sorted([sigs[i][:30], sigs[j][:30]]))
                     fakeout_sig_combos[combo] += 1
         except Exception:
-            pass
+            logger.debug("[learning] mine_fakeout_patterns: non-critical operation failed", exc_info=True)
 
     for a in winners:
         try:
@@ -3878,7 +3878,7 @@ def mine_fakeout_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
                     combo = tuple(sorted([sigs[i][:30], sigs[j][:30]]))
                     winner_sig_combos[combo] += 1
         except Exception:
-            pass
+            logger.debug("[learning] mine_fakeout_patterns: non-critical operation failed", exc_info=True)
 
     for combo, count in fakeout_sig_combos.most_common(5):
         if count < 3:
@@ -4190,7 +4190,7 @@ def mine_signal_synergies(db: Session, user_id: int | None) -> dict[str, Any]:
                     combo = tuple(sorted([short_sigs[i], short_sigs[j]]))
                     combo_outcomes[combo].append(a.outcome)
         except Exception:
-            pass
+            logger.debug("[learning] mine_signal_synergies: non-critical operation failed", exc_info=True)
 
     synergies_found = 0
     overall_wr = sum(1 for a in resolved if a.outcome == "winner") / len(resolved) * 100
@@ -4292,7 +4292,7 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
             try:
                 all_rows.extend(f.result())
             except Exception:
-                pass
+                logger.debug("[learning] refine_patterns: non-critical operation failed", exc_info=True)
 
     if len(all_rows) < 50:
         return {"refined": 0, "note": "insufficient data for refinement"}
@@ -4463,7 +4463,7 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
             f"overall: {regime['regime']}"
         )
     except Exception:
-        pass
+        logger.debug("[learning] deep_study: non-critical operation failed", exc_info=True)
 
     # Adaptive weights drift
     weights_text = "Not available"
@@ -4477,7 +4477,7 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
                 drifts.append(f"  - {k}: {default} -> {v} ({(v-default)/abs(default):+.0%})")
         weights_text = "\n".join(drifts) if drifts else "All weights at defaults."
     except Exception:
-        pass
+        logger.debug("[learning] deep_study: non-critical operation failed", exc_info=True)
 
     # Recently challenged hypotheses
     challenged_text = "None yet."
@@ -4490,7 +4490,7 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
                 f"  - {e.description[:120]}" for e in challenged_events
             )
     except Exception:
-        pass
+        logger.debug("[learning] deep_study: non-critical operation failed", exc_info=True)
 
     # Dynamic hypothesis pool status
     from ...models.trading import TradingHypothesis
@@ -4513,7 +4513,7 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
                 )
             hypothesis_pool_text = "\n".join(lines)
     except Exception:
-        pass
+        logger.debug("[learning] deep_study: non-critical operation failed", exc_info=True)
 
     reflection_prompt = f"""You are an AI trading brain doing a self-reflection on what you've learned.
 
@@ -4939,7 +4939,7 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
             param_rows, max_samples=800,
         )
     except Exception:
-        pass
+        logger.debug("[learning] get_brain_stats: non-critical operation failed", exc_info=True)
 
     last_cycle_digest = None
     last_proposal_skips = None
@@ -4963,7 +4963,7 @@ def get_brain_stats(db: Session, user_id: int | None) -> dict[str, Any]:
                 except Exception:
                     last_proposal_skips = None
     except Exception:
-        pass
+        logger.debug("[learning] get_brain_stats: non-critical operation failed", exc_info=True)
 
     return {
         "total_patterns": total_patterns,
@@ -5203,7 +5203,7 @@ def _learning_status_with_elapsed() -> dict[str, Any]:
             started = datetime.fromisoformat(status["started_at"])
             status["elapsed_s"] = round((datetime.utcnow() - started).total_seconds(), 1)
         except Exception:
-            pass
+            logger.debug("[learning] _learning_status_with_elapsed: non-critical operation failed", exc_info=True)
     return status
 
 
@@ -5238,7 +5238,7 @@ def _overlay_learning_from_brain_worker_status_file(status: dict[str, Any]) -> N
             if k in snap:
                 status[k] = snap[k]
     except Exception:
-        pass
+        logger.debug("[learning] _overlay_learning_from_brain_worker_status_file: non-critical operation failed", exc_info=True)
 
 
 def _overlay_learning_from_brain_worker_db(status: dict[str, Any]) -> None:
@@ -5261,7 +5261,7 @@ def _overlay_learning_from_brain_worker_db(status: dict[str, Any]) -> None:
         finally:
             _sdb.close()
     except Exception:
-        pass
+        logger.debug("[learning] _overlay_learning_from_brain_worker_db: non-critical operation failed", exc_info=True)
 
 
 def _persist_learning_live_snapshot_to_db() -> None:
@@ -5616,7 +5616,7 @@ def test_pattern_hypothesis(
                     try:
                         db.rollback()
                     except Exception:
-                        pass
+                        logger.debug("[learning] test_pattern_hypothesis: non-critical operation failed", exc_info=True)
             ri = result.get("research_integrity")
             if isinstance(ri, dict):
                 integrity_rows.append({"ticker": ticker, **ri})
@@ -5803,7 +5803,7 @@ def test_pattern_hypothesis(
                             ov2["decay_monitor"] = {**(ov2.get("decay_monitor") or {}), **_dm_sig}
                             patch["oos_validation_json"] = ov2
                     except Exception:
-                        pass
+                        logger.debug("[learning] test_pattern_hypothesis: non-critical operation failed", exc_info=True)
                     _bstat, _ballow = brain_apply_bench_promotion_gate(
                         origin=getattr(pattern, "origin", "") or "",
                         bench_summary=_bench_raw,
@@ -6844,7 +6844,7 @@ def _analyze_variant_losses(
             f"avg return {avg_losing_return}%, sectors={sector_losses}",
         )
     except Exception:
-        pass
+        logger.debug("[learning] _analyze_variant_losses: non-critical operation failed", exc_info=True)
 
     return report
 
@@ -7159,7 +7159,7 @@ def evolve_pattern_strategies(db: Session) -> dict[str, Any]:
             )
             db.add(evt)
         except Exception:
-            pass
+            logger.debug("[learning] evolve_pattern_strategies: non-critical operation failed", exc_info=True)
 
         # ── 4. Guided mutate phase ───────────────────────────────────
         active_children = (
@@ -7814,7 +7814,7 @@ def run_learning_cycle(
         try:
             log_learning_event(db, user_id, "error", f"Learning cycle failed: {e}")
         except Exception:
-            pass
+            logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
     finally:
         elapsed = time.time() - start
         _lease_release_holder = _brain_lease_enforcement_ctx.get("holder_id")
@@ -7854,7 +7854,7 @@ def run_learning_cycle(
             _learning_status["last_cycle_funnel"] = dict(report["funnel_snapshot"])
             _learning_status["last_cycle_budget"] = report.get("brain_resource_budget")
         except Exception:
-            pass
+            logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
 
         try:
             from ...trading_brain.wiring import brain_shadow_finally
@@ -7907,7 +7907,7 @@ def run_learning_cycle(
             try:
                 db.rollback()
             except Exception:
-                pass
+                logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
     return {"ok": True, **report}
 
 

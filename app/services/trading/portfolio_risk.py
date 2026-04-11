@@ -122,7 +122,8 @@ def check_new_trade_allowed(
         if is_kill_switch_active():
             return False, "Kill switch is active — all trading halted"
     except Exception:
-        pass
+        logger.error("[risk] Kill-switch check failed — blocking trade as precaution", exc_info=True)
+        return False, "Kill-switch check failed — trade blocked as safety precaution"
 
     if is_breaker_tripped():
         return False, f"Circuit breaker active: {_breaker_reason}"

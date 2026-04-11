@@ -586,6 +586,7 @@ def evolve_strategy_weights(db: Session) -> dict[str, Any]:
                 rules = _wj.loads(sp.rules_json)
                 conds = rules.get("conditions", [])
             except Exception:
+                logger.debug("[scanner] evolve_strategy_weights: item failed, skipping", exc_info=True)
                 continue
             wr = sp.win_rate or 50.0
             conf = sp.confidence or 0.5
@@ -873,7 +874,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             signals.append(f"Expensive P/E ({pe:.1f})")
                     score += fund_bonus
             except Exception:
-                pass
+                logger.debug("[scanner] _score_ticker_impl: optional signal component failed", exc_info=True)
 
         # ── Market regime modifier (brain-adaptive) ──
         try:
@@ -891,7 +892,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                     score += get_adaptive_weight("regime_risk_on_bonus")
                     signals.append("Risk-on regime — momentum boost")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_ticker_impl: optional signal component failed", exc_info=True)
 
         # ── Falling-knife gate: below major MAs = extra penalty ──
         _below_sma50 = pd.notna(sma_50) and price < float(sma_50)
@@ -938,8 +939,8 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             signals.append(f"Pattern: {m['name']} (+{m['score_boost']:.1f})")
             finally:
                 _pe_db.close()
-        except Exception as _pe_err:
-            pass  # Pattern engine errors should not break basic scoring
+        except Exception:
+            logger.debug("[scanner] _score_ticker_impl: pattern engine scoring failed (non-fatal)", exc_info=True)
 
         score = max(1.0, min(10.0, score))
 
@@ -1155,7 +1156,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                         score += get_adaptive_weight("float_low_bonus") * 0.8
                         signals.append(f"Low float ({shares/1e6:.1f}M)")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_ticker_intraday: optional signal component failed", exc_info=True)
 
         # ── Pullback detection (brain-adaptive — clean first pullback) ──
         if len(today_df) >= 5 and not macd_negative:
@@ -1192,7 +1193,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
                     score += get_adaptive_weight("time_of_day_bonus")
                     signals.append("Prime trading window (morning session)")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_ticker_intraday: optional signal component failed", exc_info=True)
 
         # ── MACD negative cap (brain-adaptive) ──
         if macd_negative:
@@ -1212,7 +1213,7 @@ def _score_ticker_intraday(ticker: str) -> dict[str, Any] | None:
             elif _spy_dir == "down" and daily_change_pct > 0:
                 signals.append("Long against SPY trend — added caution")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_ticker_intraday: optional signal component failed", exc_info=True)
 
         score = max(1.0, min(10.0, score))
 
@@ -1983,7 +1984,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                     score += get_adaptive_weight("crypto_bo_mtf_retest_confirm")
                     signals.append(f"1h: {mtf_retest['retest_count']}x retest — multi-TF pressure confirmed")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
 
         # MACD
         if macd_bullish:
@@ -2073,7 +2074,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                         score += get_adaptive_weight("crypto_bo_mtf_confirm")
                         signals.append("Multi-TF confirmed: 1h trend bullish + 15m setup aligned")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
 
         # ── VWAP Reclaim ──
         if _detect_vwap_reclaim(close, vwap, rvol):
@@ -2124,7 +2125,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                     score += get_adaptive_weight("crypto_bo_btc_dumping_penalty")
                     signals.append("BTC dumping hard — altcoin breakouts rarely survive this")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
 
         # ── Fakeout Penalties (learned from outcome data) ──
         _rsi_raw = float(rsi_series.iloc[-1]) if pd.notna(rsi_series.iloc[-1]) else 50
@@ -2182,7 +2183,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
             finally:
                 _pe_db.close()
         except Exception:
-            pass
+            logger.debug("[scanner] _score_crypto_breakout: optional signal component failed", exc_info=True)
 
         score = max(1.0, min(10.0, score))
 
@@ -2370,7 +2371,7 @@ def run_crypto_breakout_scan(
             from ..ticker_universe import get_all_crypto_tickers
             tickers.update(get_all_crypto_tickers())
         except Exception:
-            pass
+            logger.debug("[scanner] run_crypto_breakout_scan: optional signal component failed", exc_info=True)
 
         # Pull crypto tickers the brain has already scored (DB knowledge)
         try:
@@ -2385,16 +2386,16 @@ def run_crypto_breakout_scan(
             finally:
                 _db.close()
         except Exception:
-            pass
+            logger.debug("[scanner] run_crypto_breakout_scan: optional signal component failed", exc_info=True)
 
         try:
             tickers.update(get_trending_crypto())
         except Exception:
-            pass
+            logger.debug("[scanner] run_crypto_breakout_scan: optional signal component failed", exc_info=True)
         try:
             tickers.update(_crypto_top_movers())
         except Exception:
-            pass
+            logger.debug("[scanner] run_crypto_breakout_scan: optional signal component failed", exc_info=True)
 
         # NOTE: We intentionally skip the Massive dead-ticker filter here.
         # Many crypto tickers 404 on Massive but resolve fine via yfinance.
@@ -2658,7 +2659,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                     score += get_adaptive_weight("bo_mtf_retest_confirm")
                     signals.append(f"15m: {mtf_retest['retest_count']}x retest of ${smart_round(res_15m)} — intraday pressure confirmed")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── MACD gate (primary momentum filter — weight is brain-adaptive) ──
         if pd.notna(macd_hist) and pd.notna(macd_line) and pd.notna(macd_sig):
@@ -2706,7 +2707,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                         elif shares > 50_000_000:
                             score += get_adaptive_weight("float_high_penalty")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── Topping tail detection (brain-adaptive penalty) ──
         last_open = float(df["Open"].iloc[-1])
@@ -2803,7 +2804,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                             try:
                                 idx = idx.tz_localize(et)
                             except Exception:
-                                pass
+                                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
                         orb_mask = idx.indexer_between_time("09:30", "10:00")
                         if len(orb_mask) >= 2:
                             orb_high = float(df_intra.iloc[orb_mask]["High"].max())
@@ -2815,7 +2816,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                                 score += get_adaptive_weight("bo_orb_break_below")
                                 signals.append(f"Below Opening Range low ${orb_low:.2f}")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── VWAP Reclaim (intraday) ──
         if not _is_crypto:
@@ -2831,7 +2832,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                             score += get_adaptive_weight("bo_vwap_reclaim")
                             signals.append("VWAP reclaimed from below on volume — institutional buying")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── Weekly Multi-Timeframe Confirmation ──
         if not _is_crypto:
@@ -2852,7 +2853,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                             score -= 0.3
                             signals.append("Weekly EMAs bearish — higher timeframe headwind")
             except Exception:
-                pass
+                logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── Market regime modifier for breakouts (brain-adaptive) ──
         try:
@@ -2862,7 +2863,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("regime_vix_breakout_penalty")
                 signals.append(f"High VIX ({_vix_regime}) — false breakout risk elevated")
         except Exception:
-            pass
+            logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         # ── Fakeout Penalties (learned from outcome data) ──
         if is_squeeze and rsi_val is not None and rsi_val > 65:
@@ -2916,7 +2917,7 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
             finally:
                 _pe_db.close()
         except Exception:
-            pass
+            logger.debug("[scanner] _score_breakout: optional signal component failed", exc_info=True)
 
         score = max(1.0, min(10.0, score))
         _bo_ready = get_adaptive_weight("bo_signal_ready")
@@ -3241,7 +3242,7 @@ def run_daytrade_scan(max_results: int = 30) -> dict[str, Any]:
                 if scored is not None:
                     results.append(scored)
             except Exception:
-                pass
+                logger.debug("[scanner] run_daytrade_scan: optional signal component failed", exc_info=True)
 
     results.sort(key=lambda r: r["score"], reverse=True)
     elapsed = round(time.time() - start, 1)
@@ -3389,7 +3390,7 @@ def run_breakout_scan(
                     if scored is not None:
                         results.append(scored)
                 except Exception:
-                    pass
+                    logger.debug("[scanner] run_breakout_scan: optional signal component failed", exc_info=True)
 
         results.sort(key=lambda r: r["score"], reverse=True)
         elapsed = round(time.time() - start, 1)
@@ -3548,7 +3549,7 @@ def run_momentum_scanner(
                 if result is not None:
                     scored.append(result)
             except Exception:
-                pass
+                logger.debug("[scanner] run_momentum_scanner: optional signal component failed", exc_info=True)
 
     imm_score = get_adaptive_weight("immaculate_min_score")
     imm_vol = get_adaptive_weight("immaculate_min_vol")
@@ -3663,7 +3664,7 @@ def _try_load_cached_scores(db: "Session | None") -> list[dict[str, Any]]:
         if _bc.get("results") and _age is not None and _age < _BREAKOUT_CACHE_TTL:
             results.extend(_bc["results"])
     except Exception:
-        pass
+        logger.debug("[scanner] _try_load_cached_scores: optional signal component failed", exc_info=True)
     if _daytrade_cache["results"] and (time.time() - _daytrade_cache["ts"]) < _DAYTRADE_CACHE_TTL:
         results.extend(_daytrade_cache["results"])
 
@@ -4257,7 +4258,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
     try:
         _live_quotes = fetch_quotes_batch(_pick_tickers_for_check) if _pick_tickers_for_check else {}
     except Exception:
-        pass
+        logger.debug("[scanner] _best_backtest_for_pick: optional signal component failed", exc_info=True)
 
     validated = []
     for pick in picks:

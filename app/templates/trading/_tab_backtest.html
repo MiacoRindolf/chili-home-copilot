@@ -1,0 +1,54 @@
+      <!-- Backtest -->
+      <div class="t-tab-content" id="tab-backtest">
+        <div class="bt-form">
+          <select id="bt-strategy" title="Built-in strategies or CHILI Brain discovered patterns"></select>
+          <div id="bt-strategy-params" class="bt-strategy-params" style="flex-basis:100%;margin-top:4px"></div>
+          <select id="bt-period">
+            <option value="6mo">6 months</option>
+            <option value="1y" selected>1 year</option>
+            <option value="2y">2 years</option>
+            <option value="5y">5 years</option>
+          </select>
+          <input id="bt-cash" type="number" value="10000" step="1000" style="width:90px" placeholder="Cash $" />
+          <button type="button" onclick="runBacktest()">Run Backtest</button>
+        </div>
+        <details id="bt-advanced" class="bt-advanced" style="display:none;margin:8px 0;font-size:12px;max-width:900px">
+          <summary style="cursor:pointer;color:var(--text-secondary)">Advanced — pattern rules &amp; exits (CHILI Brain / dynamic)</summary>
+          <p style="color:var(--text-muted);margin:6px 0 8px">Add entry conditions and tune exit; or use <strong>Edit as JSON</strong> for raw overrides.</p>
+          <div class="bt-form-section" style="margin-top:10px">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+              <strong style="font-size:12px">Append entry conditions (AND)</strong>
+              <button type="button" class="bt-add-row" onclick="btAddConditionRow()" style="padding:2px 8px;font-size:11px;cursor:pointer">+ Add row</button>
+            </div>
+            <div id="bt-conditions-rows"></div>
+          </div>
+          <div class="bt-form-section" style="margin-top:12px">
+            <strong style="font-size:12px">Exit config</strong>
+            <div style="display:flex;flex-wrap:wrap;gap:12px 16px;align-items:center;margin-top:6px">
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
+                ATR mult <input type="number" id="bt-exit-atr" step="0.1" min="0.5" max="5" placeholder="e.g. 2" style="width:56px" title="Trailing stop ATR multiplier" />
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px">
+                Max bars <input type="number" id="bt-exit-max-bars" min="5" max="200" placeholder="e.g. 40" style="width:56px" title="Max hold bars" />
+              </label>
+              <label style="display:inline-flex;align-items:center;gap:4px;font-size:11px;cursor:pointer">
+                <input type="checkbox" id="bt-exit-use-bos" checked title="Break of structure exit" /> Use BOS
+              </label>
+            </div>
+          </div>
+          <details class="bt-json-details" style="margin-top:10px;border:1px solid var(--border-color, #374151);border-radius:4px;padding:6px">
+            <summary style="cursor:pointer;color:var(--text-muted);font-size:11px">Edit as JSON</summary>
+            <label style="display:block;margin-top:6px;font-size:11px">Append entry conditions (JSON array)</label>
+            <textarea id="bt-append-conditions" rows="2" style="width:100%;font-family:monospace;font-size:11px" placeholder='[{"indicator":"rsi_14","op":"&lt;","value":35}]'></textarea>
+            <label style="display:block;margin-top:6px;font-size:11px">Exit config overlay (JSON object)</label>
+            <textarea id="bt-exit-config" rows="2" style="width:100%;font-family:monospace;font-size:11px" placeholder='{"atr_mult":2.5,"max_bars":40}'></textarea>
+            <label style="display:block;margin-top:6px;font-size:11px">Full rules JSON override (replaces pattern)</label>
+            <textarea id="bt-rules-override" rows="4" style="width:100%;font-family:monospace;font-size:11px" placeholder='{"conditions":[...]}'></textarea>
+          </details>
+        </details>
+        <div class="bt-results" id="bt-results"></div>
+        <div id="bt-chart-area"></div>
+        <div id="bt-indicator-pane"></div>
+        <div id="bt-legend"></div>
+        <div id="bt-trade-log"></div>
+      </div>

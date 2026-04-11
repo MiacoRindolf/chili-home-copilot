@@ -36,13 +36,21 @@ except ImportError:
 _login_lock = threading.Lock()
 _logged_in = False
 _last_login: float = 0
-_LOGIN_TTL = 3600
+_session_connected_at: float | None = None  # exposed to runtime_status
+_last_sync_ts: float | None = None          # exposed to runtime_status
+_LOGIN_TTL = int(getattr(settings, "broker_login_ttl_seconds", 3600))
 
 # SMS flow state preserved between step 1 and step 2
 _sms_state: dict[str, Any] = {}
 
 _cache: dict[str, tuple[float, Any]] = {}
-_CACHE_TTL = 300
+_CACHE_TTL = int(getattr(settings, "broker_cache_ttl_seconds", 300))
+
+# ── Configurable execution timeouts ──────────────────────────────────────
+_ORDER_POLL_TIMEOUT = int(getattr(settings, "broker_order_poll_timeout", 30))
+_ORDER_POLL_INTERVAL = float(getattr(settings, "broker_order_poll_interval", 2.0))
+_CHALLENGE_POLL_TIMEOUT = int(getattr(settings, "broker_challenge_poll_timeout", 15))
+_RECONCILE_CONFIRM_WINDOW = int(getattr(settings, "broker_reconcile_confirm_seconds", 300))
 
 
 def _cache_get(key: str) -> Any | None:
@@ -97,6 +105,7 @@ def login(force: bool = False) -> bool:
             )
             _logged_in = True
             _last_login = time.time()
+            _session_connected_at = _last_login
             logger.info("[broker] Robinhood login successful (TOTP)")
             return True
         except Exception as e:
@@ -830,6 +839,17 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     )
 
     for trade in stale:
+        # Reconciliation confirmation window: only auto-close if the position
+        # has been missing for longer than _RECONCILE_CONFIRM_WINDOW seconds.
+        # This prevents premature closes during transient API glitches.
+        last_sync = getattr(trade, "last_broker_sync", None)
+        if last_sync and (datetime.utcnow() - last_sync).total_seconds() < _RECONCILE_CONFIRM_WINDOW:
+            logger.debug(
+                "[broker] %s missing from RH but within %ds confirm window — skipping",
+                trade.ticker, _RECONCILE_CONFIRM_WINDOW,
+            )
+            continue
+
         trade.status = "closed"
         trade.exit_date = datetime.utcnow()
         entry = trade.entry_price or 0.0
@@ -1009,6 +1029,38 @@ def build_portfolio_context() -> str:
     return "\n".join(lines)
 
 
+# ── Retry helper ──────────────────────────────────────────────────────
+
+def _retry_api_call(
+    fn,
+    *args,
+    max_retries: int = 3,
+    base_delay: float = 1.0,
+    label: str = "api_call",
+    **kwargs,
+) -> Any:
+    """Execute *fn* with exponential backoff retries.
+
+    Only retries on transient exceptions (network errors, timeouts).
+    ValueError / KeyError / other logic errors are not retried.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(max_retries):
+        try:
+            return fn(*args, **kwargs)
+        except (ConnectionError, TimeoutError, OSError) as e:
+            last_exc = e
+            delay = base_delay * (2 ** attempt)
+            logger.warning(
+                "[broker] %s attempt %d/%d failed: %s — retrying in %.1fs",
+                label, attempt + 1, max_retries, e, delay,
+            )
+            time.sleep(delay)
+        except Exception:
+            raise  # non-transient — don't retry
+    raise last_exc  # type: ignore[misc]
+
+
 # ── Order Placement ───────────────────────────────────────────────────
 
 
@@ -1032,23 +1084,32 @@ def place_buy_order(
     try:
         import robin_stocks.robinhood as rh
 
-        result = rh.orders.order(
-            symbol=ticker,
-            quantity=quantity,
-            side="buy",
-            limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
-            timeInForce="gtc",
-            extendedHours=False,
-            jsonify=True,
-        )
+        def _do_buy():
+            return rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="buy",
+                limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+                timeInForce="gtc",
+                extendedHours=False,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_buy, label=f"BUY {ticker}")
 
         if result and isinstance(result, dict):
             order_id = result.get("id", "")
             state = result.get("state", "unknown")
-            logger.info(f"[broker] BUY order placed: {ticker} x{quantity} ({order_type}) → {state}")
+            logger.info(f"[broker] BUY order placed: {ticker} x{quantity} ({order_type}) -> {state}")
             _cache.pop("positions", None)
             _cache.pop("portfolio", None)
             _cache.pop("recent_orders", None)
+
+            # Post-order poll: wait for fill on market orders
+            if order_type == "market" and order_id and state not in _RH_TERMINAL_STATES:
+                state = _poll_order_until_terminal(order_id, label=f"BUY {ticker}")
+                result["state"] = state
+
             return {"ok": True, "order_id": order_id, "state": state, "raw": result}
         else:
             error_msg = str(result) if result else "Empty response from Robinhood"
@@ -1080,23 +1141,32 @@ def place_sell_order(
     try:
         import robin_stocks.robinhood as rh
 
-        result = rh.orders.order(
-            symbol=ticker,
-            quantity=quantity,
-            side="sell",
-            limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
-            timeInForce="gtc",
-            extendedHours=False,
-            jsonify=True,
-        )
+        def _do_sell():
+            return rh.orders.order(
+                symbol=ticker,
+                quantity=quantity,
+                side="sell",
+                limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
+                timeInForce="gtc",
+                extendedHours=False,
+                jsonify=True,
+            )
+
+        result = _retry_api_call(_do_sell, label=f"SELL {ticker}")
 
         if result and isinstance(result, dict):
             order_id = result.get("id", "")
             state = result.get("state", "unknown")
-            logger.info(f"[broker] SELL order placed: {ticker} x{quantity} ({order_type}) → {state}")
+            logger.info(f"[broker] SELL order placed: {ticker} x{quantity} ({order_type}) -> {state}")
             _cache.pop("positions", None)
             _cache.pop("portfolio", None)
             _cache.pop("recent_orders", None)
+
+            # Post-order poll: wait for fill on market orders
+            if order_type == "market" and order_id and state not in _RH_TERMINAL_STATES:
+                state = _poll_order_until_terminal(order_id, label=f"SELL {ticker}")
+                result["state"] = state
+
             return {"ok": True, "order_id": order_id, "state": state, "raw": result}
         else:
             error_msg = str(result) if result else "Empty response from Robinhood"
@@ -1106,6 +1176,29 @@ def place_sell_order(
     except Exception as e:
         logger.error(f"[broker] SELL order exception for {ticker}: {e}", exc_info=True)
         return {"ok": False, "error": str(e)}
+
+
+def _poll_order_until_terminal(order_id: str, *, label: str = "") -> str:
+    """Poll a Robinhood order until it reaches a terminal state or times out.
+
+    Returns the final state string. Does not raise.
+    """
+    start = time.time()
+    last_state = "queued"
+    while (time.time() - start) < _ORDER_POLL_TIMEOUT:
+        try:
+            order = get_order_by_id(order_id)
+            if order:
+                st = (order.get("state") or "").lower()
+                last_state = st
+                if st in _RH_TERMINAL_STATES:
+                    logger.info("[broker] %s order %s reached terminal state: %s", label, order_id, st)
+                    return st
+        except Exception:
+            logger.warning("[broker] %s order %s poll error (will retry)", label, order_id, exc_info=True)
+        time.sleep(_ORDER_POLL_INTERVAL)
+    logger.warning("[broker] %s order %s poll timed out after %ds (last: %s)", label, order_id, _ORDER_POLL_TIMEOUT, last_state)
+    return last_state
 
 
 # ── Helpers ──
@@ -1298,6 +1391,9 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     if synced:
         db.commit()
+
+    global _last_sync_ts
+    _last_sync_ts = time.time()
 
     logger.info(
         f"[broker] Order sync: {synced} checked, {filled} filled, "

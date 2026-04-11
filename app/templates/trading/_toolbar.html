@@ -1,0 +1,34 @@
+    <div class="t-toolbar">
+      <span class="ticker-display" id="ticker-label" onclick="openToolbarSearch()" title="Click to search (/)"></span>
+      <div class="toolbar-search" id="toolbar-search">
+        <input type="text" id="toolbar-search-input" placeholder="Search ticker or name..." autocomplete="off" />
+        <div class="toolbar-search-results" id="toolbar-search-results"></div>
+      </div>
+      <span id="live-dot" class="live-dot disconnected" title="Live stream status"></span>
+      <div class="mm-mode-bar" id="mm-mode-bar" title="Paper vs live operator mode (neural mesh automation; not learning-cycle). Live requires explicit confirm.">
+        <span>Mode</span>
+        <button type="button" class="mm-mode-btn" id="mm-mode-paper" onclick="_setMomentumUiMode('paper')">Paper</button>
+        <button type="button" class="mm-mode-btn mm-live" id="mm-mode-live" onclick="_setMomentumUiMode('live')">Live</button>
+      </div>
+      <span class="price-display" id="price-label"></span>
+      <span class="tb-divider"></span>
+      <div class="interval-picker-wrap" role="group" aria-label="Chart interval">
+        <div class="interval-grid" role="listbox" aria-label="Timeframe">
+          <button type="button" class="interval-pop-item" data-interval="1m" onclick="changeInterval('1m')" role="option">1m</button>
+          <button type="button" class="interval-pop-item" data-interval="5m" onclick="changeInterval('5m')" role="option">5m</button>
+          <button type="button" class="interval-pop-item" data-interval="15m" onclick="changeInterval('15m')" role="option">15m</button>
+          <button type="button" class="interval-pop-item" data-interval="30m" onclick="changeInterval('30m')" role="option">30m</button>
+          <button type="button" class="interval-pop-item" data-interval="1h" onclick="changeInterval('1h')" role="option">1h</button>
+          <button type="button" class="interval-pop-item" data-interval="1d" onclick="changeInterval('1d')" role="option">1D</button>
+          <button type="button" class="interval-pop-item" data-interval="1wk" onclick="changeInterval('1wk')" role="option">1W</button>
+          <button type="button" class="interval-pop-item" data-interval="1mo" onclick="changeInterval('1mo')" role="option">1M</button>
+        </div>
+      </div>
+      <span class="tb-divider"></span>
+      <button id="btn-multiview" class="mv-btn" onclick="toggleMultiView()" title="Multi-timeframe view (M)">&#x25A6; Multi</button>
+      <button id="btn-fullscreen" onclick="toggleFullscreen()" title="Fullscreen (F11)">&#x26F6;</button>
+      <button id="btn-screenshot" onclick="chartScreenshot()" title="Screenshot chart">&#x1F4F7;</button>
+      <button id="btn-alert" onclick="_promptChartAlert()" title="Add price alert line">&#x1F514; Alert</button>
+      <span class="tb-divider"></span>
+      <button id="btn-analyze" class="tb-action" onclick="runAnalysis()">&#x1F916; AI Analyze</button>
+    </div>

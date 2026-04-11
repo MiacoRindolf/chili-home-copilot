@@ -1,0 +1,49 @@
+    <!-- Indicator toggles -->
+    <div class="ind-panel" id="ind-panel"></div>
+
+    <div class="t-chart-area" id="chart-area">
+      <div class="chart-draw-toolbar" id="draw-toolbar">
+        <button class="draw-btn" data-tool="trendline" title="Trend Line (L)">&#x2571;</button>
+        <button class="draw-btn" data-tool="ray" title="Ray (Y)">&#x2192;</button>
+        <button class="draw-btn" data-tool="hline" title="Horizontal Line (H)">&#x2500;</button>
+        <button class="draw-btn" data-tool="vline" title="Vertical Line (V)">&#x2502;</button>
+        <button class="draw-btn" data-tool="channel" title="Parallel Channel (C)">&#x2225;</button>
+        <button class="draw-btn" data-tool="rect" title="Rectangle (R)">&#x25AD;</button>
+        <button class="draw-btn" data-tool="fib" title="Fibonacci (F)">&#x0192;</button>
+        <button class="draw-btn" data-tool="arrow" title="Arrow (A)">&#x279C;</button>
+        <button class="draw-btn" data-tool="callout" title="Callout (N)">&#x1F4AC;</button>
+        <button class="draw-btn" data-tool="measure" title="Measure (G)">&#x1F4CF;</button>
+        <button class="draw-btn" data-tool="text" title="Text Label (T)">&#x0054;</button>
+        <div class="draw-sep"></div>
+        <button class="draw-btn" id="btn-magnet" title="Magnet/Snap (S)" onclick="_toggleMagnet()">&#x1F9F2;</button>
+        <button class="draw-btn" id="btn-undo" title="Undo (Ctrl+Z)" onclick="_undoDraw()">&#x21B6;</button>
+        <button class="draw-btn" id="btn-redo" title="Redo (Ctrl+Y)" onclick="_redoDraw()">&#x21B7;</button>
+        <div class="draw-sep"></div>
+        <button class="draw-btn" data-tool="eraser" title="Eraser (E)">&#x2716;</button>
+        <button class="draw-btn" id="draw-clear-btn" title="Clear All (X)">&#x1F5D1;</button>
+      </div>
+      <canvas id="draw-canvas"></canvas>
+      <div id="ind-panes-top" class="ind-panes-slot"></div>
+      <div id="main-chart"></div>
+      <div id="user-alert-handles-layer" class="user-alert-handles-layer" aria-hidden="true"></div>
+      <div id="ind-panes-bottom" class="ind-panes-slot"></div>
+      <div class="ind-sub-pane" id="rsi-pane" style="display:none" data-pane-id="rsi" data-pane-default="top">
+        <div class="ind-sub-label" id="rsi-pane-label"><span class="ind-sub-grip" title="Drag to reorder">&#x2630;</span> RSI <span class="ind-sub-val" id="rsi-pane-val"></span></div>
+        <div class="ind-sub-chart" id="rsi-chart"></div>
+      </div>
+      <div class="ind-sub-pane" id="macd-pane" style="display:none" data-pane-id="macd" data-pane-default="bottom">
+        <div class="ind-sub-label" id="macd-pane-label"><span class="ind-sub-grip" title="Drag to reorder">&#x2630;</span> MACD <span class="ind-sub-val" id="macd-pane-val"></span></div>
+        <div class="ind-sub-chart" id="macd-chart"></div>
+      </div>
+      <div id="multi-chart-grid" class="multi-chart-grid hidden">
+        <div class="mc-cell" data-tf="1wk" onclick="exitMultiView('1wk')"><div class="mc-label">Weekly</div><div class="mc-chart" id="mc-1wk"></div></div>
+        <div class="mc-cell" data-tf="1d" onclick="exitMultiView('1d')"><div class="mc-label">Daily</div><div class="mc-chart" id="mc-1d"></div></div>
+        <div class="mc-cell" data-tf="1h" onclick="exitMultiView('1h')"><div class="mc-label">1 Hour</div><div class="mc-chart" id="mc-1h"></div></div>
+        <div class="mc-cell" data-tf="15m" onclick="exitMultiView('15m')"><div class="mc-label">15 Min</div><div class="mc-chart" id="mc-15m"></div></div>
+      </div>
+      <div class="chart-annotations-legend" id="annotations-legend"></div>
+      <div class="chart-loading-overlay" id="chart-overlay">
+        <div class="chart-spinner"></div>
+        <div class="chart-loading-text">Loading chart data...</div>
+      </div>
+    </div>

@@ -1,4 +1,9 @@
-"""Thesis generation: convert technical signals into persuasive English."""
+"""Thesis generation: convert technical signals into persuasive English.
+
+Also provides structured pick explainability via ``build_evidence_summary``,
+which returns machine-readable reasoning that the UI can render as an
+evidence panel (why_ranked, key_contributors, invalidation, state_note).
+"""
 from __future__ import annotations
 
 import logging
@@ -7,6 +12,213 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 logger = logging.getLogger(__name__)
+
+
+# ── Evidence / explainability ───────────────────────────────────────────────
+
+def _top_contributors(pick: dict[str, Any], *, max_items: int = 4) -> list[dict[str, Any]]:
+    """Extract the strongest contributing signals as labelled evidence items."""
+    contributors: list[dict[str, Any]] = []
+
+    indicators = pick.get("indicators") or {}
+    signals = pick.get("signals") or []
+    score = float(pick.get("score") or 0)
+
+    # Score contribution
+    if score >= 7:
+        contributors.append({"label": "Composite score", "value": f"{score}/10", "weight": "high"})
+    elif score >= 5:
+        contributors.append({"label": "Composite score", "value": f"{score}/10", "weight": "medium"})
+
+    # Backtest support
+    bt_wr = pick.get("backtest_win_rate")
+    bt_ret = pick.get("backtest_return")
+    if bt_wr is not None:
+        contributors.append({
+            "label": "Historical win rate",
+            "value": f"{float(bt_wr):.0f}%",
+            "weight": "high" if float(bt_wr) > 60 else "medium",
+        })
+    if bt_ret is not None:
+        contributors.append({
+            "label": "Avg backtest return",
+            "value": f"{float(bt_ret):+.1f}%",
+            "weight": "high" if float(bt_ret) > 5 else "medium",
+        })
+
+    # Risk/reward
+    rr = pick.get("risk_reward")
+    if rr and float(rr) >= 1.5:
+        contributors.append({
+            "label": "Risk/reward",
+            "value": f"{float(rr):.1f}:1",
+            "weight": "high" if float(rr) >= 2.5 else "medium",
+        })
+
+    # Technical signals
+    _sig_weights = {
+        "breakout": "high",
+        "squeeze firing": "high",
+        "golden cross": "high",
+        "vcp": "high",
+        "above vwap": "medium",
+        "volume surge": "medium",
+        "macd bullish": "medium",
+        "ema stacking bullish": "medium",
+        "nr7": "medium",
+        "rsi oversold": "medium",
+        "adx trending": "medium",
+    }
+    for sig in signals:
+        sig_l = sig.lower()
+        matched_weight = None
+        for key, weight in _sig_weights.items():
+            if key in sig_l:
+                matched_weight = weight
+                break
+        if matched_weight:
+            contributors.append({"label": sig, "value": None, "weight": matched_weight})
+
+    # Indicator values
+    rsi = indicators.get("rsi")
+    if rsi is not None:
+        contributors.append({
+            "label": "RSI",
+            "value": f"{float(rsi):.1f}",
+            "weight": "high" if float(rsi) < 30 or float(rsi) > 70 else "low",
+        })
+
+    adx = indicators.get("adx")
+    if adx is not None and float(adx) > 25:
+        contributors.append({
+            "label": "ADX (trend strength)",
+            "value": f"{float(adx):.1f}",
+            "weight": "high" if float(adx) > 35 else "medium",
+        })
+
+    # Deduplicate and trim
+    seen: set[str] = set()
+    unique: list[dict[str, Any]] = []
+    for c in contributors:
+        key = c["label"].lower()
+        if key not in seen:
+            seen.add(key)
+            unique.append(c)
+
+    return unique[:max_items]
+
+
+def _why_ranked(pick: dict[str, Any]) -> str:
+    """Produce a 1-sentence "why this ranked" explanation."""
+    score = float(pick.get("score") or 0)
+    signal = pick.get("signal", "buy")
+    ticker = pick.get("ticker", "")
+    bt_wr = pick.get("backtest_win_rate")
+    bt_ret = pick.get("backtest_return")
+    signals = pick.get("signals") or []
+
+    # Find the most prominent signal keyword
+    breakout_kws = ["breakout", "squeeze firing", "golden cross", "vcp", "nr7"]
+    lead_signal = None
+    for sig in signals:
+        for kw in breakout_kws:
+            if kw in sig.lower():
+                lead_signal = sig
+                break
+        if lead_signal:
+            break
+
+    parts: list[str] = []
+    if score >= 8:
+        parts.append(f"{ticker} scored {score:.0f}/10")
+    elif score >= 6:
+        parts.append(f"{ticker} ranked {score:.0f}/10")
+    else:
+        parts.append(f"{ticker} appeared in the scan with a score of {score:.0f}/10")
+
+    direction = "bullish" if signal in ("buy", "long") else "bearish" if signal in ("sell", "short") else "neutral"
+    parts.append(f"on a {direction} setup")
+
+    if lead_signal:
+        parts.append(f"driven by {lead_signal.lower()}")
+
+    if bt_wr is not None and bt_ret is not None:
+        parts.append(f"with {float(bt_wr):.0f}% historical win rate ({float(bt_ret):+.1f}% avg return)")
+    elif bt_wr is not None:
+        parts.append(f"with {float(bt_wr):.0f}% historical win rate")
+
+    return " ".join(parts) + "."
+
+
+def _invalidation_triggers(pick: dict[str, Any]) -> list[str]:
+    """Return a list of conditions that would invalidate the pick."""
+    triggers: list[str] = []
+    stop = pick.get("stop_loss")
+    entry = pick.get("entry_price") or pick.get("price")
+    signal = pick.get("signal", "buy")
+    indicators = pick.get("indicators") or {}
+
+    if stop and entry:
+        triggers.append(f"Price closes below ${float(stop):.2f} (stop loss)")
+
+    if signal in ("buy", "long"):
+        rsi = indicators.get("rsi")
+        if rsi is not None and float(rsi) > 70:
+            triggers.append("RSI crosses into extreme overbought (>80)")
+        triggers.append("MACD crosses bearish (histogram turns negative)")
+        triggers.append("Volume drops sharply below 20-day average on any up day")
+    elif signal in ("sell", "short"):
+        triggers.append("Price reclaims the breakdown level on volume")
+        triggers.append("MACD crosses bullish (histogram turns positive)")
+
+    triggers.append("Market regime shifts to risk-off (VIX spike)")
+    return triggers[:4]
+
+
+def build_evidence_summary(pick: dict[str, Any]) -> dict[str, Any]:
+    """Build a structured evidence panel for a pick or proposal.
+
+    Returns:
+        {
+            "why_ranked": str,             # 1-sentence explanation
+            "key_contributors": list,      # top signals/indicators with weights
+            "invalidation": list[str],     # conditions that kill the thesis
+            "state_note": str | None,      # freshness / provenance note
+        }
+
+    The returned dict is safe to attach as ``evidence_summary`` on any
+    pick/proposal response without changing existing fields.
+    """
+    freshness = pick.get("freshness") or pick.get("as_of")
+    pattern_id = pick.get("scan_pattern_id") or pick.get("pattern_id")
+    bt_strategy = pick.get("best_strategy") or pick.get("strategy_name")
+
+    state_parts: list[str] = []
+    if freshness:
+        state_parts.append(f"Data as of {freshness}")
+    if pattern_id:
+        state_parts.append(f"Pattern #{pattern_id}")
+    if bt_strategy:
+        state_parts.append(f"Strategy: {bt_strategy}")
+    if pick.get("is_stale"):
+        state_parts.append("WARNING: data may be stale")
+
+    return {
+        "why_ranked": _why_ranked(pick),
+        "key_contributors": _top_contributors(pick),
+        "invalidation": _invalidation_triggers(pick),
+        "state_note": " | ".join(state_parts) if state_parts else None,
+    }
+
+
+def enrich_picks_with_evidence(picks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Attach evidence_summary to each pick dict in-place. Returns the same list."""
+    for pick in picks:
+        try:
+            pick["evidence_summary"] = build_evidence_summary(pick)
+        except Exception as e:
+            logger.debug("[thesis] evidence build failed for %s: %s", pick.get("ticker"), e)
+    return picks
 
 _SIGNAL_TRANSLATIONS: dict[str, str] = {
     "rsi oversold": "RSI has dipped into oversold territory, suggesting a potential bounce.",

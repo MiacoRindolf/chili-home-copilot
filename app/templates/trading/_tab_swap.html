@@ -1,0 +1,46 @@
+      <!-- Swap -->
+      <div class="t-tab-content" id="tab-swap">
+        <div class="swap-panel" id="swap-panel">
+          <div id="swap-connect-state" class="swap-connect-prompt">
+            <div style="font-size:28px;margin-bottom:8px">&#x1F98A;</div>
+            <div>Connect your MetaMask wallet to swap tokens on-chain</div>
+            <button onclick="_connectWallet()">Connect MetaMask</button>
+          </div>
+          <div id="swap-main" style="display:none">
+            <div class="swap-settings-row">
+              <span style="font-size:10px;color:var(--text-muted);font-weight:600">Slippage:</span>
+              <button class="slip-btn" onclick="_setSlippage(30,this)">0.3%</button>
+              <button class="slip-btn active" onclick="_setSlippage(50,this)">0.5%</button>
+              <button class="slip-btn" onclick="_setSlippage(100,this)">1%</button>
+              <button class="slip-btn" onclick="_setSlippage(300,this)">3%</button>
+            </div>
+            <div class="swap-card">
+              <div class="swap-card-label">You Pay</div>
+              <div class="swap-row">
+                <input class="swap-amount-input" id="swap-sell-amount" type="text" inputmode="decimal" placeholder="0.0" oninput="_onSwapAmountChange()">
+                <button class="swap-token-btn" id="swap-sell-token-btn" onclick="_openTokenModal('sell')">ETH &#x25BC;</button>
+              </div>
+              <div class="swap-balance" id="swap-sell-balance"></div>
+            </div>
+            <div class="swap-arrow-row">
+              <button class="swap-arrow-btn" onclick="_flipTokens()" title="Swap direction">&#x21C5;</button>
+            </div>
+            <div class="swap-card">
+              <div class="swap-card-label">You Receive</div>
+              <div class="swap-row">
+                <input class="swap-amount-input" id="swap-buy-amount" type="text" readonly placeholder="0.0">
+                <button class="swap-token-btn" id="swap-buy-token-btn" onclick="_openTokenModal('buy')">USDC &#x25BC;</button>
+              </div>
+              <div class="swap-balance" id="swap-buy-balance"></div>
+            </div>
+            <div class="swap-details" id="swap-details" style="display:none">
+              <div class="swap-detail-row"><span>Rate</span><span class="val" id="swap-rate">--</span></div>
+              <div class="swap-detail-row"><span>Price Impact</span><span class="val" id="swap-impact">--</span></div>
+              <div class="swap-detail-row"><span>Est. Gas</span><span class="val" id="swap-gas">--</span></div>
+              <div class="swap-detail-row"><span>Min. Received</span><span class="val" id="swap-min">--</span></div>
+            </div>
+            <button class="swap-execute-btn" id="swap-exec-btn" onclick="_executeSwap()" disabled>Enter an amount</button>
+            <div id="swap-tx-area"></div>
+          </div>
+        </div>
+      </div>

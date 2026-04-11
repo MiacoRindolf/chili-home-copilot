@@ -1,0 +1,173 @@
+  <!-- News Reader Modal -->
+  <div class="news-reader-overlay" id="news-reader-overlay" onclick="if(event.target===this)closeNewsReader()">
+    <div class="news-reader-card">
+      <div class="news-reader-header">
+        <span class="nr-title" id="nr-title"></span>
+        <span class="nr-source" id="nr-source"></span>
+        <a class="nr-open" id="nr-open" href="#" target="_blank" rel="noopener">Open in new tab</a>
+        <button class="nr-close" onclick="closeNewsReader()">&times;</button>
+      </div>
+      <div class="news-reader-body">
+        <div class="nr-preview" id="nr-preview">
+          <p class="nr-preview-note">Most publishers block embedded article previews. Open the story in a new tab to read it.</p>
+          <h2 class="nr-preview-title" id="nr-preview-title"></h2>
+          <p class="nr-preview-meta" id="nr-preview-meta"></p>
+          <a class="nr-primary-open" id="nr-primary-open" href="#" target="_blank" rel="noopener noreferrer">Read full article</a>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main chart context menu (custom; not from Lightweight Charts) -->
+  <div id="chart-context-menu" class="chart-ctx-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="chart-ctx-item" id="ctx-reset-view" role="menuitem">
+      <span class="ctx-label">Reset chart view</span><span class="chart-ctx-kbd">Alt+R</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-copy-price" role="menuitem">
+      <span class="ctx-label" id="ctx-copy-label">Copy price</span>
+    </button>
+    <button type="button" class="chart-ctx-item" id="ctx-paste-price" role="menuitem">
+      <span class="ctx-label">Paste</span><span class="chart-ctx-kbd">Ctrl+V</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-add-alert" role="menuitem">
+      <span class="ctx-label" id="ctx-alert-label">Add alert at price</span><span class="chart-ctx-kbd">Alt+A</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-table-view" role="menuitem"><span class="ctx-label">Table view</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-object-tree" role="menuitem"><span class="ctx-label">Object tree</span></button>
+    <div class="chart-ctx-row-sub">
+      <button type="button" class="chart-ctx-item caret" id="ctx-template-toggle" aria-expanded="false" aria-haspopup="true">
+        <span class="ctx-label">Chart template</span>
+      </button>
+      <div id="ctx-template-flyout" class="chart-ctx-flyout hidden" role="menu">
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-save" role="menuitem"><span class="ctx-label">Save template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-load" role="menuitem"><span class="ctx-label">Load template</span></button>
+        <button type="button" class="chart-ctx-item" id="ctx-tpl-reset" role="menuitem"><span class="ctx-label">Reset to default</span></button>
+      </div>
+    </div>
+    <button type="button" class="chart-ctx-item" id="ctx-remove-indicators" role="menuitem">
+      <span class="ctx-label" id="ctx-remove-ind-label">Remove indicators</span>
+    </button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-chart-settings" role="menuitem"><span class="ctx-label">Settings…</span></button>
+  </div>
+
+  <!-- Right-click menu for an on-chart price alert -->
+  <div id="chart-alert-ctx-menu" class="chart-ctx-menu chart-alert-ctx-menu hidden" role="menu" aria-hidden="true">
+    <button type="button" class="chart-ctx-item" id="ctx-uap-pause" role="menuitem"><span class="ctx-label" id="ctx-uap-pause-label">Pause</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-uap-edit" role="menuitem"><span class="ctx-label">Edit…</span></button>
+    <button type="button" class="chart-ctx-item" id="ctx-uap-delete" role="menuitem"><span class="ctx-label">Delete</span></button>
+    <hr class="chart-ctx-sep" />
+    <button type="button" class="chart-ctx-item" id="ctx-uap-lines-toggle" role="menuitem">
+      <span class="ctx-label">Alert lines</span><span class="ctx-check" id="ctx-uap-lines-check">&#x2713;</span>
+    </button>
+    <div class="chart-ctx-row-sub">
+      <button type="button" class="chart-ctx-item caret" id="ctx-uap-color-toggle" aria-expanded="false" aria-haspopup="true">
+        <span class="ctx-label">Change alert color…</span>
+      </button>
+      <div id="ctx-uap-color-flyout" class="chart-ctx-flyout hidden" role="menu">
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#f97316" role="menuitem"><span class="sw" style="background:#f97316"></span> Orange</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#3b82f6" role="menuitem"><span class="sw" style="background:#3b82f6"></span> Blue</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#22c55e" role="menuitem"><span class="sw" style="background:#22c55e"></span> Green</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#ef4444" role="menuitem"><span class="sw" style="background:#ef4444"></span> Red</button>
+        <button type="button" class="chart-ctx-color-swatch" data-uap-color="#a855f7" role="menuitem"><span class="sw" style="background:#a855f7"></span> Violet</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-table-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal wide">
+      <div class="chart-ctx-modal-hd">
+        <span>OHLC table — <span id="chart-table-ticker"></span></span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartTableModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <div class="chart-ctx-table-wrap" id="chart-table-wrap"></div>
+      </div>
+    </div>
+  </div>
+
+  <div id="chart-obj-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Object tree</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartObjModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd" id="chart-obj-modal-body"></div>
+    </div>
+  </div>
+
+  <div id="chart-settings-modal" class="chart-ctx-modal-overlay" aria-hidden="true">
+    <div class="chart-ctx-modal">
+      <div class="chart-ctx-modal-hd">
+        <span>Chart settings</span>
+        <button type="button" class="chart-ctx-modal-close" onclick="_closeChartSettingsModal()" aria-label="Close">&times;</button>
+      </div>
+      <div class="chart-ctx-modal-bd">
+        <p style="font-size:12px;color:var(--text-muted);margin:0 0 10px">Indicator toggles live in the bar above the chart. Drawing shortcuts:</p>
+        <div class="chart-ctx-settings-shortcuts" id="chart-settings-shortcuts"></div>
+        <button type="button" class="chart-ctx-item" style="margin-top:12px;border:1px solid var(--border);border-radius:8px;width:auto" onclick="_scrollToIndPanel()">Scroll to indicators</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create price alert (modal) -->
+  <div id="chart-alert-modal" class="chart-alert-overlay" aria-hidden="true" onclick="if(event.target===this)_closeChartAlertModal()">
+    <div class="chart-alert-dialog" role="dialog" aria-modal="true" aria-labelledby="chart-alert-title" onclick="event.stopPropagation()">
+      <div class="chart-alert-hd">
+        <div class="chart-alert-title-row">
+          <h2 id="chart-alert-title" class="chart-alert-title">Create alert on <span id="cam-ticker" class="cam-ticker-pill"></span></h2>
+          <button type="button" class="chart-alert-icon-btn" onclick="_closeChartAlertModal()" aria-label="Close">&times;</button>
+        </div>
+      </div>
+      <div class="chart-alert-bd">
+        <div class="cam-field">
+          <label>Condition</label>
+          <div class="cam-condition-stack">
+            <span class="cam-pill">Price</span>
+            <select id="cam-condition" class="cam-select" onchange="_onCamConditionChange()">
+              <option value="crossing">Crossing</option>
+              <option value="crossing_up">Crossing up</option>
+              <option value="crossing_down">Crossing down</option>
+              <option value="gte">At or above</option>
+              <option value="lte">At or below</option>
+            </select>
+          </div>
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-value">Value</label>
+          <input type="number" id="cam-value" class="cam-input" step="any" />
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-trigger">Trigger</label>
+          <select id="cam-trigger" class="cam-select">
+            <option value="once">Once only</option>
+            <option value="repeat">Each crossing</option>
+          </select>
+        </div>
+        <div class="cam-field cam-field-row">
+          <label for="cam-expires">Expiration</label>
+          <input type="datetime-local" id="cam-expires" class="cam-input" />
+        </div>
+        <p class="cam-hint" id="cam-expires-hint">Leave empty for no expiration.</p>
+        <div class="cam-field">
+          <label for="cam-message">Message</label>
+          <input type="text" id="cam-message" class="cam-input cam-input-full" maxlength="220" placeholder="Toast and chart label" />
+        </div>
+        <div class="cam-field cam-notify-row">
+          <label>Notifications</label>
+          <div class="cam-checks">
+            <label class="cam-check"><input type="checkbox" id="cam-toast" checked /> In-app toast</label>
+            <label class="cam-check"><input type="checkbox" id="cam-sound" checked /> Sound</label>
+          </div>
+        </div>
+        <input type="hidden" id="cam-edit-id" value="" />
+      </div>
+      <div class="chart-alert-ft">
+        <button type="button" class="cam-btn cam-btn-secondary" onclick="_closeChartAlertModal()">Cancel</button>
+        <button type="button" class="cam-btn cam-btn-primary" id="cam-submit-btn" onclick="_submitChartAlertModal()">Create alert</button>
+      </div>
+    </div>
+  </div>

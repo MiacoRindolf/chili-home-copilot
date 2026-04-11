@@ -1,0 +1,47 @@
+<!-- Robinhood SMS Code Dialog -->
+<div class="broker-sms-dialog" id="sms-dialog">
+  <div class="broker-sms-card">
+    <div class="sms-icon">&#x1F4F1;</div>
+    <h3>Enter SMS Code</h3>
+    <p>Robinhood sent a verification code to your phone. Enter it below to connect.</p>
+    <input type="text" class="sms-code-input" id="sms-code-input" maxlength="6" placeholder="000000" autocomplete="one-time-code" inputmode="numeric" />
+    <div class="sms-error" id="sms-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeSmsDialog()">Cancel</button>
+      <button class="sms-btn-verify" id="sms-verify-btn" onclick="verifySmsCode()">Verify</button>
+    </div>
+  </div>
+</div>
+
+<!-- Broker Setup Dialog -->
+<div class="broker-sms-dialog" id="broker-setup-dialog">
+  <div class="broker-sms-card" style="width:380px">
+    <div class="sms-icon" id="setup-icon">&#x1F511;</div>
+    <h3 id="setup-title">Broker Setup</h3>
+    <p id="setup-desc">Enter your credentials below.</p>
+    <div id="setup-fields"></div>
+    <div class="sms-error" id="setup-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeBrokerSetup()">Cancel</button>
+      <button class="sms-btn-verify" id="setup-save-btn" onclick="saveBrokerCredentials()">Save & Connect</button>
+    </div>
+  </div>
+</div>
+
+<div class="broker-sms-dialog" id="deposit-addr-dialog">
+  <div class="broker-sms-card" style="width:400px">
+    <div class="sms-icon">&#x1F4B0;</div>
+    <h3 id="deposit-dialog-title">Coinbase Deposit Address</h3>
+    <p style="font-size:.85rem;color:#aaa;margin-bottom:4px" id="deposit-dialog-desc">Open Coinbase, find the token, tap Receive, and copy the address.</p>
+    <p style="font-size:.85rem;color:#f44;margin-bottom:12px;font-weight:600" id="deposit-dialog-warning"></p>
+    <div class="setup-field">
+      <label id="deposit-dialog-label">Deposit Address</label>
+      <input type="text" id="deposit-addr-input" placeholder="0x..." style="font-family:monospace" />
+    </div>
+    <div class="sms-error" id="deposit-addr-error"></div>
+    <div class="sms-actions">
+      <button class="sms-btn-cancel" onclick="closeDepositAddrDialog()">Cancel</button>
+      <button class="sms-btn-verify" id="deposit-addr-save-btn" onclick="saveDepositAddress()">Save & Continue</button>
+    </div>
+  </div>
+</div>
