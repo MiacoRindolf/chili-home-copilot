@@ -87,6 +87,103 @@
 .ap-log b { color: var(--accent); }
 .ap-fill-table { width: 100%; border-collapse: collapse; font-size: 10px; }
 .ap-fill-table th, .ap-fill-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
+
+/* ── Momentum mode bar ─────────────────────────────────────────────────── */
+.mm-mode-bar {
+  display: inline-flex; align-items: center; gap: 2px;
+  padding: 2px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary, #1e1e2e);
+  vertical-align: middle;
+}
+.mm-mode-bar span { font-size: 9px; color: var(--text-muted); margin-right: 4px; text-transform: uppercase; letter-spacing: .4px; }
+.mm-mode-btn {
+  font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 6px; border: 1px solid transparent;
+  background: transparent; color: var(--text-secondary); cursor: pointer;
+}
+.mm-mode-btn.active { background: rgba(99,102,241,.25); color: var(--accent); border-color: rgba(99,102,241,.35); }
+.mm-mode-btn.mm-live.active {
+  background: #b91c1c; color: #fff; border-color: #7f1d1d;
+  box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.35);
+}
+
+/* ── Momentum panels (viable strategies + operator strip) ──────────────── */
+.mm-panel {
+  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-header);
+  max-height: 320px; overflow-y: auto; margin-bottom: 12px;
+}
+.mm-panel-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.mm-panel-head h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); margin: 0; }
+.mm-panel-head button {
+  font-size: 10px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
+  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;
+}
+.mm-panel-head button:hover { border-color: var(--accent); color: var(--accent); }
+.mm-panel-body { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
+.mm-operator-strip { max-height: 240px; }
+.mm-operator-strip .mm-op-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 10px;
+  font-size: 10px; color: var(--text-secondary); line-height: 1.35;
+}
+.mm-operator-strip .mm-op-grid b { color: var(--text); font-weight: 700; }
+.mm-op-warn {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.45); color: var(--text); font-size: 10px;
+}
+.mm-op-events { margin-top: 6px; font-size: 9px; color: var(--text-muted); max-height: 48px; overflow-y: auto; }
+.mm-row {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
+  padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+  font-size: 11px;
+}
+.mm-row-title { font-weight: 700; color: var(--text); }
+.mm-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+.mm-badge {
+  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 4px; text-transform: uppercase;
+  background: var(--bg-header); border: 1px solid var(--border); color: var(--text-secondary);
+}
+.mm-badge.ok { border-color: #15803d; color: #22c55e; }
+.mm-badge.no { opacity: .55; }
+.mm-badge.venue { border-color: #2563eb; color: #60a5fa; }
+.mm-meta { color: var(--text-muted); font-size: 10px; margin-top: 4px; line-height: 1.35; }
+.mm-actions { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
+.mm-actions button {
+  font-size: 10px; padding: 5px 8px; border-radius: 6px; border: none; cursor: pointer; font-weight: 700;
+}
+.mm-btn-paper { background: var(--accent); color: #fff; }
+.mm-btn-live { background: #7f1d1d; color: #fff; }
+.mm-btn-live:disabled { opacity: .45; cursor: not-allowed; }
+.mm-btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
+.mm-warn { color: #f97316; font-size: 10px; margin-top: 4px; }
+
+/* ── Live arm confirmation modal ────────────────────────────────────────── */
+.mm-modal-backdrop {
+  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 12000;
+  align-items: center; justify-content: center; padding: 16px;
+}
+.mm-modal-backdrop.open { display: flex; }
+.mm-modal {
+  background: var(--bg-card, #1f2937); border: 1px solid var(--border); border-radius: 12px;
+  max-width: 420px; width: 100%; padding: 16px; box-shadow: 0 16px 48px rgba(0,0,0,.4);
+}
+.mm-modal h4 { margin: 0 0 10px; font-size: 14px; color: var(--text); }
+.mm-modal .mm-modal-body { font-size: 12px; color: var(--text-secondary); line-height: 1.45; max-height: 280px; overflow-y: auto; }
+.mm-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
+.mm-modal-actions button { padding: 8px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; border: none; }
+.mm-modal-cancel { background: var(--bg-header); color: var(--text); border: 1px solid var(--border) !important; }
+.mm-modal-confirm { background: #b91c1c; color: #fff; }
+
+/* ── Symbol picker ──────────────────────────────────────────────────────── */
+.ap-symbol-bar {
+  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap;
+}
+.ap-symbol-input {
+  padding: 7px 12px; font-size: 13px; font-weight: 700; border: 1px solid var(--border);
+  border-radius: 8px; background: var(--bg); color: var(--text); width: 120px;
+  text-transform: uppercase;
+}
+.ap-symbol-input::placeholder { font-weight: 400; text-transform: none; }
 </style>
 {% endblock %}
 
@@ -95,7 +192,7 @@
   <header class="ap-header">
     <div class="ap-title">
       <h1>Trading Autopilot</h1>
-      <p>Simulation-first runtime for watching CHILI trade in motion: lane, thesis, readiness, provider truth, and session audit stay visible while live execution remains explicitly gated.</p>
+      <p>Full automation runtime: momentum viable strategies, operator readiness, session audit, and live execution gating in one place.</p>
     </div>
     <nav class="ap-nav">
       <a href="/">Home</a>
@@ -113,10 +210,41 @@
       <div class="ap-banner">Brain decides and learns. Postgres records durable truth. Autopilot reads runtime state, simulated fills, and provider fidelity without bypassing kill switch, broker readiness, or operator confirmation.</div>
       {% endif %}
 
+      <!-- ── Symbol picker + mode toggle + neural refresh ──────────────── -->
+      <div class="ap-symbol-bar">
+        <input type="text" id="ap-symbol-input" class="ap-symbol-input" placeholder="Ticker..." value="" autocomplete="off" />
+        <button type="button" class="ap-btn" onclick="apLoadSymbol()">Load Symbol</button>
+        <div class="mm-mode-bar" id="mm-mode-bar" title="Paper vs live operator mode">
+          <span>Mode</span>
+          <button type="button" class="mm-mode-btn" id="mm-mode-paper" onclick="_setMomentumUiMode('paper')">Paper</button>
+          <button type="button" class="mm-mode-btn mm-live" id="mm-mode-live" onclick="_setMomentumUiMode('live')">Live</button>
+        </div>
+        <button type="button" class="ap-btn" id="mm-neural-refresh-btn" onclick="_momentumNeuralRefresh()">Neural refresh</button>
+      </div>
+
+      <!-- ── Momentum viable strategies panel ──────────────────────────── -->
+      <div id="momentum-viable-panel" class="mm-panel" style="display:none" aria-label="Momentum viable strategies">
+        <div class="mm-panel-head">
+          <h3>Momentum Viable Strategies</h3>
+        </div>
+        <div id="mm-panel-body" class="mm-panel-body"></div>
+      </div>
+
+      <!-- ── Momentum operator strip ───────────────────────────────────── -->
+      <div id="mm-operator-strip" class="mm-panel mm-operator-strip" style="display:none" aria-label="Momentum operator status">
+        <div class="mm-panel-head">
+          <h3>Momentum Operator</h3>
+        </div>
+        <div id="mm-operator-body" class="mm-panel-body">
+          <div class="mm-meta">Enter a ticker above and click Load Symbol to inspect operator readiness.</div>
+        </div>
+      </div>
+
+      <!-- ── Summary strip ─────────────────────────────────────────────── -->
       <div class="ap-strip" id="ap-summary-strip"></div>
       <div class="ap-toolbar">
         <div class="ap-toolbar-left">
-          <button type="button" class="ap-btn" onclick="apLoadAll()">Refresh</button>
+          <button type="button" class="ap-btn" onclick="apLoadAll()">Refresh Sessions</button>
           <label class="ap-muted"><input type="checkbox" id="ap-show-archived" onchange="apLoadSessions()"> Show archived</label>
         </div>
         <div class="ap-muted" id="ap-limitations"></div>
@@ -124,7 +252,7 @@
 
       <div id="ap-guest" class="ap-empty" style="display:none">Sign in to inspect active Autopilot sessions.</div>
       <div id="ap-grid" class="ap-grid"></div>
-      <div id="ap-empty" class="ap-empty" style="display:none">No Autopilot sessions yet. Use Trading to run paper or arm live, then watch the runtime surface here.</div>
+      <div id="ap-empty" class="ap-empty" style="display:none">No Autopilot sessions yet. Use the symbol picker above to run paper or arm live, then watch the runtime surface here.</div>
     </main>
 
     <aside class="ap-side">
@@ -151,14 +279,26 @@
   </div>
 </div>
 
+<!-- Momentum live arm confirmation modal -->
+<div id="mm-live-modal" class="mm-modal-backdrop" onclick="if(event.target===this)_closeMomentumLiveModal()">
+  <div class="mm-modal" onclick="event.stopPropagation()">
+    <h4>Confirm live arm</h4>
+    <div id="mm-live-modal-body" class="mm-modal-body"></div>
+    <div class="mm-modal-actions">
+      <button type="button" class="mm-modal-cancel" onclick="_closeMomentumLiveModal()">Cancel</button>
+      <button type="button" class="mm-modal-confirm" id="mm-live-modal-confirm" onclick="_confirmMomentumLiveArm()">I understand — confirm</button>
+    </div>
+  </div>
+</div>
+
 <script>
 (function() {
   var IS_GUEST = {{ is_guest | tojson }};
   var LEGACY_ALIAS = {{ automation_legacy_alias | default(false) | tojson }};
-  var AUTO_PATH = {{ autopilot_route_path | default('/trading/autopilot') | tojson }};
   var apSelectedId = null;
   var apChart = null;
   var apSeries = null;
+  var apCurrentSymbol = '';
 
   function esc(v) {
     if (v == null) return '';
@@ -166,6 +306,8 @@
     d.textContent = String(v);
     return d.innerHTML;
   }
+  // Also expose as escHtml for momentum panel code
+  var escHtml = esc;
 
   function pct(v) {
     var n = Number(v);
@@ -188,6 +330,306 @@
     return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
   }
 
+  /* ── Momentum mode switching ──────────────────────────────────────────── */
+  var _chiliMomentumUiMode = sessionStorage.getItem('chili_momentum_ui_mode') || 'paper';
+  var _mmPendingArm = null;
+
+  window._setMomentumUiMode = function(m) {
+    _chiliMomentumUiMode = (m === 'live') ? 'live' : 'paper';
+    sessionStorage.setItem('chili_momentum_ui_mode', _chiliMomentumUiMode);
+    _syncMomentumModePill();
+    if (apCurrentSymbol) {
+      _loadMomentumViable(apCurrentSymbol);
+      _loadMomentumOperatorStrip(apCurrentSymbol);
+    }
+  };
+
+  function _syncMomentumModePill() {
+    var paper = document.getElementById('mm-mode-paper');
+    var live = document.getElementById('mm-mode-live');
+    if (paper) paper.classList.toggle('active', _chiliMomentumUiMode === 'paper');
+    if (live) live.classList.toggle('active', _chiliMomentumUiMode === 'live');
+  }
+
+  /* ── Symbol picker ────────────────────────────────────────────────────── */
+  window.apLoadSymbol = function() {
+    var inp = document.getElementById('ap-symbol-input');
+    if (!inp) return;
+    var sym = inp.value.trim().toUpperCase();
+    if (!sym) return;
+    apCurrentSymbol = sym;
+    _syncMomentumModePill();
+    _loadMomentumViable(sym);
+    _loadMomentumOperatorStrip(sym);
+    if (!IS_GUEST) {
+      fetch('/api/trading/momentum/refresh', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ symbol: sym, execution_family: 'coinbase_spot' })
+      }).then(function() {}).catch(function() {});
+    }
+  };
+
+  // Support Enter key in symbol input
+  var symInput = document.getElementById('ap-symbol-input');
+  if (symInput) {
+    symInput.addEventListener('keydown', function(e) {
+      if (e.key === 'Enter') { e.preventDefault(); apLoadSymbol(); }
+    });
+  }
+
+  /* ── Neural refresh ───────────────────────────────────────────────────── */
+  window._momentumNeuralRefresh = function() {
+    if (IS_GUEST) { alert('Sign in to request a neural refresh.'); return; }
+    if (!apCurrentSymbol) { alert('Enter a ticker first.'); return; }
+    fetch('/api/trading/momentum/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: apCurrentSymbol, execution_family: 'coinbase_spot' })
+    }).then(function(r) {
+      if (r.status === 403) { alert('Sign in required.'); return null; }
+      return r.json();
+    }).then(function(d) {
+      if (!d) return;
+      if (!d.accepted) alert('Refresh not queued: ' + (d.reason || 'unknown'));
+      else _loadMomentumViable(apCurrentSymbol);
+    }).catch(function() { alert('Refresh failed'); });
+  };
+
+  /* ── Momentum viable strategies ───────────────────────────────────────── */
+  function _loadMomentumViable(symbol) {
+    var panel = document.getElementById('momentum-viable-panel');
+    var body = document.getElementById('mm-panel-body');
+    if (!panel || !body) return;
+    if (!symbol) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    body.innerHTML = '<div class="mm-meta">Loading viable strategies...</div>';
+    var mode = _chiliMomentumUiMode === 'live' ? 'live' : 'paper';
+    fetch('/api/trading/momentum/viable?symbol=' + encodeURIComponent(symbol) + '&mode=' + encodeURIComponent(mode))
+      .then(function(r) { return r.json(); })
+      .then(_renderMomentumViable)
+      .catch(function() { body.innerHTML = '<div class="mm-warn">Failed to load.</div>'; });
+  }
+
+  function _renderMomentumViable(d) {
+    var body = document.getElementById('mm-panel-body');
+    if (!body) return;
+    var rows = d.strategies || [];
+    window._mmDetailRows = rows;
+    var gw = [];
+    if (d.warnings && d.warnings.length) gw.push.apply(gw, d.warnings);
+    var html = '';
+    var ors = d.operator_readiness || {};
+    if (_chiliMomentumUiMode === 'live' && ors && ors.broker_ready_for_live === false) {
+      html += '<div class="mm-op-warn">Live UI mode: Coinbase broker is <b>not connected</b>. Arm live / confirm require a ready broker path.</div>';
+    }
+    if (gw.length) html += '<div class="mm-warn">' + gw.map(function(w) { return esc(String(w)); }).join(' &middot; ') + '</div>';
+    if (!rows.length) {
+      html += '<div class="mm-meta">No viable rows yet for this symbol. Try Neural refresh or wait for a mesh tick.</div>';
+      body.innerHTML = html;
+      return;
+    }
+    rows.forEach(function(s, idx) {
+      var act = s.actions || {};
+      var canP = !!act.can_run_paper;
+      var canL = !!act.can_arm_live;
+      html += '<div class="mm-row">';
+      html += '<div><div class="mm-row-title">' + esc(s.label || s.family || ('variant ' + s.variant_id)) + '</div>';
+      html += '<div class="mm-badges">';
+      html += '<span class="mm-badge venue">' + esc(String(s.execution_family || 'coinbase_spot')) + '</span>';
+      html += '<span class="mm-badge ' + (canP ? 'ok' : 'no') + '">paper</span>';
+      html += '<span class="mm-badge ' + (canL ? 'ok' : 'no') + '">live</span>';
+      html += '<span class="mm-badge">score ' + esc(String(s.viability_score)) + '</span>';
+      if (s.regime_fit) html += '<span class="mm-badge">' + esc(String(s.regime_fit)) + '</span>';
+      html += '</div>';
+      html += '<div class="mm-meta">Fresh: ' + esc(String(s.freshness_ts || '')) + ' &middot; ' + esc(String(s.source_layer || '')) + '</div>';
+      if (s.rationale) html += '<div class="mm-meta">' + esc(String(s.rationale)) + '</div>';
+      if (s.entry_style) html += '<div class="mm-meta">Entry: ' + esc(String(s.entry_style)) + '</div>';
+      if (s.stop_logic) html += '<div class="mm-meta">Stop: ' + esc(String(s.stop_logic)) + '</div>';
+      if (s.exit_logic) html += '<div class="mm-meta">Exit: ' + esc(String(s.exit_logic)) + '</div>';
+      var ws = s.warnings || [];
+      if (ws.length) html += '<div class="mm-warn">' + ws.map(function(w) { return esc(String(w)); }).join(' &middot; ') + '</div>';
+      var rs = s.recent_sessions || {};
+      html += '<div class="mm-meta">Sessions 7d &mdash; paper: ' + (rs.sessions_7d_paper || 0) + ', live: ' + (rs.sessions_7d_live || 0) + '</div>';
+      html += '</div><div class="mm-actions">';
+      if (!IS_GUEST) {
+        html += '<button type="button" class="mm-btn-paper" ' + (canP ? '' : 'disabled ') + 'title="' + esc(String((act.paper_action_blocked_reason || ''))) + '" onclick="_momentumRunPaper(' + s.variant_id + ')">Run Paper</button>';
+        html += '<button type="button" class="mm-btn-live" ' + (canL ? '' : 'disabled ') + 'title="' + esc(String((act.live_action_blocked_reason || ''))) + '" onclick="_momentumArmLive(' + s.variant_id + ')">Arm Live</button>';
+      } else {
+        html += '<span class="mm-meta">Sign in for Run Paper / Arm Live</span>';
+      }
+      html += '<button type="button" class="mm-btn-ghost" onclick="_mmShowDetail(' + idx + ')">View details</button>';
+      html += '</div></div>';
+    });
+    body.innerHTML = html;
+  }
+
+  window._mmShowDetail = function(i) {
+    var r = window._mmDetailRows && window._mmDetailRows[i];
+    if (r) alert(JSON.stringify(r, null, 2));
+  };
+
+  /* ── Run paper / arm live / confirm ───────────────────────────────────── */
+  window._momentumRunPaper = function(vid) {
+    if (IS_GUEST || !apCurrentSymbol) return;
+    fetch('/api/trading/momentum/run-paper', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: apCurrentSymbol, variant_id: vid, execution_family: 'coinbase_spot' })
+    }).then(function(r) {
+      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+    }).then(function(x) {
+      if (!x.ok) {
+        var det = x.j.detail;
+        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+      } else {
+        alert(x.j.message || 'OK');
+        apLoadSessions();
+      }
+    });
+  };
+
+  window._momentumArmLive = function(vid) {
+    if (IS_GUEST || !apCurrentSymbol) return;
+    fetch('/api/trading/momentum/arm-live', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: apCurrentSymbol, variant_id: vid, execution_family: 'coinbase_spot' })
+    }).then(function(r) {
+      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+    }).then(function(x) {
+      if (!x.ok) {
+        var det = x.j.detail;
+        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+        return;
+      }
+      _mmPendingArm = { token: x.j.arm_token, sessionId: x.j.session_id, payload: x.j.confirmation };
+      _openMomentumLiveModal(x.j);
+    });
+  };
+
+  function _openMomentumLiveModal(j) {
+    var el = document.getElementById('mm-live-modal');
+    var b = document.getElementById('mm-live-modal-body');
+    if (!el || !b) return;
+    var c = j.confirmation || {};
+    var wlines = (c.warnings || []).map(function(w) { return esc(String(w)); }).join('<br/>');
+    b.innerHTML =
+      '<p><b>Symbol:</b> ' + esc(String(c.symbol || '')) + '</p>' +
+      '<p><b>Live eligible:</b> ' + esc(String(c.live_eligible)) + '</p>' +
+      '<p><b>Viability:</b> ' + esc(String(c.viability_score != null ? c.viability_score : '')) + '</p>' +
+      '<p><b>Freshness:</b> ' + esc(String(c.freshness_ts || '')) + '</p>' +
+      (wlines ? '<p><b>Warnings:</b><br/>' + wlines + '</p>' : '') +
+      '<p><b>' + esc(String(c.disclaimer || '')) + '</b></p>';
+    el.classList.add('open');
+  }
+
+  window._closeMomentumLiveModal = function() {
+    var el = document.getElementById('mm-live-modal');
+    if (el) el.classList.remove('open');
+  };
+
+  window._confirmMomentumLiveArm = function() {
+    if (!_mmPendingArm || !_mmPendingArm.token) { _closeMomentumLiveModal(); return; }
+    fetch('/api/trading/momentum/confirm-live-arm', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arm_token: _mmPendingArm.token, confirm: true })
+    }).then(function(r) {
+      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
+    }).then(function(x) {
+      _closeMomentumLiveModal();
+      if (!x.ok) {
+        var det = x.j.detail;
+        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
+      } else {
+        var j = x.j || {};
+        var lines = [
+          j.message || 'Confirmed',
+          'canonical: ' + (j.canonical_operator_state || ''),
+          'armed_only: ' + String(j.armed_only),
+          'runner_ready: ' + String(j.runner_ready),
+          'broker_ready: ' + String(j.broker_ready),
+          'scheduler_ready: ' + String(j.scheduler_ready),
+          'blocked_reason: ' + String(j.blocked_reason || ''),
+          'next: ' + String(j.next_action_required || '')
+        ];
+        alert(lines.join('\n'));
+      }
+      _mmPendingArm = null;
+      if (apCurrentSymbol) {
+        _loadMomentumViable(apCurrentSymbol);
+        _loadMomentumOperatorStrip(apCurrentSymbol);
+      }
+      apLoadSessions();
+    });
+  };
+
+  /* ── Momentum operator strip ──────────────────────────────────────────── */
+  function _loadMomentumOperatorStrip(symbol) {
+    var strip = document.getElementById('mm-operator-strip');
+    var body = document.getElementById('mm-operator-body');
+    if (!strip || !body) return;
+    if (!symbol) { strip.style.display = 'none'; return; }
+    strip.style.display = 'block';
+    if (IS_GUEST) {
+      body.innerHTML = '<div class="mm-meta">Sign in to load momentum session focus and readiness.</div>';
+      return;
+    }
+    body.innerHTML = '<div class="mm-meta">Loading operator status...</div>';
+    fetch('/api/trading/momentum/operator/current-session?symbol=' + encodeURIComponent(symbol), { credentials: 'same-origin' })
+      .then(function(r) { return r.json(); })
+      .then(_paintMomentumOperatorStrip)
+      .catch(function() { body.innerHTML = '<div class="mm-warn">Operator status failed to load.</div>'; });
+  }
+
+  function _paintMomentumOperatorStrip(d) {
+    var body = document.getElementById('mm-operator-body');
+    if (!body) return;
+    var r = d.operator_readiness || {};
+    var fs = d.focus_session;
+    var html = '<div class="mm-op-grid">';
+    html += '<div>Broker <b>' + (r.broker_ready_for_live ? 'ready' : 'not ready') + '</b></div>';
+    html += '<div>Paper runner <b>' + (r.paper_runner_enabled ? 'on' : 'off') + '</b></div>';
+    html += '<div>Live runner <b>' + (r.live_runner_enabled ? 'on' : 'off') + '</b></div>';
+    html += '<div>Paper sched <b>' + (r.paper_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
+    html += '<div>Live sched <b>' + (r.live_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
+    html += '<div>Neural <b>' + (r.momentum_neural_enabled ? 'on' : 'off') + '</b></div>';
+    html += '<div>Family <b>' + esc(String(r.execution_family || '')) + '</b> ' + (r.execution_family_implemented ? '\u2713' : '\u2717') + '</div>';
+    html += '</div>';
+    if (fs) {
+      var canon = fs.canonical_operator_state || fs.state;
+      html += '<div class="mm-meta" style="margin-top:8px"><b>Focus</b> #' + esc(String(fs.id)) + ' &middot; ' + esc(fs.symbol || '') + ' &middot; <span style="color:var(--accent)">' + esc(String(canon)) + '</span> &middot; raw <code style="font-size:9px">' + esc(String(fs.state || '')) + '</code> &middot; ' + esc(String(fs.mode || '')) + '</div>';
+      if (fs.phase_hint) html += '<div class="mm-meta">phase_hint: ' + esc(String(fs.phase_hint)) + '</div>';
+      if (fs.blocked_reason) html += '<div class="mm-op-warn">blocked_reason: ' + esc(String(fs.blocked_reason)) + '</div>';
+      html += '<div class="mm-meta">' + esc(String(fs.next_action_required || '')) + '</div>';
+      if (fs.is_armed_only_live) html += '<div class="mm-op-warn">Live is armed/queued only &mdash; not actively executing until the runner advances.</div>';
+      if (fs.source_paper_brief && fs.source_paper_brief.id) {
+        html += '<div class="mm-meta">Promoted from paper session #' + esc(String(fs.source_paper_brief.id)) + '</div>';
+      }
+      var evp = d.events_preview || [];
+      if (evp.length) {
+        html += '<div class="mm-op-events">' + evp.slice(0, 5).map(function(e) {
+          return esc(String(e.event_type || '')) + ' @ ' + esc(String((e.ts || '').slice(0, 19)));
+        }).join(' &middot; ') + '</div>';
+      }
+    } else {
+      html += '<div class="mm-meta" style="margin-top:8px">No active/pending automation session for this symbol. Use Run paper or Arm live above.</div>';
+    }
+    body.innerHTML = html;
+  }
+
+  /* ── Operator strip poll ──────────────────────────────────────────────── */
+  var _mmOpTimer = null;
+  function _kickMomentumOperatorPoll() {
+    if (_mmOpTimer) clearInterval(_mmOpTimer);
+    _mmOpTimer = setInterval(function() {
+      if (IS_GUEST || !apCurrentSymbol) return;
+      _loadMomentumOperatorStrip(apCurrentSymbol);
+    }, 25000);
+  }
+
+  /* ── Chart ────────────────────────────────────────────────────────────── */
   function initChart() {
     var el = document.getElementById('ap-chart');
     if (!el || typeof LightweightCharts === 'undefined') return;
@@ -200,10 +642,8 @@
       crosshair: { mode: 0 }
     });
     apSeries = apChart.addCandlestickSeries({
-      upColor: '#22c55e',
-      downColor: '#ef4444',
-      wickUpColor: '#22c55e',
-      wickDownColor: '#ef4444',
+      upColor: '#22c55e', downColor: '#ef4444',
+      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
       borderVisible: false
     });
   }
@@ -218,6 +658,7 @@
     return apBadge(sev || 'unknown', sev || '');
   }
 
+  /* ── Session loaders ──────────────────────────────────────────────────── */
   window.apLoadAll = function() {
     if (IS_GUEST) return;
     apLoadSummary();
@@ -317,9 +758,7 @@
       var color = fill.action && fill.action.indexOf('enter') === 0 ? '#22c55e' : '#ef4444';
       return {
         time: Math.floor(Date.parse(fill.ts) / 1000),
-        position: pos,
-        color: color,
-        shape: shape,
+        position: pos, color: color, shape: shape,
         text: fill.reason || fill.action
       };
     });
@@ -335,10 +774,8 @@
         var formatted = rows.map(function(row) {
           return {
             time: Math.floor(Date.parse(row.time || row.date || row.timestamp) / 1000),
-            open: Number(row.open),
-            high: Number(row.high),
-            low: Number(row.low),
-            close: Number(row.close)
+            open: Number(row.open), high: Number(row.high),
+            low: Number(row.low), close: Number(row.close)
           };
         }).filter(function(row) { return isFinite(row.time) && isFinite(row.open) && isFinite(row.close); });
         apSeries.setData(formatted);
@@ -371,7 +808,7 @@
         var meta = document.getElementById('ap-selected-meta');
         if (meta) {
           meta.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--text)">' + esc(session.symbol || 'Session') + '</div>' +
-            '<div class="ap-muted" style="margin-top:4px">' + esc((session.variant && session.variant.label) || '') + ' · ' + esc((session.data_fidelity || {}).simulation_fidelity || '') + '</div>' +
+            '<div class="ap-muted" style="margin-top:4px">' + esc((session.variant && session.variant.label) || '') + ' &middot; ' + esc((session.data_fidelity || {}).simulation_fidelity || '') + '</div>' +
             '<div style="margin-top:10px">' + apDetailMeta(session) + '</div>';
         }
         var detail = document.getElementById('ap-detail');
@@ -382,8 +819,8 @@
             '<div class="ap-list">' +
               '<div class="ap-log"><b>Thesis</b><div style="margin-top:4px">' + esc(session.thesis || 'Awaiting bounded update.') + '</div></div>' +
               '<div class="ap-log"><b>Execution readiness</b><div style="margin-top:4px">' + esc(JSON.stringify(session.execution_readiness || {}, null, 2)) + '</div></div>' +
-              '<div class="ap-log"><b>Data binding</b><div style="margin-top:4px">Discovery: ' + esc(bind.discovery_provider || 'massive') + ' · Chart: ' + esc(bind.chart_provider || 'massive') + ' · Truth: ' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + (bind.source_of_truth_exchange ? ' · ' + esc(bind.source_of_truth_exchange) : '') + '</div></div>' +
-              '<div class="ap-log"><b>Chart levels</b><div style="margin-top:4px">Entry ' + esc(levels.entry || 'n/a') + ' · Stop ' + esc(levels.stop || 'n/a') + ' · Target ' + esc(levels.target || 'n/a') + ' · Last ' + esc(levels.last_price || 'n/a') + '</div></div>' +
+              '<div class="ap-log"><b>Data binding</b><div style="margin-top:4px">Discovery: ' + esc(bind.discovery_provider || 'massive') + ' &middot; Chart: ' + esc(bind.chart_provider || 'massive') + ' &middot; Truth: ' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + (bind.source_of_truth_exchange ? ' &middot; ' + esc(bind.source_of_truth_exchange) : '') + '</div></div>' +
+              '<div class="ap-log"><b>Chart levels</b><div style="margin-top:4px">Entry ' + esc(levels.entry || 'n/a') + ' &middot; Stop ' + esc(levels.stop || 'n/a') + ' &middot; Target ' + esc(levels.target || 'n/a') + ' &middot; Last ' + esc(levels.last_price || 'n/a') + '</div></div>' +
             '</div>';
         }
         var events = document.getElementById('ap-events');
@@ -411,13 +848,16 @@
       .catch(function() {});
   };
 
+  /* ── Boot ──────────────────────────────────────────────────────────────── */
   function boot() {
+    _syncMomentumModePill();
     if (IS_GUEST) {
       var guest = document.getElementById('ap-guest');
       if (guest) guest.style.display = 'block';
       return;
     }
     apLoadAll();
+    _kickMomentumOperatorPoll();
     window.setInterval(function() {
       apLoadSummary();
       apLoadSessions();

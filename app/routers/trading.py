@@ -150,7 +150,6 @@ def _trading_page_response(
         "user_name": ctx["user_name"],
         "avatar_url": avatar_url,
         "google_configured": google_configured,
-        "automation_hud_enabled": bool(getattr(_s, "chili_trading_automation_hud_enabled", True)),
     }
     if extra_context:
         tmpl_ctx.update(extra_context)

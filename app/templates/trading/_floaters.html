@@ -21,27 +21,3 @@
 <!-- Real-time alert toasts -->
 <div id="alert-toast-container"></div>
 
-{% if automation_hud_enabled and not is_guest %}
-<div id="ch-auto-hud" class="ch-auto-hud" aria-label="Automation summary">
-  <div class="ch-auto-hud-head" onclick="_toggleAutomationHud()" title="Click to expand/collapse">
-    <span style="display:flex;align-items:center;gap:6px"><span id="ch-auto-hud-dot" class="ch-auto-hud-dot ok"></span><strong>Auto</strong></span>
-    <span id="ch-auto-hud-chev" style="opacity:.6">&#x25BC;</span>
-  </div>
-  <div class="ch-auto-hud-body" id="ch-auto-hud-body">
-    <div id="ch-auto-hud-lines">Loading…</div>
-    <div style="margin-top:6px"><a href="/trading/autopilot">Open Autopilot</a></div>
-  </div>
-</div>
-{% endif %}
-
-<!-- Momentum live arm confirmation (Phase 4 — two-step; no auto execution) -->
-<div id="mm-live-modal" class="mm-modal-backdrop" onclick="if(event.target===this)_closeMomentumLiveModal()">
-  <div class="mm-modal" onclick="event.stopPropagation()">
-    <h4>Confirm live arm</h4>
-    <div id="mm-live-modal-body" class="mm-modal-body"></div>
-    <div class="mm-modal-actions">
-      <button type="button" class="mm-modal-cancel" onclick="_closeMomentumLiveModal()">Cancel</button>
-      <button type="button" class="mm-modal-confirm" id="mm-live-modal-confirm" onclick="_confirmMomentumLiveArm()">I understand — confirm</button>
-    </div>
-  </div>
-</div>
