@@ -1,23 +1,15 @@
 """Canonical ordered stage keys derived from ``learning_cycle_architecture`` (single source of truth).
 
-``STAGE_KEYS`` lists every in-cycle step SID in execution order.
-``TOTAL_STAGES`` equals the number of steps that bump the progress counter.
+``STAGE_KEYS`` lists only step SIDs that bump ``steps_completed`` on the **normal**
+runtime path (``snap_inline=False``): no scheduler-only cluster, no inline-only
+snapshot steps, and no ``cycle_report`` / ``depromote`` / ``finalize``.
+
+``TOTAL_STAGES`` is ``len(STAGE_KEYS)`` and matches ``count_cycle_progress_steps(snap_inline=False)``.
 """
 
 from __future__ import annotations
 
-from ..services.trading.learning_cycle_architecture import (
-    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
-    count_cycle_progress_steps,
-)
+from ..services.trading.learning_cycle_architecture import cycle_progress_stage_keys
 
-_SCHEDULED_CLUSTER = "c_scheduled"
-
-STAGE_KEYS: tuple[str, ...] = tuple(
-    step.sid
-    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
-    if cluster.id != _SCHEDULED_CLUSTER
-    for step in cluster.steps
-)
-
-TOTAL_STAGES: int = count_cycle_progress_steps()
+STAGE_KEYS: tuple[str, ...] = cycle_progress_stage_keys(snap_inline=False)
+TOTAL_STAGES: int = len(STAGE_KEYS)

@@ -21,6 +21,9 @@ from .learning_cycle_architecture import (
 
 _ROOT_ID = "tb_root"
 
+# Public JSON ``meta.graph_version``; bump when graph shape or ordering contract changes.
+TRADING_BRAIN_NETWORK_GRAPH_VERSION = 15
+
 # Per-callable line cap: run_learning_cycle is ~700 lines; keep headroom for growth.
 # Total cap: multi-part code_ref (e.g. ``a + b``) concatenates several callables.
 _MAX_LINES_PER_CALLABLE = 20_000
@@ -269,7 +272,7 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         "source_module": "app.services.trading.learning",
         "source_symbol": "run_learning_cycle",
         "architecture_source": "learning_cycle_architecture",
-        "graph_version": 14,
+        "graph_version": TRADING_BRAIN_NETWORK_GRAPH_VERSION,
         "cluster_count": n_cl,
         "description": (
             "Macro phases follow the learning cycle call order; step labels align with "

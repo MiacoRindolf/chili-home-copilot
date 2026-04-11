@@ -21,6 +21,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
+# Cluster id for prescreen / full scan / scheduler snapshots (never part of
+# ``run_learning_cycle`` progress). Keep in sync with the first cluster below.
+SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID = "c_universe"
+
 
 @dataclass(frozen=True)
 class CycleStepDef:
@@ -60,7 +64,8 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
     description=(
         "Top-level orchestrator for one full learning cycle: refreshes market memory, "
         "mines and validates patterns, evolves hypotheses, runs optional secondary miners, "
-        "journals results, trains meta-models, generates proposals and reports, then "
+        "journals results, trains meta-models, runs the pattern-engine pass, generates proposals "
+        "and reports, then "
         "finalizes state. Universe prescreen and full market scan run as separate cron jobs."
     ),
     remarks=(
@@ -93,7 +98,7 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
 
 TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
     CycleClusterDef(
-        id="c_universe",
+        id=SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
         label="Scheduled universe & scan",
         phase_summary="batch jobs (not in run_learning_cycle)",
         description=(
@@ -747,13 +752,14 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
     CycleClusterDef(
         id="c_meta",
         label="Meta-learning & cycle close",
-        phase_summary="ML → proposals → pattern engine → report → finalize",
+        phase_summary="ML → pattern engine → proposals → report → depromote → finalize",
         description=(
-            "Trains the pattern meta-learner, emits strategy proposals, runs the pattern "
-            "engine pass, stores an AI cycle report, applies depromotion rules, and logs."
+            "Trains the pattern meta-learner, runs the pattern-engine pass, then emits "
+            "strategy proposals, stores an AI cycle report, applies depromotion rules, and logs."
         ),
         remarks=(
-            "What: Meta-model training, proposal generation, pattern-engine sub-cycle, "
+            "What: Meta-model training, pattern-engine sub-cycle (hypotheses/tests/evolution), "
+            "then proposal generation so proposals reflect the latest engine work; then "
             "markdown cycle report, live depromotion, finalize + ``learning_event``.\n\n"
             "Where: End of ``run_learning_cycle`` in ``learning.py`` plus "
             "``pattern_ml``, ``alerts``, ``learning_cycle_report`` modules.\n\n"
@@ -794,23 +800,6 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 ),
             ),
             CycleStepDef(
-                sid="proposals",
-                label="Generating strategy proposals",
-                code_ref="alerts.generate_strategy_proposals",
-                runner_phase="proposals",
-                description=(
-                    "Turns high-confidence patterns and context into user-facing strategy "
-                    "proposal objects for review or execution."
-                ),
-                remarks=(
-                    "What: Builds actionable proposal records for the trading desk UI.\n\n"
-                    "Where: ``alerts.generate_strategy_proposals(db, user_id)``.\n\n"
-                    "Why: Bridges research patterns to human-approved trades."
-                ),
-                inputs=("Patterns passing confidence gates", "User risk profile fields"),
-                outputs=("``proposals`` list", "``report['proposals_generated']``"),
-            ),
-            CycleStepDef(
                 sid="pattern_engine",
                 label="Pattern discovery & evolution",
                 code_ref="learning._run_pattern_engine_cycle",
@@ -822,13 +811,31 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 remarks=(
                     "What: Isolated engine pass for hypotheses/tests/evolution.\n\n"
                     "Where: ``_run_pattern_engine_cycle(db, user_id)`` in ``learning.py``.\n\n"
-                    "Why: Allows heavier logic without blocking the earlier fast path."
+                    "Why: Runs before proposals so desk proposals see the latest engine output."
                 ),
                 inputs=("Engine-internal config", "Pattern and insight ORM state"),
                 outputs=(
                     "``pe_result`` — hypotheses_generated, patterns_tested, patterns_evolved",
                     "Merged into ``report``",
                 ),
+            ),
+            CycleStepDef(
+                sid="proposals",
+                label="Generating strategy proposals",
+                code_ref="alerts.generate_strategy_proposals",
+                runner_phase="proposals",
+                description=(
+                    "Turns high-confidence patterns and context into user-facing strategy "
+                    "proposal objects for review or execution."
+                ),
+                remarks=(
+                    "What: Builds actionable proposal records for the trading desk UI.\n\n"
+                    "Where: ``alerts.generate_strategy_proposals(db, user_id)`` after "
+                    "``_run_pattern_engine_cycle``.\n\n"
+                    "Why: Bridges research patterns to human-approved trades using fresh engine state."
+                ),
+                inputs=("Patterns passing confidence gates", "User risk profile fields"),
+                outputs=("``proposals`` list", "``report['proposals_generated']``"),
             ),
             CycleStepDef(
                 sid="cycle_report",
@@ -909,9 +916,28 @@ def _build_step_index() -> dict[tuple[str, str], CycleStepDef]:
 _CYCLE_STEP_INDEX: dict[tuple[str, str], CycleStepDef] = _build_step_index()
 
 
-_SCHEDULED_CLUSTER = "c_scheduled"
 _NO_PROGRESS_SIDS = frozenset({"cycle_report", "depromote", "finalize"})
 _SNAP_INLINE_SIDS = frozenset({"snapshots_daily", "snapshots_intraday"})
+
+
+def cycle_progress_stage_keys(*, snap_inline: bool = False) -> tuple[str, ...]:
+    """Ordered step ``sid`` values that bump ``steps_completed`` for the learning cycle.
+
+    Same inclusion rules as the progress bar: excludes the scheduler-only cluster,
+    excludes ``cycle_report`` / ``depromote`` / ``finalize``, and excludes snapshot
+    steps unless *snap_inline* is True.
+    """
+    keys: list[str] = []
+    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
+        if cluster.id == SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID:
+            continue
+        for step in cluster.steps:
+            if step.sid in _NO_PROGRESS_SIDS:
+                continue
+            if step.sid in _SNAP_INLINE_SIDS and not snap_inline:
+                continue
+            keys.append(step.sid)
+    return tuple(keys)
 
 
 def count_cycle_progress_steps(*, snap_inline: bool = False) -> int:
@@ -920,17 +946,7 @@ def count_cycle_progress_steps(*, snap_inline: bool = False) -> int:
     Excludes scheduled-only steps (APScheduler) and post-cycle steps that don't
     bump the counter.  Snapshot steps are only included when *snap_inline* is True.
     """
-    count = 0
-    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
-        if cluster.id == _SCHEDULED_CLUSTER:
-            continue
-        for step in cluster.steps:
-            if step.sid in _NO_PROGRESS_SIDS:
-                continue
-            if step.sid in _SNAP_INLINE_SIDS and not snap_inline:
-                continue
-            count += 1
-    return count
+    return len(cycle_progress_stage_keys(snap_inline=snap_inline))
 
 
 def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:

@@ -68,14 +68,16 @@ def stop_target_prices(
     *,
     atr_pct: float,
     side_long: bool = True,
+    stop_atr_mult: float = 0.60,
+    target_atr_mult: float = 0.90,
 ) -> tuple[float, float]:
     """Simple ATR-scaled stop/target for long momentum stub."""
     if side_long:
-        stop = entry * (1.0 - max(0.003, atr_pct * 0.6))
-        target = entry * (1.0 + max(0.004, atr_pct * 0.9))
+        stop = entry * (1.0 - max(0.003, atr_pct * float(stop_atr_mult)))
+        target = entry * (1.0 + max(0.004, atr_pct * float(target_atr_mult)))
     else:
-        stop = entry * (1.0 + max(0.003, atr_pct * 0.6))
-        target = entry * (1.0 - max(0.004, atr_pct * 0.9))
+        stop = entry * (1.0 + max(0.003, atr_pct * float(stop_atr_mult)))
+        target = entry * (1.0 - max(0.004, atr_pct * float(target_atr_mult)))
     return stop, target
 
 

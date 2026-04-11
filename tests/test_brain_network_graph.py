@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-from app.services.trading.brain_network_graph import get_trading_brain_network_graph
+from app.services.trading.brain_network_graph import (
+    TRADING_BRAIN_NETWORK_GRAPH_VERSION,
+    get_trading_brain_network_graph,
+)
 
 
 def test_trading_brain_network_graph_universe_and_step_ordinals() -> None:
     data = get_trading_brain_network_graph()
-    assert int(data["meta"]["graph_version"]) >= 14
+    assert int(data["meta"]["graph_version"]) == TRADING_BRAIN_NETWORK_GRAPH_VERSION
     for n in data["nodes"]:
         if not isinstance(n, dict):
             continue
@@ -31,7 +34,7 @@ def test_trading_brain_network_graph_structure() -> None:
         assert e.get("from") in ids, f"missing from-node: {e!r}"
         assert e.get("to") in ids, f"missing to-node: {e!r}"
     meta = data.get("meta") or {}
-    assert int(meta.get("graph_version", 0)) >= 14
+    assert int(meta.get("graph_version", 0)) == TRADING_BRAIN_NETWORK_GRAPH_VERSION
     assert meta.get("architecture_source") == "learning_cycle_architecture"
     for n in nodes:
         if not isinstance(n, dict):

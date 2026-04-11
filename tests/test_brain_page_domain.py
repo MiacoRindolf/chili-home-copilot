@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import html
 import json
 import re
 from pathlib import Path
 
+import esprima
 import pytest
 from jinja2 import Environment, FileSystemLoader, select_autoescape
 from starlette.requests import Request
@@ -178,3 +180,19 @@ def test_brain_template_hub_default_when_domain_missing(brain_jinja_env) -> None
     }
     text = brain_jinja_env.get_template("brain.html").render(**ctx)
     assert 'data-brain-initial-domain="hub"' in text
+
+
+def test_brain_template_inline_scripts_parse(brain_jinja_env) -> None:
+    text = _render_brain(brain_jinja_env, "project")
+    scripts = re.findall(
+        r"<script(?![^>]*\bsrc=)(?:[^>]*)>([\s\S]*?)</script>",
+        text,
+        flags=re.IGNORECASE,
+    )
+    assert scripts, "expected at least one inline script block"
+    for source in scripts:
+        stripped = source.strip()
+        if not stripped:
+            continue
+        program = esprima.parseScript(html.unescape(stripped), tolerant=False)
+        assert program.type == "Program"

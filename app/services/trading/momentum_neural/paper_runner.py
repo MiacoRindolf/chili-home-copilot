@@ -28,6 +28,7 @@ from ..execution_family_registry import normalize_execution_family, momentum_run
 from .persistence import (
     append_trading_automation_event,
     append_trading_automation_simulated_fill,
+    variant_for_id,
     build_runtime_snapshot_values,
     default_session_binding,
     upsert_trading_automation_runtime_snapshot,
@@ -62,6 +63,8 @@ from .paper_fsm import (
     is_live_intent_state,
     PAPER_RUNNER_RUNNABLE_STATES,
 )
+from .session_lifecycle import is_operator_paused
+from .strategy_params import normalize_strategy_params
 
 _log = logging.getLogger(__name__)
 
@@ -275,7 +278,7 @@ def list_runnable_paper_sessions(db: Session, *, limit: int = 25) -> list[Tradin
         .limit(lim)
         .all()
     )
-    return [r for r in rows if not is_live_intent_state(r.state)]
+    return [r for r in rows if not is_live_intent_state(r.state) and not is_operator_paused(r.risk_snapshot_json)]
 
 
 def run_paper_runner_batch(
@@ -298,6 +301,9 @@ def tick_paper_session(
     quote_fn: Optional[QuoteFn] = None,
 ) -> dict[str, Any]:
     """Advance one paper automation session by one step."""
+    if not settings.chili_momentum_paper_runner_enabled:
+        return {"ok": True, "skipped": "paper_runner_disabled"}
+
     sess = (
         db.query(TradingAutomationSession)
         .filter(
@@ -312,6 +318,8 @@ def tick_paper_session(
         return {"ok": True, "skipped": "live_intent_session"}
     if sess.state not in PAPER_RUNNER_RUNNABLE_STATES:
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
+    if is_operator_paused(sess.risk_snapshot_json):
+        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
 
     ef = normalize_execution_family(sess.execution_family)
     if not momentum_runner_supports_execution_family(ef):
@@ -343,6 +351,12 @@ def tick_paper_session(
         db.flush()
         return {"ok": False, "error": "no_viability"}
 
+    variant = variant_for_id(db, int(sess.variant_id))
+    params = normalize_strategy_params(
+        variant.params_json if variant is not None else {},
+        family_id=variant.family if variant is not None else None,
+    )
+
     ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
     try:
         spread_bps = float(ex.get("spread_bps") or 8.0)
@@ -359,9 +373,10 @@ def tick_paper_session(
 
     caps = _policy_caps(snap)
     try:
-        max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
+        cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
-        max_hold = int(settings.chili_momentum_risk_max_hold_seconds)
+        cap_max_hold = int(settings.chili_momentum_risk_max_hold_seconds)
+    max_hold = min(int(params.get("max_hold_seconds") or cap_max_hold), cap_max_hold)
     try:
         max_notional = float(
             caps.get("max_notional_per_trade_usd") or settings.chili_momentum_risk_max_notional_per_trade_usd
@@ -454,7 +469,7 @@ def tick_paper_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING:
-        if float(via.viability_score or 0) >= 0.52 and via.paper_eligible:
+        if float(via.viability_score or 0) >= float(params["entry_viability_min"]) and via.paper_eligible:
             _safe_transition(db, sess, STATE_ENTRY_CANDIDATE)
             _emit(
                 db,
@@ -467,7 +482,7 @@ def tick_paper_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_ENTRY_CANDIDATE:
-        if float(via.viability_score or 0) < 0.48 or not via.paper_eligible:
+        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
             _safe_transition(db, sess, STATE_WATCHING)
             _emit(db, sess, "paper_watch_started", {"reason": "candidate_regressed"})
         else:
@@ -478,7 +493,7 @@ def tick_paper_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_PENDING_ENTRY:
-        if float(via.viability_score or 0) < 0.48 or not via.paper_eligible:
+        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
             _safe_transition(db, sess, STATE_WATCHING)
             _emit(db, sess, "paper_watch_started", {"reason": "entry_aborted"})
             _sync_runtime_snapshot(db, sess, via=via)
@@ -490,7 +505,13 @@ def tick_paper_session(
         qty = notional / entry_px
         regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         atrp = regime_atr_pct(regime)
-        stop_px, target_px = stop_target_prices(entry_px, atr_pct=atrp, side_long=True)
+        stop_px, target_px = stop_target_prices(
+            entry_px,
+            atr_pct=atrp,
+            side_long=True,
+            stop_atr_mult=float(params["stop_atr_mult"]),
+            target_atr_mult=float(params["target_atr_mult"]),
+        )
         fees = roundtrip_fee_usd(notional, fee_ratio)
         opened = _utcnow()
         pe["position"] = {
@@ -560,6 +581,8 @@ def tick_paper_session(
         except Exception:
             t0 = _utcnow()
         held = (_utcnow() - t0).total_seconds()
+        trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
+        trail_floor_return = 1.0 + float(params["trail_floor_return_bps"]) / 10_000.0
 
         if st == STATE_BAILOUT:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
@@ -589,7 +612,7 @@ def tick_paper_session(
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         # bailout: viability collapse
-        if float(via.viability_score or 0) < 0.38:
+        if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
             _safe_transition(db, sess, STATE_BAILOUT)
             _emit(db, sess, "paper_bailout", {"viability_score": via.viability_score, "bid": bid})
             _sync_runtime_snapshot(db, sess, via=via)
@@ -684,7 +707,7 @@ def tick_paper_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_ENTERED and exit_px >= entry * 1.008:
+        if st == STATE_ENTERED and exit_px >= entry * trail_activate_return:
             _safe_transition(db, sess, STATE_TRAILING)
             _emit(db, sess, "paper_runner_started", {"note": "trail_armed", "bid": bid})
             _sync_runtime_snapshot(db, sess, via=via)
@@ -692,7 +715,7 @@ def tick_paper_session(
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_TRAILING:
-            trail_stop = max(stop_px, entry * 1.002)
+            trail_stop = max(stop_px, entry * trail_floor_return)
             if exit_px <= trail_stop:
                 pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
                 pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
@@ -770,6 +793,7 @@ def summarize_paper_execution(snap: Any) -> dict[str, Any]:
     pos = pe.get("position")
     out: dict[str, Any] = {
         "tick_count": pe.get("tick_count"),
+        "last_tick_utc": pe.get("last_tick_utc"),
         "last_mid": pe.get("last_mid"),
         "last_quote_source": pe.get("last_quote_source"),
         "realized_pnl_usd": pe.get("realized_pnl_usd"),

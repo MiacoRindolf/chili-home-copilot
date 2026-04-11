@@ -4,186 +4,614 @@
 {% block head_extra %}
 <script src="https://unpkg.com/lightweight-charts@4/dist/lightweight-charts.standalone.production.js"></script>
 <style>
-.ap-wrap { min-height: 100vh; display: flex; flex-direction: column; background: var(--bg); color: var(--text); }
+.ap-wrap {
+  min-height: 100vh;
+  background:
+    radial-gradient(circle at top right, rgba(14, 165, 233, 0.08), transparent 28%),
+    radial-gradient(circle at left center, rgba(34, 197, 94, 0.06), transparent 26%),
+    var(--bg);
+  color: var(--text);
+}
 .ap-header {
-  display: flex; align-items: center; justify-content: space-between; gap: 12px;
-  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--bg-header); flex-wrap: wrap;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.78);
+  backdrop-filter: blur(18px);
+  position: sticky;
+  top: 0;
+  z-index: 20;
 }
-.ap-title h1 { margin: 0; font-size: 18px; font-weight: 700; }
-.ap-title p { margin: 4px 0 0; font-size: 11px; color: var(--text-secondary); max-width: 760px; }
-.ap-nav { display: flex; gap: 4px; flex-wrap: wrap; }
+.ap-title h1 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+.ap-title p {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  max-width: 900px;
+  line-height: 1.55;
+}
+.ap-nav {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
 .ap-nav a {
-  color: var(--text-secondary); text-decoration: none; padding: 6px 12px; border-radius: 7px; font-size: 11px; font-weight: 600;
+  color: var(--text-secondary);
+  text-decoration: none;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+  font-size: 11px;
+  font-weight: 700;
 }
-.ap-nav a:hover { color: var(--accent); background: rgba(99,102,241,.06); }
-.ap-nav a.ap-active { color: var(--accent); background: rgba(99,102,241,.1); }
-.ap-shell { flex: 1; display: grid; grid-template-columns: minmax(0, 1fr) 380px; min-height: 0; }
-@media (max-width: 1100px) { .ap-shell { grid-template-columns: 1fr; } }
-.ap-main { min-height: 0; overflow-y: auto; padding: 14px 16px 24px; }
-.ap-side { min-height: 0; overflow-y: auto; padding: 14px 14px 24px; border-left: 1px solid var(--border); background: var(--bg-header); }
+.ap-nav a:hover {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.25);
+  background: rgba(148, 163, 184, 0.08);
+}
+.ap-nav a.ap-active {
+  color: #e2f3ff;
+  border-color: rgba(14, 165, 233, 0.5);
+  background: rgba(14, 165, 233, 0.18);
+}
+.ap-shell {
+  max-width: 1480px;
+  margin: 0 auto;
+  padding: 18px 20px 40px;
+}
 .ap-banner {
-  margin-bottom: 12px; padding: 10px 12px; border-radius: 10px; border: 1px solid rgba(99,102,241,.22);
-  background: linear-gradient(135deg, rgba(99,102,241,.08), rgba(34,197,94,.05)); font-size: 11px; color: var(--text-secondary);
+  margin-bottom: 14px;
+  padding: 12px 14px;
+  border-radius: 16px;
+  border: 1px solid rgba(14, 165, 233, 0.22);
+  background: linear-gradient(135deg, rgba(14, 165, 233, 0.12), rgba(34, 197, 94, 0.08));
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
 }
 .ap-strip {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
   margin-bottom: 14px;
 }
 .ap-stat {
-  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-header); padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 14px 16px;
+  background: rgba(15, 23, 42, 0.72);
+  box-shadow: 0 10px 30px rgba(2, 6, 23, 0.12);
 }
-.ap-stat label { display: block; font-size: 10px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
-.ap-stat b { font-size: 17px; color: var(--text); }
-.ap-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px; flex-wrap: wrap; }
-.ap-toolbar-left { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-.ap-btn {
-  font-size: 11px; padding: 7px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-header);
-  color: var(--text); cursor: pointer; font-weight: 600;
+.ap-stat label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-weight: 700;
 }
-.ap-btn:hover { border-color: var(--accent); color: var(--accent); }
-.ap-muted { font-size: 11px; color: var(--text-secondary); }
-.ap-grid {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px;
+.ap-stat b {
+  display: block;
+  font-size: 20px;
+  color: var(--text);
+  line-height: 1.15;
 }
-.ap-card {
-  border: 1px solid var(--border); border-radius: 14px; background: var(--bg-header); padding: 14px;
-  cursor: pointer; transition: border-color .15s, transform .15s, box-shadow .15s;
-}
-.ap-card:hover { border-color: rgba(99,102,241,.35); transform: translateY(-1px); box-shadow: 0 10px 26px rgba(0,0,0,.08); }
-.ap-card.ap-selected { border-color: rgba(99,102,241,.55); box-shadow: 0 0 0 1px rgba(99,102,241,.16); }
-.ap-card-top { display: flex; justify-content: space-between; gap: 8px; align-items: flex-start; margin-bottom: 8px; }
-.ap-symbol { font-size: 18px; font-weight: 700; color: var(--text); }
-.ap-strategy { font-size: 11px; color: var(--text-secondary); margin-top: 2px; }
-.ap-badges { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 10px; }
-.ap-badge {
-  display: inline-flex; align-items: center; gap: 4px; padding: 3px 7px; border-radius: 999px; font-size: 9px;
-  text-transform: uppercase; letter-spacing: .05em; font-weight: 700; border: 1px solid var(--border); color: var(--text-secondary);
-}
-.ap-badge.simulation { border-color: #6366f1; color: #818cf8; }
-.ap-badge.live-armed { border-color: #f59e0b; color: #fbbf24; }
-.ap-badge.live { border-color: #22c55e; color: #4ade80; }
-.ap-badge.warn { border-color: #f59e0b; color: #fbbf24; }
-.ap-badge.block { border-color: #ef4444; color: #f87171; }
-.ap-thesis { font-size: 11px; line-height: 1.5; color: var(--text); min-height: 52px; }
-.ap-meta {
-  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; margin-top: 10px;
-  font-size: 10px; color: var(--text-secondary);
-}
-.ap-meta div strong { display: block; margin-bottom: 2px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; font-size: 9px; }
-.ap-empty {
-  padding: 28px; border: 1px dashed var(--border); border-radius: 14px; text-align: center; font-size: 12px; color: var(--text-muted);
-}
-.ap-side h2 { margin: 0 0 10px; font-size: 13px; font-weight: 700; }
-.ap-panel {
-  border: 1px solid var(--border); border-radius: 12px; background: var(--bg); padding: 12px; margin-bottom: 12px;
-}
-.ap-detail-row { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px 10px; font-size: 10px; color: var(--text-secondary); }
-.ap-detail-row div strong { display: block; font-size: 9px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; margin-bottom: 2px; }
-.ap-chart { height: 240px; border-radius: 12px; overflow: hidden; border: 1px solid var(--border); background: #0f172a; }
-.ap-list { display: grid; gap: 8px; font-size: 10px; }
-.ap-log {
-  padding: 8px 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--bg-header);
-}
-.ap-log b { color: var(--accent); }
-.ap-fill-table { width: 100%; border-collapse: collapse; font-size: 10px; }
-.ap-fill-table th, .ap-fill-table td { text-align: left; padding: 6px 4px; border-bottom: 1px solid var(--border); vertical-align: top; }
-
-/* ── Momentum mode bar ─────────────────────────────────────────────────── */
-.mm-mode-bar {
-  display: inline-flex; align-items: center; gap: 2px;
-  padding: 2px 4px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg-secondary, #1e1e2e);
-  vertical-align: middle;
-}
-.mm-mode-bar span { font-size: 9px; color: var(--text-muted); margin-right: 4px; text-transform: uppercase; letter-spacing: .4px; }
-.mm-mode-btn {
-  font-size: 10px; font-weight: 700; padding: 4px 10px; border-radius: 6px; border: 1px solid transparent;
-  background: transparent; color: var(--text-secondary); cursor: pointer;
-}
-.mm-mode-btn.active { background: rgba(99,102,241,.25); color: var(--accent); border-color: rgba(99,102,241,.35); }
-.mm-mode-btn.mm-live.active {
-  background: #b91c1c; color: #fff; border-color: #7f1d1d;
-  box-shadow: 0 0 0 2px rgba(185, 28, 28, 0.35);
-}
-
-/* ── Momentum panels (viable strategies + operator strip) ──────────────── */
-.mm-panel {
-  border: 1px solid var(--border); border-radius: 12px; background: var(--bg-header);
-  max-height: 320px; overflow-y: auto; margin-bottom: 12px;
-}
-.mm-panel-head {
-  display: flex; align-items: center; justify-content: space-between; gap: 8px;
-  padding: 8px 12px; border-bottom: 1px solid var(--border);
-}
-.mm-panel-head h3 { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-secondary); margin: 0; }
-.mm-panel-head button {
-  font-size: 10px; padding: 4px 10px; border-radius: 6px; border: 1px solid var(--border);
-  background: var(--bg); color: var(--text); cursor: pointer; font-weight: 600;
-}
-.mm-panel-head button:hover { border-color: var(--accent); color: var(--accent); }
-.mm-panel-body { padding: 8px 12px 12px; display: flex; flex-direction: column; gap: 8px; }
-.mm-operator-strip { max-height: 240px; }
-.mm-operator-strip .mm-op-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(140px, 1fr)); gap: 6px 10px;
-  font-size: 10px; color: var(--text-secondary); line-height: 1.35;
-}
-.mm-operator-strip .mm-op-grid b { color: var(--text); font-weight: 700; }
-.mm-op-warn {
-  margin-top: 6px; padding: 6px 8px; border-radius: 6px; background: rgba(245, 158, 11, 0.12);
-  border: 1px solid rgba(245, 158, 11, 0.45); color: var(--text); font-size: 10px;
-}
-.mm-op-events { margin-top: 6px; font-size: 9px; color: var(--text-muted); max-height: 48px; overflow-y: auto; }
-.mm-row {
-  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
-  padding: 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--bg);
+.ap-stat small {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-secondary);
   font-size: 11px;
+  line-height: 1.45;
 }
-.mm-row-title { font-weight: 700; color: var(--text); }
-.mm-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-.mm-badge {
-  font-size: 9px; font-weight: 700; padding: 2px 6px; border-radius: 4px; text-transform: uppercase;
-  background: var(--bg-header); border: 1px solid var(--border); color: var(--text-secondary);
+.ap-blockers {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 16px;
 }
-.mm-badge.ok { border-color: #15803d; color: #22c55e; }
-.mm-badge.no { opacity: .55; }
-.mm-badge.venue { border-color: #2563eb; color: #60a5fa; }
-.mm-meta { color: var(--text-muted); font-size: 10px; margin-top: 4px; line-height: 1.35; }
-.mm-actions { display: flex; flex-direction: column; gap: 4px; align-items: stretch; }
-.mm-actions button {
-  font-size: 10px; padding: 5px 8px; border-radius: 6px; border: none; cursor: pointer; font-weight: 700;
+.ap-blocker {
+  border-radius: 16px;
+  padding: 12px 14px;
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(127, 29, 29, 0.16);
+  color: #fecaca;
+  font-size: 12px;
+  line-height: 1.55;
 }
-.mm-btn-paper { background: var(--accent); color: #fff; }
-.mm-btn-live { background: #7f1d1d; color: #fff; }
-.mm-btn-live:disabled { opacity: .45; cursor: not-allowed; }
-.mm-btn-ghost { background: transparent; border: 1px solid var(--border); color: var(--text-secondary); }
-.mm-warn { color: #f97316; font-size: 10px; margin-top: 4px; }
-
-/* ── Live arm confirmation modal ────────────────────────────────────────── */
-.mm-modal-backdrop {
-  display: none; position: fixed; inset: 0; background: rgba(0,0,0,.55); z-index: 12000;
-  align-items: center; justify-content: center; padding: 16px;
+.ap-blocker strong {
+  color: #fff1f2;
 }
-.mm-modal-backdrop.open { display: flex; }
-.mm-modal {
-  background: var(--bg-card, #1f2937); border: 1px solid var(--border); border-radius: 12px;
-  max-width: 420px; width: 100%; padding: 16px; box-shadow: 0 16px 48px rgba(0,0,0,.4);
+.ap-section {
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  background: rgba(15, 23, 42, 0.72);
+  overflow: hidden;
+  box-shadow: 0 12px 36px rgba(2, 6, 23, 0.12);
 }
-.mm-modal h4 { margin: 0 0 10px; font-size: 14px; color: var(--text); }
-.mm-modal .mm-modal-body { font-size: 12px; color: var(--text-secondary); line-height: 1.45; max-height: 280px; overflow-y: auto; }
-.mm-modal-actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 14px; }
-.mm-modal-actions button { padding: 8px 14px; border-radius: 8px; font-weight: 700; cursor: pointer; border: none; }
-.mm-modal-cancel { background: var(--bg-header); color: var(--text); border: 1px solid var(--border) !important; }
-.mm-modal-confirm { background: #b91c1c; color: #fff; }
-
-/* ── Symbol picker ──────────────────────────────────────────────────────── */
-.ap-symbol-bar {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; flex-wrap: wrap;
+.ap-section-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid var(--border);
 }
-.ap-symbol-input {
-  padding: 7px 12px; font-size: 13px; font-weight: 700; border: 1px solid var(--border);
-  border-radius: 8px; background: var(--bg); color: var(--text); width: 120px;
+.ap-section-head h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 800;
+}
+.ap-section-head p {
+  margin: 5px 0 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+}
+.ap-section-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ap-filter-group {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.82);
+}
+.ap-filter-btn {
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  padding: 7px 12px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.ap-filter-btn:hover {
+  color: var(--text);
+}
+.ap-filter-btn.active {
+  background: rgba(14, 165, 233, 0.18);
+  color: #e0f2fe;
+}
+.ap-filter-btn.live.active {
+  background: rgba(220, 38, 38, 0.2);
+  color: #fee2e2;
+}
+.ap-btn {
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.86);
+  color: var(--text);
+  padding: 8px 12px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 800;
+  cursor: pointer;
+}
+.ap-btn:hover {
+  border-color: rgba(14, 165, 233, 0.4);
+  color: #e0f2fe;
+}
+.ap-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+.ap-btn-primary {
+  border-color: rgba(14, 165, 233, 0.4);
+  background: rgba(14, 165, 233, 0.18);
+  color: #e0f2fe;
+}
+.ap-btn-live {
+  border-color: rgba(248, 113, 113, 0.45);
+  background: rgba(220, 38, 38, 0.16);
+  color: #fee2e2;
+}
+.ap-btn-danger {
+  border-color: rgba(248, 113, 113, 0.34);
+  color: #fecaca;
+}
+.ap-search {
+  min-width: 220px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: rgba(2, 6, 23, 0.5);
+  color: var(--text);
+  font-size: 12px;
+}
+.ap-section-body {
+  padding: 16px 18px 18px;
+}
+.ap-empty {
+  padding: 26px 20px;
+  border: 1px dashed rgba(148, 163, 184, 0.28);
+  border-radius: 16px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+.ap-muted {
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.ap-opportunity-list,
+.ap-session-list {
+  display: grid;
+  gap: 12px;
+}
+.ap-opportunity-row,
+.ap-session-card {
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: rgba(2, 6, 23, 0.34);
+  padding: 16px;
+}
+.ap-opportunity-row {
+  display: grid;
+  gap: 12px;
+}
+.ap-op-top,
+.ap-session-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.ap-symbol-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.ap-symbol {
+  font-size: 22px;
+  font-weight: 900;
+  letter-spacing: -0.03em;
+}
+.ap-subline {
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.ap-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.ap-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.ap-badge.stock {
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #bfdbfe;
+}
+.ap-badge.crypto {
+  border-color: rgba(45, 212, 191, 0.4);
+  color: #99f6e4;
+}
+.ap-badge.compatible,
+.ap-badge.live,
+.ap-badge.open {
+  border-color: rgba(34, 197, 94, 0.45);
+  color: #bbf7d0;
+}
+.ap-badge.blocked,
+.ap-badge.closed {
+  border-color: rgba(248, 113, 113, 0.45);
+  color: #fecaca;
+}
+.ap-badge.warn,
+.ap-badge.paused {
+  border-color: rgba(251, 191, 36, 0.45);
+  color: #fde68a;
+}
+.ap-badge.refined {
+  border-color: rgba(167, 139, 250, 0.45);
+  color: #ddd6fe;
+}
+.ap-badge.seeded {
+  border-color: rgba(148, 163, 184, 0.4);
+  color: #cbd5e1;
+}
+.ap-badge.paper {
+  border-color: rgba(14, 165, 233, 0.45);
+  color: #bae6fd;
+}
+.ap-badge.event {
+  border-color: rgba(148, 163, 184, 0.35);
+  color: #e2e8f0;
+}
+.ap-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: center;
+}
+.ap-row-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+.ap-metric {
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 14px;
+  padding: 12px;
+  background: rgba(15, 23, 42, 0.48);
+}
+.ap-metric label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
 }
-.ap-symbol-input::placeholder { font-weight: 400; text-transform: none; }
+.ap-metric b {
+  display: block;
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.25;
+}
+.ap-metric small {
+  display: block;
+  margin-top: 5px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.ap-callout {
+  border-radius: 14px;
+  padding: 12px 14px;
+  background: rgba(15, 23, 42, 0.52);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  font-size: 12px;
+  color: var(--text-secondary);
+  line-height: 1.55;
+}
+.ap-callout strong {
+  display: block;
+  color: var(--text);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+.ap-callout.warn {
+  border-color: rgba(251, 191, 36, 0.35);
+  background: rgba(120, 53, 15, 0.2);
+}
+.ap-callout.block {
+  border-color: rgba(248, 113, 113, 0.36);
+  background: rgba(127, 29, 29, 0.18);
+}
+.ap-callout.good {
+  border-color: rgba(34, 197, 94, 0.28);
+  background: rgba(20, 83, 45, 0.18);
+}
+.ap-inline-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ap-inline-chip {
+  padding: 6px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  background: rgba(15, 23, 42, 0.62);
+  border: 1px solid rgba(148, 163, 184, 0.16);
+}
+.ap-session-body {
+  display: grid;
+  gap: 14px;
+  margin-top: 14px;
+}
+.ap-session-chart-wrap {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 18px;
+  padding: 12px;
+  background: rgba(2, 6, 23, 0.34);
+}
+.ap-chart-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.ap-chart {
+  height: 290px;
+  border-radius: 14px;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  background: #020617;
+  overflow: hidden;
+}
+.ap-chart-empty {
+  padding: 24px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.ap-session-lower {
+  display: grid;
+  grid-template-columns: minmax(0, 1.3fr) minmax(320px, 0.9fr);
+  gap: 14px;
+}
+.ap-detail-stack {
+  display: grid;
+  gap: 12px;
+}
+.ap-fill-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+.ap-fill-table th,
+.ap-fill-table td {
+  padding: 8px 6px;
+  text-align: left;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.12);
+  vertical-align: top;
+}
+.ap-fill-table th {
+  color: var(--text-muted);
+  font-size: 10px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+.ap-fill-table td {
+  color: var(--text-secondary);
+}
+.ap-fill-table td strong {
+  color: var(--text);
+}
+.ap-details {
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 14px;
+  background: rgba(15, 23, 42, 0.42);
+  overflow: hidden;
+}
+.ap-details summary {
+  list-style: none;
+  cursor: pointer;
+  padding: 12px 14px;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 800;
+}
+.ap-details summary::-webkit-details-marker {
+  display: none;
+}
+.ap-details-body {
+  padding: 0 14px 14px;
+}
+.ap-event-list {
+  display: grid;
+  gap: 8px;
+}
+.ap-event {
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  background: rgba(2, 6, 23, 0.34);
+}
+.ap-event b {
+  color: var(--text);
+  font-size: 11px;
+}
+.ap-event small {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+.ap-pre {
+  margin: 8px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-secondary);
+}
+.ap-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(2, 6, 23, 0.62);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 18px;
+  z-index: 1200;
+}
+.ap-modal-backdrop.open {
+  display: flex;
+}
+.ap-modal {
+  width: min(520px, 100%);
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-radius: 18px;
+  background: #0f172a;
+  box-shadow: 0 24px 64px rgba(2, 6, 23, 0.5);
+  overflow: hidden;
+}
+.ap-modal-head {
+  padding: 16px 18px 12px;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.14);
+}
+.ap-modal-head h3 {
+  margin: 0;
+  font-size: 18px;
+}
+.ap-modal-body {
+  padding: 16px 18px;
+  display: grid;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  line-height: 1.55;
+}
+.ap-modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 0 18px 18px;
+}
+@media (max-width: 1100px) {
+  .ap-session-lower {
+    grid-template-columns: 1fr;
+  }
+}
+@media (max-width: 900px) {
+  .ap-header,
+  .ap-section-head,
+  .ap-op-top,
+  .ap-session-top {
+    flex-direction: column;
+  }
+  .ap-row-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 620px) {
+  .ap-shell {
+    padding: 14px 12px 24px;
+  }
+  .ap-header {
+    padding: 14px 12px;
+  }
+  .ap-row-grid {
+    grid-template-columns: 1fr;
+  }
+  .ap-search {
+    min-width: 0;
+    width: 100%;
+  }
+}
 </style>
 {% endblock %}
 
@@ -192,7 +620,10 @@
   <header class="ap-header">
     <div class="ap-title">
       <h1>Trading Autopilot</h1>
-      <p>Full automation runtime: momentum viable strategies, operator readiness, session audit, and live execution gating in one place.</p>
+      <p>
+        Opportunity-first momentum scalping runtime with paper and live compatibility, runner health, brain-refined
+        strategy variants, and full-width session cards with charts, fills, and controls.
+      </p>
     </div>
     <nav class="ap-nav">
       <a href="/">Home</a>
@@ -203,90 +634,90 @@
   </header>
 
   <div class="ap-shell">
-    <main class="ap-main">
-      {% if automation_legacy_alias %}
-      <div class="ap-banner">Trading Automation compatibility path: this legacy URL now opens the Autopilot runtime surface while keeping the existing momentum automation APIs and session identifiers intact.</div>
-      {% else %}
-      <div class="ap-banner">Brain decides and learns. Postgres records durable truth. Autopilot reads runtime state, simulated fills, and provider fidelity without bypassing kill switch, broker readiness, or operator confirmation.</div>
-      {% endif %}
+    {% if automation_legacy_alias %}
+    <div class="ap-banner">
+      Trading Automation compatibility path: this legacy URL now opens the Autopilot runtime surface while keeping the
+      existing momentum automation APIs and session identifiers intact.
+    </div>
+    {% else %}
+    <div class="ap-banner">
+      Autopilot now starts from what is actually compatible now. The board below merges fresh scanner signals, crypto
+      breakouts, and live strategy viability so you can see which stocks and crypto pairs the current momentum scalping
+      family can trade, why a symbol is allowed, and exactly what is blocking it when it is not.
+    </div>
+    {% endif %}
 
-      <!-- ── Symbol picker + mode toggle + neural refresh ──────────────── -->
-      <div class="ap-symbol-bar">
-        <input type="text" id="ap-symbol-input" class="ap-symbol-input" placeholder="Ticker..." value="" autocomplete="off" />
-        <button type="button" class="ap-btn" onclick="apLoadSymbol()">Load Symbol</button>
-        <div class="mm-mode-bar" id="mm-mode-bar" title="Paper vs live operator mode">
-          <span>Mode</span>
-          <button type="button" class="mm-mode-btn" id="mm-mode-paper" onclick="_setMomentumUiMode('paper')">Paper</button>
-          <button type="button" class="mm-mode-btn mm-live" id="mm-mode-live" onclick="_setMomentumUiMode('live')">Live</button>
+    <div id="ap-summary-strip" class="ap-strip"></div>
+    <div id="ap-blockers" class="ap-blockers"></div>
+
+    <section class="ap-section">
+      <div class="ap-section-head">
+        <div>
+          <h2>Eligible Now</h2>
+          <p>
+            Ranked by live compatibility, scan signal strength, scan score, top variant viability, and freshness.
+            Stocks only qualify during market hours; crypto stays available 24/7 when data and venue checks are green.
+          </p>
         </div>
-        <button type="button" class="ap-btn" id="mm-neural-refresh-btn" onclick="_momentumNeuralRefresh()">Neural refresh</button>
-      </div>
-
-      <!-- ── Momentum viable strategies panel ──────────────────────────── -->
-      <div id="momentum-viable-panel" class="mm-panel" style="display:none" aria-label="Momentum viable strategies">
-        <div class="mm-panel-head">
-          <h3>Momentum Viable Strategies</h3>
-        </div>
-        <div id="mm-panel-body" class="mm-panel-body"></div>
-      </div>
-
-      <!-- ── Momentum operator strip ───────────────────────────────────── -->
-      <div id="mm-operator-strip" class="mm-panel mm-operator-strip" style="display:none" aria-label="Momentum operator status">
-        <div class="mm-panel-head">
-          <h3>Momentum Operator</h3>
-        </div>
-        <div id="mm-operator-body" class="mm-panel-body">
-          <div class="mm-meta">Enter a ticker above and click Load Symbol to inspect operator readiness.</div>
+        <div class="ap-section-actions">
+          <div class="ap-filter-group" id="ap-mode-filters">
+            <button type="button" class="ap-filter-btn" data-mode="paper">Paper</button>
+            <button type="button" class="ap-filter-btn live" data-mode="live">Live</button>
+          </div>
+          <div class="ap-filter-group" id="ap-asset-filters">
+            <button type="button" class="ap-filter-btn" data-asset="all">All</button>
+            <button type="button" class="ap-filter-btn" data-asset="stock">Stocks</button>
+            <button type="button" class="ap-filter-btn" data-asset="crypto">Crypto</button>
+          </div>
+          <input id="ap-opportunity-search" class="ap-search" type="text" placeholder="Filter tickers or strategies" />
+          <button type="button" class="ap-btn" onclick="apRefreshOpportunities()">Refresh board</button>
+          <button type="button" class="ap-btn" onclick="apRefreshAll()">Refresh all</button>
         </div>
       </div>
-
-      <!-- ── Summary strip ─────────────────────────────────────────────── -->
-      <div class="ap-strip" id="ap-summary-strip"></div>
-      <div class="ap-toolbar">
-        <div class="ap-toolbar-left">
-          <button type="button" class="ap-btn" onclick="apLoadAll()">Refresh Sessions</button>
-          <label class="ap-muted"><input type="checkbox" id="ap-show-archived" onchange="apLoadSessions()"> Show archived</label>
+      <div class="ap-section-body">
+        <div id="ap-guest" class="ap-empty" style="display:none">Sign in to inspect opportunities and control sessions.</div>
+        <div id="ap-opportunities" class="ap-opportunity-list"></div>
+        <div id="ap-opportunities-empty" class="ap-empty" style="display:none">
+          No compatible opportunities matched the current filters.
         </div>
-        <div class="ap-muted" id="ap-limitations"></div>
       </div>
+    </section>
 
-      <div id="ap-guest" class="ap-empty" style="display:none">Sign in to inspect active Autopilot sessions.</div>
-      <div id="ap-grid" class="ap-grid"></div>
-      <div id="ap-empty" class="ap-empty" style="display:none">No Autopilot sessions yet. Use the symbol picker above to run paper or arm live, then watch the runtime surface here.</div>
-    </main>
-
-    <aside class="ap-side">
-      <div class="ap-panel">
-        <h2>Selected Session</h2>
-        <div id="ap-selected-meta" class="ap-muted">Pick a runtime card to inspect chart, fills, and event audit.</div>
+    <section class="ap-section">
+      <div class="ap-section-head">
+        <div>
+          <h2>Simulation Runtime</h2>
+          <p>
+            Every session now stays inline: controls, runner status, chart, fills, and event trail all live in the card
+            so the page reads as an operational list instead of a selected-session side panel.
+          </p>
+        </div>
+        <div class="ap-section-actions">
+          <label class="ap-muted"><input type="checkbox" id="ap-show-archived" /> Show archived</label>
+          <button type="button" class="ap-btn" onclick="apRefreshSessions()">Refresh sessions</button>
+        </div>
       </div>
-      <div class="ap-panel">
-        <div id="ap-chart" class="ap-chart"></div>
+      <div class="ap-section-body">
+        <div id="ap-sessions" class="ap-session-list"></div>
+        <div id="ap-sessions-empty" class="ap-empty" style="display:none">
+          No Autopilot sessions yet. Start from an eligible symbol above to create a paper or live workflow.
+        </div>
       </div>
-      <div class="ap-panel">
-        <h2>Session Detail</h2>
-        <div id="ap-detail"></div>
-      </div>
-      <div class="ap-panel">
-        <h2>Recent Events</h2>
-        <div id="ap-events" class="ap-list"></div>
-      </div>
-      <div class="ap-panel">
-        <h2>Simulated Fills</h2>
-        <div id="ap-fills" class="ap-muted">Select a session to see simulated entries, exits, stops, and replay markers.</div>
-      </div>
-    </aside>
+    </section>
   </div>
 </div>
 
-<!-- Momentum live arm confirmation modal -->
-<div id="mm-live-modal" class="mm-modal-backdrop" onclick="if(event.target===this)_closeMomentumLiveModal()">
-  <div class="mm-modal" onclick="event.stopPropagation()">
-    <h4>Confirm live arm</h4>
-    <div id="mm-live-modal-body" class="mm-modal-body"></div>
-    <div class="mm-modal-actions">
-      <button type="button" class="mm-modal-cancel" onclick="_closeMomentumLiveModal()">Cancel</button>
-      <button type="button" class="mm-modal-confirm" id="mm-live-modal-confirm" onclick="_confirmMomentumLiveArm()">I understand — confirm</button>
+<div id="ap-live-modal" class="ap-modal-backdrop" onclick="if (event.target === this) apCloseLiveModal()">
+  <div class="ap-modal" onclick="event.stopPropagation()">
+    <div class="ap-modal-head">
+      <h3>Confirm Live Arm</h3>
+    </div>
+    <div id="ap-live-modal-body" class="ap-modal-body"></div>
+    <div class="ap-modal-actions">
+      <button type="button" class="ap-btn" onclick="apCloseLiveModal()">Cancel</button>
+      <button type="button" class="ap-btn ap-btn-live" id="ap-live-modal-confirm" onclick="apConfirmLiveArm()">
+        I understand, confirm
+      </button>
     </div>
   </div>
 </div>
@@ -295,574 +726,849 @@
 (function() {
   var IS_GUEST = {{ is_guest | tojson }};
   var LEGACY_ALIAS = {{ automation_legacy_alias | default(false) | tojson }};
-  var apSelectedId = null;
-  var apChart = null;
-  var apSeries = null;
-  var apCurrentSymbol = '';
+  var state = {
+    opportunityMode: 'paper',
+    assetFilter: 'all',
+    opportunitySearch: '',
+    opportunities: [],
+    sessions: [],
+    detailCache: {},
+    visibleSessionIds: {},
+    charts: {},
+    observer: null,
+    liveArmPending: null,
+    pollHandle: null
+  };
 
-  function esc(v) {
-    if (v == null) return '';
-    var d = document.createElement('div');
-    d.textContent = String(v);
-    return d.innerHTML;
+  function esc(value) {
+    if (value == null) return '';
+    var div = document.createElement('div');
+    div.textContent = String(value);
+    return div.innerHTML;
   }
-  // Also expose as escHtml for momentum panel code
-  var escHtml = esc;
 
-  function pct(v) {
-    var n = Number(v);
-    if (!isFinite(n)) return 'n/a';
-    if (n <= 1) n = n * 100;
-    return Math.round(n) + '%';
+  function safeNum(value, fallback) {
+    var num = Number(value);
+    return isFinite(num) ? num : fallback;
   }
 
-  function money(v) {
-    var n = Number(v);
-    if (!isFinite(n)) return 'n/a';
-    return (n < 0 ? '-$' : '$') + Math.abs(n).toFixed(2);
+  function pct(value) {
+    var num = Number(value);
+    if (!isFinite(num)) return 'n/a';
+    if (num <= 1) num = num * 100;
+    return num.toFixed(num >= 10 ? 0 : 1) + '%';
+  }
+
+  function money(value) {
+    var num = Number(value);
+    if (!isFinite(num)) return 'n/a';
+    return (num < 0 ? '-$' : '$') + Math.abs(num).toFixed(2);
   }
 
   function runtimeLabel(runtime) {
     var sec = runtime && runtime.seconds;
-    if (!sec && sec !== 0) return 'n/a';
-    if (sec < 60) return sec + 's';
+    if (sec !== 0 && !sec) return 'n/a';
+    sec = Number(sec);
+    if (!isFinite(sec)) return 'n/a';
+    if (sec < 60) return Math.round(sec) + 's';
     if (sec < 3600) return Math.floor(sec / 60) + 'm';
     return Math.floor(sec / 3600) + 'h ' + Math.floor((sec % 3600) / 60) + 'm';
   }
 
-  /* ── Momentum mode switching ──────────────────────────────────────────── */
-  var _chiliMomentumUiMode = sessionStorage.getItem('chili_momentum_ui_mode') || 'paper';
-  var _mmPendingArm = null;
-
-  window._setMomentumUiMode = function(m) {
-    _chiliMomentumUiMode = (m === 'live') ? 'live' : 'paper';
-    sessionStorage.setItem('chili_momentum_ui_mode', _chiliMomentumUiMode);
-    _syncMomentumModePill();
-    if (apCurrentSymbol) {
-      _loadMomentumViable(apCurrentSymbol);
-      _loadMomentumOperatorStrip(apCurrentSymbol);
+  function dateLabel(value) {
+    if (!value) return 'n/a';
+    try {
+      return new Date(value).toLocaleString();
+    } catch (_err) {
+      return String(value);
     }
-  };
-
-  function _syncMomentumModePill() {
-    var paper = document.getElementById('mm-mode-paper');
-    var live = document.getElementById('mm-mode-live');
-    if (paper) paper.classList.toggle('active', _chiliMomentumUiMode === 'paper');
-    if (live) live.classList.toggle('active', _chiliMomentumUiMode === 'live');
   }
 
-  /* ── Symbol picker ────────────────────────────────────────────────────── */
-  window.apLoadSymbol = function() {
-    var inp = document.getElementById('ap-symbol-input');
-    if (!inp) return;
-    var sym = inp.value.trim().toUpperCase();
-    if (!sym) return;
-    apCurrentSymbol = sym;
-    _syncMomentumModePill();
-    _loadMomentumViable(sym);
-    _loadMomentumOperatorStrip(sym);
-    if (!IS_GUEST) {
-      fetch('/api/trading/momentum/refresh', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ symbol: sym, execution_family: 'coinbase_spot' })
-      }).then(function() {}).catch(function() {});
-    }
-  };
-
-  // Support Enter key in symbol input
-  var symInput = document.getElementById('ap-symbol-input');
-  if (symInput) {
-    symInput.addEventListener('keydown', function(e) {
-      if (e.key === 'Enter') { e.preventDefault(); apLoadSymbol(); }
-    });
+  function etaLabel(seconds) {
+    var num = Number(seconds);
+    if (!isFinite(num)) return 'n/a';
+    if (num < 60) return num + 's';
+    return Math.ceil(num / 60) + 'm';
   }
 
-  /* ── Neural refresh ───────────────────────────────────────────────────── */
-  window._momentumNeuralRefresh = function() {
-    if (IS_GUEST) { alert('Sign in to request a neural refresh.'); return; }
-    if (!apCurrentSymbol) { alert('Enter a ticker first.'); return; }
-    fetch('/api/trading/momentum/refresh', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: apCurrentSymbol, execution_family: 'coinbase_spot' })
-    }).then(function(r) {
-      if (r.status === 403) { alert('Sign in required.'); return null; }
-      return r.json();
-    }).then(function(d) {
-      if (!d) return;
-      if (!d.accepted) alert('Refresh not queued: ' + (d.reason || 'unknown'));
-      else _loadMomentumViable(apCurrentSymbol);
-    }).catch(function() { alert('Refresh failed'); });
-  };
-
-  /* ── Momentum viable strategies ───────────────────────────────────────── */
-  function _loadMomentumViable(symbol) {
-    var panel = document.getElementById('momentum-viable-panel');
-    var body = document.getElementById('mm-panel-body');
-    if (!panel || !body) return;
-    if (!symbol) { panel.style.display = 'none'; return; }
-    panel.style.display = 'block';
-    body.innerHTML = '<div class="mm-meta">Loading viable strategies...</div>';
-    var mode = _chiliMomentumUiMode === 'live' ? 'live' : 'paper';
-    fetch('/api/trading/momentum/viable?symbol=' + encodeURIComponent(symbol) + '&mode=' + encodeURIComponent(mode))
-      .then(function(r) { return r.json(); })
-      .then(_renderMomentumViable)
-      .catch(function() { body.innerHTML = '<div class="mm-warn">Failed to load.</div>'; });
-  }
-
-  function _renderMomentumViable(d) {
-    var body = document.getElementById('mm-panel-body');
-    if (!body) return;
-    var rows = d.strategies || [];
-    window._mmDetailRows = rows;
-    var gw = [];
-    if (d.warnings && d.warnings.length) gw.push.apply(gw, d.warnings);
-    var html = '';
-    var ors = d.operator_readiness || {};
-    if (_chiliMomentumUiMode === 'live' && ors && ors.broker_ready_for_live === false) {
-      html += '<div class="mm-op-warn">Live UI mode: Coinbase broker is <b>not connected</b>. Arm live / confirm require a ready broker path.</div>';
-    }
-    if (gw.length) html += '<div class="mm-warn">' + gw.map(function(w) { return esc(String(w)); }).join(' &middot; ') + '</div>';
-    if (!rows.length) {
-      html += '<div class="mm-meta">No viable rows yet for this symbol. Try Neural refresh or wait for a mesh tick.</div>';
-      body.innerHTML = html;
-      return;
-    }
-    rows.forEach(function(s, idx) {
-      var act = s.actions || {};
-      var canP = !!act.can_run_paper;
-      var canL = !!act.can_arm_live;
-      html += '<div class="mm-row">';
-      html += '<div><div class="mm-row-title">' + esc(s.label || s.family || ('variant ' + s.variant_id)) + '</div>';
-      html += '<div class="mm-badges">';
-      html += '<span class="mm-badge venue">' + esc(String(s.execution_family || 'coinbase_spot')) + '</span>';
-      html += '<span class="mm-badge ' + (canP ? 'ok' : 'no') + '">paper</span>';
-      html += '<span class="mm-badge ' + (canL ? 'ok' : 'no') + '">live</span>';
-      html += '<span class="mm-badge">score ' + esc(String(s.viability_score)) + '</span>';
-      if (s.regime_fit) html += '<span class="mm-badge">' + esc(String(s.regime_fit)) + '</span>';
-      html += '</div>';
-      html += '<div class="mm-meta">Fresh: ' + esc(String(s.freshness_ts || '')) + ' &middot; ' + esc(String(s.source_layer || '')) + '</div>';
-      if (s.rationale) html += '<div class="mm-meta">' + esc(String(s.rationale)) + '</div>';
-      if (s.entry_style) html += '<div class="mm-meta">Entry: ' + esc(String(s.entry_style)) + '</div>';
-      if (s.stop_logic) html += '<div class="mm-meta">Stop: ' + esc(String(s.stop_logic)) + '</div>';
-      if (s.exit_logic) html += '<div class="mm-meta">Exit: ' + esc(String(s.exit_logic)) + '</div>';
-      var ws = s.warnings || [];
-      if (ws.length) html += '<div class="mm-warn">' + ws.map(function(w) { return esc(String(w)); }).join(' &middot; ') + '</div>';
-      var rs = s.recent_sessions || {};
-      html += '<div class="mm-meta">Sessions 7d &mdash; paper: ' + (rs.sessions_7d_paper || 0) + ', live: ' + (rs.sessions_7d_live || 0) + '</div>';
-      html += '</div><div class="mm-actions">';
-      if (!IS_GUEST) {
-        html += '<button type="button" class="mm-btn-paper" ' + (canP ? '' : 'disabled ') + 'title="' + esc(String((act.paper_action_blocked_reason || ''))) + '" onclick="_momentumRunPaper(' + s.variant_id + ')">Run Paper</button>';
-        html += '<button type="button" class="mm-btn-live" ' + (canL ? '' : 'disabled ') + 'title="' + esc(String((act.live_action_blocked_reason || ''))) + '" onclick="_momentumArmLive(' + s.variant_id + ')">Arm Live</button>';
-      } else {
-        html += '<span class="mm-meta">Sign in for Run Paper / Arm Live</span>';
-      }
-      html += '<button type="button" class="mm-btn-ghost" onclick="_mmShowDetail(' + idx + ')">View details</button>';
-      html += '</div></div>';
-    });
-    body.innerHTML = html;
-  }
-
-  window._mmShowDetail = function(i) {
-    var r = window._mmDetailRows && window._mmDetailRows[i];
-    if (r) alert(JSON.stringify(r, null, 2));
-  };
-
-  /* ── Run paper / arm live / confirm ───────────────────────────────────── */
-  window._momentumRunPaper = function(vid) {
-    if (IS_GUEST || !apCurrentSymbol) return;
-    fetch('/api/trading/momentum/run-paper', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: apCurrentSymbol, variant_id: vid, execution_family: 'coinbase_spot' })
-    }).then(function(r) {
-      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
-    }).then(function(x) {
-      if (!x.ok) {
-        var det = x.j.detail;
-        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
-      } else {
-        alert(x.j.message || 'OK');
-        apLoadSessions();
-      }
-    });
-  };
-
-  window._momentumArmLive = function(vid) {
-    if (IS_GUEST || !apCurrentSymbol) return;
-    fetch('/api/trading/momentum/arm-live', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ symbol: apCurrentSymbol, variant_id: vid, execution_family: 'coinbase_spot' })
-    }).then(function(r) {
-      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
-    }).then(function(x) {
-      if (!x.ok) {
-        var det = x.j.detail;
-        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
-        return;
-      }
-      _mmPendingArm = { token: x.j.arm_token, sessionId: x.j.session_id, payload: x.j.confirmation };
-      _openMomentumLiveModal(x.j);
-    });
-  };
-
-  function _openMomentumLiveModal(j) {
-    var el = document.getElementById('mm-live-modal');
-    var b = document.getElementById('mm-live-modal-body');
-    if (!el || !b) return;
-    var c = j.confirmation || {};
-    var wlines = (c.warnings || []).map(function(w) { return esc(String(w)); }).join('<br/>');
-    b.innerHTML =
-      '<p><b>Symbol:</b> ' + esc(String(c.symbol || '')) + '</p>' +
-      '<p><b>Live eligible:</b> ' + esc(String(c.live_eligible)) + '</p>' +
-      '<p><b>Viability:</b> ' + esc(String(c.viability_score != null ? c.viability_score : '')) + '</p>' +
-      '<p><b>Freshness:</b> ' + esc(String(c.freshness_ts || '')) + '</p>' +
-      (wlines ? '<p><b>Warnings:</b><br/>' + wlines + '</p>' : '') +
-      '<p><b>' + esc(String(c.disclaimer || '')) + '</b></p>';
-    el.classList.add('open');
-  }
-
-  window._closeMomentumLiveModal = function() {
-    var el = document.getElementById('mm-live-modal');
-    if (el) el.classList.remove('open');
-  };
-
-  window._confirmMomentumLiveArm = function() {
-    if (!_mmPendingArm || !_mmPendingArm.token) { _closeMomentumLiveModal(); return; }
-    fetch('/api/trading/momentum/confirm-live-arm', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ arm_token: _mmPendingArm.token, confirm: true })
-    }).then(function(r) {
-      return r.json().then(function(j) { return { ok: r.ok, j: j }; });
-    }).then(function(x) {
-      _closeMomentumLiveModal();
-      if (!x.ok) {
-        var det = x.j.detail;
-        alert(typeof det === 'string' ? det : JSON.stringify(det || x.j));
-      } else {
-        var j = x.j || {};
-        var lines = [
-          j.message || 'Confirmed',
-          'canonical: ' + (j.canonical_operator_state || ''),
-          'armed_only: ' + String(j.armed_only),
-          'runner_ready: ' + String(j.runner_ready),
-          'broker_ready: ' + String(j.broker_ready),
-          'scheduler_ready: ' + String(j.scheduler_ready),
-          'blocked_reason: ' + String(j.blocked_reason || ''),
-          'next: ' + String(j.next_action_required || '')
-        ];
-        alert(lines.join('\n'));
-      }
-      _mmPendingArm = null;
-      if (apCurrentSymbol) {
-        _loadMomentumViable(apCurrentSymbol);
-        _loadMomentumOperatorStrip(apCurrentSymbol);
-      }
-      apLoadSessions();
-    });
-  };
-
-  /* ── Momentum operator strip ──────────────────────────────────────────── */
-  function _loadMomentumOperatorStrip(symbol) {
-    var strip = document.getElementById('mm-operator-strip');
-    var body = document.getElementById('mm-operator-body');
-    if (!strip || !body) return;
-    if (!symbol) { strip.style.display = 'none'; return; }
-    strip.style.display = 'block';
-    if (IS_GUEST) {
-      body.innerHTML = '<div class="mm-meta">Sign in to load momentum session focus and readiness.</div>';
-      return;
-    }
-    body.innerHTML = '<div class="mm-meta">Loading operator status...</div>';
-    fetch('/api/trading/momentum/operator/current-session?symbol=' + encodeURIComponent(symbol), { credentials: 'same-origin' })
-      .then(function(r) { return r.json(); })
-      .then(_paintMomentumOperatorStrip)
-      .catch(function() { body.innerHTML = '<div class="mm-warn">Operator status failed to load.</div>'; });
-  }
-
-  function _paintMomentumOperatorStrip(d) {
-    var body = document.getElementById('mm-operator-body');
-    if (!body) return;
-    var r = d.operator_readiness || {};
-    var fs = d.focus_session;
-    var html = '<div class="mm-op-grid">';
-    html += '<div>Broker <b>' + (r.broker_ready_for_live ? 'ready' : 'not ready') + '</b></div>';
-    html += '<div>Paper runner <b>' + (r.paper_runner_enabled ? 'on' : 'off') + '</b></div>';
-    html += '<div>Live runner <b>' + (r.live_runner_enabled ? 'on' : 'off') + '</b></div>';
-    html += '<div>Paper sched <b>' + (r.paper_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
-    html += '<div>Live sched <b>' + (r.live_scheduler_would_run ? 'yes' : 'no') + '</b></div>';
-    html += '<div>Neural <b>' + (r.momentum_neural_enabled ? 'on' : 'off') + '</b></div>';
-    html += '<div>Family <b>' + esc(String(r.execution_family || '')) + '</b> ' + (r.execution_family_implemented ? '\u2713' : '\u2717') + '</div>';
-    html += '</div>';
-    if (fs) {
-      var canon = fs.canonical_operator_state || fs.state;
-      html += '<div class="mm-meta" style="margin-top:8px"><b>Focus</b> #' + esc(String(fs.id)) + ' &middot; ' + esc(fs.symbol || '') + ' &middot; <span style="color:var(--accent)">' + esc(String(canon)) + '</span> &middot; raw <code style="font-size:9px">' + esc(String(fs.state || '')) + '</code> &middot; ' + esc(String(fs.mode || '')) + '</div>';
-      if (fs.phase_hint) html += '<div class="mm-meta">phase_hint: ' + esc(String(fs.phase_hint)) + '</div>';
-      if (fs.blocked_reason) html += '<div class="mm-op-warn">blocked_reason: ' + esc(String(fs.blocked_reason)) + '</div>';
-      html += '<div class="mm-meta">' + esc(String(fs.next_action_required || '')) + '</div>';
-      if (fs.is_armed_only_live) html += '<div class="mm-op-warn">Live is armed/queued only &mdash; not actively executing until the runner advances.</div>';
-      if (fs.source_paper_brief && fs.source_paper_brief.id) {
-        html += '<div class="mm-meta">Promoted from paper session #' + esc(String(fs.source_paper_brief.id)) + '</div>';
-      }
-      var evp = d.events_preview || [];
-      if (evp.length) {
-        html += '<div class="mm-op-events">' + evp.slice(0, 5).map(function(e) {
-          return esc(String(e.event_type || '')) + ' @ ' + esc(String((e.ts || '').slice(0, 19)));
-        }).join(' &middot; ') + '</div>';
-      }
-    } else {
-      html += '<div class="mm-meta" style="margin-top:8px">No active/pending automation session for this symbol. Use Run paper or Arm live above.</div>';
-    }
-    body.innerHTML = html;
-  }
-
-  /* ── Operator strip poll ──────────────────────────────────────────────── */
-  var _mmOpTimer = null;
-  function _kickMomentumOperatorPoll() {
-    if (_mmOpTimer) clearInterval(_mmOpTimer);
-    _mmOpTimer = setInterval(function() {
-      if (IS_GUEST || !apCurrentSymbol) return;
-      _loadMomentumOperatorStrip(apCurrentSymbol);
-    }, 25000);
-  }
-
-  /* ── Chart ────────────────────────────────────────────────────────────── */
-  function initChart() {
-    var el = document.getElementById('ap-chart');
-    if (!el || typeof LightweightCharts === 'undefined') return;
-    if (apChart) return;
-    apChart = LightweightCharts.createChart(el, {
-      layout: { background: { color: '#0f172a' }, textColor: '#cbd5e1' },
-      grid: { vertLines: { color: 'rgba(148,163,184,0.08)' }, horzLines: { color: 'rgba(148,163,184,0.08)' } },
-      rightPriceScale: { borderColor: 'rgba(148,163,184,0.18)' },
-      timeScale: { borderColor: 'rgba(148,163,184,0.18)' },
-      crosshair: { mode: 0 }
-    });
-    apSeries = apChart.addCandlestickSeries({
-      upColor: '#22c55e', downColor: '#ef4444',
-      wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      borderVisible: false
-    });
-  }
-
-  function apBadge(text, cls) {
+  function badge(text, cls) {
     return '<span class="ap-badge ' + esc(cls || '') + '">' + esc(text) + '</span>';
   }
 
-  function apRiskBadge(readiness) {
-    var sev = readiness && readiness.severity;
-    if (!sev && readiness && readiness.operator_readiness && readiness.operator_readiness.live_ready === false) sev = 'warn';
-    return apBadge(sev || 'unknown', sev || '');
+  function searchMatchesOpportunity(row) {
+    if (!state.opportunitySearch) return true;
+    var hay = [
+      row.symbol,
+      row.asset_class,
+      row.scan_context && row.scan_context.label,
+      row.top_variant && row.top_variant.label,
+      row.top_variant && row.top_variant.family
+    ].join(' ').toLowerCase();
+    return hay.indexOf(state.opportunitySearch) >= 0;
   }
 
-  /* ── Session loaders ──────────────────────────────────────────────────── */
-  window.apLoadAll = function() {
-    if (IS_GUEST) return;
-    apLoadSummary();
-    apLoadSessions();
-    if (apSelectedId) apLoadDetail(apSelectedId);
-  };
-
-  function apLoadSummary() {
-    fetch('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var strip = document.getElementById('ap-summary-strip');
-        if (!strip) return;
-        var gov = d.governance || {};
-        var lanes = d.lanes || {};
-        strip.innerHTML =
-          '<div class="ap-stat"><label>Runtime Sessions</label><b>' + esc(d.total_sessions || 0) + '</b></div>' +
-          '<div class="ap-stat"><label>Simulation</label><b>' + esc(lanes.simulation || 0) + '</b></div>' +
-          '<div class="ap-stat"><label>Live Armed</label><b>' + esc(lanes["live-armed"] || 0) + '</b></div>' +
-          '<div class="ap-stat"><label>Live Active</label><b>' + esc(lanes.live || 0) + '</b></div>' +
-          '<div class="ap-stat"><label>Kill Switch</label><b>' + esc(gov.kill_switch_active ? 'ON' : 'Off') + '</b></div>' +
-          '<div class="ap-stat"><label>Last Event</label><b style="font-size:12px">' + esc(d.last_event_ts || 'n/a') + '</b></div>';
-        var lim = document.getElementById('ap-limitations');
-        if (lim) lim.textContent = d.limitations_note || '';
-      })
-      .catch(function() {});
+  function jsonPreview(value) {
+    try {
+      return JSON.stringify(value || {}, null, 2);
+    } catch (_err) {
+      return String(value || '');
+    }
   }
 
-  function apCardHtml(row) {
-    var bind = row.data_binding || {};
-    var fidelity = row.data_fidelity || {};
-    return '' +
-      '<div class="ap-card-top">' +
-        '<div><div class="ap-symbol">' + esc(row.symbol) + '</div><div class="ap-strategy">' + esc((row.variant && row.variant.label) || row.strategy_family || 'Strategy') + '</div></div>' +
-        '<div>' + apBadge(row.lane || 'simulation', row.lane || 'simulation') + '</div>' +
-      '</div>' +
-      '<div class="ap-badges">' +
-        apBadge(row.state || 'idle', '') +
-        apBadge(String(fidelity.simulation_fidelity || 'provider_sim').replace(/_/g, ' '), '') +
-        apRiskBadge(row.execution_readiness || {}) +
-      '</div>' +
-      '<div class="ap-thesis">' + esc(row.thesis || 'Awaiting next bounded decision update.') + '</div>' +
-      '<div class="ap-meta">' +
-        '<div><strong>Runtime</strong>' + esc(runtimeLabel(row.runtime || {})) + '</div>' +
-        '<div><strong>Confidence</strong>' + esc(pct(row.confidence)) + '</div>' +
-        '<div><strong>Position</strong>' + esc(row.current_position_state || 'flat') + '</div>' +
-        '<div><strong>Last action</strong>' + esc(row.last_action || row.state) + '</div>' +
-        '<div><strong>Sim P&L</strong>' + esc(money(row.simulated_pnl)) + '</div>' +
-        '<div><strong>Trades</strong>' + esc(row.trade_count || 0) + '</div>' +
-        '<div><strong>Provider</strong>' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + '</div>' +
-        '<div><strong>Exchange</strong>' + esc(bind.source_of_truth_exchange || row.venue || 'consolidated') + '</div>' +
-      '</div>';
+  function runnerStateText(health) {
+    if (!health) return 'n/a';
+    if (health.blocked_reason) return 'Blocked';
+    if (!health.enabled) return 'Off';
+    if (!health.scheduler_enabled) return 'Manual only';
+    return 'Ready';
   }
 
-  window.apLoadSessions = function() {
-    if (IS_GUEST) return;
-    var q = '?limit=100';
-    var chk = document.getElementById('ap-show-archived');
-    if (chk && chk.checked) q += '&include_archived=true';
-    fetch('/api/trading/momentum/automation/sessions' + q, { credentials: 'same-origin' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var grid = document.getElementById('ap-grid');
-        var empty = document.getElementById('ap-empty');
-        if (!grid) return;
-        var rows = d.sessions || [];
-        grid.innerHTML = '';
-        if (!rows.length) {
-          if (empty) empty.style.display = 'block';
-          return;
-        }
-        if (empty) empty.style.display = 'none';
-        rows.forEach(function(row) {
-          var card = document.createElement('div');
-          card.className = 'ap-card' + (apSelectedId === row.id ? ' ap-selected' : '');
-          card.innerHTML = apCardHtml(row);
-          card.onclick = function() {
-            apSelectedId = row.id;
-            apLoadSessions();
-            apLoadDetail(row.id);
-          };
-          grid.appendChild(card);
-        });
-        if (!apSelectedId && rows[0]) {
-          apSelectedId = rows[0].id;
-          apLoadSessions();
-          apLoadDetail(apSelectedId);
-        }
-      })
-      .catch(function() {});
-  };
+  function runnerStateBadge(health) {
+    if (!health) return badge('runner unknown', 'warn');
+    if (health.blocked_reason) return badge('runner blocked', 'blocked');
+    if (!health.enabled) return badge('runner off', 'warn');
+    if (!health.scheduler_enabled) return badge('manual runner', 'warn');
+    return badge('runner ready', 'compatible');
+  }
 
-  function apRenderMarkers(fills) {
-    return (fills || []).filter(function(fill) { return fill.ts && fill.price; }).map(function(fill) {
-      var pos = fill.action && fill.action.indexOf('enter') === 0 ? 'belowBar' : 'aboveBar';
-      var shape = fill.action && fill.action.indexOf('enter') === 0 ? 'arrowUp' : 'arrowDown';
-      var color = fill.action && fill.action.indexOf('enter') === 0 ? '#22c55e' : '#ef4444';
-      return {
-        time: Math.floor(Date.parse(fill.ts) / 1000),
-        position: pos, color: color, shape: shape,
-        text: fill.reason || fill.action
-      };
+  function explainBlockedReasons(reasons) {
+    var list = Array.isArray(reasons) ? reasons.filter(Boolean) : [];
+    if (!list.length) return 'No active blockers.';
+    return list.join(', ').replace(/_/g, ' ');
+  }
+
+  function refinementBadge(info) {
+    if (info && info.is_refined) return badge('Brain refined', 'refined');
+    return badge('Seeded', 'seeded');
+  }
+
+  function renderFilterState() {
+    var modeButtons = document.querySelectorAll('#ap-mode-filters [data-mode]');
+    modeButtons.forEach(function(btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-mode') === state.opportunityMode);
+    });
+    var assetButtons = document.querySelectorAll('#ap-asset-filters [data-asset]');
+    assetButtons.forEach(function(btn) {
+      btn.classList.toggle('active', btn.getAttribute('data-asset') === state.assetFilter);
     });
   }
 
-  function apLoadChart(symbol, fills) {
-    initChart();
-    if (!apChart || !apSeries || !symbol) return;
+  function renderSummary(summary) {
+    var strip = document.getElementById('ap-summary-strip');
+    var blockers = document.getElementById('ap-blockers');
+    if (!strip || !blockers) return;
+    var lanes = summary && summary.lanes || {};
+    var paperRunner = summary && summary.paper_runner_health || {};
+    var liveRunner = summary && summary.live_runner_health || {};
+    strip.innerHTML = ''
+      + '<div class="ap-stat"><label>Runtime Sessions</label><b>' + esc(summary.total_sessions || 0) + '</b><small>'
+      + 'Simulation ' + esc(lanes.simulation || 0) + ' | Live armed ' + esc(lanes['live-armed'] || 0)
+      + ' | Live active ' + esc(lanes.live || 0) + '</small></div>'
+      + '<div class="ap-stat"><label>Paper Runner</label><b>' + esc(runnerStateText(paperRunner)) + '</b><small>'
+      + 'Last tick: ' + esc(dateLabel(paperRunner.last_tick_utc))
+      + '<br>Next tick ETA: ' + esc(etaLabel(paperRunner.next_tick_eta_seconds))
+      + '</small></div>'
+      + '<div class="ap-stat"><label>Live Runner</label><b>' + esc(runnerStateText(liveRunner)) + '</b><small>'
+      + 'Last tick: ' + esc(dateLabel(liveRunner.last_tick_utc))
+      + '<br>Next tick ETA: ' + esc(etaLabel(liveRunner.next_tick_eta_seconds))
+      + '</small></div>'
+      + '<div class="ap-stat"><label>Pending Drafts</label><b>' + esc(summary.pending_paper_drafts || 0) + '</b><small>'
+      + 'Queued paper ' + esc(summary.paper_runner_queued || 0)
+      + ' | Armed live ' + esc(summary.armed_awaiting_runner || 0)
+      + '</small></div>'
+      + '<div class="ap-stat"><label>Governance</label><b>'
+      + esc(summary.governance && summary.governance.kill_switch_active ? 'Kill switch on' : 'Normal')
+      + '</b><small>Last event: ' + esc(dateLabel(summary.last_event_ts))
+      + '<br>' + esc(summary.limitations_note || '')
+      + '</small></div>';
+
+    var cards = [];
+    if (paperRunner.blocked_reason) {
+      cards.push(
+        '<div class="ap-blocker"><strong>Paper runner blocked</strong>'
+        + 'Sessions can be created, but they will not advance until the paper runner and scheduler path are healthy.'
+        + '<br>Reason: ' + esc(String(paperRunner.blocked_reason).replace(/_/g, ' '))
+        + (paperRunner.scheduler_heartbeat_utc ? '<br>Scheduler heartbeat: ' + esc(dateLabel(paperRunner.scheduler_heartbeat_utc)) : '')
+        + '</div>'
+      );
+    }
+    if (liveRunner.blocked_reason) {
+      cards.push(
+        '<div class="ap-blocker"><strong>Live runner gated</strong>'
+        + 'Live control paths remain visible, but actual live execution is blocked until runtime readiness is healthy.'
+        + '<br>Reason: ' + esc(String(liveRunner.blocked_reason).replace(/_/g, ' '))
+        + '</div>'
+      );
+    }
+    blockers.innerHTML = cards.join('');
+  }
+
+  function opportunityActionButtons(row) {
+    var top = row.top_variant || {};
+    var variantId = top.variant_id;
+    var paperDisabled = !row.paper_ready || !variantId;
+    var liveDisabled = !row.live_ready || !variantId;
+    return ''
+      + '<button type="button" class="ap-btn ap-btn-primary" '
+      + (paperDisabled ? 'disabled ' : '')
+      + 'onclick="apRunPaper(\'' + esc(row.symbol) + '\',' + Number(variantId || 0) + ')">Run paper</button>'
+      + '<button type="button" class="ap-btn ap-btn-live" '
+      + (liveDisabled ? 'disabled ' : '')
+      + 'onclick="apArmLive(\'' + esc(row.symbol) + '\',' + Number(variantId || 0) + ')">Arm live</button>'
+      + '<button type="button" class="ap-btn" onclick="apNeuralRefresh(\'' + esc(row.symbol) + '\')">Brain refresh</button>';
+  }
+
+  function opportunityReason(row) {
+    if (row.compatible_now) {
+      return 'Compatible now for ' + state.opportunityMode + ' mode.';
+    }
+    return explainBlockedReasons(row.blocked_reasons);
+  }
+
+  function renderOpportunities() {
+    var list = document.getElementById('ap-opportunities');
+    var empty = document.getElementById('ap-opportunities-empty');
+    if (!list || !empty) return;
+    var rows = (state.opportunities || []).filter(searchMatchesOpportunity);
+    if (!rows.length) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      return;
+    }
+    empty.style.display = 'none';
+    list.innerHTML = rows.map(function(row) {
+      var scan = row.scan_context || {};
+      var top = row.top_variant || {};
+      var params = top.strategy_params_summary || {};
+      var compatBadge = row.compatible_now ? badge('Compatible now', 'compatible') : badge('Blocked', 'blocked');
+      var marketBadge = row.asset_class === 'crypto'
+        ? badge('24x7', 'open')
+        : badge(row.market_open_now ? 'Market open' : 'Market closed', row.market_open_now ? 'open' : 'closed');
+      var scanBadge = scan.signal ? badge('Signal ' + String(scan.signal), 'paper') : badge('No scan signal', 'warn');
+      var paperBadge = badge(row.paper_ready ? 'Paper ready' : 'Paper blocked', row.paper_ready ? 'compatible' : 'warn');
+      var liveBadge = badge(row.live_ready ? 'Live ready' : 'Live blocked', row.live_ready ? 'live' : 'blocked');
+      var strategyLabel = top.label || 'No fresh strategy variant';
+      return ''
+        + '<div class="ap-opportunity-row">'
+        + '  <div class="ap-op-top">'
+        + '    <div>'
+        + '      <div class="ap-symbol-lockup">'
+        + '        <span class="ap-symbol">' + esc(row.symbol) + '</span>'
+        +          badge(row.asset_class || 'unknown', row.asset_class || '')
+        +          marketBadge
+        +          compatBadge
+        +          refinementBadge(top.refinement_info)
+        + '      </div>'
+        + '      <div class="ap-subline" style="margin-top:8px;">'
+        + '        Top strategy: <strong style="color:var(--text)">' + esc(strategyLabel) + '</strong>'
+        + '        | Freshness: ' + esc(dateLabel(row.freshness_ts))
+        + '      </div>'
+        + '    </div>'
+        + '    <div class="ap-actions">' + opportunityActionButtons(row) + '</div>'
+        + '  </div>'
+        + '  <div class="ap-badges">' + paperBadge + liveBadge + scanBadge + '</div>'
+        + '  <div class="ap-callout ' + (row.compatible_now ? 'good' : 'warn') + '">'
+        + '    <strong>Compatibility</strong>' + esc(opportunityReason(row))
+        + '  </div>'
+        + '  <div class="ap-row-grid">'
+        + '    <div class="ap-metric"><label>Scan score</label><b>' + esc(safeNum(scan.score, 0).toFixed(3)) + '</b><small>'
+        +          esc(scan.source || 'no scan source')
+        +        '</small></div>'
+        + '    <div class="ap-metric"><label>Viability</label><b>' + esc(safeNum(top.viability_score, 0).toFixed(3)) + '</b><small>'
+        +          esc(top.family || 'n/a')
+        +        '</small></div>'
+        + '    <div class="ap-metric"><label>Entry floor</label><b>' + esc(params.entry_viability_min != null ? params.entry_viability_min : 'n/a') + '</b><small>'
+        +          'Revalidate ' + esc(params.entry_revalidate_floor != null ? params.entry_revalidate_floor : 'n/a')
+        +        '</small></div>'
+        + '    <div class="ap-metric"><label>Scalp hold cap</label><b>' + esc(params.max_hold_seconds != null ? params.max_hold_seconds + 's' : 'n/a') + '</b><small>'
+        +          'Trail ' + esc(params.trail_activate_return_bps != null ? params.trail_activate_return_bps + ' bps' : 'n/a')
+        +        '</small></div>'
+        + '  </div>'
+        + '  <div class="ap-inline-list">'
+        + '    <span class="ap-inline-chip">Blocked reasons: ' + esc(explainBlockedReasons(row.blocked_reasons)) + '</span>'
+        + '    <span class="ap-inline-chip">Signal label: ' + esc(scan.label || 'n/a') + '</span>'
+        + '    <span class="ap-inline-chip">Variant version: ' + esc(top.version != null ? 'v' + top.version : 'n/a') + '</span>'
+        + '  </div>'
+        + '</div>';
+    }).join('');
+  }
+
+  function renderSessionWarningCallout(row, readiness, runner) {
+    var parts = [];
+    if (readiness && readiness.blocked_reason) {
+      parts.push('Execution blocked: ' + String(readiness.blocked_reason).replace(/_/g, ' '));
+    }
+    if (row.blocked_reason) {
+      parts.push('Operator blocked: ' + String(row.blocked_reason).replace(/_/g, ' '));
+    }
+    if (runner && runner.blocked_reason) {
+      parts.push('Runner blocked: ' + String(runner.blocked_reason).replace(/_/g, ' '));
+    }
+    if (row.next_action_required) {
+      parts.push('Next action: ' + row.next_action_required);
+    }
+    if (!parts.length) {
+      return '<div class="ap-callout good"><strong>Status</strong>Session is clear to continue based on current runtime state.</div>';
+    }
+    return '<div class="ap-callout block"><strong>Watchouts</strong>' + esc(parts.join(' | ')) + '</div>';
+  }
+
+  function renderSessionControlButton(sessionId, action, meta) {
+    meta = meta || {};
+    var cls = 'ap-btn';
+    if (action === 'run' || action === 'resume') cls += ' ap-btn-primary';
+    if (action === 'stop') cls += ' ap-btn-live';
+    if (action === 'delete') cls += ' ap-btn-danger';
+    return '<button type="button" class="' + cls + '" '
+      + (meta.enabled ? '' : 'disabled ')
+      + 'onclick="apSessionAction(' + Number(sessionId) + ',\'' + esc(action) + '\')">'
+      + esc(meta.label || action)
+      + '</button>';
+  }
+
+  function sessionSummaryCard(row) {
+    var controls = row.controls || {};
+    var readiness = row.execution_readiness || {};
+    var refinement = row.refinement_info || {};
+    var params = row.strategy_params_summary || {};
+    var runner = row.runner_health || {};
+    var badges = ''
+      + badge(row.mode || 'paper', row.mode || 'paper')
+      + badge(row.state || 'unknown', row.is_paused ? 'paused' : (row.market_open_now ? 'open' : 'closed'))
+      + badge(row.asset_class || 'unknown', row.asset_class || '')
+      + badge(row.market_open_now ? (row.asset_class === 'crypto' ? '24x7' : 'Market open') : 'Market closed', row.market_open_now ? 'open' : 'closed')
+      + refinementBadge(refinement)
+      + runnerStateBadge(runner);
+    if (row.is_paused) badges += badge('Paused', 'paused');
+    return ''
+      + '<article class="ap-session-card" data-session-id="' + esc(row.id) + '">'
+      + '  <div class="ap-session-top">'
+      + '    <div>'
+      + '      <div class="ap-symbol-lockup">'
+      + '        <span class="ap-symbol">' + esc(row.symbol) + '</span>'
+      + badges
+      + '      </div>'
+      + '      <div class="ap-subline" style="margin-top:8px;">'
+      + '        ' + esc((row.variant && row.variant.label) || row.strategy_family || 'Strategy')
+      + '        | Position ' + esc(row.current_position_state || 'flat')
+      + '        | Last action ' + esc(row.last_action || row.state || 'n/a')
+      + '      </div>'
+      + '    </div>'
+      + '    <div class="ap-actions">'
+      + renderSessionControlButton(row.id, 'run', controls.run)
+      + renderSessionControlButton(row.id, 'pause', controls.pause)
+      + renderSessionControlButton(row.id, 'resume', controls.resume)
+      + renderSessionControlButton(row.id, 'stop', controls.stop)
+      + renderSessionControlButton(row.id, 'delete', controls.delete)
+      + '    </div>'
+      + '  </div>'
+      + '  <div class="ap-session-body">'
+      + '    <div class="ap-row-grid">'
+      + '      <div class="ap-metric"><label>Runtime</label><b>' + esc(runtimeLabel(row.runtime || {})) + '</b><small>Lane ' + esc(row.lane || 'simulation') + '</small></div>'
+      + '      <div class="ap-metric"><label>Confidence</label><b>' + esc(pct(row.confidence)) + '</b><small>Conviction ' + esc(pct(row.conviction)) + '</small></div>'
+      + '      <div class="ap-metric"><label>Sim P&amp;L</label><b>' + esc(money(row.simulated_pnl)) + '</b><small>Trades ' + esc(row.trade_count || 0) + '</small></div>'
+      + '      <div class="ap-metric"><label>Runner</label><b>' + esc(runnerStateText(runner)) + '</b><small>Last tick ' + esc(dateLabel(runner.last_tick_utc)) + '</small></div>'
+      + '    </div>'
+      + '    <div class="ap-session-lower">'
+      + '      <div class="ap-detail-stack">'
+      + '        <div class="ap-callout">'
+      + '          <strong>Thesis</strong>' + esc(row.thesis || 'Awaiting next bounded decision update.')
+      + '        </div>'
+      + renderSessionWarningCallout(row, readiness, runner)
+      + '        <div class="ap-session-chart-wrap">'
+      + '          <div class="ap-chart-head">'
+      + '            <div class="ap-muted">Live candlestick replay with simulated buy and sell markers.</div>'
+      + '            <div class="ap-badges">' + badge('Provider ' + (((row.data_binding || {}).source_of_truth_provider) || ((row.data_binding || {}).chart_provider) || 'n/a'), 'event') + '</div>'
+      + '          </div>'
+      + '          <div id="ap-chart-' + esc(row.id) + '" class="ap-chart"><div class="ap-chart-empty">Waiting for chart data...</div></div>'
+      + '        </div>'
+      + '        <div class="ap-details">'
+      + '          <summary>Event Detail</summary>'
+      + '          <div class="ap-details-body"><div id="ap-events-' + esc(row.id) + '" class="ap-event-list"><div class="ap-muted">Scroll this card into view to load event detail.</div></div></div>'
+      + '        </div>'
+      + '      </div>'
+      + '      <div class="ap-detail-stack">'
+      + '        <div class="ap-callout">'
+      + '          <strong>Strategy Params</strong>'
+      + '          Entry ' + esc(params.entry_viability_min != null ? params.entry_viability_min : 'n/a')
+      + '          | Revalidate ' + esc(params.entry_revalidate_floor != null ? params.entry_revalidate_floor : 'n/a')
+      + '          | Bailout ' + esc(params.bailout_viability_floor != null ? params.bailout_viability_floor : 'n/a')
+      + '          <br>Stop ATR ' + esc(params.stop_atr_mult != null ? params.stop_atr_mult : 'n/a')
+      + '          | Target ATR ' + esc(params.target_atr_mult != null ? params.target_atr_mult : 'n/a')
+      + '          | Hold cap ' + esc(params.max_hold_seconds != null ? params.max_hold_seconds + 's' : 'n/a')
+      + '        </div>'
+      + '        <div class="ap-callout">'
+      + '          <strong>Refinement</strong>'
+      + (refinement.is_refined
+        ? 'Brain refined from variant #' + esc(refinement.parent_variant_id || 'n/a')
+        : 'Current session is still using a seeded family baseline.')
+      + '        </div>'
+      + '        <div class="ap-callout">'
+      + '          <strong>Runner Health</strong>'
+      + '          Blocked reason: ' + esc((runner.blocked_reason || 'none').replace(/_/g, ' '))
+      + '          <br>Next tick ETA: ' + esc(etaLabel(runner.next_tick_eta_seconds))
+      + '          <br>Scheduler heartbeat: ' + esc(dateLabel(runner.scheduler_heartbeat_utc))
+      + '        </div>'
+      + '        <div class="ap-details">'
+      + '          <summary>Simulated Fills</summary>'
+      + '          <div class="ap-details-body"><div id="ap-fills-' + esc(row.id) + '" class="ap-muted">Scroll this card into view to load fills.</div></div>'
+      + '        </div>'
+      + '        <div class="ap-details">'
+      + '          <summary>Runtime Snapshot</summary>'
+      + '          <div class="ap-details-body"><pre id="ap-runtime-' + esc(row.id) + '" class="ap-pre">'
+      + esc(jsonPreview({
+          execution_readiness: row.execution_readiness || {},
+          chart_levels: row.chart_levels || {},
+          pause_info: row.pause_info || {},
+          data_binding: row.data_binding || {}
+        }))
+      + '</pre></div>'
+      + '        </div>'
+      + '      </div>'
+      + '    </div>'
+      + '  </div>'
+      + '</article>';
+  }
+
+  function renderSessions() {
+    var list = document.getElementById('ap-sessions');
+    var empty = document.getElementById('ap-sessions-empty');
+    if (!list || !empty) return;
+    destroyAllCharts();
+    if (!state.sessions.length) {
+      list.innerHTML = '';
+      empty.style.display = 'block';
+      observeSessionCards();
+      return;
+    }
+    empty.style.display = 'none';
+    list.innerHTML = state.sessions.map(sessionSummaryCard).join('');
+    observeSessionCards();
+  }
+
+  function observeSessionCards() {
+    if (state.observer) state.observer.disconnect();
+    state.visibleSessionIds = {};
+    state.observer = new IntersectionObserver(function(entries) {
+      entries.forEach(function(entry) {
+        var id = Number(entry.target.getAttribute('data-session-id') || 0);
+        if (!id) return;
+        if (entry.isIntersecting) {
+          state.visibleSessionIds[id] = true;
+          apLoadSessionDetail(id, false);
+        } else {
+          delete state.visibleSessionIds[id];
+          destroyChart(id);
+        }
+      });
+    }, { rootMargin: '240px 0px' });
+    document.querySelectorAll('.ap-session-card[data-session-id]').forEach(function(card) {
+      state.observer.observe(card);
+    });
+  }
+
+  function renderFillTable(rows) {
+    if (!rows || !rows.length) {
+      return '<div class="ap-muted">No fills recorded yet.</div>';
+    }
+    return '<table class="ap-fill-table"><thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Qty</th><th>P&amp;L</th><th>Reason</th></tr></thead><tbody>'
+      + rows.map(function(fill) {
+        return '<tr>'
+          + '<td>' + esc(dateLabel(fill.ts)) + '</td>'
+          + '<td><strong>' + esc(fill.action || '') + '</strong></td>'
+          + '<td>' + esc(fill.price != null ? Number(fill.price).toFixed(4) : 'n/a') + '</td>'
+          + '<td>' + esc(fill.quantity != null ? fill.quantity : 'n/a') + '</td>'
+          + '<td>' + esc(fill.pnl_usd == null ? 'n/a' : money(fill.pnl_usd)) + '</td>'
+          + '<td>' + esc(fill.reason || '') + '</td>'
+          + '</tr>';
+      }).join('')
+      + '</tbody></table>';
+  }
+
+  function renderEventRows(rows) {
+    if (!rows || !rows.length) {
+      return '<div class="ap-muted">No events yet.</div>';
+    }
+    return rows.map(function(ev) {
+      return '<div class="ap-event">'
+        + '<b>' + esc(ev.event_type || 'event') + '</b>'
+        + '<small>' + esc(dateLabel(ev.ts)) + '</small>'
+        + '<div class="ap-pre">' + esc(jsonPreview(ev.payload_summary || {})) + '</div>'
+        + '</div>';
+    }).join('');
+  }
+
+  function loadChartForSession(sessionId, symbol, fills) {
+    var chartEl = document.getElementById('ap-chart-' + sessionId);
+    if (!chartEl || !state.visibleSessionIds[sessionId] || !symbol || typeof LightweightCharts === 'undefined') return;
     fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(symbol) + '&interval=5m&period=1d', { credentials: 'same-origin' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var rows = d.data || [];
-        var formatted = rows.map(function(row) {
+      .then(function(resp) { return resp.json(); })
+      .then(function(payload) {
+        if (!state.visibleSessionIds[sessionId]) return;
+        var points = (payload.data || []).map(function(row) {
+          var timeVal = row.time || row.date || row.timestamp;
+          var ts = Date.parse(timeVal);
           return {
-            time: Math.floor(Date.parse(row.time || row.date || row.timestamp) / 1000),
-            open: Number(row.open), high: Number(row.high),
-            low: Number(row.low), close: Number(row.close)
+            time: Math.floor(ts / 1000),
+            open: safeNum(row.open, NaN),
+            high: safeNum(row.high, NaN),
+            low: safeNum(row.low, NaN),
+            close: safeNum(row.close, NaN)
           };
-        }).filter(function(row) { return isFinite(row.time) && isFinite(row.open) && isFinite(row.close); });
-        apSeries.setData(formatted);
-        if (typeof apSeries.setMarkers === 'function') {
-          apSeries.setMarkers(apRenderMarkers(fills));
+        }).filter(function(row) {
+          return isFinite(row.time) && isFinite(row.open) && isFinite(row.high) && isFinite(row.low) && isFinite(row.close);
+        }).sort(function(a, b) {
+          return a.time - b.time;
+        });
+        if (!points.length) {
+          chartEl.innerHTML = '<div class="ap-chart-empty">No chart data returned for this symbol.</div>';
+          return;
         }
-        apChart.timeScale().fitContent();
+        var existing = state.charts[sessionId];
+        if (existing && existing.chart) {
+          try { existing.chart.remove(); } catch (_err) {}
+        }
+        chartEl.innerHTML = '';
+        var chart = LightweightCharts.createChart(chartEl, {
+          layout: {
+            background: { color: '#020617' },
+            textColor: '#cbd5e1'
+          },
+          grid: {
+            vertLines: { color: 'rgba(148,163,184,0.08)' },
+            horzLines: { color: 'rgba(148,163,184,0.08)' }
+          },
+          rightPriceScale: { borderColor: 'rgba(148,163,184,0.14)' },
+          timeScale: { borderColor: 'rgba(148,163,184,0.14)', timeVisible: true, secondsVisible: false },
+          crosshair: { mode: 0 }
+        });
+        var series = chart.addCandlestickSeries({
+          upColor: '#22c55e',
+          downColor: '#ef4444',
+          wickUpColor: '#22c55e',
+          wickDownColor: '#ef4444',
+          borderVisible: false
+        });
+        series.setData(points);
+        var markers = (fills || []).map(function(fill) {
+          var timeVal = Date.parse(fill.ts || '');
+          if (!isFinite(timeVal) || !isFinite(Number(fill.price))) return null;
+          var isEnter = String(fill.action || '').indexOf('enter') === 0;
+          return {
+            time: Math.floor(timeVal / 1000),
+            position: isEnter ? 'belowBar' : 'aboveBar',
+            color: isEnter ? '#22c55e' : '#ef4444',
+            shape: isEnter ? 'arrowUp' : 'arrowDown',
+            text: fill.reason || fill.action || 'fill'
+          };
+        }).filter(Boolean).sort(function(a, b) { return a.time - b.time; });
+        if (typeof series.setMarkers === 'function') series.setMarkers(markers);
+        chart.timeScale().fitContent();
+        state.charts[sessionId] = { chart: chart, series: series };
       })
-      .catch(function() {});
+      .catch(function() {
+        if (chartEl) chartEl.innerHTML = '<div class="ap-chart-empty">Chart failed to load.</div>';
+      });
   }
 
-  function apDetailMeta(session) {
-    return '' +
-      '<div class="ap-detail-row">' +
-        '<div><strong>Lane</strong>' + esc(session.lane || 'simulation') + '</div>' +
-        '<div><strong>Runtime</strong>' + esc(runtimeLabel(session.runtime || {})) + '</div>' +
-        '<div><strong>Last action</strong>' + esc(session.last_action || session.state) + '</div>' +
-        '<div><strong>Position</strong>' + esc(session.current_position_state || 'flat') + '</div>' +
-        '<div><strong>Sim P&L</strong>' + esc(money(session.simulated_pnl)) + '</div>' +
-        '<div><strong>Trades</strong>' + esc(session.trade_count || 0) + '</div>' +
-      '</div>';
+  function destroyChart(sessionId) {
+    var existing = state.charts[sessionId];
+    if (!existing || !existing.chart) return;
+    try {
+      existing.chart.remove();
+    } catch (_err) {}
+    delete state.charts[sessionId];
   }
 
-  window.apLoadDetail = function(id) {
-    fetch('/api/trading/momentum/automation/sessions/' + id, { credentials: 'same-origin' })
-      .then(function(r) { return r.json(); })
-      .then(function(d) {
-        var session = d.session || {};
-        var fills = d.simulated_fills || [];
-        var meta = document.getElementById('ap-selected-meta');
-        if (meta) {
-          meta.innerHTML = '<div style="font-size:12px;font-weight:700;color:var(--text)">' + esc(session.symbol || 'Session') + '</div>' +
-            '<div class="ap-muted" style="margin-top:4px">' + esc((session.variant && session.variant.label) || '') + ' &middot; ' + esc((session.data_fidelity || {}).simulation_fidelity || '') + '</div>' +
-            '<div style="margin-top:10px">' + apDetailMeta(session) + '</div>';
+  function destroyAllCharts() {
+    Object.keys(state.charts).forEach(function(key) {
+      destroyChart(Number(key));
+    });
+  }
+
+  function applySessionDetail(detail) {
+    var session = detail && detail.session || {};
+    var sessionId = Number(session.id || 0);
+    if (!sessionId) return;
+    var fillsEl = document.getElementById('ap-fills-' + sessionId);
+    var eventsEl = document.getElementById('ap-events-' + sessionId);
+    var runtimeEl = document.getElementById('ap-runtime-' + sessionId);
+    if (fillsEl) fillsEl.innerHTML = renderFillTable(detail.simulated_fills || []);
+    if (eventsEl) eventsEl.innerHTML = renderEventRows(detail.events || []);
+    if (runtimeEl) {
+      runtimeEl.textContent = jsonPreview({
+        session: {
+          blocked_reason: session.blocked_reason,
+          canonical_operator_state: session.canonical_operator_state,
+          next_action_required: session.next_action_required,
+          runner_health: session.runner_health || {},
+          viability_snapshot: detail.viability_snapshot || {},
+          momentum_feedback: session.momentum_feedback || {}
+        },
+        execution_readiness: session.execution_readiness || {},
+        paper_execution: session.paper_execution || {},
+        live_execution: session.live_execution || {}
+      });
+    }
+    loadChartForSession(sessionId, session.symbol, detail.simulated_fills || []);
+  }
+
+  function fetchJson(url, options) {
+    return fetch(url, options || { credentials: 'same-origin' }).then(function(resp) {
+      return resp.json().then(function(data) {
+        if (!resp.ok) {
+          var detail = data && data.detail;
+          var message = typeof detail === 'string' ? detail : JSON.stringify(detail || data || {});
+          throw new Error(message || ('Request failed: ' + resp.status));
         }
-        var detail = document.getElementById('ap-detail');
-        if (detail) {
-          var bind = session.data_binding || {};
-          var levels = session.chart_levels || {};
-          detail.innerHTML =
-            '<div class="ap-list">' +
-              '<div class="ap-log"><b>Thesis</b><div style="margin-top:4px">' + esc(session.thesis || 'Awaiting bounded update.') + '</div></div>' +
-              '<div class="ap-log"><b>Execution readiness</b><div style="margin-top:4px">' + esc(JSON.stringify(session.execution_readiness || {}, null, 2)) + '</div></div>' +
-              '<div class="ap-log"><b>Data binding</b><div style="margin-top:4px">Discovery: ' + esc(bind.discovery_provider || 'massive') + ' &middot; Chart: ' + esc(bind.chart_provider || 'massive') + ' &middot; Truth: ' + esc(bind.source_of_truth_provider || bind.chart_provider || 'massive') + (bind.source_of_truth_exchange ? ' &middot; ' + esc(bind.source_of_truth_exchange) : '') + '</div></div>' +
-              '<div class="ap-log"><b>Chart levels</b><div style="margin-top:4px">Entry ' + esc(levels.entry || 'n/a') + ' &middot; Stop ' + esc(levels.stop || 'n/a') + ' &middot; Target ' + esc(levels.target || 'n/a') + ' &middot; Last ' + esc(levels.last_price || 'n/a') + '</div></div>' +
-            '</div>';
-        }
-        var events = document.getElementById('ap-events');
-        if (events) {
-          var evRows = d.events || [];
-          events.innerHTML = evRows.length ? evRows.map(function(ev) {
-            return '<div class="ap-log"><b>' + esc(ev.event_type) + '</b><div style="margin-top:4px">' + esc(ev.ts || '') + '</div><div style="margin-top:4px">' + esc(JSON.stringify(ev.payload_summary || {})) + '</div></div>';
-          }).join('') : '<div class="ap-muted">No events yet.</div>';
-        }
-        var fillsEl = document.getElementById('ap-fills');
-        if (fillsEl) {
-          if (!fills.length) {
-            fillsEl.innerHTML = '<div class="ap-muted">No simulated fills recorded yet.</div>';
-          } else {
-            fillsEl.innerHTML =
-              '<table class="ap-fill-table"><thead><tr><th>Time</th><th>Action</th><th>Price</th><th>Qty</th><th>P&L</th><th>Reason</th></tr></thead><tbody>' +
-              fills.map(function(fill) {
-                return '<tr><td>' + esc(fill.ts || '') + '</td><td>' + esc(fill.action || '') + '</td><td>' + esc(fill.price || '') + '</td><td>' + esc(fill.quantity || '') + '</td><td>' + esc(fill.pnl_usd == null ? '' : money(fill.pnl_usd)) + '</td><td>' + esc(fill.reason || '') + '</td></tr>';
-              }).join('') +
-              '</tbody></table>';
-          }
-        }
-        apLoadChart(session.symbol, fills);
-      })
-      .catch(function() {});
+        return data;
+      });
+    });
+  }
+
+  function showError(message) {
+    window.alert(message);
+  }
+
+  window.apRefreshSummary = function() {
+    if (IS_GUEST) return Promise.resolve();
+    return fetchJson('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
+      .then(renderSummary)
+      .catch(function(err) {
+        showError(err.message || 'Failed to load summary.');
+      });
   };
 
-  /* ── Boot ──────────────────────────────────────────────────────────────── */
+  window.apRefreshOpportunities = function() {
+    if (IS_GUEST) return Promise.resolve();
+    var url = '/api/trading/momentum/opportunities?mode=' + encodeURIComponent(state.opportunityMode)
+      + '&asset_class=' + encodeURIComponent(state.assetFilter)
+      + '&limit=80';
+    return fetchJson(url, { credentials: 'same-origin' })
+      .then(function(data) {
+        state.opportunities = data.opportunities || [];
+        renderOpportunities();
+      })
+      .catch(function(err) {
+        showError(err.message || 'Failed to load opportunities.');
+      });
+  };
+
+  window.apRefreshSessions = function() {
+    if (IS_GUEST) return Promise.resolve();
+    var includeArchived = document.getElementById('ap-show-archived');
+    var url = '/api/trading/momentum/automation/sessions?limit=100';
+    if (includeArchived && includeArchived.checked) url += '&include_archived=true';
+    return fetchJson(url, { credentials: 'same-origin' })
+      .then(function(data) {
+        state.sessions = data.sessions || [];
+        renderSessions();
+      })
+      .catch(function(err) {
+        showError(err.message || 'Failed to load sessions.');
+      });
+  };
+
+  window.apRefreshAll = function() {
+    return Promise.all([
+      apRefreshSummary(),
+      apRefreshOpportunities(),
+      apRefreshSessions()
+    ]);
+  };
+
+  window.apLoadSessionDetail = function(sessionId, force) {
+    if (IS_GUEST) return Promise.resolve();
+    var cached = state.detailCache[sessionId];
+    if (!force && cached && (Date.now() - cached.loadedAt < 10000)) {
+      applySessionDetail(cached.payload);
+      return Promise.resolve(cached.payload);
+    }
+    return fetchJson('/api/trading/momentum/automation/sessions/' + encodeURIComponent(sessionId), { credentials: 'same-origin' })
+      .then(function(detail) {
+        state.detailCache[sessionId] = { payload: detail, loadedAt: Date.now() };
+        applySessionDetail(detail);
+        return detail;
+      })
+      .catch(function(err) {
+        var fillsEl = document.getElementById('ap-fills-' + sessionId);
+        var eventsEl = document.getElementById('ap-events-' + sessionId);
+        if (fillsEl) fillsEl.innerHTML = '<div class="ap-muted">Detail failed to load.</div>';
+        if (eventsEl) eventsEl.innerHTML = '<div class="ap-muted">Detail failed to load.</div>';
+        console.error(err);
+      });
+  };
+
+  window.apNeuralRefresh = function(symbol) {
+    if (IS_GUEST) return;
+    fetchJson('/api/trading/momentum/refresh', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: symbol, execution_family: 'coinbase_spot' })
+    }).then(function(payload) {
+      window.alert(payload.accepted ? ('Refresh queued for ' + symbol) : ('Refresh not queued: ' + (payload.reason || 'blocked')));
+      apRefreshOpportunities();
+    }).catch(function(err) {
+      showError(err.message || 'Failed to queue neural refresh.');
+    });
+  };
+
+  window.apRunPaper = function(symbol, variantId) {
+    if (!variantId) return;
+    fetchJson('/api/trading/momentum/run-paper', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: symbol, variant_id: Number(variantId), execution_family: 'coinbase_spot' })
+    }).then(function(payload) {
+      window.alert(payload.message || ('Paper workflow started for ' + symbol));
+      apRefreshAll();
+    }).catch(function(err) {
+      showError(err.message || 'Failed to start paper workflow.');
+    });
+  };
+
+  function openLiveModal(payload) {
+    state.liveArmPending = payload;
+    var modal = document.getElementById('ap-live-modal');
+    var body = document.getElementById('ap-live-modal-body');
+    if (!modal || !body) return;
+    var lines = [];
+    var confirmation = payload.confirmation || {};
+    var evaluation = payload.risk_evaluation || {};
+    lines.push('<div class="ap-callout block"><strong>Live execution warning</strong>Live execution can place real orders on the configured execution family. Confirm only if the venue and risk context look right.</div>');
+    lines.push('<div class="ap-callout"><strong>Symbol</strong>' + esc(confirmation.symbol || payload.symbol || 'n/a') + '</div>');
+    lines.push('<div class="ap-callout"><strong>Variant</strong>#' + esc(confirmation.variant_id || payload.variant_id || 'n/a') + ' | Viability ' + esc(confirmation.viability_score != null ? confirmation.viability_score : 'n/a') + '</div>');
+    lines.push('<div class="ap-callout"><strong>Risk evaluation</strong>Severity ' + esc(evaluation.severity || 'n/a') + '<br>Allowed ' + esc(String(evaluation.allowed)) + '</div>');
+    if (Array.isArray(confirmation.warnings) && confirmation.warnings.length) {
+      lines.push('<div class="ap-callout warn"><strong>Warnings</strong>' + esc(confirmation.warnings.join(' | ')) + '</div>');
+    }
+    if (confirmation.disclaimer) {
+      lines.push('<div class="ap-callout"><strong>Disclaimer</strong>' + esc(confirmation.disclaimer) + '</div>');
+    }
+    body.innerHTML = lines.join('');
+    modal.classList.add('open');
+  }
+
+  window.apCloseLiveModal = function() {
+    state.liveArmPending = null;
+    var modal = document.getElementById('ap-live-modal');
+    if (modal) modal.classList.remove('open');
+  };
+
+  window.apArmLive = function(symbol, variantId) {
+    if (!variantId) return;
+    fetchJson('/api/trading/momentum/arm-live', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: symbol, variant_id: Number(variantId), execution_family: 'coinbase_spot' })
+    }).then(function(payload) {
+      if (payload.arm_token && payload.confirmation) {
+        payload.symbol = symbol;
+        payload.variant_id = variantId;
+        openLiveModal(payload);
+        return;
+      }
+      window.alert(payload.message || ('Live arm request processed for ' + symbol));
+      apRefreshAll();
+    }).catch(function(err) {
+      showError(err.message || 'Failed to arm live workflow.');
+    });
+  };
+
+  window.apConfirmLiveArm = function() {
+    if (!state.liveArmPending || !state.liveArmPending.arm_token) {
+      apCloseLiveModal();
+      return;
+    }
+    fetchJson('/api/trading/momentum/confirm-live-arm', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ arm_token: state.liveArmPending.arm_token, confirm: true })
+    }).then(function(payload) {
+      apCloseLiveModal();
+      window.alert(payload.message || ('Live arm confirmed for ' + (payload.symbol || 'session')));
+      apRefreshAll();
+    }).catch(function(err) {
+      apCloseLiveModal();
+      showError(err.message || 'Failed to confirm live arm.');
+    });
+  };
+
+  window.apSessionAction = function(sessionId, action) {
+    if (!sessionId || !action) return;
+    if ((action === 'delete' || action === 'stop') && !window.confirm('Are you sure you want to ' + action + ' this session?')) {
+      return;
+    }
+    fetchJson('/api/trading/momentum/automation/sessions/' + encodeURIComponent(sessionId) + '/' + encodeURIComponent(action), {
+      method: 'POST',
+      credentials: 'same-origin'
+    }).then(function(payload) {
+      window.alert(payload.message || ('Session ' + action + ' complete.'));
+      delete state.detailCache[sessionId];
+      apRefreshAll();
+    }).catch(function(err) {
+      showError(err.message || ('Failed to ' + action + ' session.'));
+    });
+  };
+
+  function kickPoll() {
+    if (state.pollHandle) window.clearInterval(state.pollHandle);
+    state.pollHandle = window.setInterval(function() {
+      if (IS_GUEST) return;
+      apRefreshSummary();
+      apRefreshOpportunities();
+      apRefreshSessions().then(function() {
+        Object.keys(state.visibleSessionIds).forEach(function(id) {
+          apLoadSessionDetail(Number(id), true);
+        });
+      });
+    }, 20000);
+  }
+
+  function bindUi() {
+    document.querySelectorAll('#ap-mode-filters [data-mode]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        state.opportunityMode = btn.getAttribute('data-mode') || 'paper';
+        renderFilterState();
+        apRefreshOpportunities();
+      });
+    });
+    document.querySelectorAll('#ap-asset-filters [data-asset]').forEach(function(btn) {
+      btn.addEventListener('click', function() {
+        state.assetFilter = btn.getAttribute('data-asset') || 'all';
+        renderFilterState();
+        apRefreshOpportunities();
+      });
+    });
+    var search = document.getElementById('ap-opportunity-search');
+    if (search) {
+      search.addEventListener('input', function() {
+        state.opportunitySearch = String(search.value || '').trim().toLowerCase();
+        renderOpportunities();
+      });
+    }
+    var archived = document.getElementById('ap-show-archived');
+    if (archived) {
+      archived.addEventListener('change', function() {
+        apRefreshSessions();
+      });
+    }
+  }
+
   function boot() {
-    _syncMomentumModePill();
+    renderFilterState();
+    bindUi();
     if (IS_GUEST) {
       var guest = document.getElementById('ap-guest');
       if (guest) guest.style.display = 'block';
       return;
     }
-    apLoadAll();
-    _kickMomentumOperatorPoll();
-    window.setInterval(function() {
-      apLoadSummary();
-      apLoadSessions();
-      if (apSelectedId) apLoadDetail(apSelectedId);
-    }, 15000);
+    apRefreshAll();
+    kickPoll();
   }
 
   boot();

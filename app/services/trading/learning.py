@@ -7361,7 +7361,8 @@ def run_learning_cycle(
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
     _learning_status["steps_completed"] = 0
-    _learning_status["total_steps"] = 24
+    # Matches ``stage_catalog.TOTAL_STAGES`` / ``cycle_progress_stage_keys(snap_inline=False)``.
+    _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -7418,7 +7419,7 @@ def run_learning_cycle(
         from ...trading_brain.wiring import brain_shadow_begin_cycle
 
         _cycle_step = 0
-        _learning_status["total_steps"] = count_cycle_progress_steps()
+        _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
 
         def _bump_cycle_step() -> None:
             nonlocal _cycle_step
@@ -7708,7 +7709,24 @@ def run_learning_cycle(
                     if ml_result.get("ok") else "skipped")
         _commit_step()
 
-        # Step 23: Generate strategy proposals
+        # Pattern engine — discover, test, evolve (before proposals)
+        if _shutting_down.is_set():
+            raise InterruptedError("shutdown")
+        step_start = time.time()
+        # graph-node: c_meta/pattern_engine
+        apply_learning_cycle_step_status(_learning_status, "c_meta", "pattern_engine")
+        try:
+            pe_result = _run_pattern_engine_cycle(db, user_id)
+            report["patterns_discovered_engine"] = pe_result.get("hypotheses_generated", 0)
+            report["patterns_tested"] = pe_result.get("patterns_tested", 0)
+            report["patterns_evolved"] = pe_result.get("patterns_evolved", 0)
+        except Exception as e:
+            logger.warning(f"[trading] Pattern engine cycle failed: {e}")
+        _bump_cycle_step()
+        _step_time("pattern_engine", step_start, "done")
+        _commit_step()
+
+        # Strategy proposals (after pattern engine)
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -7724,23 +7742,6 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
-        _commit_step()
-
-        # Step 24: Pattern engine — discover, test, evolve
-        if _shutting_down.is_set():
-            raise InterruptedError("shutdown")
-        step_start = time.time()
-        # graph-node: c_meta/pattern_engine
-        apply_learning_cycle_step_status(_learning_status, "c_meta", "pattern_engine")
-        try:
-            pe_result = _run_pattern_engine_cycle(db, user_id)
-            report["patterns_discovered_engine"] = pe_result.get("hypotheses_generated", 0)
-            report["patterns_tested"] = pe_result.get("patterns_tested", 0)
-            report["patterns_evolved"] = pe_result.get("patterns_evolved", 0)
-        except Exception as e:
-            logger.warning(f"[trading] Pattern engine cycle failed: {e}")
-        _bump_cycle_step()
-        _step_time("pattern_engine", step_start, "done")
         _commit_step()
 
         # Cycle AI report (deep study) — synthesize cycle into stored markdown

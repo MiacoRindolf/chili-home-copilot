@@ -79,6 +79,9 @@ services:
       # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
       # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
       - CHILI_SCHEDULER_ROLE=none
+      # Local Autopilot default: paper sessions should advance without extra env setup.
+      - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
+      - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
       # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -274,6 +277,8 @@ services:
       - OLLAMA_HOST=http://ollama:11434
       - CHILI_SCHEDULER_ROLE=all
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
+      - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
+      - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false

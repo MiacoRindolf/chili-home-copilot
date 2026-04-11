@@ -20,6 +20,7 @@ from ....models.trading import (
     TradingAutomationSimulatedFill,
 )
 from .features import ExecutionReadinessFeatures
+from .strategy_params import family_default_params, normalize_strategy_params, summarize_strategy_params
 from .variants import iter_momentum_families
 
 _log = logging.getLogger(__name__)
@@ -38,29 +39,39 @@ def _momentum_tables_present(db: Session) -> bool:
 
 
 def ensure_momentum_strategy_variants(db: Session) -> None:
-    """Upsert registry rows from ``variants.iter_momentum_families`` (idempotent)."""
-    now = datetime.utcnow()
+    """Ensure seed registry rows exist and carry runner-consumable params."""
     for fam in iter_momentum_families():
-        stmt = pg_insert(MomentumStrategyVariant).values(
-            family=fam.family_id,
-            variant_key=fam.family_id,
-            version=int(fam.version),
-            label=fam.label,
-            params_json={},
-            is_active=True,
-            execution_family="coinbase_spot",
-            created_at=now,
-            updated_at=now,
+        row = (
+            db.query(MomentumStrategyVariant)
+            .filter(
+                MomentumStrategyVariant.family == fam.family_id,
+                MomentumStrategyVariant.variant_key == fam.family_id,
+                MomentumStrategyVariant.version == int(fam.version),
+            )
+            .one_or_none()
         )
-        stmt = stmt.on_conflict_do_update(
-            constraint="uq_momentum_strategy_variant_fkv",
-            set_={
-                "label": fam.label,
-                "is_active": True,
-                "updated_at": now,
-            },
-        )
-        db.execute(stmt)
+        if row is None:
+            db.add(
+                MomentumStrategyVariant(
+                    family=fam.family_id,
+                    variant_key=fam.family_id,
+                    version=int(fam.version),
+                    label=fam.label,
+                    params_json=family_default_params(fam.family_id),
+                    is_active=True,
+                    execution_family="coinbase_spot",
+                    refinement_meta_json={},
+                    created_at=datetime.utcnow(),
+                    updated_at=datetime.utcnow(),
+                )
+            )
+            continue
+        row.label = fam.label
+        row.execution_family = row.execution_family or "coinbase_spot"
+        row.params_json = normalize_strategy_params(row.params_json, family_id=fam.family_id)
+        if not isinstance(row.refinement_meta_json, dict):
+            row.refinement_meta_json = {}
+        row.updated_at = datetime.utcnow()
 
 
 def _variant_id_for_family(db: Session, family_id: str, version: int) -> Optional[int]:
@@ -74,6 +85,29 @@ def _variant_id_for_family(db: Session, family_id: str, version: int) -> Optiona
         .one_or_none()
     )
     return int(row[0]) if row else None
+
+
+def active_variant_for_family(db: Session, family_id: str) -> MomentumStrategyVariant | None:
+    fam = (family_id or "").strip()
+    if not fam:
+        return None
+    return (
+        db.query(MomentumStrategyVariant)
+        .filter(
+            MomentumStrategyVariant.family == fam,
+            MomentumStrategyVariant.is_active.is_(True),
+        )
+        .order_by(MomentumStrategyVariant.version.desc(), MomentumStrategyVariant.id.desc())
+        .first()
+    )
+
+
+def variant_for_id(db: Session, variant_id: int) -> MomentumStrategyVariant | None:
+    return (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.id == int(variant_id))
+        .one_or_none()
+    )
 
 
 def _lane_for_session(mode: str | None, state: str | None) -> str:
@@ -230,6 +264,7 @@ def build_runtime_snapshot_values(
 
     metrics_json = {
         "event_correlation_id": sess.correlation_id,
+        "strategy_params_summary": summarize_strategy_params(variant.params_json if variant is not None else {}),
         "paper_execution": {
             "tick_count": pe.get("tick_count"),
             "last_quote_source": pe.get("last_quote_source"),
@@ -368,7 +403,11 @@ def persist_neural_momentum_tick(
         fam_ver = int(row.get("family_version") or 1)
         if not fam_id:
             continue
-        vid = _variant_id_for_family(db, str(fam_id), fam_ver)
+        active_variant = active_variant_for_family(db, str(fam_id))
+        if active_variant is not None:
+            vid = int(active_variant.id)
+        else:
+            vid = _variant_id_for_family(db, str(fam_id), fam_ver)
         if vid is None:
             _log.warning("momentum persistence: no variant row for family=%s", fam_id)
             continue

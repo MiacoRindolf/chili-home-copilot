@@ -68,6 +68,18 @@ _PROMOTABLE_PAPER_STATES = frozenset(
         STATE_COOLDOWN,
     }
 )
+_TERMINAL_OPERATOR_STATES = frozenset(
+    {
+        STATE_CANCELLED,
+        STATE_EXPIRED,
+        STATE_ERROR,
+        STATE_ARCHIVED,
+        STATE_FINISHED,
+        "live_finished",
+        "live_cancelled",
+        "live_error",
+    }
+)
 
 
 def _utcnow() -> datetime:
@@ -179,6 +191,28 @@ def create_paper_draft_session(
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
 
     sym = symbol.strip().upper()
+    existing = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == int(user_id),
+            TradingAutomationSession.symbol == sym,
+            TradingAutomationSession.variant_id == int(variant_id),
+            TradingAutomationSession.mode == "paper",
+            TradingAutomationSession.state != STATE_ARCHIVED,
+        )
+        .order_by(TradingAutomationSession.updated_at.desc())
+        .all()
+    )
+    for row in existing:
+        if row.state not in _TERMINAL_OPERATOR_STATES:
+            return {
+                "ok": True,
+                "session_id": int(row.id),
+                "state": row.state,
+                "mode": row.mode,
+                "deduped": True,
+                "message": "Existing paper automation session reused for this symbol/variant.",
+            }
     policy_full = resolve_effective_risk_policy()
     ev = evaluate_proposed_momentum_automation(
         db,
@@ -274,6 +308,30 @@ def begin_live_arm(
         return {"ok": False, "error": "user_required", "message": "Paired user required."}
 
     sym = symbol.strip().upper()
+    existing = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == int(user_id),
+            TradingAutomationSession.symbol == sym,
+            TradingAutomationSession.variant_id == int(variant_id),
+            TradingAutomationSession.mode == "live",
+            TradingAutomationSession.state != STATE_ARCHIVED,
+        )
+        .order_by(TradingAutomationSession.updated_at.desc())
+        .all()
+    )
+    for row in existing:
+        if row.state not in _TERMINAL_OPERATOR_STATES:
+            snap = row.risk_snapshot_json if isinstance(row.risk_snapshot_json, dict) else {}
+            return {
+                "ok": True,
+                "session_id": int(row.id),
+                "arm_token": snap.get("arm_token"),
+                "state": row.state,
+                "mode": row.mode,
+                "deduped": True,
+                "message": "Existing live automation session reused for this symbol/variant.",
+            }
     row = (
         db.query(MomentumSymbolViability)
         .filter(

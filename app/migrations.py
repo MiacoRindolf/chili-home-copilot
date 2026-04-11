@@ -4354,6 +4354,53 @@ def _migration_095_task_workspace_binding(conn) -> None:
         conn.rollback()
 
 
+def _migration_096_momentum_variant_refinement(conn) -> None:
+    """Momentum variant lineage + refinement metadata columns."""
+    tables = _tables(conn)
+    if "momentum_strategy_variants" not in tables:
+        return
+
+    cols = _columns(conn, "momentum_strategy_variants")
+    if "parent_variant_id" not in cols:
+        conn.execute(text("ALTER TABLE momentum_strategy_variants ADD COLUMN parent_variant_id INTEGER"))
+        conn.commit()
+    if "refinement_meta_json" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_strategy_variants "
+                "ADD COLUMN refinement_meta_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+        conn.commit()
+
+    try:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE momentum_strategy_variants
+                ADD CONSTRAINT fk_momentum_strategy_variants_parent_variant
+                FOREIGN KEY (parent_variant_id)
+                REFERENCES momentum_strategy_variants(id)
+                ON DELETE SET NULL
+                """
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+    try:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_momentum_strategy_variants_parent_variant_id "
+                "ON momentum_strategy_variants (parent_variant_id)"
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4451,6 +4498,7 @@ MIGRATIONS = [
     ("093_automation_session_promotion_lineage", _migration_093_automation_session_promotion_lineage),
     ("094_trading_autopilot_runtime", _migration_094_trading_autopilot_runtime),
     ("095_task_workspace_binding", _migration_095_task_workspace_binding),
+    ("096_momentum_variant_refinement", _migration_096_momentum_variant_refinement),
 ]
 
 

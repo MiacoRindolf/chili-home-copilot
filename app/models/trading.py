@@ -675,6 +675,13 @@ class MomentumStrategyVariant(Base):
     params_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     is_active: bool = Column(Boolean, nullable=False, default=True)
     execution_family: str = Column(String(32), nullable=False, default="coinbase_spot")
+    parent_variant_id: Optional[int] = Column(
+        Integer,
+        ForeignKey("momentum_strategy_variants.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    refinement_meta_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     scan_pattern_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )

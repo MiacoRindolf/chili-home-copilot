@@ -35,10 +35,15 @@ from ...services.trading.momentum_neural.automation_query import (
     archive_automation_session,
     automation_summary,
     cancel_automation_session,
+    delete_automation_session,
     get_automation_session_detail,
     get_operator_session_focus,
     list_automation_events,
     list_automation_sessions,
+    pause_automation_session,
+    resume_automation_session,
+    run_automation_session,
+    stop_automation_session,
 )
 from ...services.trading.momentum_neural.operator_readiness import build_momentum_operator_readiness
 from ...services.trading.execution_family_registry import execution_family_capabilities
@@ -50,6 +55,7 @@ from ...services.trading.momentum_neural.feedback_query import (
     momentum_outcomes_table_present,
 )
 from ...services.trading.momentum_neural.viable_query import build_viable_strategies_payload
+from ...services.trading.momentum_neural.opportunities import list_momentum_opportunities
 
 _log = logging.getLogger(__name__)
 
@@ -106,6 +112,18 @@ def get_momentum_viable(
         enrich_coinbase=True,
         operator_mode=m,
     )
+
+
+@router.get("/opportunities")
+def get_momentum_opportunities(
+    request: Request,
+    db: Session = Depends(get_db),
+    mode: str = Query("paper", description="paper|live"),
+    asset_class: str = Query("all", description="all|stock|crypto"),
+    limit: int = Query(60, ge=1, le=200),
+) -> dict[str, Any]:
+    _require_user(request, db)
+    return list_momentum_opportunities(db, mode=mode, asset_filter=asset_class, limit=limit)
 
 
 @router.post("/refresh")
@@ -456,6 +474,81 @@ def post_automation_session_archive(
         err = out.get("error")
         code = 404 if err == "not_found" else 400
         raise HTTPException(status_code=code, detail=out.get("error", "archive_failed"))
+    db.commit()
+    return out
+
+
+@router.post("/automation/sessions/{session_id}/run")
+def post_automation_session_run(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    out = run_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "run_failed")
+    db.commit()
+    return out
+
+
+@router.post("/automation/sessions/{session_id}/pause")
+def post_automation_session_pause(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    out = pause_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "pause_failed")
+    db.commit()
+    return out
+
+
+@router.post("/automation/sessions/{session_id}/resume")
+def post_automation_session_resume(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    out = resume_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "resume_failed")
+    db.commit()
+    return out
+
+
+@router.post("/automation/sessions/{session_id}/stop")
+def post_automation_session_stop(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    out = stop_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "stop_failed")
+    db.commit()
+    return out
+
+
+@router.post("/automation/sessions/{session_id}/delete")
+def post_automation_session_delete(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    out = delete_automation_session(db, user_id=_automation_user_id(request, db), session_id=session_id)
+    if not out.get("ok"):
+        err = out.get("error")
+        code = 404 if err == "not_found" else 400
+        raise HTTPException(status_code=code, detail=err or "delete_failed")
     db.commit()
     return out
 

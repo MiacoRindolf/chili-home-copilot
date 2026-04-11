@@ -194,12 +194,6 @@ def brain_shadow_before_commit(
                             status=StageJobStatus.skipped,
                             skip_reason="legacy_jump",
                         )
-            elif prev_k == 23 and k == 24:
-                # Legacy: proposals → k=23, pattern_engine at k=23, then cycle_ai sets k=24.
-                ca_key = STAGE_KEYS[24]
-                jid = job_by_key.get(ca_key)
-                if jid is not None:
-                    stage_repo.update_job(db, jid, status=StageJobStatus.succeeded)
             else:
                 key = STAGE_KEYS[k - 1]
                 jid = job_by_key.get(key)
@@ -207,16 +201,15 @@ def brain_shadow_before_commit(
                     stage_repo.update_job(db, jid, status=StageJobStatus.succeeded)
             ctx["prev_k"] = k
 
-        if phase == "backtesting" and k == 7:
-            lk = STAGE_KEYS[7]
-            jid = job_by_key.get(lk)
+        cur_sid = str(learning_status.get("current_step_sid") or "")
+        if phase == "backtesting" and cur_sid == "bt_insights":
+            jid = job_by_key.get("bt_insights")
             if jid is not None:
                 stage_repo.update_job(db, jid, status=StageJobStatus.running)
-        elif phase == "pattern_engine" and k == 23:
-            pk = STAGE_KEYS[23]
-            jid = job_by_key.get(pk)
+        elif phase == "pattern_engine" and cur_sid == "pattern_engine":
+            jid = job_by_key.get("pattern_engine")
             if jid is not None:
-                stage_repo.update_job(db, jid, status=StageJobStatus.succeeded)
+                stage_repo.update_job(db, jid, status=StageJobStatus.running)
 
         _persist_run_meta(db, int(run_id), learning_status, str(ctx.get("correlation_id", "")))
 

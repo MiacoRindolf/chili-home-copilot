@@ -13,9 +13,11 @@ from ....config import settings
 from ....models.trading import BrainNodeState, MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from ..brain_neural_mesh.schema import mesh_enabled
 from ..execution_family_registry import is_momentum_automation_implemented, momentum_execution_seam_meta
+from .market_profile import asset_class_for_symbol, is_coinbase_spot_symbol, market_open_now
 from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
-from .persistence import _variant_id_for_family
+from .persistence import _variant_id_for_family, active_variant_for_family
+from .strategy_params import summarize_strategy_params
 
 _log = logging.getLogger(__name__)
 
@@ -124,6 +126,13 @@ def _merge_row(
     if live_readiness_overlay:
         exec_r = {**exec_r, **live_readiness_overlay}
 
+    asset_class = asset_class_for_symbol(symbol)
+    market_open = market_open_now(symbol)
+    product_tradable = exec_r.get("product_tradable")
+    live_symbol_ok = is_coinbase_spot_symbol(symbol) and product_tradable is not False
+    paper_ready = bool(paper_eligible) and (market_open if asset_class == "stock" else True)
+    live_ready = bool(live_eligible) and live_symbol_ok and (market_open if asset_class == "stock" else True)
+
     return {
         "variant_id": variant.id,
         "family": fam,
@@ -133,7 +142,12 @@ def _merge_row(
         "version": ver,
         "viability_score": round(viability_score, 4),
         "paper_eligible": paper_eligible,
-        "live_eligible": live_eligible,
+        "live_eligible": live_ready,
+        "paper_ready": paper_ready,
+        "live_ready": live_ready,
+        "compatible_now": paper_ready or live_ready,
+        "asset_class": asset_class,
+        "market_open_now": market_open,
         "freshness_ts": freshness_ts.isoformat() if hasattr(freshness_ts, "isoformat") else str(freshness_ts),
         "regime": regime,
         "execution_readiness": exec_r,
@@ -145,10 +159,16 @@ def _merge_row(
         "stop_logic": stop_logic,
         "exit_logic": exit_logic,
         "execution_family": variant.execution_family or "coinbase_spot",
+        "strategy_params_summary": summarize_strategy_params(variant.params_json),
+        "refinement_info": {
+            "is_refined": bool(getattr(variant, "parent_variant_id", None)),
+            "parent_variant_id": getattr(variant, "parent_variant_id", None),
+            "meta": variant.refinement_meta_json if isinstance(variant.refinement_meta_json, dict) else {},
+        },
         "source_layer": source,
         "actions": {
-            "can_run_paper": bool(paper_eligible),
-            "can_arm_live": bool(live_eligible),
+            "can_run_paper": paper_ready,
+            "can_arm_live": live_ready,
         },
     }
 
@@ -316,6 +336,7 @@ def build_viable_strategies_payload(
     q = (
         db.query(MomentumSymbolViability, MomentumStrategyVariant)
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumSymbolViability.variant_id)
+        .filter(MomentumStrategyVariant.is_active.is_(True))
         .filter(MomentumSymbolViability.symbol == sym)
         .order_by(MomentumSymbolViability.viability_score.desc())
     )
@@ -333,6 +354,9 @@ def build_viable_strategies_payload(
             except (TypeError, ValueError):
                 ver = 1
             vid = _variant_id_for_family(db, fid, ver)
+            if vid is None:
+                active = active_variant_for_family(db, fid)
+                vid = int(active.id) if active is not None else None
             if vid is None:
                 continue
             vrow = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.id == vid).one_or_none()
@@ -365,8 +389,8 @@ def build_viable_strategies_payload(
             s["recent_sessions"] = _session_summary(db, user_id=user_id, symbol=sym, variant_id=int(vrow.id))
             or_loc = build_momentum_operator_readiness(execution_family=s.get("execution_family") or "coinbase_spot", symbol=sym)
             s["actions"] = _strategy_action_flags(
-                paper_eligible=bool(s.get("paper_eligible")),
-                live_eligible=bool(s.get("live_eligible")),
+                paper_eligible=bool(s.get("paper_ready")),
+                live_eligible=bool(s.get("live_ready")),
                 execution_family=str(s.get("execution_family") or "coinbase_spot"),
                 operator_readiness=or_loc,
             )
@@ -390,8 +414,8 @@ def build_viable_strategies_payload(
         row["recent_sessions"] = _session_summary(db, user_id=user_id, symbol=sym, variant_id=int(variant.id))
         or_loc = build_momentum_operator_readiness(execution_family=row.get("execution_family") or "coinbase_spot", symbol=sym)
         row["actions"] = _strategy_action_flags(
-            paper_eligible=bool(row.get("paper_eligible")),
-            live_eligible=bool(row.get("live_eligible")),
+            paper_eligible=bool(row.get("paper_ready")),
+            live_eligible=bool(row.get("live_ready")),
             execution_family=str(row.get("execution_family") or "coinbase_spot"),
             operator_readiness=or_loc,
         )

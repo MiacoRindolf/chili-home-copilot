@@ -72,15 +72,18 @@ def eval_extension_risk(f: feat.SignalFeatures) -> NodeActivation:
     if feat.extension_re().search(f.blob):
         s = 0.72
         bits.append("extension/blow-off lexicon")
+    # Scanner heat is a weak prior only; lexical/structural extension evidence stays primary.
+    scanner_prior = 0.0
     if f.scanner_score >= 8.5:
-        s = max(s, 0.85)
-        bits.append(f"high_scanner_score={f.scanner_score:.1f}")
+        scanner_prior = 0.12
+        bits.append(f"scanner_score_prior={f.scanner_score:.1f}")
     elif f.scanner_score >= 8.0:
-        s = max(s, 0.62)
-        bits.append(f"elevated_scanner_score={f.scanner_score:.1f}")
+        scanner_prior = 0.06
+        bits.append(f"scanner_score_prior={f.scanner_score:.1f}")
+    s = _clamp(s + scanner_prior)
     return NodeActivation(
         NODE_EXTENSION_RISK,
-        _clamp(s),
+        s,
         "; ".join(bits) or "no extension signal",
     )
 

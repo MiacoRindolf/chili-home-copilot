@@ -2,17 +2,22 @@
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
 from app.services.trading.brain_network_graph import get_trading_brain_network_graph
 from app.services.trading.learning_cycle_architecture import (
+    SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
     TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
     TRADING_BRAIN_ROOT_METADATA,
     apply_learning_cycle_step_status,
     apply_learning_cycle_step_status_progress,
+    count_cycle_progress_steps,
+    cycle_progress_stage_keys,
     get_cycle_step,
 )
+from app.trading_brain.stage_catalog import STAGE_KEYS, TOTAL_STAGES
 
 
 def _assert_io_tuple(t: tuple[str, ...]) -> None:
@@ -101,6 +106,193 @@ def test_apply_learning_cycle_step_status_preceded_by_graph_node_comment() -> No
             f"line {i + 1}: graph-node {gm.group(1)}/{gm.group(2)} does not match "
             f"apply_learning_cycle_step_status({m.group(1)}, {m.group(2)})"
         )
+
+
+def test_scheduler_only_cluster_excluded_from_stage_keys_and_progress() -> None:
+    assert SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID == "c_universe"
+    for sid in ("batch_prescreen_scan", "brain_market_snapshots"):
+        assert sid not in STAGE_KEYS
+    # First catalog cluster is scheduler-only; steps must not affect in-cycle progress.
+    first = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS[0]
+    assert first.id == SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+    for sid in (s.sid for s in first.steps):
+        assert sid not in STAGE_KEYS
+
+
+def test_progress_catalog_invariants_match_architecture() -> None:
+    assert len(STAGE_KEYS) == len(set(STAGE_KEYS)), "progress stage sids must be unique"
+    assert TOTAL_STAGES == len(STAGE_KEYS)
+    assert TOTAL_STAGES == count_cycle_progress_steps(snap_inline=False)
+    assert list(STAGE_KEYS) == list(cycle_progress_stage_keys(snap_inline=False))
+
+
+def test_normal_cycle_progress_step_count_matches_snapshots_off() -> None:
+    assert count_cycle_progress_steps(snap_inline=False) == 22
+    assert len(STAGE_KEYS) == 22
+
+
+def test_stage_keys_excludes_scheduler_snapshots_and_non_progress_meta() -> None:
+    excluded = frozenset(
+        {
+            "batch_prescreen_scan",
+            "brain_market_snapshots",
+            "snapshots_daily",
+            "snapshots_intraday",
+            "cycle_report",
+            "depromote",
+            "finalize",
+        }
+    )
+    for sid in excluded:
+        assert sid not in STAGE_KEYS
+
+
+def _literal_apply_learning_pair(call: ast.Call) -> tuple[str, str] | None:
+    if not isinstance(call.func, ast.Name) or call.func.id != "apply_learning_cycle_step_status":
+        return None
+    if len(call.args) < 3:
+        return None
+    st = call.args[0]
+    if not isinstance(st, ast.Name) or st.id not in ("_learning_status", "learning_status"):
+        return None
+    c_arg, s_arg = call.args[1], call.args[2]
+    if not isinstance(c_arg, ast.Constant) or not isinstance(c_arg.value, str):
+        return None
+    if not isinstance(s_arg, ast.Constant) or not isinstance(s_arg.value, str):
+        return None
+    return (c_arg.value, s_arg.value)
+
+
+def _block_has_call_named(stmts: list[ast.stmt], name: str) -> bool:
+    for stmt in stmts:
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            fn = stmt.value.func
+            if isinstance(fn, ast.Name) and fn.id == name:
+                return True
+        if isinstance(stmt, ast.Try):
+            if _block_has_call_named(stmt.body, name):
+                return True
+            for h in stmt.handlers:
+                if _block_has_call_named(h.body, name):
+                    return True
+            if _block_has_call_named(stmt.orelse, name):
+                return True
+            if _block_has_call_named(stmt.finalbody, name):
+                return True
+        elif isinstance(stmt, ast.If):
+            if _block_has_call_named(stmt.body, name) or _block_has_call_named(stmt.orelse, name):
+                return True
+        elif isinstance(stmt, ast.With):
+            if _block_has_call_named(stmt.body, name):
+                return True
+        elif isinstance(stmt, (ast.For, ast.While)):
+            if _block_has_call_named(stmt.body, name) or _block_has_call_named(stmt.orelse, name):
+                return True
+    return False
+
+
+def _find_main_cycle_try(fn: ast.FunctionDef) -> ast.Try:
+    for stmt in fn.body:
+        if isinstance(stmt, ast.Try) and _block_has_call_named(stmt.body, "brain_shadow_begin_cycle"):
+            return stmt
+    raise AssertionError("run_learning_cycle: no try block containing brain_shadow_begin_cycle")
+
+
+def _collect_literal_applies_from_cycle_stmts(
+    stmts: list[ast.stmt],
+    *,
+    secondary_pairs: list[tuple[str, str]],
+) -> list[tuple[str, str]]:
+    out: list[tuple[str, str]] = []
+    for stmt in stmts:
+        if isinstance(stmt, ast.FunctionDef):
+            continue
+        if isinstance(stmt, ast.Try):
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.body, secondary_pairs=secondary_pairs))
+            for h in stmt.handlers:
+                out.extend(_collect_literal_applies_from_cycle_stmts(h.body, secondary_pairs=secondary_pairs))
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.orelse, secondary_pairs=secondary_pairs))
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.finalbody, secondary_pairs=secondary_pairs))
+            continue
+        if isinstance(stmt, ast.If):
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.body, secondary_pairs=secondary_pairs))
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.orelse, secondary_pairs=secondary_pairs))
+            continue
+        if isinstance(stmt, ast.With):
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.body, secondary_pairs=secondary_pairs))
+            continue
+        if isinstance(stmt, ast.For):
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.body, secondary_pairs=secondary_pairs))
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.orelse, secondary_pairs=secondary_pairs))
+            continue
+        if isinstance(stmt, ast.While):
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.body, secondary_pairs=secondary_pairs))
+            out.extend(_collect_literal_applies_from_cycle_stmts(stmt.orelse, secondary_pairs=secondary_pairs))
+            continue
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            call = stmt.value
+            fn = call.func
+            if isinstance(fn, ast.Name) and fn.id == "run_secondary_miners_phase":
+                out.extend(secondary_pairs)
+                continue
+            pair = _literal_apply_learning_pair(call)
+            if pair:
+                out.append(pair)
+    return out
+
+
+def _extract_secondary_literal_applies() -> list[tuple[str, str]]:
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "app"
+        / "services"
+        / "trading"
+        / "learning_cycle_steps"
+        / "secondary_bundle.py"
+    )
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    fn = next(
+        n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_secondary_miners_phase"
+    )
+    return _collect_literal_applies_from_cycle_stmts(fn.body, secondary_pairs=[])
+
+
+def _extract_run_learning_cycle_literal_applies() -> list[tuple[str, str]]:
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "learning.py"
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    fn = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "run_learning_cycle")
+    main_try = _find_main_cycle_try(fn)
+    secondary = _extract_secondary_literal_applies()
+    return _collect_literal_applies_from_cycle_stmts(main_try.body, secondary_pairs=secondary)
+
+
+def test_run_learning_cycle_progress_apply_order_matches_stage_keys() -> None:
+    """Literal ``apply_learning_cycle_step_status`` (+ secondary bundle) order matches STAGE_KEYS."""
+    progress_set = frozenset(cycle_progress_stage_keys(snap_inline=False))
+    pairs = _extract_run_learning_cycle_literal_applies()
+    runtime_sids = [sid for _c, sid in pairs if sid in progress_set]
+    assert runtime_sids == list(STAGE_KEYS), (
+        f"runtime progress sids={runtime_sids!r}\nSTAGE_KEYS={list(STAGE_KEYS)!r}"
+    )
+
+
+def test_c_meta_architecture_lists_pattern_engine_before_proposals() -> None:
+    meta = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == "c_meta")
+    sids = [s.sid for s in meta.steps]
+    assert sids.index("pattern_engine") < sids.index("proposals")
+
+
+def test_run_learning_cycle_c_meta_apply_order_matches_architecture() -> None:
+    """Runtime ``apply_learning_cycle_step_status`` c_meta sequence matches canonical cluster."""
+    meta = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == "c_meta")
+    expected = [s.sid for s in meta.steps]
+    path = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "learning.py"
+    text = path.read_text(encoding="utf-8")
+    pat = re.compile(
+        r'apply_learning_cycle_step_status\(_learning_status,\s*"c_meta",\s*"(\w+)"\)'
+    )
+    found = pat.findall(text)
+    assert found == expected, f"runtime={found!r} architecture={expected!r}"
 
 
 def test_run_learning_cycle_no_literal_current_step_assignments() -> None:

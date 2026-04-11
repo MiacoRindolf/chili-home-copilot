@@ -9,10 +9,16 @@ from sqlalchemy.orm import Session
 
 from app.models.trading import ScanResult
 from app.services.trading.speculative_momentum_engine import build_speculative_momentum_slice
+from app.services.trading.speculative_momentum_engine.clusters import resolve_cluster
+from app.services.trading.speculative_momentum_engine.features import build_features
+from app.services.trading.speculative_momentum_engine.nodes import evaluate_all_nodes
+from app.services.trading.speculative_momentum_engine.reasoning import build_non_promotion
+from app.services.trading.speculative_momentum_engine.scoring import build_scoring_plane
 from app.services.trading.speculative_momentum_engine.schema import (
     NODE_EVENT_IMPULSE,
     NODE_SQUEEZE_PRESSURE,
     ClusterId,
+    ReasonCode,
 )
 
 
@@ -26,9 +32,9 @@ def scan_squeeze(db: Session) -> None:
         entry_price=1.0,
         stop_loss=0.9,
         take_profit=1.2,
-        risk_level="high",
+        risk_level="medium",
         rationale="Short squeeze with abnormal volume spike intraday parabolic move.",
-        indicator_data={"volume_ratio": 4.2},
+        indicator_data={"volume_ratio": 2.6},
         scanned_at=datetime.utcnow(),
     )
     db.add(r)
@@ -86,6 +92,81 @@ def test_build_speculative_momentum_slice_empty_db(db: Session) -> None:
     out = build_speculative_momentum_slice(db, limit=5)
     assert out["ok"] is True
     assert out["items"] == []
+
+
+def test_repeatability_confidence_discriminates_rows() -> None:
+    """Repeatability must not be capped ~0.30; strong structure can clear low-repeatability threshold."""
+    hi = ScanResult(
+        user_id=None,
+        ticker="RHI",
+        score=8.0,
+        signal="buy",
+        risk_level="medium",
+        rationale="First pullback reclaim vwap hold with abnormal volume expansion.",
+        indicator_data={"volume_ratio": 2.8},
+        scanned_at=datetime.utcnow(),
+    )
+    lo = ScanResult(
+        user_id=None,
+        ticker="RLO",
+        score=6.5,
+        signal="buy",
+        risk_level="medium",
+        rationale="Sympathy mover watch.",
+        indicator_data={"volume_ratio": 1.0},
+        scanned_at=datetime.utcnow(),
+    )
+    f_hi = build_features(hi)
+    acts_hi = evaluate_all_nodes(f_hi)
+    cl_hi = resolve_cluster(acts_hi, scanner_score=f_hi.scanner_score)
+    out_hi = build_scoring_plane(f_hi, acts_hi, cl_hi)
+
+    f_lo = build_features(lo)
+    acts_lo = evaluate_all_nodes(f_lo)
+    cl_lo = resolve_cluster(acts_lo, scanner_score=f_lo.scanner_score)
+    out_lo = build_scoring_plane(f_lo, acts_lo, cl_lo)
+
+    assert out_hi["repeatability_confidence"] > out_lo["repeatability_confidence"]
+    codes_hi, _, _ = build_non_promotion(scores=out_hi, cluster=cl_hi)
+    assert ReasonCode.low_repeatability_signature.value not in codes_hi
+
+
+def test_high_scanner_without_extension_lexicon_not_too_extended() -> None:
+    sr = ScanResult(
+        user_id=None,
+        ticker="HOTX",
+        score=9.2,
+        signal="buy",
+        risk_level="medium",
+        rationale="Strong momentum breakout trending stock leader.",
+        indicator_data={"volume_ratio": 1.1},
+        scanned_at=datetime.utcnow(),
+    )
+    f = build_features(sr)
+    acts = evaluate_all_nodes(f)
+    cl = resolve_cluster(acts, scanner_score=f.scanner_score)
+    assert cl.cluster_id not in (
+        ClusterId.too_extended.value,
+        ClusterId.blow_off_risk.value,
+    )
+
+
+def test_severe_execution_risk_overrides_squeeze_cluster() -> None:
+    """High squeeze + extreme liquidity stress → execution_risk_high, not speculative_squeeze."""
+    r = ScanResult(
+        user_id=None,
+        ticker="EXECO",
+        score=8.0,
+        signal="buy",
+        risk_level="high",
+        rationale="Short squeeze gamma ramp abnormal volume spike halt resume.",
+        indicator_data={"volume_ratio": 4.5},
+        scanned_at=datetime.utcnow(),
+    )
+    f = build_features(r)
+    acts = evaluate_all_nodes(f)
+    cl = resolve_cluster(acts, scanner_score=f.scanner_score)
+    assert cl.cluster_id == ClusterId.execution_risk_high.value
 
 
 def test_core_opportunity_board_untouched_import(db: Session, scan_squeeze: None) -> None:

@@ -54,6 +54,13 @@ def resolve_cluster(acts: list[NodeActivation], *, scanner_score: float) -> Clus
             "extension_with_exhaustion_language",
         )
 
+    # Severe execution / liquidity stress must not hide behind squeeze/event labels.
+    if exe >= 0.85 and (sq >= 0.45 or ev >= 0.45):
+        return ClusterResolution(
+            ClusterId.execution_risk_high.value,
+            "severe_execution_stress_over_thematic_label",
+        )
+
     if ext >= 0.55:
         return ClusterResolution(ClusterId.too_extended.value, "extension_risk_dominant")
 

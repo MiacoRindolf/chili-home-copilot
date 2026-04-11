@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import uuid
 from datetime import datetime
 from typing import Any, Optional
 
@@ -11,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from ....config import settings
 from ....models.trading import (
+    BrainBatchJob,
     MomentumStrategyVariant,
     MomentumSymbolViability,
     TradingAutomationEvent,
@@ -19,7 +21,14 @@ from ....models.trading import (
     TradingAutomationSessionBinding,
     TradingAutomationSimulatedFill,
 )
+from ..brain_batch_job_log import brain_batch_job_record_completed
+from ..batch_job_constants import JOB_SCHEDULER_WORKER_HEARTBEAT
 from ..brain_neural_mesh.schema import mesh_enabled
+from ..execution_family_registry import (
+    ExecutionFamilyNotImplementedError,
+    normalize_execution_family,
+    resolve_live_spot_adapter_factory,
+)
 from ..governance import get_kill_switch_status
 from .operator_actions import (
     STATE_ARMED_PENDING_RUNNER,
@@ -28,6 +37,8 @@ from .operator_actions import (
     STATE_QUEUED,
 )
 from .paper_fsm import (
+    PAPER_RUNNER_RUNNABLE_STATES,
+    PAPER_RUNNER_TERMINAL_STATES,
     STATE_BAILOUT,
     STATE_COOLDOWN,
     STATE_CANCELLED,
@@ -45,6 +56,8 @@ from .paper_fsm import (
 from .live_fsm import (
     LIVE_CANCELLABLE_STATES,
     LIVE_RUNNER_ACTIVE_SUMMARY_STATES,
+    LIVE_RUNNER_RUNNABLE_STATES,
+    LIVE_RUNNER_TERMINAL_STATES,
     STATE_LIVE_BAILOUT,
     STATE_LIVE_CANCELLED,
     STATE_LIVE_COOLDOWN,
@@ -60,7 +73,9 @@ from .live_fsm import (
     STATE_WATCHING_LIVE,
 )
 from .live_runner import summarize_live_execution
-from .paper_runner import summarize_paper_execution
+from .live_runner import summarize_live_execution, tick_live_session, _fmt_base_size
+from .paper_runner import summarize_paper_execution, tick_paper_session
+from .market_profile import asset_class_for_symbol, market_open_now
 from .risk_evaluator import summarize_risk_from_snapshot
 from .risk_policy import effective_policy_summary
 from .operator_readiness import (
@@ -69,12 +84,22 @@ from .operator_readiness import (
     next_action_required,
 )
 from .session_lifecycle import (
+    apply_operator_pause,
     canonical_operator_state,
+    clear_operator_pause,
     is_armed_only_live,
     is_live_orders_active,
+    is_operator_paused,
+    operator_pause_info,
     phase_hint,
 )
-from .persistence import build_runtime_snapshot_values, default_session_binding
+from .persistence import (
+    append_trading_automation_event,
+    build_runtime_snapshot_values,
+    create_trading_automation_session,
+    default_session_binding,
+)
+from .strategy_params import summarize_strategy_params
 
 _log = logging.getLogger(__name__)
 
@@ -242,6 +267,7 @@ def _variant_brief(v: MomentumStrategyVariant) -> dict[str, Any]:
         "label": v.label,
         "version": v.version,
         "execution_family": v.execution_family,
+        "is_active": bool(v.is_active),
     }
 
 
@@ -318,6 +344,168 @@ def operator_fields_for_session(sess: TradingAutomationSession, readiness: dict[
         "is_armed_only_live": is_armed_only_live(mode=sess.mode, state=sess.state),
         "is_live_orders_active": is_live_orders_active(mode=sess.mode, state=sess.state),
     }
+
+
+TERMINAL_STATES = frozenset(PAPER_RUNNER_TERMINAL_STATES) | frozenset(LIVE_RUNNER_TERMINAL_STATES)
+PAUSABLE_STATES = frozenset(PAPER_RUNNER_RUNNABLE_STATES) | frozenset(LIVE_RUNNER_RUNNABLE_STATES)
+
+
+def _variant_refinement_info(variant: MomentumStrategyVariant) -> dict[str, Any]:
+    return {
+        "is_refined": bool(getattr(variant, "parent_variant_id", None)),
+        "parent_variant_id": getattr(variant, "parent_variant_id", None),
+        "meta": variant.refinement_meta_json if isinstance(variant.refinement_meta_json, dict) else {},
+    }
+
+
+def _last_tick_from_snapshot(sess: TradingAutomationSession) -> str | None:
+    snap = sess.risk_snapshot_json if isinstance(sess.risk_snapshot_json, dict) else {}
+    if sess.mode == "live":
+        le = snap.get("momentum_live_execution")
+        return le.get("last_tick_utc") if isinstance(le, dict) else None
+    pe = snap.get("momentum_paper_execution")
+    return pe.get("last_tick_utc") if isinstance(pe, dict) else None
+
+
+def _latest_scheduler_heartbeat_at(db: Session) -> datetime | None:
+    try:
+        row = (
+            db.query(BrainBatchJob.ended_at)
+            .filter(
+                BrainBatchJob.job_type == JOB_SCHEDULER_WORKER_HEARTBEAT,
+                BrainBatchJob.status == "ok",
+            )
+            .order_by(BrainBatchJob.ended_at.desc())
+            .first()
+        )
+        return row[0] if row and row[0] else None
+    except Exception:
+        return None
+
+
+def _runner_health_for_mode(
+    db: Session,
+    *,
+    mode: str,
+    sess: TradingAutomationSession | None = None,
+) -> dict[str, Any]:
+    now = datetime.utcnow()
+    m = (mode or "paper").strip().lower()
+    if m == "live":
+        enabled = bool(settings.chili_momentum_live_runner_enabled)
+        scheduler_enabled = bool(settings.chili_momentum_live_runner_scheduler_enabled)
+        interval_minutes = int(settings.chili_momentum_live_runner_scheduler_interval_minutes)
+    else:
+        enabled = bool(settings.chili_momentum_paper_runner_enabled)
+        scheduler_enabled = bool(settings.chili_momentum_paper_runner_scheduler_enabled)
+        interval_minutes = int(settings.chili_momentum_paper_runner_scheduler_interval_minutes)
+
+    hb_at = _latest_scheduler_heartbeat_at(db)
+    hb_age = (now - hb_at).total_seconds() if hb_at else None
+    blocked_reason = None
+    if not enabled:
+        blocked_reason = f"{m}_runner_disabled"
+    elif not scheduler_enabled:
+        blocked_reason = f"{m}_runner_scheduler_disabled"
+    elif hb_age is None:
+        blocked_reason = "scheduler_worker_heartbeat_missing"
+    elif hb_age > max(420.0, float(interval_minutes) * 120.0):
+        blocked_reason = "scheduler_worker_stale"
+
+    last_tick = _last_tick_from_snapshot(sess) if sess is not None else None
+    if last_tick is None:
+        latest = (
+            db.query(TradingAutomationSession)
+            .filter(TradingAutomationSession.mode == m)
+            .order_by(TradingAutomationSession.updated_at.desc())
+            .first()
+        )
+        last_tick = _last_tick_from_snapshot(latest) if latest is not None else None
+
+    next_tick_eta_seconds = None
+    if enabled and scheduler_enabled and hb_at is not None:
+        next_tick_eta_seconds = max(0, int(interval_minutes * 60 - max(0.0, hb_age or 0.0)))
+
+    return {
+        "mode": m,
+        "enabled": enabled,
+        "scheduler_enabled": scheduler_enabled,
+        "interval_minutes": interval_minutes,
+        "last_tick_utc": last_tick,
+        "scheduler_heartbeat_utc": hb_at.isoformat() if hb_at else None,
+        "next_tick_eta_seconds": next_tick_eta_seconds,
+        "blocked_reason": blocked_reason,
+    }
+
+
+def _controls_for_session(
+    sess: TradingAutomationSession,
+    *,
+    paused: bool,
+    runner_health: dict[str, Any],
+) -> dict[str, Any]:
+    runner_enabled = bool(runner_health.get("enabled"))
+    is_terminal = sess.state in TERMINAL_STATES or sess.state == STATE_ARCHIVED
+    run_enabled = False
+    if paused:
+        run_enabled = False
+    elif is_terminal:
+        run_enabled = runner_enabled
+    elif sess.mode == "paper" and sess.state in (STATE_DRAFT, STATE_IDLE, STATE_QUEUED):
+        run_enabled = runner_enabled
+    elif sess.mode == "live" and sess.state in (STATE_ARMED_PENDING_RUNNER, STATE_QUEUED_LIVE):
+        run_enabled = runner_enabled
+
+    pause_enabled = (sess.state in PAUSABLE_STATES) and not paused and sess.state not in (STATE_DRAFT, STATE_IDLE)
+    resume_enabled = paused and runner_enabled
+    stop_enabled = sess.state != STATE_ARCHIVED and sess.state not in TERMINAL_STATES
+    delete_enabled = sess.state != STATE_ARCHIVED
+    return {
+        "run": {"enabled": run_enabled, "label": "Run again" if is_terminal else "Run"},
+        "pause": {"enabled": pause_enabled, "label": "Pause"},
+        "resume": {"enabled": resume_enabled, "label": "Resume"},
+        "stop": {"enabled": stop_enabled, "label": "Stop"},
+        "delete": {"enabled": delete_enabled, "label": "Delete"},
+    }
+
+
+def _fresh_run_snapshot(sess: TradingAutomationSession) -> dict[str, Any]:
+    snap = dict(sess.risk_snapshot_json or {})
+    for key in (
+        "momentum_paper_execution",
+        "momentum_live_execution",
+        "operator_pause",
+        "arm_token",
+        "expires_at_utc",
+        "arm_confirmed_at_utc",
+        "arm_confirmed",
+    ):
+        snap.pop(key, None)
+    return snap
+
+
+def _find_duplicate_active_session(
+    db: Session,
+    *,
+    user_id: int,
+    sess: TradingAutomationSession,
+) -> TradingAutomationSession | None:
+    q = (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == user_id,
+            TradingAutomationSession.symbol == sess.symbol,
+            TradingAutomationSession.variant_id == sess.variant_id,
+            TradingAutomationSession.mode == sess.mode,
+            TradingAutomationSession.id != int(sess.id),
+            TradingAutomationSession.state != STATE_ARCHIVED,
+        )
+        .all()
+    )
+    for row in q:
+        if row.state not in TERMINAL_STATES:
+            return row
+    return None
 
 
 def _serialize_binding(binding: TradingAutomationSessionBinding | None, *, sess: TradingAutomationSession, quote_source: str | None = None, blocked_reason: str | None = None) -> dict[str, Any]:
@@ -461,6 +649,9 @@ def list_automation_sessions(
         if ef not in rd_cache:
             rd_cache[ef] = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
         op_fields = operator_fields_for_session(sess, rd_cache[ef])
+        paused = is_operator_paused(sess.risk_snapshot_json)
+        pause_info = operator_pause_info(sess.risk_snapshot_json)
+        runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
         via = viability_map.get((str(sess.symbol), int(sess.variant_id)))
         runtime_values = build_runtime_snapshot_values(
             sess,
@@ -500,6 +691,8 @@ def list_automation_sessions(
             "venue": sess.venue,
             "execution_family": sess.execution_family,
             "state": sess.state,
+            "asset_class": asset_class_for_symbol(sess.symbol),
+            "market_open_now": market_open_now(sess.symbol),
             "created_at": sess.created_at.isoformat() if sess.created_at else None,
             "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
             "started_at": sess.started_at.isoformat() if sess.started_at else None,
@@ -513,6 +706,9 @@ def list_automation_sessions(
             "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
             "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
             "live_execution": summarize_live_execution(sess.risk_snapshot_json),
+            "is_paused": paused,
+            "pause_info": pause_info,
+            "runner_health": runner_health,
             "lane": runtime_values.get("lane"),
             "runtime": runtime_payload,
             "thesis": runtime_values.get("thesis"),
@@ -526,6 +722,9 @@ def list_automation_sessions(
             "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
             "trade_count": runtime_values.get("trade_count"),
             "chart_levels": runtime_values.get("latest_levels_json"),
+            "strategy_params_summary": summarize_strategy_params(var.params_json),
+            "refinement_info": _variant_refinement_info(var),
+            "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
         }
         row.update(op_fields)
         sessions_out.append(row)
@@ -606,6 +805,9 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
     ef = (sess.execution_family or "coinbase_spot").strip().lower()
     readiness = build_momentum_operator_readiness(execution_family=ef, symbol=sess.symbol)
     op_fields = operator_fields_for_session(sess, readiness)
+    paused = is_operator_paused(sess.risk_snapshot_json)
+    pause_info = operator_pause_info(sess.risk_snapshot_json)
+    runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
     fill_rows = []
     if _table_exists(db, "trading_automation_simulated_fills"):
         fill_rows = (
@@ -663,6 +865,8 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "venue": sess.venue,
         "execution_family": sess.execution_family,
         "state": sess.state,
+        "asset_class": asset_class_for_symbol(sess.symbol),
+        "market_open_now": market_open_now(sess.symbol),
         "created_at": sess.created_at.isoformat() if sess.created_at else None,
         "updated_at": sess.updated_at.isoformat() if sess.updated_at else None,
         "started_at": sess.started_at.isoformat() if sess.started_at else None,
@@ -677,6 +881,9 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "risk_status": summarize_risk_from_snapshot(sess.risk_snapshot_json),
         "paper_execution": summarize_paper_execution(sess.risk_snapshot_json),
         "live_execution": summarize_live_execution(sess.risk_snapshot_json),
+        "is_paused": paused,
+        "pause_info": pause_info,
+        "runner_health": runner_health,
         "momentum_feedback": momentum_feedback,
         "lane": runtime_values.get("lane"),
         "runtime": {
@@ -699,6 +906,9 @@ def get_automation_session_detail(db: Session, *, user_id: int, session_id: int)
         "simulated_pnl": runtime_values.get("simulated_pnl_usd"),
         "trade_count": runtime_values.get("trade_count"),
         "chart_levels": runtime_values.get("latest_levels_json"),
+        "strategy_params_summary": summarize_strategy_params(var.params_json),
+        "refinement_info": _variant_refinement_info(var),
+        "controls": _controls_for_session(sess, paused=paused, runner_health=runner_health),
     }
     session_dict.update(op_fields)
 
@@ -915,6 +1125,8 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
                 "governance": governance_strip(),
                 "risk_policy_summary": effective_policy_summary(),
                 "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
+                "paper_runner_health": _runner_health_for_mode(db, mode="paper"),
+                "live_runner_health": _runner_health_for_mode(db, mode="live"),
             }
         )
         return out
@@ -970,6 +1182,8 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
             "governance": governance_strip(),
             "risk_policy_summary": effective_policy_summary(),
             "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
+            "paper_runner_health": _runner_health_for_mode(db, mode="paper"),
+            "live_runner_health": _runner_health_for_mode(db, mode="live"),
             "lanes": {
                 "simulation": pending_draft + paper_queued + paper_active,
                 "live-armed": pending_arm + armed,
@@ -978,6 +1192,241 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
         }
     )
     return summary
+
+
+def _clone_session_for_run(
+    db: Session,
+    *,
+    user_id: int,
+    sess: TradingAutomationSession,
+) -> TradingAutomationSession:
+    dup = _find_duplicate_active_session(db, user_id=user_id, sess=sess)
+    if dup is not None:
+        return dup
+    new_state = STATE_QUEUED if sess.mode == "paper" else STATE_QUEUED_LIVE
+    clone = create_trading_automation_session(
+        db,
+        user_id=user_id,
+        venue=sess.venue,
+        execution_family=sess.execution_family,
+        mode=sess.mode,
+        symbol=sess.symbol,
+        variant_id=int(sess.variant_id),
+        state=new_state,
+        risk_snapshot_json=_fresh_run_snapshot(sess),
+        correlation_id=str(uuid.uuid4()),
+        source_node_id="momentum_automation_monitor",
+        source_paper_session_id=getattr(sess, "source_paper_session_id", None),
+    )
+    append_trading_automation_event(
+        db,
+        clone.id,
+        "session_cloned_for_run",
+        {"source_session_id": int(sess.id), "source_state": sess.state},
+        correlation_id=clone.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+    return clone
+
+
+def run_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    if not _tables_present(db):
+        return {"ok": False, "error": "tables_missing"}
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
+        .one_or_none()
+    )
+    if not sess:
+        return {"ok": False, "error": "not_found"}
+
+    runner_health = _runner_health_for_mode(db, mode=sess.mode, sess=sess)
+    if not runner_health.get("enabled"):
+        return {"ok": False, "error": "runner_disabled", "runner_health": runner_health}
+
+    target = sess
+    paused = is_operator_paused(sess.risk_snapshot_json)
+    if paused:
+        sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
+        sess.updated_at = datetime.utcnow()
+        append_trading_automation_event(
+            db,
+            sess.id,
+            "session_resumed",
+            {"by": "operator_run"},
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    elif sess.state in TERMINAL_STATES or sess.state == STATE_ARCHIVED:
+        target = _clone_session_for_run(db, user_id=user_id, sess=sess)
+    elif sess.mode == "paper" and sess.state in (STATE_DRAFT, STATE_IDLE):
+        prev = sess.state
+        sess.state = STATE_QUEUED
+        sess.updated_at = datetime.utcnow()
+        append_trading_automation_event(
+            db,
+            sess.id,
+            "session_run_requested",
+            {"previous_state": prev, "mode": "paper"},
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    elif sess.mode == "live" and sess.state == STATE_ARMED_PENDING_RUNNER:
+        sess.state = STATE_QUEUED_LIVE
+        sess.updated_at = datetime.utcnow()
+        append_trading_automation_event(
+            db,
+            sess.id,
+            "session_run_requested",
+            {"previous_state": STATE_ARMED_PENDING_RUNNER, "mode": "live"},
+            correlation_id=sess.correlation_id,
+            source_node_id="momentum_automation_monitor",
+        )
+    elif sess.mode == "paper" and sess.state not in PAPER_RUNNER_RUNNABLE_STATES:
+        return {"ok": False, "error": "not_runnable", "state": sess.state}
+    elif sess.mode == "live" and sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
+        return {"ok": False, "error": "not_runnable", "state": sess.state}
+
+    if target.mode == "paper":
+        tick_result = tick_paper_session(db, int(target.id))
+    else:
+        tick_result = tick_live_session(db, int(target.id))
+    return {
+        "ok": True,
+        "session_id": int(target.id),
+        "cloned_from_session_id": int(sess.id) if target.id != sess.id else None,
+        "state": target.state,
+        "tick_result": tick_result,
+    }
+
+
+def pause_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    if not _tables_present(db):
+        return {"ok": False, "error": "tables_missing"}
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
+        .one_or_none()
+    )
+    if not sess:
+        return {"ok": False, "error": "not_found"}
+    if sess.state not in PAUSABLE_STATES:
+        return {"ok": False, "error": "not_pausable", "state": sess.state}
+    if is_operator_paused(sess.risk_snapshot_json):
+        return {"ok": False, "error": "already_paused"}
+    sess.risk_snapshot_json = apply_operator_pause(sess.risk_snapshot_json, state=sess.state)
+    sess.updated_at = datetime.utcnow()
+    append_trading_automation_event(
+        db,
+        sess.id,
+        "session_paused",
+        {"state": sess.state},
+        correlation_id=sess.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+    return {"ok": True, "session_id": int(sess.id), "state": sess.state, "pause_info": operator_pause_info(sess.risk_snapshot_json)}
+
+
+def resume_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    if not _tables_present(db):
+        return {"ok": False, "error": "tables_missing"}
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
+        .one_or_none()
+    )
+    if not sess:
+        return {"ok": False, "error": "not_found"}
+    if not is_operator_paused(sess.risk_snapshot_json):
+        return {"ok": False, "error": "not_paused"}
+    return run_automation_session(db, user_id=user_id, session_id=int(sess.id))
+
+
+def _flatten_live_session_for_stop(sess: TradingAutomationSession) -> dict[str, Any]:
+    snap = dict(sess.risk_snapshot_json or {})
+    le = snap.get("momentum_live_execution")
+    le = dict(le) if isinstance(le, dict) else {}
+    pos = le.get("position")
+    entry_order_id = le.get("entry_order_id")
+    if not entry_order_id and not isinstance(pos, dict):
+        return {"ok": True, "action": "no_live_orders"}
+
+    ef = normalize_execution_family(sess.execution_family)
+    try:
+        adapter = resolve_live_spot_adapter_factory(ef)()
+    except ExecutionFamilyNotImplementedError:
+        return {"ok": False, "error": "execution_family_not_implemented"}
+    if not adapter.is_enabled():
+        return {"ok": False, "error": "live_adapter_unavailable"}
+
+    if entry_order_id and not isinstance(pos, dict):
+        adapter.cancel_order(str(entry_order_id))
+        return {"ok": True, "action": "cancelled_entry_order", "order_id": str(entry_order_id)}
+
+    if isinstance(pos, dict) and float(pos.get("quantity") or 0.0) > 0:
+        product_id = str(pos.get("product_id") or sess.symbol)
+        qty = _fmt_base_size(float(pos.get("quantity") or 0.0))
+        client_order_id = f"chili_ml_stop_{sess.id}_{uuid.uuid4().hex[:10]}"
+        result = adapter.place_market_order(
+            product_id=product_id,
+            side="sell",
+            base_size=qty,
+            client_order_id=client_order_id,
+        )
+        le["exit_order_id"] = result.get("order_id")
+        le["exit_client_order_id"] = result.get("client_order_id")
+        le["last_exit_reason"] = "operator_stop"
+        le["position"] = None
+        snap["momentum_live_execution"] = le
+        sess.risk_snapshot_json = snap
+        return {"ok": True, "action": "flattened_live_position", "order_result": result}
+    return {"ok": True, "action": "no_live_orders"}
+
+
+def stop_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    if not _tables_present(db):
+        return {"ok": False, "error": "tables_missing"}
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == user_id)
+        .one_or_none()
+    )
+    if not sess:
+        return {"ok": False, "error": "not_found"}
+    if sess.state == STATE_ARCHIVED or sess.state in TERMINAL_STATES:
+        return {"ok": False, "error": "already_terminal", "state": sess.state}
+
+    live_stop = None
+    if sess.mode == "live":
+        live_stop = _flatten_live_session_for_stop(sess)
+        if not live_stop.get("ok"):
+            return live_stop
+
+    now = datetime.utcnow()
+    prev = sess.state
+    sess.state = STATE_LIVE_CANCELLED if sess.mode == "live" else STATE_CANCELLED
+    sess.ended_at = now
+    sess.updated_at = now
+    sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
+    append_trading_automation_event(
+        db,
+        sess.id,
+        "session_stopped",
+        {"previous_state": prev, "terminal_state": sess.state, "live_stop": live_stop},
+        correlation_id=sess.correlation_id,
+        source_node_id="momentum_automation_monitor",
+    )
+    try:
+        from .feedback_emit import emit_feedback_after_terminal_transition
+
+        emit_feedback_after_terminal_transition(db, sess)
+    except Exception:
+        pass
+    return {"ok": True, "session_id": int(sess.id), "state": sess.state, "live_stop": live_stop}
+
+
+def delete_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
+    return archive_automation_session(db, user_id=user_id, session_id=session_id)
 
 
 def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> dict[str, Any]:
@@ -1002,6 +1451,7 @@ def cancel_automation_session(db: Session, *, user_id: int, session_id: int) -> 
         sess.state = STATE_CANCELLED
     sess.ended_at = now
     sess.updated_at = now
+    sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
 
     from .persistence import append_trading_automation_event
 
@@ -1059,6 +1509,7 @@ def archive_automation_session(db: Session, *, user_id: int, session_id: int) ->
     prev = sess.state
     sess.state = STATE_ARCHIVED
     sess.updated_at = datetime.utcnow()
+    sess.risk_snapshot_json = clear_operator_pause(sess.risk_snapshot_json)
 
     from .persistence import append_trading_automation_event
 

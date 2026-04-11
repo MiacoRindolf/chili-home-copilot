@@ -21,7 +21,7 @@ from app.trading_brain.schemas.cycle import (
     StageDefinition,
     StageJobStatus,
 )
-from app.trading_brain.stage_catalog import STAGE_KEYS
+from app.trading_brain.stage_catalog import STAGE_KEYS, TOTAL_STAGES
 from app.trading_brain.infrastructure.learning_status_sqlalchemy import (
     log_learning_status_parity,
 )
@@ -149,7 +149,7 @@ def test_shadow_hooks_happy_path_increment(db: Session, monkeypatch: pytest.Monk
         "phase": "pre-filtering",
         "current_step": "x",
         "steps_completed": 0,
-        "total_steps": 25,
+        "total_steps": TOTAL_STAGES,
         "started_at": datetime.utcnow().isoformat(),
         "step_timings": {},
         "data_provider": "yfinance",
@@ -171,6 +171,7 @@ def test_shadow_hooks_happy_path_increment(db: Session, monkeypatch: pytest.Monk
     sj = SqlAlchemyBrainStageJobRepository()
     jobs = sj.get_jobs_for_cycle(db, ctx["run_id"])
     pre = next(j for j in jobs if j.stage_key == STAGE_KEYS[0])
+    assert STAGE_KEYS[0] == "backfill"
     assert pre.status == StageJobStatus.succeeded
     ls["running"] = False
     ls["phase"] = "idle"

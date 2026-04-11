@@ -15,6 +15,7 @@ from ..execution_family_registry import (
     normalize_execution_family,
 )
 from ..governance import get_kill_switch_status, is_kill_switch_active
+from .market_profile import is_coinbase_spot_symbol
 from .live_fsm import LIVE_RUNNER_ACTIVE_FOR_CONCURRENCY
 from .paper_fsm import LIVE_INTENT_STATES, PAPER_CONCURRENT_STATES
 from .risk_policy import MomentumAutomationRiskPolicy, POLICY_VERSION, resolve_effective_risk_policy
@@ -281,6 +282,16 @@ def evaluate_proposed_momentum_automation(
                 )
             )
         if m == "live":
+            if ef == "coinbase_spot" and not is_coinbase_spot_symbol(sym):
+                checks.append(
+                    _check(
+                        "symbol_live_compatibility",
+                        False,
+                        severity="block",
+                        message="Symbol is not a Coinbase spot product id for live execution.",
+                        detail={"symbol": sym, "execution_family": ef},
+                    )
+                )
             ok_le = bool(via.live_eligible)
             if policy.require_live_eligible_for_live:
                 checks.append(
@@ -380,6 +391,16 @@ def evaluate_proposed_momentum_automation(
                     False,
                     severity="block",
                     message="Product marked not tradable in readiness metadata.",
+                )
+            )
+        elif m == "live" and ef == "coinbase_spot" and not is_coinbase_spot_symbol(sym):
+            checks.append(
+                _check(
+                    "product_tradable_symbol",
+                    False,
+                    severity="block",
+                    message="Live readiness requires a Coinbase spot symbol like BTC-USD.",
+                    detail={"symbol": sym},
                 )
             )
 

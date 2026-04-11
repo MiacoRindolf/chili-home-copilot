@@ -71,7 +71,19 @@ def build_scoring_plane(
         4,
     )
 
-    repeatability_confidence = round(0.22 + 0.08 * min(1.0, f.scanner_score / 10.0), 4)
+    # Speculative names cap vs core edge, but must spread across rows (scanner-only was ~0.22–0.30).
+    repeatability_confidence = round(
+        max(
+            0.0,
+            min(
+                1.0,
+                0.26
+                + 0.50 * structural_confirmation
+                + 0.12 * min(1.0, f.scanner_score / 10.0),
+            ),
+        ),
+        4,
+    )
 
     core_edge_score = round(max(0.0, (1.0 - speculative_momentum_score) * structural_confirmation), 4)
 

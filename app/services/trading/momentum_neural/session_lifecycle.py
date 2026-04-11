@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any, Optional
 
 from .live_fsm import (
@@ -60,6 +61,8 @@ CANON_ARCHIVED = "archived"
 CANON_FAILED = "failed"
 
 _PHASE_EXITING = "exiting"
+_PHASE_OPERATOR_PAUSED = "operator_paused"
+OPERATOR_PAUSE_KEY = "operator_pause"
 
 
 def _paper_active_runner_states() -> frozenset[str]:
@@ -144,6 +147,50 @@ def canonical_operator_state(
     return CANON_DRAFT
 
 
+def operator_pause_info(risk_snapshot_json: Optional[dict[str, Any]] = None) -> dict[str, Any]:
+    snap = risk_snapshot_json if isinstance(risk_snapshot_json, dict) else {}
+    raw = snap.get(OPERATOR_PAUSE_KEY)
+    if not isinstance(raw, dict):
+        return {"active": False, "paused_at_utc": None, "resume_state": None}
+    return {
+        "active": bool(raw.get("active")),
+        "paused_at_utc": raw.get("paused_at_utc"),
+        "resume_state": raw.get("resume_state"),
+    }
+
+
+def is_operator_paused(risk_snapshot_json: Optional[dict[str, Any]] = None) -> bool:
+    info = operator_pause_info(risk_snapshot_json)
+    return bool(info.get("active"))
+
+
+def apply_operator_pause(
+    risk_snapshot_json: Optional[dict[str, Any]],
+    *,
+    state: str,
+) -> dict[str, Any]:
+    snap = dict(risk_snapshot_json or {})
+    snap[OPERATOR_PAUSE_KEY] = {
+        "active": True,
+        "paused_at_utc": datetime.utcnow().isoformat(),
+        "resume_state": state,
+    }
+    return snap
+
+
+def clear_operator_pause(risk_snapshot_json: Optional[dict[str, Any]]) -> dict[str, Any]:
+    snap = dict(risk_snapshot_json or {})
+    raw = snap.get(OPERATOR_PAUSE_KEY)
+    if isinstance(raw, dict):
+        raw = dict(raw)
+        raw["active"] = False
+        raw["resumed_at_utc"] = datetime.utcnow().isoformat()
+        snap[OPERATOR_PAUSE_KEY] = raw
+    else:
+        snap[OPERATOR_PAUSE_KEY] = {"active": False, "resumed_at_utc": datetime.utcnow().isoformat()}
+    return snap
+
+
 def phase_hint(
     *,
     mode: str,
@@ -151,6 +198,8 @@ def phase_hint(
     risk_snapshot_json: Optional[dict[str, Any]] = None,
 ) -> Optional[str]:
     """Sub-phase for UI when canonical state groups multiple FSM states."""
+    if is_operator_paused(risk_snapshot_json):
+        return _PHASE_OPERATOR_PAUSED
     st = (state or "").strip()
     m = (mode or "paper").strip().lower()
     if m == "paper" and st in (STATE_EXITED, STATE_COOLDOWN):

@@ -9,7 +9,8 @@ from typing import Any, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ....models.trading import MomentumAutomationOutcome, MomentumSymbolViability
+from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability
+from .strategy_params import params_signature, refine_strategy_params
 from ..brain_neural_mesh.repository import get_or_create_state
 
 EVOLUTION_NODE_ID = "nm_momentum_evolution_trace"
@@ -22,6 +23,8 @@ _TAU_DAYS = 14.0
 _MAX_VIABILITY_DELTA = 0.03
 # Minimum live samples before full live weighting kick-in
 _LIVE_WEIGHT_FULL_N = 3
+_REFINEMENT_MIN_OUTCOMES = 5
+_REFINEMENT_LOOKBACK_DAYS = 30
 
 
 def record_evolution_trace(
@@ -112,6 +115,7 @@ def ingest_session_outcome(db: Session, outcome_row: MomentumAutomationOutcome) 
     )
     if outcome_row.contributes_to_evolution:
         apply_outcome_feedback_to_viability(db, outcome_row)
+        maybe_publish_refined_variant(db, variant_id=int(outcome_row.variant_id))
 
 
 def record_feedback_ingestion_trace(db: Session, payload: dict[str, Any]) -> None:
@@ -283,6 +287,125 @@ def apply_outcome_feedback_to_viability(db: Session, outcome_row: MomentumAutoma
         via.explain_json = ex
 
     via.updated_at = datetime.utcnow()
+
+
+def _recent_outcomes_for_variant(db: Session, *, variant_id: int, days: int = _REFINEMENT_LOOKBACK_DAYS) -> list[MomentumAutomationOutcome]:
+    since = datetime.utcnow() - timedelta(days=max(1, int(days)))
+    return (
+        db.query(MomentumAutomationOutcome)
+        .filter(
+            MomentumAutomationOutcome.variant_id == int(variant_id),
+            MomentumAutomationOutcome.contributes_to_evolution.is_(True),
+            MomentumAutomationOutcome.created_at >= since,
+        )
+        .order_by(MomentumAutomationOutcome.created_at.desc())
+        .all()
+    )
+
+
+def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
+    variant = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.id == int(variant_id))
+        .one_or_none()
+    )
+    if variant is None:
+        return {"ok": False, "error": "variant_not_found"}
+
+    outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant.id))
+    if len(outcomes) < _REFINEMENT_MIN_OUTCOMES:
+        return {"ok": True, "skipped": "insufficient_outcomes", "sample_size": len(outcomes)}
+
+    existing_child = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.parent_variant_id == int(variant.id))
+        .order_by(MomentumStrategyVariant.version.desc())
+        .first()
+    )
+    if existing_child is not None:
+        return {"ok": True, "skipped": "child_already_exists", "variant_id": int(existing_child.id)}
+
+    refined_params, meta = refine_strategy_params(variant.params_json, outcomes)
+    if not meta.get("eligible"):
+        return {"ok": True, "skipped": meta.get("reason") or "not_eligible", "meta": meta}
+    if params_signature(refined_params) == params_signature(variant.params_json):
+        return {"ok": True, "skipped": "params_unchanged", "meta": meta}
+
+    next_version = int(variant.version) + 1
+    child = MomentumStrategyVariant(
+        family=variant.family,
+        variant_key=variant.variant_key,
+        version=next_version,
+        label=f"{variant.label} [Brain refined v{next_version}]",
+        params_json=refined_params,
+        is_active=True,
+        execution_family=variant.execution_family,
+        parent_variant_id=int(variant.id),
+        refinement_meta_json={
+            "created_at_utc": datetime.utcnow().isoformat(),
+            "source_variant_id": int(variant.id),
+            "source_variant_version": int(variant.version),
+            "source_outcome_count": len(outcomes),
+            **meta,
+        },
+        scan_pattern_id=variant.scan_pattern_id,
+        created_at=datetime.utcnow(),
+        updated_at=datetime.utcnow(),
+    )
+    db.add(child)
+    db.flush()
+
+    variant.is_active = False
+    variant.updated_at = datetime.utcnow()
+
+    source_rows = (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.variant_id == int(variant.id))
+        .all()
+    )
+    for row in source_rows:
+        explain = dict(row.explain_json or {})
+        explain["refined_from_variant_id"] = int(variant.id)
+        evidence_window = dict(row.evidence_window_json or {})
+        evidence_window["refined_clone_from_variant_id"] = int(variant.id)
+        evidence_window["refined_clone_at_utc"] = datetime.utcnow().isoformat()
+        db.add(
+            MomentumSymbolViability(
+                symbol=row.symbol,
+                variant_id=int(child.id),
+                viability_score=row.viability_score,
+                paper_eligible=row.paper_eligible,
+                live_eligible=row.live_eligible,
+                freshness_ts=row.freshness_ts,
+                regime_snapshot_json=dict(row.regime_snapshot_json or {}),
+                execution_readiness_json=dict(row.execution_readiness_json or {}),
+                explain_json=explain,
+                evidence_window_json=evidence_window,
+                source_node_id=row.source_node_id,
+                correlation_id=row.correlation_id,
+                created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            )
+        )
+
+    record_feedback_ingestion_trace(
+        db,
+        {
+            "variant_id": int(variant.id),
+            "refined_variant_id": int(child.id),
+            "refined_version": next_version,
+            "sample_size": len(outcomes),
+            "mean_return_bps": meta.get("mean_return_bps"),
+            "win_rate": meta.get("win_rate"),
+        },
+    )
+    return {
+        "ok": True,
+        "created": True,
+        "variant_id": int(child.id),
+        "source_variant_id": int(variant.id),
+        "version": next_version,
+    }
 
 
 def _viability_delta_from_slices(paper: dict[str, Any], live: dict[str, Any]) -> float:

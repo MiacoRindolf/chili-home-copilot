@@ -32,6 +32,7 @@ from .persistence import append_trading_automation_event
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY
 from .paper_execution import regime_atr_pct, stop_target_prices, utc_iso
+from .persistence import variant_for_id
 from .live_fsm import (
     LIVE_RUNNER_RUNNABLE_STATES,
     STATE_ARMED_PENDING_RUNNER,
@@ -49,6 +50,8 @@ from .live_fsm import (
     STATE_WATCHING_LIVE,
     assert_transition_live,
 )
+from .session_lifecycle import is_operator_paused
+from .strategy_params import normalize_strategy_params
 
 _log = logging.getLogger(__name__)
 
@@ -165,6 +168,7 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
     pos = le.get("position")
     out: dict[str, Any] = {
         "tick_count": le.get("tick_count"),
+        "last_tick_utc": le.get("last_tick_utc"),
         "entry_order_id": le.get("entry_order_id"),
         "entry_client_order_id": le.get("entry_client_order_id"),
         "exit_order_id": le.get("exit_order_id"),
@@ -187,7 +191,7 @@ def summarize_live_execution(snap: Any) -> dict[str, Any]:
 
 def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[TradingAutomationSession]:
     lim = max(1, min(int(limit), 200))
-    return (
+    rows = (
         db.query(TradingAutomationSession)
         .filter(
             TradingAutomationSession.mode == "live",
@@ -197,6 +201,7 @@ def list_runnable_live_sessions(db: Session, *, limit: int = 25) -> list[Trading
         .limit(lim)
         .all()
     )
+    return [row for row in rows if not is_operator_paused(row.risk_snapshot_json)]
 
 
 def run_live_runner_batch(
@@ -230,6 +235,8 @@ def tick_live_session(
     )
     if sess is None:
         return {"ok": False, "error": "not_found"}
+    if is_operator_paused(sess.risk_snapshot_json):
+        return {"ok": True, "skipped": "operator_paused", "state": sess.state}
     ef = normalize_execution_family(sess.execution_family)
     if not momentum_runner_supports_execution_family(ef):
         return {"ok": True, "skipped": "execution_family_not_implemented", "execution_family": ef}
@@ -304,6 +311,11 @@ def tick_live_session(
         _safe_transition(db, sess, STATE_LIVE_ERROR)
         db.flush()
         return {"ok": False, "error": "no_viability"}
+    variant = variant_for_id(db, int(sess.variant_id))
+    params = normalize_strategy_params(
+        variant.params_json if variant is not None else {},
+        family_id=variant.family if variant is not None else None,
+    )
 
     product_id = sess.symbol.upper().strip()
     if not product_id.endswith("-USD"):
@@ -379,9 +391,10 @@ def tick_live_session(
     except (TypeError, ValueError):
         max_notional = float(settings.chili_momentum_risk_max_notional_per_trade_usd)
     try:
-        max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
+        cap_max_hold = int(caps.get("max_hold_seconds") or settings.chili_momentum_risk_max_hold_seconds)
     except (TypeError, ValueError):
-        max_hold = int(settings.chili_momentum_risk_max_hold_seconds)
+        cap_max_hold = int(settings.chili_momentum_risk_max_hold_seconds)
+    max_hold = min(int(params.get("max_hold_seconds") or cap_max_hold), cap_max_hold)
 
     snap = dict(sess.risk_snapshot_json or {})
     le = _live_exec(snap)
@@ -408,14 +421,14 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING_LIVE:
-        if float(via.viability_score or 0) >= 0.52 and via.live_eligible:
+        if float(via.viability_score or 0) >= float(params["entry_viability_min"]) and via.live_eligible:
             _safe_transition(db, sess, STATE_LIVE_ENTRY_CANDIDATE)
             _emit(db, sess, "live_entry_candidate_detected", {"viability_score": via.viability_score})
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_ENTRY_CANDIDATE:
-        if float(via.viability_score or 0) < 0.48 or not via.live_eligible:
+        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.live_eligible:
             _safe_transition(db, sess, STATE_WATCHING_LIVE)
         else:
             _safe_transition(db, sess, STATE_LIVE_PENDING_ENTRY)
@@ -424,6 +437,12 @@ def tick_live_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_LIVE_PENDING_ENTRY:
+        if not le.get("entry_submitted") and (
+            float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.live_eligible
+        ):
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state}
         if le.get("entry_submitted") and le.get("entry_order_id"):
             no, _ = adapter.get_order(str(le["entry_order_id"]))
             if no and _order_done_for_entry(no):
@@ -446,7 +465,13 @@ def tick_live_session(
                 }
                 regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
                 atrp = regime_atr_pct(regime)
-                stop_px, target_px = stop_target_prices(avg, atr_pct=atrp, side_long=True)
+                stop_px, target_px = stop_target_prices(
+                    avg,
+                    atr_pct=atrp,
+                    side_long=True,
+                    stop_atr_mult=float(params["stop_atr_mult"]),
+                    target_atr_mult=float(params["target_atr_mult"]),
+                )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
                 _commit_le(sess, le)
@@ -523,6 +548,8 @@ def tick_live_session(
         except Exception:
             t0 = _utcnow()
         held = (_utcnow() - t0).total_seconds()
+        trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
+        trail_floor_return = 1.0 + float(params["trail_floor_return_bps"]) / 10_000.0
 
         if st == STATE_LIVE_BAILOUT:
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
@@ -546,7 +573,7 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if float(via.viability_score or 0) < 0.38:
+        if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
             _safe_transition(db, sess, STATE_LIVE_BAILOUT)
             _emit(db, sess, "live_bailout", {"viability_score": via.viability_score})
             db.flush()
@@ -620,14 +647,14 @@ def tick_live_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
-        if st == STATE_LIVE_ENTERED and bid >= avg * 1.008:
+        if st == STATE_LIVE_ENTERED and bid >= avg * trail_activate_return:
             _safe_transition(db, sess, STATE_LIVE_TRAILING)
             _emit(db, sess, "live_trailing_armed", {"bid": bid})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_LIVE_TRAILING:
-            trail_stop = max(stop_px, avg * 1.002)
+            trail_stop = max(stop_px, avg * trail_floor_return)
             if bid <= trail_stop:
                 cid = f"chili_ml_tr_{sess.id}_{uuid.uuid4().hex[:12]}"
                 sr = adapter.place_market_order(
