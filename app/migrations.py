@@ -4425,6 +4425,45 @@ def _migration_097_scan_pattern_lifecycle_challenged(conn) -> None:
         conn.rollback()
 
 
+def _migration_098_brain_validation_slice_ledger(conn) -> None:
+    """Selection-bias accounting: dedupe by research_run_key, aggregate by slice_key."""
+    if "brain_validation_slice_ledger" in _tables(conn):
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE brain_validation_slice_ledger (
+                id SERIAL PRIMARY KEY,
+                research_run_key VARCHAR(64) NOT NULL,
+                slice_key VARCHAR(64) NOT NULL,
+                scan_pattern_id INTEGER NOT NULL,
+                rules_fingerprint VARCHAR(32),
+                param_hash VARCHAR(64),
+                recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_bvsl_research_run_key "
+            "ON brain_validation_slice_ledger (research_run_key)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_bvsl_slice_key ON brain_validation_slice_ledger (slice_key)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_bvsl_scan_pattern_id "
+            "ON brain_validation_slice_ledger (scan_pattern_id)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4524,6 +4563,7 @@ MIGRATIONS = [
     ("095_task_workspace_binding", _migration_095_task_workspace_binding),
     ("096_momentum_variant_refinement", _migration_096_momentum_variant_refinement),
     ("097_scan_pattern_lifecycle_challenged", _migration_097_scan_pattern_lifecycle_challenged),
+    ("098_brain_validation_slice_ledger", _migration_098_brain_validation_slice_ledger),
 ]
 
 

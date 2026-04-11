@@ -564,6 +564,16 @@ class Settings(BaseSettings):
     brain_edge_evidence_max_wf_perm_p: float = 0.25
     brain_edge_evidence_require_wf_when_available: bool = False
 
+    # Phase 2 research hygiene (repeatable-edge lane): slice burn ledger + optional stability probe.
+    brain_selection_bias_enabled: bool = True
+    brain_parameter_stability_enabled: bool = False
+    brain_parameter_stability_seed: int = 123
+    brain_parameter_stability_ticker_subset_size: int = 2
+    brain_parameter_stability_max_variant_evals: int = 6
+    brain_parameter_stability_neighbor_rel_tol: float = 0.12
+    brain_parameter_stability_neighbor_abs_floor: float = 40.0
+    brain_phase2_hygiene_nudge_enabled: bool = True
+
     # Two-tier queue: cheap prescreen then full backtest (final OOS gate unchanged).
     brain_queue_prescreen_enabled: bool = True
     brain_queue_prescreen_tickers: int = 6

@@ -238,6 +238,34 @@ def apply_edge_evidence_veto(
     return False, []
 
 
+def apply_phase2_hygiene_nudges(
+    edge_evidence: dict[str, Any],
+    *,
+    parameter_stability: dict[str, Any] | None,
+    selection_bias: dict[str, Any] | None,
+    oos_validation: dict[str, Any],
+) -> None:
+    """Soft tier / flag nudges from Phase 2 (no promotion hard gate). Mutates dicts in place."""
+    down_map = {"A": "B", "B": "C", "C": "none", "none": "none"}
+    flags = list(oos_validation.get("research_hygiene_flags") or [])
+    steps = 0
+    ps = parameter_stability if isinstance(parameter_stability, dict) else None
+    sb = selection_bias if isinstance(selection_bias, dict) else None
+    if ps and ps.get("stability_tier") == "fragile":
+        if "phase2_fragile_parameter_neighborhood" not in flags:
+            flags.append("phase2_fragile_parameter_neighborhood")
+        steps += 1
+    if sb and sb.get("burn_tier") == "high" and not sb.get("skip_reason"):
+        if "phase2_high_validation_slice_burn" not in flags:
+            flags.append("phase2_high_validation_slice_burn")
+        steps += 1
+    oos_validation["research_hygiene_flags"] = flags
+    tier = str(edge_evidence.get("evidence_tier") or "none")
+    for _ in range(min(steps, 2)):
+        tier = down_map.get(tier, "none")
+    edge_evidence["evidence_tier"] = tier
+
+
 def resolve_gated_lifecycle_stage(
     *,
     promotion_status: str,

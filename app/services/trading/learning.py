@@ -5556,6 +5556,7 @@ def test_pattern_hypothesis(
     oos_profit_factors: list[float] = []
     oos_robust_mins: list[float] = []
     integrity_rows: list[dict[str, Any]] = []
+    eval_rows: list[dict[str, Any]] = []
 
     for ticker in tickers[:5]:
         try:
@@ -5573,6 +5574,25 @@ def test_pattern_hypothesis(
                 continue
             total += 1
             wr, ret = backtest_metrics_for_promotion_gate(result)
+            eval_rows.append(
+                {
+                    "ticker": (ticker or "").strip().upper(),
+                    "chart_time_from": result.get("chart_time_from"),
+                    "chart_time_to": result.get("chart_time_to"),
+                    "ohlc_bars": result.get("ohlc_bars"),
+                    "in_sample_bars": result.get("in_sample_bars"),
+                    "out_of_sample_bars": result.get("out_of_sample_bars"),
+                    "oos_holdout_fraction": result.get("oos_holdout_fraction"),
+                    "period": bt_params["period"],
+                    "interval": bt_params["interval"],
+                    "spread_used": result.get("spread_used"),
+                    "commission_used": result.get("commission_used"),
+                    "oos_win_rate": result.get("oos_win_rate"),
+                    "is_win_rate": wr,
+                    "trade_count": result.get("trade_count"),
+                    "oos_ok": bool(result.get("oos_ok")),
+                }
+            )
             is_wrs.append(wr)
             if wr > 50:
                 wins += 1
@@ -5892,6 +5912,104 @@ def test_pattern_hypothesis(
             if edge_veto:
                 patch["promotion_status"] = "pending_oos"
                 patch["active"] = True
+
+    if _gated_edge:
+        oos_merged = dict(patch.get("oos_validation_json") or oos_validation_merged)
+        from .edge_evidence import apply_phase2_hygiene_nudges
+        from .research_integrity import rules_json_fingerprint
+        from .selection_bias import (
+            build_outcome_fingerprint,
+            build_research_run_key,
+            build_selection_bias_contract,
+            build_validation_slice_key,
+            record_validation_slice_use,
+            selection_bias_skip_contract,
+        )
+
+        _rules_for_fp: list[dict[str, Any]] = []
+        try:
+            _rj = json.loads(pattern.rules_json or "{}")
+            _rules_for_fp = list(_rj.get("conditions") or [])
+        except Exception:
+            pass
+        _rfp = rules_json_fingerprint(_rules_for_fp if _rules_for_fp else None)
+
+        if bool(getattr(_edge_st, "brain_selection_bias_enabled", True)):
+            if eval_rows:
+                _slice_key = build_validation_slice_key(
+                    origin=_origin_lc,
+                    asset_class=(getattr(pattern, "asset_class", None) or "all"),
+                    timeframe=tf,
+                    hypothesis_family=getattr(pattern, "hypothesis_family", None),
+                    eval_rows=eval_rows,
+                )
+                _ofp = build_outcome_fingerprint(eval_rows)
+                _rrk = build_research_run_key(
+                    slice_key=_slice_key,
+                    scan_pattern_id=int(pattern.id),
+                    rules_fingerprint=_rfp,
+                    outcome_fingerprint=_ofp,
+                )
+                _ins = record_validation_slice_use(
+                    db,
+                    research_run_key=_rrk,
+                    slice_key=_slice_key,
+                    scan_pattern_id=int(pattern.id),
+                    rules_fingerprint=_rfp,
+                    param_hash=None,
+                )
+                oos_merged["selection_bias"] = build_selection_bias_contract(
+                    db, slice_key=_slice_key, ledger_inserted=_ins
+                )
+            else:
+                oos_merged["selection_bias"] = selection_bias_skip_contract("no_eval_rows")
+
+        if bool(getattr(_edge_st, "brain_parameter_stability_enabled", False)):
+            from .parameter_stability import compute_parameter_stability, pick_stability_tickers
+
+            _st_seed = int(getattr(_edge_st, "brain_parameter_stability_seed", 123) or 123) + int(
+                pattern.id
+            )
+            _st_k = int(getattr(_edge_st, "brain_parameter_stability_ticker_subset_size", 2) or 2)
+            st_tick, _ = pick_stability_tickers(
+                [r.get("ticker") or "" for r in eval_rows],
+                k=_st_k,
+                seed=_st_seed,
+            )
+            _baseline_st = (
+                float(mean_oos_wr) if mean_oos_wr is not None else float(mean_is_wr)
+            )
+            oos_merged["parameter_stability"] = compute_parameter_stability(
+                pattern_name=pattern.name,
+                rules_json=pattern.rules_json,
+                stability_tickers=st_tick,
+                baseline_score=_baseline_st,
+                backtest_pattern_fn=backtest_pattern,
+                bt_params=bt_params,
+                bt_kw=bt_kw,
+                exit_config=getattr(pattern, "exit_config", None),
+                scan_pattern_id=int(pattern.id),
+                max_variant_evals=int(
+                    getattr(_edge_st, "brain_parameter_stability_max_variant_evals", 6) or 6
+                ),
+                rel_pass_tol=float(
+                    getattr(_edge_st, "brain_parameter_stability_neighbor_rel_tol", 0.12) or 0.12
+                ),
+                abs_floor=float(
+                    getattr(_edge_st, "brain_parameter_stability_neighbor_abs_floor", 40.0) or 40.0
+                ),
+            )
+
+        if bool(getattr(_edge_st, "brain_phase2_hygiene_nudge_enabled", True)):
+            _ee2 = oos_merged.get("edge_evidence")
+            if isinstance(_ee2, dict):
+                apply_phase2_hygiene_nudges(
+                    _ee2,
+                    parameter_stability=oos_merged.get("parameter_stability"),
+                    selection_bias=oos_merged.get("selection_bias"),
+                    oos_validation=oos_merged,
+                )
+        patch["oos_validation_json"] = oos_merged
 
     _promo_for_lifecycle = str(patch.get("promotion_status", prom_stat))
     if _gated_edge and bool(getattr(_edge_st, "brain_edge_evidence_enabled", True)):

@@ -883,7 +883,7 @@ class TestBrainAPI:
             origin="brain_discovered",
             promotion_status="promoted",
             active=True,
-            oos_win_rate=55.0,
+            oos_win_rate=0.55,
             oos_trade_count=10,
             backtest_count=10,
         )
@@ -893,7 +893,7 @@ class TestBrainAPI:
             origin="brain_discovered",
             promotion_status="promoted",
             active=True,
-            oos_win_rate=40.0,
+            oos_win_rate=0.40,
             oos_trade_count=10,
         )
         p_legacy = ScanPattern(
@@ -902,7 +902,7 @@ class TestBrainAPI:
             origin="user",
             promotion_status="legacy",
             active=True,
-            oos_win_rate=99.0,
+            oos_win_rate=0.99,
             oos_trade_count=99,
         )
         db.add_all([p_ok, p_low_wr, p_legacy])

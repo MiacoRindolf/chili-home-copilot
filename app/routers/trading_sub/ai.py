@@ -582,7 +582,7 @@ def api_tradeable_patterns(
     )
     wr_from_oos = and_(
         ScanPattern.oos_win_rate.isnot(None),
-        ScanPattern.oos_win_rate >= min_wr,
+        ScanPattern.oos_win_rate * 100.0 >= min_wr,
     )
     wr_from_is = and_(
         ScanPattern.oos_win_rate.is_(None),
@@ -638,7 +638,9 @@ def api_tradeable_patterns(
             display_wr = round(float(p.win_rate) * 100.0, 1)
             wr_source = "in_sample"
         else:
-            display_wr = float(oos_wr) if oos_wr is not None else None
+            display_wr = (
+                round(float(oos_wr) * 100.0, 1) if oos_wr is not None else None
+            )
             wr_source = "oos" if oos_wr is not None else None
 
         tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
@@ -744,7 +746,9 @@ def api_research_edge_patterns(
             display_wr = round(float(p.win_rate) * 100.0, 1)
             wr_source = "in_sample"
         else:
-            display_wr = float(oos_wr) if oos_wr is not None else None
+            display_wr = (
+                round(float(oos_wr) * 100.0, 1) if oos_wr is not None else None
+            )
             wr_source = "oos" if oos_wr is not None else None
         tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
         out.append(

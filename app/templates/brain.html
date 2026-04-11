@@ -4149,6 +4149,37 @@ function _perfCard(label, value, color) {
     + '</div>';
 }
 
+function _phase2ResearchLine(ov) {
+  if (!ov || typeof ov !== 'object') return '';
+  var ps = ov.parameter_stability;
+  var sb = ov.selection_bias;
+  var bits = [];
+  if (ps && typeof ps === 'object') {
+    var st = ps.stability_tier != null ? String(ps.stability_tier) : '';
+    var ss = ps.stability_score != null ? String(ps.stability_score) : '';
+    if (st || ss) {
+      bits.push('stability ' + escHtml(st || 'â€”') + (ss ? ' (score ' + escHtml(ss) + ')' : ''));
+    }
+  }
+  if (sb && typeof sb === 'object') {
+    if (sb.skip_reason) {
+      bits.push('slice burn skipped: ' + escHtml(String(sb.skip_reason)));
+    } else {
+      var bt = sb.burn_tier != null ? String(sb.burn_tier) : '';
+      var uc = sb.usage_count != null ? String(sb.usage_count) : '';
+      if (bt || uc) {
+        bits.push('slice burn ' + escHtml(bt || 'â€”') + (uc ? ' (uses ' + escHtml(uc) + ')' : ''));
+      }
+    }
+  }
+  var hf = ov.research_hygiene_flags;
+  if (hf && hf.length) {
+    bits.push('hygiene: ' + escHtml(hf.join(', ')));
+  }
+  if (!bits.length) return '';
+  return '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.35" title="Phase 2 research hygiene (display only; not a promotion gate)">' + bits.join(' Â· ') + '</div>';
+}
+
 function loadTradeablePatterns() {
   var container = document.getElementById('brain-tradeable-patterns');
   if (!container) return;
@@ -4206,6 +4237,7 @@ function loadTradeablePatterns() {
         edgeLine = '<div style="font-size:8px;color:var(--text-muted);margin-top:4px;line-height:1.35" title="v1 weak-null permutation layer (display only; server enforces gates)">' +
           'Edge evidence (v1 weak-null): tier ' + escHtml(tier) + ', IS p ' + escHtml(String(isp)) + ', WF p ' + escHtml(String(wfp)) + '</div>';
       }
+      var phase2Line = _phase2ResearchLine(p.oos_validation);
       var link = '/trading?tab=backtest&scan_pattern_id=' + encodeURIComponent(p.id);
       html += '<div class="tp-tradeable-card">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:4px;line-height:1.35">' + name + '</div>' +
@@ -4218,6 +4250,7 @@ function loadTradeablePatterns() {
         '</div>' +
         rk +
         edgeLine +
+        phase2Line +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
       '</div>';
     });
@@ -4274,10 +4307,12 @@ function loadResearchEdgePatterns() {
       } else {
         body = '<div style="font-size:9px;color:var(--text-muted);margin-top:6px">No edge_evidence JSON yet for this row.</div>';
       }
+      var phase2Line = _phase2ResearchLine(p.oos_validation);
       html += '<div class="tp-tradeable-card">' +
         '<div style="font-size:11px;font-weight:700;color:var(--text);margin-bottom:2px;line-height:1.35">' + name + '</div>' +
         '<div style="font-size:9px;color:var(--text-secondary)">lifecycle <strong style="color:var(--accent)">' + life + '</strong> Â· ' + promo + '</div>' +
         body +
+        phase2Line +
         '<a href="' + link + '" style="display:inline-block;margin-top:8px;font-size:10px;font-weight:600;color:var(--accent);text-decoration:none">Open in Trading â†’</a>' +
         '</div>';
     });

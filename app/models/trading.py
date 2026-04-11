@@ -131,6 +131,28 @@ class BacktestParamSet(Base):
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class BrainValidationSliceLedger(Base):
+    """Append-only usage of validation slices for repeatable-edge research (burn accounting).
+
+    ``research_run_key`` dedupes accidental retries; ``slice_key`` aggregates actual evaluated context.
+    """
+
+    __tablename__ = "brain_validation_slice_ledger"
+    __table_args__ = (
+        UniqueConstraint("research_run_key", name="uq_bvsl_research_run_key"),
+        Index("ix_bvsl_slice_key", "slice_key"),
+        Index("ix_bvsl_scan_pattern_id", "scan_pattern_id"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    research_run_key: str = Column(String(64), nullable=False)
+    slice_key: str = Column(String(64), nullable=False)
+    scan_pattern_id: int = Column(Integer, nullable=False)
+    rules_fingerprint: Optional[str] = Column(String(32), nullable=True)
+    param_hash: Optional[str] = Column(String(64), nullable=True)
+    recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class BacktestResult(Base):
     """Stored backtest run results for strategy comparison."""
     __tablename__ = "trading_backtests"
