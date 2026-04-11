@@ -61,6 +61,16 @@ Built as a production-style LLM application showcasing multi-model routing, RAG 
 - **Alerts**: Price target and percent-change alerts with SMS delivery (Twilio) and DB logging
 - **Performance optimizations**: Batch yfinance downloads, parallel ticker scoring, 5-minute market-context cache, ThreadPoolExecutor throughout
 
+### Project Domain
+- **Developer cockpit at `/brain?domain=project`** with four operator panes: `Workspace`, `Planner Handoff`, `Agents`, and `Feed`
+- **Workspace-first bootstrap** via `GET /api/brain/project/bootstrap` so repo setup, indexing readiness, planner task binding, and agent/feed status load from one payload
+- **Canonical repo binding** for planner coding tasks through `plan_task_coding_profile.code_repo_id`, with legacy `repo_index` preserved only as a migration fallback
+- **Human-in-the-loop coding workflow**: explicit repo registration, code indexing, planner handoff load, suggestion generation, snapshot save, dry-run apply, real apply, and validation
+- **Fail-closed task workspaces**: unbound or stale task profiles surface clear reasons in the UI and disable suggest/apply/validate until rebound to an active `CodeRepo`
+- **Targeted project/coding test cleanup** so planner and project-domain tests do not hang on full-schema truncation between cases
+- **Parser-backed static asset coverage** for the extracted project cockpit JavaScript so the split frontend modules stay syntax-checked under pytest
+- **Architecture notes** in [docs/PROJECT_DOMAIN.md](docs/PROJECT_DOMAIN.md) covering router ownership, client-module boundaries, workspace binding, and the explicit operator workflow
+
 ### LLM Tool Calling
 - Natural language mapped to structured actions (`add_chore`, `mark_chore_done`, `add_birthday`, `list_chores`, `answer_from_docs`, etc.)
 - Planner returns strict JSON `{type, data, reply}` validated by Pydantic discriminated-union schemas

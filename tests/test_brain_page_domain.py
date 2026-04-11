@@ -13,6 +13,7 @@ from starlette.requests import Request
 from app.routers.brain import _brain_initial_domain_for_request
 
 _TEMPLATES = Path(__file__).resolve().parents[1] / "app" / "templates"
+_STATIC_COMPONENTS = Path(__file__).resolve().parents[1] / "app" / "static" / "components"
 
 
 @pytest.fixture
@@ -83,6 +84,10 @@ def test_brain_template_project_contract(brain_jinja_env) -> None:
     text = _render_brain(brain_jinja_env, "project")
     assert 'data-brain-initial-domain="project"' in text
     assert 'data-trading-boot="deferred"' in text
+    assert '/static/components/brain-project-domain.js' in text
+    assert '/static/components/brain-project-agents.js' in text
+    assert '/static/components/brain-project-handoff.js' in text
+    assert '/static/components/brain-project-domain.css' in text
     assert "__CHILI_BRAIN_INITIAL_DOMAIN__" in text
     assert re.search(
         r"__CHILI_BRAIN_INITIAL_DOMAIN__\s*=\s*(?:\"|&#34;)project(?:\"|&#34;)",
@@ -92,6 +97,12 @@ def test_brain_template_project_contract(brain_jinja_env) -> None:
         r'id="domain-project"[^>]*style="[^"]*display:\s*block',
         text,
     ), "project root should be display:block on first paint"
+    assert text.count('id="domain-project"') == 1
+    assert "Developer Cockpit" in text
+    assert "Loading workspace bootstrap" in text
+    assert 'data-project-pane="workspace"' in text
+    assert 'class="brain-act-btn project-pane-tab is-active"' in text
+    assert 'project-section-card' in text
     assert re.search(
         r'id="domain-trading"[^>]*style="[^"]*display:\s*none',
         text,
@@ -101,8 +112,39 @@ def test_brain_template_project_contract(brain_jinja_env) -> None:
         r'id="agent-msg-feed"[^>]*>[\s\S]{0,400}?Loading agent messages',
         text,
     )
-    assert "Could not load agent messages. Try Refresh." in text
-    assert "network error" in text
+    assert "function loadAgentMessageFeed()" not in text
+    assert "function loadCodeRepos()" not in text
+    assert "function triggerCodeLearn()" not in text
+    assert "function runCodeAgent()" not in text
+    assert "function initProjectAgentBar()" not in text
+    assert "function loadPODashboard()" not in text
+    assert "function initBrainPlannerHandoffBridge()" not in text
+    assert "function brainHandoffPlannerTaskId()" not in text
+
+
+def test_project_template_is_split_into_partials() -> None:
+    brain_template = (_TEMPLATES / "brain.html").read_text(encoding="utf-8")
+    assert '/static/components/brain-project-domain.css' in brain_template
+    assert ".proj-agent-bar {" not in brain_template
+    assert ".code-repo-card {" not in brain_template
+    assert ".chili-handoff-launch-flash {" not in brain_template
+
+    domain_template = (_TEMPLATES / "brain_project_domain.html").read_text(encoding="utf-8")
+    assert '{% include "brain_project_workspace_header.html" %}' in domain_template
+    assert '{% include "brain_project_pane_handoff.html" %}' in domain_template
+    assert '{% include "brain_project_pane_workspace.html" %}' in domain_template
+    assert '{% include "brain_project_pane_agents.html" %}' in domain_template
+    assert '{% include "brain_project_pane_feed.html" %}' in domain_template
+
+    agents_template = (_TEMPLATES / "brain_project_pane_agents.html").read_text(encoding="utf-8")
+    assert '{% include "brain_project_agent_panel_product_owner.html" %}' in agents_template
+    assert '{% include "brain_project_agent_panel_project_manager.html" %}' in agents_template
+    assert '{% include "brain_project_agent_panel_architect.html" %}' in agents_template
+
+    project_styles = (_STATIC_COMPONENTS / "brain-project-domain.css").read_text(encoding="utf-8")
+    assert ".proj-agent-bar {" in project_styles
+    assert ".code-repo-card {" in project_styles
+    assert ".chili-handoff-launch-flash {" in project_styles
 
 
 def test_brain_template_trading_contract(brain_jinja_env) -> None:

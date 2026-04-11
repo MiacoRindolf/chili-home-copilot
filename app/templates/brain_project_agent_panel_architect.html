@@ -1,0 +1,102 @@
+<div class="proj-agent-panel" id="agent-panel-architect" data-agent="architect">
+  <div class="agent-status-card" id="arch-status-card"></div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Health</div>
+    <div id="arch-health">
+      <div class="project-inline-muted">Run an Architect cycle to analyze the codebase...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F504;</span> Circular Dependencies</div>
+    <div id="arch-circular" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Circular dependency analysis will appear...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F517;</span> Module Coupling</div>
+    <div id="arch-coupling" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Coupling analysis will appear...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F525;</span> Complexity Hotspots</div>
+    <div id="arch-hotspots" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Hotspot analysis will appear...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Architectural Recommendations</div>
+    <div id="arch-findings" class="project-scroll-panel">
+      <div class="project-inline-muted">Findings will appear after a cycle...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F50D;</span> Research</div>
+    <div id="arch-research" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Architecture research will appear...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Evolution Timeline</div>
+    <div id="arch-evolution" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Evolution events will appear...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4C1;</span> Repositories</div>
+    <div id="code-repos" class="code-repos-grid">
+      <div style="font-size:11px;color:var(--text-muted)">Loading repos...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Quality Metrics</div>
+    <div class="brain-kpis" id="code-kpis">
+      <div class="brain-kpi project-kpi-skeleton"></div>
+      <div class="brain-kpi project-kpi-skeleton"></div>
+      <div class="brain-kpi project-kpi-skeleton"></div>
+      <div class="brain-kpi project-kpi-skeleton"></div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F3D7;</span> Architecture Graph</div>
+    <div id="code-graph" class="project-scroll-panel" style="max-height:400px;">
+      <div class="project-inline-muted">Run a learning cycle to build the dependency graph.</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4A1;</span> Discovered Conventions &amp; Patterns</div>
+    <div id="code-insights" class="project-scroll-panel" style="max-height:400px;">
+      <div class="project-inline-muted">Loading insights...</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Quality Trends</div>
+    <div id="code-trends">
+      <div class="project-inline-muted">Trends will appear after multiple learning cycles.</div>
+    </div>
+  </div>
+
+  <div class="brain-section">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F50E;</span> Code Search</div>
+    <div class="project-search-row">
+      <input type="text" id="code-search-input" class="project-search-input" placeholder="Search functions, classes, files...">
+      <button onclick="runCodeSearch()" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2);padding:6px 14px;font-size:11px">Search</button>
+      <button onclick="runCodeSearch(true)" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);padding:6px 14px;font-size:11px" title="Ask LLM">AI Search</button>
+    </div>
+    <div id="code-search-results" class="project-scroll-panel medium">
+      <div class="project-inline-muted">Type a query to search indexed code.</div>
+    </div>
+  </div>
+</div>

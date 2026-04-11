@@ -104,6 +104,57 @@ def _agent_ndjson(*, hypothesis_id: str, location: str, message: str, data: dict
 
 
 _schema_initialized = False
+_PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
+    {
+        "users",
+        "devices",
+        "plan_projects",
+        "project_members",
+        "plan_tasks",
+        "task_comments",
+        "task_activities",
+        "plan_labels",
+        "task_labels",
+        "task_watchers",
+        "plan_task_coding_profile",
+        "task_clarification",
+        "coding_task_brief",
+        "coding_task_validation_run",
+        "coding_validation_artifact",
+        "coding_agent_suggestion",
+        "coding_agent_suggestion_apply",
+        "coding_blocker_report",
+        "code_repos",
+        "code_insights",
+        "code_snapshots",
+        "code_hotspots",
+        "code_learning_events",
+        "code_dependencies",
+        "code_quality_snapshots",
+        "code_reviews",
+        "code_dep_alerts",
+        "code_search_index",
+        "project_agent_states",
+        "agent_findings",
+        "agent_research",
+        "agent_goals",
+        "agent_evolution",
+        "agent_messages",
+        "po_questions",
+        "po_requirements",
+        "qa_test_cases",
+        "qa_test_runs",
+        "qa_bug_reports",
+    }
+)
+_PROJECT_DOMAIN_TARGETED_TESTS = (
+    "test_planner_coding",
+    "test_brain_page_domain.py",
+    "test_brain_http_domain.py",
+    "test_brain_project_",
+    "test_projects.py",
+    "test_code_agent.py",
+)
 
 
 def _bootstrap_test_schema() -> None:
@@ -202,15 +253,49 @@ def _truncate_lock_recoverable(exc: BaseException) -> bool:
     return "locknotavailable" in low.replace(" ", "") or "lock timeout" in low
 
 
-def _truncate_app_tables() -> None:
+def _terminate_stale_truncate_peers(max_age_s: int = 90) -> None:
+    """Kill stale active TRUNCATE sessions left behind by timed-out pytest runs."""
+    if not (os.environ.get("CHILI_PYTEST") or "").strip():
+        return
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    SELECT pg_terminate_backend(pid)
+                    FROM pg_stat_activity
+                    WHERE datname = current_database()
+                      AND pid <> pg_backend_pid()
+                      AND backend_type = 'client backend'
+                      AND state = 'active'
+                      AND query ILIKE 'TRUNCATE %'
+                      AND now() - query_start > make_interval(secs => :max_age_s)
+                    """
+                ),
+                {"max_age_s": int(max_age_s)},
+            )
+    except Exception:
+        pass
+
+
+def _truncate_app_tables(table_names: frozenset[str] | None = None) -> None:
     """Remove row data between tests; keep schema_version so migrations are not re-run."""
     # Static neural mesh topology is seeded by migration 086; keep nodes/edges so tests
     # do not need to re-seed the graph definition every time.
     _skip_truncate = frozenset({"schema_version", "brain_graph_nodes", "brain_graph_edges"})
+    if table_names is not None:
+        _evict_idle_in_transaction_peers()
+        _terminate_stale_truncate_peers()
+        with engine.begin() as conn:
+            for table in reversed(Base.metadata.sorted_tables):
+                if table.name in _skip_truncate or table.name not in table_names:
+                    continue
+                conn.execute(text(f'DELETE FROM "{table.name}"'))
+        return
     names = [
         f'"{t.name}"'
         for t in Base.metadata.sorted_tables
-        if t.name not in _skip_truncate
+        if t.name not in _skip_truncate and (table_names is None or t.name in table_names)
     ]
     if not names:
         return
@@ -219,6 +304,7 @@ def _truncate_app_tables() -> None:
     lock_s = max(30, int(os.environ.get("CHILI_PYTEST_LOCK_TIMEOUT_S", "120")))
     for attempt in range(attempts):
         _evict_idle_in_transaction_peers()
+        _terminate_stale_truncate_peers()
         try:
             with engine.begin() as conn:
                 conn.execute(text(f"SET LOCAL lock_timeout = '{lock_s}s'"))
@@ -247,8 +333,16 @@ def _truncate_app_tables() -> None:
             time.sleep(0.4 * (attempt + 1))
 
 
+def _test_prefers_targeted_cleanup(request) -> bool:
+    try:
+        name = Path(str(request.node.fspath)).name.lower()
+    except Exception:
+        return False
+    return any(token in name for token in _PROJECT_DOMAIN_TARGETED_TESTS)
+
+
 @pytest.fixture()
-def db():
+def db(request):
     """Yield a DB session; tables are truncated at test start.
 
     We do not TRUNCATE again in ``finally``: the session-scoped ASGI ``TestClient`` keeps
@@ -256,7 +350,9 @@ def db():
     teardown errors (lock timeout) after PASSED.
     """
     _bootstrap_test_schema()
-    _truncate_app_tables()
+    _truncate_app_tables(
+        _PROJECT_DOMAIN_TARGETED_TABLES if _test_prefers_targeted_cleanup(request) else None
+    )
     SessionTesting = sessionmaker(autocommit=False, autoflush=False, bind=engine)
     session = SessionTesting()
     try:

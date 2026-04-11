@@ -1,0 +1,12 @@
+<div id="domain-project" style="display:{% if _bd == 'project' %}block{% else %}none{% endif %}">
+  <div class="b-main-header">
+    <h2>Project Brain</h2>
+    <span id="code-scheduler-info" style="font-size:10px;color:var(--text-muted)"></span>
+  </div>
+
+  {% include "brain_project_workspace_header.html" %}
+  {% include "brain_project_pane_handoff.html" %}
+  {% include "brain_project_pane_workspace.html" %}
+  {% include "brain_project_pane_agents.html" %}
+  {% include "brain_project_pane_feed.html" %}
+</div>

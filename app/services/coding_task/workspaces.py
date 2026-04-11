@@ -1,0 +1,230 @@
+"""Canonical workspace binding helpers for planner coding tasks."""
+from __future__ import annotations
+
+from pathlib import Path
+
+from sqlalchemy import or_
+from sqlalchemy.orm import Query, Session
+
+from ...models.code_brain import CodeRepo
+from ...models.coding_task import PlanTaskCodingProfile
+from . import envelope
+
+
+def _workspace_query(db: Session, user_id: int | None = None) -> Query:
+    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
+    if user_id is None:
+        return q
+    return q.filter(or_(CodeRepo.user_id == user_id, CodeRepo.user_id.is_(None)))
+
+
+def list_workspace_roots() -> list[Path]:
+    return envelope.list_code_repo_roots()
+
+
+def legacy_workspace_root(repo_index: int | None) -> Path | None:
+    if repo_index is None:
+        return None
+    roots = list_workspace_roots()
+    try:
+        idx = int(repo_index)
+    except (TypeError, ValueError):
+        return None
+    if idx < 0 or idx >= len(roots):
+        return None
+    return roots[idx]
+
+
+def legacy_workspace_index_for_path(path: str | Path | None) -> int | None:
+    if not path:
+        return None
+    try:
+        target = Path(path).resolve()
+    except OSError:
+        return None
+    for idx, root in enumerate(list_workspace_roots()):
+        try:
+            if root.resolve() == target:
+                return idx
+        except OSError:
+            continue
+    return None
+
+
+def get_active_workspace_repo(
+    db: Session,
+    code_repo_id: int | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    if code_repo_id is None:
+        return None
+    return (
+        _workspace_query(db, user_id=user_id)
+        .filter(CodeRepo.id == int(code_repo_id))
+        .first()
+    )
+
+
+def resolve_workspace_repo_from_legacy_index(
+    db: Session,
+    repo_index: int | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    root = legacy_workspace_root(repo_index)
+    if root is None:
+        return None
+    for row in _workspace_query(db, user_id=user_id).all():
+        try:
+            if Path(row.path).resolve() == root.resolve():
+                return row
+        except OSError:
+            continue
+    return None
+
+
+def resolve_workspace_repo_by_name(
+    db: Session,
+    repo_name: str | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    name = (repo_name or "").strip().lower()
+    if not name:
+        return None
+    matches = [
+        row
+        for row in _workspace_query(db, user_id=user_id).all()
+        if (row.name or "").strip().lower() == name
+    ]
+    if len(matches) > 1:
+        raise ValueError("Multiple active registered repos share that name; choose by code_repo_id.")
+    return matches[0] if matches else None
+
+
+def lookup_workspace_repo_for_profile(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    if profile is None:
+        return None
+    repo = get_active_workspace_repo(db, profile.code_repo_id, user_id=user_id)
+    if repo is not None:
+        return repo
+    return resolve_workspace_repo_from_legacy_index(db, profile.repo_index, user_id=user_id)
+
+
+def workspace_binding_reason(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> str | None:
+    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    if repo is not None:
+        return None
+    if profile is None:
+        return "No workspace is bound to this task yet."
+    if profile.code_repo_id is not None:
+        return "The bound workspace is inactive or unavailable."
+    if legacy_workspace_root(profile.repo_index) is not None:
+        return "The legacy repo_index points to a directory that is not registered as a workspace."
+    return "No registered workspace matches this task profile."
+
+
+def build_workspace_binding_dict(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> dict:
+    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    legacy_root = legacy_workspace_root(profile.repo_index if profile else 0)
+    effective_repo_id = int(repo.id) if repo is not None else (
+        int(profile.code_repo_id) if profile and profile.code_repo_id is not None else None
+    )
+    return {
+        "repo_index": int(profile.repo_index) if profile is not None else 0,
+        "code_repo_id": effective_repo_id,
+        "repo_name": repo.name if repo is not None else None,
+        "repo_path": (
+            str(Path(repo.path).resolve())
+            if repo is not None
+            else (str(legacy_root) if legacy_root is not None else None)
+        ),
+        "sub_path": (profile.sub_path or "") if profile is not None else "",
+        "workspace_bound": repo is not None,
+    }
+
+
+def bind_profile_workspace(
+    db: Session,
+    profile: PlanTaskCodingProfile,
+    *,
+    code_repo_id: int | None = None,
+    repo_name: str | None = None,
+    repo_index: int | None = None,
+    user_id: int | None = None,
+) -> CodeRepo | None:
+    repo: CodeRepo | None = None
+    if code_repo_id is not None:
+        repo = get_active_workspace_repo(db, code_repo_id, user_id=user_id)
+        if repo is None:
+            raise ValueError("code_repo_id does not point to an active registered workspace.")
+        profile.code_repo_id = int(repo.id)
+        idx = legacy_workspace_index_for_path(repo.path)
+        if idx is not None:
+            profile.repo_index = idx
+        return repo
+
+    if repo_name is not None:
+        repo = resolve_workspace_repo_by_name(db, repo_name, user_id=user_id)
+        if repo is None:
+            raise ValueError("repo_name does not match an active registered workspace.")
+        profile.code_repo_id = int(repo.id)
+        idx = legacy_workspace_index_for_path(repo.path)
+        if idx is not None:
+            profile.repo_index = idx
+        return repo
+
+    if repo_index is not None:
+        profile.repo_index = int(repo_index)
+        repo = resolve_workspace_repo_from_legacy_index(db, repo_index, user_id=user_id)
+        profile.code_repo_id = int(repo.id) if repo is not None else None
+        return repo
+
+    return lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+
+
+def resolve_profile_cwd(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> Path:
+    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    if repo is None:
+        raise ValueError(
+            "Task workspace is not bound to an active registered repo. Rebind the task to a Project workspace first."
+        )
+    try:
+        root = Path(repo.path).resolve()
+    except OSError as exc:
+        raise ValueError("Bound workspace path could not be resolved.") from exc
+    rel = ((profile.sub_path if profile is not None else "") or "").strip().replace("\\", "/").strip("/")
+    if not rel:
+        cwd = root
+    else:
+        if ".." in Path(rel).parts:
+            raise ValueError("sub_path must not contain '..'")
+        cwd = (root / rel).resolve()
+    try:
+        cwd.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("Resolved cwd escapes the bound workspace root.") from exc
+    if not cwd.is_dir():
+        raise ValueError("Resolved cwd is not a directory.")
+    return cwd

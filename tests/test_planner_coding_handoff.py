@@ -27,8 +27,19 @@ _ALLOWED_CLARIFICATION_KEYS = frozenset(
 _ALLOWED_TASK_KEYS = frozenset(
     {"id", "project_id", "title", "coding_readiness_state", "coding_workflow_mode"}
 )
-_ALLOWED_PROFILE_KEYS = frozenset({"repo_index", "sub_path"})
-_ALLOWED_OPS_KEYS = frozenset({"code_repos_configured_count", "repo_index_valid", "cwd_resolvable"})
+_ALLOWED_PROFILE_KEYS = frozenset(
+    {"repo_index", "code_repo_id", "repo_name", "repo_path", "sub_path", "workspace_bound", "brief_approved_at"}
+)
+_ALLOWED_OPS_KEYS = frozenset(
+    {
+        "code_repos_configured_count",
+        "repo_index_valid",
+        "workspace_bound",
+        "workspace_indexed",
+        "workspace_reason",
+        "cwd_resolvable",
+    }
+)
 _ALLOWED_BRIEF_KEYS = frozenset({"id", "version", "body"})
 _ALLOWED_VAL_KEYS = frozenset(
     {
@@ -66,7 +77,9 @@ def test_handoff_ok_shape_and_allowlist(paired_client, db):
     assert set(h["task"].keys()) == _ALLOWED_TASK_KEYS
     assert h["task"]["project_id"] == p.id
     assert set(h["profile"].keys()) == _ALLOWED_PROFILE_KEYS
+    assert h["profile"]["workspace_bound"] is False
     assert set(h["ops_hints"].keys()) == _ALLOWED_OPS_KEYS
+    assert h["ops_hints"]["workspace_bound"] is False
     assert h["brief"] is None
     assert h["validation_latest"] is None
     assert h["blockers"] == []
@@ -207,6 +220,7 @@ def test_handoff_brief_and_validation_latest_allowlists(paired_client, db):
     h = r.json()["handoff"]
     assert set(h["brief"].keys()) == _ALLOWED_BRIEF_KEYS
     assert h["brief"]["body"] == "Hello brief"
+    assert set(h["profile"].keys()) == _ALLOWED_PROFILE_KEYS
     assert set(h["validation_latest"].keys()) == _ALLOWED_VAL_KEYS
     assert h["validation_latest"]["id"] == run.id
     assert len(h["artifact_previews"]) == 1

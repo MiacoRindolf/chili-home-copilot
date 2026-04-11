@@ -7,6 +7,7 @@ from unittest.mock import patch
 from sqlalchemy import text
 
 from app.models import PlanProject, PlanTask, ProjectMember
+from app.models.code_brain import CodeRepo
 from app.services.coding_task.validator_runner import StepResult
 
 
@@ -29,6 +30,7 @@ def test_post_validation_summary_shows_run_and_read_path_idempotent(paired_clien
     db.add(ProjectMember(project_id=p.id, user_id=user.id, role="owner"))
     t = PlanTask(project_id=p.id, title="Vis task", reporter_id=user.id)
     db.add(t)
+    db.add(CodeRepo(user_id=user.id, path=str(tmp_path), name="workspace", active=True))
     db.commit()
     tid = t.id
 

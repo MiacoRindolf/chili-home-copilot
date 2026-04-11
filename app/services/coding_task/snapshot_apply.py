@@ -8,14 +8,13 @@ from pathlib import Path
 from sqlalchemy.orm import Session
 
 from ...models import PlanTask
-from ...models.code_brain import CodeRepo
 from ...models.coding_task import (
     CodingAgentSuggestion,
     CodingAgentSuggestionApply,
     PlanTaskCodingProfile,
 )
-from .agent_suggest import resolve_code_repo_id_for_task_repo_index
 from .envelope import subprocess_safe_env, truncate_text
+from .workspaces import lookup_workspace_repo_for_profile
 
 _AUDIT_MESSAGE_MAX = 4000
 _APPLY_TIMEOUT_SEC = 120
@@ -39,15 +38,11 @@ def get_suggestion_row_for_apply(
 
 def _repo_root_for_task(db: Session, task: PlanTask, user_id: int) -> Path | None:
     prof = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
-    ri = int(prof.repo_index) if prof else 0
-    repo_id = resolve_code_repo_id_for_task_repo_index(db, user_id, ri)
-    if repo_id is None:
-        return None
-    row = db.query(CodeRepo).filter(CodeRepo.id == repo_id, CodeRepo.active.is_(True)).first()
-    if not row:
+    repo = lookup_workspace_repo_for_profile(db, prof, user_id=user_id)
+    if repo is None:
         return None
     try:
-        return Path(row.path).resolve()
+        return Path(repo.path).resolve()
     except OSError:
         return None
 

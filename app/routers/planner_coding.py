@@ -97,6 +97,8 @@ class BriefBody(BaseModel):
 
 
 class ProfileUpdateBody(BaseModel):
+    code_repo_id: int | None = Field(default=None, ge=1)
+    repo_name: str | None = Field(default=None, max_length=200)
     repo_index: int | None = Field(default=None, ge=0)
     sub_path: str | None = Field(default=None, max_length=2000)
 
@@ -143,7 +145,7 @@ def api_coding_summary(task_id: int, request: Request, db: Session = Depends(get
     t = _get_task_readable(db, task_id, identity["user_id"])
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
-    summary = get_coding_summary_dict(db, t)
+    summary = get_coding_summary_dict(db, t, user_id=identity["user_id"])
     return {"ok": True, "summary": summary}
 
 
@@ -156,7 +158,7 @@ def api_coding_handoff(task_id: int, request: Request, db: Session = Depends(get
     t = _get_task_readable(db, task_id, identity["user_id"])
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
-    handoff = build_handoff_dict(db, t)
+    handoff = build_handoff_dict(db, t, user_id=identity["user_id"])
     return {"ok": True, "handoff": handoff}
 
 
@@ -311,8 +313,11 @@ def api_update_profile(
         prof = update_coding_profile(
             db,
             t,
+            code_repo_id=body.code_repo_id,
+            repo_name=body.repo_name,
             repo_index=body.repo_index,
             sub_path=body.sub_path,
+            user_id=identity["user_id"],
         )
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=400)
@@ -334,7 +339,12 @@ def api_run_validation(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     try:
-        result = run_validation_for_task(db, t, trigger_source=body.trigger_source)
+        result = run_validation_for_task(
+            db,
+            t,
+            user_id=identity["user_id"],
+            trigger_source=body.trigger_source,
+        )
     except ValueError as e:
         return JSONResponse(_preflight_error_payload(db, t, str(e)), status_code=400)
     return {"ok": True, **result}
