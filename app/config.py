@@ -598,6 +598,25 @@ class Settings(BaseSettings):
     brain_live_depromotion_min_closed_trades: int = 8
     brain_live_depromotion_max_gap_pct: float = 25.0
 
+    # Phase 3: live/paper drift vs research baseline (repeatable-edge promoted/live only).
+    brain_live_drift_enabled: bool = False
+    brain_live_drift_window_days: int = 120
+    brain_live_drift_live_min_primary: int = 8
+    brain_live_drift_min_trades: int = 8
+    brain_live_drift_baseline_p0_low: float = 0.05
+    brain_live_drift_baseline_p0_high: float = 0.95
+    brain_live_drift_warning_delta_pp: float = 8.0
+    brain_live_drift_critical_delta_pp: float = 18.0
+    brain_live_drift_strong_p_like: float = 0.02
+    brain_live_drift_confidence_nudge_enabled: bool = True
+    brain_live_drift_confidence_mult_healthy: float = 1.0
+    brain_live_drift_confidence_mult_warning: float = 0.94
+    brain_live_drift_confidence_mult_critical: float = 0.88
+    brain_live_drift_confidence_floor: float = 0.1
+    brain_live_drift_confidence_cap: float = 0.95
+    brain_live_drift_auto_challenged_enabled: bool = False
+    brain_live_drift_auto_challenged_max_p_like: float = 0.02
+
     # When a pattern is promoted, initialize paper_book_json for optional shadow tracking.
     brain_paper_book_on_promotion: bool = False
 

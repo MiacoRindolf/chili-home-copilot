@@ -612,6 +612,8 @@ def api_tradeable_patterns(
         )
 
     rows = q.limit(lim).all()
+    from ...services.trading.live_drift import live_drift_summary as _live_drift_summary
+
     sp_ids = [p.id for p in rows]
     kpi_by_sp = _research_kpi_summary_for_scan_patterns(db, sp_ids)
     insight_by_sp: dict[int, int] = {}
@@ -654,6 +656,7 @@ def api_tradeable_patterns(
             oos_val = {}
 
         ee = oos_val.get("edge_evidence") if isinstance(oos_val, dict) else None
+        _ld = oos_val.get("live_drift") if isinstance(oos_val.get("live_drift"), dict) else None
         out.append(
             {
                 "id": p.id,
@@ -675,6 +678,7 @@ def api_tradeable_patterns(
                 "bench_stress_passes_gate": stress_pass,
                 "oos_validation": oos_val,
                 "edge_evidence": ee if isinstance(ee, dict) else None,
+                "live_drift_summary": _live_drift_summary(_ld),
                 "queue_tier": getattr(p, "queue_tier", None),
                 "linked_insight_id": insight_by_sp.get(p.id),
                 "research_kpi_summary": kpi_by_sp.get(p.id),
@@ -735,6 +739,8 @@ def api_research_edge_patterns(
             if spid is not None and spid not in insight_by_sp:
                 insight_by_sp[int(spid)] = int(iid)
 
+    from ...services.trading.live_drift import live_drift_summary as _live_drift_summary_re
+
     out = []
     for p in rows:
         oos_val = getattr(p, "oos_validation_json", None) or {}
@@ -751,6 +757,7 @@ def api_research_edge_patterns(
             )
             wr_source = "oos" if oos_wr is not None else None
         tc = p.oos_trade_count if p.oos_trade_count is not None else p.backtest_count
+        _ldr = oos_val.get("live_drift") if isinstance(oos_val.get("live_drift"), dict) else None
         out.append(
             {
                 "id": p.id,
@@ -762,6 +769,7 @@ def api_research_edge_patterns(
                 "trade_count_for_gate": int(tc or 0),
                 "edge_evidence": ee if isinstance(ee, dict) else None,
                 "oos_validation": oos_val,
+                "live_drift_summary": _live_drift_summary_re(_ldr),
                 "linked_insight_id": insight_by_sp.get(p.id),
             }
         )

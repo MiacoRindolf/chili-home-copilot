@@ -5557,6 +5557,10 @@ def test_pattern_hypothesis(
     oos_robust_mins: list[float] = []
     integrity_rows: list[dict[str, Any]] = []
     eval_rows: list[dict[str, Any]] = []
+    # First persisted insight backtest in this pass (``save_backtest``) supplies the ledger
+    # param_hash via ``BacktestParamSet.param_hash`` — same canonical blob as stored rows.
+    ledger_backtest_param_hash: str | None = None
+    from ...models.trading import BacktestParamSet as _LedgerBacktestParamSet
 
     for ticker in tickers[:5]:
         try:
@@ -5625,13 +5629,19 @@ def test_pattern_hypothesis(
                         pass
             if linked_insight:
                 try:
-                    save_backtest(
+                    _bt_row = save_backtest(
                         db,
                         linked_insight.user_id,
                         result,
                         insight_id=linked_insight.id,
                         scan_pattern_id=pattern.id,
                     )
+                    if ledger_backtest_param_hash is None and _bt_row is not None:
+                        _psid = getattr(_bt_row, "param_set_id", None)
+                        if _psid is not None:
+                            _bps = db.get(_LedgerBacktestParamSet, int(_psid))
+                            if _bps is not None:
+                                ledger_backtest_param_hash = _bps.param_hash
                 except Exception:
                     try:
                         db.rollback()
@@ -5956,7 +5966,7 @@ def test_pattern_hypothesis(
                     slice_key=_slice_key,
                     scan_pattern_id=int(pattern.id),
                     rules_fingerprint=_rfp,
-                    param_hash=None,
+                    param_hash=ledger_backtest_param_hash,
                 )
                 oos_merged["selection_bias"] = build_selection_bias_contract(
                     db, slice_key=_slice_key, ledger_inserted=_ins
@@ -7962,6 +7972,13 @@ def run_learning_cycle(
             except Exception as e:
                 logger.warning("[learning] live depromotion failed: %s", e)
                 report["live_depromotion"] = {"ok": False, "error": str(e)}
+            try:
+                from .live_drift import run_live_drift_refresh
+
+                report["live_drift"] = run_live_drift_refresh(db)
+            except Exception as e:
+                logger.warning("[learning] live drift refresh failed: %s", e)
+                report["live_drift"] = {"ok": False, "error": str(e)}
 
         # Step 14: Finalize + log
         # graph-node: c_meta/finalize
