@@ -4256,6 +4256,104 @@ def _migration_094_trading_autopilot_runtime(conn) -> None:
     conn.commit()
 
 
+def _migration_095_task_workspace_binding(conn) -> None:
+    """Canonical planner task workspace binding via code_repo_id with legacy repo_index backfill."""
+    tables = _tables(conn)
+    if "plan_task_coding_profile" not in tables or "code_repos" not in tables:
+        return
+
+    cols = _columns(conn, "plan_task_coding_profile")
+    if "code_repo_id" not in cols:
+        conn.execute(text("ALTER TABLE plan_task_coding_profile ADD COLUMN code_repo_id INTEGER"))
+        conn.commit()
+
+    try:
+        conn.execute(
+            text(
+                """
+                ALTER TABLE plan_task_coding_profile
+                ADD CONSTRAINT fk_plan_task_coding_profile_code_repo_id
+                FOREIGN KEY (code_repo_id) REFERENCES code_repos(id) ON DELETE SET NULL
+                """
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+    try:
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_plan_task_coding_profile_code_repo_id "
+                "ON plan_task_coding_profile (code_repo_id)"
+            )
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+
+    try:
+        from pathlib import Path
+
+        from .config import settings
+
+        raw = (getattr(settings, "code_brain_repos", "") or "").strip()
+        roots = []
+        if raw:
+            for part in raw.split(","):
+                part = part.strip()
+                if not part:
+                    continue
+                try:
+                    roots.append(Path(part).resolve())
+                except OSError:
+                    continue
+
+        if not roots:
+            return
+
+        repo_rows = conn.execute(
+            text("SELECT id, path FROM code_repos WHERE active IS TRUE")
+        ).fetchall()
+        path_to_repo_id: dict[str, int] = {}
+        for repo_id, path in repo_rows:
+            try:
+                path_to_repo_id[str(Path(path).resolve())] = int(repo_id)
+            except OSError:
+                continue
+
+        prof_rows = conn.execute(
+            text(
+                "SELECT task_id, repo_index FROM plan_task_coding_profile "
+                "WHERE code_repo_id IS NULL"
+            )
+        ).fetchall()
+        changed = False
+        for task_id, repo_index in prof_rows:
+            try:
+                idx = int(repo_index)
+            except (TypeError, ValueError):
+                continue
+            if idx < 0 or idx >= len(roots):
+                continue
+            repo_id = path_to_repo_id.get(str(roots[idx]))
+            if repo_id is None:
+                continue
+            conn.execute(
+                text(
+                    "UPDATE plan_task_coding_profile "
+                    "SET code_repo_id = :repo_id "
+                    "WHERE task_id = :task_id"
+                ),
+                {"repo_id": repo_id, "task_id": task_id},
+            )
+            changed = True
+        if changed:
+            conn.commit()
+    except Exception:
+        conn.rollback()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4352,6 +4450,7 @@ MIGRATIONS = [
     ("092_speculative_momentum_neural_subgraph", _migration_092_speculative_momentum_neural_subgraph),
     ("093_automation_session_promotion_lineage", _migration_093_automation_session_promotion_lineage),
     ("094_trading_autopilot_runtime", _migration_094_trading_autopilot_runtime),
+    ("095_task_workspace_binding", _migration_095_task_workspace_binding),
 ]
 
 

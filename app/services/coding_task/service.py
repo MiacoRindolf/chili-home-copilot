@@ -12,8 +12,9 @@ from ...models import (
     CodingValidationArtifact,
     CodingBlockerReport,
 )
+from ...models.code_brain import CodeRepo
 from .blockers import record_blockers_for_run
-from .envelope import list_code_repo_roots, resolve_task_cwd, truncate_text
+from .envelope import list_code_repo_roots, truncate_text
 from .po_v2 import (
     assert_ready_for_validation,
     get_or_create_profile,
@@ -24,17 +25,24 @@ from .po_v2 import (
     sync_readiness,
 )
 from .validator_runner import run_phase1_validation
+from .workspaces import (
+    bind_profile_workspace,
+    build_workspace_binding_dict,
+    lookup_workspace_repo_for_profile,
+    resolve_profile_cwd,
+    workspace_binding_reason,
+)
 
 
-def _profile_dict(db: Session, task_id: int) -> dict:
+def _profile_dict(db: Session, task_id: int, *, user_id: int | None = None) -> dict:
     p = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task_id).first()
     if not p:
-        return {"repo_index": 0, "sub_path": "", "brief_approved_at": None}
-    return {
-        "repo_index": p.repo_index,
-        "sub_path": p.sub_path or "",
-        "brief_approved_at": p.brief_approved_at.isoformat() if p.brief_approved_at else None,
-    }
+        profile = build_workspace_binding_dict(db, None, user_id=user_id)
+        profile["brief_approved_at"] = None
+        return profile
+    profile = build_workspace_binding_dict(db, p, user_id=user_id)
+    profile["brief_approved_at"] = p.brief_approved_at.isoformat() if p.brief_approved_at else None
+    return profile
 
 
 def _clar_dict(c) -> dict:
@@ -61,23 +69,31 @@ def _brief_dict(b) -> dict | None:
     }
 
 
-def _ops_hints_dict(db: Session, task: PlanTask) -> dict:
+def _ops_hints_dict(db: Session, task: PlanTask, *, user_id: int | None = None) -> dict:
     """Minimal non-sensitive hints for cwd/repo alignment (counts and booleans only)."""
     roots = list_code_repo_roots()
-    n = len(roots)
     p = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
     ri = p.repo_index if p else 0
-    repo_index_valid = n == 0 or (0 <= ri < n)
+    repo_index_valid = len(roots) == 0 or (0 <= ri < len(roots))
+    repo = lookup_workspace_repo_for_profile(db, p, user_id=user_id)
     cwd_resolvable = False
-    if n > 0 and repo_index_valid and p is not None:
+    if p is not None:
         try:
-            resolve_task_cwd(p.repo_index, p.sub_path or "")
+            resolve_profile_cwd(db, p, user_id=user_id)
             cwd_resolvable = True
-        except Exception:
+        except ValueError:
             cwd_resolvable = False
+    repo_count_q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
+    if user_id is not None:
+        repo_count_q = repo_count_q.filter(
+            (CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None))
+        )
     return {
-        "code_repos_configured_count": n,
+        "code_repos_configured_count": repo_count_q.count(),
         "repo_index_valid": repo_index_valid,
+        "workspace_bound": repo is not None,
+        "workspace_indexed": bool(repo and (repo.last_indexed or (repo.file_count or 0) > 0)),
+        "workspace_reason": workspace_binding_reason(db, p, user_id=user_id),
         "cwd_resolvable": cwd_resolvable,
     }
 
@@ -97,18 +113,18 @@ def _validation_runs_for_task(db: Session, task_id: int, limit: int) -> list:
     )
 
 
-def get_coding_summary_dict(db: Session, task: PlanTask) -> dict:
+def get_coding_summary_dict(db: Session, task: PlanTask, *, user_id: int | None = None) -> dict:
     """Assemble coding summary read-only: no sync_readiness, no commits (Phase 2 read-path contract)."""
     br = latest_brief(db, task.id)
     runs = _validation_runs_for_task(db, task.id, _VALIDATION_RUNS_LIST_DEFAULT_LIMIT)
     return {
         "coding_workflow_mode": task.coding_workflow_mode or "tracked",
         "coding_readiness_state": preview_readiness(db, task),
-        "profile": _profile_dict(db, task.id),
+        "profile": _profile_dict(db, task.id, user_id=user_id),
         "clarifications": [_clar_dict(c) for c in list_clarifications(db, task.id)],
         "brief": _brief_dict(br),
         "open_clarification_count": open_clarification_count(db, task.id),
-        "ops_hints": _ops_hints_dict(db, task),
+        "ops_hints": _ops_hints_dict(db, task, user_id=user_id),
         "validation_runs": [
             {
                 "id": r.id,
@@ -129,35 +145,47 @@ def update_coding_profile(
     db: Session,
     task: PlanTask,
     *,
+    code_repo_id: int | None = None,
+    repo_name: str | None = None,
     repo_index: int | None = None,
     sub_path: str | None = None,
+    user_id: int | None = None,
 ) -> dict:
     roots = list_code_repo_roots()
     p = get_or_create_profile(db, task.id)
     if repo_index is not None:
         ri = int(repo_index)
-        if roots and ri >= len(roots):
+        if ri < 0 or (roots and ri >= len(roots)):
             raise ValueError("repo_index out of range for code_brain_repos.")
-        p.repo_index = ri
+    if code_repo_id is not None or repo_name is not None or repo_index is not None:
+        bind_profile_workspace(
+            db,
+            p,
+            code_repo_id=code_repo_id,
+            repo_name=repo_name,
+            repo_index=repo_index,
+            user_id=user_id,
+        )
     if sub_path is not None:
         p.sub_path = sub_path.strip().replace("\\", "/")
     p.updated_at = datetime.utcnow()
     db.commit()
     db.refresh(task)
-    return _profile_dict(db, task.id)
+    return _profile_dict(db, task.id, user_id=user_id)
 
 
 def run_validation_for_task(
     db: Session,
     task: PlanTask,
     *,
+    user_id: int | None = None,
     trigger_source: str = "manual",
 ) -> dict:
     if trigger_source not in ("manual", "post_apply"):
         trigger_source = "manual"
     assert_ready_for_validation(db, task)
     prof = get_or_create_profile(db, task.id)
-    cwd = resolve_task_cwd(prof.repo_index, prof.sub_path or "")
+    cwd = resolve_profile_cwd(db, prof, user_id=user_id)
 
     task.coding_readiness_state = "validation_pending"
     run = CodingTaskValidationRun(
@@ -301,7 +329,7 @@ def list_validation_runs_metadata_dict(db: Session, task_id: int, limit: int | N
     return out
 
 
-def build_handoff_dict(db: Session, task: PlanTask) -> dict:
+def build_handoff_dict(db: Session, task: PlanTask, *, user_id: int | None = None) -> dict:
     """
     Read-only implementation handoff: existing rows only, latest validation run only for
     artifact_previews. Phase 7: clarifications from task_clarification only; readiness_context
@@ -419,11 +447,8 @@ def build_handoff_dict(db: Session, task: PlanTask) -> dict:
             "coding_workflow_mode": task.coding_workflow_mode or "tracked",
         },
         "brief": brief_out,
-        "profile": {
-            "repo_index": prof.repo_index if prof else 0,
-            "sub_path": (prof.sub_path or "") if prof else "",
-        },
-        "ops_hints": _ops_hints_dict(db, task),
+        "profile": _profile_dict(db, task.id, user_id=user_id),
+        "ops_hints": _ops_hints_dict(db, task, user_id=user_id),
         "validation_latest": validation_latest,
         "blockers": blockers_out,
         "artifact_previews": artifact_previews,

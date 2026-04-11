@@ -1,0 +1,31 @@
+<div id="project-cockpit-pane-workspace" data-project-pane="workspace" style="display:block">
+  <div class="brain-action-row project-toolbar">
+    <button onclick="triggerAllAgentsCycle()" id="btn-all-agents" class="brain-act-btn brain-act-primary">&#x1F504; Run All Agents</button>
+    <button onclick="triggerCodeLearn()" id="btn-code-learn" class="brain-act-btn" style="background:linear-gradient(135deg,#06b6d4,#0891b2)">&#x1F4BB; Reindex Code</button>
+    <button onclick="showAddRepoModal()" id="btn-project-add-repo" class="brain-act-btn" style="background:linear-gradient(135deg,#22c55e,#16a34a)">&#x2795; Add Repo</button>
+    <button onclick="codeAgentOpen()" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F916; Dev Assistant</button>
+    <span id="project-brain-status-text" class="project-toolbar-status"></span>
+  </div>
+
+  <div class="brain-section project-section-card" id="code-pipeline-section" style="display:none">
+    <div class="brain-section-title"><span class="bs-icon">&#x26A1;</span> Code Learning In Progress</div>
+    <div style="height:4px;background:var(--border);border-radius:2px;margin-top:4px">
+      <div id="code-progress-bar" style="height:100%;background:linear-gradient(90deg,#06b6d4,#0891b2);border-radius:2px;transition:width .3s;width:0%"></div>
+    </div>
+    <div class="project-inline-muted" style="display:flex;justify-content:space-between;margin-top:3px">
+      <span id="code-learning-step"></span>
+      <span id="code-learning-phase"></span>
+    </div>
+  </div>
+
+  <div class="brain-section project-section-card" id="code-agent-section" style="display:none">
+    <div class="brain-section-title"><span class="bs-icon">&#x1F916;</span> Dev Assistant</div>
+    <div class="code-agent-panel">
+      <div class="code-agent-input-row">
+        <textarea id="code-agent-prompt" placeholder="Ask Chili to analyze, refactor, or implement something..." rows="3" style="width:100%;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:12px;resize:vertical;font-family:inherit"></textarea>
+        <button onclick="runCodeAgent()" id="btn-code-agent" class="brain-act-btn" style="background:linear-gradient(135deg,#8b5cf6,#6d28d9);margin-top:6px">&#x1F680; Run Agent</button>
+      </div>
+      <div id="code-agent-result" class="project-result-host"></div>
+    </div>
+  </div>
+</div>

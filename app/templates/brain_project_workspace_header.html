@@ -1,0 +1,44 @@
+<div id="project-cockpit-nav" class="project-pane-nav">
+  <button
+    type="button"
+    class="brain-act-btn project-pane-tab is-active"
+    data-project-pane-target="workspace"
+    aria-pressed="true"
+  >
+    Workspace
+  </button>
+  <button
+    type="button"
+    class="brain-act-btn project-pane-tab"
+    data-project-pane-target="handoff"
+    aria-pressed="false"
+  >
+    Planner Handoff
+  </button>
+  <button
+    type="button"
+    class="brain-act-btn project-pane-tab"
+    data-project-pane-target="agents"
+    aria-pressed="false"
+  >
+    Agents
+  </button>
+  <button
+    type="button"
+    class="brain-act-btn project-pane-tab"
+    data-project-pane-target="feed"
+    aria-pressed="false"
+  >
+    Feed
+  </button>
+</div>
+
+<div class="brain-section project-section-card" id="project-workspace-bootstrap-section">
+  <div class="brain-section-title">
+    <span class="bs-icon">&#x1F4BB;</span> Developer Cockpit
+  </div>
+  <div id="project-workspace-summary" class="project-inline-muted">Loading workspace bootstrap...</div>
+  <div id="project-workspace-empty" class="project-empty-state"></div>
+  <ul id="project-workspace-checklist" class="project-checklist"></ul>
+  <div id="project-workspace-task-summary" class="project-task-summary"></div>
+</div>

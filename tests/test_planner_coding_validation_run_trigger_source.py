@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.models import PlanProject, PlanTask, ProjectMember
+from app.models.code_brain import CodeRepo
 from app.models.coding_task import CodingTaskValidationRun
 from app.services.coding_task.validator_runner import StepResult
 
@@ -29,11 +30,17 @@ def _ready_task(db, user):
     return tid
 
 
+def _register_workspace(db, user, path: Path):
+    db.add(CodeRepo(user_id=user.id, path=str(path), name="workspace", active=True))
+    db.commit()
+
+
 def test_validation_run_post_no_json_defaults_manual_trigger(paired_client, db, tmp_path: Path):
     client, user = paired_client
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
+    _register_workspace(db, user, tmp_path)
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
@@ -52,6 +59,7 @@ def test_validation_run_post_post_apply_trigger(paired_client, db, tmp_path: Pat
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
+    _register_workspace(db, user, tmp_path)
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 
@@ -72,6 +80,7 @@ def test_validation_run_post_empty_json_manual(paired_client, db, tmp_path: Path
     tid = _ready_task(db, user)
     tmp_path = tmp_path.resolve()
     (tmp_path / ".git").mkdir()
+    _register_workspace(db, user, tmp_path)
     client.put(f"/api/planner/tasks/{tid}/coding/brief", json={"body": "Brief."})
     client.post(f"/api/planner/tasks/{tid}/coding/brief/approve")
 

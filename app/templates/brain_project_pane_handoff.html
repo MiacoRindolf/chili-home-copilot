@@ -1,0 +1,48 @@
+<div id="project-cockpit-pane-handoff" data-project-pane="handoff" style="display:none">
+  <div id="brain-planner-handoff-bridge" class="project-section-card">
+    <div style="font-size:11px;font-weight:700;color:var(--text);">Planner implementation handoff (read-only)</div>
+    <div id="brain-planner-handoff-hint" class="project-summary-note"></div>
+    <div class="project-inline-actions">
+      <button type="button" class="brain-act-btn brain-act-primary project-mini-btn" id="brain-handoff-load-btn">Load handoff</button>
+      <button type="button" class="brain-act-btn project-mini-btn alt" id="brain-handoff-copy-json-btn">Copy handoff (JSON)</button>
+      <button type="button" class="brain-act-btn project-mini-btn alt" id="brain-handoff-copy-md-btn">Copy handoff (Markdown)</button>
+      <button type="button" class="brain-act-btn project-mini-btn muted" id="brain-handoff-prefill-code-search-btn" disabled>Prefill code search from task</button>
+      <button type="button" class="brain-act-btn project-mini-btn accent" id="brain-handoff-agent-suggest-btn" disabled title="One explicit run: bounded task context to Code Agent; review only; no auto-apply or validation">Suggest implementation (agent)</button>
+      <a id="brain-open-planner-link" href="/planner" style="display:none;font-size:10px;align-self:center;color:var(--accent);font-weight:600;">Open in Planner</a>
+    </div>
+    <div id="brain-handoff-preview-wrap" style="display:none;margin-top:10px;">
+      <div class="project-summary-note" style="margin-bottom:4px;">Preview (read-only; from explicit Load only; not auto-refreshed)</div>
+      <pre id="brain-handoff-preview" class="project-pre" style="margin:0;"></pre>
+    </div>
+    <div id="brain-handoff-project-bind" class="project-summary-note"></div>
+    <div id="brain-handoff-status" class="project-summary-note"></div>
+    <pre id="brain-handoff-agent-suggest-result" class="project-pre" style="display:none;margin-bottom:0;max-height:280px;"></pre>
+    <div class="project-inline-actions">
+      <button type="button" class="brain-act-btn project-mini-btn info" id="brain-handoff-save-suggestion-btn" disabled title="Saves the current on-screen successful agent result only (explicit); no auto-save">Save suggestion snapshot</button>
+      <button type="button" class="brain-act-btn project-mini-btn warn" id="brain-handoff-dry-run-snapshot-btn" disabled title="git apply --check only; does not write files; explicit click only; never auto-runs">Check patch (dry run)</button>
+      <button type="button" class="brain-act-btn project-mini-btn danger" id="brain-handoff-apply-snapshot-btn" disabled title="git apply stored snapshot diffs at repo root; all-or-nothing; confirm required">Apply snapshot to workspace</button>
+    </div>
+    <div id="brain-handoff-suggestions-wrap" style="margin-top:10px;display:none;">
+      <div style="font-size:10px;font-weight:700;color:var(--text);">Saved snapshots (metadata)</div>
+      <ul id="brain-handoff-suggestions-list" class="project-list-reset"></ul>
+    </div>
+    <pre id="brain-handoff-suggestion-detail" class="project-pre" style="display:none;margin-bottom:0;max-height:260px;"></pre>
+    <div id="brain-handoff-apply-attempts-wrap" style="display:none;margin-top:8px;">
+      <div class="project-inline-actions" style="margin-top:0;">
+        <span style="font-size:10px;font-weight:700;color:var(--text);">Apply attempts (metadata)</span>
+        <button type="button" class="brain-act-btn project-mini-btn muted" id="brain-handoff-apply-attempts-refresh-btn" title="Explicit refresh only; no auto-polling">Refresh</button>
+      </div>
+      <ul id="brain-handoff-apply-attempts-list" class="project-list-reset" style="font-size:9px;"></ul>
+    </div>
+    <div id="brain-handoff-validation-bridge-wrap" style="display:none;margin-top:10px;">
+      <div style="font-size:10px;font-weight:700;color:var(--text);">Phase 20 - Workspace validation (explicit)</div>
+      <div class="project-inline-actions" style="margin-top:6px;">
+        <button type="button" class="brain-act-btn project-mini-btn success" id="brain-handoff-run-validation-btn" title="Runs existing task validation tools once; non-destructive; requires planner edit access; never auto-runs">Run workspace validation</button>
+        <button type="button" class="brain-act-btn project-mini-btn muted" id="brain-handoff-validation-runs-refresh-btn" title="Load validation runs metadata only; explicit refresh; no auto-polling">Refresh runs list</button>
+      </div>
+      <ul id="brain-handoff-validation-runs-list" class="project-list-reset" style="font-size:9px;"></ul>
+      <pre id="brain-handoff-validation-run-result" class="project-pre compact" style="display:none;margin-bottom:0;max-height:160px;"></pre>
+    </div>
+    <pre id="brain-handoff-apply-result" class="project-pre" style="display:none;margin-bottom:0;max-height:180px;"></pre>
+  </div>
+</div>

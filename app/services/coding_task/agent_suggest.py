@@ -1,48 +1,18 @@
 """Task-first implementation bridge v1: bounded prompt + Code Agent, schema-free."""
 from __future__ import annotations
 
-from pathlib import Path
-
 from sqlalchemy.orm import Session
 
 from ...models import PlanTask
-from ...models.code_brain import CodeRepo
-from .envelope import list_code_repo_roots, truncate_text
+from .envelope import truncate_text
 from .service import build_handoff_dict
+from .workspaces import lookup_workspace_repo_for_profile
 
 # Prompt bounds (allowlist-only context; no full clarifications / artifacts / raw logs)
 _BRIDGE_TITLE_MAX_BYTES = 1500
 _BRIDGE_BRIEF_MAX_BYTES = 12_000
 _BRIDGE_BLOCKER_MAX = 3
 _BRIDGE_EXTRA_MAX_BYTES = 4000
-
-
-def resolve_code_repo_id_for_task_repo_index(db: Session, user_id: int, repo_index: int) -> int | None:
-    """
-    Map task profile repo_index to CodeRepo.id by matching resolved paths.
-    Fail closed: no guess, no fallback to another index.
-    """
-    roots = list_code_repo_roots()
-    if not roots or repo_index < 0 or repo_index >= len(roots):
-        return None
-    try:
-        target = roots[repo_index].resolve()
-    except OSError:
-        return None
-    rows = (
-        db.query(CodeRepo)
-        .filter(CodeRepo.active.is_(True), CodeRepo.user_id == user_id)
-        .all()
-    )
-    for r in rows:
-        try:
-            if Path(r.path).resolve() == target:
-                return int(r.id)
-        except OSError:
-            continue
-    return None
-
-
 def build_bounded_implementation_prompt(
     handoff: dict,
     extra_instructions: str | None = None,
@@ -60,6 +30,10 @@ def build_bounded_implementation_prompt(
 
     prof = handoff.get("profile") or {}
     sub_path = (prof.get("sub_path") or "").strip()
+    code_repo_id = prof.get("code_repo_id")
+    repo_name = prof.get("repo_name") or ""
+    repo_path = prof.get("repo_path") or ""
+    workspace_bound = bool(prof.get("workspace_bound"))
 
     brief = handoff.get("brief") or {}
     body = brief.get("body") or ""
@@ -78,6 +52,12 @@ def build_bounded_implementation_prompt(
         f"- task_id: {tid}",
         f"- project_id: {pid}",
         f"- title: {title_t}",
+        "",
+        "## Workspace binding",
+        f"- workspace_bound: {workspace_bound}",
+        f"- code_repo_id: {code_repo_id}",
+        f"- repo_name: {repo_name or '(unbound)'}",
+        f"- repo_path: {repo_path or '(unbound)'}",
         "",
         "## Focus path (relative to repo root)",
         f"- sub_path: {sub_path or '(repo root)'}",
@@ -131,24 +111,18 @@ async def run_agent_suggest_for_task(
     user_id: int,
     extra_instructions: str | None = None,
 ) -> dict:
-    handoff = build_handoff_dict(db, task)
-    profile = handoff.get("profile") or {}
-    try:
-        ri = int(profile.get("repo_index", 0))
-    except (TypeError, ValueError):
-        ri = 0
-
-    repo_id = resolve_code_repo_id_for_task_repo_index(db, user_id, ri)
-    if repo_id is None:
+    handoff = build_handoff_dict(db, task, user_id=user_id)
+    profile = task.coding_profile
+    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    if repo is None:
         return {
             "error": (
-                "No active Code Brain repository matches this task's coding profile (repo_index). "
-                "Register an indexed repo whose path matches CHILI's code_brain_repos entry for "
-                "that index, under your user, or adjust the task profile."
+                "No active registered workspace matches this task profile. Bind the task to a Project workspace "
+                "with code_repo_id or a registered legacy repo_index before running agent suggest."
             )
         }
 
     prompt = build_bounded_implementation_prompt(handoff, extra_instructions)
     from ..code_brain.agent import run_code_agent
 
-    return await run_code_agent(db, prompt, repo_id=repo_id, user_id=user_id)
+    return await run_code_agent(db, prompt, repo_id=int(repo.id), user_id=user_id)

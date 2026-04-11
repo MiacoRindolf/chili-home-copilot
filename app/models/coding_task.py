@@ -14,11 +14,13 @@ class PlanTaskCodingProfile(Base):
 
     task_id = Column(Integer, ForeignKey("plan_tasks.id", ondelete="CASCADE"), primary_key=True)
     repo_index = Column(Integer, nullable=False, default=0)
+    code_repo_id = Column(Integer, ForeignKey("code_repos.id", ondelete="SET NULL"), nullable=True, index=True)
     sub_path = Column(Text, nullable=False, default="")
     brief_approved_at = Column(DateTime, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
     task = relationship("PlanTask", back_populates="coding_profile")
+    code_repo = relationship("CodeRepo")
 
 
 class TaskClarification(Base):
