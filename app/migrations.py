@@ -4613,6 +4613,33 @@ def _migration_100_momentum_viability_scope(conn) -> None:
     conn.commit()
 
 
+def _migration_101_coding_execution_iteration(conn) -> None:
+    if "coding_execution_iteration" in _tables(conn):
+        return
+    conn.execute(text("""
+        CREATE TABLE coding_execution_iteration (
+            id SERIAL PRIMARY KEY,
+            run_id VARCHAR(64) NOT NULL,
+            iteration INTEGER NOT NULL DEFAULT 0,
+            state VARCHAR(32) NOT NULL DEFAULT 'planning',
+            prompt TEXT,
+            plan_json TEXT,
+            diffs_json TEXT,
+            files_changed_json TEXT,
+            apply_status VARCHAR(24),
+            test_exit_code INTEGER,
+            test_output TEXT,
+            diagnosis TEXT,
+            error_category VARCHAR(64),
+            model_used VARCHAR(200),
+            duration_ms INTEGER,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+        )
+    """))
+    conn.execute(text("CREATE INDEX ix_cei_run_id ON coding_execution_iteration (run_id)"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4715,6 +4742,7 @@ MIGRATIONS = [
     ("098_brain_validation_slice_ledger", _migration_098_brain_validation_slice_ledger),
     ("099_execution_audit_and_allocator", _migration_099_execution_audit_and_allocator),
     ("100_momentum_viability_scope", _migration_100_momentum_viability_scope),
+    ("101_coding_execution_iteration", _migration_101_coding_execution_iteration),
 ]
 
 

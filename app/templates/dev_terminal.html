@@ -1,0 +1,273 @@
+{% extends "base.html" %}
+{% block title %}CHILI Dev Terminal{% endblock %}
+{% block head_extra %}
+<style>
+  body { background: #0a0e17; color: #c9d1d9; font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace; font-size: 13px; }
+  [data-theme="dark"] body, [data-theme="light"] body { background: #0a0e17; color: #c9d1d9; }
+  #terminal { display: flex; flex-direction: column; height: 100vh; max-width: 1200px; margin: 0 auto; padding: 0 16px; }
+  #header { padding: 12px 0 8px; border-bottom: 1px solid #1e2d3d; flex-shrink: 0; display: flex; align-items: center; gap: 12px; }
+  #header h1 { font-size: 14px; font-weight: 600; color: #58a6ff; margin: 0; letter-spacing: 0.5px; }
+  #header .status { font-size: 11px; color: #484f58; }
+  #header .status.ready { color: #3fb950; }
+  #header .nav-links { margin-left: auto; display: flex; gap: 12px; }
+  #header .nav-links a { color: #484f58; text-decoration: none; font-size: 11px; }
+  #header .nav-links a:hover { color: #c9d1d9; }
+  #output { flex: 1; overflow-y: auto; padding: 16px 0; }
+  .entry { margin-bottom: 16px; }
+  .entry .prompt-line { color: #3fb950; margin-bottom: 4px; }
+  .entry .prompt-line::before { content: "> "; color: #484f58; }
+  .entry .response { color: #c9d1d9; white-space: pre-wrap; word-wrap: break-word; line-height: 1.6; }
+  .entry .response .event { color: #484f58; font-size: 12px; }
+  .entry .response .event.state { color: #d2a8ff; }
+  .entry .response .event.success { color: #3fb950; font-weight: 600; }
+  .entry .response .event.error { color: #f85149; }
+  .entry .response .event.info { color: #58a6ff; }
+  .entry .response .diff-block { background: #161b22; border: 1px solid #1e2d3d; border-radius: 6px; padding: 8px 12px; margin: 8px 0; overflow-x: auto; font-size: 12px; }
+  .entry .response .diff-block .add { color: #3fb950; }
+  .entry .response .diff-block .del { color: #f85149; }
+  .entry .response .diff-block .hdr { color: #58a6ff; }
+  .entry .actions { margin-top: 8px; display: flex; gap: 8px; }
+  .entry .actions button { background: transparent; border: 1px solid #1e2d3d; color: #c9d1d9; padding: 4px 12px; border-radius: 4px; cursor: pointer; font-family: inherit; font-size: 12px; }
+  .entry .actions button:hover { border-color: #58a6ff; color: #58a6ff; }
+  .entry .actions button.accept { border-color: #238636; color: #3fb950; }
+  .entry .actions button.accept:hover { background: #238636; color: #fff; }
+  .entry .actions button.reject { border-color: #da3633; color: #f85149; }
+  .entry .actions button.reject:hover { background: #da3633; color: #fff; }
+  #input-bar { border-top: 1px solid #1e2d3d; padding: 12px 0; flex-shrink: 0; display: flex; gap: 8px; align-items: center; }
+  #input-bar .chevron { color: #3fb950; font-weight: 600; flex-shrink: 0; }
+  #input-bar input { flex: 1; background: transparent; border: none; color: #c9d1d9; font-family: inherit; font-size: 13px; outline: none; caret-color: #58a6ff; }
+  #input-bar input::placeholder { color: #484f58; }
+  #input-bar .spinner { display: none; width: 14px; height: 14px; border: 2px solid #1e2d3d; border-top-color: #58a6ff; border-radius: 50%; animation: spin 0.8s linear infinite; }
+  #input-bar .spinner.active { display: block; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .welcome { color: #484f58; line-height: 1.8; }
+  .welcome strong { color: #c9d1d9; }
+  .welcome code { background: #161b22; padding: 2px 6px; border-radius: 3px; color: #d2a8ff; }
+</style>
+{% endblock %}
+{% block content %}
+<div id="terminal">
+  <div id="header">
+    <h1>CHILI DEV TERMINAL</h1>
+    <span class="status" id="status-indicator">checking...</span>
+    <div class="nav-links">
+      <a href="/brain?domain=project">project brain</a>
+      <a href="/chat">chat</a>
+      <a href="/admin">admin</a>
+    </div>
+  </div>
+  <div id="output">
+    <div class="welcome">
+      <strong>Autonomous code development terminal.</strong>
+      Type a coding request in natural language and CHILI will:
+      plan &rarr; generate &rarr; apply &rarr; test &rarr; diagnose &rarr; fix &rarr; verify
+
+      Commands:
+        <code>status</code>    system readiness and recent runs
+        <code>context</code>   what CHILI knows about the active repo
+        <code>review &lt;id&gt;</code>  inspect a previous run
+
+      Or just describe what you want to build or fix.
+    </div>
+  </div>
+  <div id="input-bar">
+    <span class="chevron">&gt;</span>
+    <input id="cmd-input" type="text" placeholder="describe a coding task..." autofocus autocomplete="off" />
+    <div class="spinner" id="spinner"></div>
+  </div>
+</div>
+<script>
+(function(){
+  const output = document.getElementById('output');
+  const input = document.getElementById('cmd-input');
+  const spinner = document.getElementById('spinner');
+  const statusEl = document.getElementById('status-indicator');
+  let running = false;
+
+  function scrollBottom() { output.scrollTop = output.scrollHeight; }
+
+  function appendEntry(promptText) {
+    const entry = document.createElement('div');
+    entry.className = 'entry';
+    entry.innerHTML = '<div class="prompt-line">' + escHtml(promptText) + '</div><div class="response"></div>';
+    output.appendChild(entry);
+    scrollBottom();
+    return entry;
+  }
+
+  function appendEvent(entry, cls, text) {
+    const resp = entry.querySelector('.response');
+    const ev = document.createElement('div');
+    ev.className = 'event ' + cls;
+    ev.textContent = text;
+    resp.appendChild(ev);
+    scrollBottom();
+  }
+
+  function appendDiff(entry, diffs) {
+    const resp = entry.querySelector('.response');
+    const block = document.createElement('div');
+    block.className = 'diff-block';
+    for (const d of diffs) {
+      for (const line of d.split('\n')) {
+        const span = document.createElement('div');
+        if (line.startsWith('+')) span.className = 'add';
+        else if (line.startsWith('-')) span.className = 'del';
+        else if (line.startsWith('@@') || line.startsWith('diff')) span.className = 'hdr';
+        span.textContent = line;
+        block.appendChild(span);
+      }
+    }
+    resp.appendChild(block);
+    scrollBottom();
+  }
+
+  function appendActions(entry, runId) {
+    const acts = document.createElement('div');
+    acts.className = 'actions';
+    const accept = document.createElement('button');
+    accept.className = 'accept';
+    accept.textContent = 'accept changes';
+    accept.onclick = () => doAccept(runId, 'accept', entry);
+    const reject = document.createElement('button');
+    reject.className = 'reject';
+    reject.textContent = 'reject';
+    reject.onclick = () => doAccept(runId, 'reject', entry);
+    acts.appendChild(accept);
+    acts.appendChild(reject);
+    entry.appendChild(acts);
+  }
+
+  async function doAccept(runId, action, entry) {
+    try {
+      const r = await fetch('/api/dev/accept', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({run_id: runId, action: action})
+      });
+      const d = await r.json();
+      appendEvent(entry, d.ok ? 'success' : 'error', d.message || d.error || 'done');
+      const acts = entry.querySelector('.actions');
+      if (acts) acts.remove();
+    } catch(e) { appendEvent(entry, 'error', 'request failed: ' + e.message); }
+  }
+
+  function escHtml(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+  async function handleCommand(text) {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+
+    if (trimmed === 'status') { return runBuiltin('/api/dev/status', trimmed); }
+    if (trimmed === 'context') { return runBuiltin('/api/dev/context', trimmed); }
+    if (trimmed.startsWith('review ')) {
+      const id = trimmed.slice(7).trim();
+      return runBuiltin('/api/dev/run/' + encodeURIComponent(id), trimmed);
+    }
+
+    // Autonomous execution
+    const entry = appendEntry(trimmed);
+    running = true;
+    spinner.classList.add('active');
+    let runId = null;
+
+    try {
+      const resp = await fetch('/api/dev/run', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({prompt: trimmed}),
+      });
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      while (true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, {stream: true});
+
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop() || '';
+
+        for (const chunk of lines) {
+          if (!chunk.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(chunk.slice(6));
+            if (data.done) break;
+            if (data.event === 'heartbeat') continue;
+
+            if (data.event === 'branch_created') {
+              runId = data.run_id;
+              appendEvent(entry, 'info', 'branch: ' + data.branch + '  run: ' + data.run_id);
+            } else if (data.event === 'iteration_start') {
+              appendEvent(entry, 'state', 'iteration ' + data.iteration + ': ' + data.state);
+            } else if (data.event === 'state_change') {
+              appendEvent(entry, 'state', '  ' + data.state + (data.files ? ' [' + data.files.join(', ') + ']' : ''));
+            } else if (data.event === 'plan_ready') {
+              appendEvent(entry, 'info', '  plan: ' + (data.files || []).join(', '));
+            } else if (data.event === 'tests_passed') {
+              appendEvent(entry, 'success', '  all tests pass!');
+            } else if (data.event === 'diagnosis_ready') {
+              appendEvent(entry, 'error', '  test failed (' + data.error_category + ') — retrying...');
+            } else if (data.event === 'rolled_back') {
+              appendEvent(entry, '', '  rolled back to: ' + data.branch);
+            } else if (data.event === 'result') {
+              appendEvent(entry, data.ok ? 'success' : 'error', data.summary || data.error || 'done');
+              if (data.diffs && data.diffs.length) appendDiff(entry, data.diffs);
+              if (data.ok && data.run_id) appendActions(entry, data.run_id);
+              if (!data.ok && data.run_id) runId = data.run_id;
+            } else if (data.event === 'loop_complete') {
+              if (data.status !== 'success') {
+                appendEvent(entry, data.status === 'failed' ? 'error' : '', data.status + ' after ' + data.iterations + ' iterations (' + data.duration_ms + 'ms)');
+              } else {
+                appendEvent(entry, 'success', 'completed in ' + data.iterations + ' iteration(s), ' + data.duration_ms + 'ms — ' + (data.files_changed || []).join(', '));
+              }
+            } else if (data.event === 'error') {
+              appendEvent(entry, 'error', data.message || 'unknown error');
+            }
+          } catch(e) { /* skip parse errors */ }
+        }
+      }
+    } catch(e) {
+      appendEvent(entry, 'error', 'connection error: ' + e.message);
+    } finally {
+      running = false;
+      spinner.classList.remove('active');
+    }
+  }
+
+  async function runBuiltin(url, text) {
+    const entry = appendEntry(text);
+    try {
+      const r = await fetch(url);
+      const d = await r.json();
+      appendEvent(entry, '', JSON.stringify(d, null, 2));
+    } catch(e) {
+      appendEvent(entry, 'error', e.message);
+    }
+  }
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !running) {
+      const text = input.value;
+      input.value = '';
+      handleCommand(text);
+    }
+  });
+
+  // Check status on load
+  fetch('/api/dev/status').then(r => r.json()).then(d => {
+    if (d.ok && d.repos && d.repos.length > 0 && d.llm_configured) {
+      statusEl.textContent = 'ready (' + d.repos.length + ' repo' + (d.repos.length > 1 ? 's' : '') + ')';
+      statusEl.className = 'status ready';
+    } else if (d.ok && (!d.repos || d.repos.length === 0)) {
+      statusEl.textContent = 'no repos registered';
+    } else if (d.ok && !d.llm_configured) {
+      statusEl.textContent = 'LLM not configured';
+    } else {
+      statusEl.textContent = 'offline';
+    }
+  }).catch(() => { statusEl.textContent = 'offline'; });
+})();
+</script>
+{% endblock %}

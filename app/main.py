@@ -27,7 +27,7 @@ from jinja2 import ChoiceLoader
 
 from .db import Base, SessionLocal, engine
 from .migrations import run_migrations
-from .routers import admin, auth, brain, brain_project, brain_v1_compat, chat, health_routes, jobs, pages, marketplace, mobile, trading
+from .routers import admin, auth, brain, brain_project, brain_v1_compat, chat, dev_terminal, health_routes, jobs, pages, marketplace, mobile, trading
 from .modules import get_nav_modules, load_enabled_modules, load_third_party_module
 from .models import (  # noqa: F401 — register ORM tables
     BrainWorkerControl,
@@ -36,7 +36,7 @@ from .models import (  # noqa: F401 — register ORM tables
     PatternEvidenceHypothesis,
     PatternTradeRow,
 )
-from .models.coding_task import PlanTaskCodingProfile  # noqa: F401
+from .models.coding_task import PlanTaskCodingProfile, CodingExecutionIteration  # noqa: F401
 from .services.trading_scheduler import start_scheduler, stop_scheduler
 
 # Suppress noisy WinError 10054 tracebacks from asyncio on Windows
@@ -684,6 +684,7 @@ app.include_router(auth.router)
 app.include_router(chat.router)
 app.include_router(admin.router)
 app.include_router(brain_project.router)
+app.include_router(dev_terminal.router)
 app.include_router(brain.router)
 app.include_router(brain_v1_compat.router)
 app.include_router(pages.router)
