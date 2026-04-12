@@ -5411,6 +5411,171 @@ def _migration_105_execution_context_venue_nodes(conn) -> None:
     conn.commit()
 
 
+def _migration_106_split_c_secondary_cluster(conn) -> None:
+    """Split c_secondary into c_secondary_structure, c_secondary_outcomes, c_secondary_signals."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    # ── 1. Insert new cluster nodes ────────────────────────────────────
+    new_clusters = [
+        ("nm_lc_c_secondary_structure", 8, "learning_cluster", "Pattern structure miners", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_secondary_structure",
+            "description": "Mines intraday/HV patterns and refines candidate parameters.",
+            "remarks": "Split from c_secondary. Covers structural pattern discovery and parameter polish.",
+            "phase_summary": "brain_secondary_miners_on_cycle (structure)",
+            "code_ref": "run_learning_cycle → c_secondary_structure",
+        }),
+        ("nm_lc_c_secondary_outcomes", 8, "learning_cluster", "Trade outcome learning", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_secondary_outcomes",
+            "description": "Learns exit rules, fakeout filters, and position sizing from realized outcomes.",
+            "remarks": "Split from c_secondary. Feeds back trade results into pattern scoring and risk hints.",
+            "phase_summary": "brain_secondary_miners_on_cycle (outcomes)",
+            "code_ref": "run_learning_cycle → c_secondary_outcomes",
+        }),
+        ("nm_lc_c_secondary_signals", 8, "learning_cluster", "Signal correlation miners", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_secondary_signals",
+            "description": "Mines inter-alert sequences, timeframe attribution, and signal synergies.",
+            "remarks": "Split from c_secondary. Temporal and portfolio-level signal correlation analysis.",
+            "phase_summary": "brain_secondary_miners_on_cycle (signals)",
+            "code_ref": "run_learning_cycle → c_secondary_signals",
+        }),
+    ]
+
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in new_clusters:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid, "domain": dom, "gv": gv, "ntype": ntype,
+                "layer": layer, "label": label, "fth": fth, "cd": cd,
+                "is_obs": is_obs, "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # ── 2. Reassign step nodes to new clusters ─────────────────────────
+    step_reassign = {
+        "nm_lc_intraday_hv": "c_secondary_structure",
+        "nm_lc_refine": "c_secondary_structure",
+        "nm_lc_exit": "c_secondary_outcomes",
+        "nm_lc_fakeout": "c_secondary_outcomes",
+        "nm_lc_sizing": "c_secondary_outcomes",
+        "nm_lc_inter_alert": "c_secondary_signals",
+        "nm_lc_timeframe": "c_secondary_signals",
+        "nm_lc_synergy": "c_secondary_signals",
+    }
+    for step_nid, new_cluster_id in step_reassign.items():
+        conn.execute(
+            text(
+                """
+                UPDATE brain_graph_nodes
+                SET display_meta = jsonb_set(
+                    COALESCE(display_meta, '{}'::jsonb),
+                    '{cluster_id}',
+                    cast(:cid_json as jsonb)
+                ),
+                updated_at = CURRENT_TIMESTAMP
+                WHERE id = :nid
+                """
+            ),
+            {"nid": step_nid, "cid_json": f'"{new_cluster_id}"'},
+        )
+
+    # ── 3. Disable old nm_lc_c_secondary (preserve for FK integrity) ──
+    conn.execute(
+        text(
+            "UPDATE brain_graph_nodes SET enabled = FALSE, updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = 'nm_lc_c_secondary'"
+        )
+    )
+
+    # ── 4. Add pipeline edges for new clusters ─────────────────────────
+    new_edges = [
+        # Chain: evolution → secondary_structure → secondary_outcomes → secondary_signals → journal
+        ("nm_lc_c_evolution", "nm_lc_c_secondary_structure", "cluster_chain", 0.7, "excitatory", "control"),
+        ("nm_lc_c_secondary_structure", "nm_lc_c_secondary_outcomes", "cluster_chain", 0.7, "excitatory", "control"),
+        ("nm_lc_c_secondary_outcomes", "nm_lc_c_secondary_signals", "cluster_chain", 0.7, "excitatory", "control"),
+        ("nm_lc_c_secondary_signals", "nm_lc_c_journal", "cluster_chain", 0.7, "excitatory", "control"),
+        # Cluster → first step
+        ("nm_lc_c_secondary_structure", "nm_lc_intraday_hv", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_c_secondary_outcomes", "nm_lc_exit", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_c_secondary_signals", "nm_lc_inter_alert", "step_completed", 0.7, "excitatory", "control"),
+        # Last step → cluster completion
+        ("nm_lc_refine", "nm_lc_c_secondary_structure", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_sizing", "nm_lc_c_secondary_outcomes", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_synergy", "nm_lc_c_secondary_signals", "step_completed", 0.7, "excitatory", "control"),
+    ]
+    for src, tgt, sig, w, pol, etype in new_edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    # ── 5. Disable old edges from/to nm_lc_c_secondary ────────────────
+    conn.execute(
+        text(
+            "UPDATE brain_graph_edges SET enabled = FALSE, updated_at = CURRENT_TIMESTAMP "
+            "WHERE (source_node_id = 'nm_lc_c_secondary' OR target_node_id = 'nm_lc_c_secondary') "
+            "AND enabled = TRUE"
+        )
+    )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -5518,6 +5683,7 @@ MIGRATIONS = [
     ("103_unified_neural_mesh", _migration_103_unified_neural_mesh),
     ("104_split_c_meta_cluster", _migration_104_split_c_meta_cluster),
     ("105_execution_context_venue_nodes", _migration_105_execution_context_venue_nodes),
+    ("106_split_c_secondary_cluster", _migration_106_split_c_secondary_cluster),
 ]
 
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +40,16 @@ def test_decay_reduces_confidence() -> None:
     )
     assert prop.apply_decay_to_state(st, half_life_seconds=300.0, now=datetime.utcnow()) is True
     assert st.confidence < 0.8
+
+
+def test_projection_stale_and_cooling_accepts_naive_utc_timestamps() -> None:
+    """Postgres/SQLAlchemy often returns naive UTC; projection uses aware ``now``."""
+    from app.services.trading.brain_neural_mesh.projection import _node_cooling, _node_stale_flag
+
+    now = datetime.now(timezone.utc)
+    naive_recent = (now - timedelta(seconds=30)).replace(tzinfo=None)
+    assert _node_stale_flag(naive_recent, now=now, stale_after_sec=480.0) is False
+    assert _node_cooling(naive_recent, 60, now=now) is True
 
 
 @pytest.mark.usefixtures("db")

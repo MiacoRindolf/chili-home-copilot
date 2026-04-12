@@ -35,7 +35,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start_id = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "intraday_hv")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_structure", "intraday_hv")
         intra_result = L.mine_intraday_patterns(db, user_id, cycle_budget)
         hv_result = L.mine_high_vol_regime_patterns(db, user_id, cycle_budget)
         report["intraday_discoveries"] = intra_result.get("discoveries", 0)
@@ -52,7 +52,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "refine")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_structure", "refine")
         refine_result = L.refine_patterns(db, user_id)
         report["patterns_refined"] = refine_result.get("refined", 0)
         bump_cycle_step()
@@ -62,7 +62,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "exit")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_outcomes", "exit")
         exit_result = L.learn_exit_optimization(db, user_id)
         report["exit_adjustments"] = exit_result.get("adjustments", 0)
         bump_cycle_step()
@@ -72,7 +72,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "fakeout")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_outcomes", "fakeout")
         fakeout_result = L.mine_fakeout_patterns(db, user_id)
         report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
         bump_cycle_step()
@@ -82,7 +82,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "sizing")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_outcomes", "sizing")
         sizing_result = L.tune_position_sizing(db, user_id)
         report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
         bump_cycle_step()
@@ -92,7 +92,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "inter_alert")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_signals", "inter_alert")
         inter_result = L.learn_inter_alert_patterns(db, user_id)
         report["inter_alert_insights"] = inter_result.get("insights", 0)
         bump_cycle_step()
@@ -102,7 +102,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "timeframe")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_signals", "timeframe")
         tf_result = L.learn_timeframe_performance(db, user_id)
         report["timeframe_insights"] = tf_result.get("insights", 0)
         bump_cycle_step()
@@ -112,7 +112,7 @@ def run_secondary_miners_phase(
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        apply_learning_cycle_step_status(learning_status, "c_secondary", "synergy")
+        apply_learning_cycle_step_status(learning_status, "c_secondary_signals", "synergy")
         synergy_result = L.mine_signal_synergies(db, user_id)
         report["synergies_found"] = synergy_result.get("synergies_found", 0)
         bump_cycle_step()

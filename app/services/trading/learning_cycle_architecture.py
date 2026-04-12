@@ -523,29 +523,28 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             ),
         ),
     ),
+    # ── Secondary miners (split from c_secondary into 3 domain clusters) ──
     CycleClusterDef(
-        id="c_secondary",
-        label="Secondary miners",
-        phase_summary="brain_secondary_miners_on_cycle",
+        id="c_secondary_structure",
+        label="Pattern structure miners",
+        phase_summary="brain_secondary_miners_on_cycle (structure)",
         description=(
-            "Optional deep-dive miners (intraday, fakeouts, sizing, synergies, etc.) when "
-            "brain_secondary_miners_on_cycle is on; skipped otherwise for faster cycles."
+            "Mines intraday/HV structural patterns and refines candidate parameters. "
+            "Gated by brain_secondary_miners_on_cycle; skipped for faster cycles."
         ),
         remarks=(
-            "What: Eight specialized miners and tuners gated by "
-            "``settings.brain_secondary_miners_on_cycle``.\n\n"
-            "Where: Sequential block inside ``run_learning_cycle`` in ``learning.py`` "
-            "(intraday/HV, refine, exit, fakeout, sizing, inter-alert, timeframe, synergy).\n\n"
-            "Why: Adds depth when cycle budget allows; skipping keeps hourly cycles feasible."
+            "What: Two structural miners (intraday compression, high-vol regimes) plus "
+            "parameter refinement.\n\n"
+            "Where: First block of ``run_secondary_miners_phase`` in ``secondary_bundle.py``.\n\n"
+            "Why: Captures pattern geometry invisible on daily bars only, then polishes fit."
         ),
         inputs=(
             "``BrainResourceBudget`` for the cycle",
-            "``db``, ``user_id``",
-            "Patterns and bars required by each miner",
+            "15m (etc.) OHLCV slices, volatility regime labels",
         ),
         outputs=(
-            "Per-step counts in ``report`` (intraday_discoveries, refined, exit_adjustments, …)",
-            "Updated ``ScanPattern`` / insight side effects",
+            "``report['intraday_discoveries']``, ``report['high_vol_discoveries']``",
+            "``report['patterns_refined']``",
         ),
         steps=(
             CycleStepDef(
@@ -588,6 +587,31 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 inputs=("Patterns marked refinable", "Search limits from config"),
                 outputs=("``report['patterns_refined']``", "Updated pattern params in DB"),
             ),
+        ),
+    ),
+    CycleClusterDef(
+        id="c_secondary_outcomes",
+        label="Trade outcome learning",
+        phase_summary="brain_secondary_miners_on_cycle (outcomes)",
+        description=(
+            "Learns exit rules, fakeout filters, and position sizing from realized trade "
+            "outcomes. Gated by brain_secondary_miners_on_cycle."
+        ),
+        remarks=(
+            "What: Three outcome-feedback miners — exit optimization, fakeout anti-patterns, "
+            "and position sizing tuning.\n\n"
+            "Where: Middle block of ``run_secondary_miners_phase`` in ``secondary_bundle.py``.\n\n"
+            "Why: Feeds back trade results into scoring and risk hints."
+        ),
+        inputs=(
+            "Historical fills and alerts",
+            "Position and PnL history, risk caps",
+        ),
+        outputs=(
+            "``report['exit_adjustments']``, ``report['fakeout_patterns']``",
+            "``report['sizing_adjustments']``",
+        ),
+        steps=(
             CycleStepDef(
                 sid="exit",
                 label="Learning exit optimization",
@@ -639,6 +663,31 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 inputs=("Position and PnL history", "Risk caps from settings"),
                 outputs=("``report['sizing_adjustments']``", "Sizing hint columns/JSON"),
             ),
+        ),
+    ),
+    CycleClusterDef(
+        id="c_secondary_signals",
+        label="Signal correlation miners",
+        phase_summary="brain_secondary_miners_on_cycle (signals)",
+        description=(
+            "Mines inter-alert sequences, timeframe attribution, and signal synergies. "
+            "Gated by brain_secondary_miners_on_cycle."
+        ),
+        remarks=(
+            "What: Three correlation miners — inter-alert sequencing, timeframe performance "
+            "attribution, and signal co-occurrence synergies.\n\n"
+            "Where: Final block of ``run_secondary_miners_phase`` in ``secondary_bundle.py``.\n\n"
+            "Why: Understanding temporal and portfolio-level signal behavior improves stacking."
+        ),
+        inputs=(
+            "Time-ordered alerts and pattern linkage",
+            "Trades/backtests tagged by interval and co-occurrence windows",
+        ),
+        outputs=(
+            "``report['inter_alert_insights']``, ``report['timeframe_insights']``",
+            "``report['synergies_found']``",
+        ),
+        steps=(
             CycleStepDef(
                 sid="inter_alert",
                 label="Learning inter-alert patterns",

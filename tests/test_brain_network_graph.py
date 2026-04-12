@@ -22,6 +22,15 @@ def test_learning_cycle_cluster_split_has_no_c_meta() -> None:
     assert "c_control" in cluster_ids
 
 
+def test_learning_cycle_cluster_split_has_no_c_secondary() -> None:
+    """c_secondary has been split into c_secondary_structure, c_secondary_outcomes, c_secondary_signals."""
+    cluster_ids = {c.id for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS}
+    assert "c_secondary" not in cluster_ids
+    assert "c_secondary_structure" in cluster_ids
+    assert "c_secondary_outcomes" in cluster_ids
+    assert "c_secondary_signals" in cluster_ids
+
+
 def test_seed_graph_cluster_ids_match_architecture() -> None:
     """Seed graph cluster IDs must match learning_cycle_architecture (minus c_universe)."""
     arch_cluster_ids = {c.id for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id != "c_universe"}

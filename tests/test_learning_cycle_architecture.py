@@ -52,10 +52,11 @@ def test_architecture_node_count_consistent() -> None:
     clusters = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
     n_steps = sum(len(c.steps) for c in clusters)
     # c_universe (2 steps) + c_state (4) + c_discovery (2) + c_validation (2)
-    # + c_evolution (3) + c_secondary (8) + c_journal (2)
+    # + c_evolution (3) + c_secondary_structure (2) + c_secondary_outcomes (3)
+    # + c_secondary_signals (3) + c_journal (2)
     # + c_meta_learning (1) + c_decisioning (2) + c_control (3)
-    # = 29 steps across 10 clusters (c_meta split into 3)
-    assert len(clusters) == 10
+    # = 29 steps across 12 clusters (c_meta split into 3, c_secondary split into 3)
+    assert len(clusters) == 12
     assert n_steps == 29
 
 

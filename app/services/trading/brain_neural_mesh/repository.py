@@ -192,13 +192,15 @@ def nodes_for_domain(
     *,
     domain: str = DEFAULT_DOMAIN,
     graph_version: int = DEFAULT_GRAPH_VERSION,
+    include_disabled: bool = False,
 ) -> Sequence[BrainGraphNode]:
-    return (
-        db.query(BrainGraphNode)
-        .filter(BrainGraphNode.domain == domain, BrainGraphNode.graph_version == graph_version)
-        .order_by(BrainGraphNode.layer.asc(), BrainGraphNode.id.asc())
-        .all()
+    q = db.query(BrainGraphNode).filter(
+        BrainGraphNode.domain == domain,
+        BrainGraphNode.graph_version == graph_version,
     )
+    if not include_disabled:
+        q = q.filter(BrainGraphNode.enabled.is_(True))
+    return q.order_by(BrainGraphNode.layer.asc(), BrainGraphNode.id.asc()).all()
 
 
 def reap_dead_events(db: Session, *, older_than_hours: int = 72) -> int:

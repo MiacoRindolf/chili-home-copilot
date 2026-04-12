@@ -43,6 +43,8 @@ NEURAL_LAYER_LABELS: dict[int, str] = {
     5: "Evidence / Verification",
     6: "Action / Expression",
     7: "Meta-Learning / Reweighting",
+    8: "Learning Cycle / Cluster",
+    9: "Learning Cycle / Step",
 }
 
 
@@ -51,21 +53,32 @@ def neural_layer_labels_meta() -> dict[str, str]:
     return {str(k): v for k, v in sorted(NEURAL_LAYER_LABELS.items())}
 
 
+def _utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
+    """Align SQLAlchemy naive timestamps with aware UTC ``now`` (avoids subtract TypeError)."""
+    if dt is None:
+        return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
 def _node_cooling(
     last_fired_at: Optional[datetime],
     cooldown_seconds: int,
     *,
     now: datetime,
 ) -> bool:
-    if last_fired_at is None or cooldown_seconds <= 0:
+    lf = _utc_aware(last_fired_at)
+    if lf is None or cooldown_seconds <= 0:
         return False
-    return (now - last_fired_at).total_seconds() < float(cooldown_seconds)
+    return (now - lf).total_seconds() < float(cooldown_seconds)
 
 
 def _node_stale_flag(last_activated_at: Optional[datetime], *, now: datetime, stale_after_sec: float) -> bool:
-    if last_activated_at is None:
+    la = _utc_aware(last_activated_at)
+    if la is None:
         return False
-    return (now - last_activated_at).total_seconds() > stale_after_sec
+    return (now - la).total_seconds() > stale_after_sec
 
 
 def build_neural_graph_projection(
