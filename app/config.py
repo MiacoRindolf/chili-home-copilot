@@ -1,8 +1,31 @@
 """Centralized configuration for CHILI. Loads from .env with type safety."""
-from typing import Optional
+from __future__ import annotations
 
-from pydantic import AliasChoices, Field, field_validator
+from typing import Any, Optional
+
+from pydantic import AliasChoices, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# ── Config profiles ──────────────────────────────────────────────────────
+CONFIG_PROFILES: dict[str, dict[str, Any]] = {
+    "default": {},
+    "conservative": {
+        "brain_backtest_parallel": 6,
+        "brain_research_integrity_strict": True,
+        "momentum_max_notional_usd": 200.0,
+        "momentum_max_spread_bps_live": 8.0,
+    },
+    "aggressive": {
+        "brain_backtest_parallel": 24,
+        "momentum_max_notional_usd": 1000.0,
+        "momentum_max_spread_bps_live": 20.0,
+    },
+    "research": {
+        "brain_research_integrity_strict": True,
+        "brain_research_integrity_enabled": True,
+        "chili_robinhood_spot_adapter_enabled": False,
+    },
+}
 
 
 class Settings(BaseSettings):
@@ -12,6 +35,22 @@ class Settings(BaseSettings):
         extra="ignore",
         populate_by_name=True,
     )
+
+    # Config profile — applies preset defaults; env vars always win.
+    brain_config_profile: str = "default"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _apply_profile(cls, values: dict[str, Any]) -> dict[str, Any]:
+        profile_name = values.get(
+            "brain_config_profile",
+            values.get("BRAIN_CONFIG_PROFILE", "default"),
+        )
+        profile = CONFIG_PROFILES.get(profile_name, {})
+        for key, default_val in profile.items():
+            if key not in values and key.upper() not in values:
+                values[key] = default_val
+        return values
 
     # Ollama (local planner, wellness, RAG, vision)
     ollama_host: str = "http://127.0.0.1:11434"
@@ -293,6 +332,12 @@ class Settings(BaseSettings):
     chili_momentum_neural_feedback_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NEURAL_FEEDBACK_ENABLED"),
+    )
+
+    # Robinhood spot venue adapter (execution layer; equities via robin_stocks).
+    chili_robinhood_spot_adapter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_ROBINHOOD_SPOT_ADAPTER_ENABLED"),
     )
 
     # Coinbase spot venue adapter (execution layer; neural momentum may consume readiness only).
@@ -746,6 +791,13 @@ class Settings(BaseSettings):
     def premium_api_key_resolved(self) -> str:
         """Premium key: PREMIUM_API_KEY or primary for vision fallback."""
         return self.premium_api_key or self.primary_api_key or ""
+
+
+def get_active_profile_info() -> dict[str, Any]:
+    """Return the active profile name and its preset keys."""
+    name = settings.brain_config_profile
+    profile = CONFIG_PROFILES.get(name, {})
+    return {"profile": name, "overrides": dict(profile)}
 
 
 # Load once at import

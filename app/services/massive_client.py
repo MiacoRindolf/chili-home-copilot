@@ -867,6 +867,127 @@ def _fire_tick_listeners(sym: str, snap: QuoteSnapshot | TradeSnapshot) -> None:
             pass
 
 
+# ── Candle aggregation (trade ticks → OHLCV bars) ────────────────────────────
+
+
+@dataclass
+class OHLCVBar:
+    """A single time-bucketed OHLCV bar assembled from trade ticks."""
+    ticker: str
+    interval_seconds: int
+    bucket_start: float  # unix timestamp (start of interval)
+    open: float
+    high: float
+    low: float
+    close: float
+    volume: float
+    trade_count: int
+    closed: bool = False
+
+
+CandleCallback = Callable[[str, OHLCVBar], None]
+
+
+class CandleAggregator:
+    """Accumulates TradeSnapshot ticks into time-bucketed OHLCV bars."""
+
+    def __init__(self, interval_seconds: int = 60):
+        self._interval = interval_seconds
+        self._bars: dict[str, OHLCVBar] = {}  # ticker -> current open bar
+        self._lock = threading.Lock()
+        self._listeners: dict[str, list[CandleCallback]] = {}
+        self._listeners_lock = threading.Lock()
+
+    @property
+    def interval(self) -> int:
+        return self._interval
+
+    def on_trade(self, sym: str, snap: TradeSnapshot) -> None:
+        """Process a trade tick — bucket into bars and emit on close."""
+        bucket_start = (snap.timestamp // self._interval) * self._interval
+        with self._lock:
+            bar = self._bars.get(sym)
+            if bar is None or bar.bucket_start != bucket_start:
+                # Close previous bar if exists
+                if bar is not None:
+                    bar.closed = True
+                    self._emit(sym, bar)
+                # Open new bar
+                self._bars[sym] = OHLCVBar(
+                    ticker=sym,
+                    interval_seconds=self._interval,
+                    bucket_start=bucket_start,
+                    open=snap.price,
+                    high=snap.price,
+                    low=snap.price,
+                    close=snap.price,
+                    volume=float(snap.size),
+                    trade_count=1,
+                )
+            else:
+                bar.high = max(bar.high, snap.price)
+                bar.low = min(bar.low, snap.price)
+                bar.close = snap.price
+                bar.volume += float(snap.size)
+                bar.trade_count += 1
+
+    def register_candle_listener(self, ticker: str, cb: CandleCallback) -> None:
+        sym = ticker.upper()
+        with self._listeners_lock:
+            self._listeners.setdefault(sym, []).append(cb)
+
+    def unregister_candle_listener(self, ticker: str, cb: CandleCallback) -> None:
+        sym = ticker.upper()
+        with self._listeners_lock:
+            cbs = self._listeners.get(sym)
+            if cbs:
+                try:
+                    cbs.remove(cb)
+                except ValueError:
+                    pass
+                if not cbs:
+                    del self._listeners[sym]
+
+    def _emit(self, sym: str, bar: OHLCVBar) -> None:
+        with self._listeners_lock:
+            cbs = list(self._listeners.get(sym, []))
+        for cb in cbs:
+            try:
+                cb(sym, bar)
+            except Exception:
+                pass
+        # Invalidate OHLCV cache for this ticker so next fetch gets fresh data
+        try:
+            from .trading.market_data import invalidate_ohlcv_cache_for_ticker
+
+            invalidate_ohlcv_cache_for_ticker(sym)
+        except Exception:
+            pass
+
+
+# Module-level candle aggregator registry (interval_seconds -> aggregator)
+_candle_aggregators: dict[int, CandleAggregator] = {}
+_candle_agg_lock = threading.Lock()
+
+
+def get_candle_aggregator(interval_seconds: int = 60) -> CandleAggregator:
+    """Get or create a CandleAggregator for the given interval."""
+    with _candle_agg_lock:
+        if interval_seconds not in _candle_aggregators:
+            _candle_aggregators[interval_seconds] = CandleAggregator(interval_seconds)
+        return _candle_aggregators[interval_seconds]
+
+
+def register_candle_listener(ticker: str, interval_seconds: int, cb: CandleCallback) -> None:
+    get_candle_aggregator(interval_seconds).register_candle_listener(ticker, cb)
+
+
+def unregister_candle_listener(ticker: str, interval_seconds: int, cb: CandleCallback) -> None:
+    agg = _candle_aggregators.get(interval_seconds)
+    if agg:
+        agg.unregister_candle_listener(ticker, cb)
+
+
 def get_ws_quote(ticker: str) -> QuoteSnapshot | None:
     """Return a fresh WebSocket-cached quote, or None if stale/missing."""
     with _ws_cache_lock:
@@ -1031,6 +1152,14 @@ class MassiveWSClient:
                     timestamp=now,
                 )
                 _fire_tick_listeners(sym, trade)
+                # Feed trade ticks into candle aggregators
+                with _candle_agg_lock:
+                    aggs = list(_candle_aggregators.values())
+                for agg in aggs:
+                    try:
+                        agg.on_trade(sym, trade)
+                    except Exception:
+                        pass
 
 
 # Singleton instance

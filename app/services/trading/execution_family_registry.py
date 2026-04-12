@@ -17,6 +17,7 @@ from typing import Any, Callable, Optional
 
 # ── Implemented (live adapter + runners honor this) ───────────────────────────
 EXECUTION_FAMILY_COINBASE_SPOT = "coinbase_spot"
+EXECUTION_FAMILY_ROBINHOOD_SPOT = "robinhood_spot"
 
 # ── Documented stubs only (no behavior, no jobs, no hidden execution) ────────
 EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE = "multi_venue_arbitrage"
@@ -26,13 +27,17 @@ EXECUTION_FAMILY_BASIS_TRADE = "basis_trade"
 DOCUMENTED_EXECUTION_FAMILIES: frozenset[str] = frozenset(
     {
         EXECUTION_FAMILY_COINBASE_SPOT,
+        EXECUTION_FAMILY_ROBINHOOD_SPOT,
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE,
         EXECUTION_FAMILY_SAME_VENUE_TRIANGULAR_ARB,
         EXECUTION_FAMILY_BASIS_TRADE,
     }
 )
 
-IMPLEMENTED_MOMENTUM_AUTOMATION_FAMILIES: frozenset[str] = frozenset({EXECUTION_FAMILY_COINBASE_SPOT})
+IMPLEMENTED_MOMENTUM_AUTOMATION_FAMILIES: frozenset[str] = frozenset({
+    EXECUTION_FAMILY_COINBASE_SPOT,
+    EXECUTION_FAMILY_ROBINHOOD_SPOT,
+})
 
 
 class ExecutionFamilyNotImplementedError(LookupError):
@@ -67,6 +72,9 @@ def execution_family_capabilities() -> list[dict[str, Any]]:
     notes_map = {
         EXECUTION_FAMILY_COINBASE_SPOT: (
             "Implemented: Coinbase spot VenueAdapter + neural momentum operator/runner path."
+        ),
+        EXECUTION_FAMILY_ROBINHOOD_SPOT: (
+            "Implemented: Robinhood equities VenueAdapter via robin_stocks + broker_service."
         ),
         EXECUTION_FAMILY_MULTI_VENUE_ARBITRAGE: (
             "Planned seam only — needs multi-venue intelligence, inventory, transfers, risk (not built)."
@@ -109,8 +117,12 @@ def resolve_live_spot_adapter_factory(execution_family: str) -> Callable[[], Any
         ExecutionFamilyNotImplementedError: for any family other than ``coinbase_spot``.
     """
     ef = normalize_execution_family(execution_family)
-    if ef != EXECUTION_FAMILY_COINBASE_SPOT:
-        raise ExecutionFamilyNotImplementedError(ef)
-    from .venue.coinbase_spot import CoinbaseSpotAdapter
+    if ef == EXECUTION_FAMILY_COINBASE_SPOT:
+        from .venue.coinbase_spot import CoinbaseSpotAdapter
 
-    return CoinbaseSpotAdapter
+        return CoinbaseSpotAdapter
+    if ef == EXECUTION_FAMILY_ROBINHOOD_SPOT:
+        from .venue.robinhood_spot import RobinhoodSpotAdapter
+
+        return RobinhoodSpotAdapter
+    raise ExecutionFamilyNotImplementedError(ef)

@@ -304,6 +304,16 @@ def clear_ohlcv_cache() -> None:
         _ohlcv_df_cache.clear()
 
 
+def invalidate_ohlcv_cache_for_ticker(ticker: str) -> int:
+    """Remove all cached OHLCV entries for *ticker*. Returns count removed."""
+    prefix = f"{ticker.upper()}|"
+    with _ohlcv_df_lock:
+        keys = [k for k in _ohlcv_df_cache if k.startswith(prefix)]
+        for k in keys:
+            del _ohlcv_df_cache[k]
+        return len(keys)
+
+
 def fetch_ohlcv_df(
     ticker: str,
     interval: str = "1d",
