@@ -82,7 +82,7 @@ def _annotate_desk_fields(candidates: list[dict[str, Any]]) -> None:
         it["extension_risk"] = None
         it["execution_risk"] = None
         it["structural_confirmation"] = None
-        it["spread_liquidity_quality"] = None
+        it["liquidity_quality"] = None
 
 
 def _prediction_index(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:

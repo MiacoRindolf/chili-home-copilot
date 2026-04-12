@@ -5,7 +5,7 @@ from __future__ import annotations
 import math
 import logging
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -83,6 +83,8 @@ class PropagationResult:
     inhibitions_applied: int
     suppressions: int
     truncated: bool = False
+    gated_by_signal: int = 0
+    gated_by_confidence: int = 0
 
 
 def propagate_one_event(
@@ -100,7 +102,7 @@ def propagate_one_event(
     """Single-hop propagation from ``source_node_id`` to outbound targets; may enqueue downstream."""
     from . import repository as repo
 
-    now = now or datetime.utcnow()
+    now = now or datetime.now(timezone.utc)
     res = PropagationResult(0, 0, 0, 0, 0)
     if not source_node_id:
         return res
@@ -120,6 +122,7 @@ def propagate_one_event(
     edges = list(outbound_edges(db, source_node_id, graph_version=graph_version))
     for edge in edges:
         if not gate_allows(edge, ev_signal):
+            res.gated_by_signal += 1
             continue
 
         tgt = get_node(db, edge.target_node_id)
@@ -128,7 +131,14 @@ def propagate_one_event(
 
         state = get_or_create_state(db, tgt.id)
         if not min_confidence_ok(edge, state.confidence):
+            res.gated_by_confidence += 1
             continue
+
+        if edge.delay_ms and int(edge.delay_ms) > 0:
+            _log.debug(
+                "%s edge %s has delay_ms=%s but delay is not yet implemented; firing instantly",
+                LOG_PREFIX, edge.id, edge.delay_ms,
+            )
 
         before_act = float(state.activation_score)
         delta = compute_activation_delta(edge, confidence_delta=confidence_delta, polarity=edge.polarity)
@@ -163,12 +173,17 @@ def propagate_one_event(
             state.activation_score = _clamp01(state.activation_score * 0.4)
             res.fires += 1
             if propagation_depth + 1 < max_depth and not tgt.is_observer:
+                # Fixed fire-propagation delta (0.20) — not the node's absolute
+                # confidence.  Using state.confidence here would scale downstream
+                # activation by the source's absolute confidence level, causing
+                # high-confidence nodes to over-amplify and low-confidence ones
+                # to barely propagate.
                 repo.enqueue_activation(
                     db,
                     source_node_id=tgt.id,
                     cause="fired",
                     payload={"signal_type": "fired", "from_edge": edge.id},
-                    confidence_delta=state.confidence,
+                    confidence_delta=0.20,
                     propagation_depth=propagation_depth + 1,
                     correlation_id=correlation_id,
                 )
@@ -177,13 +192,17 @@ def propagate_one_event(
     return res
 
 
+ACTIVATION_DECAY_HALF_LIFE_SEC = 1800.0  # 30 minutes — longer than confidence
+
+
 def apply_decay_to_state(
     state: BrainNodeState,
     *,
     half_life_seconds: float,
     now: datetime,
+    activation_half_life_seconds: float = ACTIVATION_DECAY_HALF_LIFE_SEC,
 ) -> bool:
-    """Exponential decay on confidence when stale. Returns True if mutated."""
+    """Exponential decay on confidence and activation_score when stale. Returns True if mutated."""
     if half_life_seconds <= 0:
         return False
     ref = state.staleness_at
@@ -192,10 +211,25 @@ def apply_decay_to_state(
     dt = (now - ref).total_seconds()
     if dt <= 0:
         return False
+
+    mutated = False
+
+    # Confidence decay
     factor = math.exp(-math.log(2) * dt / half_life_seconds)
     new_c = _clamp01(float(state.confidence) * factor)
-    if abs(new_c - state.confidence) < 1e-6:
-        return False
-    state.confidence = new_c
-    state.updated_at = now
-    return True
+    if abs(new_c - state.confidence) >= 1e-6:
+        state.confidence = new_c
+        mutated = True
+
+    # Activation score decay (longer half-life so near-threshold nodes
+    # drain over ~30 min instead of sitting permanently near fire_threshold).
+    if activation_half_life_seconds > 0:
+        act_factor = math.exp(-math.log(2) * dt / activation_half_life_seconds)
+        new_a = _clamp01(float(state.activation_score) * act_factor)
+        if abs(new_a - state.activation_score) >= 1e-6:
+            state.activation_score = new_a
+            mutated = True
+
+    if mutated:
+        state.updated_at = now
+    return mutated

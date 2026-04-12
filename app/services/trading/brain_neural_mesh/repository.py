@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import text
@@ -38,6 +38,22 @@ def _validate_payload(cause: str, payload: Optional[dict[str, Any]]) -> None:
         _log.warning("%s enqueue payload for cause=%s missing keys: %s", LOG_PREFIX, cause, missing)
 
 
+MAX_PENDING_QUEUE_DEPTH = 500
+MAX_EVENTS_PER_CORRELATION = 100
+
+
+def pending_queue_depth(db: Session) -> int:
+    return db.query(BrainActivationEvent).filter(BrainActivationEvent.status == "pending").count()
+
+
+def correlation_event_count(db: Session, correlation_id: str) -> int:
+    return (
+        db.query(BrainActivationEvent)
+        .filter(BrainActivationEvent.correlation_id == correlation_id)
+        .count()
+    )
+
+
 def enqueue_activation(
     db: Session,
     *,
@@ -50,9 +66,32 @@ def enqueue_activation(
     domain: str = DEFAULT_DOMAIN,
     graph_version: int = DEFAULT_GRAPH_VERSION,
 ) -> int:
-    """Insert a pending activation event. Returns new row id."""
+    """Insert a pending activation event. Returns new row id.
+
+    Circuit breakers:
+    - Rejects if the pending queue exceeds MAX_PENDING_QUEUE_DEPTH (500).
+    - Rejects if the correlation_id already has MAX_EVENTS_PER_CORRELATION (100) events.
+    Returns -1 when rejected.
+    """
     _validate_payload(cause, payload)
     cid = correlation_id or str(uuid.uuid4())
+
+    # Circuit breaker: global queue depth
+    if pending_queue_depth(db) >= MAX_PENDING_QUEUE_DEPTH:
+        _log.warning(
+            "%s enqueue rejected — queue depth >= %s (source=%s cause=%s)",
+            LOG_PREFIX, MAX_PENDING_QUEUE_DEPTH, source_node_id, cause,
+        )
+        return -1
+
+    # Circuit breaker: per-correlation-id cap
+    if correlation_event_count(db, cid) >= MAX_EVENTS_PER_CORRELATION:
+        _log.warning(
+            "%s enqueue rejected — correlation %s has >= %s events (source=%s)",
+            LOG_PREFIX, cid, MAX_EVENTS_PER_CORRELATION, source_node_id,
+        )
+        return -1
+
     ev = BrainActivationEvent(
         source_node_id=source_node_id,
         cause=cause,
@@ -88,6 +127,9 @@ def claim_pending_batch(db: Session, limit: int = 24) -> list[BrainActivationEve
     row_ids = [r[0] for r in db.execute(sql, {"lim": limit}).fetchall()]
     if not row_ids:
         return []
+    # Expire cached ORM objects so the subsequent query reflects the
+    # status='processing' written by the raw SQL UPDATE above.
+    db.expire_all()
     return (
         db.query(BrainActivationEvent)
         .filter(BrainActivationEvent.id.in_(row_ids))
@@ -110,7 +152,7 @@ def mark_event_status(
     if processed_at is not None:
         ev.processed_at = processed_at
     elif status in ("done", "dead"):
-        ev.processed_at = datetime.utcnow()
+        ev.processed_at = datetime.now(timezone.utc)
 
 
 def outbound_edges(
@@ -161,7 +203,7 @@ def nodes_for_domain(
 
 def reap_dead_events(db: Session, *, older_than_hours: int = 72) -> int:
     """Delete processed/dead activation events older than the retention window."""
-    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=older_than_hours)
     n = (
         db.query(BrainActivationEvent)
         .filter(

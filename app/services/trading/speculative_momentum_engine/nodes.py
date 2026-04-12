@@ -60,15 +60,31 @@ def eval_volume_expansion(f: feat.SignalFeatures) -> NodeActivation:
 
 
 def eval_squeeze_pressure(f: feat.SignalFeatures) -> NodeActivation:
-    if not feat.squeeze_re().search(f.blob):
+    hits = feat.squeeze_re().findall(f.blob)
+    n = len(hits)
+    if n == 0:
         return NodeActivation(NODE_SQUEEZE_PRESSURE, 0.0, "no squeeze/halt lexicon")
-    return NodeActivation(NODE_SQUEEZE_PRESSURE, 0.88, "squeeze/halt/resume language in scanner text")
+    if n == 1:
+        s = 0.60
+    elif n == 2:
+        s = 0.75
+    else:
+        s = 0.88
+    return NodeActivation(NODE_SQUEEZE_PRESSURE, s, f"squeeze/halt language ({n} matches)")
 
 
 def eval_event_impulse(f: feat.SignalFeatures) -> NodeActivation:
-    if not feat.event_re().search(f.blob):
+    hits = feat.event_re().findall(f.blob)
+    n = len(hits)
+    if n == 0:
         return NodeActivation(NODE_EVENT_IMPULSE, 0.0, "no event/catalyst lexicon")
-    return NodeActivation(NODE_EVENT_IMPULSE, 0.82, "event/catalyst language in scanner text")
+    if n == 1:
+        s = 0.55
+    elif n == 2:
+        s = 0.70
+    else:
+        s = 0.82
+    return NodeActivation(NODE_EVENT_IMPULSE, s, f"event/catalyst language ({n} matches)")
 
 
 def eval_extension_risk(f: feat.SignalFeatures) -> NodeActivation:
@@ -113,15 +129,31 @@ def eval_execution_risk(f: feat.SignalFeatures) -> NodeActivation:
 
 
 def eval_vwap_pullback(f: feat.SignalFeatures) -> NodeActivation:
-    if not feat.vwap_pullback_re().search(f.blob):
+    hits = feat.vwap_pullback_re().findall(f.blob)
+    n = len(hits)
+    if n == 0:
         return NodeActivation(NODE_VWAP_PULLBACK, 0.0, "no vwap/pullback lexicon")
-    return NodeActivation(NODE_VWAP_PULLBACK, 0.68, "vwap/pullback/reclaim language")
+    if n == 1:
+        s = 0.45
+    elif n == 2:
+        s = 0.58
+    else:
+        s = 0.68
+    return NodeActivation(NODE_VWAP_PULLBACK, s, f"vwap/pullback language ({n} matches)")
 
 
 def eval_exhaustion(f: feat.SignalFeatures) -> NodeActivation:
-    if not feat.exhaustion_re().search(f.blob):
+    hits = feat.exhaustion_re().findall(f.blob)
+    n = len(hits)
+    if n == 0:
         return NodeActivation(NODE_EXHAUSTION, 0.0, "no exhaustion/failed-continuation lexicon")
-    return NodeActivation(NODE_EXHAUSTION, 0.7, "exhaustion/rejection language")
+    if n == 1:
+        s = 0.50
+    elif n == 2:
+        s = 0.62
+    else:
+        s = 0.70
+    return NodeActivation(NODE_EXHAUSTION, s, f"exhaustion/rejection language ({n} matches)")
 
 
 def evaluate_all_nodes(f: feat.SignalFeatures) -> list[NodeActivation]:

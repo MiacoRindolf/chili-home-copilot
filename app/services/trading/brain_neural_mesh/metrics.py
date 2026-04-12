@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -32,6 +32,16 @@ class MeshCounters:
     batches: int = 0
     last_flush_ts: float = field(default_factory=time.monotonic)
 
+    # Baselines at last DB flush — used to compute incremental deltas so
+    # multiple workers don't overwrite each other's totals.
+    _flushed_events_published: int = 0
+    _flushed_events_processed: int = 0
+    _flushed_node_fires: int = 0
+    _flushed_suppressions: int = 0
+    _flushed_inhibitions: int = 0
+    _flushed_momentum_tick_failures: int = 0
+    _flushed_depth_cutoffs: int = 0
+
     def note_publish(self, n: int = 1) -> None:
         self.events_published += n
 
@@ -50,6 +60,26 @@ class MeshCounters:
         self.suppressions += suppressions
         self.inhibitions += inhibitions
         self.propagation_depth_sum += depth_sum
+
+    def flush_deltas(self) -> dict[str, float]:
+        """Return incremental deltas since the last flush and advance baselines."""
+        deltas = {
+            "events_published_total": float(self.events_published - self._flushed_events_published),
+            "events_processed_total": float(self.events_processed - self._flushed_events_processed),
+            "node_fires_total": float(self.node_fires - self._flushed_node_fires),
+            "suppressions_total": float(self.suppressions - self._flushed_suppressions),
+            "inhibitions_total": float(self.inhibitions - self._flushed_inhibitions),
+            "momentum_tick_failures_total": float(self.momentum_tick_failures - self._flushed_momentum_tick_failures),
+            "depth_cutoffs_total": float(self.depth_cutoffs - self._flushed_depth_cutoffs),
+        }
+        self._flushed_events_published = self.events_published
+        self._flushed_events_processed = self.events_processed
+        self._flushed_node_fires = self.node_fires
+        self._flushed_suppressions = self.suppressions
+        self._flushed_inhibitions = self.inhibitions
+        self._flushed_momentum_tick_failures = self.momentum_tick_failures
+        self._flushed_depth_cutoffs = self.depth_cutoffs
+        return deltas
 
 
 _COUNTERS = MeshCounters()
@@ -74,32 +104,51 @@ def flush_metrics_to_db(db: Session, *, domain: str = DEFAULT_DOMAIN, graph_vers
     lag_sec = _queue_lag_seconds(db)
     stale_n = _stale_node_count(db, domain=domain, graph_version=graph_version)
     starved_n = _starved_node_count(db, domain=domain, graph_version=graph_version)
-    pairs = [
-        ("events_published_total", float(c.events_published)),
-        ("events_processed_total", float(c.events_processed)),
-        ("node_fires_total", float(c.node_fires)),
-        ("suppressions_total", float(c.suppressions)),
-        ("inhibitions_total", float(c.inhibitions)),
+    now_utc = datetime.now(timezone.utc)
+
+    # Cumulative counters: flush as incremental deltas so multiple workers
+    # add to the DB total instead of overwriting each other (last-write-wins).
+    deltas = c.flush_deltas()
+    for key, delta in deltas.items():
+        if delta == 0.0:
+            continue
+        stmt = pg_insert(BrainGraphMetric).values(
+            domain=domain,
+            graph_version=graph_version,
+            metric_key=key,
+            value_num=delta,
+            updated_at=now_utc,
+        )
+        stmt = stmt.on_conflict_do_update(
+            index_elements=["domain", "graph_version", "metric_key"],
+            set_={
+                "value_num": BrainGraphMetric.value_num + delta,
+                "updated_at": now_utc,
+            },
+        )
+        db.execute(stmt)
+
+    # Gauge metrics: absolute last-value is correct (these are point-in-time).
+    gauges = [
         ("avg_propagation_depth", float(depth_avg)),
-        ("momentum_tick_failures_total", float(c.momentum_tick_failures)),
-        ("depth_cutoffs_total", float(c.depth_cutoffs)),
         ("queue_lag_seconds", float(lag_sec or 0.0)),
         ("stale_node_count", float(stale_n)),
         ("starved_node_count", float(starved_n)),
     ]
-    for key, val in pairs:
+    for key, val in gauges:
         stmt = pg_insert(BrainGraphMetric).values(
             domain=domain,
             graph_version=graph_version,
             metric_key=key,
             value_num=val,
-            updated_at=datetime.utcnow(),
+            updated_at=now_utc,
         )
         stmt = stmt.on_conflict_do_update(
             index_elements=["domain", "graph_version", "metric_key"],
-            set_={"value_num": val, "updated_at": datetime.utcnow()},
+            set_={"value_num": val, "updated_at": now_utc},
         )
         db.execute(stmt)
+
     _log.info(
         "%s metrics flush published=%s processed=%s fires=%s queue_lag_s=%.2f stale_nodes=%s",
         LOG_PREFIX,
@@ -121,7 +170,7 @@ def _queue_lag_seconds(db: Session) -> Optional[float]:
     )
     if not row or not row[0]:
         return None
-    return max(0.0, (datetime.utcnow() - row[0]).total_seconds())
+    return max(0.0, (datetime.now(timezone.utc) - row[0]).total_seconds())
 
 
 def _stale_node_count(
@@ -131,7 +180,7 @@ def _stale_node_count(
     graph_version: int,
     stale_after_sec: float = 600.0,
 ) -> int:
-    cutoff = datetime.utcnow() - timedelta(seconds=stale_after_sec)
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=stale_after_sec)
     return (
         db.query(BrainNodeState.node_id)
         .join(BrainGraphNode, BrainGraphNode.id == BrainNodeState.node_id)

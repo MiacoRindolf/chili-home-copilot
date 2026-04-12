@@ -60,10 +60,18 @@ def operator_hint(cluster_id: str, scores: dict[str, Any], vwap_pullback_score: 
         return "Avoid chase — blow-off / exhaustion profile."
     if cluster_id == ClusterId.too_extended.value:
         return "Too extended for sane core entry — watch only."
-    if cluster_id == ClusterId.first_pullback_candidate.value and scores.get("extension_risk", 1) < 0.65:
+    if cluster_id == ClusterId.first_pullback_candidate.value:
+        if scores.get("extension_risk", 0) >= 0.65:
+            return "First pullback candidate — elevated extension risk; verify tape carefully."
         return "First pullback candidate — still speculative; verify tape."
     if cluster_id == ClusterId.execution_risk_high.value:
         return "Execution risk high — size down or pass."
+    if cluster_id == ClusterId.speculative_squeeze.value:
+        return "Squeeze / halt risk — expect halts and wide spreads; size for volatility."
+    if cluster_id == ClusterId.event_driven_spike.value:
+        return "Event-driven impulse — verify catalyst persistence; fade risk elevated."
+    if cluster_id == ClusterId.structured_momentum.value:
+        return "Volume-backed momentum — confirm structure before entry; watch for exhaustion."
     if cluster_id == ClusterId.watch_only.value:
         return "Watch only — weak cluster alignment."
     return "Speculative — verify liquidity/spread live."

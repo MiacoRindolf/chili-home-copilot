@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -86,7 +86,7 @@ def build_neural_graph_projection(
         .all()
     )
 
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
 
     momentum_ctx: dict[str, Any] = {}
     try:
@@ -235,7 +235,7 @@ def build_node_detail(
         .limit(fire_limit)
         .all()
     )
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     stale_after = 480.0
     stale = _node_stale_flag(st.staleness_at if st else None, now=now, stale_after_sec=stale_after)
     cooling = _node_cooling(st.last_fired_at if st else None, int(node.cooldown_seconds), now=now)

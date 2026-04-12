@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from sqlalchemy.orm import Session
@@ -20,6 +20,8 @@ _log = logging.getLogger(__name__)
 
 DEFAULT_MAX_DEPTH = 5
 DEFAULT_EVENT_BATCH = 22
+REAP_INTERVAL_SEC = 300.0  # 5 minutes between dead-event reaping runs
+_last_reap_ts: float = 0.0
 
 
 def run_activation_batch(
@@ -67,7 +69,7 @@ def run_activation_batch(
                     payload=ev.payload if isinstance(ev.payload, dict) else None,
                     max_depth=max_depth,
                     graph_version=graph_version,
-                    now=datetime.utcnow(),
+                    now=datetime.now(timezone.utc),
                 )
                 fires += pr.fires
                 inhibitions += pr.inhibitions_applied
@@ -86,11 +88,11 @@ def run_activation_batch(
                         exc_info=True,
                     )
                     ctr.momentum_tick_failures += 1
-                mark_event_status(db, int(ev.id), "done", processed_at=datetime.utcnow())
+                mark_event_status(db, int(ev.id), "done", processed_at=datetime.now(timezone.utc))
                 processed += 1
             except Exception as e:
                 _log.warning("%s event %s failed: %s", LOG_PREFIX, ev.id, e)
-                mark_event_status(db, int(ev.id), "dead", processed_at=datetime.utcnow())
+                mark_event_status(db, int(ev.id), "dead", processed_at=datetime.now(timezone.utc))
                 processed += 1
         db.flush()
 
@@ -101,7 +103,10 @@ def run_activation_batch(
         inhibitions=inhibitions,
         depth_sum=depth_sum,
     )
-    if ctr.batches % 50 == 0:
+    global _last_reap_ts
+    now_m = time.monotonic()
+    if now_m - _last_reap_ts >= REAP_INTERVAL_SEC:
+        _last_reap_ts = now_m
         try:
             reap_dead_events(db)
         except Exception as e:
@@ -154,7 +159,7 @@ def run_propagation_dry_run(
         payload=payload,
         max_depth=max_depth,
         graph_version=graph_version,
-        now=datetime.utcnow(),
+        now=datetime.now(timezone.utc),
     )
     return {
         "targets_touched": pr.targets_touched,
@@ -162,4 +167,6 @@ def run_propagation_dry_run(
         "downstream_events": pr.downstream_events,
         "inhibitions_applied": pr.inhibitions_applied,
         "suppressions": pr.suppressions,
+        "gated_by_signal": pr.gated_by_signal,
+        "gated_by_confidence": pr.gated_by_confidence,
     }

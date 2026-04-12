@@ -169,6 +169,143 @@ def test_severe_execution_risk_overrides_squeeze_cluster() -> None:
     assert cl.cluster_id == ClusterId.execution_risk_high.value
 
 
+def test_exhaustion_only_does_not_trigger_blow_off_risk() -> None:
+    """After regex overlap fix: 'exhaustion' alone should NOT fire extension_risk."""
+    sr = ScanResult(
+        user_id=None,
+        ticker="EXONLY",
+        score=8.0,
+        signal="buy",
+        risk_level="medium",
+        rationale="Exhaustion rejection failed continuation fade.",
+        indicator_data={},
+        scanned_at=datetime.utcnow(),
+    )
+    f = build_features(sr)
+    acts = evaluate_all_nodes(f)
+    m = {a.node_id: a.score for a in acts}
+    from app.services.trading.speculative_momentum_engine.schema import NODE_EXTENSION_RISK, NODE_EXHAUSTION
+
+    # After regex fix, exhaustion-only text should NOT trigger the extension
+    # lexical path (0.72).  The scanner_score prior (0.06 at score=8.0) is fine.
+    assert m[NODE_EXTENSION_RISK] < 0.15, "exhaust should no longer match extension lexical regex"
+    assert m[NODE_EXHAUSTION] > 0.0
+    cl = resolve_cluster(acts, scanner_score=f.scanner_score)
+    assert cl.cluster_id != ClusterId.blow_off_risk.value
+
+
+def test_vwap_pullback_passes_hot_gate() -> None:
+    """VWAP pullback language should pass hot gate even without other signals."""
+    from app.services.trading.speculative_momentum_engine.features import passes_hot_gate, SignalFeatures
+
+    f = SignalFeatures(
+        ticker="VPULL",
+        scanner_score=7.2,
+        signal="buy",
+        risk_level="medium",
+        blob="first pullback vwap reclaim structure",
+        vol_ratio=None,
+    )
+    assert passes_hot_gate(f, min_score=6.0) is True
+
+
+def test_sell_signal_blocked_by_hot_gate() -> None:
+    """Sell/short signals should be filtered out at the hot gate."""
+    from app.services.trading.speculative_momentum_engine.features import passes_hot_gate, SignalFeatures
+
+    f = SignalFeatures(
+        ticker="SELLS",
+        scanner_score=9.0,
+        signal="sell",
+        risk_level="low",
+        blob="Short squeeze gamma halt with abnormal volume.",
+        vol_ratio=3.0,
+    )
+    assert passes_hot_gate(f, min_score=6.0) is False
+
+
+def test_squeeze_match_count_granularity() -> None:
+    """Multiple squeeze matches should score higher than a single match."""
+    from app.services.trading.speculative_momentum_engine.nodes import eval_squeeze_pressure
+    from app.services.trading.speculative_momentum_engine.features import SignalFeatures
+
+    f_one = SignalFeatures(ticker="A", scanner_score=8.0, signal="buy", risk_level="medium",
+                           blob="squeeze pressure building", vol_ratio=None)
+    f_many = SignalFeatures(ticker="B", scanner_score=8.0, signal="buy", risk_level="medium",
+                            blob="short squeeze gamma squeeze halt resume", vol_ratio=None)
+    act_one = eval_squeeze_pressure(f_one)
+    act_many = eval_squeeze_pressure(f_many)
+    assert act_one.score > 0
+    assert act_many.score > act_one.score
+
+
+def test_operator_hint_covers_all_clusters() -> None:
+    """Every cluster should return a non-generic operator hint."""
+    from app.services.trading.speculative_momentum_engine.reasoning import operator_hint
+
+    generic = "Speculative — verify liquidity/spread live."
+    for cid in ClusterId:
+        hint = operator_hint(cid.value, {}, 0.0)
+        if cid != ClusterId.watch_only:
+            assert hint != generic, f"{cid.value} should have a specific hint"
+
+
+def test_scoring_plane_all_zeros() -> None:
+    """All-zero node activations should produce valid bounded scores with no NaN."""
+    from app.services.trading.speculative_momentum_engine.nodes import NodeActivation
+    from app.services.trading.speculative_momentum_engine.schema import (
+        NODE_VOLUME_EXPANSION, NODE_SQUEEZE_PRESSURE, NODE_EVENT_IMPULSE,
+        NODE_EXTENSION_RISK, NODE_EXECUTION_RISK, NODE_VWAP_PULLBACK, NODE_EXHAUSTION,
+    )
+
+    zero_acts = [
+        NodeActivation(NODE_VOLUME_EXPANSION, 0.0, ""),
+        NodeActivation(NODE_SQUEEZE_PRESSURE, 0.0, ""),
+        NodeActivation(NODE_EVENT_IMPULSE, 0.0, ""),
+        NodeActivation(NODE_EXTENSION_RISK, 0.0, ""),
+        NodeActivation(NODE_EXECUTION_RISK, 0.0, ""),
+        NodeActivation(NODE_VWAP_PULLBACK, 0.0, ""),
+        NodeActivation(NODE_EXHAUSTION, 0.0, ""),
+    ]
+    from app.services.trading.speculative_momentum_engine.features import SignalFeatures
+    from app.services.trading.speculative_momentum_engine.clusters import ClusterResolution
+
+    f = SignalFeatures(ticker="Z", scanner_score=0.0, signal="buy", risk_level="medium", blob="", vol_ratio=None)
+    cl = ClusterResolution(cluster_id="watch_only", rationale="test")
+    scores = build_scoring_plane(f, zero_acts, cl)
+    for key, val in scores.items():
+        assert 0.0 <= val <= 1.0, f"{key}={val} out of bounds"
+        assert val == val, f"{key} is NaN"  # NaN != NaN
+
+
+def test_scoring_plane_all_ones() -> None:
+    """All-max node activations should produce valid bounded scores."""
+    from app.services.trading.speculative_momentum_engine.nodes import NodeActivation
+    from app.services.trading.speculative_momentum_engine.schema import (
+        NODE_VOLUME_EXPANSION, NODE_SQUEEZE_PRESSURE, NODE_EVENT_IMPULSE,
+        NODE_EXTENSION_RISK, NODE_EXECUTION_RISK, NODE_VWAP_PULLBACK, NODE_EXHAUSTION,
+    )
+
+    max_acts = [
+        NodeActivation(NODE_VOLUME_EXPANSION, 1.0, ""),
+        NodeActivation(NODE_SQUEEZE_PRESSURE, 1.0, ""),
+        NodeActivation(NODE_EVENT_IMPULSE, 1.0, ""),
+        NodeActivation(NODE_EXTENSION_RISK, 1.0, ""),
+        NodeActivation(NODE_EXECUTION_RISK, 1.0, ""),
+        NodeActivation(NODE_VWAP_PULLBACK, 1.0, ""),
+        NodeActivation(NODE_EXHAUSTION, 1.0, ""),
+    ]
+    from app.services.trading.speculative_momentum_engine.features import SignalFeatures
+    from app.services.trading.speculative_momentum_engine.clusters import ClusterResolution
+
+    f = SignalFeatures(ticker="Z", scanner_score=10.0, signal="buy", risk_level="high", blob="", vol_ratio=5.0)
+    cl = ClusterResolution(cluster_id="blow_off_risk", rationale="test")
+    scores = build_scoring_plane(f, max_acts, cl)
+    for key, val in scores.items():
+        assert 0.0 <= val <= 1.0, f"{key}={val} out of bounds"
+        assert val == val, f"{key} is NaN"
+
+
 def test_core_opportunity_board_untouched_import(db: Session, scan_squeeze: None) -> None:
     """Regression: board helper still attaches speculative payload without touching tiers."""
     from app.services.trading.opportunity_board import get_trading_opportunity_board

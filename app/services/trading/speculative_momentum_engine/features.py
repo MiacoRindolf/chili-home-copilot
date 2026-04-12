@@ -28,7 +28,7 @@ _EVENT_RE = re.compile(
     re.I,
 )
 _EXTENSION_RE = re.compile(
-    r"\b(extended|extension|parabolic|blow[- ]?off|exhaust|overbought\s+stretch|too\s+far)\b",
+    r"\b(extended|extension|parabolic|blow[- ]?off|overbought\s+stretch|too\s+far)\b",
     re.I,
 )
 _VOLUME_RE = re.compile(
@@ -78,8 +78,14 @@ def build_features(sr: ScanResult) -> SignalFeatures:
     )
 
 
+_BUY_SIGNALS = frozenset({"buy", "long", "momentum", ""})
+
+
 def passes_hot_gate(f: SignalFeatures, *, min_score: float = 6.0) -> bool:
     if f.scanner_score < min_score:
+        return False
+    # Engine is buy-oriented; filter out explicit sell/short signals.
+    if f.signal and f.signal not in _BUY_SIGNALS:
         return False
     return (
         f.scanner_score >= 7.8
@@ -87,6 +93,7 @@ def passes_hot_gate(f: SignalFeatures, *, min_score: float = 6.0) -> bool:
         or bool(_VOLUME_RE.search(f.blob))
         or bool(_EXTENSION_RE.search(f.blob))
         or bool(_EVENT_RE.search(f.blob))
+        or bool(_VWAP_PULLBACK_RE.search(f.blob))
         or (f.vol_ratio is not None and f.vol_ratio >= 2.5)
     )
 
