@@ -943,14 +943,13 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
           {% if trading_brain_neural_first_paint|default(false) %}
           <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Nodes react to incoming events and may fire together in the same activation wave. Pulsing edges and ripple halos show propagation (several nodes can be hot at once). Faint circular guides are layer structure, not activity. Muted nodes are stale, cooling, or disabled. Observer nodes (dashed ring) surface outputs without participating in the cognition core.</p>
           {% else %}
-          <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. This view loads the learning-cycle architecture graph from the API (legacy mode). Enable <code style="font-size:9px">TRADING_BRAIN_NEURAL_MESH_ENABLED</code> for the event-driven neural mesh.</p>
+          <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Nodes react to incoming events and may fire together in the same activation wave.</p>
           {% endif %}
           <span class="tbn-wave-indicator" id="tbn-wave-indicator" aria-live="polite"></span>
-          <div id="tbn-graph-mode-wrap" class="tbn-graph-mode-row" style="display:none" title="Neural mesh requires TRADING_BRAIN_NEURAL_MESH_ENABLED">
+          <div id="tbn-graph-mode-wrap" class="tbn-graph-mode-row" style="display:none">
             <label for="tbn-graph-mode">View</label>
             <select id="tbn-graph-mode" aria-label="Graph view mode">
-              <option value="legacy">Legacy architecture</option>
-              <option value="neural">Neural mesh</option>
+              <option value="neural" selected>Neural mesh</option>
             </select>
             <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
               <input type="checkbox" id="tbn-live-activations" />
@@ -2200,33 +2199,21 @@ function initTradingBrainNetworkGraph() {
   function tbnApplyServerDeskConfig(d) {
     if (!d || d.ok === false) return;
     _tbnDesk = {
-      mesh_enabled: !!d.mesh_enabled,
-      effective_graph_mode: d.effective_graph_mode || 'legacy',
-      trading_brain_graph_mode_setting: d.trading_brain_graph_mode_setting || 'neural',
+      mesh_enabled: true,
+      effective_graph_mode: 'neural',
       desk_boot: d.desk_boot || 'api',
       recommended_graph_url: d.recommended_graph_url || '/api/trading/brain/graph',
-      legacy_graph_url: d.legacy_graph_url || '/api/brain/trading/network-graph',
-      silent_legacy_fallback: !!d.silent_legacy_fallback,
     };
     window.__CHILI_TBN_DESK__ = _tbnDesk;
   }
 
   function tbnGraphFetchUrl() {
     var desk = _tbnDesk || {};
-    if (!desk.mesh_enabled) return desk.legacy_graph_url || '/api/brain/trading/network-graph';
-    var wrap = document.getElementById('tbn-graph-mode-wrap');
-    var sel = document.getElementById('tbn-graph-mode');
-    var userNeural = wrap && wrap.style.display !== 'none' && sel && sel.value === 'neural';
-    if (userNeural) return desk.recommended_graph_url || '/api/trading/brain/graph';
-    return desk.legacy_graph_url || '/api/brain/trading/network-graph';
+    return desk.recommended_graph_url || '/api/trading/brain/graph';
   }
 
   function tbnWantsNeuralStrict() {
-    var desk = _tbnDesk || {};
-    if (!desk.mesh_enabled) return false;
-    var wrap = document.getElementById('tbn-graph-mode-wrap');
-    var sel = document.getElementById('tbn-graph-mode');
-    return !!(wrap && wrap.style.display !== 'none' && sel && sel.value === 'neural');
+    return true;
   }
 
   function tbnRestartLivePoll() {
@@ -2285,15 +2272,8 @@ function initTradingBrainNetworkGraph() {
     var sel = document.getElementById('tbn-graph-mode');
     var desk = _tbnDesk || {};
     if (!wrap || !sel) return;
-    if (!desk.mesh_enabled) return;
     wrap.style.display = 'flex';
-    var saved = null;
-    try { saved = localStorage.getItem('chili_tbn_graph_mode'); } catch (e1) {}
-    if (saved === 'neural' || saved === 'legacy') {
-      sel.value = saved;
-    } else {
-      sel.value = (desk.effective_graph_mode === 'neural') ? 'neural' : 'legacy';
-    }
+    sel.value = 'neural';
     sel.onchange = function() {
       try { localStorage.setItem('chili_tbn_graph_mode', sel.value); } catch (e2) {}
       tbnRefreshTradingBrainNetworkGraph();
@@ -2377,8 +2357,8 @@ function initTradingBrainNetworkGraph() {
     var y0 = 430;
     var lines = [
       'Neural graph unavailable',
-      'The desk did not load a neural mesh projection (no silent legacy fallback).',
-      'Check: API reachable, TRADING_BRAIN_NEURAL_MESH_ENABLED=1, DB migration 086, graph payload.',
+      'The desk did not load a neural mesh projection.',
+      'Check: API reachable, DB migrations applied, graph payload.',
     ];
     if (detail) lines.push(String(detail).slice(0, 120));
     lines.forEach(function(line, i) {
@@ -3188,7 +3168,7 @@ function initTradingBrainNetworkGraph() {
     }).observe(vp);
   }
 
-  // Live cycle status overlay â€” legacy graph only (neural uses activation waves)
+  // Live cycle status overlay — highlights active cluster/step during a learning cycle
   function tbnUpdateNodeStatuses() {
     if (_tbnNeuralView) return;
     fetch('/api/trading/scan/status', { credentials: 'same-origin' })
