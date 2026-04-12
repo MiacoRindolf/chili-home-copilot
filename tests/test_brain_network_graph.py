@@ -1,52 +1,48 @@
-"""Structural sanity for the Trading Brain Network graph JSON (no DB)."""
+"""Structural sanity for the Trading Brain learning-cycle architecture (no DB)."""
 
 from __future__ import annotations
 
-from app.services.trading.brain_network_graph import (
-    TRADING_BRAIN_NETWORK_GRAPH_VERSION,
-    get_trading_brain_network_graph,
+from app.services.trading.learning_cycle_architecture import (
+    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+)
+from app.services.trading.brain_neural_mesh.seed_graph import (
+    LEARNING_CYCLE_CLUSTER_IDS,
+    LEARNING_CYCLE_STEP_IDS,
+    VENUE_NODE_IDS,
+    EXECUTION_CONTEXT_NODE_IDS,
 )
 
 
-def test_trading_brain_network_graph_universe_and_step_ordinals() -> None:
-    data = get_trading_brain_network_graph()
-    assert int(data["meta"]["graph_version"]) == TRADING_BRAIN_NETWORK_GRAPH_VERSION
-    for n in data["nodes"]:
-        if not isinstance(n, dict):
-            continue
-        tid = n.get("id", "")
-        if n.get("tier") == "step":
-            assert isinstance(n.get("cluster_index"), int)
-            assert isinstance(n.get("step_index"), int)
-        if tid == "c_universe" or (isinstance(tid, str) and tid.startswith("s_c_universe_")):
-            assert n.get("in_learning_cycle") is False
+def test_learning_cycle_cluster_split_has_no_c_meta() -> None:
+    """c_meta has been split into c_meta_learning, c_decisioning, c_control."""
+    cluster_ids = {c.id for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS}
+    assert "c_meta" not in cluster_ids
+    assert "c_meta_learning" in cluster_ids
+    assert "c_decisioning" in cluster_ids
+    assert "c_control" in cluster_ids
 
 
-def test_trading_brain_network_graph_structure() -> None:
-    data = get_trading_brain_network_graph()
-    assert data.get("ok") is True
-    nodes = data.get("nodes") or []
-    edges = data.get("edges") or []
-    assert len(nodes) > 0
-    assert len(edges) > 0
-    ids = {n["id"] for n in nodes if isinstance(n, dict) and "id" in n}
-    for e in edges:
-        assert e.get("from") in ids, f"missing from-node: {e!r}"
-        assert e.get("to") in ids, f"missing to-node: {e!r}"
-    meta = data.get("meta") or {}
-    assert int(meta.get("graph_version", 0)) == TRADING_BRAIN_NETWORK_GRAPH_VERSION
-    assert meta.get("architecture_source") == "learning_cycle_architecture"
-    for n in nodes:
-        if not isinstance(n, dict):
+def test_seed_graph_cluster_ids_match_architecture() -> None:
+    """Seed graph cluster IDs must match learning_cycle_architecture (minus c_universe)."""
+    arch_cluster_ids = {c.id for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id != "c_universe"}
+    seed_cluster_ids = {nid.replace("nm_lc_", "") for nid in LEARNING_CYCLE_CLUSTER_IDS}
+    assert arch_cluster_ids == seed_cluster_ids
+
+
+def test_seed_graph_step_ids_cover_architecture() -> None:
+    """Every step sid in learning_cycle_architecture should have a corresponding nm_lc_ node."""
+    arch_step_sids = set()
+    for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
+        if c.id == "c_universe":
             continue
-        assert "description" in n
-        assert str(n.get("description", "")).strip()
-        assert "remarks" in n
-        assert str(n.get("remarks", "")).strip()
-        assert isinstance(n.get("inputs"), list)
-        assert isinstance(n.get("outputs"), list)
-        for item in n["inputs"] + n["outputs"]:
-            assert isinstance(item, str)
-        assert "code_snippet" in n
-        assert isinstance(n.get("code_snippet"), str)
-        assert str(n.get("code_snippet", "")).strip()
+        for s in c.steps:
+            arch_step_sids.add(s.sid)
+    seed_step_sids = {nid.replace("nm_lc_", "") for nid in LEARNING_CYCLE_STEP_IDS}
+    assert arch_step_sids == seed_step_sids
+
+
+def test_venue_and_execution_node_ids_defined() -> None:
+    """Provider truth and execution context nodes must be defined."""
+    assert "nm_venue_truth_coinbase" in VENUE_NODE_IDS
+    assert "nm_venue_truth_robinhood" in VENUE_NODE_IDS
+    assert len(EXECUTION_CONTEXT_NODE_IDS) >= 3

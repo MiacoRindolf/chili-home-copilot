@@ -45,16 +45,41 @@ def min_confidence_ok(edge: BrainGraphEdge, state_confidence: float) -> bool:
     return float(state_confidence) >= float(edge.min_confidence or 0.0)
 
 
+def source_confidence_ok(edge: BrainGraphEdge, source_confidence: float) -> bool:
+    """Check source node's confidence against edge's min_source_confidence threshold."""
+    min_src = float(getattr(edge, "min_source_confidence", 0.0) or 0.0)
+    return float(source_confidence) >= min_src
+
+
+# Edge-type scaling factors: veto edges hit harder, evidence edges carry more weight.
+_EDGE_TYPE_SCALE: dict[str, float] = {
+    "dataflow": 1.0,
+    "evidence": 1.3,
+    "veto": 1.5,
+    "feedback": 0.9,
+    "control": 0.8,
+    "operator_output": 1.0,
+}
+
+
 def compute_activation_delta(
     edge: BrainGraphEdge,
     *,
     confidence_delta: float,
     polarity: str,
+    source_confidence: float = 1.0,
 ) -> float:
-    """Signed change to apply to target activation (before clamp)."""
+    """Signed change to apply to target activation (before clamp).
+
+    Scales by edge weight, edge type, and source confidence quality.
+    """
     base = abs(float(confidence_delta)) if confidence_delta != 0.0 else 0.12
     w = float(edge.weight or 1.0)
-    mag = w * base * 0.35
+    edge_type = getattr(edge, "edge_type", "dataflow") or "dataflow"
+    type_scale = _EDGE_TYPE_SCALE.get(edge_type, 1.0)
+    # Source confidence attenuates: weak sources don't strongly activate targets.
+    src_factor = max(0.3, float(source_confidence))
+    mag = w * base * 0.35 * type_scale * src_factor
     if polarity == "inhibitory":
         return -mag
     return mag
@@ -119,6 +144,18 @@ def propagate_one_event(
     if not src_node or not src_node.enabled:
         return res
 
+    # Load source state for source-quality gating
+    src_state = get_or_create_state(db, source_node_id)
+    src_confidence = float(src_state.confidence) if src_state else 0.5
+
+    # Freshness scaling: attenuate confidence_delta for stale data
+    effective_delta = confidence_delta
+    if payload and isinstance(payload, dict):
+        freshness_sec = payload.get("freshness_seconds")
+        if isinstance(freshness_sec, (int, float)) and freshness_sec > 120.0:
+            # Linear attenuation from 120s to 900s (15 min), floor at 0.3x
+            effective_delta *= max(0.3, 1.0 - (freshness_sec - 120.0) / 780.0)
+
     edges = list(outbound_edges(db, source_node_id, graph_version=graph_version))
     for edge in edges:
         if not gate_allows(edge, ev_signal):
@@ -134,6 +171,11 @@ def propagate_one_event(
             res.gated_by_confidence += 1
             continue
 
+        # Source-quality gating: weak sources are blocked by min_source_confidence
+        if not source_confidence_ok(edge, src_confidence):
+            res.gated_by_confidence += 1
+            continue
+
         if edge.delay_ms and int(edge.delay_ms) > 0:
             _log.debug(
                 "%s edge %s has delay_ms=%s but delay is not yet implemented; firing instantly",
@@ -141,12 +183,17 @@ def propagate_one_event(
             )
 
         before_act = float(state.activation_score)
-        delta = compute_activation_delta(edge, confidence_delta=confidence_delta, polarity=edge.polarity)
+        delta = compute_activation_delta(
+            edge,
+            confidence_delta=effective_delta,
+            polarity=edge.polarity,
+            source_confidence=src_confidence,
+        )
         if edge.polarity == "inhibitory":
             res.inhibitions_applied += 1
 
         state.activation_score = _clamp01(before_act + delta)
-        state.staleness_at = now
+        state.last_activated_at = now
         state.updated_at = now
 
         # Suppression: was at/above threshold, inhibitory pulled below
@@ -205,7 +252,7 @@ def apply_decay_to_state(
     """Exponential decay on confidence and activation_score when stale. Returns True if mutated."""
     if half_life_seconds <= 0:
         return False
-    ref = state.staleness_at
+    ref = state.last_activated_at
     if ref is None:
         return False
     dt = (now - ref).total_seconds()

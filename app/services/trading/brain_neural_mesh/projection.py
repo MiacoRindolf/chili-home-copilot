@@ -14,6 +14,7 @@ from ....models.trading import (
     BrainGraphNode,
     BrainNodeState,
 )
+from .code_snippets import build_code_snippet_from_ref
 from .layout_neural_graph import (
     MARGIN,
     VIEWPORT_H,
@@ -61,10 +62,10 @@ def _node_cooling(
     return (now - last_fired_at).total_seconds() < float(cooldown_seconds)
 
 
-def _node_stale_flag(staleness_at: Optional[datetime], *, now: datetime, stale_after_sec: float) -> bool:
-    if staleness_at is None:
+def _node_stale_flag(last_activated_at: Optional[datetime], *, now: datetime, stale_after_sec: float) -> bool:
+    if last_activated_at is None:
         return False
-    return (now - staleness_at).total_seconds() > stale_after_sec
+    return (now - last_activated_at).total_seconds() > stale_after_sec
 
 
 def build_neural_graph_projection(
@@ -109,7 +110,7 @@ def build_neural_graph_projection(
         st = states.get(node.id)
         act = float(st.activation_score) if st else 0.0
         conf = float(st.confidence) if st else 0.5
-        stale = _node_stale_flag(st.staleness_at if st else None, now=now, stale_after_sec=stale_after_sec)
+        stale = _node_stale_flag(st.last_activated_at if st else None, now=now, stale_after_sec=stale_after_sec)
         recent_fire = st.last_fired_at.isoformat() if st and st.last_fired_at else None
         cooling = _node_cooling(
             st.last_fired_at if st else None,
@@ -117,6 +118,7 @@ def build_neural_graph_projection(
             now=now,
         )
         layer_label = NEURAL_LAYER_LABELS.get(int(node.layer), f"Layer {node.layer}")
+        dmeta = node.display_meta if isinstance(node.display_meta, dict) else {}
         nd: dict[str, Any] = {
             "id": node.id,
             "label": node.label,
@@ -135,6 +137,9 @@ def build_neural_graph_projection(
             "last_fired_at": recent_fire,
             "x": round(x, 2),
             "y": round(y, 2),
+            "description": dmeta.get("description"),
+            "remarks": dmeta.get("remarks"),
+            "cluster_id": dmeta.get("cluster_id"),
         }
         ls = st.local_state if st and isinstance(st.local_state, dict) else None
         if ls and ls.get("momentum_neural_version"):
@@ -163,6 +168,7 @@ def build_neural_graph_projection(
                 "signal_type": e.signal_type,
                 "weight": float(e.weight),
                 "polarity": e.polarity,
+                "edge_type": getattr(e, "edge_type", "dataflow") or "dataflow",
                 "kind": "neural",
             }
         )
@@ -237,7 +243,7 @@ def build_node_detail(
     )
     now = datetime.now(timezone.utc)
     stale_after = 480.0
-    stale = _node_stale_flag(st.staleness_at if st else None, now=now, stale_after_sec=stale_after)
+    stale = _node_stale_flag(st.last_activated_at if st else None, now=now, stale_after_sec=stale_after)
     cooling = _node_cooling(st.last_fired_at if st else None, int(node.cooldown_seconds), now=now)
 
     def _pc(edges: list) -> dict[str, int]:
@@ -260,6 +266,10 @@ def build_node_detail(
     ov_waves = group_activation_events_into_waves(ov_events, time_window_sec=2.0)
     hot_overlay, _, last_act_wave = derive_overlay_hot_pulse_from_waves(ov_waves, {})
 
+    dmeta_detail = node.display_meta if isinstance(node.display_meta, dict) else {}
+    code_ref = dmeta_detail.get("code_ref", "")
+    code_snippet = build_code_snippet_from_ref(code_ref) if code_ref else ""
+
     out: dict[str, Any] = {
         "id": node.id,
         "label": node.label,
@@ -273,10 +283,17 @@ def build_node_detail(
         "confidence": float(st.confidence) if st else 0.5,
         "local_state": st.local_state if st and st.local_state else {},
         "last_fired_at": st.last_fired_at.isoformat() if st and st.last_fired_at else None,
-        "staleness_at": st.staleness_at.isoformat() if st and st.staleness_at else None,
+        "last_activated_at": st.last_activated_at.isoformat() if st and st.last_activated_at else None,
         "stale": stale,
         "cooling": cooling,
         "layer_label": NEURAL_LAYER_LABELS.get(int(node.layer), f"Layer {node.layer}"),
+        "description": dmeta_detail.get("description"),
+        "remarks": dmeta_detail.get("remarks"),
+        "code_ref": code_ref or None,
+        "code_snippet": code_snippet or None,
+        "inputs": dmeta_detail.get("inputs"),
+        "outputs": dmeta_detail.get("outputs"),
+        "display_meta": dmeta_detail or None,
         "edge_polarity_inbound": ib_pc,
         "edge_polarity_outbound": ob_pc,
         "last_wave_correlation_id": last_wave_id,
@@ -342,10 +359,12 @@ def build_edge_detail(db: Session, edge_id: int) -> Optional[dict[str, Any]]:
         "signal_type": e.signal_type,
         "weight": float(e.weight),
         "polarity": e.polarity,
+        "edge_type": getattr(e, "edge_type", "dataflow") or "dataflow",
         "delay_ms": int(e.delay_ms),
         "decay_half_life_seconds": e.decay_half_life_seconds,
         "gate_config": e.gate_config,
         "min_confidence": float(e.min_confidence),
+        "min_source_confidence": float(getattr(e, "min_source_confidence", 0.0) or 0.0),
         "enabled": e.enabled,
         "graph_version": e.graph_version,
         "source_label": src.label if src else None,

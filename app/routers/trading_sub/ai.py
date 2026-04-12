@@ -114,24 +114,11 @@ def api_trading_brain_graph_config(request: Request, db: Session = Depends(get_d
 def api_trading_brain_graph(
     request: Request,
     db: Session = Depends(get_db),
-    mode: str | None = Query(None, description="legacy | neural (default: server policy)"),
 ):
     get_identity_ctx(request, db)
-    from ...services.trading.brain_network_graph import get_trading_brain_network_graph
     from ...services.trading.brain_neural_mesh.projection import build_neural_graph_projection
-    from ...services.trading.brain_neural_mesh.schema import effective_graph_mode, mesh_enabled
 
-    want = (mode or "").strip().lower() or None
-    eff = effective_graph_mode()
-    resolved = want or eff
-    if resolved == "neural":
-        if not mesh_enabled():
-            return JSONResponse(
-                {"ok": False, "error": "neural_mesh_disabled", "hint": "Set TRADING_BRAIN_NEURAL_MESH_ENABLED=1"},
-                status_code=403,
-            )
-        return JSONResponse(build_neural_graph_projection(db))
-    return JSONResponse(get_trading_brain_network_graph(db=db))
+    return JSONResponse(build_neural_graph_projection(db))
 
 
 # ── Neural momentum desk (Phase 10 — read-only; not learning-cycle) ─────────

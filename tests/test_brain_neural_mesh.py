@@ -36,7 +36,7 @@ def test_decay_reduces_confidence() -> None:
         node_id="n1",
         activation_score=0.5,
         confidence=0.8,
-        staleness_at=datetime.utcnow() - timedelta(seconds=900),
+        last_activated_at=datetime.utcnow() - timedelta(seconds=900),
     )
     assert prop.apply_decay_to_state(st, half_life_seconds=300.0, now=datetime.utcnow()) is True
     assert st.confidence < 0.8
@@ -168,7 +168,7 @@ def test_activation_score_decay() -> None:
         node_id="n1",
         activation_score=0.9,
         confidence=0.8,
-        staleness_at=datetime.utcnow() - timedelta(seconds=1800),
+        last_activated_at=datetime.utcnow() - timedelta(seconds=1800),
     )
     assert prop.apply_decay_to_state(st, half_life_seconds=300.0, now=datetime.utcnow()) is True
     assert st.activation_score < 0.9

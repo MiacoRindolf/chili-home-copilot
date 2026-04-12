@@ -7936,8 +7936,8 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        # graph-node: c_meta/ml
-        apply_learning_cycle_step_status(_learning_status, "c_meta", "ml")
+        # graph-node: c_meta_learning/ml
+        apply_learning_cycle_step_status(_learning_status, "c_meta_learning", "ml")
         from .pattern_ml import get_meta_learner, apply_ml_feedback
         _meta = get_meta_learner()
         ml_result = _meta.train(db)
@@ -7963,8 +7963,8 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        # graph-node: c_meta/pattern_engine
-        apply_learning_cycle_step_status(_learning_status, "c_meta", "pattern_engine")
+        # graph-node: c_decisioning/pattern_engine
+        apply_learning_cycle_step_status(_learning_status, "c_decisioning", "pattern_engine")
         try:
             pe_result = _run_pattern_engine_cycle(db, user_id)
             report["patterns_discovered_engine"] = pe_result.get("hypotheses_generated", 0)
@@ -7980,8 +7980,8 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        # graph-node: c_meta/proposals
-        apply_learning_cycle_step_status(_learning_status, "c_meta", "proposals")
+        # graph-node: c_decisioning/proposals
+        apply_learning_cycle_step_status(_learning_status, "c_decisioning", "proposals")
         try:
             from .alerts import generate_strategy_proposals
             proposals = generate_strategy_proposals(db, user_id)
@@ -7998,8 +7998,8 @@ def run_learning_cycle(
         report["cycle_ai_report_id"] = None
         if not _shutting_down.is_set():
             step_start = time.time()
-            # graph-node: c_meta/cycle_report
-            apply_learning_cycle_step_status(_learning_status, "c_meta", "cycle_report")
+            # graph-node: c_control/cycle_report
+            apply_learning_cycle_step_status(_learning_status, "c_control", "cycle_report")
             report["elapsed_s_pre_report"] = round(time.time() - start, 1)
             try:
                 from .learning_cycle_report import generate_and_store_cycle_report
@@ -8020,8 +8020,8 @@ def run_learning_cycle(
 
         # Live vs research depromotion (optional)
         if not _shutting_down.is_set():
-            # graph-node: c_meta/depromote
-            apply_learning_cycle_step_status(_learning_status, "c_meta", "depromote")
+            # graph-node: c_control/depromote
+            apply_learning_cycle_step_status(_learning_status, "c_control", "depromote")
             try:
                 report["live_depromotion"] = run_live_pattern_depromotion(db)
             except Exception as e:
@@ -8043,8 +8043,8 @@ def run_learning_cycle(
                 report["execution_robustness"] = {"ok": False, "error": str(e)}
 
         # Step 14: Finalize + log
-        # graph-node: c_meta/finalize
-        apply_learning_cycle_step_status(_learning_status, "c_meta", "finalize")
+        # graph-node: c_control/finalize
+        apply_learning_cycle_step_status(_learning_status, "c_control", "finalize")
         elapsed = time.time() - start
         report["data_provider"] = _provider
         log_learning_event(

@@ -22,7 +22,6 @@ from ..services.code_brain import lenses as cb_lenses
 from ..services.reasoning_brain import learning as rb_learning
 from ..services.project_brain import registry as pb_registry
 from ..services.reasoning_brain import proactive_chat as rb_chat
-from ..services.trading.brain_network_graph import get_trading_brain_network_graph
 from ..services.trading.brain_neural_mesh.schema import desk_graph_boot_config
 from ..models import (
     BrainBatchJob,
@@ -253,15 +252,19 @@ def api_brain_trading_metrics(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/api/brain/trading/network-graph")
-def api_brain_trading_network_graph():
-    """Static governance graph for Trading Brain Network (skill-tree UI)."""
-    return JSONResponse(get_trading_brain_network_graph())
+def api_brain_trading_network_graph(db: Session = Depends(get_db)):
+    """Neural mesh graph for Trading Brain Network (skill-tree UI)."""
+    from ..services.trading.brain_neural_mesh.projection import build_neural_graph_projection
+
+    return JSONResponse(build_neural_graph_projection(db))
 
 
 @router.get("/api/brain/network-graph")
-def api_brain_network_graph_compat():
+def api_brain_network_graph_compat(db: Session = Depends(get_db)):
     """Same payload as ``/api/brain/trading/network-graph`` for external SPAs (e.g. dev on :3000)."""
-    return JSONResponse(get_trading_brain_network_graph())
+    from ..services.trading.brain_neural_mesh.projection import build_neural_graph_projection
+
+    return JSONResponse(build_neural_graph_projection(db))
 
 
 # ── Trading domain: controls ───────────────────────────────────────────

@@ -26,7 +26,9 @@ LEARNING_CYCLE_CLUSTER_IDS: tuple[str, ...] = (
     "nm_lc_c_evolution",
     "nm_lc_c_secondary",
     "nm_lc_c_journal",
-    "nm_lc_c_meta",
+    "nm_lc_c_meta_learning",
+    "nm_lc_c_decisioning",
+    "nm_lc_c_control",
 )
 
 # Learning-cycle step nodes (layer 9)
@@ -62,3 +64,15 @@ LEARNING_CYCLE_STEP_IDS: tuple[str, ...] = (
 
 # Combined for convenience
 LEARNING_CYCLE_NODE_IDS: tuple[str, ...] = LEARNING_CYCLE_CLUSTER_IDS + LEARNING_CYCLE_STEP_IDS
+
+# Execution context / provider truth nodes
+VENUE_NODE_IDS: tuple[str, ...] = (
+    "nm_venue_truth_coinbase",
+    "nm_venue_truth_robinhood",
+)
+
+EXECUTION_CONTEXT_NODE_IDS: tuple[str, ...] = (
+    "nm_exec_liquidity_regime",
+    "nm_exec_spread_quality",
+    "nm_exec_readiness_gate",
+)

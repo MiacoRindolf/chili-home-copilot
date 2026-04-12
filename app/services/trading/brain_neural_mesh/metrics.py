@@ -188,8 +188,8 @@ def _stale_node_count(
             BrainGraphNode.domain == domain,
             BrainGraphNode.graph_version == graph_version,
             BrainGraphNode.enabled.is_(True),
-            BrainNodeState.staleness_at.isnot(None),
-            BrainNodeState.staleness_at < cutoff,
+            BrainNodeState.last_activated_at.isnot(None),
+            BrainNodeState.last_activated_at < cutoff,
         )
         .count()
     )

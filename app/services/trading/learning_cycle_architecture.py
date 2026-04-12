@@ -748,32 +748,25 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
         ),
     ),
     CycleClusterDef(
-        id="c_meta",
-        label="Meta-learning & cycle close",
-        phase_summary="ML → pattern engine → proposals → report → depromote → finalize",
+        id="c_meta_learning",
+        label="Meta-learning & reweighting",
+        phase_summary="ML training",
         description=(
-            "Trains the pattern meta-learner, runs the pattern-engine pass, then emits "
-            "strategy proposals, stores an AI cycle report, applies depromotion rules, and logs."
+            "Trains the pattern meta-learner and applies feedback boosts or penalties "
+            "to pattern scores based on realized outcomes."
         ),
         remarks=(
-            "What: Meta-model training, pattern-engine sub-cycle (hypotheses/tests/evolution), "
-            "then proposal generation so proposals reflect the latest engine work; then "
-            "markdown cycle report, live depromotion, finalize + ``learning_event``.\n\n"
+            "What: Meta-model training on pattern features; writes feedback boosts.\n\n"
             "Where: End of ``run_learning_cycle`` in ``learning.py`` plus "
-            "``pattern_ml``, ``alerts``, ``learning_cycle_report`` modules.\n\n"
-            "Why: Compresses the whole cycle into learnable weights, user proposals, "
-            "audit narrative, and integrity gates before idle."
+            "``pattern_ml`` module.\n\n"
+            "Why: Ranks which pattern families deserve capital vs research dustbin."
         ),
         inputs=(
             "``report`` dict accumulated through the cycle",
             "Active patterns and feature rows for ML",
-            "LLM/config for cycle report",
         ),
         outputs=(
-            "``report['ml_trained']``, ``proposals_generated``, engine stats",
-            "``cycle_ai_report_id``",
-            "``live_depromotion`` dict",
-            "Final ``log_learning_event`` + idle status",
+            "``report['ml_trained']``, ``ml_feedback_boosted/penalised``",
         ),
         steps=(
             CycleStepDef(
@@ -797,6 +790,31 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                     "``report['ml_trained']``, ``ml_feedback_boosted/penalised``",
                 ),
             ),
+        ),
+    ),
+    CycleClusterDef(
+        id="c_decisioning",
+        label="Decisioning & promotion",
+        phase_summary="pattern engine → proposals",
+        description=(
+            "Runs the pattern-engine sub-cycle and generates strategy proposals from "
+            "high-confidence patterns for user review or execution."
+        ),
+        remarks=(
+            "What: Pattern-engine sub-cycle (hypotheses/tests/evolution), then proposal "
+            "generation so proposals reflect the latest engine work.\n\n"
+            "Where: End of ``run_learning_cycle`` in ``learning.py`` plus ``alerts`` module.\n\n"
+            "Why: Bridges research patterns to human-approved trades using fresh engine state."
+        ),
+        inputs=(
+            "``report`` dict accumulated through the cycle",
+            "Patterns passing confidence gates",
+            "User risk profile fields",
+        ),
+        outputs=(
+            "``report['proposals_generated']``, engine stats",
+        ),
+        steps=(
             CycleStepDef(
                 sid="pattern_engine",
                 label="Pattern discovery & evolution",
@@ -835,6 +853,33 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 inputs=("Patterns passing confidence gates", "User risk profile fields"),
                 outputs=("``proposals`` list", "``report['proposals_generated']``"),
             ),
+        ),
+    ),
+    CycleClusterDef(
+        id="c_control",
+        label="Control & audit close",
+        phase_summary="report → depromote → finalize",
+        description=(
+            "Generates the cycle AI report, applies live depromotion integrity gates, "
+            "and finalizes the cycle with audit logging."
+        ),
+        remarks=(
+            "What: Markdown cycle report, live depromotion, finalize + ``learning_event``.\n\n"
+            "Where: End of ``run_learning_cycle`` in ``learning.py`` plus "
+            "``learning_cycle_report`` module.\n\n"
+            "Why: Integrity, auditability, and clean close-the-books before idle."
+        ),
+        inputs=(
+            "``report`` dict accumulated through the cycle",
+            "LLM/config for cycle report",
+            "Live vs research performance splits",
+        ),
+        outputs=(
+            "``cycle_ai_report_id``",
+            "``live_depromotion`` dict",
+            "Final ``log_learning_event`` + idle status",
+        ),
+        steps=(
             CycleStepDef(
                 sid="cycle_report",
                 label="Generating cycle AI report",

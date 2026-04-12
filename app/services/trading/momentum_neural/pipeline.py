@@ -122,12 +122,12 @@ def run_momentum_neural_tick(
 
     hub = get_or_create_state(db, HUB_NODE_ID)
     hub.local_state = hub_payload
-    hub.staleness_at = datetime.utcnow()
+    hub.last_activated_at = datetime.utcnow()
     hub.updated_at = datetime.utcnow()
 
     pool = get_or_create_state(db, VIABILITY_NODE_ID)
     pool.local_state = viability_payload
-    pool.staleness_at = datetime.utcnow()
+    pool.last_activated_at = datetime.utcnow()
     pool.updated_at = datetime.utcnow()
 
     record_evolution_trace(

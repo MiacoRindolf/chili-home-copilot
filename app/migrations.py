@@ -4835,6 +4835,582 @@ def _migration_102_learning_cycle_neural_nodes(conn) -> None:
     conn.commit()
 
 
+def _migration_103_unified_neural_mesh(conn) -> None:
+    """Backfill display_meta on all mesh nodes, add edge_type + min_source_confidence,
+    rename staleness_at → last_activated_at.  Unified neural-only graph."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    # ── 1. Core spine display_meta (layers 1-7) ────────────────────────
+    spine_meta: dict[str, dict] = {
+        "nm_snap_daily": {
+            "role": "sensory_snapshot",
+            "description": "Captures daily OHLCV market snapshots into the database for downstream feature extraction and pattern mining.",
+            "remarks": "Layer 1 sensory node. Fires on scheduler-driven snapshot refresh. Feeds event bus and feature extractors.",
+        },
+        "nm_snap_intraday": {
+            "role": "sensory_snapshot",
+            "description": "Captures intraday bar snapshots (e.g. 15m) for crypto symbols when enabled.",
+            "remarks": "Layer 1 sensory node. Enables shorter-timeframe pattern mining and compression/HV analysis.",
+        },
+        "nm_snap_crypto": {
+            "role": "sensory_snapshot",
+            "description": "Captures crypto-specific market snapshots with exchange-native data.",
+            "remarks": "Layer 1 sensory node. Feeds crypto-specific feature extraction paths.",
+        },
+        "nm_universe_scan": {
+            "role": "sensory_universe",
+            "description": "Universe prescreen and full market scan to identify the tradeable candidate pool.",
+            "remarks": "Layer 1 sensory node. Daily prescreen (2:00) and full scan (2:30) populate candidate tables.",
+        },
+        "nm_volatility": {
+            "role": "feature_volatility",
+            "description": "Extracts and tracks volatility regime features (HV, IV rank, compression, expansion).",
+            "remarks": "Layer 2 feature node. Feeds regime inference and risk gating downstream.",
+        },
+        "nm_momentum": {
+            "role": "feature_momentum",
+            "description": "Extracts momentum state features (trend strength, rate of change, relative strength).",
+            "remarks": "Layer 2 feature node. Core input to regime inference and pattern discovery.",
+        },
+        "nm_anomaly": {
+            "role": "feature_anomaly",
+            "description": "Detects statistical anomalies in price, volume, or feature distributions.",
+            "remarks": "Layer 2 feature node. Currently disabled in default seed. Fires on distribution breaks.",
+        },
+        "nm_liquidity_state": {
+            "role": "feature_liquidity",
+            "description": "Tracks liquidity conditions (spread quality, depth, volume profile).",
+            "remarks": "Layer 2 feature node. Feeds execution readiness and risk gating.",
+        },
+        "nm_breadth_state": {
+            "role": "feature_breadth",
+            "description": "Tracks market breadth metrics (advance/decline, new highs/lows, sector rotation).",
+            "remarks": "Layer 2 feature node. Contextualizes individual signals against broad market health.",
+        },
+        "nm_intermarket_state": {
+            "role": "feature_intermarket",
+            "description": "Tracks cross-asset correlations and intermarket signals (bonds, currencies, commodities).",
+            "remarks": "Layer 2 feature node. Provides macro context for equity/crypto positioning.",
+        },
+        "nm_event_bus": {
+            "role": "latent_event_bus",
+            "description": "Central activation router that distributes events across the neural mesh.",
+            "remarks": "Layer 3 latent node. Hub node with low fire threshold (0.35). Routes snapshot refreshes, cycle completions, and momentum ticks.",
+        },
+        "nm_working_memory": {
+            "role": "latent_working_memory",
+            "description": "Short-term working memory for active hypotheses, recent signals, and context.",
+            "remarks": "Layer 3 latent node. Receives decay policy signals. Maintains active thesis context.",
+        },
+        "nm_regime": {
+            "role": "latent_regime",
+            "description": "Infers the current market regime (trending, mean-reverting, volatile, quiet).",
+            "remarks": "Layer 3 latent node. Key routing decision — regime shifts trigger pattern discovery and journal observation.",
+        },
+        "nm_contradiction": {
+            "role": "latent_contradiction",
+            "description": "Tracks contradictory signals that should suppress action (conflicting indicators, regime ambiguity).",
+            "remarks": "Layer 3 latent node. Inhibitory edge to action signals — prevents trading when evidence conflicts.",
+        },
+        "nm_active_thesis_state": {
+            "role": "latent_thesis",
+            "description": "Tracks the active trading thesis and its current validity.",
+            "remarks": "Layer 3 latent node. Maintains thesis coherence across regime shifts.",
+        },
+        "nm_confidence_accumulator": {
+            "role": "latent_confidence",
+            "description": "Accumulates confidence from multiple evidence sources before gating action.",
+            "remarks": "Layer 3 latent node. Prevents premature action from single-source signals.",
+        },
+        "nm_memory_freshness": {
+            "role": "latent_memory_fresh",
+            "description": "Tracks the freshness of working memory and feature data.",
+            "remarks": "Layer 3 latent node. Signals when stored state is too old for reliable decisions.",
+        },
+        "nm_pattern_disc": {
+            "role": "pattern_discovery",
+            "description": "Pattern discovery and candidate generation from market structure.",
+            "remarks": "Layer 4 pattern node. Receives regime shift signals. Feeds evidence/backtest layer.",
+        },
+        "nm_similarity": {
+            "role": "pattern_similarity",
+            "description": "Similarity search across pattern library to find related setups and analogues.",
+            "remarks": "Layer 4 pattern node. Currently disabled in default seed. Cross-references new candidates.",
+        },
+        "nm_evidence_bt": {
+            "role": "evidence_backtest",
+            "description": "Backtest evidence evaluation — validates pattern candidates against historical data.",
+            "remarks": "Layer 5 evidence node. Core evidence gate before action signals.",
+        },
+        "nm_evidence_replay": {
+            "role": "evidence_replay",
+            "description": "Scenario replay evidence — tests pattern robustness under alternative market paths.",
+            "remarks": "Layer 5 evidence node. Currently disabled. Complements backtest with Monte Carlo / replay approaches.",
+        },
+        "nm_evidence_quality": {
+            "role": "evidence_quality",
+            "description": "Scores the overall quality and reliability of accumulated evidence.",
+            "remarks": "Layer 5 evidence node. Meta-evidence: rates backtest sample size, OOS consistency, regime coverage.",
+        },
+        "nm_counterfactual_challenger": {
+            "role": "evidence_counterfactual",
+            "description": "Challenges pattern evidence with counterfactual scenarios and devil's advocate analysis.",
+            "remarks": "Layer 5 evidence node. Reduces confirmation bias in pattern promotion.",
+        },
+        "nm_contradiction_verifier": {
+            "role": "evidence_contradiction",
+            "description": "Verifies whether contradictory evidence should suppress or merely discount a pattern.",
+            "remarks": "Layer 5 evidence node. Graduated contradiction response instead of binary veto.",
+        },
+        "nm_action_signals": {
+            "role": "action_signals",
+            "description": "Signal surfacing — aggregates validated patterns into actionable trading signals.",
+            "remarks": "Layer 6 action node. Receives evidence-ok signals, inhibited by contradiction tracker.",
+        },
+        "nm_action_alerts": {
+            "role": "action_alerts",
+            "description": "Alert candidate generation for user notification and desk display.",
+            "remarks": "Layer 6 action node. Currently disabled. Converts signals into user-facing alerts.",
+        },
+        "nm_observer_journal": {
+            "role": "observer_journal",
+            "description": "Passive observer that logs regime shifts and significant events to the market journal.",
+            "remarks": "Layer 6 observer node. Does not propagate downstream (is_observer=True).",
+        },
+        "nm_observer_playbook": {
+            "role": "observer_playbook",
+            "description": "Passive observer that tracks playbook-relevant events for operator review.",
+            "remarks": "Layer 6 observer node. Does not propagate downstream (is_observer=True).",
+        },
+        "nm_risk_gate": {
+            "role": "action_risk_gate",
+            "description": "Risk gate that can block or attenuate action signals based on portfolio risk limits.",
+            "remarks": "Layer 6 action node. Final safety check before operator surface.",
+        },
+        "nm_sizing_policy": {
+            "role": "action_sizing",
+            "description": "Position sizing policy that modulates trade size based on confidence and risk.",
+            "remarks": "Layer 6 action node. Translates signal strength into appropriate position sizes.",
+        },
+        "nm_meta_reweight": {
+            "role": "meta_reweight",
+            "description": "Edge and threshold tuning — adapts mesh weights from realized performance feedback.",
+            "remarks": "Layer 7 meta node. Learns which edges and thresholds produce good outcomes.",
+        },
+        "nm_meta_decay": {
+            "role": "meta_decay_policy",
+            "description": "Decay policy — governs how quickly stale activations and confidence drain.",
+            "remarks": "Layer 7 meta node. Sends decay ticks to working memory. Configures half-life behavior.",
+        },
+        "nm_threshold_tuner": {
+            "role": "meta_threshold",
+            "description": "Dynamically tunes fire thresholds based on recent activation patterns and outcomes.",
+            "remarks": "Layer 7 meta node. Prevents threshold drift from causing over- or under-firing.",
+        },
+        "nm_promotion_demotion_monitor": {
+            "role": "meta_promotion",
+            "description": "Monitors pattern promotion/demotion rates and flags anomalous churn.",
+            "remarks": "Layer 7 meta node. Integrity check on the promotion pipeline.",
+        },
+    }
+
+    for nid, meta in spine_meta.items():
+        conn.execute(
+            text(
+                """
+                UPDATE brain_graph_nodes
+                SET display_meta = COALESCE(display_meta, '{}'::jsonb) || CAST(:meta AS jsonb),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :nid
+                """
+            ),
+            {"nid": nid, "meta": json.dumps(meta)},
+        )
+
+    # ── 2. Learning-cycle cluster + step display_meta (layers 8-9) ─────
+    # Import canonical definitions to avoid duplicating long text.
+    from app.services.trading.learning_cycle_architecture import TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+
+    for cdef in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
+        cluster_nid = f"nm_lc_{cdef.id}"
+        cmeta = {
+            "role": "learning_cluster",
+            "cluster_id": cdef.id,
+            "description": cdef.description,
+            "remarks": cdef.remarks,
+            "phase_summary": cdef.phase_summary,
+            "inputs": list(cdef.inputs),
+            "outputs": list(cdef.outputs),
+            "code_ref": f"run_learning_cycle \u2192 {cdef.id}",
+        }
+        conn.execute(
+            text(
+                """
+                UPDATE brain_graph_nodes
+                SET display_meta = CAST(:meta AS jsonb),
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :nid
+                """
+            ),
+            {"nid": cluster_nid, "meta": json.dumps(cmeta)},
+        )
+
+        for st in cdef.steps:
+            step_nid = f"nm_lc_{st.sid}"
+            smeta = {
+                "role": "learning_step",
+                "cluster_id": cdef.id,
+                "step_sid": st.sid,
+                "description": st.description,
+                "remarks": st.remarks,
+                "code_ref": st.code_ref,
+                "runner_phase": st.runner_phase,
+                "inputs": list(st.inputs),
+                "outputs": list(st.outputs),
+            }
+            conn.execute(
+                text(
+                    """
+                    UPDATE brain_graph_nodes
+                    SET display_meta = CAST(:meta AS jsonb),
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :nid
+                    """
+                ),
+                {"nid": step_nid, "meta": json.dumps(smeta)},
+            )
+
+    # ── 3. Add edge_type column ────────────────────────────────────────
+    cols = _columns(conn, "brain_graph_edges")
+    if "edge_type" not in cols:
+        conn.execute(text(
+            "ALTER TABLE brain_graph_edges "
+            "ADD COLUMN edge_type VARCHAR(32) NOT NULL DEFAULT 'dataflow'"
+        ))
+        conn.execute(text(
+            "ALTER TABLE brain_graph_edges "
+            "ADD COLUMN min_source_confidence DOUBLE PRECISION NOT NULL DEFAULT 0.0"
+        ))
+        # Backfill existing edges by semantic type
+        conn.execute(text(
+            "UPDATE brain_graph_edges SET edge_type = 'veto' "
+            "WHERE polarity = 'inhibitory'"
+        ))
+        conn.execute(text(
+            "UPDATE brain_graph_edges SET edge_type = 'evidence' "
+            "WHERE source_node_id LIKE 'nm_evidence%'"
+        ))
+        conn.execute(text(
+            "UPDATE brain_graph_edges SET edge_type = 'feedback' "
+            "WHERE source_node_id LIKE 'nm_meta%'"
+        ))
+        conn.execute(text(
+            "UPDATE brain_graph_edges SET edge_type = 'control' "
+            "WHERE signal_type IN ('cluster_chain', 'step_completed')"
+        ))
+        conn.execute(text(
+            "ALTER TABLE brain_graph_edges "
+            "ADD CONSTRAINT ck_brain_graph_edges_edge_type "
+            "CHECK (edge_type IN ('dataflow','evidence','veto','feedback','control','operator_output'))"
+        ))
+
+    # ── 4. Rename staleness_at → last_activated_at ─────────────────────
+    state_cols = _columns(conn, "brain_node_states")
+    if "staleness_at" in state_cols and "last_activated_at" not in state_cols:
+        conn.execute(text(
+            "ALTER TABLE brain_node_states "
+            "RENAME COLUMN staleness_at TO last_activated_at"
+        ))
+
+    conn.commit()
+
+
+def _migration_104_split_c_meta_cluster(conn) -> None:
+    """Split c_meta into c_meta_learning, c_decisioning, c_control."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    # ── 1. Insert new cluster nodes ────────────────────────────────────
+    new_clusters = [
+        ("nm_lc_c_meta_learning", 8, "learning_cluster", "Meta-learning & reweighting", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_meta_learning",
+            "description": "Trains the pattern meta-learner and applies feedback boosts or penalties to pattern scores.",
+            "remarks": "Split from c_meta. Focuses on ML model training and confidence reweighting.",
+            "phase_summary": "ML training",
+            "code_ref": "run_learning_cycle \u2192 c_meta_learning",
+        }),
+        ("nm_lc_c_decisioning", 8, "learning_cluster", "Decisioning & promotion", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_decisioning",
+            "description": "Runs the pattern engine sub-cycle and generates strategy proposals from high-confidence patterns.",
+            "remarks": "Split from c_meta. Bridges research patterns to actionable proposals.",
+            "phase_summary": "pattern engine \u2192 proposals",
+            "code_ref": "run_learning_cycle \u2192 c_decisioning",
+        }),
+        ("nm_lc_c_control", 8, "learning_cluster", "Control & audit close", False, 0.40, 30, {
+            "role": "learning_cluster",
+            "cluster_id": "c_control",
+            "description": "Generates the cycle AI report, applies live depromotion gates, and finalizes the cycle.",
+            "remarks": "Split from c_meta. Integrity, audit, and close-the-books operations.",
+            "phase_summary": "report \u2192 depromote \u2192 finalize",
+            "code_ref": "run_learning_cycle \u2192 c_control",
+        }),
+    ]
+
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in new_clusters:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid, "domain": dom, "gv": gv, "ntype": ntype,
+                "layer": layer, "label": label, "fth": fth, "cd": cd,
+                "is_obs": is_obs, "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # ── 2. Reassign step nodes to new clusters ─────────────────────────
+    step_reassign = {
+        "nm_lc_ml": "c_meta_learning",
+        "nm_lc_pattern_engine": "c_decisioning",
+        "nm_lc_proposals": "c_decisioning",
+        "nm_lc_cycle_report": "c_control",
+        "nm_lc_depromote": "c_control",
+        "nm_lc_finalize": "c_control",
+    }
+    for step_nid, new_cluster_id in step_reassign.items():
+        conn.execute(
+            text(
+                """
+                UPDATE brain_graph_nodes
+                SET display_meta = jsonb_set(
+                    COALESCE(display_meta, '{}'::jsonb),
+                    '{cluster_id}',
+                    cast(:cid_json as jsonb)
+                ),
+                updated_at = CURRENT_TIMESTAMP
+                WHERE id = :nid
+                """
+            ),
+            {"nid": step_nid, "cid_json": f'"{new_cluster_id}"'},
+        )
+
+    # ── 3. Disable old nm_lc_c_meta (preserve for FK integrity) ────────
+    conn.execute(
+        text(
+            "UPDATE brain_graph_nodes SET enabled = FALSE, updated_at = CURRENT_TIMESTAMP "
+            "WHERE id = 'nm_lc_c_meta'"
+        )
+    )
+
+    # ── 4. Add pipeline edges for new clusters ─────────────────────────
+    new_edges = [
+        # Chain: journal → meta_learning → decisioning → control
+        ("nm_lc_c_journal", "nm_lc_c_meta_learning", "cluster_chain", 0.7, "excitatory", "control"),
+        ("nm_lc_c_meta_learning", "nm_lc_c_decisioning", "cluster_chain", 0.7, "excitatory", "control"),
+        ("nm_lc_c_decisioning", "nm_lc_c_control", "cluster_chain", 0.7, "excitatory", "control"),
+        # Cluster → first step
+        ("nm_lc_c_meta_learning", "nm_lc_ml", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_c_decisioning", "nm_lc_pattern_engine", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_c_control", "nm_lc_cycle_report", "step_completed", 0.7, "excitatory", "control"),
+        # Last step → cluster completion
+        ("nm_lc_ml", "nm_lc_c_meta_learning", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_proposals", "nm_lc_c_decisioning", "step_completed", 0.7, "excitatory", "control"),
+        ("nm_lc_finalize", "nm_lc_c_control", "step_completed", 0.7, "excitatory", "control"),
+    ]
+    for src, tgt, sig, w, pol, etype in new_edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    # ── 5. Disable old edges from/to nm_lc_c_meta ─────────────────────
+    conn.execute(
+        text(
+            "UPDATE brain_graph_edges SET enabled = FALSE, updated_at = CURRENT_TIMESTAMP "
+            "WHERE (source_node_id = 'nm_lc_c_meta' OR target_node_id = 'nm_lc_c_meta') "
+            "AND enabled = TRUE"
+        )
+    )
+
+    conn.commit()
+
+
+def _migration_105_execution_context_venue_nodes(conn) -> None:
+    """Add provider truth (Coinbase, Robinhood) and execution context nodes to neural mesh."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    nodes = [
+        ("nm_venue_truth_coinbase", 2, "feature_venue", "Coinbase venue truth", False, 0.45, 60, {
+            "role": "venue_provider_truth",
+            "venue": "coinbase",
+            "execution_family": "coinbase_spot",
+            "description": "Live Coinbase exchange state: spread, liquidity, tradability, product status.",
+            "remarks": "Layer 2 venue node. Publishes execution readiness metadata from the Coinbase spot adapter.",
+        }),
+        ("nm_venue_truth_robinhood", 2, "feature_venue", "Robinhood venue truth", False, 0.45, 60, {
+            "role": "venue_provider_truth",
+            "venue": "robinhood",
+            "execution_family": "robinhood_spot",
+            "description": "Live Robinhood exchange state: quotes, tradability, market hours, product status.",
+            "remarks": "Layer 2 venue node. Publishes execution readiness metadata from the Robinhood spot adapter.",
+        }),
+        ("nm_exec_liquidity_regime", 3, "latent_liquidity_regime", "Liquidity regime", False, 0.50, 90, {
+            "role": "execution_context",
+            "description": "Infers current liquidity regime from venue truth signals (thin, normal, deep).",
+            "remarks": "Layer 3 execution context node. Aggregates venue signals into a regime classification.",
+        }),
+        ("nm_exec_spread_quality", 5, "evidence_execution", "Spread / slippage quality", False, 0.50, 60, {
+            "role": "execution_context",
+            "description": "Evaluates whether current spread and estimated slippage are within acceptable bounds.",
+            "remarks": "Layer 5 evidence node. Gates execution readiness based on microstructure quality.",
+        }),
+        ("nm_exec_readiness_gate", 6, "action_exec_gate", "Execution readiness gate", False, 0.55, 30, {
+            "role": "execution_context",
+            "description": "Final execution readiness check: blocks action signals when venue conditions are unfavorable.",
+            "remarks": "Layer 6 action gate. Inhibits action_signals and risk_gate when execution quality is poor.",
+        }),
+    ]
+
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid, "domain": dom, "gv": gv, "ntype": ntype,
+                "layer": layer, "label": label, "fth": fth, "cd": cd,
+                "is_obs": is_obs, "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # Edges (typed)
+    edges = [
+        ("nm_venue_truth_coinbase", "nm_exec_liquidity_regime", "venue_refresh", 0.8, "excitatory", "dataflow"),
+        ("nm_venue_truth_robinhood", "nm_exec_liquidity_regime", "venue_refresh", 0.8, "excitatory", "dataflow"),
+        ("nm_exec_liquidity_regime", "nm_exec_spread_quality", "liquidity_update", 0.75, "excitatory", "evidence"),
+        ("nm_exec_spread_quality", "nm_exec_readiness_gate", "spread_ok", 0.85, "excitatory", "evidence"),
+        ("nm_exec_readiness_gate", "nm_action_signals", "exec_ready", 0.7, "excitatory", "control"),
+        ("nm_exec_readiness_gate", "nm_risk_gate", "exec_not_ready", 0.9, "inhibitory", "veto"),
+        # Connect existing liquidity_state to the new regime node
+        ("nm_liquidity_state", "nm_exec_liquidity_regime", "feature_signal", 0.6, "excitatory", "dataflow"),
+    ]
+
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4939,6 +5515,9 @@ MIGRATIONS = [
     ("100_momentum_viability_scope", _migration_100_momentum_viability_scope),
     ("101_coding_execution_iteration", _migration_101_coding_execution_iteration),
     ("102_learning_cycle_neural_nodes", _migration_102_learning_cycle_neural_nodes),
+    ("103_unified_neural_mesh", _migration_103_unified_neural_mesh),
+    ("104_split_c_meta_cluster", _migration_104_split_c_meta_cluster),
+    ("105_execution_context_venue_nodes", _migration_105_execution_context_venue_nodes),
 ]
 
 

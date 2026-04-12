@@ -651,7 +651,7 @@ class BrainGraphNode(Base):
 
 
 class BrainGraphEdge(Base):
-    """Directed edge between mesh nodes (excitatory / inhibitory)."""
+    """Directed edge between mesh nodes (excitatory / inhibitory, typed)."""
 
     __tablename__ = "brain_graph_edges"
 
@@ -661,10 +661,12 @@ class BrainGraphEdge(Base):
     signal_type: str = Column(String(64), nullable=False, default="*")
     weight: float = Column(Float, nullable=False, default=1.0)
     polarity: str = Column(String(16), nullable=False, default="excitatory")
+    edge_type: str = Column(String(32), nullable=False, default="dataflow")
     delay_ms: int = Column(Integer, nullable=False, default=0)
     decay_half_life_seconds: Optional[int] = Column(Integer, nullable=True)
     gate_config: Optional[dict] = Column(JSONB, nullable=True)
     min_confidence: float = Column(Float, nullable=False, default=0.0)
+    min_source_confidence: float = Column(Float, nullable=False, default=0.0)
     enabled: bool = Column(Boolean, nullable=False, default=True)
     graph_version: int = Column(Integer, nullable=False, default=1)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -681,7 +683,7 @@ class BrainNodeState(Base):
     confidence: float = Column(Float, nullable=False, default=0.5)
     local_state: Optional[dict] = Column(JSONB, nullable=True)
     last_fired_at: Optional[datetime] = Column(DateTime, nullable=True)
-    staleness_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_activated_at: Optional[datetime] = Column(DateTime, nullable=True)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 

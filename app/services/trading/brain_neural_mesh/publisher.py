@@ -80,7 +80,7 @@ def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, An
 
 _KEY_STEPS = frozenset({"mine", "bt_queue", "hypotheses", "ml", "depromote"})
 
-# Maps cluster_id → ordered list of step sids (last fires cluster completion)
+# Maps cluster_id → last step sid (fires cluster completion when step completes)
 _CLUSTER_LAST_STEP: dict[str, str] = {
     "c_state": "decay",
     "c_discovery": "seek",
@@ -88,7 +88,9 @@ _CLUSTER_LAST_STEP: dict[str, str] = {
     "c_evolution": "breakout",
     "c_secondary": "synergy",
     "c_journal": "signals",
-    "c_meta": "finalize",
+    "c_meta_learning": "ml",
+    "c_decisioning": "proposals",
+    "c_control": "finalize",
 }
 
 

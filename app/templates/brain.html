@@ -2682,7 +2682,7 @@ function initTradingBrainNetworkGraph() {
         parts.push('<div><strong>wave correlation</strong> ' + escHtml(String(nd.activation_wave_correlation_id || '\u2014')) + '</div>');
         parts.push('<div><strong>last fire correlation</strong> ' + escHtml(String(nd.last_wave_correlation_id || '\u2014')) + '</div>');
         parts.push('<div><strong>last_fired</strong> ' + escHtml(String(nd.last_fired_at || '\u2014')) + '</div>');
-        parts.push('<div><strong>staleness_at</strong> ' + escHtml(String(nd.staleness_at || '\u2014')) + '</div>');
+        parts.push('<div><strong>last_activated_at</strong> ' + escHtml(String(nd.last_activated_at || '\u2014')) + '</div>');
         parts.push('<div style="margin-top:6px;font-size:9px;color:var(--text-muted)">Waves can include <strong>multiple nodes</strong> at once; match wave id to the Network tab Live indicator.</div>');
         var ibp = nd.edge_polarity_inbound || {};
         var obp = nd.edge_polarity_outbound || {};

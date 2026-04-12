@@ -6,7 +6,6 @@ import ast
 import re
 from pathlib import Path
 
-from app.services.trading.brain_network_graph import get_trading_brain_network_graph
 from app.services.trading.learning_cycle_architecture import (
     SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
     TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
@@ -48,12 +47,16 @@ def test_cycle_cluster_and_step_ids_unique() -> None:
         assert get_cycle_step(c.id, c.steps[0].sid).label
 
 
-def test_graph_node_count_matches_architecture() -> None:
-    data = get_trading_brain_network_graph()
+def test_architecture_node_count_consistent() -> None:
+    """Cluster + step count should be consistent across the architecture definition."""
     clusters = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
     n_steps = sum(len(c.steps) for c in clusters)
-    expected_nodes = 1 + len(clusters) + n_steps
-    assert len(data["nodes"]) == expected_nodes
+    # c_universe (2 steps) + c_state (4) + c_discovery (2) + c_validation (2)
+    # + c_evolution (3) + c_secondary (8) + c_journal (2)
+    # + c_meta_learning (1) + c_decisioning (2) + c_control (3)
+    # = 29 steps across 10 clusters (c_meta split into 3)
+    assert len(clusters) == 10
+    assert n_steps == 29
 
 
 def test_snapshot_learning_for_brain_worker_status_file_has_stable_keys() -> None:
@@ -169,6 +172,10 @@ def _block_has_call_named(stmts: list[ast.stmt], name: str) -> bool:
             fn = stmt.value.func
             if isinstance(fn, ast.Name) and fn.id == name:
                 return True
+        if isinstance(stmt, ast.Assign) and isinstance(stmt.value, ast.Call):
+            fn = stmt.value.func
+            if isinstance(fn, ast.Name) and fn.id == name:
+                return True
         if isinstance(stmt, ast.Try):
             if _block_has_call_named(stmt.body, name):
                 return True
@@ -276,23 +283,25 @@ def test_run_learning_cycle_progress_apply_order_matches_stage_keys() -> None:
     )
 
 
-def test_c_meta_architecture_lists_pattern_engine_before_proposals() -> None:
-    meta = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == "c_meta")
-    sids = [s.sid for s in meta.steps]
+def test_decisioning_architecture_lists_pattern_engine_before_proposals() -> None:
+    dec = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == "c_decisioning")
+    sids = [s.sid for s in dec.steps]
     assert sids.index("pattern_engine") < sids.index("proposals")
 
 
-def test_run_learning_cycle_c_meta_apply_order_matches_architecture() -> None:
-    """Runtime ``apply_learning_cycle_step_status`` c_meta sequence matches canonical cluster."""
-    meta = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == "c_meta")
-    expected = [s.sid for s in meta.steps]
+def test_run_learning_cycle_split_meta_apply_order_matches_architecture() -> None:
+    """Runtime apply_learning_cycle_step_status calls for the split c_meta clusters
+    match their canonical definitions (c_meta_learning, c_decisioning, c_control)."""
     path = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "learning.py"
     text = path.read_text(encoding="utf-8")
-    pat = re.compile(
-        r'apply_learning_cycle_step_status\(_learning_status,\s*"c_meta",\s*"(\w+)"\)'
-    )
-    found = pat.findall(text)
-    assert found == expected, f"runtime={found!r} architecture={expected!r}"
+    for cluster_id in ("c_meta_learning", "c_decisioning", "c_control"):
+        cdef = next(c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == cluster_id)
+        expected = [s.sid for s in cdef.steps]
+        pat = re.compile(
+            rf'apply_learning_cycle_step_status\(_learning_status,\s*"{re.escape(cluster_id)}",\s*"(\w+)"\)'
+        )
+        found = pat.findall(text)
+        assert found == expected, f"cluster={cluster_id} runtime={found!r} architecture={expected!r}"
 
 
 def test_run_learning_cycle_no_literal_current_step_assignments() -> None:
