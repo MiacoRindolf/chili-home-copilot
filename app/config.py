@@ -312,17 +312,6 @@ class Settings(BaseSettings):
     # Optional: restrict to one compose project label (empty = match any project with that service name)
     brain_worker_compose_project: str = ""
 
-    # Trading Brain v2: Postgres neural mesh (strangler). When False, legacy graph + cycle only.
-    trading_brain_neural_mesh_enabled: bool = Field(
-        default=False,
-        validation_alias=AliasChoices("TRADING_BRAIN_NEURAL_MESH_ENABLED"),
-    )
-    # Effective only when ``trading_brain_neural_mesh_enabled``: ``legacy`` | ``neural`` (desk default projection).
-    trading_brain_graph_mode: str = Field(
-        default="neural",
-        validation_alias=AliasChoices("TRADING_BRAIN_GRAPH_MODE"),
-    )
-
     # Coinbase/crypto momentum intelligence (neural mesh only — not learning-cycle).
     chili_momentum_neural_enabled: bool = Field(
         default=True,

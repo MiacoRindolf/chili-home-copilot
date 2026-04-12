@@ -235,7 +235,6 @@ def expire_stale_live_arm_sessions(db: Session, *, user_id: int) -> int:
 def neural_config_strip() -> dict[str, Any]:
     return {
         "mesh_enabled": bool(mesh_enabled()),
-        "trading_brain_neural_mesh_enabled": bool(settings.trading_brain_neural_mesh_enabled),
         "momentum_neural_enabled": bool(settings.chili_momentum_neural_enabled),
         "coinbase_spot_adapter_enabled": bool(settings.chili_coinbase_spot_adapter_enabled),
         "coinbase_ws_enabled": bool(settings.chili_coinbase_ws_enabled),

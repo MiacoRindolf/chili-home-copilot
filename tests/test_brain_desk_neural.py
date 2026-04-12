@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from unittest.mock import patch
-
 from app.services.trading.brain_neural_mesh.schema import desk_graph_boot_config
 from app.services.trading.brain_neural_mesh.waves import (
     edge_pulse_keys_for_sources,
@@ -11,25 +9,12 @@ from app.services.trading.brain_neural_mesh.waves import (
 )
 
 
-def test_desk_graph_boot_config_legacy_when_mesh_off() -> None:
-    with patch("app.services.trading.brain_neural_mesh.schema.mesh_enabled", return_value=False):
-        with patch("app.services.trading.brain_neural_mesh.schema.effective_graph_mode", return_value="legacy"):
-            d = desk_graph_boot_config()
-    assert d["mesh_enabled"] is False
-    assert d["effective_graph_mode"] == "legacy"
-    assert d["desk_boot"] == "api"
-    assert d["recommended_graph_url"] == "/api/trading/brain/graph"
-    assert d["legacy_graph_url"] == "/api/brain/trading/network-graph"
-    assert d["silent_legacy_fallback"] is True
-
-
-def test_desk_graph_boot_config_neural_no_silent_legacy() -> None:
-    with patch("app.services.trading.brain_neural_mesh.schema.mesh_enabled", return_value=True):
-        with patch("app.services.trading.brain_neural_mesh.schema.effective_graph_mode", return_value="neural"):
-            d = desk_graph_boot_config()
+def test_desk_graph_boot_config_neural() -> None:
+    d = desk_graph_boot_config()
     assert d["mesh_enabled"] is True
     assert d["effective_graph_mode"] == "neural"
-    assert d["silent_legacy_fallback"] is False
+    assert d["desk_boot"] == "api"
+    assert d["recommended_graph_url"] == "/api/trading/brain/graph"
 
 
 def test_waves_same_correlation_id_single_wave() -> None:
@@ -84,9 +69,6 @@ def test_api_graph_config_truth_fields(paired_client) -> None:
         "effective_graph_mode",
         "desk_boot",
         "recommended_graph_url",
-        "legacy_graph_url",
-        "silent_legacy_fallback",
-        "trading_brain_graph_mode_setting",
     ):
         assert k in d
     assert d["desk_boot"] == "api"
@@ -111,12 +93,11 @@ def test_activations_includes_waves(paired_client) -> None:
     assert isinstance(d["waves"], list)
 
 
-def test_legacy_network_graph_api_still_ok(paired_client) -> None:
+def test_legacy_network_graph_api_returns_neural_projection(paired_client) -> None:
     client, _user = paired_client
     r = client.get("/api/brain/trading/network-graph")
     assert r.status_code == 200
     d = r.json()
     assert d.get("ok") is True
     assert d.get("nodes")
-    root_ids = [n["id"] for n in d["nodes"] if n.get("tier") == "root"]
-    assert root_ids
+    assert d["meta"]["view"] == "neural"

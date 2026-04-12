@@ -23,7 +23,6 @@ def desk_graph_boot_config() -> dict[str, Any]:
     """Single server-side truth for Trading Brain desk graph boot (SSR + /graph/config)."""
     return {
         "mesh_enabled": True,
-        "trading_brain_neural_mesh_enabled": True,
         "effective_graph_mode": "neural",
         "desk_boot": "api",
         "recommended_graph_url": "/api/trading/brain/graph",

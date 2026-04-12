@@ -644,13 +644,6 @@ def _cleanup_on_exit():
 
 def _maybe_run_neural_activation_batch() -> None:
     """Postgres neural mesh: bounded activation batch (no new infra)."""
-    try:
-        from app.config import settings as _settings
-
-        if not getattr(_settings, "trading_brain_neural_mesh_enabled", False):
-            return
-    except Exception:
-        return
     db = SessionLocal()
     try:
         from app.services.trading.brain_neural_mesh import run_activation_batch

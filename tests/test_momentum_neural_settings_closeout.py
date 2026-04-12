@@ -7,7 +7,6 @@ from app.config import settings
 
 def test_momentum_and_coinbase_flags_exist_on_settings() -> None:
     """Typed access used by momentum_neural and scheduler after closeout."""
-    assert hasattr(settings, "trading_brain_neural_mesh_enabled")
     assert hasattr(settings, "chili_momentum_neural_enabled")
     assert hasattr(settings, "chili_momentum_neural_feedback_enabled")
     assert hasattr(settings, "chili_coinbase_spot_adapter_enabled")
