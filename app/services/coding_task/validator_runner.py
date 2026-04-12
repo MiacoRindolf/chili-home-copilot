@@ -199,6 +199,84 @@ def run_git_diff_stat(cwd: Path) -> StepResult:
     return StepResult("git_diff_stat", 0 if code == 0 else code, to, out_t, err_t, False, None)
 
 
+def _infer_test_files(cwd: Path, changed_files: list[str]) -> list[str]:
+    """Map changed source files to likely test files.
+
+    Strategy: for ``app/routers/auth.py`` look for ``tests/test_auth*.py``,
+    ``tests/test_routers_auth*.py``, etc. Returns paths relative to *cwd*.
+    """
+    candidates: list[str] = []
+    tests_dir = cwd / "tests"
+    if not tests_dir.is_dir():
+        return []
+    for src in changed_files:
+        stem = Path(src).stem  # e.g. "auth"
+        for tp in tests_dir.rglob(f"test_{stem}*.py"):
+            rel = str(tp.relative_to(cwd)).replace("\\", "/")
+            if rel not in candidates:
+                candidates.append(rel)
+        # Also check parent-qualified: app/routers/auth.py -> test_routers_auth.py
+        parts = Path(src).parts
+        if len(parts) >= 2:
+            qualified = f"test_{'_'.join(parts[-2:])}".replace(".py", "*.py").replace("/", "_")
+            for tp in tests_dir.rglob(qualified):
+                rel = str(tp.relative_to(cwd)).replace("\\", "/")
+                if rel not in candidates:
+                    candidates.append(rel)
+    return candidates[:20]  # bounded
+
+
+def run_pytest_targeted(cwd: Path, changed_files: list[str] | None = None) -> StepResult:
+    """Run pytest on test files related to changed source files.
+
+    Falls back to full collection test if no targeted tests are found.
+    """
+    import tempfile
+
+    pc = Path(tempfile.gettempdir()) / f"chili_pytest_{uuid.uuid4().hex}"
+    pc.mkdir(parents=True, exist_ok=True)
+
+    test_files = _infer_test_files(cwd, changed_files or []) if changed_files else []
+
+    if test_files:
+        argv = [
+            sys.executable, "-m", "pytest",
+            "-x",  # stop on first failure for faster feedback
+            "--tb=short",
+            "-q",
+            "-o", f"cache_dir={pc}",
+        ] + test_files
+    else:
+        # No targeted tests found; run full suite with collect-only to verify nothing is broken
+        argv = [
+            sys.executable, "-m", "pytest",
+            "--collect-only", "-q", ".",
+            "-o", f"cache_dir={pc}",
+        ]
+
+    code, to, out, err = _run_subprocess_allowlisted(argv, cwd, timeout=300)
+    if code == 127 or (code == 1 and "No module named pytest" in (err or "")):
+        return StepResult("pytest_targeted", 0, to, out or "", err or "", True, "pytest not available")
+    out_t, _ = truncate_text(out or "")
+    err_t, _ = truncate_text(err or "")
+    ok = code in (0, 5)  # 5 = no tests collected
+    return StepResult("pytest_targeted", 0 if ok else code, to, out_t, err_t, False, None)
+
+
+def run_mypy_check(cwd: Path) -> StepResult:
+    """Run mypy type checking on changed Python files."""
+    code, to, out, err = _run_subprocess_allowlisted(
+        [sys.executable, "-m", "mypy", ".", "--ignore-missing-imports", "--no-error-summary"],
+        cwd,
+        timeout=120,
+    )
+    if code == 127 or "No module named mypy" in (err or ""):
+        return StepResult("mypy_check", 0, to, out or "", err or "", True, "mypy not available")
+    out_t, _ = truncate_text(out or "")
+    err_t, _ = truncate_text(err or "")
+    return StepResult("mypy_check", 0 if code == 0 else code, to, out_t, err_t, False, None)
+
+
 _STEP_RUNNERS: dict[str, Callable[[Path], StepResult]] = {
     "ast_syntax": run_ast_syntax,
     "ruff_check": run_ruff_check,

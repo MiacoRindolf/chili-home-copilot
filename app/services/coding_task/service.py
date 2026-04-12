@@ -1,7 +1,8 @@
-"""Orchestration: coding summary + validation run persistence."""
+"""Orchestration: coding summary + validation run persistence + autonomous execution."""
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Callable
 
 from sqlalchemy.orm import Session
 
@@ -513,5 +514,65 @@ def get_run_detail_dict(db: Session, task_id: int, run_id: int) -> dict | None:
                 "byte_length": a.byte_length,
             }
             for a in arts
+        ],
+    }
+
+
+# ── Autonomous execution ──────────────────────────────────────────
+
+
+def _first_active_repo(db: Session, user_id: int | None = None) -> CodeRepo | None:
+    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
+    if user_id is not None:
+        q = q.filter((CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None)))
+    return q.first()
+
+
+def run_autonomous_task(
+    db: Session,
+    prompt: str,
+    *,
+    repo_id: int | None = None,
+    user_id: int | None = None,
+    on_progress: Callable[[str, dict], None] | None = None,
+) -> dict:
+    """Run the autonomous execution loop for a natural-language coding request.
+
+    If ``repo_id`` is not provided, uses the first active CodeRepo.
+    Returns a summary dict suitable for JSON serialization.
+    """
+    from .execution_loop import run_execution_loop
+
+    if repo_id is None:
+        repo = _first_active_repo(db, user_id)
+        if repo is None:
+            return {"ok": False, "error": "No active code repository registered. Add one first."}
+        repo_id = repo.id
+
+    result = run_execution_loop(
+        db, prompt, repo_id, user_id=user_id, on_progress=on_progress,
+    )
+
+    return {
+        "ok": result.status == "success",
+        "run_id": result.run_id,
+        "status": result.status,
+        "branch": result.branch_name,
+        "iterations": len(result.iterations),
+        "files_changed": result.final_files_changed,
+        "diffs": result.final_diffs,
+        "duration_ms": result.total_duration_ms,
+        "summary": result.summary,
+        "iteration_details": [
+            {
+                "iteration": it.iteration,
+                "state": it.state,
+                "test_exit_code": it.test_exit_code,
+                "error_category": it.error_category,
+                "diagnosis": it.diagnosis[:500] if it.diagnosis else None,
+                "files_changed": it.files_changed,
+                "duration_ms": it.duration_ms,
+            }
+            for it in result.iterations
         ],
     }

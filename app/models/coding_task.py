@@ -137,6 +137,29 @@ class CodingAgentSuggestionApply(Base):
     suggestion = relationship("CodingAgentSuggestion", back_populates="apply_attempts")
 
 
+class CodingExecutionIteration(Base):
+    """Autonomous execution loop: one row per plan→generate→apply→test→diagnose cycle."""
+
+    __tablename__ = "coding_execution_iteration"
+
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(64), nullable=False, index=True)  # groups iterations for one autonomous task
+    iteration = Column(Integer, nullable=False, default=0)
+    state = Column(String(32), nullable=False, default="planning")
+    prompt = Column(Text, nullable=True)  # user's original request (iteration 0) or error context (iterations 1+)
+    plan_json = Column(Text, nullable=True)  # agent plan output
+    diffs_json = Column(Text, nullable=True)  # generated diffs
+    files_changed_json = Column(Text, nullable=True)
+    apply_status = Column(String(24), nullable=True)  # ok | failed | skipped
+    test_exit_code = Column(Integer, nullable=True)
+    test_output = Column(Text, nullable=True)  # structured: stdout+stderr from test run
+    diagnosis = Column(Text, nullable=True)  # LLM analysis of test failure
+    error_category = Column(String(64), nullable=True)  # syntax, type, import, test_assertion, runtime
+    model_used = Column(String(200), nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class CodingBlockerReport(Base):
     __tablename__ = "coding_blocker_report"
 
