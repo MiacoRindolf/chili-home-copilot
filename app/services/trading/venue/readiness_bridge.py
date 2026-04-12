@@ -1,6 +1,6 @@
-"""Translate Coinbase adapter DTOs into momentum_neural execution-readiness meta (passive; no runner).
+"""Translate venue adapter DTOs into momentum_neural execution-readiness meta (passive; no runner).
 
-Readiness meta tags ``execution_family='coinbase_spot'`` — other families would use their own bridges later.
+Each execution family has its own ``execution_readiness_meta_from_*`` helper.
 """
 
 from __future__ import annotations
@@ -61,5 +61,25 @@ def execution_readiness_meta_from_coinbase(product_id: str) -> dict[str, Any]:
         prod, _ = adapter.get_product(product_id)
         tick, _ = adapter.get_ticker(product_id)
         return execution_readiness_dict_from_normalized(prod, tick)
+    except Exception:
+        return {}
+
+
+def execution_readiness_meta_from_robinhood(ticker: str) -> dict[str, Any]:
+    """Best-effort live fetch for Robinhood equities (returns ``{}`` if adapter off or errors)."""
+    if not getattr(settings, "chili_robinhood_spot_adapter_enabled", False):
+        return {}
+    from .robinhood_spot import RobinhoodSpotAdapter
+
+    adapter = RobinhoodSpotAdapter()
+    if not adapter.is_enabled():
+        return {}
+    try:
+        prod, _ = adapter.get_product(ticker)
+        tick, _ = adapter.get_ticker(ticker)
+        meta = execution_readiness_dict_from_normalized(prod, tick)
+        meta["venue"] = "robinhood"
+        meta["execution_family"] = "robinhood_spot"
+        return meta
     except Exception:
         return {}

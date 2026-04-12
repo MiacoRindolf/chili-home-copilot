@@ -863,10 +863,13 @@ def _broadcast_alert_sync(alert_data: dict[str, Any]) -> None:
 
 
 @router.websocket("/ws/trading/live")
-async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
-    """Stream real-time price ticks for *ticker* and broadcast alerts globally."""
+async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0):
+    """Stream real-time price ticks for *ticker* and broadcast alerts globally.
+
+    When *interval* > 0 (seconds), also streams ``candle`` events on bucket close.
+    """
     await ws.accept()
-    logger.info("[live-ws] Client connected for %s", ticker)
+    logger.info("[live-ws] Client connected for %s (candle_interval=%d)", ticker, interval)
 
     with _live_clients_tlock:
         _live_clients.add(ws)
@@ -875,6 +878,7 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
     massive_available = False
     m_ticker = ""
     _on_tick = None
+    _on_candle = None
 
     try:
         from ..services.massive_client import (
@@ -884,6 +888,9 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
             to_massive_ticker,
             QuoteSnapshot,
             TradeSnapshot,
+            register_candle_listener,
+            unregister_candle_listener,
+            OHLCVBar,
         )
 
         m_ticker = to_massive_ticker(ticker).upper()
@@ -900,11 +907,27 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
             except Exception:
                 pass
 
+        _on_candle = None
+        if interval > 0:
+            def _on_candle_cb(sym: str, bar: OHLCVBar):
+                try:
+                    tick_queue.put_nowait({
+                        "type": "candle",
+                        "o": bar.open, "h": bar.high, "l": bar.low, "c": bar.close,
+                        "v": bar.volume, "t": bar.bucket_start, "interval": bar.interval_seconds,
+                        "trades": bar.trade_count,
+                    })
+                except Exception:
+                    pass
+            _on_candle = _on_candle_cb
+
         _on_tick = _on_tick_cb
         ws_client = get_ws_client()
         if ws_client.running:
             ws_client.subscribe([m_ticker])
             register_tick_listener(m_ticker, _on_tick)
+            if _on_candle and interval > 0:
+                register_candle_listener(m_ticker, interval, _on_candle)
             massive_available = True
             logger.info("[live-ws] Subscribed to Massive WS ticks for %s", m_ticker)
         else:
@@ -974,8 +997,10 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL"):
             poll_task.cancel()
         if massive_available and _on_tick and m_ticker:
             try:
-                from ..services.massive_client import unregister_tick_listener
+                from ..services.massive_client import unregister_tick_listener, unregister_candle_listener
                 unregister_tick_listener(m_ticker, _on_tick)
+                if interval > 0 and _on_candle:
+                    unregister_candle_listener(m_ticker, interval, _on_candle)
             except Exception:
                 pass
         with _live_clients_tlock:
