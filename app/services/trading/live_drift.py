@@ -645,9 +645,8 @@ def run_live_drift_refresh(db: Session) -> dict[str, Any]:
     from ...config import settings
     from ...models.trading import ScanPattern
 
-    legacy_on = bool(getattr(settings, "brain_live_drift_enabled", False))
     v2_on = bool(getattr(settings, "brain_live_drift_v2_enabled", True))
-    if not legacy_on and not v2_on:
+    if not v2_on:
         return {"ok": True, "skipped": True, "reason": "disabled", "updated": 0}
 
     uid = getattr(settings, "brain_default_user_id", None)
@@ -670,22 +669,6 @@ def run_live_drift_refresh(db: Session) -> dict[str, Any]:
         try:
             ov0 = pattern.oos_validation_json or {}
             prev = ov0.get("live_drift") if isinstance(ov0, dict) and isinstance(ov0.get("live_drift"), dict) else None
-
-            if legacy_on:
-                rt = aggregate_runtime_samples(
-                    db,
-                    scan_pattern_id=int(pattern.id),
-                    user_id=int(uid),
-                    window_days=window_days,
-                )
-                contract = compute_live_drift_contract(
-                    pattern=pattern,
-                    oos_val=dict(ov0) if isinstance(ov0, dict) else {},
-                    runtime=rt,
-                    prev_live_drift=prev,
-                    settings=settings,
-                )
-                apply_live_drift_to_pattern(db, pattern, contract, settings)
 
             if v2_on:
                 scorecards = aggregate_runtime_scorecards(

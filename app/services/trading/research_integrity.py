@@ -353,7 +353,8 @@ def promotion_blocked_by_integrity(
 ) -> bool:
     from ...config import settings
 
-    if not bool(getattr(settings, "brain_research_integrity_strict", False)):
+    if not bool(getattr(settings, "brain_research_integrity_strict", True)):
+        logger.warning("[research-integrity] strict mode DISABLED — lookahead-biased patterns may reach live trading")
         return False
     if target_status != "promoted":
         return False

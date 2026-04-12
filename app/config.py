@@ -122,21 +122,8 @@ class Settings(BaseSettings):
     # forever; clear the lock after this many seconds (default 3h).
     learning_cycle_stale_seconds: int = 10800
 
-    # Trading-brain Phase 2: mirror cycle/stage rows + optional lease telemetry + status dual-read (legacy authoritative).
-    brain_cycle_shadow_write_enabled: bool = False
-    brain_status_dual_read_enabled: bool = False
-    brain_lease_shadow_write_enabled: bool = False
     # Phase 3: single-flight via `brain_cycle_lease` using dedicated DB sessions (admission only; legacy status authoritative for UI).
     brain_cycle_lease_enforcement_enabled: bool = False
-    # Phase 4: append-only mirror of legacy `get_current_predictions` (dedicated session; routers unchanged; not read-authoritative).
-    brain_prediction_dual_write_enabled: bool = False
-    # Phase 5: mirror read compare + optional candidate-authoritative (explicit API tickers only; no router/API shape change).
-    brain_prediction_read_compare_enabled: bool = False
-    brain_prediction_read_authoritative_enabled: bool = False
-    brain_prediction_read_max_age_seconds: int = 900
-    # Phase 6: one bounded INFO line per _get_current_predictions_impl (chili_prediction_ops); WARNING paths unchanged when off.
-    brain_prediction_ops_log_enabled: bool = False
-
     # Brain resource / queue tuning (raise parallel for high-core machines; watch API rate limits)
     brain_max_cpu_pct: int | None = None  # cap queue pattern workers to this % of logical CPUs (None = no cap)
     brain_backtest_parallel: int = 18     # ScanPatterns to backtest in parallel (queue step); tune vs DB pool + provider caps
@@ -162,7 +149,6 @@ class Settings(BaseSettings):
     brain_use_gpu_ml: bool = False       # GPU for pattern meta-learner (LightGBM) â€” ML train step only, not queue BT
 
     # Full learning cycle (run_learning_cycle): optional slim mode
-    brain_insight_backtest_on_cycle: bool = False  # legacy TradingInsight smart backtests (ScanPattern queue is canonical)
     brain_secondary_miners_on_cycle: bool = True   # intraday/refine/exit/fakeout/sizing/inter-alert/timeframe/synergy steps
 
     # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
@@ -173,7 +159,7 @@ class Settings(BaseSettings):
 
     # Research integrity: causality checks + provenance on pattern backtests (Freqtrade-style hygiene, CHILI-native).
     brain_research_integrity_enabled: bool = True
-    brain_research_integrity_strict: bool = False  # True = block promotion to promoted when causality fails
+    brain_research_integrity_strict: bool = True  # block promotion to promoted when causality fails
     brain_research_integrity_max_check_bars: int = 48
 
     # Lightweight prediction refresh: promoted ScanPatterns only (no full learning cycle).
@@ -598,8 +584,7 @@ class Settings(BaseSettings):
     brain_live_depromotion_min_closed_trades: int = 8
     brain_live_depromotion_max_gap_pct: float = 25.0
 
-    # Phase 3: live/paper drift vs research baseline (repeatable-edge promoted/live only).
-    brain_live_drift_enabled: bool = False
+    # Live/paper drift vs research baseline (repeatable-edge promoted/live only).
     brain_live_drift_window_days: int = 120
     brain_live_drift_live_min_primary: int = 8
     brain_live_drift_min_trades: int = 8
@@ -625,8 +610,7 @@ class Settings(BaseSettings):
     brain_live_drift_v2_warn_slippage_bps: float = 25.0
     brain_live_drift_v2_critical_slippage_bps: float = 45.0
 
-    # Phase 4: execution robustness from linked Trade rows (repeatable-edge promoted/live).
-    brain_execution_robustness_enabled: bool = False
+    # Execution robustness from linked Trade rows (repeatable-edge promoted/live).
     brain_execution_robustness_window_days: int = 120
     brain_execution_robustness_min_orders: int = 5
     brain_execution_robustness_warn_fill_rate: float = 0.65

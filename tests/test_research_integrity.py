@@ -88,6 +88,14 @@ def test_aggregate_promotion_integrity():
     assert len(agg["per_ticker"]) == 2
 
 
+def test_research_integrity_strict_default_is_true():
+    """Strict mode must default to True to prevent lookahead-biased patterns reaching live."""
+    from app.config import Settings
+
+    fresh = Settings()
+    assert fresh.brain_research_integrity_strict is True
+
+
 def test_promotion_blocked_by_integrity_strict_only(monkeypatch):
     from app.config import settings
 
