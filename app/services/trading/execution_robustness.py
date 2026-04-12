@@ -438,9 +438,8 @@ def apply_execution_robustness_v2_to_pattern(
 def run_execution_robustness_refresh(db: Session) -> dict[str, Any]:
     from ...models.trading import ScanPattern
 
-    legacy_on = bool(getattr(settings, "brain_execution_robustness_enabled", False))
     v2_on = bool(getattr(settings, "brain_execution_robustness_v2_enabled", True))
-    if not legacy_on and not v2_on:
+    if not v2_on:
         return {"ok": True, "skipped": True, "reason": "disabled", "updated": 0}
     uid = getattr(settings, "brain_default_user_id", None)
     if uid is None:
@@ -459,15 +458,6 @@ def run_execution_robustness_refresh(db: Session) -> dict[str, Any]:
     updated = 0
     for pattern in rows:
         try:
-            if legacy_on:
-                stats = aggregate_trade_execution_for_pattern(
-                    db,
-                    scan_pattern_id=int(pattern.id),
-                    user_id=int(uid),
-                    window_days=window,
-                )
-                contract = compute_execution_robustness_contract(pattern=pattern, stats=stats, settings_mod=settings)
-                apply_execution_robustness_to_pattern(db, pattern, contract, settings)
             if v2_on:
                 telemetry = aggregate_execution_events_for_pattern(
                     db,

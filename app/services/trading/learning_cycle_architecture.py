@@ -389,20 +389,18 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
         steps=(
             CycleStepDef(
                 sid="bt_insights",
-                label="Backtesting insights",
-                code_ref="learning._auto_backtest_patterns (brain_insight_backtest_on_cycle)",
+                label="Backtesting insights (legacy, removed)",
+                code_ref="learning.py (step retained for ordinal stability)",
                 runner_phase="backtesting",
                 description=(
-                    "Optional legacy backtest pass over TradingInsight-linked ideas when "
-                    "brain_insight_backtest_on_cycle is enabled."
+                    "Legacy TradingInsight backtests — removed. ScanPattern queue is canonical. "
+                    "Step kept as no-op for stage ordinal stability."
                 ),
                 remarks=(
-                    "What: When enabled, runs automated backtests for legacy insight-linked "
-                    "strategies.\n\n"
-                    "Where: ``_auto_backtest_patterns`` guarded by "
-                    "``settings.brain_insight_backtest_on_cycle`` in ``learning.py``.\n\n"
-                    "Why: Backward compatibility for insight-centric workflows while the "
-                    "queue path becomes canonical."
+                    "What: Previously ran automated backtests for legacy insight-linked "
+                    "strategies. Removed; ScanPattern queue step is now the only backtest path.\n\n"
+                    "Where: No-op block in ``learning.py``.\n\n"
+                    "Why: Legacy path was never enabled in production."
                 ),
                 inputs=(
                     "``db``, ``user_id``",

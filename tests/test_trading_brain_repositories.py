@@ -21,14 +21,11 @@ from app.trading_brain.schemas.cycle import (
     StageDefinition,
     StageJobStatus,
 )
-from app.trading_brain.stage_catalog import STAGE_KEYS, TOTAL_STAGES
+
 from app.trading_brain.infrastructure.learning_status_sqlalchemy import (
     log_learning_status_parity,
 )
 from app.trading_brain.wiring import (
-    brain_shadow_before_commit,
-    brain_shadow_begin_cycle,
-    brain_shadow_finally,
     make_learning_status_reader,
 )
 
@@ -136,59 +133,6 @@ def test_integration_event_idempotent_insert_and_mark_processed(db: Session) -> 
     db.commit()
     store.mark_processed(db, "ik1")
     db.commit()
-
-
-def test_shadow_hooks_happy_path_increment(db: Session, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Minimal parity: begin → before_commit steps 0→1 → finally."""
-    from app.config import settings
-
-    monkeypatch.setattr(settings, "brain_cycle_shadow_write_enabled", True, raising=False)
-    ctx: dict = {}
-    ls = {
-        "running": True,
-        "phase": "pre-filtering",
-        "current_step": "x",
-        "steps_completed": 0,
-        "total_steps": TOTAL_STAGES,
-        "started_at": datetime.utcnow().isoformat(),
-        "step_timings": {},
-        "data_provider": "yfinance",
-        "last_cycle_funnel": None,
-        "last_cycle_budget": None,
-    }
-    brain_shadow_begin_cycle(
-        db,
-        ctx=ctx,
-        full_universe=True,
-        data_provider="yfinance",
-        learning_status=ls,
-    )
-    db.commit()
-    assert ctx.get("run_id")
-    ls["steps_completed"] = 1
-    brain_shadow_before_commit(db, ctx=ctx, learning_status=ls)
-    db.commit()
-    sj = SqlAlchemyBrainStageJobRepository()
-    jobs = sj.get_jobs_for_cycle(db, ctx["run_id"])
-    pre = next(j for j in jobs if j.stage_key == STAGE_KEYS[0])
-    assert STAGE_KEYS[0] == "backfill"
-    assert pre.status == StageJobStatus.succeeded
-    ls["running"] = False
-    ls["phase"] = "idle"
-    ls["current_step"] = ""
-    run_id = int(ctx["run_id"])
-    brain_shadow_finally(
-        db,
-        ctx=ctx,
-        learning_status=ls,
-        interrupted=False,
-        report_error=None,
-    )
-    db.commit()
-    cr = SqlAlchemyBrainLearningCycleRunRepository()
-    final = cr.get(db, run_id)
-    assert final is not None
-    assert final.status == CycleRunStatus.succeeded
 
 
 def test_learning_status_parity_logger_no_crash(db: Session) -> None:

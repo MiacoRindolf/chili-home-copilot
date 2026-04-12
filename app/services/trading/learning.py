@@ -5170,9 +5170,6 @@ _learning_status: dict[str, Any] = {
     "last_cycle_budget": None,
 }
 
-# Phase 2: per-process context for brain DB shadow writes (cleared in shadow finally).
-_brain_shadow_ctx: dict[str, Any] = {}
-
 # Phase 3: global cycle lease enforcement (dedicated sessions; cleared in run_learning_cycle finally).
 _brain_lease_enforcement_ctx: dict[str, Any] = {}
 
@@ -5304,21 +5301,6 @@ def get_learning_status() -> dict[str, Any]:
     status = _learning_status_with_elapsed()
     _overlay_learning_from_brain_worker_status_file(status)
     _overlay_learning_from_brain_worker_db(status)
-    try:
-        from ...config import settings as _st
-
-        if not getattr(_st, "brain_status_dual_read_enabled", False):
-            return status
-        from ...db import SessionLocal
-        from ...trading_brain.wiring import dual_read_compare_status
-
-        _sdb = SessionLocal()
-        try:
-            dual_read_compare_status(status, _sdb)
-        finally:
-            _sdb.close()
-    except Exception as e:
-        logger.warning("[brain_status_dual_read] skipped: %s", e)
     return status
 
 
@@ -7582,13 +7564,6 @@ def run_learning_cycle(
 
     def _commit_step() -> None:
         try:
-            from ...trading_brain.wiring import brain_shadow_before_commit
-
-            brain_shadow_before_commit(
-                db,
-                ctx=_brain_shadow_ctx,
-                learning_status=_learning_status,
-            )
             if _brain_lease_enforcement_ctx.get("acquired"):
                 from ...config import settings as _ls
                 from ...trading_brain.infrastructure.lease_dedicated_session import (
@@ -7611,7 +7586,6 @@ def run_learning_cycle(
 
     try:
         from ...config import settings
-        from ...trading_brain.wiring import brain_shadow_begin_cycle
 
         _cycle_step = 0
         _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
@@ -7660,14 +7634,6 @@ def run_learning_cycle(
                 _bump_cycle_step()
                 _step_time(timing_name, step.start, step.extra)
                 _commit_step()
-
-        brain_shadow_begin_cycle(
-            db,
-            ctx=_brain_shadow_ctx,
-            full_universe=full_universe,
-            data_provider=_provider,
-            learning_status=_learning_status,
-        )
 
         # Prescreen + full scan are batch jobs (scheduler); hydrate report from DB only.
         _pre_updates, top_tickers, _ = load_prescreen_scan_and_universe(db, user_id)
@@ -7736,15 +7702,9 @@ def run_learning_cycle(
         step_start = time.time()
         # graph-node: c_validation/bt_insights
         apply_learning_cycle_step_status(_learning_status, "c_validation", "bt_insights")
-        if getattr(settings, "brain_insight_backtest_on_cycle", False):
-            bt_count = _auto_backtest_patterns(db, user_id)
-            report["backtests_run"] = bt_count
-            report["insight_backtests_skipped"] = False
-            _step_time("backtest_insights", step_start, f"{bt_count} insight backtests via {_provider}")
-        else:
-            bt_count = 0
-            report["insight_backtests_skipped"] = True
-            _step_time("backtest_insights", step_start, "skipped (brain_insight_backtest_on_cycle=false)")
+        # Legacy TradingInsight backtests removed — ScanPattern queue is canonical.
+        report["insight_backtests_skipped"] = True
+        _step_time("backtest_insights", step_start, "skipped (legacy insight backtests removed)")
         _bump_cycle_step()
         _commit_step()
 
@@ -8065,19 +8025,6 @@ def run_learning_cycle(
             _learning_status["last_cycle_budget"] = report.get("brain_resource_budget")
         except Exception:
             logger.debug("[learning] run_learning_cycle: non-critical operation failed", exc_info=True)
-
-        try:
-            from ...trading_brain.wiring import brain_shadow_finally
-
-            brain_shadow_finally(
-                db,
-                ctx=_brain_shadow_ctx,
-                learning_status=_learning_status,
-                interrupted=interrupted,
-                report_error=report_error,
-            )
-        except Exception as e:
-            logger.warning("[brain_shadow] finally hook failed (ignored): %s", e)
 
         if _lease_release_acquired and _lease_release_holder:
             from ...trading_brain.infrastructure.lease_dedicated_session import (

@@ -27,7 +27,6 @@ def test_brain_learning_cycle_config_defaults():
     """Flags added to slim run_learning_cycle — defaults match product intent."""
     from app.config import settings
 
-    assert getattr(settings, "brain_insight_backtest_on_cycle", None) is False
     assert getattr(settings, "brain_secondary_miners_on_cycle", None) is True
     assert int(getattr(settings, "brain_snapshot_top_tickers", 0)) == 1000
     assert getattr(settings, "brain_intraday_snapshots_enabled", None) is True

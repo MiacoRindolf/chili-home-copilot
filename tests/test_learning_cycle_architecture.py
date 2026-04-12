@@ -193,9 +193,9 @@ def _block_has_call_named(stmts: list[ast.stmt], name: str) -> bool:
 
 def _find_main_cycle_try(fn: ast.FunctionDef) -> ast.Try:
     for stmt in fn.body:
-        if isinstance(stmt, ast.Try) and _block_has_call_named(stmt.body, "brain_shadow_begin_cycle"):
+        if isinstance(stmt, ast.Try) and _block_has_call_named(stmt.body, "count_cycle_progress_steps"):
             return stmt
-    raise AssertionError("run_learning_cycle: no try block containing brain_shadow_begin_cycle")
+    raise AssertionError("run_learning_cycle: no try block containing count_cycle_progress_steps")
 
 
 def _collect_literal_applies_from_cycle_stmts(

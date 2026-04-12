@@ -122,7 +122,12 @@ def transition(
 
 
 def _sync_legacy_fields(pattern: ScanPattern, stage: str) -> None:
-    """Keep promotion_status and active in sync with the new lifecycle_stage."""
+    """Keep promotion_status and active in sync with the new lifecycle_stage.
+
+    DEPRECATED: promotion_status is legacy. New code should use lifecycle_stage only.
+    This sync exists for backward compatibility with reads in ai.py, alerts.py,
+    learning.py, and brain.html. Remove once all readers migrate to lifecycle_stage.
+    """
     if stage == "promoted":
         pattern.promotion_status = "promoted"
         pattern.active = True
