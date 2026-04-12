@@ -19,6 +19,7 @@ from .features import ExecutionReadinessFeatures
 from .telemetry import log_tick
 from .variants import iter_momentum_families
 from .viability import score_viability
+from .viability_scope import VIABILITY_SCOPE_AGGREGATE, VIABILITY_SCOPE_SYMBOL
 
 HUB_NODE_ID = "nm_momentum_crypto_intel"
 VIABILITY_NODE_ID = "nm_momentum_viability_pool"
@@ -83,14 +84,17 @@ def run_momentum_neural_tick(
     tickers = meta.get("tickers")
     if isinstance(tickers, list) and tickers:
         symbols = [str(t).strip().upper() for t in tickers if t][:32]
+        scope = VIABILITY_SCOPE_SYMBOL
     else:
         symbols = ["__aggregate__"]
+        scope = VIABILITY_SCOPE_AGGREGATE
 
     rows: list[dict[str, Any]] = []
     for sym in symbols:
         for family in iter_momentum_families():
             vr = score_viability(sym, family, ctx, feats)
             d = vr.to_public_dict()
+            d["scope"] = scope
             d["label"] = family.label
             d["entry_style"] = family.entry_style
             d["default_stop_logic"] = family.default_stop_logic

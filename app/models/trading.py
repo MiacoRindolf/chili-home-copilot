@@ -783,6 +783,7 @@ class MomentumSymbolViability(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     symbol: str = Column(String(36), nullable=False, index=True)
+    scope: str = Column(String(16), nullable=False, default="symbol", index=True)
     variant_id: int = Column(
         Integer, ForeignKey("momentum_strategy_variants.id", ondelete="CASCADE"), nullable=False, index=True
     )

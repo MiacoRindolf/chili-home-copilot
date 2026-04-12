@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.models.core import User
 from app.models.trading import (
+    BrainActivationEvent,
     MomentumAutomationOutcome,
     MomentumStrategyVariant,
     MomentumSymbolViability,
@@ -71,9 +72,11 @@ def _seed_viability(
     paper_eligible: bool = True,
     live_eligible: bool = False,
     product_tradable: bool = True,
+    scope: str = "symbol",
 ) -> MomentumSymbolViability:
     row = MomentumSymbolViability(
         symbol=symbol,
+        scope=scope,
         variant_id=variant_id,
         viability_score=viability_score,
         paper_eligible=paper_eligible,
@@ -104,6 +107,7 @@ def test_automation_summary_shape(db: Session) -> None:
     assert "limitations_note" in s
     assert "governance" in s and "kill_switch_active" in s["governance"]
     assert "risk_policy_summary" in s and "policy_version" in s["risk_policy_summary"]
+    assert "viability_pipeline" in s and "pending_refresh_count" in s["viability_pipeline"]
 
 
 def test_list_sessions_shape_and_event_count(db: Session) -> None:
@@ -336,14 +340,94 @@ def test_opportunities_route_merges_stock_and_crypto_sources(paired_client, db: 
     r = c.get("/api/trading/momentum/opportunities?mode=paper&asset_class=all&limit=20")
     assert r.status_code == 200
     rows = r.json()["opportunities"]
+    meta = r.json()["metadata"]
     assert any(row["symbol"] == "BTC-USD" and row["asset_class"] == "crypto" for row in rows)
     assert any(row["symbol"] == "AAPL" and row["asset_class"] == "stock" for row in rows)
     btc = next(row for row in rows if row["symbol"] == "BTC-USD")
     aapl = next(row for row in rows if row["symbol"] == "AAPL")
     assert btc["paper_ready"] is True
     assert btc["live_ready"] is True
+    assert btc["can_create_paper_draft"] is True
+    assert btc["can_run_paper"] is False
+    assert btc["paper_action"]["label"] == "Create draft"
     assert aapl["live_ready"] is False
     assert btc["top_variant"]["strategy_params_summary"]["entry_viability_min"] is not None
+    assert meta["hidden_scan_only_count"] == 0
+
+
+def test_opportunities_hide_scan_only_without_symbol_viability(paired_client, db: Session, monkeypatch) -> None:
+    c, _user = paired_client
+    v = _variant(db)
+    _seed_viability(
+        db,
+        symbol="__aggregate__",
+        scope="aggregate",
+        variant_id=v.id,
+        viability_score=0.88,
+        paper_eligible=True,
+        live_eligible=True,
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities.run_momentum_scanner",
+        lambda max_results=20: {
+            "results": [
+                {"ticker": "AAPL", "signal": "buy", "score": 0.74, "label": "stock scanner"},
+            ]
+        },
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities.get_crypto_breakout_cache",
+        lambda: {"results": []},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities.market_open_now",
+        lambda symbol: True,
+    )
+
+    r = c.get("/api/trading/momentum/opportunities?mode=paper&asset_class=all&limit=20")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["opportunities"] == []
+    assert body["metadata"]["hidden_scan_only_count"] == 1
+    assert body["metadata"]["viability_symbol_count"] == 0
+
+
+def test_opportunities_metadata_marks_stale_refresh_backlog(paired_client, db: Session, monkeypatch) -> None:
+    c, _user = paired_client
+    db.add(
+        BrainActivationEvent(
+            source_node_id=None,
+            cause="momentum_context_refresh",
+            payload={"signal_type": "momentum_context_refresh", "meta": {"tickers": ["BTC-USD"]}},
+            confidence_delta=0.12,
+            propagation_depth=0,
+            correlation_id="stale-op-test",
+            created_at=datetime.utcnow() - timedelta(minutes=20),
+            status="pending",
+        )
+    )
+    db.commit()
+
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities.run_momentum_scanner",
+        lambda max_results=20: {"results": []},
+    )
+    monkeypatch.setattr(
+        "app.services.trading.momentum_neural.opportunities.get_crypto_breakout_cache",
+        lambda: {"results": []},
+    )
+
+    r = c.get("/api/trading/momentum/opportunities?mode=paper&asset_class=all&limit=20")
+    assert r.status_code == 200
+    meta = r.json()["metadata"]
+    assert meta["pending_refresh_count"] >= 1
+    assert meta["viability_pipeline_stale"] is True
+
+    summary = c.get("/api/trading/momentum/automation/summary")
+    assert summary.status_code == 200
+    assert summary.json()["viability_pipeline"]["viability_pipeline_stale"] is True
 
 
 def test_session_action_routes_run_pause_resume_stop_delete(paired_client, db: Session, monkeypatch) -> None:

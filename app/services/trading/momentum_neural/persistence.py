@@ -22,6 +22,7 @@ from ....models.trading import (
 from .features import ExecutionReadinessFeatures
 from .strategy_params import family_default_params, normalize_strategy_params, summarize_strategy_params
 from .variants import iter_momentum_families
+from .viability_scope import infer_viability_scope
 
 _log = logging.getLogger(__name__)
 
@@ -426,6 +427,7 @@ def persist_neural_momentum_tick(
 
         stmt = pg_insert(MomentumSymbolViability).values(
             symbol=str(row.get("symbol") or ""),
+            scope=infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
             variant_id=vid,
             viability_score=float(row.get("viability") or 0.0),
             paper_eligible=bool(row.get("paper_eligible", True)),
@@ -444,6 +446,7 @@ def persist_neural_momentum_tick(
             constraint="uq_momentum_symbol_viability_sym_var",
             set_={
                 "viability_score": float(row.get("viability") or 0.0),
+                "scope": infer_viability_scope(row.get("symbol"), explicit=row.get("scope")),
                 "paper_eligible": bool(row.get("paper_eligible", True)),
                 "live_eligible": bool(row.get("live_eligible", False)),
                 "freshness_ts": now,

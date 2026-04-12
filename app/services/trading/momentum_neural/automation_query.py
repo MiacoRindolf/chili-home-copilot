@@ -101,6 +101,7 @@ from .persistence import (
     default_session_binding,
 )
 from .strategy_params import summarize_strategy_params
+from .viability_health import get_viability_pipeline_health
 
 _log = logging.getLogger(__name__)
 
@@ -1152,6 +1153,7 @@ def list_automation_events(
 
 
 def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
+    pipeline_health = get_viability_pipeline_health(db)
     if not _tables_present(db):
         out = neural_config_strip()
         out.update(
@@ -1174,6 +1176,7 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
                 "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
                 "paper_runner_health": _runner_health_for_mode(db, mode="paper"),
                 "live_runner_health": _runner_health_for_mode(db, mode="live"),
+                "viability_pipeline": pipeline_health,
             }
         )
         return out
@@ -1231,6 +1234,7 @@ def automation_summary(db: Session, *, user_id: int) -> dict[str, Any]:
             "operator_readiness": build_momentum_operator_readiness(execution_family="coinbase_spot"),
             "paper_runner_health": _runner_health_for_mode(db, mode="paper"),
             "live_runner_health": _runner_health_for_mode(db, mode="live"),
+            "viability_pipeline": pipeline_health,
             "lanes": {
                 "simulation": pending_draft + paper_queued + paper_active,
                 "live-armed": pending_arm + armed,

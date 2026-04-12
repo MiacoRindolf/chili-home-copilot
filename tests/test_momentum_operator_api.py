@@ -54,6 +54,30 @@ def test_viable_payload_shape_empty(db: Session) -> None:
     assert "neural_status" in p
 
 
+def test_viable_payload_ignores_aggregate_only_rows(db: Session) -> None:
+    ensure_momentum_strategy_variants(db)
+    db.commit()
+    v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
+    db.add(
+        MomentumSymbolViability(
+            symbol="__aggregate__",
+            scope="aggregate",
+            variant_id=v.id,
+            viability_score=0.77,
+            paper_eligible=True,
+            live_eligible=True,
+            freshness_ts=datetime.utcnow(),
+            regime_snapshot_json={},
+            execution_readiness_json={},
+            explain_json={"warnings": []},
+            evidence_window_json={},
+        )
+    )
+    db.commit()
+    p = build_viable_strategies_payload(db, symbol="SOL-USD", user_id=1, enrich_coinbase=False)
+    assert p["strategies"] == []
+
+
 def test_viable_payload_after_persist(db: Session) -> None:
     vid, _ = _seed_live_eligible_row(db, symbol="SOL-USD")
     p = build_viable_strategies_payload(db, symbol="SOL-USD", user_id=1, enrich_coinbase=False)
@@ -106,6 +130,7 @@ def test_arm_live_not_eligible_forbidden(paired_client, db: Session) -> None:
     v = db.query(MomentumStrategyVariant).filter(MomentumStrategyVariant.family == "impulse_breakout").one()
     ms = MomentumSymbolViability(
         symbol="X-USD",
+        scope="symbol",
         variant_id=v.id,
         viability_score=0.5,
         paper_eligible=True,

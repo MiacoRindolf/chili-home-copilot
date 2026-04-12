@@ -372,6 +372,7 @@ def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, 
         db.add(
             MomentumSymbolViability(
                 symbol=row.symbol,
+                scope=getattr(row, "scope", "symbol"),
                 variant_id=int(child.id),
                 viability_score=row.viability_score,
                 paper_eligible=row.paper_eligible,

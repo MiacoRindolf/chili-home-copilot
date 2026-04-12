@@ -18,6 +18,7 @@ from .operator_readiness import build_momentum_operator_readiness
 from .pipeline import VIABILITY_NODE_ID
 from .persistence import _variant_id_for_family, active_variant_for_family
 from .strategy_params import summarize_strategy_params
+from .viability_scope import VIABILITY_SCOPE_SYMBOL
 
 _log = logging.getLogger(__name__)
 
@@ -56,6 +57,8 @@ def _hot_rows_for_symbol(db: Session, symbol: str) -> tuple[list[dict[str, Any]]
     out: list[dict[str, Any]] = []
     for row in raw:
         if not isinstance(row, dict):
+            continue
+        if str(row.get("scope") or VIABILITY_SCOPE_SYMBOL).strip().lower() != VIABILITY_SCOPE_SYMBOL:
             continue
         if str(row.get("symbol") or "").strip().upper() != sym:
             continue
@@ -338,6 +341,7 @@ def build_viable_strategies_payload(
         .join(MomentumStrategyVariant, MomentumStrategyVariant.id == MomentumSymbolViability.variant_id)
         .filter(MomentumStrategyVariant.is_active.is_(True))
         .filter(MomentumSymbolViability.symbol == sym)
+        .filter(MomentumSymbolViability.scope == VIABILITY_SCOPE_SYMBOL)
         .order_by(MomentumSymbolViability.viability_score.desc())
     )
     pairs = q.all()
@@ -364,6 +368,7 @@ def build_viable_strategies_payload(
                 continue
             fake = MomentumSymbolViability(
                 symbol=sym,
+                scope=VIABILITY_SCOPE_SYMBOL,
                 variant_id=vid,
                 viability_score=float(r.get("viability") or 0.0),
                 paper_eligible=bool(r.get("paper_eligible", True)),

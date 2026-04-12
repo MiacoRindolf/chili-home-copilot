@@ -3900,6 +3900,7 @@ def _migration_090_momentum_neural_persistence(conn) -> None:
                 CREATE TABLE momentum_symbol_viability (
                     id SERIAL PRIMARY KEY,
                     symbol VARCHAR(36) NOT NULL,
+                    scope VARCHAR(16) NOT NULL DEFAULT 'symbol',
                     variant_id INTEGER NOT NULL REFERENCES momentum_strategy_variants(id) ON DELETE CASCADE,
                     viability_score DOUBLE PRECISION NOT NULL,
                     paper_eligible BOOLEAN NOT NULL DEFAULT TRUE,
@@ -3936,6 +3937,9 @@ def _migration_090_momentum_neural_persistence(conn) -> None:
         )
         conn.execute(text("CREATE INDEX ix_msvi_freshness ON momentum_symbol_viability (freshness_ts)"))
         conn.execute(text("CREATE INDEX ix_msvi_corr ON momentum_symbol_viability (correlation_id)"))
+        conn.execute(
+            text("CREATE INDEX ix_msvi_scope_freshness ON momentum_symbol_viability (scope, freshness_ts DESC)")
+        )
 
     if "trading_automation_sessions" not in _tables(conn):
         conn.execute(
@@ -4056,6 +4060,12 @@ def _migration_090_momentum_neural_persistence(conn) -> None:
         )
         conn.execute(
             text("CREATE INDEX IF NOT EXISTS ix_msvi_corr ON momentum_symbol_viability (correlation_id)")
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_msvi_scope_freshness "
+                "ON momentum_symbol_viability (scope, freshness_ts DESC)"
+            )
         )
     if "trading_automation_sessions" in _tables(conn):
         conn.execute(text("CREATE INDEX IF NOT EXISTS ix_tas_user ON trading_automation_sessions (user_id)"))
@@ -4481,7 +4491,7 @@ def _migration_099_execution_audit_and_allocator(conn) -> None:
         for name, ddl in trade_cols.items():
             if name not in cols:
                 conn.execute(text(ddl))
-                conn.commit()
+    conn.commit()
 
     if "trading_proposals" in tables:
         cols = _columns(conn, "trading_proposals")
@@ -4573,6 +4583,34 @@ def _migration_099_execution_audit_and_allocator(conn) -> None:
             )
         )
         conn.commit()
+
+
+def _migration_100_momentum_viability_scope(conn) -> None:
+    """Add explicit symbol-vs-aggregate scope to durable viability rows."""
+    if "momentum_symbol_viability" not in _tables(conn):
+        return
+    cols = _columns(conn, "momentum_symbol_viability")
+    if "scope" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_symbol_viability "
+                "ADD COLUMN scope VARCHAR(16) NOT NULL DEFAULT 'symbol'"
+            )
+        )
+    conn.execute(
+        text(
+            "UPDATE momentum_symbol_viability "
+            "SET scope = 'aggregate' "
+            "WHERE UPPER(COALESCE(symbol, '')) = '__AGGREGATE__'"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_msvi_scope_freshness "
+            "ON momentum_symbol_viability (scope, freshness_ts DESC)"
+        )
+    )
+    conn.commit()
 
 
 # (version_id, callable that receives conn and runs migration)
@@ -4676,6 +4714,7 @@ MIGRATIONS = [
     ("097_scan_pattern_lifecycle_challenged", _migration_097_scan_pattern_lifecycle_challenged),
     ("098_brain_validation_slice_ledger", _migration_098_brain_validation_slice_ledger),
     ("099_execution_audit_and_allocator", _migration_099_execution_audit_and_allocator),
+    ("100_momentum_viability_scope", _migration_100_momentum_viability_scope),
 ]
 
 
