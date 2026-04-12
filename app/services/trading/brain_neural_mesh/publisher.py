@@ -78,6 +78,87 @@ def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, An
         return {"ok": False, "reason": str(e), "correlation_id": None, "activation_event_id": None}
 
 
+_KEY_STEPS = frozenset({"mine", "bt_queue", "hypotheses", "ml", "depromote"})
+
+# Maps cluster_id → ordered list of step sids (last fires cluster completion)
+_CLUSTER_LAST_STEP: dict[str, str] = {
+    "c_state": "decay",
+    "c_discovery": "seek",
+    "c_validation": "bt_queue",
+    "c_evolution": "breakout",
+    "c_secondary": "synergy",
+    "c_journal": "signals",
+    "c_meta": "finalize",
+}
+
+
+def publish_learning_step_completed(
+    db: Session,
+    *,
+    cluster_id: str,
+    step_sid: str,
+    elapsed_sec: float,
+    extra: str = "",
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Publish a learning step completion into the neural mesh."""
+    if not mesh_enabled():
+        return
+    try:
+        cid = correlation_id or str(uuid.uuid4())
+        source_node = f"nm_lc_{step_sid}"
+        delta = 0.25 if step_sid in _KEY_STEPS else 0.15
+        enqueue_activation(
+            db,
+            source_node_id=source_node,
+            cause="learning_step_completed",
+            payload={
+                "signal_type": "step_completed",
+                "cluster_id": cluster_id,
+                "step_sid": step_sid,
+                "elapsed_sec": elapsed_sec,
+                "extra": extra,
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug("%s published learning_step_completed step=%s cluster=%s", LOG_PREFIX, step_sid, cluster_id)
+        # Auto-fire cluster completion when last step in cluster fires
+        if _CLUSTER_LAST_STEP.get(cluster_id) == step_sid:
+            publish_learning_cluster_completed(db, cluster_id=cluster_id, correlation_id=cid)
+    except Exception as e:
+        _log.warning("%s publish_learning_step_completed failed: %s", LOG_PREFIX, e)
+
+
+def publish_learning_cluster_completed(
+    db: Session,
+    *,
+    cluster_id: str,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Publish a learning cluster completion into the neural mesh."""
+    if not mesh_enabled():
+        return
+    try:
+        cid = correlation_id or str(uuid.uuid4())
+        source_node = f"nm_lc_{cluster_id}"
+        enqueue_activation(
+            db,
+            source_node_id=source_node,
+            cause="learning_cluster_completed",
+            payload={"signal_type": "cluster_completed", "cluster_id": cluster_id},
+            confidence_delta=0.20,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug("%s published learning_cluster_completed cluster=%s", LOG_PREFIX, cluster_id)
+    except Exception as e:
+        _log.warning("%s publish_learning_cluster_completed failed: %s", LOG_PREFIX, e)
+
+
 def publish_learning_cycle_completed(db: Session, *, elapsed_s: Optional[float] = None) -> None:
     if not mesh_enabled():
         return

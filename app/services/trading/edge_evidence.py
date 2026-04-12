@@ -53,8 +53,34 @@ def permutation_mean_one_sided_p(
     return float(min(1.0, max(0.0, p))), None
 
 
-def collect_walk_forward_fold_returns(bench_raw: dict[str, Any] | None) -> list[float]:
-    """Extract return_pct from benchmark_walk_forward_evaluate raw tickers[*].windows."""
+def apply_fdr_correction(p_values: list[float | None], q: float = 0.10) -> list[bool]:
+    """Benjamini-Hochberg FDR control. Returns list of bools (True=significant) aligned with input."""
+    indexed = [(i, p) for i, p in enumerate(p_values) if p is not None]
+    result = [False] * len(p_values)
+    if not indexed:
+        return result
+    indexed.sort(key=lambda x: x[1])
+    m = len(indexed)
+    # Walk from largest rank down; once one passes, all smaller ranks pass too
+    max_rank_passing = -1
+    for rank_0, (orig_i, pv) in enumerate(indexed):
+        rank = rank_0 + 1  # 1-based
+        threshold = q * rank / m
+        if pv <= threshold:
+            max_rank_passing = rank_0
+    # All indices up to max_rank_passing are significant
+    for rank_0 in range(max_rank_passing + 1):
+        orig_i, _ = indexed[rank_0]
+        result[orig_i] = True
+    return result
+
+
+def collect_walk_forward_fold_returns(bench_raw: dict[str, Any] | None, *, embargo_bars: int = 0) -> list[float]:
+    """Extract return_pct from benchmark_walk_forward_evaluate raw tickers[*].windows.
+
+    When *embargo_bars* > 0, the first *embargo_bars* OOS windows per ticker are
+    skipped to prevent forward-return leakage from the training window boundary.
+    """
     if not bench_raw or not isinstance(bench_raw, dict):
         return []
     out: list[float] = []
@@ -64,11 +90,14 @@ def collect_walk_forward_fold_returns(bench_raw: dict[str, Any] | None) -> list[
     for _sym, rec in tickers.items():
         if not isinstance(rec, dict):
             continue
-        for w in rec.get("windows") or []:
+        windows = rec.get("windows") or []
+        for wi, w in enumerate(windows):
             if not isinstance(w, dict):
                 continue
             if not w.get("ok"):
                 continue
+            if embargo_bars > 0 and wi < embargo_bars:
+                continue  # skip embargoed bars at fold boundary
             rp = w.get("return_pct")
             if rp is None:
                 continue
@@ -105,7 +134,8 @@ def build_edge_evidence(
     if len(oos_wrs) >= 2:
         oos_p, oos_skip = permutation_mean_one_sided_p(list(oos_wrs), n_perm=n_perm, rng=rng)
 
-    folds = collect_walk_forward_fold_returns(bench_raw)
+    embargo_bars = 5
+    folds = collect_walk_forward_fold_returns(bench_raw, embargo_bars=embargo_bars)
     wf_score: float | None = None
     wf_p: float | None = None
     wf_skip: str | None = None
@@ -143,6 +173,9 @@ def build_edge_evidence(
 
     block_codes = list(prev_block_codes) if prev_block_codes else []
 
+    # FDR correction across the three tests
+    fdr_sig = apply_fdr_correction([is_p, oos_p, wf_p], q=0.10)
+
     return {
         "challenge_version": CHALLENGE_VERSION,
         "null_model_is_oos": "v1_ticker_wr_exchangeability",
@@ -158,6 +191,10 @@ def build_edge_evidence(
         "walk_forward_perm_p": round(wf_p, 6) if wf_p is not None else None,
         "walk_forward_perm_skip": wf_skip,
         "walk_forward_evidence_source": wf_source,
+        "embargo_bars": embargo_bars,
+        "fdr_significant_is": fdr_sig[0],
+        "fdr_significant_oos": fdr_sig[1],
+        "fdr_significant_wf": fdr_sig[2],
         "effective_n": int(eff_n),
         "oos_coverage": cov,
         "evidence_fresh_at": _utc_now_iso(),
@@ -198,6 +235,7 @@ def apply_edge_evidence_veto(
     max_oos_perm_p: float,
     max_wf_perm_p: float,
     require_wf_when_available: bool,
+    fdr_enabled: bool = True,
 ) -> tuple[bool, list[str]]:
     """Return (should_veto, extra_block_codes). Mutates evidence['promotion_block_codes']."""
     codes: list[str] = []
@@ -228,6 +266,15 @@ def apply_edge_evidence_veto(
     ):
         # Bench did not yield fold stats — optional strict mode
         codes.append("weak_null_wf_unavailable")
+
+    # FDR gate: if any test was individually significant but fails FDR, flag it
+    if fdr_enabled:
+        if evidence.get("fdr_significant_oos") is False and oos_p is not None:
+            if "weak_null_fdr_oos" not in codes:
+                codes.append("weak_null_fdr_oos")
+        if evidence.get("fdr_significant_wf") is False and wf_p is not None:
+            if "weak_null_fdr_wf" not in codes:
+                codes.append("weak_null_fdr_wf")
 
     if codes:
         for c in codes:

@@ -310,6 +310,37 @@ def brain_oos_gate_kwargs_for_pattern(pattern: Any | None, oos_trade_sum: int) -
     }
 
 
+def _find_dead_tickers(db, tickers: list[str], *, stale_days: int = 14) -> set[str]:
+    """Find tickers with no recent OHLCV data (delisted or data unavailable)."""
+    from ...models.trading import MarketSnapshot
+    from sqlalchemy import func as sa_func
+
+    if not tickers:
+        return set()
+    cutoff = datetime.utcnow() - timedelta(days=stale_days)
+    # Tickers with at least one snapshot but none recent → likely dead
+    latest = (
+        db.query(
+            MarketSnapshot.ticker,
+            sa_func.max(MarketSnapshot.snapshot_date).label("last_snap"),
+        )
+        .filter(MarketSnapshot.ticker.in_(tickers))
+        .group_by(MarketSnapshot.ticker)
+        .all()
+    )
+    dead: set[str] = set()
+    seen = set()
+    for ticker, last_snap in latest:
+        seen.add(ticker)
+        if last_snap and last_snap < cutoff:
+            dead.add(ticker)
+    # Tickers with zero snapshots at all are also dead
+    for t in tickers:
+        if t not in seen:
+            dead.add(t)
+    return dead
+
+
 def brain_apply_oos_promotion_gate(
     *,
     origin: str,
@@ -353,9 +384,13 @@ def brain_apply_oos_promotion_gate(
         return "pending_oos", True
     if mean_oos_win_rate is None:
         return "pending_oos", True
-    if min_oos_aggregate_trades is not None and int(min_oos_aggregate_trades) > 0:
-        if int(oos_aggregate_trade_count or 0) < int(min_oos_aggregate_trades):
-            return "pending_oos", True
+    agg_floor = (
+        int(min_oos_aggregate_trades)
+        if min_oos_aggregate_trades is not None
+        else int(getattr(settings, "brain_oos_min_aggregate_trades", 0))
+    )
+    if agg_floor > 0 and int(oos_aggregate_trade_count or 0) < agg_floor:
+        return "pending_oos", True
     gap = float(mean_is_win_rate) - float(mean_oos_win_rate)
     if float(mean_oos_win_rate) < min_wr:
         return "rejected_oos", False
@@ -568,7 +603,45 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     if touched:
         db.commit()
 
-    return {"ok": True, "demoted": demoted, "decay_monitor_updated": touched}
+    # D2: Auto-retire stale patterns — zero trades in 90 days + low confidence
+    retired = 0
+    try:
+        stale_cutoff = datetime.utcnow() - timedelta(days=90)
+        stale_patterns = (
+            db.query(ScanPattern)
+            .filter(
+                ScanPattern.promotion_status == "promoted",
+                ScanPattern.active.is_(True),
+            )
+            .all()
+        )
+        for sp in stale_patterns:
+            ov = dict(sp.oos_validation_json or {}) if isinstance(sp.oos_validation_json, dict) else {}
+            dm = ov.get("decay_monitor") or {}
+            n_live = int(dm.get("live_n_closed") or 0)
+            conf = float(getattr(sp, "confidence", 0.5) or 0.5)
+            last_trade_str = dm.get("updated_at")
+            last_active = None
+            if last_trade_str:
+                try:
+                    last_active = datetime.fromisoformat(str(last_trade_str).replace("Z", "+00:00")).replace(tzinfo=None)
+                except Exception:
+                    pass
+            if n_live == 0 and conf < 0.15 and (last_active is None or last_active < stale_cutoff):
+                sp.active = False
+                sp.promotion_status = "retired"
+                sp.lifecycle_stage = "retired"
+                sp.lifecycle_changed_at = datetime.utcnow()
+                ov["retirement_reason"] = "stale_no_activity_90d"
+                sp.oos_validation_json = ov
+                retired += 1
+        if retired:
+            db.commit()
+            logger.info("[learning] Auto-retired %d stale promoted patterns (no trades 90d + low confidence)", retired)
+    except Exception as e:
+        logger.debug("[learning] Stale pattern retirement skipped: %s", e)
+
+    return {"ok": True, "demoted": demoted, "decay_monitor_updated": touched, "retired_stale": retired}
 
 
 # ── Learning Event Logger (extracted to learning_events.py) ───────────
@@ -7633,6 +7706,18 @@ def run_learning_cycle(
             finally:
                 _bump_cycle_step()
                 _step_time(timing_name, step.start, step.extra)
+                try:
+                    from .brain_neural_mesh.publisher import publish_learning_step_completed
+                    publish_learning_step_completed(
+                        db,
+                        cluster_id=cluster_id,
+                        step_sid=step_sid,
+                        elapsed_sec=round(time.time() - step.start, 2),
+                        extra=step.extra or "",
+                        correlation_id=_learning_status.get("correlation_id"),
+                    )
+                except Exception:
+                    pass  # mesh wiring must never break learning cycle
                 _commit_step()
 
         # Prescreen + full scan are batch jobs (scheduler); hydrate report from DB only.
@@ -7670,6 +7755,16 @@ def run_learning_cycle(
         _step_time("confidence_decay", step_start,
                     f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned")
         _commit_step()
+
+        # D1: Dead asset auto-cleanup — remove tickers with 3+ consecutive fetch failures
+        try:
+            dead_tickers = _find_dead_tickers(db, top_tickers)
+            if dead_tickers:
+                top_tickers = [t for t in top_tickers if t not in dead_tickers]
+                logger.info("[learning] Auto-excluded %d dead/delisted tickers: %s", len(dead_tickers), dead_tickers)
+                report["dead_tickers_excluded"] = list(dead_tickers)
+        except Exception as e:
+            logger.debug("[learning] Dead ticker cleanup skipped: %s", e)
 
         # Step 5: Mine patterns
         # graph-node: c_discovery/mine

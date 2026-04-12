@@ -17,3 +17,48 @@ CORE_SPINE_NODE_IDS: tuple[str, ...] = (
 )
 
 INHIBITORY_EDGE = ("nm_contradiction", "nm_action_signals", "contradict")
+
+# Learning-cycle cluster nodes (layer 8)
+LEARNING_CYCLE_CLUSTER_IDS: tuple[str, ...] = (
+    "nm_lc_c_state",
+    "nm_lc_c_discovery",
+    "nm_lc_c_validation",
+    "nm_lc_c_evolution",
+    "nm_lc_c_secondary",
+    "nm_lc_c_journal",
+    "nm_lc_c_meta",
+)
+
+# Learning-cycle step nodes (layer 9)
+LEARNING_CYCLE_STEP_IDS: tuple[str, ...] = (
+    "nm_lc_snapshots_daily",
+    "nm_lc_snapshots_intraday",
+    "nm_lc_backfill",
+    "nm_lc_decay",
+    "nm_lc_mine",
+    "nm_lc_seek",
+    "nm_lc_bt_insights",
+    "nm_lc_bt_queue",
+    "nm_lc_variants",
+    "nm_lc_hypotheses",
+    "nm_lc_breakout",
+    "nm_lc_intraday_hv",
+    "nm_lc_refine",
+    "nm_lc_exit",
+    "nm_lc_fakeout",
+    "nm_lc_sizing",
+    "nm_lc_inter_alert",
+    "nm_lc_timeframe",
+    "nm_lc_synergy",
+    "nm_lc_journal",
+    "nm_lc_signals",
+    "nm_lc_ml",
+    "nm_lc_pattern_engine",
+    "nm_lc_proposals",
+    "nm_lc_cycle_report",
+    "nm_lc_depromote",
+    "nm_lc_finalize",
+)
+
+# Combined for convenience
+LEARNING_CYCLE_NODE_IDS: tuple[str, ...] = LEARNING_CYCLE_CLUSTER_IDS + LEARNING_CYCLE_STEP_IDS

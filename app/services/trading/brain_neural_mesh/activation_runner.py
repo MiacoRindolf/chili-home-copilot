@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 from .decay import apply_global_decay
 from .metrics import get_counters, maybe_flush_metrics
 from .propagation import propagate_one_event
-from .repository import mark_event_status
+from .repository import mark_event_status, reap_dead_events
 from .schema import DEFAULT_GRAPH_VERSION, LOG_PREFIX
 from . import repository as repo
 
@@ -33,6 +33,7 @@ def run_activation_batch(
 ) -> dict[str, Any]:
     """Process pending activation events with a wall-clock budget."""
     t0 = time.monotonic()
+    ctr = get_counters()
     processed = 0
     fires = 0
     inhibitions = 0
@@ -72,12 +73,19 @@ def run_activation_batch(
                 inhibitions += pr.inhibitions_applied
                 suppressions += pr.suppressions
                 downstream += pr.downstream_events
+                if pr.truncated:
+                    ctr.depth_cutoffs += 1
                 try:
                     from ..momentum_neural.pipeline import maybe_run_momentum_neural_tick
 
                     maybe_run_momentum_neural_tick(db, ev, graph_version=graph_version)
                 except Exception as mom_e:
-                    _log.warning("%s momentum neural tick failed: %s", LOG_PREFIX, mom_e)
+                    _log.error(
+                        "%s momentum neural tick failed for event=%s corr=%s: %s",
+                        LOG_PREFIX, ev.id, ev.correlation_id, mom_e,
+                        exc_info=True,
+                    )
+                    ctr.momentum_tick_failures += 1
                 mark_event_status(db, int(ev.id), "done", processed_at=datetime.utcnow())
                 processed += 1
             except Exception as e:
@@ -86,7 +94,6 @@ def run_activation_batch(
                 processed += 1
         db.flush()
 
-    ctr = get_counters()
     ctr.note_batch(
         processed=processed,
         fires=fires,
@@ -94,6 +101,11 @@ def run_activation_batch(
         inhibitions=inhibitions,
         depth_sum=depth_sum,
     )
+    if ctr.batches % 50 == 0:
+        try:
+            reap_dead_events(db)
+        except Exception as e:
+            _log.debug("%s reap skipped: %s", LOG_PREFIX, e)
     try:
         maybe_flush_metrics(db, graph_version=graph_version)
     except Exception as e:

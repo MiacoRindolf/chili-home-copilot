@@ -95,7 +95,7 @@ def build_scoring_plane(
         "blowoff_risk": blowoff_risk,
         "repeatability_confidence": repeatability_confidence,
         "structural_confirmation": structural_confirmation,
-        "spread_liquidity_quality": None,
+        "spread_liquidity_quality": liquidity_quality,
         "liquidity_quality": liquidity_quality,
         "continuation_quality": continuation_quality,
     }

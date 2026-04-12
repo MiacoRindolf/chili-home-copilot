@@ -27,6 +27,11 @@ class NodeActivation:
         return {"node_id": self.node_id, "score": round(self.score, 4), "evidence": self.evidence}
 
 
+# Execution risk is never truly zero for speculative momentum plays — there is
+# always base slippage/liquidity uncertainty even with neutral scanner signals.
+EXECUTION_RISK_BASELINE = 0.25
+
+
 def _clamp(x: float) -> float:
     return max(0.0, min(1.0, x))
 
@@ -89,7 +94,7 @@ def eval_extension_risk(f: feat.SignalFeatures) -> NodeActivation:
 
 
 def eval_execution_risk(f: feat.SignalFeatures) -> NodeActivation:
-    s = 0.25
+    s = EXECUTION_RISK_BASELINE
     bits: list[str] = []
     if f.risk_level == "high":
         s += 0.4

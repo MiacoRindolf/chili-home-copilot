@@ -537,7 +537,8 @@ class Settings(BaseSettings):
     brain_oos_gate_enabled: bool = True
     brain_oos_min_win_rate_pct: float = 42.0
     brain_oos_max_is_oos_gap_pct: float = 38.0
-    brain_oos_min_evaluated_tickers: int = 2
+    brain_oos_min_evaluated_tickers: int = 3
+    brain_oos_min_aggregate_trades: int = 15
     # Optional stricter OOS gates (None = use brain_oos_min_win_rate_pct / gap only). Applied in
     # brain_oos_gate_kwargs_for_pattern when timeframe, asset_class, or hypothesis_family matches.
     brain_oos_min_win_rate_pct_short_tf: Optional[float] = None
@@ -581,23 +582,25 @@ class Settings(BaseSettings):
     # If True, min OOS win rate must hold for every evaluated extra holdout (per ticker), not only primary.
     brain_oos_require_robustness_wr_above_gate: bool = False
     # Bootstrap on vector of per-ticker OOS win rates (0 = disabled).
-    brain_oos_bootstrap_iterations: int = 0
+    brain_oos_bootstrap_iterations: int = 500
     # Reject promotion when bootstrap CI lower bound for mean OOS WR is below this (None = skip).
-    brain_oos_bootstrap_ci_min_wr: Optional[float] = None
+    brain_oos_bootstrap_ci_min_wr: Optional[float] = 0.42
 
     # Edge-vs-luck (v1 weak-null permutations) for OOS-gated repeatable-edge patterns only.
     brain_edge_evidence_enabled: bool = True
-    brain_edge_evidence_gate_enabled: bool = False
+    brain_edge_evidence_gate_enabled: bool = True
     brain_edge_evidence_permutations: int = 400
     brain_edge_evidence_seed: int = 42
     brain_edge_evidence_max_is_perm_p: Optional[float] = None
     brain_edge_evidence_max_oos_perm_p: float = 0.20
     brain_edge_evidence_max_wf_perm_p: float = 0.25
     brain_edge_evidence_require_wf_when_available: bool = False
+    brain_edge_evidence_fdr_enabled: bool = True
+    brain_edge_evidence_fdr_q: float = 0.10
 
     # Phase 2 research hygiene (repeatable-edge lane): slice burn ledger + optional stability probe.
     brain_selection_bias_enabled: bool = True
-    brain_parameter_stability_enabled: bool = False
+    brain_parameter_stability_enabled: bool = True
     brain_parameter_stability_seed: int = 123
     brain_parameter_stability_ticker_subset_size: int = 2
     brain_parameter_stability_max_variant_evals: int = 6
@@ -632,7 +635,7 @@ class Settings(BaseSettings):
     # Live/paper drift vs research baseline (repeatable-edge promoted/live only).
     brain_live_drift_window_days: int = 120
     brain_live_drift_live_min_primary: int = 8
-    brain_live_drift_min_trades: int = 8
+    brain_live_drift_min_trades: int = 12
     brain_live_drift_baseline_p0_low: float = 0.05
     brain_live_drift_baseline_p0_high: float = 0.95
     brain_live_drift_warning_delta_pp: float = 8.0
@@ -644,10 +647,10 @@ class Settings(BaseSettings):
     brain_live_drift_confidence_mult_critical: float = 0.88
     brain_live_drift_confidence_floor: float = 0.1
     brain_live_drift_confidence_cap: float = 0.95
-    brain_live_drift_auto_challenged_enabled: bool = False
+    brain_live_drift_auto_challenged_enabled: bool = True
     brain_live_drift_auto_challenged_max_p_like: float = 0.02
     brain_live_drift_v2_enabled: bool = True
-    brain_live_drift_shadow_mode: bool = True
+    brain_live_drift_shadow_mode: bool = False
     brain_live_drift_v2_warn_expectancy_ratio: float = 0.7
     brain_live_drift_v2_critical_expectancy_ratio: float = 0.4
     brain_live_drift_v2_warn_profit_factor: float = 1.0

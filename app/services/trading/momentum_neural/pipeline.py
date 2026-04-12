@@ -139,6 +139,7 @@ def run_momentum_neural_tick(
         },
     )
 
+    persistence_ok = True
     try:
         from .persistence import persist_neural_momentum_tick
 
@@ -154,6 +155,7 @@ def run_momentum_neural_tick(
             log_tick("persisted viability rows=%s", n)
     except Exception as e:
         _log.warning("[momentum_neural] viability persistence failed: %s", e)
+        persistence_ok = False
 
     log_tick(
         "tick symbols=%s families=%s top=%s corr=%s",
@@ -162,4 +164,4 @@ def run_momentum_neural_tick(
         top.get("family_id"),
         correlation_id,
     )
-    return {"ok": True, "rows": len(rows), "top_family": top.get("family_id")}
+    return {"ok": True, "rows": len(rows), "top_family": top.get("family_id"), "persistence_ok": persistence_ok}

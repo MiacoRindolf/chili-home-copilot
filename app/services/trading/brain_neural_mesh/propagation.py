@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Optional
@@ -11,6 +12,9 @@ from sqlalchemy.orm import Session
 
 from ....models.trading import BrainFireLog, BrainGraphEdge, BrainGraphNode, BrainNodeState
 from .repository import get_node, get_or_create_state, outbound_edges
+from .schema import LOG_PREFIX
+
+_log = logging.getLogger(__name__)
 
 
 def _clamp01(x: float) -> float:
@@ -78,6 +82,7 @@ class PropagationResult:
     downstream_events: int
     inhibitions_applied: int
     suppressions: int
+    truncated: bool = False
 
 
 def propagate_one_event(
@@ -100,6 +105,11 @@ def propagate_one_event(
     if not source_node_id:
         return res
     if propagation_depth >= max_depth:
+        _log.debug(
+            "%s propagation depth cutoff at %s/%s for source=%s",
+            LOG_PREFIX, propagation_depth, max_depth, source_node_id,
+        )
+        res.truncated = True
         return res
 
     ev_signal = signal_from_payload(payload)
@@ -176,7 +186,7 @@ def apply_decay_to_state(
     """Exponential decay on confidence when stale. Returns True if mutated."""
     if half_life_seconds <= 0:
         return False
-    ref = state.staleness_at or state.updated_at
+    ref = state.staleness_at
     if ref is None:
         return False
     dt = (now - ref).total_seconds()

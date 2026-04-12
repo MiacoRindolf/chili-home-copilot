@@ -5,13 +5,15 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
-from ....models.trading import BrainActivationEvent, BrainGraphMetric, BrainGraphNode, BrainNodeState
+from sqlalchemy import func as sa_func
+
+from ....models.trading import BrainActivationEvent, BrainGraphEdge, BrainGraphMetric, BrainGraphNode, BrainNodeState
 from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION, LOG_PREFIX
 
 _log = logging.getLogger(__name__)
@@ -25,6 +27,8 @@ class MeshCounters:
     suppressions: int = 0
     inhibitions: int = 0
     propagation_depth_sum: int = 0
+    momentum_tick_failures: int = 0
+    depth_cutoffs: int = 0
     batches: int = 0
     last_flush_ts: float = field(default_factory=time.monotonic)
 
@@ -69,6 +73,7 @@ def flush_metrics_to_db(db: Session, *, domain: str = DEFAULT_DOMAIN, graph_vers
     depth_avg = (c.propagation_depth_sum / c.batches) if c.batches else 0.0
     lag_sec = _queue_lag_seconds(db)
     stale_n = _stale_node_count(db, domain=domain, graph_version=graph_version)
+    starved_n = _starved_node_count(db, domain=domain, graph_version=graph_version)
     pairs = [
         ("events_published_total", float(c.events_published)),
         ("events_processed_total", float(c.events_processed)),
@@ -76,8 +81,11 @@ def flush_metrics_to_db(db: Session, *, domain: str = DEFAULT_DOMAIN, graph_vers
         ("suppressions_total", float(c.suppressions)),
         ("inhibitions_total", float(c.inhibitions)),
         ("avg_propagation_depth", float(depth_avg)),
+        ("momentum_tick_failures_total", float(c.momentum_tick_failures)),
+        ("depth_cutoffs_total", float(c.depth_cutoffs)),
         ("queue_lag_seconds", float(lag_sec or 0.0)),
         ("stale_node_count", float(stale_n)),
+        ("starved_node_count", float(starved_n)),
     ]
     for key, val in pairs:
         stmt = pg_insert(BrainGraphMetric).values(
@@ -123,8 +131,8 @@ def _stale_node_count(
     graph_version: int,
     stale_after_sec: float = 600.0,
 ) -> int:
-    now = datetime.utcnow()
-    q = (
+    cutoff = datetime.utcnow() - timedelta(seconds=stale_after_sec)
+    return (
         db.query(BrainNodeState.node_id)
         .join(BrainGraphNode, BrainGraphNode.id == BrainNodeState.node_id)
         .filter(
@@ -132,17 +140,44 @@ def _stale_node_count(
             BrainGraphNode.graph_version == graph_version,
             BrainGraphNode.enabled.is_(True),
             BrainNodeState.staleness_at.isnot(None),
+            BrainNodeState.staleness_at < cutoff,
         )
-        .all()
+        .count()
     )
-    n = 0
-    for (nid,) in q:
-        st = db.query(BrainNodeState).filter(BrainNodeState.node_id == nid).one_or_none()
-        if not st or not st.staleness_at:
-            continue
-        if (now - st.staleness_at).total_seconds() > stale_after_sec:
-            n += 1
-    return n
+
+
+def _starved_node_count(
+    db: Session,
+    *,
+    domain: str,
+    graph_version: int,
+) -> int:
+    """Count enabled nodes whose confidence is below the minimum min_confidence of all inbound edges."""
+    # Subquery: for each target node, find the lowest min_confidence across inbound edges.
+    min_conf_sq = (
+        db.query(
+            BrainGraphEdge.target_node_id.label("node_id"),
+            sa_func.min(BrainGraphEdge.min_confidence).label("min_gate"),
+        )
+        .filter(
+            BrainGraphEdge.enabled.is_(True),
+            BrainGraphEdge.graph_version == graph_version,
+        )
+        .group_by(BrainGraphEdge.target_node_id)
+        .subquery()
+    )
+    return (
+        db.query(BrainNodeState.node_id)
+        .join(BrainGraphNode, BrainGraphNode.id == BrainNodeState.node_id)
+        .join(min_conf_sq, min_conf_sq.c.node_id == BrainNodeState.node_id)
+        .filter(
+            BrainGraphNode.domain == domain,
+            BrainGraphNode.graph_version == graph_version,
+            BrainGraphNode.enabled.is_(True),
+            BrainNodeState.confidence < min_conf_sq.c.min_gate,
+        )
+        .count()
+    )
 
 
 def read_metrics_map(

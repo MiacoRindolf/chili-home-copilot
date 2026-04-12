@@ -216,6 +216,50 @@ def run_live_runner_batch(
     return out
 
 
+_RECONCILE_TICK_INTERVAL = 5  # only reconcile every Nth tick
+_reconcile_counters: dict[int, int] = {}
+
+
+def _reconcile_venue_position(adapter: Any, db: Session, sess: Any, product_id: str) -> None:
+    """Rate-limited venue reconciliation: detect orphaned orders or stale positions."""
+    sid = int(sess.id)
+    _reconcile_counters[sid] = _reconcile_counters.get(sid, 0) + 1
+    if _reconcile_counters[sid] % _RECONCILE_TICK_INTERVAL != 0:
+        return
+    try:
+        le = _live_exec(dict(sess.risk_snapshot_json or {}))
+        st = sess.state
+        entry_oid = le.get("entry_order_id")
+        has_pos = isinstance(le.get("position"), dict)
+
+        if not entry_oid:
+            return
+
+        # Check if venue has filled order but session hasn't caught up
+        if st in (STATE_LIVE_PENDING_ENTRY,) and not has_pos:
+            no, _ = adapter.get_order(str(entry_oid))
+            if no and no.status == "filled" and float(no.filled_size or 0) > 0:
+                _log.warning(
+                    "[live_runner] Reconcile: venue shows filled entry for session=%s but state=%s — next tick will process",
+                    sid, st,
+                )
+                _emit(db, sess, "reconcile_stale_entry_detected", {"order_id": entry_oid, "venue_status": no.status})
+
+        # Check if session thinks it has position but venue shows nothing
+        if st in (STATE_LIVE_ENTERED, STATE_LIVE_SCALING_OUT, STATE_LIVE_TRAILING) and has_pos:
+            exit_oid = le.get("exit_order_id")
+            if exit_oid:
+                no, _ = adapter.get_order(str(exit_oid))
+                if no and no.status == "filled":
+                    _log.warning(
+                        "[live_runner] Reconcile: venue shows filled exit for session=%s — marking for review",
+                        sid,
+                    )
+                    _emit(db, sess, "reconcile_orphaned_exit_detected", {"order_id": exit_oid})
+    except Exception as e:
+        _log.debug("[live_runner] reconcile failed for session=%s: %s", sid, e)
+
+
 def tick_live_session(
     db: Session,
     session_id: int,
@@ -250,6 +294,9 @@ def tick_live_session(
 
     if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
+
+    # C2: Orphaned order recovery — reconcile with venue (rate-limited)
+    _reconcile_venue_position(adapter, db, sess, product_id)
 
     snap = dict(sess.risk_snapshot_json or {})
     if RISK_SNAPSHOT_KEY not in snap:
@@ -474,6 +521,7 @@ def tick_live_session(
                 )
                 le["position"]["stop_price"] = stop_px
                 le["position"]["target_price"] = target_px
+                le["admission_viability_score"] = float(via.viability_score or 0)
                 _commit_le(sess, le)
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
                 _emit(
@@ -489,6 +537,22 @@ def tick_live_session(
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state}
             if no and _order_open(no):
+                # C3: Ack timeout — cancel if pending too long
+                submit_raw = le.get("entry_submit_utc")
+                if submit_raw:
+                    try:
+                        t_sub = datetime.fromisoformat(str(submit_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+                        if (_utcnow() - t_sub).total_seconds() > 10:
+                            adapter.cancel_order(str(le["entry_order_id"]))
+                            _emit(db, sess, "entry_ack_timeout", {"elapsed_sec": (_utcnow() - t_sub).total_seconds()})
+                            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                            le["entry_submitted"] = False
+                            le["entry_order_id"] = None
+                            _commit_le(sess, le)
+                            db.flush()
+                            return {"ok": True, "session_id": sess.id, "state": sess.state, "timeout": True}
+                    except Exception:
+                        pass
                 db.flush()
                 return {"ok": True, "session_id": sess.id, "state": sess.state, "pending": "entry_open"}
             _emit(db, sess, "live_error", {"reason": "entry_order_state", "status": no.status if no else None})
@@ -519,6 +583,7 @@ def tick_live_session(
             client_order_id=cid,
         )
         le["entry_submitted"] = True
+        le["entry_submit_utc"] = _utcnow().isoformat()
         le["entry_client_order_id"] = res.get("client_order_id") or cid
         le["entry_order_id"] = res.get("order_id")
         le["entry_place_result"] = {"ok": res.get("ok"), "error": res.get("error")}
@@ -551,6 +616,16 @@ def tick_live_session(
         trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
         trail_floor_return = 1.0 + float(params["trail_floor_return_bps"]) / 10_000.0
 
+        # C1: Per-trade loss enforcement
+        max_loss_usd = float(caps.get("max_loss_per_trade_usd") or 0)
+        if max_loss_usd > 0 and st != STATE_LIVE_BAILOUT:
+            unrealized_pnl = (bid - avg) * qty
+            if unrealized_pnl <= -max_loss_usd:
+                _safe_transition(db, sess, STATE_LIVE_BAILOUT)
+                _emit(db, sess, "live_bailout", {"reason": "max_loss_per_trade", "unrealized_pnl": unrealized_pnl})
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
+
         if st == STATE_LIVE_BAILOUT:
             cid = f"chili_ml_b_{sess.id}_{uuid.uuid4().hex[:12]}"
             sr = adapter.place_market_order(
@@ -578,6 +653,21 @@ def tick_live_session(
             _emit(db, sess, "live_bailout", {"viability_score": via.viability_score})
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # C4: Viability degradation — tighten stop if score drops >15% from admission
+        admission_via = float(le.get("admission_viability_score") or 0)
+        current_via = float(via.viability_score or 0)
+        if admission_via > 0 and current_via < admission_via * 0.85:
+            tighter_stop = max(stop_px, avg * 0.995)
+            if tighter_stop > stop_px:
+                pos["stop_price"] = tighter_stop
+                _commit_le(sess, le)
+                _emit(db, sess, "viability_degraded_tighten", {
+                    "admission_viability": admission_via,
+                    "current_viability": current_via,
+                    "old_stop": stop_px,
+                    "new_stop": tighter_stop,
+                })
 
         if held >= max_hold:
             cid = f"chili_ml_t_{sess.id}_{uuid.uuid4().hex[:12]}"

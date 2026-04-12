@@ -4640,6 +4640,201 @@ def _migration_101_coding_execution_iteration(conn) -> None:
     conn.commit()
 
 
+def _migration_102_learning_cycle_neural_nodes(conn) -> None:
+    """Wire learning-cycle clusters + steps as real neural mesh nodes (layers 8-9)."""
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    # --- 7 cluster nodes (layer 8) ---
+    cluster_nodes = [
+        ("nm_lc_c_state", 8, "learning_cluster", "Market state & memory", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_state"}),
+        ("nm_lc_c_discovery", 8, "learning_cluster", "Pattern discovery", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_discovery"}),
+        ("nm_lc_c_validation", 8, "learning_cluster", "Evidence & backtests", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_validation"}),
+        ("nm_lc_c_evolution", 8, "learning_cluster", "Evolution & hypotheses", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_evolution"}),
+        ("nm_lc_c_secondary", 8, "learning_cluster", "Secondary miners", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_secondary"}),
+        ("nm_lc_c_journal", 8, "learning_cluster", "Journal & signals", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_journal"}),
+        ("nm_lc_c_meta", 8, "learning_cluster", "Meta-learning & close", False, 0.40, 30,
+         {"role": "learning_cluster", "cluster_id": "c_meta"}),
+    ]
+
+    # --- 27 step nodes (layer 9) ---
+    step_nodes = [
+        # c_state (4)
+        ("nm_lc_snapshots_daily", 9, "learning_step", "Daily market snapshots", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_state", "step_sid": "snapshots_daily"}),
+        ("nm_lc_snapshots_intraday", 9, "learning_step", "Intraday snapshots", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_state", "step_sid": "snapshots_intraday"}),
+        ("nm_lc_backfill", 9, "learning_step", "Backfilling future returns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_state", "step_sid": "backfill"}),
+        ("nm_lc_decay", 9, "learning_step", "Decaying stale insights", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_state", "step_sid": "decay"}),
+        # c_discovery (2)
+        ("nm_lc_mine", 9, "learning_step", "Mining patterns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_discovery", "step_sid": "mine"}),
+        ("nm_lc_seek", 9, "learning_step", "Active pattern seeking", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_discovery", "step_sid": "seek"}),
+        # c_validation (2)
+        ("nm_lc_bt_insights", 9, "learning_step", "Backtesting insights", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_validation", "step_sid": "bt_insights"}),
+        ("nm_lc_bt_queue", 9, "learning_step", "Backtesting pattern queue", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_validation", "step_sid": "bt_queue"}),
+        # c_evolution (3)
+        ("nm_lc_variants", 9, "learning_step", "Evolving pattern variants", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_evolution", "step_sid": "variants"}),
+        ("nm_lc_hypotheses", 9, "learning_step", "Testing hypotheses", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_evolution", "step_sid": "hypotheses"}),
+        ("nm_lc_breakout", 9, "learning_step", "Learning from breakouts", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_evolution", "step_sid": "breakout"}),
+        # c_secondary (8)
+        ("nm_lc_intraday_hv", 9, "learning_step", "Intraday breakout patterns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "intraday_hv"}),
+        ("nm_lc_refine", 9, "learning_step", "Refining patterns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "refine"}),
+        ("nm_lc_exit", 9, "learning_step", "Exit optimization", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "exit"}),
+        ("nm_lc_fakeout", 9, "learning_step", "Mining fakeout patterns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "fakeout"}),
+        ("nm_lc_sizing", 9, "learning_step", "Position sizing tuning", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "sizing"}),
+        ("nm_lc_inter_alert", 9, "learning_step", "Inter-alert patterns", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "inter_alert"}),
+        ("nm_lc_timeframe", 9, "learning_step", "Timeframe performance", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "timeframe"}),
+        ("nm_lc_synergy", 9, "learning_step", "Signal synergies", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_secondary", "step_sid": "synergy"}),
+        # c_journal (2)
+        ("nm_lc_journal", 9, "learning_step", "Writing market journal", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_journal", "step_sid": "journal"}),
+        ("nm_lc_signals", 9, "learning_step", "Checking signal events", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_journal", "step_sid": "signals"}),
+        # c_meta (6)
+        ("nm_lc_ml", 9, "learning_step", "Training meta-learner", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "ml"}),
+        ("nm_lc_pattern_engine", 9, "learning_step", "Pattern discovery engine", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "pattern_engine"}),
+        ("nm_lc_proposals", 9, "learning_step", "Strategy proposals", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "proposals"}),
+        ("nm_lc_cycle_report", 9, "learning_step", "Cycle AI report", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "cycle_report"}),
+        ("nm_lc_depromote", 9, "learning_step", "Live depromotion", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "depromote"}),
+        ("nm_lc_finalize", 9, "learning_step", "Finalizing cycle", False, 0.35, 15,
+         {"role": "learning_step", "cluster_id": "c_meta", "step_sid": "finalize"}),
+    ]
+
+    all_nodes = cluster_nodes + step_nodes
+    for nid, layer, ntype, label, is_obs, fth, cd, dmeta in all_nodes:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, :is_obs,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid,
+                "domain": dom,
+                "gv": gv,
+                "ntype": ntype,
+                "layer": layer,
+                "label": label,
+                "fth": fth,
+                "cd": cd,
+                "is_obs": is_obs,
+                "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # --- Edges ---
+    edges = [
+        # Sequential cluster chain
+        ("nm_lc_c_state", "nm_lc_c_discovery", "cluster_chain", 0.7, "excitatory"),
+        ("nm_lc_c_discovery", "nm_lc_c_validation", "cluster_chain", 0.7, "excitatory"),
+        ("nm_lc_c_validation", "nm_lc_c_evolution", "cluster_chain", 0.7, "excitatory"),
+        ("nm_lc_c_evolution", "nm_lc_c_secondary", "cluster_chain", 0.7, "excitatory"),
+        ("nm_lc_c_secondary", "nm_lc_c_journal", "cluster_chain", 0.7, "excitatory"),
+        ("nm_lc_c_journal", "nm_lc_c_meta", "cluster_chain", 0.7, "excitatory"),
+        # Cluster → first step in cluster
+        ("nm_lc_c_state", "nm_lc_snapshots_daily", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_discovery", "nm_lc_mine", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_validation", "nm_lc_bt_insights", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_evolution", "nm_lc_variants", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_secondary", "nm_lc_intraday_hv", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_journal", "nm_lc_journal", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_c_meta", "nm_lc_ml", "step_completed", 0.7, "excitatory"),
+        # Last step → cluster completion
+        ("nm_lc_decay", "nm_lc_c_state", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_seek", "nm_lc_c_discovery", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_bt_queue", "nm_lc_c_validation", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_breakout", "nm_lc_c_evolution", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_synergy", "nm_lc_c_secondary", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_signals", "nm_lc_c_journal", "step_completed", 0.7, "excitatory"),
+        ("nm_lc_finalize", "nm_lc_c_meta", "step_completed", 0.7, "excitatory"),
+        # Cross-connects to existing spine
+        ("nm_lc_mine", "nm_pattern_disc", "step_completed", 0.55, "excitatory"),
+        ("nm_lc_bt_queue", "nm_evidence_bt", "step_completed", 0.55, "excitatory"),
+        ("nm_lc_finalize", "nm_event_bus", "step_completed", 0.50, "excitatory"),
+        ("nm_lc_snapshots_daily", "nm_snap_daily", "step_completed", 0.50, "excitatory"),
+    ]
+    for src, tgt, sig, w, pol in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv},
+        )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -4743,6 +4938,7 @@ MIGRATIONS = [
     ("099_execution_audit_and_allocator", _migration_099_execution_audit_and_allocator),
     ("100_momentum_viability_scope", _migration_100_momentum_viability_scope),
     ("101_coding_execution_iteration", _migration_101_coding_execution_iteration),
+    ("102_learning_cycle_neural_nodes", _migration_102_learning_cycle_neural_nodes),
 ]
 
 

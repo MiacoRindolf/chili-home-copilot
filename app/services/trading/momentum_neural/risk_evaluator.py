@@ -8,7 +8,7 @@ from typing import Any, Optional
 from sqlalchemy.orm import Session
 
 from ....config import settings
-from ....models.trading import MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
+from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability, TradingAutomationSession
 from ..execution_family_registry import (
     is_documented_execution_family,
     is_momentum_automation_implemented,
@@ -88,6 +88,23 @@ def _readiness_numbers(exec_json: dict[str, Any]) -> dict[str, Any]:
             if k2 in ex and k2 not in out:
                 out[k2] = ex[k2]
     return out
+
+
+def _daily_realized_pnl(db: Session, user_id: int) -> float:
+    """Sum realized_pnl_usd from all sessions that terminated today for this user."""
+    from datetime import date
+    from sqlalchemy import func as sa_func
+
+    today_start = datetime.combine(date.today(), datetime.min.time())
+    rows = (
+        db.query(sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0))
+        .filter(
+            MomentumAutomationOutcome.user_id == user_id,
+            MomentumAutomationOutcome.terminal_at >= today_start,
+        )
+        .scalar()
+    )
+    return float(rows or 0.0)
 
 
 def evaluate_proposed_momentum_automation(
@@ -461,14 +478,16 @@ def evaluate_proposed_momentum_automation(
             )
         )
 
-    # ── PnL / notional (deferred — runner does not track yet) ───────────
+    # ── Daily loss cap ────────────────────────────────────────────────────
+    daily_pnl = _daily_realized_pnl(db, user_id)
+    ok_dloss = daily_pnl > -policy.max_daily_loss_usd
     checks.append(
         _check(
             "daily_loss_cap",
-            True,
-            severity="warn",
-            message="Daily loss / per-trade loss caps not enforced until runner PnL (Phase 7+).",
-            detail={"max_daily_loss_usd": policy.max_daily_loss_usd},
+            ok_dloss,
+            severity="block" if not ok_dloss and m == "live" else ("warn" if not ok_dloss else "ok"),
+            message=f"Daily realized PnL ${daily_pnl:+.2f} vs max loss -${policy.max_daily_loss_usd:.2f}.",
+            detail={"daily_pnl_usd": daily_pnl, "max_daily_loss_usd": policy.max_daily_loss_usd},
         )
     )
     checks.append(

@@ -42,7 +42,7 @@ def resolve_cluster(acts: list[NodeActivation], *, scanner_score: float) -> Clus
     vwap = m.get(NODE_VWAP_PULLBACK, 0.0)
     exh = m.get(NODE_EXHAUSTION, 0.0)
 
-    # Blow-off: strong extension + high score or exhaustion co-fired
+    # --- Blow-off: strong extension + high score or exhaustion co-fired ---
     if ext >= 0.72 and scanner_score >= 8.0:
         return ClusterResolution(
             ClusterId.blow_off_risk.value,
@@ -54,7 +54,10 @@ def resolve_cluster(acts: list[NodeActivation], *, scanner_score: float) -> Clus
             "extension_with_exhaustion_language",
         )
 
-    # Severe execution / liquidity stress must not hide behind squeeze/event labels.
+    # Path 1 (execution_risk_high): severe execution stress co-firing with
+    # squeeze/event signals — override the thematic label because execution
+    # risk dominates.  Standalone severe exe (no co-fire) falls through to
+    # Path 2 at exe >= 0.65 below.
     if exe >= 0.85 and (sq >= 0.45 or ev >= 0.45):
         return ClusterResolution(
             ClusterId.execution_risk_high.value,
@@ -77,6 +80,8 @@ def resolve_cluster(acts: list[NodeActivation], *, scanner_score: float) -> Clus
     if ev >= 0.45:
         return ClusterResolution(ClusterId.event_driven_spike.value, "event_flow_impulse")
 
+    # Path 2 (execution_risk_high): standalone execution stress without
+    # squeeze/event co-fire, including severe exe that fell through Path 1.
     if exe >= 0.65:
         return ClusterResolution(ClusterId.execution_risk_high.value, "execution_liquidity_stress")
 

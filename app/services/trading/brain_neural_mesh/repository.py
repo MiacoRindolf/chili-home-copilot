@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional, Sequence
 
 from sqlalchemy import text
@@ -21,6 +21,23 @@ from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION, LOG_PREFIX
 _log = logging.getLogger(__name__)
 
 
+_REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
+    "momentum_context_refresh": {"signal_type"},
+    "brain_market_snapshots": {"signal_type"},
+    "learning_cycle_completed": {"signal_type"},
+    "fired": {"signal_type", "from_edge"},
+}
+
+
+def _validate_payload(cause: str, payload: Optional[dict[str, Any]]) -> None:
+    required = _REQUIRED_PAYLOAD_FIELDS.get(cause)
+    if required is None or payload is None:
+        return
+    missing = required - set(payload.keys())
+    if missing:
+        _log.warning("%s enqueue payload for cause=%s missing keys: %s", LOG_PREFIX, cause, missing)
+
+
 def enqueue_activation(
     db: Session,
     *,
@@ -34,6 +51,7 @@ def enqueue_activation(
     graph_version: int = DEFAULT_GRAPH_VERSION,
 ) -> int:
     """Insert a pending activation event. Returns new row id."""
+    _validate_payload(cause, payload)
     cid = correlation_id or str(uuid.uuid4())
     ev = BrainActivationEvent(
         source_node_id=source_node_id,
@@ -139,3 +157,20 @@ def nodes_for_domain(
         .order_by(BrainGraphNode.layer.asc(), BrainGraphNode.id.asc())
         .all()
     )
+
+
+def reap_dead_events(db: Session, *, older_than_hours: int = 72) -> int:
+    """Delete processed/dead activation events older than the retention window."""
+    cutoff = datetime.utcnow() - timedelta(hours=older_than_hours)
+    n = (
+        db.query(BrainActivationEvent)
+        .filter(
+            BrainActivationEvent.status.in_(("dead", "done")),
+            BrainActivationEvent.processed_at.isnot(None),
+            BrainActivationEvent.processed_at < cutoff,
+        )
+        .delete(synchronize_session=False)
+    )
+    if n:
+        _log.info("%s reaped %s old activation events (cutoff=%sh)", LOG_PREFIX, n, older_than_hours)
+    return n

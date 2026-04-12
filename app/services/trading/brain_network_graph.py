@@ -10,19 +10,24 @@ from __future__ import annotations
 
 import importlib
 import inspect
+import logging
 import math
 import re
-from typing import Any
+from typing import Any, Optional
+
+from sqlalchemy.orm import Session
 
 from .learning_cycle_architecture import (
     TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
     TRADING_BRAIN_ROOT_METADATA,
 )
 
+_log = logging.getLogger(__name__)
+
 _ROOT_ID = "tb_root"
 
 # Public JSON ``meta.graph_version``; bump when graph shape or ordering contract changes.
-TRADING_BRAIN_NETWORK_GRAPH_VERSION = 15
+TRADING_BRAIN_NETWORK_GRAPH_VERSION = 16
 
 # Per-callable line cap: run_learning_cycle is ~700 lines; keep headroom for growth.
 # Total cap: multi-part code_ref (e.g. ``a + b``) concatenates several callables.
@@ -184,7 +189,7 @@ def _cluster_positions(n: int, cx: float, cy: float, radius: float) -> list[tupl
     ]
 
 
-def get_trading_brain_network_graph() -> dict[str, Any]:
+def get_trading_brain_network_graph(db: Optional[Session] = None) -> dict[str, Any]:
     clusters = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
     n_cl = len(clusters)
     root_x, root_y = 800.0, 475.0
@@ -284,4 +289,52 @@ def get_trading_brain_network_graph() -> dict[str, Any]:
         ),
     }
 
+    # Enrich step/cluster nodes with live mesh state when db is available
+    if db is not None:
+        try:
+            _enrich_with_mesh_state(db, nodes)
+        except Exception as e:
+            _log.debug("mesh state enrichment skipped: %s", e)
+
     return {"ok": True, "meta": meta, "nodes": nodes, "edges": edges}
+
+
+def _enrich_with_mesh_state(db: Session, nodes: list[dict[str, Any]]) -> None:
+    """Merge BrainNodeState activation_score/confidence into display nodes."""
+    from ...models.trading import BrainNodeState
+
+    # Build lookup: display node id → mesh node id
+    mesh_map: dict[str, str] = {}
+    for n in nodes:
+        nid = n["id"]
+        tier = n.get("tier")
+        if tier == "step":
+            # Display id: s_{cluster}_{sid} → mesh id: nm_lc_{sid}
+            parts = nid.split("_", 2)  # ["s", cluster_id, step_sid]
+            if len(parts) == 3:
+                mesh_map[nid] = f"nm_lc_{parts[2]}"
+        elif tier == "cluster" and nid.startswith("c_"):
+            mesh_map[nid] = f"nm_lc_{nid}"
+
+    if not mesh_map:
+        return
+
+    mesh_ids = list(mesh_map.values())
+    states = (
+        db.query(BrainNodeState)
+        .filter(BrainNodeState.node_id.in_(mesh_ids))
+        .all()
+    )
+    state_by_id = {s.node_id: s for s in states}
+
+    for n in nodes:
+        mesh_nid = mesh_map.get(n["id"])
+        if not mesh_nid:
+            continue
+        st = state_by_id.get(mesh_nid)
+        if st:
+            n["mesh_node_id"] = mesh_nid
+            n["activation_score"] = round(float(st.activation_score or 0), 4)
+            n["confidence"] = round(float(st.confidence or 0), 4)
+            n["last_fired_at"] = st.last_fired_at.isoformat() if st.last_fired_at else None
+            n["staleness_at"] = st.staleness_at.isoformat() if st.staleness_at else None

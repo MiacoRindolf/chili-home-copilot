@@ -131,7 +131,7 @@ def api_trading_brain_graph(
                 status_code=403,
             )
         return JSONResponse(build_neural_graph_projection(db))
-    return JSONResponse(get_trading_brain_network_graph())
+    return JSONResponse(get_trading_brain_network_graph(db=db))
 
 
 # ── Neural momentum desk (Phase 10 — read-only; not learning-cycle) ─────────

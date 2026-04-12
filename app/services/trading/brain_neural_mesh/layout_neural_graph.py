@@ -12,7 +12,7 @@ MARGIN = 80.0
 CX = VIEWPORT_W / 2.0
 CY = VIEWPORT_H / 2.0
 
-# Layer 1 = outer (sensory), 7 = inner (meta). Tunable ladder (px from center).
+# Layer 1 = outer (sensory), 7 = inner (meta), 8-9 = learning cycle. Tunable ladder (px from center).
 CORE_RING_RADIUS: dict[int, float] = {
     1: 352.0,
     2: 300.0,
@@ -21,6 +21,8 @@ CORE_RING_RADIUS: dict[int, float] = {
     5: 156.0,
     6: 116.0,
     7: 78.0,
+    8: 404.0,   # learning-cycle clusters (outer ring)
+    9: 448.0,   # learning-cycle steps (outermost ring)
 }
 
 # Hubs sit on a small diamond/square — not on the crowded L3 ring.
@@ -85,7 +87,7 @@ def compute_neural_positions(nodes_min: list[_NodeLay]) -> tuple[dict[str, tuple
     for nid, p in hub_pos.items():
         positions[nid] = p
 
-    for layer in range(1, 8):
+    for layer in range(1, 10):
         r_core = CORE_RING_RADIUS.get(layer, 78.0)
         layer_nodes = [n for n in nodes_min if n["layer"] == layer]
         # Exclude hubs from ring placement
@@ -150,10 +152,10 @@ def compute_neural_positions(nodes_min: list[_NodeLay]) -> tuple[dict[str, tuple
 
     xs3 = [p[0] for p in final.values()]
     ys3 = [p[1] for p in final.values()]
-    ring_radii_draw = sorted({round(s * CORE_RING_RADIUS[L], 2) for L in range(1, 8)})
+    ring_radii_draw = sorted({round(s * CORE_RING_RADIUS[L], 2) for L in CORE_RING_RADIUS})
     layer_ring_cues = [
         {"layer": L, "r": round(s * CORE_RING_RADIUS[L], 2), "abbr": f"L{L}"}
-        for L in range(1, 8)
+        for L in sorted(CORE_RING_RADIUS)
     ]
     layout_meta = {
         "bounds": {
