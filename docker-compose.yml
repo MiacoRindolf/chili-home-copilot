@@ -85,6 +85,9 @@ services:
       # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
+      # Optional: surfaced as scan/status ``release.git_commit``; set in host ``.env`` after deploy.
+      - CHILI_GIT_COMMIT=${CHILI_GIT_COMMIT:-}
+      - CHILI_BRAIN_DEFAULT_USER_ID=${CHILI_BRAIN_DEFAULT_USER_ID:-}
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./docs:/app/docs
@@ -144,6 +147,8 @@ services:
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
+      - CHILI_GIT_COMMIT=${CHILI_GIT_COMMIT:-}
+      - CHILI_BRAIN_DEFAULT_USER_ID=${CHILI_BRAIN_DEFAULT_USER_ID:-}
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
