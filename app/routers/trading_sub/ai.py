@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import os
 import logging
+from pathlib import Path
 import re
 from typing import Any, Literal, cast
 
@@ -1016,7 +1017,19 @@ def api_scan_status():
             sdb.close()
 
     def _release_info() -> dict[str, Any]:
-        """Optional deploy fingerprint — set CHILI_GIT_COMMIT in the container/host for truth passes."""
+        """Deploy fingerprint: prefer image-baked ``.chili-git-commit`` (Dockerfile), then env.
+
+        PaaS dashboards often set ``CHILI_GIT_COMMIT`` once; it can stay stale across rollouts.
+        The baked file reflects the **build** and wins when non-empty.
+        """
+        baked_path = Path(__file__).resolve().parents[3] / ".chili-git-commit"
+        try:
+            if baked_path.is_file():
+                baked = baked_path.read_text(encoding="utf-8").strip()
+                if baked and not baked.lstrip().startswith("#"):
+                    return {"git_commit": baked}
+        except OSError:
+            pass
         sha = (
             os.environ.get("CHILI_GIT_COMMIT")
             or os.environ.get("GIT_COMMIT")
@@ -2915,8 +2928,6 @@ def api_pattern_trade_ml(
 
 
 # ── Brain Worker Control ────────────────────────────────────────────────
-
-from pathlib import Path
 
 _BRAIN_WORKER_STATUS_FILE = DATA_DIR / "brain_worker_status.json"
 _BRAIN_WORKER_STOP_SIGNAL = DATA_DIR / "brain_worker_stop"
