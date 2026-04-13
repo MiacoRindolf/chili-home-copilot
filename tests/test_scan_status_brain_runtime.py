@@ -1,4 +1,15 @@
-"""``/api/trading/scan/status`` — brain_runtime primary aggregate + compatibility mirrors."""
+"""``/api/trading/scan/status`` — brain_runtime primary aggregate + compatibility mirrors.
+
+Post-``31ca070`` deploy validation contract (no SHA / ``release`` fingerprint):
+
+- ``brain_runtime.release`` and top-level ``release`` are always ``{}`` — expected; do not
+  assert ``git_commit`` or compare JSON to ``git rev-parse HEAD``.
+- Validate payload shape, ``learning`` last, mirror equality, ``learning.status_role``,
+  ``activity_signals`` (four minimal keys), and ``work_ledger`` presence via ``brain_runtime``.
+
+See ``.cursor/plans/lc_shrink_validation_reset.plan.md`` and
+``.cursor/rules/chili-scan-status-deploy-validation.mdc``.
+"""
 
 from __future__ import annotations
 
