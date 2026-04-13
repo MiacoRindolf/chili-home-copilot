@@ -1044,7 +1044,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
         <div style="margin-top:8px;line-height:1.55;padding:8px 0">
           <strong>Operator desk</strong> (top) answers: alive?, thesis, freshness, top trades, and whether each idea is a <em>repeatable edge</em> or <em>speculative momentum</em>.
           <strong>Repeatable edges</strong> use promoted pattern imminent rules (Tier Aâ€“C). <strong>Explosive movers</strong> are a separate heuristic plane over scanner history â€” the brain can â€œseeâ€ them without treating them as core-quality setups.
-          Open <strong>Runtime &amp; worker controls</strong> for Start/Stop/Wake; use <strong>Network</strong> for the neural mesh graph. Research, cycles, and inspect JSON live under <strong>Deep dive</strong> tabs.
+          Open <strong>Runtime &amp; worker controls</strong> for Start/Stop/Wake; use <strong>Network</strong> for the neural mesh graph. Research, cycle AI reports, and inspect JSON live under <strong>Deep dive</strong> tabs.
         </div>
       </details>
       <div id="tb-momentum-neural-strip" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
@@ -1278,7 +1278,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
               <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Reconcile digest (AI reports)</div>
               <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Digest / audit: one summary per full reconcile pass (newest first). Flip for full report.</p>
-              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No reports yet â€” run a worker reconcile pass or wait for the next cycle.</div>
+              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No reports yet â€” run a worker reconcile pass or wait for the next iteration.</div>
               <div id="cycle-report-ui" style="display:none">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
                   <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
@@ -1335,7 +1335,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             </div>
             <div class="bw-status-row" style="margin-bottom:10px">
               <span><span class="bw-status-label">Uptime:</span> <span class="bw-status-value" id="bw-uptime">--</span></span>
-              <span><span class="bw-status-label">Cycles:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
+              <span><span class="bw-status-label">Iterations:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
             </div>
             <div class="bw-current" id="bw-current" style="display:none;margin-bottom:10px">
               <span class="bw-current-step" id="bw-current-step">Idle</span>
@@ -1847,8 +1847,8 @@ function updateBrainWorkerUI(data) {
     pauseBtn.style.display = '';
     stopBtn.style.display = '';
     pauseBtn.textContent = status === 'paused' ? 'â–¶ Resume' : 'â¸ Pause';
-    /* Wake applies as soon as the worker is between cycles (idle sleep). If clicked during
-       a long cycle, the wake file is kept until the next sleep â€” always show when running. */
+    /* Wake applies as soon as the worker is between iterations (idle sleep). If clicked during
+       a long reconcile pass, the wake file is kept until the next sleep â€” always show when running. */
     if (wakeBtn) {
       wakeBtn.style.display = (status === 'running') ? '' : 'none';
     }
@@ -1863,8 +1863,8 @@ function updateBrainWorkerUI(data) {
       stepEl.textContent = data.current_step;
       var progressText = data.current_progress || '';
       if (data.current_step === 'Idle' && progressText.indexOf('Queue empty') !== -1 && data.queue_pending_live > 0) {
-        var nextMatch = progressText.match(/Next cycle in (\d+ \w+)/i);
-        progressText = data.queue_pending_live + ' pending (next cycle in ' + (nextMatch ? nextMatch[1] : '?') + ')';
+        var nextMatch = progressText.match(/Next (?:cycle|iteration) in (\d+ \w+)/i);
+        progressText = data.queue_pending_live + ' pending (next iteration in ' + (nextMatch ? nextMatch[1] : '?') + ')';
       }
       progressEl.textContent = progressText;
     } else {

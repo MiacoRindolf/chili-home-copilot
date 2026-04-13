@@ -1,6 +1,6 @@
 ---
 title: LC-shrink — validation reset + scan/status contract
-status: active
+status: completed
 updated: 2026-04-13
 ---
 
@@ -39,6 +39,7 @@ Implemented on `main` (API + UI + tests + worker copy + docs):
 - [x] `scripts/brain_worker.py` iteration/reconcile wording (no behavior change).
 - [x] `docs/TRADING_BRAIN_WORK_LEDGER.md` aligned with empty `release`.
 - [x] **Non-goals honored:** no `brain.py` / `trading.py` copy cleanup unless blocking; no mutex changes to `get_learning_status()["running"]`.
+- [x] Operator-facing copy: worker status **Iterations** (was Cycles), queue idle line uses **next iteration**, cycle-report empty state, intro line **cycle AI reports**, comments aligned with reconcile/iteration model.
 
 ## Copy-paste: reset Cursor validation (next session)
 
