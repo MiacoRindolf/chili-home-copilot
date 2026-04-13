@@ -16,7 +16,8 @@ The **`release` fingerprint was removed** on purpose: a wrong SHA is worse than 
 ## Do (deploy / runtime validation)
 
 - Assert **`release == {}`** at **`brain_runtime.release`** and top-level **`release`** (expected).
-- Assert **payload shape**: `ok`, `brain_runtime`, `prescreen`, mirror keys, **`learning` last**; **`brain_runtime.activity_signals`** has exactly the four minimal keys; **`learning.status_role == "reconcile_compatibility"`**; **`brain_runtime.learning_summary`** includes **`status_role`** and **`tickers_processed`**; mirrors equal **`brain_runtime`** slices.
+- Assert **payload shape** (default `compat_mirrors=1`): `ok`, `brain_runtime`, `prescreen`, mirror keys, **`learning` last**; **`brain_runtime.activity_signals`** has exactly the four minimal keys; **`learning.status_role == "reconcile_compatibility"`**; **`brain_runtime.learning_summary`** includes **`status_role`** and **`tickers_processed`**; mirrors equal **`brain_runtime`** slices. With **`compat_mirrors=0`**, expect `ok`, `brain_runtime`, `prescreen`, `learning` only (no top-level mirror keys).
+- **Frozen `encode_error` response:** HTTP 200, `encode_error: true`, empty `brain_runtime` / `prescreen` / `learning` / `work_ledger` / `release` / `scan`, `scheduler` = `{"running": false, "jobs": []}` — see `docs/TRADING_BRAIN_WORK_LEDGER.md`. Do not alter when changing mirror defaults.
 - **Operator desk** should treat **`brain_runtime` as sufficient** for strip/scheduler/ledger/reconcile progress; **graph overlay** may still read top-level **`learning`** for mesh/cluster/step fields only.
 - Validate **`work_ledger`** fields and real DB-backed behavior where relevant (tests or staging scripts).
 - For production UX, rely on **Brain UI** copy/order/behavior and manual or browser checks — not JSON git SHAs.

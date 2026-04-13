@@ -78,3 +78,27 @@ def test_scan_status_brain_runtime_shape_and_mirrors(client):
 
     assert br.get("release") == {}
     assert data.get("release") == {}
+
+
+def test_scan_status_compat_mirrors_zero_omits_top_level_duplicates(client):
+    """compat_mirrors=0 omits legacy top-level mirrors; brain_runtime and learning unchanged."""
+    r_full = client.get("/api/trading/scan/status")
+    r0 = client.get("/api/trading/scan/status?compat_mirrors=0")
+    assert r_full.status_code == 200 and r0.status_code == 200
+    d0 = r0.json()
+    assert d0.get("ok") is True
+    assert list(d0.keys()) == ["ok", "brain_runtime", "prescreen", "learning"]
+    assert "work_ledger" not in d0
+    assert "release" not in d0
+    assert "scheduler" not in d0
+    assert "scan" not in d0
+    br0 = d0.get("brain_runtime") or {}
+    brf = r_full.json().get("brain_runtime") or {}
+    assert br0.get("work_ledger") == brf.get("work_ledger")
+    assert (d0.get("learning") or {}).get("status_role") == "reconcile_compatibility"
+
+
+def test_scan_status_compat_mirrors_one_explicit_matches_default(client):
+    r_def = client.get("/api/trading/scan/status")
+    r1 = client.get("/api/trading/scan/status?compat_mirrors=1")
+    assert r_def.json() == r1.json()
