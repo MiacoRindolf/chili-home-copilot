@@ -5,7 +5,8 @@ Post-``31ca070`` deploy validation contract (no SHA / ``release`` fingerprint):
 - ``brain_runtime.release`` and top-level ``release`` are always ``{}`` — expected; do not
   assert ``git_commit`` or compare JSON to ``git rev-parse HEAD``.
 - Validate payload shape, ``learning`` last, mirror equality, ``learning.status_role``,
-  ``activity_signals`` (four minimal keys), and ``work_ledger`` presence via ``brain_runtime``.
+  ``brain_runtime.learning_summary`` (incl. ``status_role``, ``tickers_processed``),
+  ``activity_signals`` (four minimal keys), and ``work_ledger`` via ``brain_runtime``.
 
 See ``.cursor/plans/lc_shrink_validation_reset.plan.md`` and
 ``.cursor/rules/chili-scan-status-deploy-validation.mdc``.
@@ -49,6 +50,8 @@ def test_scan_status_brain_runtime_shape_and_mirrors(client):
     ls = br.get("learning_summary")
     assert isinstance(ls, dict)
     assert "running" in ls
+    assert ls.get("status_role") == "reconcile_compatibility"
+    assert isinstance(ls.get("tickers_processed"), int)
     asig = br.get("activity_signals")
     assert isinstance(asig, dict)
     assert set(asig.keys()) == {

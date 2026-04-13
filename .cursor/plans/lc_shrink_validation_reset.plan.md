@@ -23,8 +23,9 @@ updated: 2026-04-13
 5. **Mirrors:** top-level `work_ledger`, `scheduler`, `scan` **deep-equal** the same fields inside `brain_runtime`.
 6. **`learning.status_role`:** **`reconcile_compatibility`**.
 7. **`activity_signals`:** exactly **`reconcile_active`**, **`ledger_busy`**, **`retry_or_dead_attention`**, **`outcome_head_id`** (minimal slice).
-8. **`work_ledger`:** structure and enabled flag consistent with ledger service (environment-specific).
-9. **Brain desk (manual / browser):** reconcile-first copy where implemented, **`details` collapsed when idle**, optional **`window.__CHILI_LEDGER_OUTCOME_REFRESH`** default **off**, debounced refresh only when opted in.
+8. **`learning_summary`:** includes **`status_role`** (`reconcile_compatibility`) and **`tickers_processed`**; operator UI should prefer **`brain_runtime`** for runtime strip (graph overlay may still use top-level **`learning`** for mesh/step fields).
+9. **`work_ledger`:** structure and enabled flag consistent with ledger service (environment-specific).
+10. **Brain desk (manual / browser):** reconcile-first copy where implemented, **`details` collapsed when idle**, optional **`window.__CHILI_LEDGER_OUTCOME_REFRESH`** default **off**, debounced refresh only when opted in.
 
 **Automated gate:** `pytest tests/test_scan_status_brain_runtime.py -v`.
 
@@ -40,6 +41,7 @@ Implemented on `main` (API + UI + tests + worker copy + docs):
 - [x] `docs/TRADING_BRAIN_WORK_LEDGER.md` aligned with empty `release`.
 - [x] **Non-goals honored:** no `brain.py` / `trading.py` copy cleanup unless blocking; no mutex changes to `get_learning_status()["running"]`.
 - [x] Operator-facing copy: worker status **Iterations** (was Cycles), queue idle line uses **next iteration**, cycle-report empty state, intro line **cycle AI reports**, comments aligned with reconcile/iteration model.
+- [x] **`brain_runtime` sufficient for operator/runtime strip:** `learning_summary` adds `status_role` + `tickers_processed`; `pollLearningStatus` merges `learning_summary` over top-level `learning`; graph overlay still uses full `learning` only.
 
 ## Copy-paste: reset Cursor validation (next session)
 

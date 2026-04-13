@@ -55,7 +55,7 @@
 
 ## API / UI
 
-- **`GET /api/trading/scan/status` — primary read path:** `brain_runtime` bundles `work_ledger`, `release`, `scheduler`, `scan`, `learning_summary`, and `activity_signals`. New UI should read these from `brain_runtime` first.
+- **`GET /api/trading/scan/status` — primary read path:** `brain_runtime` bundles `work_ledger`, `release`, `scheduler`, `scan`, `learning_summary`, and `activity_signals`. **Operator/runtime display** should use only `brain_runtime` (plus `prescreen` if needed). `learning_summary` includes `running`, `phase`, `current_step`, `steps_completed`, `total_steps`, `elapsed_s`, `tickers_processed`, `status_role` (`reconcile_compatibility`). Top-level `learning` remains for the **neural graph overlay** and any consumer that needs the full reconcile snapshot (mesh/step ids, indices, funnel, etc.).
 - **JSON key order (happy path):** `ok`, `brain_runtime`, `prescreen`, `work_ledger`, `release`, `scheduler`, `scan`, `learning` — `learning` is **last** (full reconcile compatibility object); do not rely on object key order in clients if avoidable.
 - **`brain_runtime.activity_signals` (minimal contract):** `reconcile_active` (bool), `ledger_busy` (bool), `retry_or_dead_attention` (bool), `outcome_head_id` (int or null — newest `recent_meaningful_outcomes[0].id` when present).
 - **One-release compatibility mirrors:** top-level `work_ledger`, `release`, `scheduler`, and `scan` duplicate `brain_runtime` for backward compatibility; remove after consumers migrate.

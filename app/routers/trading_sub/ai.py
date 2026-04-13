@@ -996,10 +996,13 @@ def _safe_scan_status_part(label: str, fn, default):
 def api_scan_status():
     """Aggregate Brain runtime, scan, reconcile-cycle, prescreen, and scheduler state.
 
-    **Primary operator read path:** ``brain_runtime`` (work ledger, scheduler, scan,
-    ``learning_summary``, ``activity_signals``). ``release`` is always ``{}`` (reserved for
-    compatibility; do not use for deploy truth). Top-level mirrors duplicate ``brain_runtime`` —
-    prefer ``brain_runtime`` in new UI.
+    **Primary operator read path:** ``brain_runtime`` alone is sufficient for desk/runtime
+    display (work ledger, scheduler, scan, ``learning_summary``, ``activity_signals``).
+    Top-level ``learning`` keeps the **full reconcile snapshot** for the neural **graph overlay**
+    (mesh/cluster/step indices, ``graph_node_id``, etc.) and any consumers that need the complete
+    mutex-backed shape; operators should prefer ``brain_runtime.learning_summary`` over
+    duplicating those fields from ``learning``. ``release`` is always ``{}``. Top-level mirrors
+    duplicate ``brain_runtime`` for one-release compatibility — prefer ``brain_runtime``.
 
     Values are passed through :func:`to_jsonable` so numpy/pandas scalars and
     non-finite floats cannot break JSON encoding (Starlette uses ``allow_nan=False``).
@@ -1034,6 +1037,8 @@ def api_scan_status():
         "steps_completed": int(learning_st.get("steps_completed") or 0),
         "total_steps": int(learning_st.get("total_steps") or 0),
         "elapsed_s": learning_st.get("elapsed_s"),
+        "tickers_processed": int(learning_st.get("tickers_processed") or 0),
+        "status_role": "reconcile_compatibility",
     }
 
     def _activity_signals(wl: dict[str, Any], ls: dict[str, Any]) -> dict[str, Any]:

@@ -3211,7 +3211,7 @@ function initTradingBrainNetworkGraph() {
       .then(function(r) { return r.json(); })
       .then(function(d) {
         if (!d || !d.ok) return;
-        // No brain_runtime substitute: overlay needs mesh/cluster/step fields from top-level `learning` only.
+        // Graph overlay only: needs mesh/cluster/step indices and graph_node_id from full top-level `learning`.
         var lr = d.learning;
         if (!lr) return;
         var running = !!lr.running;
@@ -6324,8 +6324,10 @@ var _PIPELINE_STEPS = [
  * Resolve primary fields from ``/api/trading/scan/status``.
  * Prefer ``brain_runtime``; fall back to top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan``
  * (one-release compatibility mirrors — see api_scan_status in ai.py). ``release`` is always empty.
- * Full reconcile graph fields stay on top-level ``learning`` only (no brain_runtime equivalent).
- * ``activity_signals`` is optional; ledger outcome refresh uses ``outcome_head_id`` when
+ * ``learning_summary`` + mirrors + ``activity_signals`` are enough for operator desk/runtime strip;
+ * ``pollLearningStatus`` merges ``learning_summary`` over top-level ``learning`` for those fields.
+ * Neural graph overlay (``tbnUpdateNodeStatuses``) still reads top-level ``learning`` only (mesh/step indices).
+ * ``activity_signals``: ledger outcome refresh uses ``outcome_head_id`` when
  * ``window.__CHILI_LEDGER_OUTCOME_REFRESH === true`` (default off).
  */
 if (typeof window.__CHILI_LEDGER_OUTCOME_REFRESH === 'undefined') { window.__CHILI_LEDGER_OUTCOME_REFRESH = false; }
@@ -6367,8 +6369,12 @@ function scanStatusBrainRuntime(d) {
 function pollLearningStatus() {
   return fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var learning = d.learning || {};
     var rt = scanStatusBrainRuntime(d);
+    var learningFull = d.learning || {};
+    var lsOp = rt.learning_summary;
+    var learning = (lsOp && typeof lsOp === 'object')
+      ? Object.assign({}, learningFull, lsOp)
+      : learningFull;
     var asLedger = rt.activity_signals;
     if (asLedger && asLedger.outcome_head_id != null) {
       _debouncedLedgerOutcomeRefresh(asLedger.outcome_head_id);
