@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import logging
 import re
 from typing import Any, Literal, cast
@@ -1009,6 +1010,16 @@ def api_scan_status():
         finally:
             sdb.close()
 
+    def _release_info() -> dict[str, Any]:
+        """Optional deploy fingerprint — set CHILI_GIT_COMMIT in the container/host for truth passes."""
+        sha = (
+            os.environ.get("CHILI_GIT_COMMIT")
+            or os.environ.get("GIT_COMMIT")
+            or os.environ.get("RAILWAY_GIT_COMMIT_SHA")
+            or os.environ.get("RENDER_GIT_COMMIT")
+        )
+        return {"git_commit": sha} if sha else {}
+
     payload = {
         "ok": True,
         "scan": _safe_scan_status_part("scan", ts.get_scan_status, {}),
@@ -1020,6 +1031,7 @@ def api_scan_status():
             {"running": False, "jobs": []},
         ),
         "work_ledger": _safe_scan_status_part("work_ledger", _work_ledger_summary, {}),
+        "release": _release_info(),
     }
     try:
         return JSONResponse(to_jsonable(payload))
@@ -1034,6 +1046,7 @@ def api_scan_status():
                 "prescreen": {},
                 "scheduler": {"running": False, "jobs": []},
                 "work_ledger": {},
+                "release": {},
                 "encode_error": True,
             }
         )

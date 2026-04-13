@@ -671,8 +671,14 @@ def _maybe_run_brain_work_batch() -> None:
 
         _uid = getattr(_settings, "brain_default_user_id", None)
         summary = run_brain_work_batch(db, user_id=_uid)
-        if summary.get("processed"):
-            logger.info("[brain] work ledger batch %s", summary)
+        # Always log once per call so production logs prove dispatch ran before cycle (even when idle).
+        logger.info(
+            "[brain] work ledger dispatch round processed=%s claimed=%s per_type=%s errors=%s",
+            summary.get("processed"),
+            summary.get("claimed"),
+            summary.get("per_type"),
+            summary.get("errors"),
+        )
     except Exception as e:
         logger.warning("[brain] work ledger batch failed: %s", e)
         try:

@@ -57,6 +57,24 @@
 
 - **`/api/trading/scan/status` → `work_ledger`**: `pending_work`, `retry_wait`, `dead_last_24h`, `pending_by_type`, `processing`, `last_done_by_type`, `recent_completions`, `recent_meaningful_outcomes`.
 - **Brain desk** renders handler-centric summary from the above.
+- **`release`**: optional `{"git_commit": "..."}` when `CHILI_GIT_COMMIT` (or `GIT_COMMIT`, `RAILWAY_GIT_COMMIT_SHA`, `RENDER_GIT_COMMIT`) is set — use on deploy to prove image revision from `GET /api/trading/scan/status`.
+
+## Operational proof (execution feedback)
+
+End-to-end check for `paper_trade_closed` → `execution_feedback_digest` → `execution_quality_updated`:
+
+1. Deploy with ledger enabled and `brain_default_user_id` set (same as worker).
+2. Set `CHILI_GIT_COMMIT` on app/worker if you want `release.git_commit` in scan status.
+3. Run against **staging or local Postgres** (default: avoid surprise rows on production):
+
+```powershell
+$env:CHILI_PROVE_EXEC_FEEDBACK_LEDGER = "1"
+conda run -n chili-env python scripts/prove_execution_feedback_ledger.py
+```
+
+The script closes a synthetic `PaperTrade` (`CHILI-PROOF-USD`), backdates the debounced digest row, runs one `run_brain_work_dispatch_round`, prints recent ledger rows, then deletes the paper row (ledger outcomes remain). Verify with `GET /api/trading/scan/status` → `work_ledger.recent_meaningful_outcomes`.
+
+**Worker logs:** each lean-cycle iteration logs `[brain] work ledger dispatch round processed=...` so dispatch-before-cycle is visible even when idle.
 
 ## Compatibility / risks
 
@@ -75,6 +93,7 @@
 - `app/services/trading/paper_trading.py`, `portfolio.py`, `broker_service.py` — execution hooks
 - `app/services/trading_scheduler.py` — `market_snapshots_batch` outcome
 - `app/config.py` — ledger + debounce + snapshot outcome flags
-- `scripts/brain_worker.py` — dispatch before cycle / activation batch
-- `app/routers/trading_sub/ai.py`, `app/templates/brain.html` — richer `work_ledger`
+- `scripts/brain_worker.py` — dispatch before cycle / activation batch; always logs dispatch summary
+- `scripts/prove_execution_feedback_ledger.py` — gated one-shot proof for execution-feedback ledger path
+- `app/routers/trading_sub/ai.py`, `app/templates/brain.html` — richer `work_ledger` + optional `release`
 - `tests/test_brain_work_ledger.py`
