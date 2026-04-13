@@ -58,3 +58,7 @@ def test_scan_status_brain_runtime_shape_and_mirrors(client):
 
     learn = data.get("learning") or {}
     assert learn.get("status_role") == "reconcile_compatibility"
+
+    rel = br.get("release") or {}
+    if rel.get("git_commit"):
+        assert rel.get("git_commit_source") in ("baked_file", "environment")

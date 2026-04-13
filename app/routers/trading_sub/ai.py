@@ -1021,22 +1021,32 @@ def api_scan_status():
 
         PaaS dashboards often set ``CHILI_GIT_COMMIT`` once; it can stay stale across rollouts.
         The baked file reflects the **build** and wins when non-empty.
+        ``git_commit_source`` is ``baked_file`` or ``environment`` when ``git_commit`` is set (Phase 0 debug).
         """
-        baked_path = Path(__file__).resolve().parents[3] / ".chili-git-commit"
-        try:
-            if baked_path.is_file():
-                baked = baked_path.read_text(encoding="utf-8").strip()
-                if baked and not baked.lstrip().startswith("#"):
-                    return {"git_commit": baked}
-        except OSError:
-            pass
+        baked_candidates = (
+            Path(__file__).resolve().parents[3] / ".chili-git-commit",
+            Path("/app/.chili-git-commit"),
+        )
+        for baked_path in baked_candidates:
+            try:
+                if baked_path.is_file():
+                    baked = baked_path.read_text(encoding="utf-8").strip()
+                    if baked and not baked.lstrip().startswith("#"):
+                        return {
+                            "git_commit": baked,
+                            "git_commit_source": "baked_file",
+                        }
+            except OSError:
+                continue
         sha = (
             os.environ.get("CHILI_GIT_COMMIT")
             or os.environ.get("GIT_COMMIT")
             or os.environ.get("RAILWAY_GIT_COMMIT_SHA")
             or os.environ.get("RENDER_GIT_COMMIT")
         )
-        return {"git_commit": sha} if sha else {}
+        if sha:
+            return {"git_commit": sha, "git_commit_source": "environment"}
+        return {}
 
     scan_st = _safe_scan_status_part("scan", ts.get_scan_status, {})
     prescreen_st = _safe_scan_status_part("prescreen", ts.get_prescreen_status, {})

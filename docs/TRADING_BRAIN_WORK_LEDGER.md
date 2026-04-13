@@ -61,7 +61,8 @@
 - **One-release compatibility mirrors:** top-level `work_ledger`, `release`, `scheduler`, and `scan` duplicate `brain_runtime` for backward compatibility; remove after consumers migrate.
 - **`brain_runtime.work_ledger`**: `pending_work`, `retry_wait`, `dead_last_24h`, `pending_by_type`, `processing`, `last_done_by_type`, `recent_completions`, `recent_meaningful_outcomes`, `execution_pulse`, `execution_outcomes_24h`.
 - **Brain desk** renders handler-centric summary from `brain_runtime.work_ledger` (with flat-key fallback during the mirror window).
-- **`brain_runtime.release`**: optional `{"git_commit": "..."}`. **Precedence:** image-baked `/app/.chili-git-commit` (written in `Dockerfile` from build-arg `CHILI_GIT_COMMIT`) wins over runtime env — avoids stale dashboard `CHILI_GIT_COMMIT` after a rollout. If the file is empty/missing, falls back to `CHILI_GIT_COMMIT` / `GIT_COMMIT` / `RAILWAY_GIT_COMMIT_SHA` / `RENDER_GIT_COMMIT`.
+- **`brain_runtime.release`**: optional `{"git_commit": "...", "git_commit_source": "baked_file"|"environment"}`. **Precedence:** image-baked `/app/.chili-git-commit` (written in `Dockerfile` from build-arg `CHILI_GIT_COMMIT`) wins over runtime env — avoids stale dashboard `CHILI_GIT_COMMIT` after a rollout. If the file is empty/missing, falls back to `CHILI_GIT_COMMIT` / `GIT_COMMIT` / `RAILWAY_GIT_COMMIT_SHA` / `RENDER_GIT_COMMIT`.
+- **Phase 0 check:** `python scripts/verify_phase0_release_sha.py` (compares prod to `origin/main`; optional `CHILI_PHASE0_STATUS_URL`).
 
 ## Operational proof (execution feedback)
 
