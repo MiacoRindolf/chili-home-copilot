@@ -971,6 +971,130 @@ class TradingAutomationSimulatedFill(Base):
     reason: Optional[str] = Column(String(64), nullable=True)
     marker_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    # Links the first durable execution artifact for momentum autopilot (paper) to the decision ledger.
+    # For rows in trading_trades, use TradingDecisionPacket.linked_trade_id instead.
+    decision_packet_id: Optional[int] = Column(
+        BigInteger, ForeignKey("trading_decision_packets.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
+class TradingDecisionPacket(Base):
+    """Canonical persisted decision at entry/execution boundary (autopilot + brain).
+
+    linked_trade_id references trading_trades only. Momentum paper/live entry fills link via
+    trading_automation_simulated_fills.decision_packet_id (and live venue path may have no Trade row).
+    """
+
+    __tablename__ = "trading_decision_packets"
+    __table_args__ = (
+        Index("ix_tdp_user_created", "user_id", "created_at"),
+        Index("ix_tdp_session_created", "automation_session_id", "created_at"),
+        Index("ix_tdp_ticker_created", "chosen_ticker", "created_at"),
+        Index("ix_tdp_pattern_created", "scan_pattern_id", "created_at"),
+        Index("ix_tdp_mode_stage", "execution_mode", "deployment_stage"),
+        Index("ix_tdp_outcome", "outcome_status", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    automation_session_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_automation_sessions.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    chosen_ticker: Optional[str] = Column(String(36), nullable=True, index=True)
+    decision_type: str = Column(String(24), nullable=False, default="trade")
+    execution_mode: str = Column(String(16), nullable=False, default="paper")
+    deployment_stage: str = Column(String(24), nullable=False, default="paper")
+    regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    allocator_input_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    allocator_output_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    portfolio_context_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    expected_edge_gross: Optional[float] = Column(Float, nullable=True)
+    expected_edge_net: Optional[float] = Column(Float, nullable=True)
+    expected_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    expected_fill_probability: Optional[float] = Column(Float, nullable=True)
+    expected_partial_fill_probability: Optional[float] = Column(Float, nullable=True)
+    expected_missed_fill_probability: Optional[float] = Column(Float, nullable=True)
+    risk_budget_pct: Optional[float] = Column(Float, nullable=True)
+    size_notional: Optional[float] = Column(Float, nullable=True)
+    size_shares_or_qty: Optional[float] = Column(Float, nullable=True)
+    abstain_reason_code: Optional[str] = Column(String(64), nullable=True)
+    abstain_reason_text: Optional[str] = Column(Text, nullable=True)
+    selected_candidate_rank: Optional[int] = Column(Integer, nullable=True)
+    candidate_count: int = Column(Integer, nullable=False, default=0)
+    capacity_blocked: bool = Column(Boolean, nullable=False, default=False)
+    capacity_reason_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    correlation_penalty: Optional[float] = Column(Float, nullable=True)
+    uncertainty_haircut: Optional[float] = Column(Float, nullable=True)
+    execution_penalty: Optional[float] = Column(Float, nullable=True)
+    final_score: Optional[float] = Column(Float, nullable=True)
+    source_surface: str = Column(String(32), nullable=False, default="autopilot")
+    research_vs_live_context_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    linked_trade_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    outcome_status: str = Column(String(24), nullable=False, default="pending")
+    shadow_advisory_only: bool = Column(Boolean, nullable=False, default=True)
+
+
+class TradingDecisionCandidate(Base):
+    __tablename__ = "trading_decision_candidates"
+    __table_args__ = (Index("ix_tdc_packet_rank", "decision_packet_id", "rank"),)
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    decision_packet_id: int = Column(
+        BigInteger, ForeignKey("trading_decision_packets.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    rank: int = Column(Integer, nullable=False, default=0)
+    ticker: str = Column(String(36), nullable=False)
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True
+    )
+    candidate_score_raw: Optional[float] = Column(Float, nullable=True)
+    candidate_score_net: Optional[float] = Column(Float, nullable=True)
+    expected_edge_gross: Optional[float] = Column(Float, nullable=True)
+    expected_edge_net: Optional[float] = Column(Float, nullable=True)
+    expected_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    expected_fill_probability: Optional[float] = Column(Float, nullable=True)
+    size_cap_notional: Optional[float] = Column(Float, nullable=True)
+    was_selected: bool = Column(Boolean, nullable=False, default=False)
+    reject_reason_code: Optional[str] = Column(String(64), nullable=True)
+    reject_reason_text: Optional[str] = Column(Text, nullable=True)
+    reject_detail_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+
+
+class TradingDeploymentState(Base):
+    __tablename__ = "trading_deployment_states"
+    __table_args__ = (
+        UniqueConstraint("scope_type", "scope_key", name="uq_trading_deployment_scope"),
+        Index("ix_tds_user_stage", "user_id", "current_stage"),
+    )
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    scope_type: str = Column(String(32), nullable=False)
+    scope_key: str = Column(String(256), nullable=False)
+    user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True)
+    current_stage: str = Column(String(24), nullable=False, default="paper")
+    promoted_at: Optional[datetime] = Column(DateTime, nullable=True)
+    degraded_at: Optional[datetime] = Column(DateTime, nullable=True)
+    disabled_at: Optional[datetime] = Column(DateTime, nullable=True)
+    stage_metrics_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    live_trade_count: int = Column(Integer, nullable=False, default=0)
+    paper_trade_count: int = Column(Integer, nullable=False, default=0)
+    rolling_win_rate: Optional[float] = Column(Float, nullable=True)
+    rolling_expectancy_net: Optional[float] = Column(Float, nullable=True)
+    rolling_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    rolling_drawdown_pct: Optional[float] = Column(Float, nullable=True)
+    rolling_missed_fill_rate: Optional[float] = Column(Float, nullable=True)
+    rolling_partial_fill_rate: Optional[float] = Column(Float, nullable=True)
+    last_reason_code: Optional[str] = Column(String(64), nullable=True)
+    last_reason_text: Optional[str] = Column(Text, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
 class MomentumAutomationOutcome(Base):

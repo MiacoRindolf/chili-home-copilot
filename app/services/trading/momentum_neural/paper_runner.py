@@ -65,6 +65,12 @@ from .paper_fsm import (
 )
 from .session_lifecycle import is_operator_paused
 from .strategy_params import normalize_strategy_params
+from ..decision_ledger import (
+    finalize_packet_after_simulated_exit,
+    mark_packet_executed,
+    run_momentum_entry_decision,
+)
+from ..deployment_ladder_service import record_trade_outcome_metrics
 
 _log = logging.getLogger(__name__)
 
@@ -164,6 +170,7 @@ def _record_sim_fill(
     position_state_after: str | None = None,
     reason: str | None = None,
     marker_json: Optional[dict[str, Any]] = None,
+    decision_packet_id: int | None = None,
 ) -> None:
     try:
         append_trading_automation_simulated_fill(
@@ -183,9 +190,44 @@ def _record_sim_fill(
             position_state_after=position_state_after,
             reason=reason,
             marker_json=marker_json,
+            decision_packet_id=decision_packet_id,
         )
     except Exception:
         _log.debug("paper simulated fill audit skipped for session %s", sess.id, exc_info=True)
+
+
+def _finalize_paper_decision_after_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    pe: dict[str, Any],
+    realized_pnl_usd: float,
+    slip_bps: float,
+) -> None:
+    pid = pe.get("last_entry_decision_packet_id")
+    if not pid:
+        return
+    try:
+        finalize_packet_after_simulated_exit(
+            db,
+            packet_id=int(pid),
+            realized_pnl_usd=realized_pnl_usd,
+            slippage_bps=slip_bps,
+        )
+        record_trade_outcome_metrics(
+            db,
+            session_id=int(sess.id),
+            variant_id=int(sess.variant_id),
+            user_id=sess.user_id,
+            mode="paper",
+            realized_pnl_usd=realized_pnl_usd,
+            slippage_bps=slip_bps,
+            missed_fill=False,
+            partial_fill=False,
+            cumulative_session_pnl_usd=float(pe.get("realized_pnl_usd") or 0.0),
+        )
+    except Exception:
+        _log.debug("decision packet finalize skipped session=%s", sess.id, exc_info=True)
 
 
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
@@ -422,6 +464,7 @@ def tick_paper_session(
                 pe["last_exit_price"] = exit_px
                 pe["last_exit_reason"] = "risk_block_forced_exit"
                 pe["position"] = None
+                dpid = pe.get("last_entry_decision_packet_id")
                 _record_sim_fill(
                     db,
                     sess,
@@ -435,7 +478,9 @@ def tick_paper_session(
                     position_state_after="flat",
                     reason="risk_block",
                     marker_json={"stop": pos.get("stop_price"), "target": pos.get("target_price")},
+                    decision_packet_id=int(dpid) if dpid else None,
                 )
+                _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
             pe["last_tick_utc"] = utc_iso()
             _commit_pe(sess, pe)
             _safe_transition(db, sess, STATE_EXITED)
@@ -500,10 +545,47 @@ def tick_paper_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         entry_px = long_entry_fill_price(ask, mid, slip_bps)
         notional = min(250.0, max_notional)
+        decision_packet_id: int | None = None
+        if bool(getattr(settings, "brain_enable_decision_ledger", True)):
+            dec = run_momentum_entry_decision(
+                db,
+                session=sess,
+                viability=via,
+                variant=variant,
+                user_id=sess.user_id,
+                max_notional_policy=float(max_notional),
+                quote_mid=mid,
+                spread_bps=spread_bps,
+                execution_mode="paper",
+                regime_snapshot=regime,
+            )
+            if not dec.get("proceed"):
+                alloc = dec.get("allocation") or {}
+                _emit(
+                    db,
+                    sess,
+                    "paper_entry_abstain",
+                    {
+                        "packet_id": dec.get("packet_id"),
+                        "reason": alloc.get("abstain_reason_code"),
+                        "detail": alloc.get("abstain_reason_text"),
+                    },
+                )
+                _safe_transition(db, sess, STATE_WATCHING)
+                _sync_runtime_snapshot(db, sess, via=via)
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
+            decision_packet_id = dec.get("packet_id")
+            notional = min(float(dec["allocation"]["recommended_notional"]), max_notional, 250.0)
+            if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
+                _emit(db, sess, "paper_error", {"reason": "decision_packet_required_missing"})
+                _safe_transition(db, sess, STATE_ERROR)
+                db.flush()
+                return {"ok": False, "error": "decision_packet_missing"}
         qty = notional / entry_px
-        regime = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         atrp = regime_atr_pct(regime)
         stop_px, target_px = stop_target_prices(
             entry_px,
@@ -528,8 +610,14 @@ def tick_paper_session(
             "fees_est_usd": fees,
         }
         pe["reference_mid_at_entry"] = ref_mid
+        pe["last_entry_decision_packet_id"] = decision_packet_id
         _safe_transition(db, sess, STATE_ENTERED)
         _commit_pe(sess, pe)
+        if decision_packet_id:
+            try:
+                mark_packet_executed(db, int(decision_packet_id))
+            except Exception:
+                _log.debug("mark_packet_executed skipped session=%s", sess.id, exc_info=True)
         _record_sim_fill(
             db,
             sess,
@@ -543,6 +631,7 @@ def tick_paper_session(
             position_state_after="long",
             reason="entry_fill",
             marker_json={"entry": entry_px, "stop": stop_px, "target": target_px},
+            decision_packet_id=decision_packet_id,
         )
         _emit(
             db,
@@ -592,6 +681,7 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            dpid = pe.get("last_entry_decision_packet_id")
             _record_sim_fill(
                 db,
                 sess,
@@ -605,7 +695,9 @@ def tick_paper_session(
                 position_state_after="flat",
                 reason="bailout",
                 marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                decision_packet_id=int(dpid) if dpid else None,
             )
+            _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "bailout"})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
@@ -627,6 +719,7 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            dpid = pe.get("last_entry_decision_packet_id")
             _record_sim_fill(
                 db,
                 sess,
@@ -640,7 +733,9 @@ def tick_paper_session(
                 position_state_after="flat",
                 reason="max_hold",
                 marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                decision_packet_id=int(dpid) if dpid else None,
             )
+            _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "max_hold"})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
@@ -654,6 +749,7 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            dpid = pe.get("last_entry_decision_packet_id")
             _record_sim_fill(
                 db,
                 sess,
@@ -667,7 +763,9 @@ def tick_paper_session(
                 position_state_after="flat",
                 reason="stop",
                 marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                decision_packet_id=int(dpid) if dpid else None,
             )
+            _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "stop"})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
@@ -688,6 +786,7 @@ def tick_paper_session(
             pe["position"] = None
             _safe_transition(db, sess, STATE_EXITED)
             _commit_pe(sess, pe)
+            dpid = pe.get("last_entry_decision_packet_id")
             _record_sim_fill(
                 db,
                 sess,
@@ -701,7 +800,9 @@ def tick_paper_session(
                 position_state_after="flat",
                 reason="target",
                 marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                decision_packet_id=int(dpid) if dpid else None,
             )
+            _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
             _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "target"})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
@@ -724,6 +825,7 @@ def tick_paper_session(
                 pe["position"] = None
                 _safe_transition(db, sess, STATE_EXITED)
                 _commit_pe(sess, pe)
+                dpid = pe.get("last_entry_decision_packet_id")
                 _record_sim_fill(
                     db,
                     sess,
@@ -737,7 +839,9 @@ def tick_paper_session(
                     position_state_after="flat",
                     reason="trail_stop",
                     marker_json={"entry": entry, "stop": trail_stop, "target": target_px},
+                    decision_packet_id=int(dpid) if dpid else None,
                 )
+                _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
                 _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "trail_stop"})
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()

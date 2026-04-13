@@ -30,7 +30,8 @@ from ...services.trading.momentum_neural.risk_evaluator import evaluate_proposed
 from ...services.trading.momentum_neural.risk_policy import resolve_effective_risk_policy
 from ...services.trading.momentum_neural.live_runner import tick_live_session
 from ...services.trading.momentum_neural.paper_runner import tick_paper_session
-from ...models.trading import TradingAutomationSession
+from ...models.trading import TradingAutomationSession, TradingDecisionCandidate, TradingDecisionPacket
+from ...services.trading.decision_ledger import deployment_summary_for_user, recent_packets
 from ...services.trading.momentum_neural.automation_query import (
     archive_automation_session,
     automation_summary,
@@ -455,6 +456,141 @@ def get_automation_events(
         event_type=event_type,
         limit=limit,
     )
+
+
+def _decision_packet_brief(p: TradingDecisionPacket) -> dict[str, Any]:
+    return {
+        "id": int(p.id),
+        "created_at": p.created_at.isoformat() + "Z" if p.created_at else None,
+        "automation_session_id": int(p.automation_session_id) if p.automation_session_id else None,
+        "decision_type": p.decision_type,
+        "execution_mode": p.execution_mode,
+        "deployment_stage": p.deployment_stage,
+        "chosen_ticker": p.chosen_ticker,
+        "expected_edge_gross": p.expected_edge_gross,
+        "expected_edge_net": p.expected_edge_net,
+        "expected_slippage_bps": p.expected_slippage_bps,
+        "abstain_reason_code": p.abstain_reason_code,
+        "abstain_reason_text": p.abstain_reason_text,
+        "capacity_blocked": p.capacity_blocked,
+        "outcome_status": p.outcome_status,
+        "shadow_advisory_only": p.shadow_advisory_only,
+    }
+
+
+@router.get("/automation/decisions/recent")
+def get_recent_decisions(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(40, ge=1, le=200),
+) -> dict[str, Any]:
+    uid = _automation_user_id(request, db)
+    rows = recent_packets(db, user_id=uid, limit=limit, abstain_only=False)
+    return {"ok": True, "packets": [_decision_packet_brief(p) for p in rows]}
+
+
+@router.get("/automation/decisions/abstentions/recent")
+def get_recent_abstentions(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(40, ge=1, le=200),
+) -> dict[str, Any]:
+    uid = _automation_user_id(request, db)
+    rows = recent_packets(db, user_id=uid, limit=limit, abstain_only=True)
+    return {"ok": True, "packets": [_decision_packet_brief(p) for p in rows]}
+
+
+@router.get("/automation/decisions/{packet_id}")
+def get_decision_packet_detail(
+    request: Request,
+    packet_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    uid = _automation_user_id(request, db)
+    p = (
+        db.query(TradingDecisionPacket)
+        .filter(TradingDecisionPacket.id == int(packet_id), TradingDecisionPacket.user_id == uid)
+        .one_or_none()
+    )
+    if not p:
+        raise HTTPException(status_code=404, detail="Packet not found.")
+    cands = (
+        db.query(TradingDecisionCandidate)
+        .filter(TradingDecisionCandidate.decision_packet_id == int(packet_id))
+        .order_by(TradingDecisionCandidate.rank.asc())
+        .all()
+    )
+    return {
+        "ok": True,
+        "packet": _decision_packet_brief(p)
+        | {
+            "regime_snapshot_json": p.regime_snapshot_json,
+            "allocator_output_json": p.allocator_output_json,
+            "capacity_reason_json": p.capacity_reason_json,
+            "portfolio_context_json": p.portfolio_context_json,
+            "research_vs_live_context_json": p.research_vs_live_context_json,
+            "linked_trade_id": p.linked_trade_id,
+        },
+        "candidates": [
+            {
+                "rank": c.rank,
+                "ticker": c.ticker,
+                "expected_edge_net": c.expected_edge_net,
+                "was_selected": c.was_selected,
+                "reject_reason_code": c.reject_reason_code,
+                "reject_reason_text": c.reject_reason_text,
+            }
+            for c in cands
+        ],
+    }
+
+
+@router.get("/automation/deployment/summary")
+def get_deployment_summary(request: Request, db: Session = Depends(get_db)) -> dict[str, Any]:
+    uid = _automation_user_id(request, db)
+    return {"ok": True, "deployment": deployment_summary_for_user(db, user_id=uid)}
+
+
+@router.get("/automation/sessions/{session_id}/decision-summary")
+def get_session_decision_summary(
+    request: Request,
+    session_id: int,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    uid = _automation_user_id(request, db)
+    sess = (
+        db.query(TradingAutomationSession)
+        .filter(TradingAutomationSession.id == int(session_id), TradingAutomationSession.user_id == uid)
+        .one_or_none()
+    )
+    if not sess:
+        raise HTTPException(status_code=404, detail="Session not found.")
+    last = (
+        db.query(TradingDecisionPacket)
+        .filter(
+            TradingDecisionPacket.automation_session_id == int(session_id),
+            TradingDecisionPacket.user_id == uid,
+        )
+        .order_by(TradingDecisionPacket.created_at.desc())
+        .first()
+    )
+    dep = deployment_summary_for_user(db, user_id=uid)
+    session_dep = [d for d in dep if d.get("scope_key") == f"session:{int(session_id)}"]
+    return {
+        "ok": True,
+        "session_id": int(session_id),
+        "last_packet": _decision_packet_brief(last) if last else None,
+        "deployment_scope": session_dep[0] if session_dep else None,
+        "settings": {
+            "brain_enable_decision_ledger": bool(getattr(settings, "brain_enable_decision_ledger", True)),
+            "brain_expectancy_allocator_shadow_mode": bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", True)),
+            "brain_enforce_net_expectancy_live": bool(getattr(settings, "brain_enforce_net_expectancy_live", False)),
+            "brain_enforce_net_expectancy_paper": bool(getattr(settings, "brain_enforce_net_expectancy_paper", True)),
+            "brain_live_deployment_enforcement": bool(getattr(settings, "brain_live_deployment_enforcement", False)),
+            "brain_capacity_hard_block_live": bool(getattr(settings, "brain_capacity_hard_block_live", False)),
+            "brain_capacity_hard_block_paper": bool(getattr(settings, "brain_capacity_hard_block_paper", True)),
+        },
+    }
 
 
 @router.post("/automation/sessions/{session_id}/cancel")

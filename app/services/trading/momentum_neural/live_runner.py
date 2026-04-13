@@ -29,6 +29,8 @@ from ..execution_family_registry import (
 from ..governance import is_kill_switch_active
 from ..venue.protocol import NormalizedOrder, NormalizedProduct, is_fresh_enough
 from .persistence import append_trading_automation_event
+from ..decision_ledger import finalize_packet_after_simulated_exit, mark_packet_executed, run_momentum_entry_decision
+from ..deployment_ladder_service import record_trade_outcome_metrics
 from .risk_evaluator import evaluate_proposed_momentum_automation
 from .risk_policy import RISK_SNAPSHOT_KEY
 from .paper_execution import regime_atr_pct, stop_target_prices, utc_iso
@@ -94,6 +96,40 @@ def _emit(
         correlation_id=sess.correlation_id,
         source_node_id="momentum_live_runner",
     )
+
+
+def _finalize_live_decision_after_exit(
+    db: Session,
+    sess: TradingAutomationSession,
+    *,
+    le: dict[str, Any],
+    realized_pnl_usd: float,
+    slip_bps: float,
+) -> None:
+    pid = le.get("entry_decision_packet_id")
+    if not pid:
+        return
+    try:
+        finalize_packet_after_simulated_exit(
+            db,
+            packet_id=int(pid),
+            realized_pnl_usd=realized_pnl_usd,
+            slippage_bps=slip_bps,
+        )
+        record_trade_outcome_metrics(
+            db,
+            session_id=int(sess.id),
+            variant_id=int(sess.variant_id),
+            user_id=sess.user_id,
+            mode="live",
+            realized_pnl_usd=realized_pnl_usd,
+            slippage_bps=slip_bps,
+            missed_fill=False,
+            partial_fill=False,
+            cumulative_session_pnl_usd=float(le.get("realized_pnl_usd") or 0.0),
+        )
+    except Exception:
+        _log.debug("live decision packet finalize skipped session=%s", sess.id, exc_info=True)
 
 
 def _safe_transition(db: Session, sess: TradingAutomationSession, new_state: str) -> None:
@@ -523,6 +559,11 @@ def tick_live_session(
                 le["position"]["target_price"] = target_px
                 le["admission_viability_score"] = float(via.viability_score or 0)
                 _commit_le(sess, le)
+                if le.get("entry_decision_packet_id"):
+                    try:
+                        mark_packet_executed(db, int(le["entry_decision_packet_id"]))
+                    except Exception:
+                        _log.debug("mark_packet_executed live skipped session=%s", sess.id, exc_info=True)
                 _safe_transition(db, sess, STATE_LIVE_ENTERED)
                 _emit(
                     db,
@@ -564,6 +605,59 @@ def tick_live_session(
         if le.get("entry_submitted"):
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
+        ex_live = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
+        try:
+            spread_bps_live = float(ex_live.get("spread_bps") or 8.0)
+        except (TypeError, ValueError):
+            spread_bps_live = 8.0
+        try:
+            slip_ref = float(ex_live.get("slippage_estimate_bps") or 6.0)
+        except (TypeError, ValueError):
+            slip_ref = 6.0
+
+        decision_packet_id = None
+        if bool(getattr(settings, "brain_enable_decision_ledger", True)):
+            dec = run_momentum_entry_decision(
+                db,
+                session=sess,
+                viability=via,
+                variant=variant,
+                user_id=sess.user_id,
+                max_notional_policy=float(max_notional),
+                quote_mid=mid,
+                spread_bps=spread_bps_live,
+                execution_mode="live",
+                regime_snapshot=regime_live,
+            )
+            if not dec.get("proceed"):
+                alloc = dec.get("allocation") or {}
+                _emit(
+                    db,
+                    sess,
+                    "live_entry_abstain",
+                    {
+                        "packet_id": dec.get("packet_id"),
+                        "reason": alloc.get("abstain_reason_code"),
+                        "detail": alloc.get("abstain_reason_text"),
+                    },
+                )
+                _safe_transition(db, sess, STATE_WATCHING_LIVE)
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state, "abstained": True}
+            decision_packet_id = dec.get("packet_id")
+            max_notional = min(float(max_notional), float(dec["allocation"]["recommended_notional"]))
+            if bool(getattr(settings, "brain_decision_packet_required_for_runners", True)) and decision_packet_id is None:
+                _emit(db, sess, "live_error", {"reason": "decision_packet_required_missing"})
+                _safe_transition(db, sess, STATE_LIVE_ERROR)
+                db.flush()
+                return {"ok": False, "error": "decision_packet_missing"}
+        le["entry_decision_packet_id"] = decision_packet_id
+        le["entry_slip_bps_ref"] = slip_ref
+        _commit_le(sess, le)
+        snap = dict(sess.risk_snapshot_json or {})
+        le = _live_exec(snap)
 
         inc = prod.base_increment if prod else None
         mn = prod.base_min_size if prod else None
@@ -639,7 +733,9 @@ def tick_live_session(
                 if nox and nox.average_filled_price:
                     xpx = float(nox.average_filled_price)
             pnl = (xpx - avg) * qty
+            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
             le["last_exit_reason"] = "bailout"
             le["position"] = None
             _commit_le(sess, le)
@@ -681,7 +777,9 @@ def tick_live_session(
                 if nox and nox.average_filled_price:
                     xpx = float(nox.average_filled_price)
             pnl = (xpx - avg) * qty
+            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
             le["last_exit_reason"] = "max_hold"
             le["position"] = None
             _commit_le(sess, le)
@@ -702,7 +800,9 @@ def tick_live_session(
                 if nox and nox.average_filled_price:
                     xpx = float(nox.average_filled_price)
             pnl = (xpx - avg) * qty
+            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
             le["last_exit_reason"] = "stop"
             le["position"] = None
             _commit_le(sess, le)
@@ -728,7 +828,9 @@ def tick_live_session(
                 if nox and nox.average_filled_price:
                     xpx = float(nox.average_filled_price)
             pnl = (xpx - avg) * qty
+            slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
             le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+            _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
             le["last_exit_reason"] = "target"
             le["position"] = None
             _commit_le(sess, le)
@@ -756,7 +858,9 @@ def tick_live_session(
                     if nox and nox.average_filled_price:
                         xpx = float(nox.average_filled_price)
                 pnl = (xpx - avg) * qty
+                slip_live = float(le.get("entry_slip_bps_ref") or 6.0)
                 le["realized_pnl_usd"] = float(le.get("realized_pnl_usd") or 0.0) + pnl
+                _finalize_live_decision_after_exit(db, sess, le=le, realized_pnl_usd=pnl, slip_bps=slip_live)
                 le["last_exit_reason"] = "trail_stop"
                 le["position"] = None
                 _commit_le(sess, le)

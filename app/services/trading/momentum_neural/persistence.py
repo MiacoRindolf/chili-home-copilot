@@ -357,6 +357,7 @@ def append_trading_automation_simulated_fill(
     position_state_after: str | None = None,
     reason: str | None = None,
     marker_json: Optional[dict[str, Any]] = None,
+    decision_packet_id: int | None = None,
 ) -> TradingAutomationSimulatedFill:
     row = TradingAutomationSimulatedFill(
         session_id=int(session_id),
@@ -374,6 +375,7 @@ def append_trading_automation_simulated_fill(
         position_state_after=position_state_after,
         reason=reason,
         marker_json=dict(marker_json or {}),
+        decision_packet_id=int(decision_packet_id) if decision_packet_id is not None else None,
     )
     db.add(row)
     db.flush()

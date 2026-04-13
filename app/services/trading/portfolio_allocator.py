@@ -441,3 +441,232 @@ def allocation_block_reason(decision: dict[str, Any] | None) -> str | None:
         return str(decision.get("blocked_reason") or "allocator_blocked")
     return None
 
+
+def _paper_terminal_states() -> frozenset:
+    from .momentum_neural.paper_fsm import PAPER_RUNNER_TERMINAL_STATES
+
+    return frozenset(PAPER_RUNNER_TERMINAL_STATES) | frozenset({"error"})
+
+
+def _peer_automation_sessions(
+    db: Session,
+    *,
+    user_id: int,
+    session_id: int,
+    mode: str,
+    limit: int,
+) -> list[Any]:
+    from ...models.trading import TradingAutomationSession
+
+    if limit <= 0:
+        return []
+    if mode == "live":
+        term = _LIVE_TERMINAL_SESSION_STATES
+    else:
+        term = _paper_terminal_states()
+    return (
+        db.query(TradingAutomationSession)
+        .filter(
+            TradingAutomationSession.user_id == int(user_id),
+            TradingAutomationSession.mode == mode,
+            TradingAutomationSession.id != int(session_id),
+            ~TradingAutomationSession.state.in_(tuple(term)),
+        )
+        .order_by(TradingAutomationSession.updated_at.desc())
+        .limit(int(limit))
+        .all()
+    )
+
+
+def allocate_momentum_session_entry(
+    db: Session,
+    *,
+    session: Any,
+    viability: Any,
+    variant: Any,
+    user_id: int | None,
+    max_notional_policy: float,
+    quote_mid: float | None,
+    spread_bps: float,
+    execution_mode: str,
+    regime_snapshot: dict[str, Any],
+    deployment_stage: str,
+    deployment_size_mult: float = -1.0,
+) -> dict[str, Any]:
+    """Portfolio + expectancy orchestration at entry boundary (extends existing allocator)."""
+    from .capacity_governor import evaluate_capacity
+    from .deployment_ladder_service import stage_size_multiplier
+    from .execution_realism_service import estimate_execution_realism
+    from .expectancy_service import compute_expectancy_edges
+
+    symbol = (getattr(session, "symbol", None) or "").strip().upper()
+    scan_pattern_id = int(getattr(variant, "scan_pattern_id", None) or 0) or None
+    ex = viability.execution_readiness_json if isinstance(getattr(viability, "execution_readiness_json", None), dict) else {}
+    vol_proxy = None
+    try:
+        ev = viability.evidence_window_json if isinstance(getattr(viability, "evidence_window_json", None), dict) else {}
+        vol_proxy = _safe_float(ev.get("volume_usd_24h") or ev.get("quote_volume_usd"),0.0) or None
+    except Exception:
+        vol_proxy = None
+
+    alloc = build_session_allocation_decision(db, session, user_id=user_id, context="momentum_entry")
+
+    base_cap = _safe_float(max_notional_policy, 250.0)
+    if deployment_size_mult >= 0:
+        mult = deployment_size_mult
+    else:
+        mult = stage_size_multiplier(deployment_stage)
+    if execution_mode == "live" and not bool(getattr(settings, "brain_live_deployment_enforcement", False)):
+        mult = 1.0
+    if execution_mode == "paper" and not bool(getattr(settings, "brain_paper_deployment_enforcement", True)):
+        mult = 1.0
+
+    intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
+
+    realism = estimate_execution_realism(
+        symbol=symbol,
+        execution_readiness=ex,
+        regime_snapshot=regime_snapshot,
+        quote_mid=quote_mid,
+        spread_bps=spread_bps,
+        intended_notional_usd=intended_notional,
+        execution_mode=execution_mode,
+    )
+
+    cap_eval = evaluate_capacity(
+        db,
+        user_id=user_id,
+        symbol=symbol,
+        spread_bps=spread_bps,
+        estimated_slippage_bps=_safe_float(realism.get("expected_slippage_bps"), 0.0),
+        intended_notional_usd=intended_notional,
+        execution_mode=execution_mode,
+        adv_usd_proxy=vol_proxy,
+        min_volume_usd_proxy=vol_proxy,
+    )
+
+    unc_hair = max(0.0, 1.0 - _safe_float(getattr(viability, "viability_score", None), 0.0))
+    regime_mult = 1.0
+    atrp = _safe_float((regime_snapshot or {}).get("atr_pct") or (regime_snapshot or {}).get("atr_percent"), 0.0)
+    if atrp > 3.0:
+        regime_mult = 0.85
+    elif atrp < 1.0:
+        regime_mult = 1.05
+
+    corr_pen = 0.0
+    if alloc.get("conflict_buckets"):
+        corr_pen = min(0.4, 0.05 * len(alloc.get("conflict_buckets") or []))
+
+    exp = compute_expectancy_edges(
+        db,
+        scan_pattern_id=scan_pattern_id,
+        viability_score=_safe_float(getattr(viability, "viability_score", None), 0.0),
+        viability_eligible=(
+            bool(getattr(viability, "paper_eligible", True))
+            if execution_mode != "live"
+            else bool(getattr(viability, "live_eligible", False))
+        ),
+        regime_multiplier=regime_mult,
+        uncertainty_haircut=unc_hair,
+        execution_penalty=_safe_float(realism.get("execution_penalty"), 0.0),
+        capacity_soft_penalty=_safe_float(cap_eval.get("soft_penalty"), 0.0),
+        correlation_penalty=corr_pen,
+    )
+
+    floor = _safe_float(getattr(settings, "brain_minimum_net_expectancy_to_trade", 0.0), 0.0)
+    shadow = bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", True))
+    enforce_exp = bool(getattr(settings, "brain_enforce_net_expectancy_live", False)) if execution_mode == "live" else bool(
+        getattr(settings, "brain_enforce_net_expectancy_paper", True)
+    )
+
+    abstain_code = None
+    abstain_text = None
+    shadow_override = False
+
+    if not alloc.get("allowed_if_enforced"):
+        abstain_code = "portfolio_allocator_blocked"
+        abstain_text = str(alloc.get("blocked_reason") or "allocator")
+
+    cap_blocked = bool(cap_eval.get("capacity_blocked"))
+    if cap_blocked:
+        abstain_code = abstain_code or "capacity_blocked"
+        abstain_text = abstain_text or "capacity_governor"
+
+    if mult <= 0 and (
+        bool(getattr(settings, "brain_live_deployment_enforcement", False))
+        if execution_mode == "live"
+        else bool(getattr(settings, "brain_paper_deployment_enforcement", True))
+    ):
+        abstain_code = abstain_code or "deployment_stage_disabled"
+        abstain_text = abstain_text or "zero_size_multiplier"
+
+    if exp["expected_edge_net"] < floor and enforce_exp:
+        abstain_code = abstain_code or "negative_net_expectancy"
+        abstain_text = abstain_text or "net_expectancy_below_floor"
+
+    if shadow and abstain_code in ("negative_net_expectancy",):
+        shadow_override = True
+        abstain_code = None
+        abstain_text = None
+
+    if shadow and abstain_code == "capacity_blocked":
+        shadow_override = True
+        abstain_code = None
+        abstain_text = None
+
+    primary_selected = abstain_code is None
+    candidates_payload: list[dict[str, Any]] = [
+        {
+            "rank": 0,
+            "ticker": symbol,
+            "scan_pattern_id": scan_pattern_id,
+            "expected_edge_gross": exp["expected_edge_gross"],
+            "expected_edge_net": exp["expected_edge_net"],
+            "expected_slippage_bps": realism.get("expected_slippage_bps"),
+            "expected_fill_probability": realism.get("expected_fill_probability"),
+            "size_cap_notional": intended_notional,
+            "was_selected": primary_selected,
+            "reject_reason_code": None if primary_selected else abstain_code,
+            "reject_reason_text": None if primary_selected else abstain_text,
+        }
+    ]
+
+    peer_limit = int(getattr(settings, "brain_peer_candidate_sessions_max", 4) or 0)
+    if user_id and peer_limit > 0:
+        peers = _peer_automation_sessions(db, user_id=int(user_id), session_id=int(session.id), mode=execution_mode, limit=peer_limit)
+        for i, ps in enumerate(peers, start=1):
+            candidates_payload.append(
+                {
+                    "rank": i,
+                    "ticker": (ps.symbol or "").upper(),
+                    "scan_pattern_id": None,
+                    "expected_edge_gross": None,
+                    "expected_edge_net": None,
+                    "was_selected": False,
+                    "reject_reason_code": "peer_session_not_focus",
+                    "reject_reason_text": "Different automation session; informational only",
+                    "reject_detail_json": {"peer_session_id": int(ps.id)},
+                }
+            )
+
+    proceed = abstain_code is None
+    return {
+        "proceed": proceed,
+        "abstain_reason_code": abstain_code,
+        "abstain_reason_text": abstain_text,
+        "recommended_notional": intended_notional if proceed else 0.0,
+        "expected_edge_gross": exp["expected_edge_gross"],
+        "expected_edge_net": exp["expected_edge_net"],
+        "realism": realism,
+        "capacity": cap_eval,
+        "allocation_decision": alloc,
+        "deployment_stage": deployment_stage,
+        "deployment_size_mult": mult,
+        "candidates_payload": candidates_payload,
+        "correlation_penalty": corr_pen,
+        "uncertainty_haircut": exp["uncertainty_haircut"],
+        "execution_penalty": _safe_float(realism.get("execution_penalty"), 0.0),
+        "shadow_override": shadow_override,
+        "capacity_blocked_flag": bool(cap_eval.get("capacity_hard_signals")),
+    }
+

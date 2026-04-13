@@ -5,6 +5,10 @@ fill price (when the trade is opened).  Used to:
 1. Track slippage per ticker/asset class
 2. Adaptively adjust backtest_spread for more realistic backtests
 3. Identify tickers with consistently poor execution
+
+Decision-stack realism rollups for momentum viability JSON live in
+``execution_realism_service.apply_realism_rollup_to_viability_json`` (merges into
+``execution_readiness_json["chili_realism_rollup"]``) — not a second slippage table.
 """
 from __future__ import annotations
 

@@ -648,6 +648,7 @@
     {% endif %}
 
     <div id="ap-summary-strip" class="ap-strip"></div>
+    <div id="ap-decision-strip" class="ap-strip ap-muted" style="font-size:12px;line-height:1.45;margin-top:4px;"></div>
     <div id="ap-blockers" class="ap-blockers"></div>
 
     <section class="ap-section">
@@ -1445,10 +1446,47 @@
     window.alert(message);
   }
 
+  function renderDecisionStrip(recent, abstentions, deployment) {
+    var el = document.getElementById('ap-decision-strip');
+    if (!el) return;
+    if (!recent || !recent.length) {
+      el.textContent = '';
+      return;
+    }
+    var last = recent[0];
+    var dep0 = (deployment && deployment[0]) || {};
+    var abstLast = (abstentions && abstentions[0]) || null;
+    var parts = [];
+    parts.push('Decision ledger: last #' + (last.id || '?') + ' ' + (last.decision_type || '') + ' ' + (last.execution_mode || ''));
+    if (last.expected_edge_net != null) parts.push('net edge ' + Number(last.expected_edge_net).toFixed(4));
+    if (last.deployment_stage) parts.push('stage ' + last.deployment_stage);
+    if (last.capacity_blocked) parts.push('capacity signal');
+    if (abstLast && abstLast.abstain_reason_code) {
+      parts.push('last abstain: ' + abstLast.abstain_reason_code);
+    }
+    if (dep0.current_stage) parts.push('deploy ' + dep0.scope_key + '=' + dep0.current_stage);
+    el.textContent = parts.join(' · ');
+  }
+
+  window.apRefreshDecisionLedger = function() {
+    if (IS_GUEST) return Promise.resolve();
+    return Promise.all([
+      fetchJson('/api/trading/momentum/automation/decisions/recent?limit=8', { credentials: 'same-origin' }),
+      fetchJson('/api/trading/momentum/automation/decisions/abstentions/recent?limit=5', { credentials: 'same-origin' }),
+      fetchJson('/api/trading/momentum/automation/deployment/summary', { credentials: 'same-origin' })
+    ]).then(function(results) {
+      renderDecisionStrip(results[0].packets || [], results[1].packets || [], results[2].deployment || []);
+    }).catch(function() {
+      var el = document.getElementById('ap-decision-strip');
+      if (el) el.textContent = '';
+    });
+  };
+
   window.apRefreshSummary = function() {
     if (IS_GUEST) return Promise.resolve();
     return fetchJson('/api/trading/momentum/automation/summary', { credentials: 'same-origin' })
       .then(renderSummary)
+      .then(function() { return apRefreshDecisionLedger(); })
       .catch(function(err) {
         showError(err.message || 'Failed to load summary.');
       });

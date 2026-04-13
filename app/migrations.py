@@ -5721,6 +5721,168 @@ def _migration_110_brain_work_lease_scope(conn) -> None:
     conn.commit()
 
 
+def _migration_111_trading_decision_stack(conn) -> None:
+    """Decision packets, candidates, deployment ladder state; link simulated fills to packets."""
+    if "trading_decision_packets" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_decision_packets (
+                    id BIGSERIAL PRIMARY KEY,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    automation_session_id INTEGER REFERENCES trading_automation_sessions(id) ON DELETE SET NULL,
+                    scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                    chosen_ticker VARCHAR(36),
+                    decision_type VARCHAR(24) NOT NULL DEFAULT 'trade',
+                    execution_mode VARCHAR(16) NOT NULL DEFAULT 'paper',
+                    deployment_stage VARCHAR(24) NOT NULL DEFAULT 'paper',
+                    regime_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    allocator_input_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    allocator_output_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    portfolio_context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    expected_edge_gross DOUBLE PRECISION,
+                    expected_edge_net DOUBLE PRECISION,
+                    expected_slippage_bps DOUBLE PRECISION,
+                    expected_fill_probability DOUBLE PRECISION,
+                    expected_partial_fill_probability DOUBLE PRECISION,
+                    expected_missed_fill_probability DOUBLE PRECISION,
+                    risk_budget_pct DOUBLE PRECISION,
+                    size_notional DOUBLE PRECISION,
+                    size_shares_or_qty DOUBLE PRECISION,
+                    abstain_reason_code VARCHAR(64),
+                    abstain_reason_text TEXT,
+                    selected_candidate_rank INTEGER,
+                    candidate_count INTEGER NOT NULL DEFAULT 0,
+                    capacity_blocked BOOLEAN NOT NULL DEFAULT FALSE,
+                    capacity_reason_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    correlation_penalty DOUBLE PRECISION,
+                    uncertainty_haircut DOUBLE PRECISION,
+                    execution_penalty DOUBLE PRECISION,
+                    final_score DOUBLE PRECISION,
+                    source_surface VARCHAR(32) NOT NULL DEFAULT 'autopilot',
+                    research_vs_live_context_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    linked_trade_id INTEGER REFERENCES trading_trades(id) ON DELETE SET NULL,
+                    outcome_status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    shadow_advisory_only BOOLEAN NOT NULL DEFAULT TRUE
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_user_created ON trading_decision_packets (user_id, created_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_session_created ON trading_decision_packets (automation_session_id, created_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_ticker_created ON trading_decision_packets (chosen_ticker, created_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_pattern_created ON trading_decision_packets (scan_pattern_id, created_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_mode_stage ON trading_decision_packets (execution_mode, deployment_stage)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdp_outcome ON trading_decision_packets (outcome_status, created_at DESC)"
+            )
+        )
+    if "trading_decision_candidates" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_decision_candidates (
+                    id BIGSERIAL PRIMARY KEY,
+                    decision_packet_id BIGINT NOT NULL REFERENCES trading_decision_packets(id) ON DELETE CASCADE,
+                    rank INTEGER NOT NULL DEFAULT 0,
+                    ticker VARCHAR(36) NOT NULL,
+                    scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                    candidate_score_raw DOUBLE PRECISION,
+                    candidate_score_net DOUBLE PRECISION,
+                    expected_edge_gross DOUBLE PRECISION,
+                    expected_edge_net DOUBLE PRECISION,
+                    expected_slippage_bps DOUBLE PRECISION,
+                    expected_fill_probability DOUBLE PRECISION,
+                    size_cap_notional DOUBLE PRECISION,
+                    was_selected BOOLEAN NOT NULL DEFAULT FALSE,
+                    reject_reason_code VARCHAR(64),
+                    reject_reason_text TEXT,
+                    reject_detail_json JSONB NOT NULL DEFAULT '{}'::jsonb
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tdc_packet_rank ON trading_decision_candidates (decision_packet_id, rank)"
+            )
+        )
+    if "trading_deployment_states" not in _tables(conn):
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_deployment_states (
+                    id SERIAL PRIMARY KEY,
+                    scope_type VARCHAR(32) NOT NULL,
+                    scope_key VARCHAR(256) NOT NULL,
+                    user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                    current_stage VARCHAR(24) NOT NULL DEFAULT 'paper',
+                    promoted_at TIMESTAMP,
+                    degraded_at TIMESTAMP,
+                    disabled_at TIMESTAMP,
+                    stage_metrics_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    live_trade_count INTEGER NOT NULL DEFAULT 0,
+                    paper_trade_count INTEGER NOT NULL DEFAULT 0,
+                    rolling_win_rate DOUBLE PRECISION,
+                    rolling_expectancy_net DOUBLE PRECISION,
+                    rolling_slippage_bps DOUBLE PRECISION,
+                    rolling_drawdown_pct DOUBLE PRECISION,
+                    rolling_missed_fill_rate DOUBLE PRECISION,
+                    rolling_partial_fill_rate DOUBLE PRECISION,
+                    last_reason_code VARCHAR(64),
+                    last_reason_text TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    CONSTRAINT uq_trading_deployment_scope UNIQUE (scope_type, scope_key)
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tds_user_stage ON trading_deployment_states (user_id, current_stage)"
+            )
+        )
+    if "trading_automation_simulated_fills" in _tables(conn):
+        sf_cols = _columns(conn, "trading_automation_simulated_fills")
+        if "decision_packet_id" not in sf_cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_automation_simulated_fills "
+                    "ADD COLUMN decision_packet_id BIGINT REFERENCES trading_decision_packets(id) ON DELETE SET NULL"
+                )
+            )
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS ix_tasf_decision_packet ON trading_automation_simulated_fills (decision_packet_id)"
+                )
+            )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -5833,6 +5995,7 @@ MIGRATIONS = [
     ("108_neural_mesh_lc_causal_edges", _migration_108_neural_mesh_lc_causal_edges),
     ("109_brain_work_events", _migration_109_brain_work_events),
     ("110_brain_work_lease_scope", _migration_110_brain_work_lease_scope),
+    ("111_trading_decision_stack", _migration_111_trading_decision_stack),
 ]
 
 

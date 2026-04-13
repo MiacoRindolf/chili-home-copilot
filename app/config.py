@@ -717,6 +717,50 @@ class Settings(BaseSettings):
     brain_allocator_live_hard_block_enabled: bool = False
     brain_allocator_incumbent_score_margin: float = 0.08
 
+    # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
+    brain_enable_decision_ledger: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_DECISION_LEDGER"))
+    brain_decision_packet_required_for_runners: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_DECISION_PACKET_REQUIRED_FOR_RUNNERS")
+    )
+    brain_expectancy_allocator_shadow_mode: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_EXPECTANCY_ALLOCATOR_SHADOW_MODE")
+    )
+    brain_enable_execution_realism: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_EXECUTION_REALISM"))
+    brain_enable_capacity_governor: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_CAPACITY_GOVERNOR"))
+    brain_enable_deployment_ladder: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_DEPLOYMENT_LADDER"))
+    brain_minimum_net_expectancy_to_trade: float = Field(
+        default=0.0, validation_alias=AliasChoices("CHILI_BRAIN_MINIMUM_NET_EXPECTANCY_TO_TRADE")
+    )
+    brain_enforce_net_expectancy_paper: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_PAPER")
+    )
+    brain_enforce_net_expectancy_live: bool = Field(
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_LIVE")
+    )
+    brain_capacity_hard_block_paper: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_PAPER")
+    )
+    brain_capacity_hard_block_live: bool = Field(
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_LIVE")
+    )
+    brain_paper_deployment_enforcement: bool = Field(
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_PAPER_DEPLOYMENT_ENFORCEMENT")
+    )
+    brain_live_deployment_enforcement: bool = Field(
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_LIVE_DEPLOYMENT_ENFORCEMENT")
+    )
+    brain_max_adv_notional_pct: float = Field(
+        default=0.25,
+        validation_alias=AliasChoices("CHILI_BRAIN_MAX_ADV_NOTIONAL_PCT"),
+        description="Max position notional as fraction of crude ADV USD proxy (0 disables)",
+    )
+    brain_peer_candidate_sessions_max: int = Field(default=4, validation_alias=AliasChoices("CHILI_BRAIN_PEER_CANDIDATE_SESSIONS_MAX"))
+    brain_deployment_promote_min_paper_trades: int = Field(default=3, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_PROMOTE_MIN_PAPER_TRADES"))
+    brain_deployment_degrade_drawdown_pct: float = Field(default=8.0, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_DEGRADE_DRAWDOWN_PCT"))
+    brain_deployment_degrade_slippage_bps: float = Field(default=35.0, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_DEGRADE_SLIPPAGE_BPS"))
+    brain_deployment_degrade_missed_fill_rate: float = Field(default=0.35, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_DEGRADE_MISSED_FILL_RATE"))
+    brain_deployment_degrade_negative_expectancy_rolls: int = Field(default=3, validation_alias=AliasChoices("CHILI_BRAIN_DEPLOYMENT_DEGRADE_NEGATIVE_EXPECTANCY_ROLLS"))
+
     # Imminent ScanPattern breakout alerts (scheduler + pattern_imminent_alerts).
     pattern_imminent_alert_enabled: bool = True
     pattern_imminent_max_eta_hours: float = 4.0
