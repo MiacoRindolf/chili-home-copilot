@@ -11,6 +11,16 @@ def test_scan_status_brain_runtime_first_after_ok(client):
     keys = list(data.keys())
     assert keys[0] == "ok"
     assert keys[1] == "brain_runtime"
+    assert keys == [
+        "ok",
+        "brain_runtime",
+        "prescreen",
+        "work_ledger",
+        "release",
+        "scheduler",
+        "scan",
+        "learning",
+    ]
 
 
 def test_scan_status_brain_runtime_shape_and_mirrors(client):
@@ -28,6 +38,18 @@ def test_scan_status_brain_runtime_shape_and_mirrors(client):
     ls = br.get("learning_summary")
     assert isinstance(ls, dict)
     assert "running" in ls
+    asig = br.get("activity_signals")
+    assert isinstance(asig, dict)
+    assert set(asig.keys()) == {
+        "reconcile_active",
+        "ledger_busy",
+        "retry_or_dead_attention",
+        "outcome_head_id",
+    }
+    assert isinstance(asig.get("reconcile_active"), bool)
+    assert isinstance(asig.get("ledger_busy"), bool)
+    assert isinstance(asig.get("retry_or_dead_attention"), bool)
+    assert asig.get("outcome_head_id") is None or isinstance(asig.get("outcome_head_id"), int)
 
     assert data["work_ledger"] == br["work_ledger"]
     assert data["release"] == br["release"]

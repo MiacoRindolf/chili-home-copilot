@@ -229,7 +229,7 @@ def check_pause_signal() -> bool:
 
 
 def check_wake_signal() -> bool:
-    """If wake file exists (from UI 'Run next cycle'), remove it and skip idle sleep."""
+    """If wake file exists (from UI wake control), remove it and skip idle sleep."""
     if WAKE_SIGNAL.exists():
         try:
             WAKE_SIGNAL.unlink()
@@ -809,20 +809,20 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
                 idle_msg = f"{queue_pending} pattern(s) due for retest. Continuing in 1 minute."
                 log_msg = f"[brain] Retest queue: {queue_pending} pending. Continuing in 1 minute"
             elif patterns_tested > 0:
-                idle_msg = f"Ran {patterns_tested} backtest(s) this cycle. Continuing in 1 minute."
-                log_msg = f"[brain] Backtests ran ({patterns_tested}); short sleep before next cycle"
+                idle_msg = f"Ran {patterns_tested} backtest(s) this reconcile pass. Continuing in 1 minute."
+                log_msg = f"[brain] Backtests ran ({patterns_tested}); short sleep before next iteration"
             else:
                 idle_msg = f"Exploration queued {exploration_added} pattern(s). Continuing in 1 minute."
-                log_msg = f"[brain] Exploration fill ({exploration_added}); short sleep before next cycle"
+                log_msg = f"[brain] Exploration fill ({exploration_added}); short sleep before next iteration"
             status.set_step("Idle", idle_msg)
             logger.info(log_msg)
         else:
             sleep_seconds = args.interval * 60
             status.set_step(
                 "Idle",
-                f"No retest due and no backtests this cycle. Next in {args.interval} min.",
+                f"No retest due and no backtests this pass. Next worker idle window: {args.interval} min.",
             )
-            logger.info(f"[brain] Retest queue clear and idle cycle. Sleeping {args.interval} minutes")
+            logger.info(f"[brain] Retest queue clear and idle reconcile pass. Sleeping {args.interval} minutes")
 
         status.save()
 
@@ -834,7 +834,7 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
                 stop_during_idle_sleep = True
                 break
             if check_any_wake():
-                logger.info("[brain] Wake during idle sleep — starting next cycle now")
+                logger.info("[brain] Wake during idle sleep — starting next worker iteration now")
                 break
             _db_heartbeat_tick()
             chunk = min(5, remaining)

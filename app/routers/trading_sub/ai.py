@@ -1045,16 +1045,43 @@ def api_scan_status():
         "elapsed_s": learning_st.get("elapsed_s"),
     }
 
+    def _activity_signals(wl: dict[str, Any], ls: dict[str, Any]) -> dict[str, Any]:
+        pend = int(wl.get("pending_work") or 0)
+        proc = wl.get("processing")
+        proc_list = proc if isinstance(proc, list) else []
+        ledger_busy = pend > 0 or len(proc_list) > 0
+        rw = int(wl.get("retry_wait") or 0)
+        dead = int(wl.get("dead_last_24h") or 0)
+        retry_or_dead_attention = rw > 0 or dead > 0
+        outcomes = wl.get("recent_meaningful_outcomes")
+        outcome_head_id = None
+        if isinstance(outcomes, list) and outcomes:
+            first = outcomes[0]
+            if isinstance(first, dict) and first.get("id") is not None:
+                oid = first["id"]
+                if isinstance(oid, int):
+                    outcome_head_id = oid
+                elif isinstance(oid, str) and oid.isdigit():
+                    outcome_head_id = int(oid)
+        return {
+            "reconcile_active": bool(ls.get("running")),
+            "ledger_busy": ledger_busy,
+            "retry_or_dead_attention": retry_or_dead_attention,
+            "outcome_head_id": outcome_head_id,
+        }
+
     _mirror_note = (
         "Top-level work_ledger, release, scheduler, and scan mirror brain_runtime for one release; "
         "prefer brain_runtime."
     )
+    activity_signals = _activity_signals(work_ledger_st, learning_summary)
     brain_runtime: dict[str, Any] = {
         "work_ledger": work_ledger_st,
         "release": release_st,
         "scheduler": scheduler_st,
         "scan": scan_st,
         "learning_summary": learning_summary,
+        "activity_signals": activity_signals,
         "compatibility_mirror_keys": ["work_ledger", "release", "scheduler", "scan"],
         "compatibility_mirror_note": _mirror_note,
     }
@@ -1062,16 +1089,17 @@ def api_scan_status():
     learning_out = dict(learning_st)
     learning_out["status_role"] = "reconcile_compatibility"
 
+    # Key order: learning last (reconcile/compatibility full object) after one-release mirrors.
     payload = {
         "ok": True,
         "brain_runtime": brain_runtime,
         "prescreen": prescreen_st,
-        "learning": learning_out,
         # --- One-release compatibility mirrors (remove after consumers migrate to brain_runtime) ---
         "work_ledger": work_ledger_st,  # mirror of brain_runtime["work_ledger"]
         "release": release_st,  # mirror of brain_runtime["release"]
         "scheduler": scheduler_st,  # mirror of brain_runtime["scheduler"]
         "scan": scan_st,  # mirror of brain_runtime["scan"]
+        "learning": learning_out,
     }
     try:
         return JSONResponse(to_jsonable(payload))
@@ -1083,12 +1111,12 @@ def api_scan_status():
                 "ok": True,
                 "brain_runtime": {},
                 "prescreen": {},
-                "learning": {},
                 # One-release mirrors (same keys as happy path); empty when encode failed mid-flight
                 "work_ledger": {},
                 "release": {},
                 "scheduler": {"running": False, "jobs": []},
                 "scan": {},
+                "learning": {},
                 "encode_error": True,
             }
         )

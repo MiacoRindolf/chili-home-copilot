@@ -19,6 +19,8 @@ add a migration to adjust ``brain_graph_nodes`` / ``brain_graph_edges`` and exte
 ``brain_neural_mesh/seed_graph.py`` for tests.
 
 Do **not** import ``learning`` from here (avoids circular imports).
+
+Operator-facing copy refers to ``run_learning_cycle`` as a **reconcile pass** (legacy step graph); it is distinct from scheduler-only scans and work-ledger dispatch rounds.
 """
 from __future__ import annotations
 

@@ -1369,11 +1369,11 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
               </div>
             </div>
             <div class="bw-timings" id="bw-last-cycle-timings" style="font-size:10px;color:var(--text-muted);margin-top:8px">
-              <span class="bw-timings-label">Last cycle: --</span>
+              <span class="bw-timings-label">Last reconcile pass: --</span>
               <span class="bw-timings-steps" id="bw-step-timings"></span>
             </div>
             <div class="bw-cycle-chart-wrap" style="margin-top:10px">
-              <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Cycle History</div>
+              <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Reconcile history</div>
               <div id="bw-cycle-chart" style="width:100%;height:100px;border-radius:6px;overflow:hidden;background:var(--card);border:1px solid var(--border)"></div>
               <div id="bw-cycle-chart-legend" style="font-size:9px;color:var(--text-muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
                 <span><span style="color:#8b5cf6">&#x25CF;</span> Patterns tested</span>
@@ -1904,9 +1904,9 @@ function updateBrainWorkerUI(data) {
     if (durationSec != null && durationSec > 0) {
       var m = Math.floor(durationSec / 60);
       var s = Math.round(durationSec % 60);
-      timingsLabel.querySelector('.bw-timings-label').textContent = 'Last cycle: ' + (m ? m + 'm ' : '') + s + 's';
+      timingsLabel.querySelector('.bw-timings-label').textContent = 'Last reconcile pass: ' + (m ? m + 'm ' : '') + s + 's';
     } else {
-      timingsLabel.querySelector('.bw-timings-label').textContent = 'Last cycle: --';
+      timingsLabel.querySelector('.bw-timings-label').textContent = 'Last reconcile pass: --';
     }
   }
   if (stepsEl && typeof stepTimings === 'object' && Object.keys(stepTimings).length > 0) {
@@ -1941,7 +1941,7 @@ function updateBrainWorkerUI(data) {
 function _updateBwCycleChart() {
   var el = document.getElementById('bw-cycle-chart');
   if (!el || _bwCycleHistory.length === 0) {
-    if (el) el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:10px;color:var(--text-muted)">Complete a cycle to see history</div>';
+    if (el) el.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:10px;color:var(--text-muted)">Complete a reconcile pass to see throughput history</div>';
     if (_bwCycleChart) { _bwCycleChart.remove(); _bwCycleChart = null; }
     return;
   }
@@ -6325,7 +6325,33 @@ var _PIPELINE_STEPS = [
  * Prefer ``brain_runtime``; fall back to top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan``
  * (one-release compatibility mirrors — see api_scan_status in ai.py).
  * Full reconcile graph fields stay on top-level ``learning`` only (no brain_runtime equivalent).
+ * ``activity_signals`` is optional; ledger outcome refresh uses ``outcome_head_id`` when
+ * ``window.__CHILI_LEDGER_OUTCOME_REFRESH === true`` (default off).
  */
+if (typeof window.__CHILI_LEDGER_OUTCOME_REFRESH === 'undefined') { window.__CHILI_LEDGER_OUTCOME_REFRESH = false; }
+var _chiliLedgerOutcomeHeadPrev = null;
+var _chiliLedgerRefreshTimer = null;
+function _debouncedLedgerOutcomeRefresh(headId) {
+  if (!window.__CHILI_LEDGER_OUTCOME_REFRESH) return;
+  if (headId == null) return;
+  if (headId === _chiliLedgerOutcomeHeadPrev) return;
+  var changed = _chiliLedgerOutcomeHeadPrev !== null;
+  _chiliLedgerOutcomeHeadPrev = headId;
+  if (!changed) return;
+  if (_chiliLedgerRefreshTimer) clearTimeout(_chiliLedgerRefreshTimer);
+  _chiliLedgerRefreshTimer = setTimeout(function() {
+    loadPlaybook();
+    loadPerfDashboard();
+    loadTradeablePatterns();
+    loadResearchEdgePatterns();
+    if (typeof _bddActiveTab !== 'undefined' && _bddActiveTab === 'research') {
+      if (typeof _bddLoaded !== 'undefined') _bddLoaded['research'] = false;
+      if (typeof _loadResearchData === 'function') _loadResearchData();
+    }
+    _chiliLedgerRefreshTimer = null;
+  }, 4000);
+}
+
 function scanStatusBrainRuntime(d) {
   var br = d && d.brain_runtime && typeof d.brain_runtime === 'object' ? d.brain_runtime : null;
   return {
@@ -6333,7 +6359,8 @@ function scanStatusBrainRuntime(d) {
     release: (br && br.release && typeof br.release === 'object') ? br.release : (d.release || {}),
     scheduler: (br && br.scheduler && typeof br.scheduler === 'object') ? br.scheduler : (d.scheduler || { running: false, jobs: [] }),
     scan: (br && br.scan && typeof br.scan === 'object') ? br.scan : (d.scan || {}),
-    learning_summary: (br && br.learning_summary && typeof br.learning_summary === 'object') ? br.learning_summary : null
+    learning_summary: (br && br.learning_summary && typeof br.learning_summary === 'object') ? br.learning_summary : null,
+    activity_signals: (br && br.activity_signals && typeof br.activity_signals === 'object') ? br.activity_signals : null
   };
 }
 
@@ -6342,6 +6369,10 @@ function pollLearningStatus() {
     if (!d.ok) return;
     var learning = d.learning || {};
     var rt = scanStatusBrainRuntime(d);
+    var asLedger = rt.activity_signals;
+    if (asLedger && asLedger.outcome_head_id != null) {
+      _debouncedLedgerOutcomeRefresh(asLedger.outcome_head_id);
+    }
     var scan = rt.scan;
     var scheduler = rt.scheduler;
     var wl = rt.work_ledger;
