@@ -25,14 +25,19 @@ from .layout_neural_graph import (
 from .repository import nodes_for_domain
 from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION
 from .waves import derive_overlay_hot_pulse_from_waves, group_activation_events_into_waves
+from ..learning_cycle_architecture import (
+    SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
+    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+)
 from ..momentum_neural.brain_desk_summary import (
     MOMENTUM_GRAPH_NODE_IDS,
     build_momentum_neural_graph_context,
 )
 
 NEURAL_LAYOUT_VERSION = 2
-# Bumped when neural graph node payload shape changes materially (Phase 10 momentum desk previews).
-NEURAL_PROJECTION_SCHEMA_VERSION = 3
+# Bumped when neural graph node payload shape changes materially (Phase 10 momentum desk previews;
+# v4 adds lc_cluster_index / lc_step_index for learning-cycle status overlay).
+NEURAL_PROJECTION_SCHEMA_VERSION = 4
 
 # Layer indices: 1 = outer ring (sensory), 7 = inner (meta-learning).
 NEURAL_LAYER_LABELS: dict[int, str] = {
@@ -51,6 +56,24 @@ NEURAL_LAYER_LABELS: dict[int, str] = {
 def neural_layer_labels_meta() -> dict[str, str]:
     """String keys for JSON (layer number as str)."""
     return {str(k): v for k, v in sorted(NEURAL_LAYER_LABELS.items())}
+
+
+def mesh_lc_indices_for_node_id(node_id: str) -> tuple[int, int]:
+    """Map ``nm_lc_*`` mesh id → (cluster_index, step_index) matching ``learning_status`` indices.
+
+    Cluster nodes use step_index ``-1``. Unknown / non-learning nodes → ``(-1, -1)``.
+    """
+    if not node_id.startswith("nm_lc_"):
+        return (-1, -1)
+    for ci, cluster in enumerate(TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS):
+        if cluster.id == SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID:
+            continue
+        if node_id == f"nm_lc_{cluster.id}":
+            return (ci, -1)
+        for si, st in enumerate(cluster.steps):
+            if node_id == f"nm_lc_{st.sid}":
+                return (ci, si)
+    return (-1, -1)
 
 
 def _utc_aware(dt: Optional[datetime]) -> Optional[datetime]:
@@ -169,6 +192,10 @@ def build_neural_graph_projection(
                     "title": card.get("title"),
                     "role": card.get("role"),
                 }
+        lci, lsi = mesh_lc_indices_for_node_id(node.id)
+        if lci >= 0:
+            nd["lc_cluster_index"] = lci
+            nd["lc_step_index"] = lsi
         out_nodes.append(nd)
 
     out_edges: list[dict[str, Any]] = []
@@ -206,8 +233,9 @@ def build_neural_graph_projection(
         "layer_labels": neural_layer_labels_meta(),
         "description": (
             "Event-driven neural mesh: rings by cognitive layer; hub nodes share the center band. "
-            "Edges carry typed signals; inhibitory edges reduce downstream activation. "
-            "Momentum crypto intel, viability pool, and evolution trace are neural-native (not learning-cycle)."
+            "Solid green/red edges are excitatory/inhibitory propagation. "
+            "Amber dashed edges (edge_type causal_feedback) are interpretive learning links, not extra pipeline stages. "
+            "Learning-cycle step nodes emit activations when the worker commits each architecture step."
         ),
         "momentum_desk": {
             "version": momentum_ctx.get("version") or 0,

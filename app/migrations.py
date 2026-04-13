@@ -5576,6 +5576,56 @@ def _migration_106_split_c_secondary_cluster(conn) -> None:
     conn.commit()
 
 
+def _migration_108_neural_mesh_lc_causal_edges(conn) -> None:
+    """Interpretive causal_feedback edges from learning-cycle step nodes that emit mesh activations."""
+    if "brain_graph_edges" not in _tables(conn):
+        conn.commit()
+        return
+    # Extend edge_type check (103 seeded: dataflow, evidence, veto, feedback, control, operator_output).
+    eg_cols = _columns(conn, "brain_graph_edges")
+    if "edge_type" in eg_cols:
+        conn.execute(text("ALTER TABLE brain_graph_edges DROP CONSTRAINT IF EXISTS ck_brain_graph_edges_edge_type"))
+        conn.execute(
+            text(
+                "ALTER TABLE brain_graph_edges ADD CONSTRAINT ck_brain_graph_edges_edge_type "
+                "CHECK (edge_type IN ("
+                "'dataflow','evidence','veto','feedback','control','operator_output','causal_feedback'"
+                "))"
+            )
+        )
+    gv = 1
+    edges = [
+        ("nm_lc_depromote", "nm_evidence_quality", "lc_causal_depromote", 0.55, "excitatory", "causal_feedback"),
+        ("nm_lc_bt_queue", "nm_evidence_quality", "lc_causal_bt_evidence", 0.5, "excitatory", "causal_feedback"),
+    ]
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+    conn.commit()
+
+
 def _migration_107_scan_pattern_regime_affinity(conn) -> None:
     """Add regime_affinity_json JSONB column to scan_patterns."""
     if "scan_patterns" not in _tables(conn):
@@ -5699,6 +5749,7 @@ MIGRATIONS = [
     ("105_execution_context_venue_nodes", _migration_105_execution_context_venue_nodes),
     ("106_split_c_secondary_cluster", _migration_106_split_c_secondary_cluster),
     ("107_scan_pattern_regime_affinity", _migration_107_scan_pattern_regime_affinity),
+    ("108_neural_mesh_lc_causal_edges", _migration_108_neural_mesh_lc_causal_edges),
 ]
 
 

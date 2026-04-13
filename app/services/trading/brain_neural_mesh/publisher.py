@@ -80,7 +80,9 @@ def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, An
 
 _KEY_STEPS = frozenset({"mine", "bt_queue", "hypotheses", "ml", "depromote"})
 
-# Maps cluster_id → last step sid (fires cluster completion when step completes)
+# Maps cluster_id → last step sid (fires cluster completion when step completes).
+# Must match the last ``CycleStepDef.sid`` in each cluster of
+# ``learning_cycle_architecture.TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS`` (except c_universe).
 _CLUSTER_LAST_STEP: dict[str, str] = {
     "c_state": "decay",
     "c_discovery": "seek",
@@ -94,6 +96,33 @@ _CLUSTER_LAST_STEP: dict[str, str] = {
     "c_decisioning": "proposals",
     "c_control": "finalize",
 }
+
+
+def notify_learning_cycle_step_committed(
+    db: Session,
+    *,
+    cluster_id: str,
+    step_sid: str,
+    elapsed_sec: float,
+    extra: str = "",
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Central seam: enqueue a mesh activation after a learning-cycle step DB commit.
+
+    Call this once per completed architecture step (after ``Session.commit`` for that step).
+    Safe when mesh is disabled (no-op). Must never raise to callers.
+    """
+    try:
+        publish_learning_step_completed(
+            db,
+            cluster_id=cluster_id,
+            step_sid=step_sid,
+            elapsed_sec=float(elapsed_sec),
+            extra=extra or "",
+            correlation_id=correlation_id,
+        )
+    except Exception as e:
+        _log.warning("%s notify_learning_cycle_step_committed failed: %s", LOG_PREFIX, e)
 
 
 def publish_learning_step_completed(

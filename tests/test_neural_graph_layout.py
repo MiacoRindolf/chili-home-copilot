@@ -87,3 +87,7 @@ def test_projection_has_layout_meta(db) -> None:
     assert "ring_radii_draw" in data["meta"]
     assert "layer_ring_cues" in data["meta"]
     assert any(n.get("label_short") for n in data["nodes"])
+    lc_nodes = [n for n in data["nodes"] if str(n.get("id", "")).startswith("nm_lc_")]
+    if lc_nodes:
+        assert "lc_cluster_index" in lc_nodes[0]
+        assert "lc_step_index" in lc_nodes[0]

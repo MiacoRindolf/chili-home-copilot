@@ -1,7 +1,9 @@
 """Canonical Trading Brain learning-cycle architecture (single source of truth).
 
-Used by ``get_trading_brain_network_graph`` for the Network tab and by
-``run_learning_cycle`` for ``current_step`` / ``phase`` strings.
+Drives ``run_learning_cycle`` status fields (``current_step``, ``phase``, cluster/step
+indices) and documents the same phases on the Trading Brain **neural mesh** (Postgres
+``brain_graph_nodes`` / ``brain_graph_edges``, seeded and updated via ``app/migrations.py``).
+The desk loads topology through ``brain_neural_mesh.projection.build_neural_graph_projection``.
 
 **Network tab metadata:** Each cluster and step carries ``description`` (short summary),
 ``remarks`` (what / where / why — the narrative shown in the node detail panel),
@@ -11,8 +13,10 @@ stays one import away from the cycle; ``learning.py`` marks each step with a
 for traceability (validated in tests).
 
 When you add, remove, or reorder phases, edit **this module** and the matching
-``apply_*`` calls in ``learning.py``, then bump ``graph_version`` in
-``brain_network_graph`` when the public graph shape changes.
+``apply_*`` / ``_finish_lc_step`` call sites in ``learning.py`` (and
+``learning_cycle_steps/secondary_bundle.py``). If you add or rename ``nm_lc_*`` nodes,
+add a migration to adjust ``brain_graph_nodes`` / ``brain_graph_edges`` and extend
+``brain_neural_mesh/seed_graph.py`` for tests.
 
 Do **not** import ``learning`` from here (avoids circular imports).
 """
@@ -1049,7 +1053,7 @@ def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:
 
 
 def _set_cycle_graph_node_fields(status_dict: dict[str, Any], cluster_id: str, step_sid: str) -> None:
-    """Align learning status with Network tab node ids (``brain_network_graph``)."""
+    """Set legacy skill-tree node id (``s_{cluster}_{step}``) and cluster/step indices for status APIs."""
     status_dict["graph_node_id"] = f"s_{cluster_id}_{step_sid}"
     status_dict["current_cluster_id"] = cluster_id
     status_dict["current_step_sid"] = step_sid

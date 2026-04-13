@@ -2,22 +2,24 @@
 
 ## Overview
 
-The trading brain adds an **optional**, **Postgres-backed** event-driven mesh alongside the legacy `run_learning_cycle` pipeline. The legacy graph (`learning_cycle_architecture` → `brain_network_graph`) and `/api/brain/trading/network-graph` remain stable.
+The trading brain uses a **Postgres-backed** neural mesh as the **only** Trading Brain graph mode: topology in `brain_graph_nodes` / `brain_graph_edges`, runtime activations in `brain_activation_events`, and the desk reads `build_neural_graph_projection`. `run_learning_cycle` commits each architecture step, then calls `notify_learning_cycle_step_committed` so `nm_lc_*` step nodes enqueue real propagation events (plus `publish_learning_cycle_completed` at the end).
 
-No Kafka, Redis, NATS, Celery, or extra containers are required for v1: activation events live in `brain_activation_events` and are processed by the existing `brain-worker` process (or a dedicated `activation-loop` mode).
+Legacy pipeline JSON and `brain_network_graph.py` are **removed**; compat routes (`/api/brain/trading/network-graph`, `/api/trading/brain/graph`) return the same neural projection.
+
+No Kafka, Redis, NATS, Celery, or extra containers are required for v1: activation events are processed by the existing `brain-worker` process (or a dedicated `activation-loop` mode).
 
 ## Feature flags
 
 | Env | Meaning |
 |-----|---------|
-| `TRADING_BRAIN_NEURAL_MESH_ENABLED=1` | Enable mesh publishers, worker batch, `/api/trading/brain/graph*` neural mode, UI toggle. |
-| `TRADING_BRAIN_GRAPH_MODE=legacy\|neural` | Default desk mode when mesh is enabled (server-side `effective_graph_mode()`). |
+| `TRADING_BRAIN_NEURAL_MESH_ENABLED` | Still read in some modules; mesh is **always on** in `brain_neural_mesh.schema.mesh_enabled()` for unified graph behavior. |
+| `TRADING_BRAIN_GRAPH_MODE` | **Neural only** — `effective_graph_mode()` returns `"neural"`. |
 
 ## Worker modes (`scripts/brain_worker.py`)
 
 | Mode | Behavior |
 |------|----------|
-| `lean-cycle` (default) | Full learning cycle + subtasks; after each successful cycle, runs a short activation batch if `TRADING_BRAIN_NEURAL_MESH_ENABLED=1`. |
+| `lean-cycle` (default) | Full learning cycle + subtasks; after each successful cycle, runs a short activation batch. |
 | `activation-loop` | Neural queue + decay only (soak / dev). Sleep interval uses `--interval` as **seconds** (capped). |
 | `mining` | Repeated `mine_patterns` (Compose `mining-worker`). |
 | `backtest` | Repeated fast-backtest subtask (queue drain). |
@@ -43,8 +45,8 @@ Previously, `mining` / `backtest` / `fast-scan` were accepted by argparse but st
 
 ## HTTP API (trading router)
 
-- `GET /api/trading/brain/graph/config` — flags + `effective_graph_mode`.
-- `GET /api/trading/brain/graph?mode=legacy|neural` — legacy delegates to existing graph builder; neural uses DB projection.
+- `GET /api/trading/brain/graph/config` — flags + `effective_graph_mode` (always neural).
+- `GET /api/trading/brain/graph` — neural DB projection (`build_neural_graph_projection`).
 - `GET /api/trading/brain/graph/nodes/{id}`, `GET /api/trading/brain/graph/edges/{id}`.
 - `GET /api/trading/brain/graph/activations`, `GET /api/trading/brain/graph/metrics`.
 - `POST /api/trading/brain/graph/publish` — enqueue (non-guest).
@@ -52,15 +54,15 @@ Previously, `mining` / `backtest` / `fast-scan` were accepted by argparse but st
 
 ## UI
 
-Trading Brain → Network: **Legacy pipeline** vs **Neural mesh** (localStorage `chili_tbn_graph_mode`). Neural view uses ring layout, excitatory/inhibitory styling, optional **Live** polling of activations for edge pulses.
+Trading Brain → Network: **Neural mesh** (ring layout, excitatory/inhibitory edges, optional **Live** activation pulses). While a learning cycle is running, `/api/trading/scan/status` includes `mesh_step_node_id` / `mesh_cluster_node_id` so the desk can highlight the active `nm_lc_*` step and cluster.
 
 ## Manual validation
 
-1. Apply migrations; set `TRADING_BRAIN_NEURAL_MESH_ENABLED=1`.
-2. Open `/brain` → Trading → Network → Neural mesh; confirm graph loads.
-3. `POST /api/trading/brain/graph/publish` with `source_node_id: "nm_snap_daily"`, `signal_type` in JSON body via `signal_type` field.
-4. Run worker `lean-cycle` or `activation-loop`; watch `brain_activation_events` drain and `brain_fire_log` grow.
-5. Toggle Legacy and confirm pipeline graph unchanged.
+1. Apply migrations (including LC mesh and causal edge migrations).
+2. Open `/brain` → Trading → Network; confirm graph loads.
+3. `POST /api/trading/brain/graph/publish` with `source_node_id: "nm_snap_daily"` (debug).
+4. Run worker `lean-cycle` or `activation-loop`; watch `brain_activation_events` for `cause=learning_step_completed` during cycles.
+5. During a cycle, confirm the mesh highlights the current step node when polling status.
 
 ## Known limitations (v1)
 

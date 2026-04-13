@@ -7,8 +7,8 @@ import math
 import os
 import time
 import threading
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from contextlib import contextmanager
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -5267,6 +5267,8 @@ _learning_status: dict[str, Any] = {
     "data_provider": None,
     "last_cycle_funnel": None,
     "last_cycle_budget": None,
+    "correlation_id": None,
+    "secondary_miners_skipped": False,
 }
 
 # Phase 3: global cycle lease enforcement (dedicated sessions; cleared in run_learning_cycle finally).
@@ -5300,6 +5302,17 @@ def _learning_status_with_elapsed() -> dict[str, Any]:
             status["elapsed_s"] = round((datetime.utcnow() - started).total_seconds(), 1)
         except Exception:
             logger.debug("[learning] _learning_status_with_elapsed: non-critical operation failed", exc_info=True)
+    # Neural mesh desk: map architecture ids → ``brain_graph_nodes`` ids (nm_lc_*).
+    cid = (status.get("current_cluster_id") or "").strip()
+    sid = (status.get("current_step_sid") or "").strip()
+    if status.get("running") and sid:
+        status["mesh_step_node_id"] = f"nm_lc_{sid}"
+    else:
+        status["mesh_step_node_id"] = ""
+    if status.get("running") and cid:
+        status["mesh_cluster_node_id"] = f"nm_lc_{cid}"
+    else:
+        status["mesh_cluster_node_id"] = ""
     return status
 
 
@@ -7534,10 +7547,12 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
 
 
 # Maintainer: Trading Brain Network tab + live status strings come from
-# app.services.trading.learning_cycle_architecture (single source of truth).
-# Use apply_learning_cycle_step_status(...); bump brain_network_graph meta.graph_version.
-# Each call must be preceded by: # graph-node: cluster_id/step_sid (see learning_cycle_architecture).
-# when changing public graph shape.
+# ``learning_cycle_architecture`` (single source of truth). Mesh topology lives in
+# ``brain_graph_nodes`` / migrations; projection schema in
+# ``brain_neural_mesh.projection.NEURAL_PROJECTION_SCHEMA_VERSION``.
+# Use apply_learning_cycle_step_status(...); after each step commit call
+# ``notify_learning_cycle_step_committed`` via ``_finish_lc_step`` in ``run_learning_cycle``.
+# Each step must keep: # graph-node: cluster_id/step_sid (see learning_cycle_architecture).
 
 
 def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str, Any]:
@@ -7555,17 +7570,6 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         "universe_size": len(top_tickers),
         "snapshot_driver": _drv.get("snapshot_driver"),
     }
-
-
-class _StepCtx:
-    """Mutable bag carried through a ``_cycle_step_ctx`` block."""
-
-    __slots__ = ("start", "extra", "error")
-
-    def __init__(self) -> None:
-        self.start: float = 0.0
-        self.extra: str = ""
-        self.error: str | None = None
 
 
 def run_learning_cycle(
@@ -7636,6 +7640,8 @@ def run_learning_cycle(
 
     _learning_status["running"] = True
     _learning_status["phase"] = "starting"
+    _learning_status["correlation_id"] = str(uuid.uuid4())
+    _learning_status["secondary_miners_skipped"] = False
     _learning_status["steps_completed"] = 0
     # Matches ``stage_catalog.TOTAL_STAGES`` / ``cycle_progress_stage_keys(snap_inline=False)``.
     _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
@@ -7680,6 +7686,23 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning("[learning] Step commit failed: %s", e)
 
+    def _finish_lc_step(cluster_id: str, step_sid: str, step_started: float, extra: str = "") -> None:
+        """Commit ORM work for one architecture step, then notify neural mesh (best-effort)."""
+        _commit_step()
+        try:
+            from .brain_neural_mesh.publisher import notify_learning_cycle_step_committed
+
+            notify_learning_cycle_step_committed(
+                db,
+                cluster_id=cluster_id,
+                step_sid=step_sid,
+                elapsed_sec=round(time.time() - float(step_started), 2),
+                extra=extra or "",
+                correlation_id=_learning_status.get("correlation_id"),
+            )
+        except Exception:
+            logger.debug("[learning] mesh notify after step failed (ignored)", exc_info=True)
+
     interrupted = False
     report_error: str | None = None
 
@@ -7694,57 +7717,8 @@ def run_learning_cycle(
             _cycle_step += 1
             _learning_status["steps_completed"] = _cycle_step
 
-        @contextmanager
-        def _cycle_step_ctx(
-            timing_name: str,
-            cluster_id: str,
-            step_sid: str,
-            *,
-            check_shutdown: bool = True,
-            critical: bool = True,
-        ):
-            """Context manager that wraps the boilerplate around every cycle step.
-
-            When *critical* is False, exceptions are swallowed (logged + recorded
-            in ``step.error``) so the cycle can continue.
-
-            Usage::
-
-                with _cycle_step_ctx("mine", "c_discovery", "mine") as step:
-                    discoveries = mine_patterns(db, user_id)
-                    step.extra = f"{len(discoveries)} patterns"
-            """
-            if check_shutdown and _shutting_down.is_set():
-                raise InterruptedError("shutdown")
-            apply_learning_cycle_step_status(_learning_status, cluster_id, step_sid)
-            step = _StepCtx()
-            step.start = time.time()
-            try:
-                yield step
-            except InterruptedError:
-                raise
-            except Exception as exc:
-                if critical:
-                    raise
-                step.extra = f"FAILED: {exc}"
-                step.error = str(exc)
-                logger.warning("[learning] Non-critical step '%s' failed: %s", timing_name, exc)
-            finally:
-                _bump_cycle_step()
-                _step_time(timing_name, step.start, step.extra)
-                try:
-                    from .brain_neural_mesh.publisher import publish_learning_step_completed
-                    publish_learning_step_completed(
-                        db,
-                        cluster_id=cluster_id,
-                        step_sid=step_sid,
-                        elapsed_sec=round(time.time() - step.start, 2),
-                        extra=step.extra or "",
-                        correlation_id=_learning_status.get("correlation_id"),
-                    )
-                except Exception:
-                    pass  # mesh wiring must never break learning cycle
-                _commit_step()
+        def _finish_secondary_step(cluster_id: str, step_sid: str, step_started: float, extra: str = "") -> None:
+            _finish_lc_step(cluster_id, step_sid, step_started, extra)
 
         # Prescreen + full scan are batch jobs (scheduler); hydrate report from DB only.
         _pre_updates, top_tickers, _ = load_prescreen_scan_and_universe(db, user_id)
@@ -7766,7 +7740,12 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("backfill", step_start,
                     f"{filled} returns + {scores_filled} scores via {_provider}")
-        _commit_step()
+        _finish_lc_step(
+            "c_state",
+            "backfill",
+            step_start,
+            f"{filled} returns + {scores_filled} scores via {_provider}",
+        )
 
         # Step 4: Confidence decay (prune stale insights early)
         if _shutting_down.is_set():
@@ -7780,7 +7759,12 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("confidence_decay", step_start,
                     f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned")
-        _commit_step()
+        _finish_lc_step(
+            "c_state",
+            "decay",
+            step_start,
+            f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned",
+        )
 
         # D1: Dead asset auto-cleanup — remove tickers with 3+ consecutive fetch failures
         try:
@@ -7802,7 +7786,12 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("mine", step_start,
                     f"{len(discoveries)} patterns from OHLCV via {_provider}")
-        _commit_step()
+        _finish_lc_step(
+            "c_discovery",
+            "mine",
+            step_start,
+            f"{len(discoveries)} patterns from OHLCV via {_provider}",
+        )
 
         # Step 6: Active pattern seeking (boost under-sampled patterns)
         if _shutting_down.is_set():
@@ -7815,7 +7804,12 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("active_seek", step_start,
                     f"{seek_result.get('sought', 0)} boosted")
-        _commit_step()
+        _finish_lc_step(
+            "c_discovery",
+            "seek",
+            step_start,
+            f"{seek_result.get('sought', 0)} boosted",
+        )
 
         # Step 7: Backtest TradingInsights (legacy; optional — ScanPattern queue is canonical)
         if _shutting_down.is_set():
@@ -7827,7 +7821,12 @@ def run_learning_cycle(
         report["insight_backtests_skipped"] = True
         _step_time("backtest_insights", step_start, "skipped (legacy insight backtests removed)")
         _bump_cycle_step()
-        _commit_step()
+        _finish_lc_step(
+            "c_validation",
+            "bt_insights",
+            step_start,
+            "skipped (legacy insight backtests removed)",
+        )
 
         # Step 8: Backtest ScanPatterns from priority queue
         if _shutting_down.is_set():
@@ -7841,12 +7840,20 @@ def run_learning_cycle(
         report["queue_exploration_added"] = queue_result.get("queue_exploration_added", 0)
         report["queue_pending"] = queue_result.get("pending", 0)
         report["queue_empty"] = queue_result.get("queue_empty", True)
-        report["backtests_run"] = bt_count + queue_result.get("backtests_run", 0)
+        report["backtests_run"] = int(report.get("backtests_run", 0)) + int(
+            queue_result.get("backtests_run", 0)
+        )
         _bump_cycle_step()
         _step_time("backtest_queue", step_start,
                    f"{queue_result.get('patterns_processed', 0)} patterns, "
                    f"{queue_result.get('pending', 0)} still pending")
-        _commit_step()
+        _finish_lc_step(
+            "c_validation",
+            "bt_queue",
+            step_start,
+            f"{queue_result.get('patterns_processed', 0)} patterns, "
+            f"{queue_result.get('pending', 0)} still pending",
+        )
 
         # Step 9: Fork / compare / promote ScanPattern variants (exit, entry, combo, …)
         if _shutting_down.is_set():
@@ -7866,7 +7873,12 @@ def run_learning_cycle(
             step_start,
             str(report.get("evolution", {})),
         )
-        _commit_step()
+        _finish_lc_step(
+            "c_evolution",
+            "variants",
+            step_start,
+            str(report.get("evolution", {})),
+        )
 
         # Step 10: Self-validation & weight evolution (with dynamic hypotheses)
         if _shutting_down.is_set():
@@ -7886,7 +7898,13 @@ def run_learning_cycle(
         _step_time("evolve", step_start,
                     f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
                     f"{evolve_result.get('weights_evolved', 0)} weights evolved")
-        _commit_step()
+        _finish_lc_step(
+            "c_evolution",
+            "hypotheses",
+            step_start,
+            f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
+            f"{evolve_result.get('weights_evolved', 0)} weights evolved",
+        )
 
         # Step 11: Breakout outcome learning
         if _shutting_down.is_set():
@@ -7910,13 +7928,21 @@ def run_learning_cycle(
                     f"{bo_result.get('patterns_learned', 0)} patterns from "
                     f"{bo_result.get('total_resolved', 0)} resolved alerts, "
                     f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates")
-        _commit_step()
+        _finish_lc_step(
+            "c_evolution",
+            "breakout",
+            step_start_bo,
+            f"{bo_result.get('patterns_learned', 0)} patterns from "
+            f"{bo_result.get('total_resolved', 0)} resolved alerts, "
+            f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates",
+        )
 
         # Steps 11–18: Secondary miners (optional — disable for faster cycles)
         def _mark_secondary_skipped() -> None:
             nonlocal _cycle_step
             _cycle_step += 8
             _learning_status["steps_completed"] = _cycle_step
+            _learning_status["secondary_miners_skipped"] = True
 
         run_secondary_miners_phase(
             db,
@@ -7927,7 +7953,7 @@ def run_learning_cycle(
             learning_status=_learning_status,
             bump_cycle_step=_bump_cycle_step,
             step_time=_step_time,
-            commit_step=_commit_step,
+            finish_lc_step=_finish_secondary_step,
             shutting_down_is_set=_shutting_down.is_set,
             mark_secondary_skipped=_mark_secondary_skipped,
         )
@@ -7944,7 +7970,7 @@ def run_learning_cycle(
         report["journal_written"] = journal is not None
         _bump_cycle_step()
         _step_time("journal", step_start)
-        _commit_step()
+        _finish_lc_step("c_journal", "journal", step_start, "")
 
         # Step 21: Signal events
         if _shutting_down.is_set():
@@ -7956,7 +7982,7 @@ def run_learning_cycle(
         report["signal_events"] = len(events)
         _bump_cycle_step()
         _step_time("signals", step_start, f"{len(events)} events")
-        _commit_step()
+        _finish_lc_step("c_journal", "signals", step_start, f"{len(events)} events")
 
         # Step 22: Train pattern meta-learner
         if _shutting_down.is_set():
@@ -7983,7 +8009,12 @@ def run_learning_cycle(
         _step_time("ml_train", step_start,
                     f"acc={ml_result.get('cv_accuracy', 0):.3f}"
                     if ml_result.get("ok") else "skipped")
-        _commit_step()
+        _finish_lc_step(
+            "c_meta_learning",
+            "ml",
+            step_start,
+            f"acc={ml_result.get('cv_accuracy', 0):.3f}" if ml_result.get("ok") else "skipped",
+        )
 
         # Pattern engine — discover, test, evolve (before proposals)
         if _shutting_down.is_set():
@@ -8000,7 +8031,7 @@ def run_learning_cycle(
             logger.warning(f"[trading] Pattern engine cycle failed: {e}")
         _bump_cycle_step()
         _step_time("pattern_engine", step_start, "done")
-        _commit_step()
+        _finish_lc_step("c_decisioning", "pattern_engine", step_start, "done")
 
         # Strategy proposals (after pattern engine)
         if _shutting_down.is_set():
@@ -8018,7 +8049,12 @@ def run_learning_cycle(
         _bump_cycle_step()
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
-        _commit_step()
+        _finish_lc_step(
+            "c_decisioning",
+            "proposals",
+            step_start,
+            f"{report.get('proposals_generated', 0)} generated",
+        )
 
         # Cycle AI report (deep study) — synthesize cycle into stored markdown
         report["cycle_ai_report_id"] = None
@@ -8040,12 +8076,18 @@ def run_learning_cycle(
                 step_start,
                 f"id={report.get('cycle_ai_report_id')}" if report.get("cycle_ai_report_id") else "failed",
             )
-            _commit_step()
+            _finish_lc_step(
+                "c_control",
+                "cycle_report",
+                step_start,
+                f"id={report.get('cycle_ai_report_id')}" if report.get("cycle_ai_report_id") else "failed",
+            )
         else:
             _learning_status["steps_completed"] = _cycle_step
 
         # Live vs research depromotion (optional)
         if not _shutting_down.is_set():
+            step_start_dep = time.time()
             # graph-node: c_control/depromote
             apply_learning_cycle_step_status(_learning_status, "c_control", "depromote")
             try:
@@ -8067,8 +8109,22 @@ def run_learning_cycle(
             except Exception as e:
                 logger.warning("[learning] execution robustness refresh failed: %s", e)
                 report["execution_robustness"] = {"ok": False, "error": str(e)}
+            try:
+                from .brain_neural_mesh.publisher import notify_learning_cycle_step_committed
+
+                notify_learning_cycle_step_committed(
+                    db,
+                    cluster_id="c_control",
+                    step_sid="depromote",
+                    elapsed_sec=round(time.time() - step_start_dep, 2),
+                    extra="",
+                    correlation_id=_learning_status.get("correlation_id"),
+                )
+            except Exception:
+                logger.debug("[learning] mesh notify depromote failed (ignored)", exc_info=True)
 
         # Step 14: Finalize + log
+        step_start_fin = time.time()
         # graph-node: c_control/finalize
         apply_learning_cycle_step_status(_learning_status, "c_control", "finalize")
         elapsed = time.time() - start
@@ -8090,9 +8146,13 @@ def run_learning_cycle(
             f"ML={'trained' if report.get('ml_trained') else 'skipped'}, "
             f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
-        _commit_step()
         _learning_status["steps_completed"] = _cycle_step
-        _commit_step()
+        _finish_lc_step(
+            "c_control",
+            "finalize",
+            step_start_fin,
+            f"elapsed={elapsed:.0f}s",
+        )
 
     except InterruptedError:
         interrupted = True
@@ -8119,6 +8179,8 @@ def run_learning_cycle(
         _learning_status["current_step_sid"] = ""
         _learning_status["current_cluster_index"] = -1
         _learning_status["current_step_index"] = -1
+        _learning_status["correlation_id"] = None
+        _learning_status["secondary_miners_skipped"] = False
         _learning_status["last_run"] = datetime.utcnow().isoformat()
         _learning_status["last_duration_s"] = round(elapsed, 1)
         persist_learning_live_snapshot_force()

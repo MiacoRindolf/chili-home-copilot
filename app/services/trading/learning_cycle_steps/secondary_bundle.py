@@ -13,6 +13,9 @@ from ..learning_cycle_architecture import apply_learning_cycle_step_status
 
 logger = logging.getLogger(__name__)
 
+# (cluster_id, step_sid, step_started_epoch, extra) -> None; commits + neural mesh notify
+FinishLcStepFn = Callable[[str, str, float, str], None]
+
 
 def run_secondary_miners_phase(
     db: Session,
@@ -24,7 +27,7 @@ def run_secondary_miners_phase(
     learning_status: dict[str, Any],
     bump_cycle_step: Callable[[], None],
     step_time: Callable[[str, float, str], None],
-    commit_step: Callable[[], None],
+    finish_lc_step: FinishLcStepFn,
     shutting_down_is_set: Callable[[], bool],
     mark_secondary_skipped: Callable[[], None],
 ) -> None:
@@ -47,7 +50,13 @@ def run_secondary_miners_phase(
             f"compression {intra_result.get('discoveries', 0)} / high_vol {hv_result.get('discoveries', 0)} "
             f"from {intra_result.get('rows_mined', 0)} + {hv_result.get('rows_mined', 0)} bars",
         )
-        commit_step()
+        finish_lc_step(
+            "c_secondary_structure",
+            "intraday_hv",
+            step_start_id,
+            f"compression {intra_result.get('discoveries', 0)} / high_vol {hv_result.get('discoveries', 0)} "
+            f"from {intra_result.get('rows_mined', 0)} + {hv_result.get('rows_mined', 0)} bars",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -57,7 +66,12 @@ def run_secondary_miners_phase(
         report["patterns_refined"] = refine_result.get("refined", 0)
         bump_cycle_step()
         step_time("refine", step_start, f"{refine_result.get('refined', 0)} patterns refined")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_structure",
+            "refine",
+            step_start,
+            f"{refine_result.get('refined', 0)} patterns refined",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -67,7 +81,12 @@ def run_secondary_miners_phase(
         report["exit_adjustments"] = exit_result.get("adjustments", 0)
         bump_cycle_step()
         step_time("exit_optimization", step_start, f"{exit_result.get('adjustments', 0)} adjustments")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_outcomes",
+            "exit",
+            step_start,
+            f"{exit_result.get('adjustments', 0)} adjustments",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -77,7 +96,12 @@ def run_secondary_miners_phase(
         report["fakeout_patterns"] = fakeout_result.get("patterns_found", 0)
         bump_cycle_step()
         step_time("fakeout_mining", step_start, f"{fakeout_result.get('patterns_found', 0)} fakeout patterns")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_outcomes",
+            "fakeout",
+            step_start,
+            f"{fakeout_result.get('patterns_found', 0)} fakeout patterns",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -87,7 +111,12 @@ def run_secondary_miners_phase(
         report["sizing_adjustments"] = sizing_result.get("adjustments", 0)
         bump_cycle_step()
         step_time("position_sizing", step_start, f"{sizing_result.get('adjustments', 0)} sizing adjustments")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_outcomes",
+            "sizing",
+            step_start,
+            f"{sizing_result.get('adjustments', 0)} sizing adjustments",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -97,7 +126,12 @@ def run_secondary_miners_phase(
         report["inter_alert_insights"] = inter_result.get("insights", 0)
         bump_cycle_step()
         step_time("inter_alert", step_start, f"{inter_result.get('insights', 0)} inter-alert insights")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_signals",
+            "inter_alert",
+            step_start,
+            f"{inter_result.get('insights', 0)} inter-alert insights",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -107,7 +141,12 @@ def run_secondary_miners_phase(
         report["timeframe_insights"] = tf_result.get("insights", 0)
         bump_cycle_step()
         step_time("timeframe_learning", step_start, f"{tf_result.get('insights', 0)} timeframe insights")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_signals",
+            "timeframe",
+            step_start,
+            f"{tf_result.get('insights', 0)} timeframe insights",
+        )
 
         if shutting_down_is_set():
             raise InterruptedError("shutdown")
@@ -117,7 +156,12 @@ def run_secondary_miners_phase(
         report["synergies_found"] = synergy_result.get("synergies_found", 0)
         bump_cycle_step()
         step_time("synergy_mining", step_start, f"{synergy_result.get('synergies_found', 0)} synergies found")
-        commit_step()
+        finish_lc_step(
+            "c_secondary_signals",
+            "synergy",
+            step_start,
+            f"{synergy_result.get('synergies_found', 0)} synergies found",
+        )
     else:
         report["secondary_miners_skipped"] = True
         mark_secondary_skipped()

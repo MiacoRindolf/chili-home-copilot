@@ -70,6 +70,8 @@ Scheduler role from `settings.chili_scheduler_role`: `none`, `all`, `web`, `work
 - `app/services/brain_worker_signals.py` — DB-level stop/wake controls
 - `app/models/trading.py` — All SQLAlchemy models (21 classes)
 
-### Network Graph
-- `brain_network_graph.py` — Generates D3-compatible JSON from architecture definitions
-- `app/templates/brain.html` — JavaScript visualization with LightweightCharts, search, legend
+### Network Graph (neural mesh)
+- `brain_neural_mesh/projection.py` — Builds Trading Brain graph JSON from Postgres (`brain_graph_nodes` / `brain_graph_edges`)
+- `brain_neural_mesh/publisher.py` — Enqueues `brain_activation_events` (snapshots, learning-cycle step completions, cycle complete)
+- `learning_cycle_architecture.py` — Canonical clusters/steps; indices align with `mesh_lc_indices_for_node_id` in projection for desk overlay
+- `app/templates/brain.html` — Neural mesh SVG (rings, activations, learning-cycle running/pending highlight on `nm_lc_*` nodes)

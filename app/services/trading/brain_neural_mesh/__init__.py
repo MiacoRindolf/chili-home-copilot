@@ -1,4 +1,4 @@
-"""Trading Brain v2: Postgres-backed event-driven neural mesh (strangler alongside legacy cycle)."""
+"""Trading Brain: Postgres-backed event-driven neural mesh (topology + activations)."""
 
 from __future__ import annotations
 
