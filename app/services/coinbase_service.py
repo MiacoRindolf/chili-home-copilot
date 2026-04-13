@@ -569,6 +569,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             (trade.notes or "")
             + f"\nAuto-closed: position no longer on Coinbase ({datetime.utcnow().strftime('%Y-%m-%d %H:%M')})"
         )
+        try:
+            from .trading.brain_work.execution_hooks import on_broker_reconciled_close
+
+            on_broker_reconciled_close(db, trade, source="coinbase_position_sync")
+        except Exception:
+            logger.debug("[coinbase] brain_work broker close hook failed", exc_info=True)
         closed += 1
 
     db.commit()

@@ -14,6 +14,7 @@ from .emitters import (
     emit_live_trade_closed_outcome,
     emit_paper_trade_closed_outcome,
 )
+from .execution_attribution import trade_close_attribution_dict
 from .ledger import enqueue_or_refresh_debounced_work
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,7 @@ def on_live_trade_closed(
 ) -> None:
     """Portfolio or operator-initiated close of a live ``Trade`` row (before commit)."""
     try:
+        merged = {**trade_close_attribution_dict(trade), **(extra or {})}
         emit_live_trade_closed_outcome(
             db,
             trade_id=int(trade.id),
@@ -65,7 +67,7 @@ def on_live_trade_closed(
             ticker=(trade.ticker or "").strip(),
             source=source,
             scan_pattern_id=getattr(trade, "scan_pattern_id", None),
-            extra=extra,
+            extra=merged,
         )
         uid = trade.user_id
         if uid is not None:
@@ -89,6 +91,7 @@ def on_broker_reconciled_close(
 ) -> None:
     """Broker sync inferred close (position vanished, manual cleanup during RH sync, etc.)."""
     try:
+        att = trade_close_attribution_dict(trade)
         emit_broker_fill_closed_outcome(
             db,
             trade_id=int(trade.id),
@@ -97,6 +100,7 @@ def on_broker_reconciled_close(
             broker_source=(getattr(trade, "broker_source", None) or "") or "unknown",
             source=source,
             scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            extra=att,
         )
         uid = trade.user_id
         if uid is not None:

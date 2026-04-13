@@ -127,6 +127,29 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
         "should_update": spread.get("should_update"),
         "reason": spread.get("reason"),
     }
+    attribution_summary: dict | None = None
+    try:
+        from ..attribution_service import live_vs_research_by_pattern
+
+        rep = live_vs_research_by_pattern(db, int(uid), days=90, limit=8)
+        pats = rep.get("patterns") or []
+        attribution_summary = {
+            "window_days": rep.get("window_days"),
+            "patterns_tracked": len(pats),
+            "top_by_live_closed": [
+                {
+                    "scan_pattern_id": p.get("scan_pattern_id"),
+                    "live_n": p.get("live_closed_trades"),
+                    "live_wr_pct": p.get("live_win_rate_pct"),
+                    "oos_wr_pct": p.get("research_oos_win_rate_pct"),
+                }
+                for p in pats[:5]
+            ],
+            "digest_trigger": payload.get("trigger"),
+        }
+    except Exception:
+        logger.debug("%s attribution snapshot skipped", LOG_PREFIX, exc_info=True)
+
     emit_execution_quality_updated_outcome(
         db,
         user_id=int(uid),
@@ -134,6 +157,7 @@ def _handle_execution_feedback_digest(db: Session, ev, user_id: int | None) -> N
         spread_hint=spread_hint,
         depromotion=dep if isinstance(dep, dict) else {"raw": dep},
         parent_work_event_id=int(ev.id),
+        attribution_summary=attribution_summary,
     )
     try:
         from ..brain_neural_mesh.publisher import publish_brain_work_outcome

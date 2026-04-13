@@ -993,7 +993,12 @@ def _safe_scan_status_part(label: str, fn, default):
 
 @router.get("/api/trading/scan/status")
 def api_scan_status():
-    """Aggregate scan / learning / prescreen / scheduler state for the Brain UI.
+    """Aggregate Brain runtime, scan, reconcile-cycle, prescreen, and scheduler state.
+
+    **Primary operator read path:** ``brain_runtime`` (work ledger, release, scheduler, scan,
+    ``learning_summary``). Top-level ``work_ledger``, ``release``, ``scheduler``, and ``scan``
+    duplicate ``brain_runtime`` for **one release** of backward compatibility — prefer
+    ``brain_runtime`` in new UI.
 
     Values are passed through :func:`to_jsonable` so numpy/pandas scalars and
     non-finite floats cannot break JSON encoding (Starlette uses ``allow_nan=False``).
@@ -1020,18 +1025,53 @@ def api_scan_status():
         )
         return {"git_commit": sha} if sha else {}
 
+    scan_st = _safe_scan_status_part("scan", ts.get_scan_status, {})
+    prescreen_st = _safe_scan_status_part("prescreen", ts.get_prescreen_status, {})
+    scheduler_st = _safe_scan_status_part(
+        "scheduler",
+        trading_scheduler.get_scheduler_info,
+        {"running": False, "jobs": []},
+    )
+    work_ledger_st = _safe_scan_status_part("work_ledger", _work_ledger_summary, {})
+    release_st = _release_info()
+    learning_st = _safe_scan_status_part("learning", ts.get_learning_status, {})
+
+    learning_summary: dict[str, Any] = {
+        "running": bool(learning_st.get("running")),
+        "phase": learning_st.get("phase"),
+        "current_step": learning_st.get("current_step") or "",
+        "steps_completed": int(learning_st.get("steps_completed") or 0),
+        "total_steps": int(learning_st.get("total_steps") or 0),
+        "elapsed_s": learning_st.get("elapsed_s"),
+    }
+
+    _mirror_note = (
+        "Top-level work_ledger, release, scheduler, and scan mirror brain_runtime for one release; "
+        "prefer brain_runtime."
+    )
+    brain_runtime: dict[str, Any] = {
+        "work_ledger": work_ledger_st,
+        "release": release_st,
+        "scheduler": scheduler_st,
+        "scan": scan_st,
+        "learning_summary": learning_summary,
+        "compatibility_mirror_keys": ["work_ledger", "release", "scheduler", "scan"],
+        "compatibility_mirror_note": _mirror_note,
+    }
+
+    learning_out = dict(learning_st)
+    learning_out["status_role"] = "reconcile_compatibility"
+
     payload = {
         "ok": True,
-        "scan": _safe_scan_status_part("scan", ts.get_scan_status, {}),
-        "learning": _safe_scan_status_part("learning", ts.get_learning_status, {}),
-        "prescreen": _safe_scan_status_part("prescreen", ts.get_prescreen_status, {}),
-        "scheduler": _safe_scan_status_part(
-            "scheduler",
-            trading_scheduler.get_scheduler_info,
-            {"running": False, "jobs": []},
-        ),
-        "work_ledger": _safe_scan_status_part("work_ledger", _work_ledger_summary, {}),
-        "release": _release_info(),
+        "brain_runtime": brain_runtime,
+        "prescreen": prescreen_st,
+        "learning": learning_out,
+        # --- One-release compatibility mirrors (remove after consumers migrate to brain_runtime) ---
+        "work_ledger": work_ledger_st,  # mirror of brain_runtime["work_ledger"]
+        "release": release_st,  # mirror of brain_runtime["release"]
+        "scheduler": scheduler_st,  # mirror of brain_runtime["scheduler"]
+        "scan": scan_st,  # mirror of brain_runtime["scan"]
     }
     try:
         return JSONResponse(to_jsonable(payload))
@@ -1041,12 +1081,14 @@ def api_scan_status():
         return JSONResponse(
             {
                 "ok": True,
-                "scan": {},
-                "learning": {},
+                "brain_runtime": {},
                 "prescreen": {},
-                "scheduler": {"running": False, "jobs": []},
+                "learning": {},
+                # One-release mirrors (same keys as happy path); empty when encode failed mid-flight
                 "work_ledger": {},
                 "release": {},
+                "scheduler": {"running": False, "jobs": []},
+                "scan": {},
                 "encode_error": True,
             }
         )

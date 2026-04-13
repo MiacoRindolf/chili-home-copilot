@@ -943,7 +943,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
     <div id="domain-hub" style="display:{% if _bd == 'hub' %}flex{% else %}none{% endif %}">
       <div class="b-hub-intro">
         <h2>Brain domains</h2>
-        <p>Pick a domain to open its desk. Status dots show when a learning cycle is running.</p>
+        <p>Pick a domain to open its desk. Status dots reflect domain activity (including when a full reconcile pass is in progress).</p>
       </div>
       <div class="b-hub-grid" id="domain-hub-grid"></div>
       <div class="b-hub-status-banner" id="hub-status-banner">Checking status...</div>
@@ -1073,8 +1073,8 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <details class="desk-runtime-details" id="desk-runtime-details">
         <summary>Runtime &amp; worker controls (Start / Stop / Wake / queue)</summary>
         <div style="font-size:10px;color:var(--text-muted);margin:0 0 10px 0;padding:8px 10px;line-height:1.45;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
-          <strong>Learning-cycle controls:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> learning cycle.
-          Actionable trade recommendations and runtime operations stay policy-gated through
+          <strong>Brain worker controls:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> process (dispatch round, then scheduled <em>full reconcile pass</em> / legacy cycle, plus maintenance subtasks).
+          Primary live truth is the <strong>Brain activity</strong> strip (work ledger) above. Actionable trades stay policy-gated through
           <a href="/trading" style="color:var(--accent)">Trading</a> and <a href="/trading/autopilot" style="color:var(--accent)">Autopilot</a>.
         </div>
       <div class="brain-status-bar" id="brain-status-bar">
@@ -1084,7 +1084,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             <span class="bsb-label" id="bw-status">Stopped</span>
             <div class="bsb-controls" id="bw-controls">
               <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
-              <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip the idle wait and start the next learning cycle now">&#x23ED; Wake</button>
+              <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip idle wait and start the next worker iteration (dispatch + reconcile pass) now">&#x23ED; Wake</button>
               <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
               <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
             </div>
@@ -1098,20 +1098,23 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             <span class="bsb-meta" id="brain-scheduler-info"></span>
           </div>
         </div>
-        <div id="brain-pipeline-section" class="bsb-progress" style="display:none">
-          <div class="bsb-progress-inner" style="flex-direction:column;align-items:flex-start;gap:2px">
-            <span style="font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em">Learning cycle (background runner)</span>
-            <span id="brain-learning-step" style="font-size:10px;font-weight:600;color:#a78bfa"></span>
-            <span id="brain-learning-progress" style="font-size:10px;color:var(--text-muted)"></span>
-          </div>
-          <div style="height:3px;background:var(--border);border-radius:2px;margin-top:3px">
-            <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
-          </div>
-        </div>
         <div id="brain-work-ledger-strip" style="display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary, rgba(0,0,0,.04));border:1px solid var(--border);font-size:10px;color:var(--text-secondary);line-height:1.4">
-          <span style="font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:9px;letter-spacing:.04em">Work ledger</span>
+          <span style="font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:9px;letter-spacing:.04em">Brain activity</span>
           <span id="brain-work-ledger-text" style="margin-left:8px">--</span>
         </div>
+        <details id="brain-reconcile-pipeline-details" class="brain-reconcile-pipeline-details" style="margin-top:6px;border-radius:6px;border:1px solid var(--border);padding:4px 8px;background:var(--bg-secondary, rgba(0,0,0,.02))">
+          <summary style="font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;cursor:pointer" title="Secondary: legacy step model. Expand only when a reconcile pass is running or for debugging.">Reconcile / compatibility detail (legacy step progress)</summary>
+          <div id="brain-pipeline-section" class="bsb-progress" style="display:none;margin-top:6px">
+            <div class="bsb-progress-inner" style="flex-direction:column;align-items:flex-start;gap:2px">
+              <span style="font-size:9px;font-weight:600;color:var(--text-muted);text-transform:none;letter-spacing:0">Full reconcile cycle status (legacy step model)</span>
+              <span id="brain-learning-step" style="font-size:10px;font-weight:600;color:#a78bfa"></span>
+              <span id="brain-learning-progress" style="font-size:10px;color:var(--text-muted)"></span>
+            </div>
+            <div style="height:3px;background:var(--border);border-radius:2px;margin-top:3px">
+              <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
+            </div>
+          </div>
+        </details>
         <div class="bsb-row" id="bsb-opp-summary-row" style="flex-wrap:wrap;gap:6px;align-items:center;padding-top:6px;margin-top:4px;border-top:1px solid var(--border)">
           <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-a" title="Scroll to Opportunity Board">Actionable: â€”</a>
           <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-b" title="Scroll to Opportunity Board">Watch soon: â€”</a>
@@ -1273,9 +1276,9 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
               <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
             </div>
             <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
-              <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Cycle AI Reports</div>
-              <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">One summary per learning cycle (newest first). Flip for full report.</p>
-              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No cycle reports yet â€” run a learning cycle.</div>
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Reconcile digest (AI reports)</div>
+              <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Digest / audit: one summary per full reconcile pass (newest first). Flip for full report.</p>
+              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No reports yet â€” run a worker reconcile pass or wait for the next cycle.</div>
               <div id="cycle-report-ui" style="display:none">
                 <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
                   <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
@@ -1327,7 +1330,7 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             </div>
             <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:0 0 10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
               <strong>How it works:</strong> <strong>Start / Stop</strong> control the Docker Compose <code style="font-size:9px">brain-worker</code> service (same image as the app, running <code>scripts/brain_worker.py</code>), not a subprocess inside this web server.
-              <strong>Run next cycle</strong> only skips <em>idle sleep</em> between full learning cycles.
+              Each iteration runs a <strong>work-ledger dispatch round</strong>, then a <strong>full reconcile pass</strong> (legacy in-process cycle), then maintenance subtasks. <strong>Wake</strong> only skips <em>idle sleep</em> between those iterations.
               <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug).
             </div>
             <div class="bw-status-row" style="margin-bottom:10px">
@@ -3202,13 +3205,15 @@ function initTradingBrainNetworkGraph() {
     }).observe(vp);
   }
 
-  // Live cycle status overlay — highlights active cluster/step during a learning cycle
+  // Reconcile-pass status overlay — highlights active cluster/step during full in-process reconcile (compatibility graph)
   function tbnUpdateNodeStatuses() {
     fetch('/api/trading/scan/status', { credentials: 'same-origin' })
       .then(function(r) { return r.json(); })
       .then(function(d) {
-        if (!d || !d.ok || !d.learning) return;
+        if (!d || !d.ok) return;
+        // No brain_runtime substitute: overlay needs mesh/cluster/step fields from top-level `learning` only.
         var lr = d.learning;
+        if (!lr) return;
         var running = !!lr.running;
         var graphId = (lr.graph_node_id || '').toLowerCase();
         var meshStep = (lr.mesh_step_node_id || '').toLowerCase();
@@ -4583,7 +4588,7 @@ function renderOperatorDeskTrustStrip() {
   var lc = w.last_cycle || {};
   var parts = [];
   parts.push('<div><strong>Worker:</strong> ' + escHtml(w.status || 'unknown') + '</div>');
-  if (lc.completed) parts.push('<div><strong>Last learning cycle:</strong> ' + escHtml(String(lc.completed)) + '</div>');
+  if (lc.completed) parts.push('<div><strong>Last reconcile pass (worker):</strong> ' + escHtml(String(lc.completed)) + '</div>');
   var bd = window._oppBoardLastGoodPayload;
   if (bd) {
     parts.push('<div><strong>Opportunity board generated:</strong> ' + escHtml(String(bd.generated_at || 'â€”')) + '</div>');
@@ -4721,7 +4726,7 @@ function renderOperatorDeskFromBoard(d) {
   var t3 = document.getElementById('odh-top3');
   if (t3) {
     if (!top3.length) {
-      t3.innerHTML = '<div class="odh-card"><div class="odh-eng">Core repeatable edge</div><div class="odh-tk">No tiered opportunities</div><div class="odh-act" style="color:var(--text-muted)">Run learning cycles or relax tier caps â€” see board section.</div></div>';
+      t3.innerHTML = '<div class="odh-card"><div class="odh-eng">Core repeatable edge</div><div class="odh-tk">No tiered opportunities</div><div class="odh-act" style="color:var(--text-muted)">Run worker reconcile passes or relax tier caps â€” see board section.</div></div>';
     } else {
       t3.innerHTML = top3.map(function(it) {
         var eng = it.opportunity_engine || 'context_unknown';
@@ -6036,7 +6041,7 @@ function _renderEvEvolution(root, currentSpId) {
     el.innerHTML = '<div class="evo-empty-tree">' +
       '<div style="font-size:24px;margin-bottom:8px;opacity:.5">&#x1F331;</div>' +
       '<div style="font-weight:600;margin-bottom:4px">No evolutionary variants yet</div>' +
-      '<div>Chili\'s brain will fork entry conditions, exit strategies, and cross-breed patterns to evolve them over time.<br>Check back after the next learning cycle.</div>' +
+      '<div>Chili\'s brain will fork entry conditions, exit strategies, and cross-breed patterns to evolve them over time.<br>Check back after the next reconcile pass or pattern refresh.</div>' +
     '</div>';
     return;
   }
@@ -6315,11 +6320,31 @@ var _PIPELINE_STEPS = [
   {id:'journal',label:'Journal',icon:'&#x1F4DD;'},{id:'signal',label:'Signals',icon:'&#x1F4E1;'},{id:'ml_train',label:'ML Train',icon:'&#x1F9E0;'},{id:'final',label:'Done',icon:'&#x2705;'}
 ];
 
+/**
+ * Resolve primary fields from ``/api/trading/scan/status``.
+ * Prefer ``brain_runtime``; fall back to top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan``
+ * (one-release compatibility mirrors — see api_scan_status in ai.py).
+ * Full reconcile graph fields stay on top-level ``learning`` only (no brain_runtime equivalent).
+ */
+function scanStatusBrainRuntime(d) {
+  var br = d && d.brain_runtime && typeof d.brain_runtime === 'object' ? d.brain_runtime : null;
+  return {
+    work_ledger: (br && br.work_ledger && typeof br.work_ledger === 'object') ? br.work_ledger : (d.work_ledger || {}),
+    release: (br && br.release && typeof br.release === 'object') ? br.release : (d.release || {}),
+    scheduler: (br && br.scheduler && typeof br.scheduler === 'object') ? br.scheduler : (d.scheduler || { running: false, jobs: [] }),
+    scan: (br && br.scan && typeof br.scan === 'object') ? br.scan : (d.scan || {}),
+    learning_summary: (br && br.learning_summary && typeof br.learning_summary === 'object') ? br.learning_summary : null
+  };
+}
+
 function pollLearningStatus() {
   return fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
-    var learning = d.learning, scan = d.scan, scheduler = d.scheduler;
-    var wl = d.work_ledger || {};
+    var learning = d.learning || {};
+    var rt = scanStatusBrainRuntime(d);
+    var scan = rt.scan;
+    var scheduler = rt.scheduler;
+    var wl = rt.work_ledger;
     var wlStrip = document.getElementById('brain-work-ledger-strip');
     var wlText = document.getElementById('brain-work-ledger-text');
     if (wlStrip && wlText && wl && wl.enabled !== false) {
@@ -6334,23 +6359,54 @@ function pollLearningStatus() {
       var rc = (wl.recent_meaningful_outcomes && wl.recent_meaningful_outcomes.length) ? wl.recent_meaningful_outcomes : ((wl.recent_completions && wl.recent_completions.length) ? wl.recent_completions : []);
       var last = rc[0];
       var lastStr = last ? last.event_type : 'none';
-      wlText.textContent = 'Pending ' + pend + (rw ? ' (retry_wait ' + rw + ')' : '') + ' · Dead 24h ' + dead + ' · By type: ' + (pendTypes || '—') + ' · Processing: ' + procStr + ' · Last outcome: ' + lastStr;
+      var rel = rt.release || {};
+      var sha = rel.git_commit ? String(rel.git_commit).slice(0, 7) : '';
+      var pulse = wl.execution_pulse;
+      var eo24 = wl.execution_outcomes_24h && typeof wl.execution_outcomes_24h === 'object' ? wl.execution_outcomes_24h : {};
+      var lead = [];
+      if (pulse && pulse.event_type) {
+        var evLab = pulse.event_type === 'broker_fill_closed' ? 'Broker' : 'Live';
+        var tk = pulse.ticker || '—';
+        var pid = pulse.scan_pattern_id != null ? ' p#' + pulse.scan_pattern_id : '';
+        var pnlStr = (typeof pulse.pnl === 'number') ? (' pnl ' + pulse.pnl) : '';
+        var src = pulse.source ? (' · ' + String(pulse.source).slice(0, 24)) : '';
+        lead.push(evLab + ' ' + tk + pid + pnlStr + src);
+      }
+      var e24k = Object.keys(eo24);
+      if (e24k.length) {
+        var e24lbl = { live_trade_closed: 'live', broker_fill_closed: 'broker', paper_trade_closed: 'paper' };
+        lead.push('24h ' + e24k.map(function(k){ return (e24lbl[k] || k.slice(0, 10)) + ':' + eo24[k]; }).join(' '));
+      }
+      if (sha) lead.push('build ' + sha);
+      var queue = 'Q ' + pend + (rw ? ' (retry ' + rw + ')' : '') + ' · dead24h ' + dead + ' · ' + (pendTypes || '—') + ' · proc ' + procStr;
+      wlText.textContent = lead.length ? (lead.join(' · ') + ' — ' + queue) : (queue + ' · last ' + lastStr);
     } else if (wlStrip) {
       wlStrip.style.display = 'none';
     }
     var pipelineSection = document.getElementById('brain-pipeline-section');
+    var pipelineDetails = document.getElementById('brain-reconcile-pipeline-details');
 
     if (learning.running) {
-      pipelineSection.style.display = '';
+      if (pipelineDetails) {
+        pipelineDetails.style.display = '';
+        pipelineDetails.open = true;
+      }
+      if (pipelineSection) pipelineSection.style.display = '';
       var stepEl = document.getElementById('brain-learning-step');
       var progEl = document.getElementById('brain-learning-progress');
       var barEl = document.getElementById('brain-progress-bar');
-      if (stepEl) stepEl.textContent = learning.current_step || '';
-      var pct = Math.round(learning.steps_completed / learning.total_steps * 100);
+      var roleHint = (learning.status_role === 'reconcile_compatibility') ? ' (reconcile compatibility)' : '';
+      if (stepEl) stepEl.textContent = (learning.current_step || '') + roleHint;
+      var pct = learning.total_steps ? Math.round(learning.steps_completed / learning.total_steps * 100) : 0;
       if (progEl) progEl.textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
       if (barEl) barEl.style.width = Math.min(100, pct) + '%';
     } else {
-      pipelineSection.style.display = 'none';
+      // Secondary UX: keep <details> visible but collapsed when idle (not display:none).
+      if (pipelineDetails) {
+        pipelineDetails.style.display = '';
+        pipelineDetails.open = false;
+      }
+      if (pipelineSection) pipelineSection.style.display = 'none';
     }
 
     var infoEl = document.getElementById('brain-scheduler-info');
@@ -6363,14 +6419,14 @@ function pollLearningStatus() {
     }
     if (infoEl) infoEl.textContent = parts.join(' Â· ');
 
-    if (!learning.running && pipelineSection._wasRunning) {
+    if (!learning.running && pipelineSection && pipelineSection._wasRunning) {
       loadPlaybook();
       loadPerfDashboard();
       loadTradeablePatterns();
       loadResearchEdgePatterns();
       if (_bddActiveTab === 'research') { _bddLoaded['research'] = false; _loadResearchData(); }
     }
-    pipelineSection._wasRunning = learning.running;
+    if (pipelineSection) pipelineSection._wasRunning = learning.running;
   }).catch(function(){}).then(function() { return updateSidebarStatus(); });
 }
 

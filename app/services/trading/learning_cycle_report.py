@@ -1,4 +1,4 @@
-"""Deep-study AI report for one learning cycle: bounded metrics + LLM + DB persist."""
+"""Reconcile-pass digest: bounded cycle metrics + LLM + DB persist (audit/history, not live operator truth)."""
 from __future__ import annotations
 
 import json
@@ -127,7 +127,7 @@ def build_report_payload(report: dict[str, Any]) -> dict[str, Any]:
 
 def _fallback_markdown(metrics: dict[str, Any]) -> str:
     lines = [
-        f"# Learning cycle report — {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
+        f"# Reconcile pass digest — {datetime.utcnow().strftime('%Y-%m-%d %H:%M')} UTC",
         "",
         "_LLM unavailable or call failed; metrics-only summary._",
         "",
@@ -151,11 +151,11 @@ def generate_and_store_cycle_report(db: Session, user_id: int | None, report: di
 
     system = (
         "You are CHILI's trading brain analyst. Write a clear markdown report for the user "
-        "based only on the learning-cycle metrics provided. No disclaimers about not being "
+        "based only on the reconcile-pass metrics provided. No disclaimers about not being "
         "financial advice unless one short line at the end."
     )
     user_prompt = (
-        "Here is JSON from one automated learning cycle (scans, patterns, backtests, "
+        "Here is JSON from one automated reconcile pass (scans, patterns, backtests, "
         "hypotheses, ML, proposals, timings). Produce a structured markdown report with:\n\n"
         "## Executive summary\n"
         "3-5 bullets on what this cycle accomplished.\n\n"

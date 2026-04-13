@@ -556,7 +556,11 @@ def get_attribution_coverage_stats(db: Session, user_id: int | None) -> dict[str
 
 
 def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
-    """Demote patterns when live closed-trade win rate lags research OOS by a margin."""
+    """Maintenance / reconcile: demote patterns when live win rate lags research OOS.
+
+    Also updates per-pattern decay_monitor metadata and may auto-retire stale promoted rows.
+    Not primary operator-facing “brain progress”; runs from execution-feedback / reconcile paths.
+    """
     from ...config import settings
 
     if not getattr(settings, "brain_live_depromotion_enabled", False):
@@ -1976,6 +1980,7 @@ def mine_patterns(
     except Exception:
         logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
+    # Maintenance: decay / demote stale trading insights (confidence), not a standalone “cycle step”.
     existing = get_insights(db, user_id, limit=50)
     now = datetime.utcnow()
     _PROTECTED_ORIGINS = {"user_seeded", "seed", "user", "exit_variant", "entry_variant", "combo_variant", "tf_variant", "scope_variant"}

@@ -3,10 +3,11 @@ CHILI Brain Worker — multi-mode trading brain process.
 
 Modes (``--mode``) are dispatched explicitly in ``main()``:
 
-- ``lean-cycle`` (default): full ``run_learning_cycle`` loop + subtasks between cycles.
-  When ``TRADING_BRAIN_NEURAL_MESH_ENABLED=1``, also runs a short Postgres activation
-  batch after each successful cycle.
-- ``activation-loop``: neural mesh event queue only (dev/soak); no full learning cycle.
+- ``lean-cycle`` (default): each iteration runs a **work-ledger dispatch round**, then a
+  **full reconcile pass** (``run_learning_cycle`` — legacy in-process step orchestrator),
+  then **maintenance subtasks** between iterations. When ``TRADING_BRAIN_NEURAL_MESH_ENABLED=1``,
+  also runs a short Postgres activation batch after a successful reconcile pass.
+- ``activation-loop``: neural mesh event queue only (dev/soak); no full reconcile pass.
 - ``mining``: repeated ``mine_patterns`` passes (Compose ``mining-worker``).
 - ``backtest``: drains the ScanPattern backtest queue via the fast-backtest subtask.
 - ``fast-scan``: repeated ``run_pattern_imminent_scan`` (Compose ``fast-scan-worker``).
@@ -433,7 +434,7 @@ def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
         db.close()
 
 
-# Subtask registry: (name, function, run_every_n_cycles)
+# Subtask registry: (name, function, run_every_n_cycles) — maintenance / edge refresh, not primary operator truth
 _SUBTASKS = [
     ("alpha_decay", _run_subtask_alpha_decay, 3),
     ("signal_refresh", _run_subtask_signal_refresh, 1),
@@ -444,7 +445,7 @@ _subtask_counters: dict[str, int] = {name: 0 for name, _, _ in _SUBTASKS}
 
 
 def run_subtasks(status: "BrainWorkerStatus") -> dict:
-    """Run due subtasks between full learning cycles."""
+    """Run due maintenance / edge-refresh subtasks after a full reconcile pass."""
     results = {}
     for name, fn, every_n in _SUBTASKS:
         _subtask_counters[name] = _subtask_counters.get(name, 0) + 1
@@ -495,14 +496,14 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
         cycle_stats["step_timings"] = result.get("step_timings", {})
         cycle_stats["elapsed_s"] = result.get("elapsed_s")
         logger.info(
-            f"[brain] Full cycle completed | "
+            f"[brain] Reconcile pass completed | "
             f"Scanned: {cycle_stats['tickers_scanned']}, "
             f"Mined: {cycle_stats['patterns_mined']}, "
             f"Tested: {cycle_stats['patterns_tested']}, "
             f"Hypotheses: {cycle_stats['hypotheses_validated']}"
         )
     else:
-        logger.warning(f"[brain] Learning cycle returned: {result.get('reason', 'unknown')}")
+        logger.warning(f"[brain] Reconcile pass returned: {result.get('reason', 'unknown')}")
         if db is not None:
             try:
                 from app.services.trading.backtest_queue import get_queue_status
@@ -515,10 +516,10 @@ def _apply_learning_result_to_stats(result: dict, cycle_stats: dict, db) -> None
 
 
 def run_learning_cycle(status: BrainWorkerStatus) -> dict:
-    """Execute the FULL learning cycle (23 in-cycle steps; prescreen/scan are cron jobs).
-    
-    This replaces the old 4-step minimal cycle with the complete
-    run_learning_cycle from app.services.trading.learning.
+    """Execute the full in-process **reconcile pass** (``run_learning_cycle`` in learning.py).
+
+    This is the legacy step-orchestrated pass (20+ steps); prescreen/scan are often cron-driven.
+    Primary live operator truth is the durable work ledger + scheduler, not this step bar.
     """
     from app.services.trading.learning import (
         run_learning_cycle as full_learning_cycle,
@@ -562,8 +563,8 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
 
     try:
         if use_remote:
-            status.set_step("Running full learning cycle", "Brain HTTP service...")
-            logger.info("[brain] CHILI_USE_BRAIN_SERVICE enabled — delegating to Brain service")
+            status.set_step("Running full reconcile pass", "Brain HTTP service...")
+            logger.info("[brain] CHILI_USE_BRAIN_SERVICE enabled — delegating reconcile pass to Brain service")
             try:
                 from app.services.brain_client import run_learning_cycle_via_brain_service
 
@@ -574,7 +575,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
                 finally:
                     db_remote.close()
             except Exception as e:
-                logger.error(f"[brain] Remote learning cycle failed: {e}")
+                logger.error(f"[brain] Remote reconcile pass failed: {e}")
                 import traceback
 
                 traceback.print_exc()
@@ -589,8 +590,8 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
 
         db = SessionLocal()
         try:
-            status.set_step("Running full learning cycle", "Starting...")
-            logger.info("[brain] Starting FULL learning cycle (24 steps)")
+            status.set_step("Running full reconcile pass", "Starting...")
+            logger.info("[brain] Starting full reconcile pass (run_learning_cycle)")
             # Do not skip here: run_learning_cycle() clears stale locks and returns
             # {"ok": False} if a non-stale cycle is already in progress.
 
@@ -600,7 +601,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
             result = full_learning_cycle(db, user_id=_uid, full_universe=True)
             if not result.get("ok", True):
                 logger.warning(
-                    "[brain] Learning cycle did not run: %s",
+                    "[brain] Reconcile pass did not run: %s",
                     result.get("reason", result),
                 )
             _apply_learning_result_to_stats(result, cycle_stats, db)
@@ -608,7 +609,7 @@ def run_learning_cycle(status: BrainWorkerStatus) -> dict:
             cycle_stats["completed"] = datetime.utcnow().isoformat()
 
         except Exception as e:
-            logger.error(f"[brain] Full learning cycle failed: {e}")
+            logger.error(f"[brain] Full reconcile pass failed: {e}")
             import traceback
 
             traceback.print_exc()
@@ -690,7 +691,7 @@ def _maybe_run_brain_work_batch() -> None:
 
 
 def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
-    """Default: full learning cycle + idle sleep policy."""
+    """Default: dispatch round → full reconcile pass → maintenance subtasks + idle sleep."""
     while True:
         while check_pause_signal():
             status.status = "paused"
@@ -706,7 +707,7 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
         except Exception as _we:
             logger.warning("[brain] work ledger batch before cycle skipped: %s", _we)
 
-        logger.info("[brain] Starting learning cycle")
+        logger.info("[brain] Starting reconcile pass (after work-ledger dispatch)")
         cycle_start = time.time()
 
         cycle_stats: dict = {}
@@ -737,7 +738,7 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
                 status.last_cycle = cycle_stats
 
                 logger.info(
-                    f"[brain] Cycle completed in {cycle_duration:.1f}s | "
+                    f"[brain] Reconcile pass finished in {cycle_duration:.1f}s | "
                     f"Scanned: {cycle_stats.get('tickers_scanned', 0)}, "
                     f"Mined: {cycle_stats['patterns_mined']}, Tested: {cycle_stats['patterns_tested']}, "
                     f"Evolved: {cycle_stats.get('patterns_evolved', 0)}, Pruned: {cycle_stats.get('patterns_pruned', 0)}"

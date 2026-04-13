@@ -152,20 +152,22 @@ def emit_broker_fill_closed_outcome(
     broker_source: str,
     source: str,
     scan_pattern_id: int | None = None,
+    extra: Optional[dict[str, Any]] = None,
 ) -> int | None:
     dedupe_key = f"broker_closed:{int(trade_id)}:{source[:40]}"
+    base = {
+        "trade_id": int(trade_id),
+        "user_id": user_id,
+        "ticker": ticker,
+        "broker_source": broker_source,
+        "source": source,
+        "scan_pattern_id": scan_pattern_id,
+    }
     return enqueue_outcome_event(
         db,
         event_type="broker_fill_closed",
         dedupe_key=dedupe_key,
-        payload={
-            "trade_id": int(trade_id),
-            "user_id": user_id,
-            "ticker": ticker,
-            "broker_source": broker_source,
-            "source": source,
-            "scan_pattern_id": scan_pattern_id,
-        },
+        payload={**base, **(extra or {})},
     )
 
 
@@ -177,21 +179,25 @@ def emit_execution_quality_updated_outcome(
     spread_hint: dict[str, Any],
     depromotion: dict[str, Any],
     parent_work_event_id: int | None = None,
+    attribution_summary: Optional[dict[str, Any]] = None,
 ) -> int | None:
     from datetime import datetime
 
     uid = int(user_id) if user_id is not None else 0
     hour = datetime.utcnow().strftime("%Y%m%d%H")
     dedupe_key = f"exec_quality:u{uid}:{hour}"
+    pl: dict[str, Any] = {
+        "user_id": user_id,
+        "stats_summary": stats_summary,
+        "spread_hint": spread_hint,
+        "depromotion": depromotion,
+        "parent_work_event_id": parent_work_event_id,
+    }
+    if attribution_summary:
+        pl["attribution_summary"] = attribution_summary
     return enqueue_outcome_event(
         db,
         event_type="execution_quality_updated",
         dedupe_key=dedupe_key,
-        payload={
-            "user_id": user_id,
-            "stats_summary": stats_summary,
-            "spread_hint": spread_hint,
-            "depromotion": depromotion,
-            "parent_work_event_id": parent_work_event_id,
-        },
+        payload=pl,
     )

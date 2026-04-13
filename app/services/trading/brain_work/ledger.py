@@ -341,6 +341,49 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
         .limit(min(recent_limit, 12))
         .all()
     )
+
+    exec_outcome_types = ("live_trade_closed", "broker_fill_closed", "paper_trade_closed")
+    cut24 = now - timedelta(hours=24)
+    exec_24_rows = (
+        db.query(BrainWorkEvent.event_type, func.count(BrainWorkEvent.id))
+        .filter(
+            dom,
+            BrainWorkEvent.event_kind == "outcome",
+            BrainWorkEvent.status == "done",
+            BrainWorkEvent.event_type.in_(exec_outcome_types),
+            BrainWorkEvent.processed_at >= cut24,
+        )
+        .group_by(BrainWorkEvent.event_type)
+        .all()
+    )
+    execution_outcomes_24h = {str(et): int(c) for et, c in exec_24_rows}
+
+    pulse_types = ("live_trade_closed", "broker_fill_closed")
+    pulse_row = (
+        db.query(BrainWorkEvent)
+        .filter(
+            dom,
+            BrainWorkEvent.event_kind == "outcome",
+            BrainWorkEvent.status == "done",
+            BrainWorkEvent.event_type.in_(pulse_types),
+        )
+        .order_by(BrainWorkEvent.processed_at.desc().nullslast(), BrainWorkEvent.id.desc())
+        .first()
+    )
+    execution_pulse: dict[str, Any] | None = None
+    if pulse_row:
+        plp = pulse_row.payload if isinstance(pulse_row.payload, dict) else {}
+        execution_pulse = {
+            "event_type": pulse_row.event_type,
+            "ticker": plp.get("ticker"),
+            "scan_pattern_id": plp.get("scan_pattern_id"),
+            "pnl": plp.get("pnl"),
+            "broker_source": plp.get("broker_source"),
+            "source": plp.get("source"),
+            "trade_id": plp.get("trade_id"),
+            "processed_at": pulse_row.processed_at.isoformat() if pulse_row.processed_at else None,
+        }
+
     return {
         "enabled": brain_work_ledger_enabled(),
         "pending_work": int(pending),
@@ -379,4 +422,6 @@ def get_work_ledger_summary(db: Session, *, recent_limit: int = 20) -> dict[str,
             }
             for r in recent_outcomes
         ],
+        "execution_outcomes_24h": execution_outcomes_24h,
+        "execution_pulse": execution_pulse,
     }

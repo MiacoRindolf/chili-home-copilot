@@ -207,6 +207,14 @@ def api_sell_trade(
                         apply_tca_on_trade_close(trade)
                     except Exception:
                         pass
+                    try:
+                        from ...services.trading.brain_work.execution_hooks import (
+                            on_live_trade_closed,
+                        )
+
+                        on_live_trade_closed(db, trade, source="broker_sell_filled")
+                    except Exception:
+                        pass
                 else:
                     trade.notes = (trade.notes or "") + f"\nSell order placed (full exit), {src} order {order_id} ({broker_state})"
             else:
@@ -251,6 +259,12 @@ def api_sell_trade(
                 fill_fallback=float(exit_price),
             )
             apply_tca_on_trade_close(trade)
+        except Exception:
+            pass
+        try:
+            from ...services.trading.brain_work.execution_hooks import on_live_trade_closed
+
+            on_live_trade_closed(db, trade, source="api_sell_manual")
         except Exception:
             pass
     else:
