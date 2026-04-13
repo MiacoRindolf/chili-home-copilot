@@ -27,20 +27,22 @@ _kill_switch_lock = threading.Lock()
 
 
 def activate_kill_switch(reason: str = "manual") -> None:
-    """Immediately halt all trading activity."""
+    """Immediately halt all trading activity. Persists to DB."""
     global _kill_switch, _kill_switch_reason
     with _kill_switch_lock:
         _kill_switch = True
         _kill_switch_reason = reason
+    _persist_kill_switch_state(True, reason)
     logger.critical("[governance] KILL SWITCH ACTIVATED: %s", reason)
 
 
 def deactivate_kill_switch() -> None:
-    """Re-enable trading activity."""
+    """Re-enable trading activity. Persists to DB."""
     global _kill_switch, _kill_switch_reason
     with _kill_switch_lock:
         _kill_switch = False
         _kill_switch_reason = None
+    _persist_kill_switch_state(False, None)
     logger.info("[governance] Kill switch deactivated")
 
 
@@ -52,6 +54,47 @@ def is_kill_switch_active() -> bool:
 def get_kill_switch_status() -> dict[str, Any]:
     with _kill_switch_lock:
         return {"active": _kill_switch, "reason": _kill_switch_reason}
+
+
+def _persist_kill_switch_state(active: bool, reason: str | None) -> None:
+    """Write kill-switch state to trading_risk_state so it survives restarts."""
+    try:
+        from ...db import SessionLocal
+        from sqlalchemy import text
+        sess = SessionLocal()
+        try:
+            sess.execute(text(
+                "INSERT INTO trading_risk_state (user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
+                "VALUES (:uid, NOW(), :tripped, :reason, 'kill_switch', 0) "
+            ), {"uid": None, "tripped": active, "reason": reason or ""})
+            sess.commit()
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Failed to persist kill-switch state to DB", exc_info=True)
+
+
+def restore_kill_switch_from_db() -> None:
+    """Restore kill-switch state from DB on startup."""
+    global _kill_switch, _kill_switch_reason
+    try:
+        from ...db import SessionLocal
+        from sqlalchemy import text
+        sess = SessionLocal()
+        try:
+            row = sess.execute(text(
+                "SELECT breaker_tripped, breaker_reason FROM trading_risk_state "
+                "WHERE regime = 'kill_switch' ORDER BY created_at DESC LIMIT 1"
+            )).fetchone()
+            if row and row[0]:
+                with _kill_switch_lock:
+                    _kill_switch = True
+                    _kill_switch_reason = row[1] or "restored from DB"
+                logger.warning("[governance] Kill switch restored from DB: %s", _kill_switch_reason)
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Could not restore kill-switch from DB", exc_info=True)
 
 
 # ── Approval Queue ────────────────────────────────────────────────────

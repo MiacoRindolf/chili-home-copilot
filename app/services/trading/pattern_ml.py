@@ -539,6 +539,26 @@ class PatternMetaLearner:
 
         self.save()
 
+        try:
+            from .model_registry import get_registry
+            reg = get_registry()
+            reg.register(
+                model_type="pattern_meta_learner",
+                metrics={
+                    "oos_accuracy": oos_acc,
+                    "cv_accuracy": cv_acc,
+                    "precision_oos": precision,
+                    "recall_oos": recall,
+                    "samples": len(X),
+                    "train_samples": len(X_train),
+                    "oos_samples": len(X_oos),
+                },
+                file_path=str(self._save_path) if hasattr(self, "_save_path") else None,
+                notes=f"auto-train {len(patterns)} patterns, {len(X)} samples",
+            )
+        except Exception:
+            logger.debug("[pattern_ml] Failed to register model version", exc_info=True)
+
         logger.info(
             "[pattern_ml] Trained on %d samples (OOS=%d, %d patterns): "
             "OOS acc=%s%%, CV acc=%s%%, prec=%s%%, recall=%s%%",
@@ -616,6 +636,75 @@ def get_meta_learner() -> PatternMetaLearner:
 
 def load_meta_learner() -> bool:
     return _meta_learner.load()
+
+
+def check_drift_and_retrain(db, threshold_z: float = 2.0) -> dict[str, Any]:
+    """Check feature distribution drift and retrain if significant shift detected.
+
+    Compares current feature distributions from recent snapshots against
+    training-time distributions. If >30% of features have z-score drift
+    above threshold, triggers automatic retrain.
+    """
+    from ...models.trading import MarketSnapshot
+
+    ml = get_meta_learner()
+    train_stats = ml.get_training_feature_stats()
+
+    if not train_stats:
+        return {"ok": False, "reason": "no_training_stats", "retrained": False}
+
+    recent = (
+        db.query(MarketSnapshot)
+        .filter(MarketSnapshot.indicator_data.isnot(None))
+        .order_by(MarketSnapshot.snapshot_date.desc())
+        .limit(200)
+        .all()
+    )
+
+    if len(recent) < 50:
+        return {"ok": False, "reason": "insufficient_recent_data", "retrained": False}
+
+    feature_vals: dict[str, list[float]] = {}
+    for snap in recent:
+        ind = snap.indicator_data or {}
+        for fname in train_stats:
+            if fname in ind:
+                feature_vals.setdefault(fname, []).append(float(ind[fname]))
+
+    drifted_features = []
+    for fname, stats in train_stats.items():
+        vals = feature_vals.get(fname, [])
+        if len(vals) < 20:
+            continue
+        current_mean = sum(vals) / len(vals)
+        train_mean = stats.get("mean", 0)
+        train_std = stats.get("std", 1)
+        if train_std > 0:
+            z = abs(current_mean - train_mean) / train_std
+            if z > threshold_z:
+                drifted_features.append({"feature": fname, "z_score": round(z, 2)})
+
+    drift_ratio = len(drifted_features) / max(len(train_stats), 1)
+    needs_retrain = drift_ratio > 0.3
+
+    result: dict[str, Any] = {
+        "ok": True,
+        "features_checked": len(train_stats),
+        "features_drifted": len(drifted_features),
+        "drift_ratio": round(drift_ratio, 3),
+        "threshold_z": threshold_z,
+        "needs_retrain": needs_retrain,
+        "drifted": drifted_features[:10],
+        "retrained": False,
+    }
+
+    if needs_retrain:
+        logger.warning("[pattern_ml] Drift detected (%.0f%% features), triggering retrain", drift_ratio * 100)
+        train_result = ml.train(db)
+        result["retrained"] = train_result.get("ok", False)
+        result["retrain_result"] = train_result
+
+    return result
 
 
 # ── Feedback loop ─────────────────────────────────────────────────────

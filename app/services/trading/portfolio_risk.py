@@ -650,6 +650,7 @@ def check_drawdown_breaker(
     if pnl_5d_pct < -limits.max_5day_dd_pct:
         _breaker_tripped = True
         _breaker_reason = f"5-day drawdown {pnl_5d_pct:.1f}% exceeds -{limits.max_5day_dd_pct}% limit"
+        _persist_breaker_state(True, _breaker_reason)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -666,6 +667,7 @@ def check_drawdown_breaker(
     if pnl_30d_pct < -limits.max_30day_dd_pct:
         _breaker_tripped = True
         _breaker_reason = f"30-day drawdown {pnl_30d_pct:.1f}% exceeds -{limits.max_30day_dd_pct}% limit"
+        _persist_breaker_state(True, _breaker_reason)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
@@ -678,6 +680,7 @@ def check_drawdown_breaker(
         if all((t.pnl or 0) < 0 for t in last_n):
             _breaker_tripped = True
             _breaker_reason = f"{limits.max_consecutive_losses} consecutive losing trades"
+            _persist_breaker_state(True, _breaker_reason)
             logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
             return True, _breaker_reason
 
@@ -698,8 +701,49 @@ def get_breaker_status() -> dict[str, Any]:
 
 
 def reset_breaker() -> None:
-    """Manually reset the circuit breaker (admin action)."""
+    """Manually reset the circuit breaker (admin action). Persists to DB."""
     global _breaker_tripped, _breaker_reason
     _breaker_tripped = False
     _breaker_reason = None
+    _persist_breaker_state(False, None)
     logger.info("[circuit_breaker] Manually reset")
+
+
+def _persist_breaker_state(tripped: bool, reason: str | None) -> None:
+    """Write circuit breaker state to trading_risk_state so it survives restarts."""
+    try:
+        from ...db import SessionLocal
+        from sqlalchemy import text
+        sess = SessionLocal()
+        try:
+            sess.execute(text(
+                "INSERT INTO trading_risk_state (user_id, snapshot_date, breaker_tripped, breaker_reason, regime, capital) "
+                "VALUES (:uid, NOW(), :tripped, :reason, 'circuit_breaker', 0) "
+            ), {"uid": None, "tripped": tripped, "reason": reason or ""})
+            sess.commit()
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[circuit_breaker] Failed to persist breaker state to DB", exc_info=True)
+
+
+def restore_breaker_from_db() -> None:
+    """Restore circuit breaker state from DB on startup."""
+    global _breaker_tripped, _breaker_reason
+    try:
+        from ...db import SessionLocal
+        from sqlalchemy import text
+        sess = SessionLocal()
+        try:
+            row = sess.execute(text(
+                "SELECT breaker_tripped, breaker_reason FROM trading_risk_state "
+                "WHERE regime = 'circuit_breaker' ORDER BY created_at DESC LIMIT 1"
+            )).fetchone()
+            if row and row[0]:
+                _breaker_tripped = True
+                _breaker_reason = row[1] or "restored from DB"
+                logger.warning("[circuit_breaker] Breaker restored from DB: %s", _breaker_reason)
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[circuit_breaker] Could not restore breaker from DB", exc_info=True)

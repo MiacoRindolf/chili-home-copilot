@@ -13,7 +13,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import BacktestResult, ScanPattern, Trade
+from ...models.trading import BacktestResult, PaperTrade, ScanPattern, Trade
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +21,12 @@ DEFAULT_ROLLING_WINDOW_DAYS = 30
 MIN_TRADES_FOR_DECAY_CHECK = 5
 DECAY_WR_GAP = 0.12            # demote if live WR is >12pp below OOS WR
 DECAY_RETURN_FLOOR_PCT = -1.0  # demote if rolling avg return < -1%
+
+REGIME_DECAY_ADJUSTMENTS = {
+    "risk_off": {"wr_gap": 0.08, "return_floor": -0.5, "window_days": 15},
+    "risk_on": {"wr_gap": 0.15, "return_floor": -1.5, "window_days": 45},
+    "cautious": {"wr_gap": 0.12, "return_floor": -1.0, "window_days": 30},
+}
 
 
 def check_alpha_decay(
@@ -31,12 +37,26 @@ def check_alpha_decay(
     wr_gap: float = DECAY_WR_GAP,
     return_floor: float = DECAY_RETURN_FLOOR_PCT,
     auto_demote: bool = True,
+    regime_adaptive: bool = True,
 ) -> dict[str, Any]:
     """Check all live/promoted patterns for alpha decay.
 
-    Returns summary with list of decayed pattern ids.
+    Combines evidence from both Trade and PaperTrade rows. Adjusts
+    decay thresholds based on current market regime when regime_adaptive=True.
     """
     from .lifecycle import transition_on_decay
+
+    if regime_adaptive:
+        try:
+            from .market_data import get_market_regime
+            regime = get_market_regime()
+            composite = regime.get("composite", "cautious")
+            adj = REGIME_DECAY_ADJUSTMENTS.get(composite, {})
+            window_days = adj.get("window_days", window_days)
+            wr_gap = adj.get("wr_gap", wr_gap)
+            return_floor = adj.get("return_floor", return_floor)
+        except Exception:
+            pass
 
     cutoff = datetime.utcnow() - timedelta(days=window_days)
 
@@ -61,21 +81,36 @@ def check_alpha_decay(
         trade_q = trade_q.filter(Trade.user_id == user_id)
     recent_trades = trade_q.all()
 
-    trades_by_sp: dict[int, list[Trade]] = {}
+    paper_q = db.query(PaperTrade).filter(
+        PaperTrade.status == "closed",
+        PaperTrade.scan_pattern_id.in_(sp_ids),
+        PaperTrade.exit_date >= cutoff,
+    )
+    if user_id:
+        paper_q = paper_q.filter(PaperTrade.user_id == user_id)
+    recent_paper = paper_q.all()
+
+    evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
-        trades_by_sp.setdefault(t.scan_pattern_id, []).append(t)
+        evidence_by_sp.setdefault(t.scan_pattern_id, []).append(
+            {"pnl": t.pnl or 0, "pnl_pct": getattr(t, "pnl_pct", None) or 0, "source": "live"}
+        )
+    for pt in recent_paper:
+        evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(
+            {"pnl": pt.pnl or 0, "pnl_pct": pt.pnl_pct or 0, "source": "paper"}
+        )
 
     decayed: list[dict[str, Any]] = []
     healthy: list[int] = []
 
     for pat in live_patterns:
-        trades = trades_by_sp.get(pat.id, [])
-        if len(trades) < MIN_TRADES_FOR_DECAY_CHECK:
+        evidence = evidence_by_sp.get(pat.id, [])
+        if len(evidence) < MIN_TRADES_FOR_DECAY_CHECK:
             continue
 
-        live_wins = sum(1 for t in trades if (t.pnl or 0) > 0)
-        live_wr = live_wins / len(trades)
-        live_avg_ret = sum(t.pnl or 0 for t in trades) / len(trades)
+        live_wins = sum(1 for e in evidence if e["pnl"] > 0)
+        live_wr = live_wins / len(evidence)
+        live_avg_ret = sum(e["pnl"] for e in evidence) / len(evidence)
 
         oos_wr = pat.oos_win_rate or pat.win_rate or 0.50
 
@@ -84,7 +119,13 @@ def check_alpha_decay(
 
         if live_wr < oos_wr - wr_gap:
             is_decayed = True
-            reason_parts.append(f"WR decay: live {live_wr*100:.1f}% vs OOS {oos_wr*100:.1f}%")
+            src_counts = {"live": 0, "paper": 0}
+            for e in evidence:
+                src_counts[e["source"]] = src_counts.get(e["source"], 0) + 1
+            reason_parts.append(
+                f"WR decay: live {live_wr*100:.1f}% vs OOS {oos_wr*100:.1f}% "
+                f"({src_counts['live']} real + {src_counts['paper']} paper trades)"
+            )
 
         if live_avg_ret < return_floor:
             is_decayed = True
@@ -95,10 +136,10 @@ def check_alpha_decay(
             decayed.append({
                 "pattern_id": pat.id,
                 "pattern_name": pat.name,
-                "live_wr": round(live_wr, 1),
-                "oos_wr": round(oos_wr, 1),
+                "live_wr": round(live_wr, 3),
+                "oos_wr": round(oos_wr, 3),
                 "live_avg_return": round(live_avg_ret, 2),
-                "trades": len(trades),
+                "trades": len(evidence),
                 "reason": reason,
             })
             if auto_demote:
@@ -113,8 +154,8 @@ def check_alpha_decay(
         db.commit()
 
     logger.info(
-        "[alpha_decay] Checked %d patterns: %d healthy, %d decayed",
-        len(live_patterns), len(healthy), len(decayed),
+        "[alpha_decay] Checked %d patterns: %d healthy, %d decayed (regime-adjusted=%s)",
+        len(live_patterns), len(healthy), len(decayed), regime_adaptive,
     )
 
     return {

@@ -52,69 +52,31 @@ def compute_mtf_indicators(
 
 
 def _compute_basic_indicators(df) -> dict[str, Any]:
-    """Compute a minimal set of indicators from an OHLCV DataFrame."""
-    import pandas as pd
+    """Compute indicators via indicator_core (single source of truth)."""
+    from .indicator_core import compute_all_from_df
 
-    close = df["Close"].astype(float)
-    high = df["High"].astype(float)
-    low = df["Low"].astype(float)
-    volume = df["Volume"].astype(float)
+    if df is None or len(df) < 2:
+        return {"price": 0.0}
 
-    result: dict[str, Any] = {
-        "price": float(close.iloc[-1]),
-    }
-
-    # RSI
-    delta = close.diff()
-    gain = delta.clip(lower=0).rolling(14).mean()
-    loss = (-delta.clip(upper=0)).rolling(14).mean()
-    rs = gain / loss.replace(0, float("nan"))
-    rsi = 100 - (100 / (1 + rs))
-    if not rsi.empty and not pd.isna(rsi.iloc[-1]):
-        result["rsi_14"] = round(float(rsi.iloc[-1]), 2)
-
-    # EMAs
-    for span in (9, 20, 50, 100):
-        ema = close.ewm(span=span, adjust=False).mean()
-        if not ema.empty:
-            result[f"ema_{span}"] = round(float(ema.iloc[-1]), 4)
-
-    # MACD
-    ema12 = close.ewm(span=12, adjust=False).mean()
-    ema26 = close.ewm(span=26, adjust=False).mean()
-    macd = ema12 - ema26
-    macd_signal = macd.ewm(span=9, adjust=False).mean()
-    if not macd.empty:
-        result["macd"] = round(float(macd.iloc[-1]), 4)
-        result["macd_signal"] = round(float(macd_signal.iloc[-1]), 4)
-        result["macd_histogram"] = round(float((macd - macd_signal).iloc[-1]), 4)
-
-    # ADX
-    if len(df) >= 14:
-        try:
-            tr = pd.concat([
-                high - low,
-                (high - close.shift(1)).abs(),
-                (low - close.shift(1)).abs(),
-            ], axis=1).max(axis=1)
-            atr = tr.rolling(14).mean()
-            plus_dm = (high.diff()).clip(lower=0)
-            minus_dm = (-low.diff()).clip(lower=0)
-            plus_di = 100 * (plus_dm.rolling(14).mean() / atr)
-            minus_di = 100 * (minus_dm.rolling(14).mean() / atr)
-            dx = (plus_di - minus_di).abs() / (plus_di + minus_di) * 100
-            adx = dx.rolling(14).mean()
-            if not adx.empty and not pd.isna(adx.iloc[-1]):
-                result["adx"] = round(float(adx.iloc[-1]), 2)
-        except Exception:
-            pass
-
-    # Volume ratio
-    avg_vol = volume.rolling(20).mean()
-    if not avg_vol.empty and avg_vol.iloc[-1] > 0:
-        result["volume_ratio"] = round(float(volume.iloc[-1] / avg_vol.iloc[-1]), 2)
-
-    return result
+    try:
+        arrays = compute_all_from_df(
+            df,
+            needed=["price", "rsi_14", "ema_9", "ema_20", "ema_50", "ema_100",
+                     "macd", "macd_signal", "macd_histogram", "adx",
+                     "volume_ratio", "atr"],
+        )
+        result: dict[str, Any] = {}
+        for key, arr in arrays.items():
+            if arr is not None and len(arr) > 0:
+                import math
+                val = float(arr[-1])
+                if not math.isnan(val):
+                    result[key] = round(val, 4)
+        if "price" not in result and len(df) > 0:
+            result["price"] = float(df["Close"].iloc[-1])
+        return result
+    except Exception:
+        return {"price": float(df["Close"].iloc[-1]) if len(df) > 0 else 0.0}
 
 
 def score_mtf_consensus(

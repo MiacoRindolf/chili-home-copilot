@@ -1741,6 +1741,15 @@ def run_pattern_backtest(
     if df.empty or len(df) < 30:
         return {"ok": False, "error": f"Not enough data for {ticker}"}
 
+    try:
+        from app.services.trading.data_quality import clean_ohlcv
+        df = clean_ohlcv(df)
+    except Exception:
+        pass
+
+    if df.empty or len(df) < 30:
+        return {"ok": False, "error": f"Not enough clean data for {ticker}"}
+
     df.index = pd.to_datetime(df.index)
     if df.index.tz is not None:
         df.index = df.index.tz_localize(None)

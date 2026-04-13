@@ -3899,27 +3899,61 @@ def get_latest_scan(db: Session, user_id: int | None, limit: int = 20) -> list[d
 # ── Signal Generation ─────────────────────────────────────────────────
 
 def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
-    """Generate buy/hold/sell signals for all watchlist tickers."""
-    from ...models.trading import BacktestResult
+    """Generate buy/hold/sell signals for watchlist + promoted pattern tickers.
+
+    Expands the signal universe beyond watchlist-only to include tickers from
+    promoted/live ScanPatterns (via scope_tickers or full prescreen), ensuring
+    the brain's discovered edges can actually fire signals.
+    """
+    from ...models.trading import BacktestResult, ScanPattern
+    from .backtest_metrics import backtest_win_rate_display_pct_for_compare
 
     watchlist = get_watchlist(db, user_id)
-    if not watchlist:
+    watchlist_tickers = {w.ticker for w in watchlist} if watchlist else set()
+
+    promoted_tickers: set[str] = set()
+    promoted_patterns = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.active.is_(True),
+            ScanPattern.lifecycle_stage.in_(["promoted", "live"]),
+        )
+        .all()
+    )
+    for pat in promoted_patterns:
+        if pat.scope_tickers:
+            try:
+                tks = pat.scope_tickers if isinstance(pat.scope_tickers, list) else json.loads(pat.scope_tickers)
+                promoted_tickers.update(tks)
+            except Exception:
+                pass
+
+    all_tickers = watchlist_tickers | promoted_tickers
+    if not all_tickers:
         return []
 
     signals = []
+    near_misses = []
+    funnel_total = 0
+    funnel_scored = 0
+    funnel_buy = 0
+    funnel_high_conf = 0
+
     insights = get_insights(db, user_id, limit=10)
     insight_text = "; ".join(i.pattern_description for i in insights) if insights else ""
 
-    for w in watchlist:
-        scored = _score_ticker(w.ticker)
+    _buy_thresh = get_adaptive_weight("swing_signal_buy")
+
+    for ticker in all_tickers:
+        funnel_total += 1
+        scored = _score_ticker(ticker)
         if not scored:
             continue
+        funnel_scored += 1
 
         best_bt = db.query(BacktestResult).filter(
-            BacktestResult.ticker == w.ticker,
+            BacktestResult.ticker == ticker,
         ).order_by(BacktestResult.return_pct.desc()).first()
-
-        from .backtest_metrics import backtest_win_rate_display_pct_for_compare
 
         bt_confidence = 0
         _wr_disp = backtest_win_rate_display_pct_for_compare(
@@ -3931,14 +3965,34 @@ def generate_signals(db: Session, user_id: int | None) -> list[dict[str, Any]]:
         base_confidence = (scored["score"] / 10) * 70
         confidence = min(95, base_confidence + bt_confidence)
 
+        if scored.get("signal") == "buy":
+            funnel_buy += 1
+        if confidence >= 60:
+            funnel_high_conf += 1
+
         explanation = _make_plain_english(scored, insight_text)
 
-        signals.append({
+        sig = {
             **scored,
             "confidence": round(confidence, 0),
             "explanation": explanation,
             "best_strategy": best_bt.strategy_name if best_bt else None,
-        })
+        }
+        signals.append(sig)
+
+        if scored.get("signal") != "buy" and scored["score"] >= _buy_thresh * 0.9:
+            near_misses.append({
+                "ticker": ticker,
+                "score": scored["score"],
+                "threshold": _buy_thresh,
+                "gap_pct": round((1 - scored["score"] / _buy_thresh) * 100, 1),
+            })
+
+    if near_misses or funnel_total > 0:
+        logger.info(
+            "[signal_funnel] tickers=%d scored=%d buy_signals=%d high_conf=%d near_misses=%d",
+            funnel_total, funnel_scored, funnel_buy, funnel_high_conf, len(near_misses),
+        )
 
     signals.sort(key=lambda s: s["score"], reverse=True)
     return signals

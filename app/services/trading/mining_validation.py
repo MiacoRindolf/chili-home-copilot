@@ -4,12 +4,18 @@ Includes:
 - Time-segmented validation (purged CPCV lite)
 - Bootstrap resampling for confidence intervals
 - Ensemble confirmation (2-of-3 methods must agree for promotion)
+- Multiple hypothesis correction (Bonferroni-style)
 """
 from __future__ import annotations
 
+import logging
 import random
 from datetime import datetime
 from typing import Any, Callable
+
+logger = logging.getLogger(__name__)
+
+MIN_TRADES_FOR_PROMOTION = 30
 
 
 def _row_time_key(row: dict[str, Any]) -> float:
@@ -109,8 +115,9 @@ def bootstrap_win_rate_ci(
     boot_wrs: list[float] = []
     boot_rets: list[float] = []
 
+    rng = random.Random(42)
     for _ in range(n_resamples):
-        sample = random.choices(rets, k=n)
+        sample = rng.choices(rets, k=n)
         w = sum(1 for r in sample if r > 0)
         boot_wrs.append(w / n * 100)
         boot_rets.append(sum(sample) / n)
@@ -148,8 +155,6 @@ def ensemble_promotion_check(
     1. Purged segment validation (all 3 segments positive)
     2. Bootstrap CI (lower bound of win-rate > 50%)
     3. Walk-forward half-split (both halves profitable)
-
-    DEPRECATED: This function is not called by any code path. Consider removal.
     """
     results: dict[str, Any] = {"methods": {}}
     votes = 0
@@ -222,3 +227,55 @@ def decay_signals_from_walk_forward_windows(
     if len(wrs) >= 2:
         out["fold_wr_spread"] = round(max(wrs) - min(wrs), 4)
     return out
+
+
+def check_promotion_ready(
+    filtered: list[dict[str, Any]],
+    *,
+    min_trades: int = MIN_TRADES_FOR_PROMOTION,
+    n_hypotheses_tested: int = 1,
+) -> tuple[bool, dict[str, Any]]:
+    """Combined promotion gate: minimum sample + ensemble + multiple hypothesis correction.
+
+    Args:
+        filtered: Historical row dicts with ret_5d.
+        min_trades: Minimum evidence count before promotion is considered.
+        n_hypotheses_tested: How many patterns were tested in this cycle
+            (for Bonferroni-style alpha correction).
+
+    Returns:
+        (ready, detail_dict) where ready is True only if all gates pass.
+    """
+    detail: dict[str, Any] = {}
+
+    if len(filtered) < min_trades:
+        detail["blocked"] = "insufficient_samples"
+        detail["n"] = len(filtered)
+        detail["min_required"] = min_trades
+        return False, detail
+
+    ensemble_ok, ensemble_detail = ensemble_promotion_check(filtered)
+    detail["ensemble"] = ensemble_detail
+
+    if not ensemble_ok:
+        detail["blocked"] = "ensemble_failed"
+        return False, detail
+
+    if n_hypotheses_tested > 1:
+        boot = bootstrap_win_rate_ci(filtered)
+        raw_wr_lower = boot.get("win_rate_lower", 0)
+        corrected_threshold = 50.0 + (n_hypotheses_tested * 0.1)
+        corrected_threshold = min(corrected_threshold, 65.0)
+        passes_corrected = raw_wr_lower > corrected_threshold
+        detail["hypothesis_correction"] = {
+            "n_tested": n_hypotheses_tested,
+            "raw_wr_lower": raw_wr_lower,
+            "corrected_threshold": round(corrected_threshold, 1),
+            "passes": passes_corrected,
+        }
+        if not passes_corrected:
+            detail["blocked"] = "hypothesis_correction_failed"
+            return False, detail
+
+    detail["ready"] = True
+    return True, detail
