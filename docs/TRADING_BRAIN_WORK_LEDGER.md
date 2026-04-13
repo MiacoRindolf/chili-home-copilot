@@ -58,9 +58,16 @@
 - **`GET /api/trading/scan/status` — primary read path:** `brain_runtime` bundles `work_ledger`, `release`, `scheduler`, `scan`, `learning_summary`, and `activity_signals`. **Operator/runtime display** should use only `brain_runtime` (plus `prescreen` if needed). `learning_summary` includes `running`, `phase`, `current_step`, `steps_completed`, `total_steps`, `elapsed_s`, `tickers_processed`, `status_role` (`reconcile_compatibility`). Top-level `learning` remains for the **neural graph overlay** and any consumer that needs the full reconcile snapshot (mesh/step ids, indices, funnel, etc.).
 - **JSON key order (happy path):** `ok`, `brain_runtime`, `prescreen`, `work_ledger`, `release`, `scheduler`, `scan`, `learning` — `learning` is **last** (full reconcile compatibility object); do not rely on object key order in clients if avoidable.
 - **`brain_runtime.activity_signals` (minimal contract):** `reconcile_active` (bool), `ledger_busy` (bool), `retry_or_dead_attention` (bool), `outcome_head_id` (int or null — newest `recent_meaningful_outcomes[0].id` when present).
-- **One-release compatibility mirrors:** top-level `work_ledger`, `release`, `scheduler`, and `scan` duplicate `brain_runtime` for backward compatibility; remove after consumers migrate.
+- **One-release compatibility mirrors:** top-level `work_ledger`, `release`, `scheduler`, and `scan` duplicate `brain_runtime` for backward compatibility. **Removal readiness:** in-repo `brain.html` uses **`brain_runtime` only** on the happy path; flat mirrors are used only when `encode_error` is true or `brain_runtime.work_ledger` is absent. **Do not remove** top-level **`learning`** without a separate plan — neural graph overlay and full snapshot consumers still need it.
 - **`brain_runtime.work_ledger`**: `pending_work`, `retry_wait`, `dead_last_24h`, `pending_by_type`, `processing`, `last_done_by_type`, `recent_completions`, `recent_meaningful_outcomes`, `execution_pulse`, `execution_outcomes_24h`.
-- **Brain desk** renders handler-centric summary from `brain_runtime.work_ledger` (with flat-key fallback during the mirror window).
+- **Brain desk** renders handler-centric summary from `brain_runtime.work_ledger` (no mirror dependency on success responses).
+
+### Mirror removal checklist (future PR)
+
+1. Confirm no external clients rely on top-level `work_ledger` / `release` / `scheduler` / `scan` (grep integrators, mobile, forks).
+2. Keep **`learning`** in the payload for graph overlay + full reconcile snapshot until those consumers read a nested field (e.g. `brain_runtime.learning_full`) — **separate migration**.
+3. Drop mirror keys from `api_scan_status` (or hide behind `?compat_mirrors=1`), update `tests/test_scan_status_brain_runtime.py`, and extend encode-error payload if needed.
+4. Run `pytest` + manual Brain desk + graph overlay smoke test.
 - **`brain_runtime.release`**: always `{}` (reserved for API shape / future use). **Do not** use it for deploy revision; platform logs, image tags, or your host’s own metadata are the source of truth.
 
 ## Operational proof (execution feedback)
@@ -75,7 +82,7 @@ $env:CHILI_PROVE_EXEC_FEEDBACK_LEDGER = "1"
 conda run -n chili-env python scripts/prove_execution_feedback_ledger.py
 ```
 
-The script closes a synthetic `PaperTrade` (`CHILI-PROOF-USD`), backdates the debounced digest row, runs one `run_brain_work_dispatch_round`, prints recent ledger rows, then deletes the paper row (ledger outcomes remain). Verify with `GET /api/trading/scan/status` → `work_ledger.recent_meaningful_outcomes`.
+The script closes a synthetic `PaperTrade` (`CHILI-PROOF-USD`), backdates the debounced digest row, runs one `run_brain_work_dispatch_round`, prints recent ledger rows, then deletes the paper row (ledger outcomes remain). Verify with `GET /api/trading/scan/status` → `brain_runtime.work_ledger.recent_meaningful_outcomes` (top-level `work_ledger` is a duplicate mirror).
 
 **Worker logs:** each lean-cycle iteration logs `[brain] work ledger dispatch round processed=...` so dispatch-before-cycle is visible even when idle.
 

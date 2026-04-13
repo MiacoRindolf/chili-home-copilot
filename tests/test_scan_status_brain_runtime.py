@@ -8,6 +8,9 @@ Post-``31ca070`` deploy validation contract (no SHA / ``release`` fingerprint):
   ``brain_runtime.learning_summary`` (incl. ``status_role``, ``tickers_processed``),
   ``activity_signals`` (four minimal keys), and ``work_ledger`` via ``brain_runtime``.
 
+Top-level mirror equality assertions are **regression** until mirrors are removed from
+``api_scan_status`` (see ``.cursor/plans/scan_status_mirror_removal_readiness.plan.md``).
+
 See ``.cursor/plans/lc_shrink_validation_reset.plan.md`` and
 ``.cursor/rules/chili-scan-status-deploy-validation.mdc``.
 """

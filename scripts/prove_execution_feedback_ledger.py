@@ -144,7 +144,7 @@ def main() -> int:
             db.commit()
             print(f"[prove_exec_feedback] deleted synthetic paper_trade id={paper_id}")
 
-        print("[prove_exec_feedback] done — check GET /api/trading/scan/status work_ledger")
+        print("[prove_exec_feedback] done — check GET /api/trading/scan/status brain_runtime.work_ledger")
         return 0
     except Exception as e:
         print(f"[prove_exec_feedback] failed: {e}", file=sys.stderr)

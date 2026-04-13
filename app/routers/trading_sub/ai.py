@@ -1067,8 +1067,11 @@ def api_scan_status():
         }
 
     _mirror_note = (
-        "Top-level work_ledger, release, scheduler, and scan mirror brain_runtime for one release; "
-        "prefer brain_runtime."
+        "Top-level work_ledger, release, scheduler, and scan duplicate brain_runtime for backward "
+        "compatibility; CHILI in-repo UI reads brain_runtime only (flat keys for encode_error / "
+        "legacy). External integrators should migrate to brain_runtime; these mirrors may be "
+        "removed or gated in a future release. Top-level learning remains for graph/mutex-adjacent "
+        "full reconcile snapshot."
     )
     activity_signals = _activity_signals(work_ledger_st, learning_summary)
     brain_runtime: dict[str, Any] = {

@@ -21,4 +21,6 @@ The **`release` fingerprint was removed** on purpose: a wrong SHA is worse than 
 - Validate **`work_ledger`** fields and real DB-backed behavior where relevant (tests or staging scripts).
 - For production UX, rely on **Brain UI** copy/order/behavior and manual or browser checks — not JSON git SHAs.
 
-See **`tests/test_scan_status_brain_runtime.py`** and **`.cursor/plans/lc_shrink_validation_reset.plan.md`**.
+- **Mirror removal:** in-repo UI reads **`brain_runtime`** on happy path; top-level `work_ledger` / `scheduler` / `scan` / `release` are legacy duplicates — do not build new features against them. **`learning` stays** for graph overlay / full snapshot until explicitly migrated.
+
+See **`tests/test_scan_status_brain_runtime.py`**, **`.cursor/plans/lc_shrink_validation_reset.plan.md`**, and **`.cursor/plans/scan_status_mirror_removal_readiness.plan.md`**.

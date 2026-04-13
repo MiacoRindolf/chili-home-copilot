@@ -6322,11 +6322,12 @@ var _PIPELINE_STEPS = [
 
 /**
  * Resolve primary fields from ``/api/trading/scan/status``.
- * Prefer ``brain_runtime``; fall back to top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan``
- * (one-release compatibility mirrors — see api_scan_status in ai.py). ``release`` is always empty.
- * ``learning_summary`` + mirrors + ``activity_signals`` are enough for operator desk/runtime strip;
+ * In-repo Brain desk uses ``brain_runtime`` only when the aggregate is present (happy path).
+ * Top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan`` are read only on
+ * ``encode_error`` or other legacy edge cases (mirrors scheduled for removal — see docs).
+ * ``release`` is always empty. ``learning_summary`` + ``activity_signals`` drive operator strip;
  * ``pollLearningStatus`` merges ``learning_summary`` over top-level ``learning`` for those fields.
- * Neural graph overlay (``tbnUpdateNodeStatuses``) still reads top-level ``learning`` only (mesh/step indices).
+ * Neural graph overlay (``tbnUpdateNodeStatuses``) reads top-level ``learning`` only (mesh/step indices).
  * ``activity_signals``: ledger outcome refresh uses ``outcome_head_id`` when
  * ``window.__CHILI_LEDGER_OUTCOME_REFRESH === true`` (default off).
  */
@@ -6356,13 +6357,26 @@ function _debouncedLedgerOutcomeRefresh(headId) {
 
 function scanStatusBrainRuntime(d) {
   var br = d && d.brain_runtime && typeof d.brain_runtime === 'object' ? d.brain_runtime : null;
+  var encErr = !!(d && d.encode_error);
+  var wlBr = br && br.work_ledger;
+  var useAggregate = !encErr && wlBr != null && typeof wlBr === 'object';
+  if (useAggregate) {
+    return {
+      work_ledger: wlBr,
+      release: (br.release && typeof br.release === 'object') ? br.release : {},
+      scheduler: (br.scheduler && typeof br.scheduler === 'object') ? br.scheduler : { running: false, jobs: [] },
+      scan: (br.scan && typeof br.scan === 'object') ? br.scan : {},
+      learning_summary: (br.learning_summary && typeof br.learning_summary === 'object') ? br.learning_summary : null,
+      activity_signals: (br.activity_signals && typeof br.activity_signals === 'object') ? br.activity_signals : null
+    };
+  }
   return {
-    work_ledger: (br && br.work_ledger && typeof br.work_ledger === 'object') ? br.work_ledger : (d.work_ledger || {}),
-    release: (br && br.release && typeof br.release === 'object') ? br.release : (d.release || {}),
-    scheduler: (br && br.scheduler && typeof br.scheduler === 'object') ? br.scheduler : (d.scheduler || { running: false, jobs: [] }),
-    scan: (br && br.scan && typeof br.scan === 'object') ? br.scan : (d.scan || {}),
-    learning_summary: (br && br.learning_summary && typeof br.learning_summary === 'object') ? br.learning_summary : null,
-    activity_signals: (br && br.activity_signals && typeof br.activity_signals === 'object') ? br.activity_signals : null
+    work_ledger: d.work_ledger || {},
+    release: d.release || {},
+    scheduler: d.scheduler || { running: false, jobs: [] },
+    scan: d.scan || {},
+    learning_summary: null,
+    activity_signals: null
   };
 }
 

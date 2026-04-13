@@ -49,4 +49,6 @@ Implemented on `main` (API + UI + tests + worker copy + docs):
 
 ## Next phase (out of this plan)
 
-Define separately when ready (do not expand this file without user freeze): further LC demotion, mirror removal timeline, or additional `activity_signals` — only if explicitly approved.
+**Mirror removal & consumer cleanup:** [`.cursor/plans/scan_status_mirror_removal_readiness.plan.md`](scan_status_mirror_removal_readiness.plan.md) — preserves **top-level `learning`** for graph/mutex snapshot.
+
+Other ideas (separate freeze): further LC demotion, additional `activity_signals` — only if explicitly approved.
