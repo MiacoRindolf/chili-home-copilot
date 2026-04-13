@@ -11,6 +11,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# Optional: pass at build time so scan/status ``release.git_commit`` works without runtime env:
+#   CHILI_GIT_COMMIT=$(git rev-parse HEAD) docker compose build chili
+ARG CHILI_GIT_COMMIT=
+ENV CHILI_GIT_COMMIT=${CHILI_GIT_COMMIT}
+LABEL org.opencontainers.image.revision="${CHILI_GIT_COMMIT}"
+
 RUN mkdir -p /app/data /app/docker-certs && \
     openssl req -x509 -newkey rsa:2048 -nodes \
       -keyout /app/docker-certs/server.key \
