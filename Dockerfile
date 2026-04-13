@@ -11,12 +11,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Optional: pass at build time so scan/status ``release.git_commit`` works without runtime env:
+# Optional OCI label only (not read by the app). Example:
 #   CHILI_GIT_COMMIT=$(git rev-parse HEAD) docker compose build chili
-# Baked file is preferred at runtime over stale dashboard ``CHILI_GIT_COMMIT`` overrides.
 ARG CHILI_GIT_COMMIT=
-RUN printf '%s' "${CHILI_GIT_COMMIT}" > /app/.chili-git-commit
-ENV CHILI_GIT_COMMIT=${CHILI_GIT_COMMIT}
 LABEL org.opencontainers.image.revision="${CHILI_GIT_COMMIT}"
 
 RUN mkdir -p /app/data /app/docker-certs && \

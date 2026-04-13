@@ -996,10 +996,10 @@ def _safe_scan_status_part(label: str, fn, default):
 def api_scan_status():
     """Aggregate Brain runtime, scan, reconcile-cycle, prescreen, and scheduler state.
 
-    **Primary operator read path:** ``brain_runtime`` (work ledger, release, scheduler, scan,
-    ``learning_summary``). Top-level ``work_ledger``, ``release``, ``scheduler``, and ``scan``
-    duplicate ``brain_runtime`` for **one release** of backward compatibility — prefer
-    ``brain_runtime`` in new UI.
+    **Primary operator read path:** ``brain_runtime`` (work ledger, scheduler, scan,
+    ``learning_summary``, ``activity_signals``). ``release`` is always ``{}`` (reserved for
+    compatibility; do not use for deploy truth). Top-level mirrors duplicate ``brain_runtime`` —
+    prefer ``brain_runtime`` in new UI.
 
     Values are passed through :func:`to_jsonable` so numpy/pandas scalars and
     non-finite floats cannot break JSON encoding (Starlette uses ``allow_nan=False``).
@@ -1016,38 +1016,6 @@ def api_scan_status():
         finally:
             sdb.close()
 
-    def _release_info() -> dict[str, Any]:
-        """Deploy fingerprint: prefer image-baked ``.chili-git-commit`` (Dockerfile), then env.
-
-        PaaS dashboards often set ``CHILI_GIT_COMMIT`` once; it can stay stale across rollouts.
-        The baked file reflects the **build** and wins when non-empty.
-        ``git_commit_source`` is ``baked_file`` or ``environment`` when ``git_commit`` is set (Phase 0 debug).
-        """
-        baked_candidates = (
-            Path(__file__).resolve().parents[3] / ".chili-git-commit",
-            Path("/app/.chili-git-commit"),
-        )
-        for baked_path in baked_candidates:
-            try:
-                if baked_path.is_file():
-                    baked = baked_path.read_text(encoding="utf-8").strip()
-                    if baked and not baked.lstrip().startswith("#"):
-                        return {
-                            "git_commit": baked,
-                            "git_commit_source": "baked_file",
-                        }
-            except OSError:
-                continue
-        sha = (
-            os.environ.get("CHILI_GIT_COMMIT")
-            or os.environ.get("GIT_COMMIT")
-            or os.environ.get("RAILWAY_GIT_COMMIT_SHA")
-            or os.environ.get("RENDER_GIT_COMMIT")
-        )
-        if sha:
-            return {"git_commit": sha, "git_commit_source": "environment"}
-        return {}
-
     scan_st = _safe_scan_status_part("scan", ts.get_scan_status, {})
     prescreen_st = _safe_scan_status_part("prescreen", ts.get_prescreen_status, {})
     scheduler_st = _safe_scan_status_part(
@@ -1056,7 +1024,7 @@ def api_scan_status():
         {"running": False, "jobs": []},
     )
     work_ledger_st = _safe_scan_status_part("work_ledger", _work_ledger_summary, {})
-    release_st = _release_info()
+    release_st: dict[str, Any] = {}
     learning_st = _safe_scan_status_part("learning", ts.get_learning_status, {})
 
     learning_summary: dict[str, Any] = {

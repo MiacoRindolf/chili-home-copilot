@@ -6323,7 +6323,7 @@ var _PIPELINE_STEPS = [
 /**
  * Resolve primary fields from ``/api/trading/scan/status``.
  * Prefer ``brain_runtime``; fall back to top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan``
- * (one-release compatibility mirrors — see api_scan_status in ai.py).
+ * (one-release compatibility mirrors — see api_scan_status in ai.py). ``release`` is always empty.
  * Full reconcile graph fields stay on top-level ``learning`` only (no brain_runtime equivalent).
  * ``activity_signals`` is optional; ledger outcome refresh uses ``outcome_head_id`` when
  * ``window.__CHILI_LEDGER_OUTCOME_REFRESH === true`` (default off).
