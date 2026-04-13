@@ -324,6 +324,83 @@ def get_performance_dashboard(
     }
 
 
+def get_trading_dashboard_overview(
+    db: Session, user_id: int | None,
+) -> dict[str, Any]:
+    """Consolidated trading dashboard combining performance, risk, regime, and execution quality.
+
+    Aggregates data from multiple services into a single payload suitable
+    for a unified monitoring dashboard.
+    """
+    from datetime import datetime, timedelta
+    from ...models.trading import ScanPattern
+
+    overview: dict[str, Any] = {"ok": True}
+
+    # Performance summary (reuse existing)
+    try:
+        overview["performance"] = get_performance_dashboard(db, user_id)
+    except Exception:
+        overview["performance"] = None
+
+    # Equity curve + drawdown
+    try:
+        now = datetime.utcnow()
+        daily = get_daily_pnl(db, user_id, now - timedelta(days=90), now, include_day_trades=False)
+        cumulative = 0.0
+        peak = 0.0
+        equity_curve: list[dict[str, Any]] = []
+        drawdown_series: list[dict[str, Any]] = []
+        for day in daily:
+            cumulative += day.get("pnl", 0)
+            peak = max(peak, cumulative)
+            dd = (cumulative - peak) / max(peak, 1.0) * 100 if peak > 0 else 0
+            equity_curve.append({"date": day["date"], "equity": round(cumulative, 2)})
+            drawdown_series.append({"date": day["date"], "drawdown_pct": round(dd, 2)})
+        overview["equity_curve"] = equity_curve
+        overview["drawdown_series"] = drawdown_series
+    except Exception:
+        overview["equity_curve"] = []
+        overview["drawdown_series"] = []
+
+    # Pattern lifecycle counts
+    try:
+        stages = db.query(
+            ScanPattern.lifecycle_stage,
+        ).filter(ScanPattern.active == True).all()
+        stage_counts: dict[str, int] = {}
+        for (stage,) in stages:
+            stage_counts[stage] = stage_counts.get(stage, 0) + 1
+        overview["pattern_lifecycle"] = stage_counts
+    except Exception:
+        overview["pattern_lifecycle"] = {}
+
+    # Execution quality
+    try:
+        from .execution_quality import compute_execution_stats
+        overview["execution_quality"] = compute_execution_stats(db, user_id)
+    except Exception:
+        overview["execution_quality"] = None
+
+    # Current market regime
+    try:
+        from .market_data import get_market_regime
+        overview["regime_current"] = get_market_regime()
+    except Exception:
+        overview["regime_current"] = None
+
+    # Risk snapshot
+    try:
+        from .portfolio_risk import get_portfolio_risk_snapshot
+        import dataclasses
+        budget = get_portfolio_risk_snapshot(db, user_id)
+        overview["risk_snapshot"] = dataclasses.asdict(budget)
+    except Exception:
+        overview["risk_snapshot"] = None
+
+    return overview
+
+
 def get_trade_stats_by_pattern(
     db: Session, user_id: int | None, min_trades: int = 1,
 ) -> list[dict[str, Any]]:

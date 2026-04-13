@@ -29,6 +29,8 @@ class RiskBudget:
     available_heat_pct: float = 0.0
     can_open_new: bool = True
     rejection_reason: str | None = None
+    sector_exposure: dict[str, float] = field(default_factory=dict)
+    portfolio_var_pct: float | None = None
 
 
 @dataclass
@@ -39,6 +41,8 @@ class RiskLimits:
     max_portfolio_heat_pct: float = 6.0  # total risk as % of capital
     max_risk_per_trade_pct: float = 1.0  # max 1% capital per trade
     max_same_ticker: int = 2
+    max_sector_pct: float = 40.0         # max % of open positions in one sector
+    max_avg_correlation: float = 0.75    # reject if avg correl with open positions exceeds this
 
 
 def get_risk_limits(settings: Any | None = None) -> RiskLimits:
@@ -53,6 +57,8 @@ def get_risk_limits(settings: Any | None = None) -> RiskLimits:
         max_portfolio_heat_pct=float(getattr(settings, "brain_risk_max_heat_pct", 6.0)),
         max_risk_per_trade_pct=float(getattr(settings, "brain_risk_per_trade_pct", 1.0)),
         max_same_ticker=int(getattr(settings, "brain_risk_max_same_ticker", 2)),
+        max_sector_pct=float(getattr(settings, "brain_risk_max_sector_pct", 40.0)),
+        max_avg_correlation=float(getattr(settings, "brain_risk_max_avg_correlation", 0.75)),
     )
 
 
@@ -106,6 +112,19 @@ def get_portfolio_risk_snapshot(
         budget.can_open_new = False
         budget.rejection_reason = f"Portfolio heat {budget.total_heat_pct:.1f}% >= cap {limits.max_portfolio_heat_pct}%"
 
+    # Enrich with sector exposure (lightweight — no market data fetch)
+    try:
+        budget.sector_exposure = compute_sector_exposure(db, user_id)
+    except Exception:
+        pass
+
+    # VaR is expensive (fetches OHLCV); compute only when positions exist
+    if budget.open_positions > 0:
+        try:
+            budget.portfolio_var_pct = estimate_portfolio_var(db, user_id, capital)
+        except Exception:
+            pass
+
     return budget
 
 
@@ -152,6 +171,26 @@ def check_new_trade_allowed(
     ).count()
     if same_ticker_count >= limits.max_same_ticker:
         return False, f"Already {same_ticker_count} open positions in {ticker}"
+
+    # Sector concentration check
+    try:
+        new_trade_sector = db.query(Trade.sector).filter(
+            Trade.ticker == ticker.upper(),
+        ).order_by(Trade.id.desc()).first()
+        sector_label = new_trade_sector[0] if new_trade_sector else None
+        allowed, reason = check_sector_concentration(db, user_id, sector_label, limits)
+        if not allowed:
+            return False, reason
+    except Exception:
+        logger.debug("[risk] sector concentration check failed; allowing", exc_info=True)
+
+    # Correlation risk check
+    try:
+        allowed, reason = check_correlation_risk(db, user_id, ticker, limits)
+        if not allowed:
+            return False, reason
+    except Exception:
+        logger.debug("[risk] correlation check failed; allowing", exc_info=True)
 
     return True, "ok"
 
@@ -294,6 +333,241 @@ def size_with_drawdown_scaling(
     base["method"] = "kelly_quarter_dd_scaled"
 
     return base
+
+
+# ── Portfolio-level correlation & sector risk ────────────────────────
+
+def compute_sector_exposure(
+    db: Session,
+    user_id: int | None,
+) -> dict[str, float]:
+    """Return % of open positions in each sector.
+
+    Uses the ``Trade.sector`` column.  Tickers with no sector assigned
+    are grouped under "unknown".
+    """
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+
+    if not open_trades:
+        return {}
+
+    counts: dict[str, int] = {}
+    for t in open_trades:
+        sector = (t.sector or "unknown").strip().lower()
+        counts[sector] = counts.get(sector, 0) + 1
+
+    total = len(open_trades)
+    return {s: round(c / total * 100, 1) for s, c in counts.items()}
+
+
+def compute_pairwise_correlation(
+    tickers: list[str],
+    lookback: int = 60,
+) -> dict[str, dict[str, float]]:
+    """Compute Pearson correlation matrix of daily returns for *tickers*.
+
+    Returns nested dict: ``{ticker_a: {ticker_b: corr, ...}, ...}``.
+    Tickers with insufficient data are silently excluded.
+    """
+    import numpy as np
+
+    from .market_data import fetch_ohlcv_df
+
+    if len(tickers) < 2:
+        return {}
+
+    returns_by_ticker: dict[str, list[float]] = {}
+    for ticker in tickers:
+        try:
+            df = fetch_ohlcv_df(ticker, interval="1d", period=f"{lookback + 10}d")
+            if df is None or len(df) < 20:
+                continue
+            close = df["Close"].values
+            rets = list((close[1:] - close[:-1]) / close[:-1])
+            returns_by_ticker[ticker] = rets[-lookback:]
+        except Exception:
+            continue
+
+    valid = list(returns_by_ticker.keys())
+    if len(valid) < 2:
+        return {}
+
+    # Align lengths to the shortest series
+    min_len = min(len(returns_by_ticker[t]) for t in valid)
+    matrix: dict[str, dict[str, float]] = {}
+    for a in valid:
+        matrix[a] = {}
+        ra = np.array(returns_by_ticker[a][-min_len:])
+        for b in valid:
+            if a == b:
+                matrix[a][b] = 1.0
+                continue
+            rb = np.array(returns_by_ticker[b][-min_len:])
+            if np.std(ra) == 0 or np.std(rb) == 0:
+                matrix[a][b] = 0.0
+            else:
+                matrix[a][b] = round(float(np.corrcoef(ra, rb)[0, 1]), 4)
+
+    return matrix
+
+
+def check_correlation_risk(
+    db: Session,
+    user_id: int | None,
+    new_ticker: str,
+    limits: RiskLimits | None = None,
+) -> tuple[bool, str]:
+    """Return ``(allowed, reason)`` after checking correlation with open positions.
+
+    If the average absolute correlation between *new_ticker* and all
+    currently open tickers exceeds ``limits.max_avg_correlation``, the
+    trade is rejected.
+    """
+    if limits is None:
+        limits = get_risk_limits()
+
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+
+    existing_tickers = list({t.ticker for t in open_trades})
+    if len(existing_tickers) < 2:
+        return True, "ok"
+
+    try:
+        all_tickers = existing_tickers + [new_ticker.upper()]
+        corr_matrix = compute_pairwise_correlation(all_tickers)
+        if not corr_matrix or new_ticker.upper() not in corr_matrix:
+            return True, "ok"  # insufficient data, allow
+
+        new_corrs = corr_matrix[new_ticker.upper()]
+        peer_corrs = [
+            abs(new_corrs.get(t, 0.0))
+            for t in existing_tickers
+            if t in new_corrs and t != new_ticker.upper()
+        ]
+        if not peer_corrs:
+            return True, "ok"
+
+        avg_corr = sum(peer_corrs) / len(peer_corrs)
+        if avg_corr > limits.max_avg_correlation:
+            return False, (
+                f"Avg correlation {avg_corr:.2f} with open positions "
+                f"exceeds limit {limits.max_avg_correlation}"
+            )
+    except Exception:
+        logger.debug("[risk] correlation check failed; allowing trade", exc_info=True)
+
+    return True, "ok"
+
+
+def check_sector_concentration(
+    db: Session,
+    user_id: int | None,
+    new_ticker_sector: str | None,
+    limits: RiskLimits | None = None,
+) -> tuple[bool, str]:
+    """Return ``(allowed, reason)`` after checking sector concentration.
+
+    Projects what sector exposure would look like after adding one more
+    position in *new_ticker_sector* and rejects if any sector would
+    exceed ``limits.max_sector_pct``.
+    """
+    if limits is None:
+        limits = get_risk_limits()
+
+    sector = (new_ticker_sector or "unknown").strip().lower()
+
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+
+    if not open_trades:
+        return True, "ok"
+
+    total_after = len(open_trades) + 1
+    same_sector = sum(
+        1 for t in open_trades
+        if (t.sector or "unknown").strip().lower() == sector
+    ) + 1  # +1 for the proposed trade
+
+    projected_pct = same_sector / total_after * 100
+    if projected_pct > limits.max_sector_pct:
+        return False, (
+            f"Sector '{sector}' would reach {projected_pct:.0f}% "
+            f"({same_sector}/{total_after}), exceeds {limits.max_sector_pct}% cap"
+        )
+
+    return True, "ok"
+
+
+def estimate_portfolio_var(
+    db: Session,
+    user_id: int | None,
+    capital: float = 100_000.0,
+    confidence: float = 0.95,
+    lookback: int = 60,
+) -> float | None:
+    """Estimate parametric Value-at-Risk (%) for current open positions.
+
+    Uses a covariance-based approach on daily returns, assuming normal
+    distribution.  Returns the estimated 1-day loss as a percentage of
+    capital, or None if insufficient data.
+    """
+    import numpy as np
+    from scipy.stats import norm
+
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+
+    if not open_trades or capital <= 0:
+        return None
+
+    # Collect per-position weights (notional / capital) and returns
+    from .market_data import fetch_ohlcv_df
+
+    tickers = list({t.ticker for t in open_trades})
+    weights: dict[str, float] = {}
+    for t in open_trades:
+        notional = t.entry_price * t.quantity
+        weights[t.ticker] = weights.get(t.ticker, 0.0) + notional / capital
+
+    returns_data: dict[str, list[float]] = {}
+    for ticker in tickers:
+        try:
+            df = fetch_ohlcv_df(ticker, interval="1d", period=f"{lookback + 10}d")
+            if df is None or len(df) < 20:
+                continue
+            close = df["Close"].values
+            rets = list((close[1:] - close[:-1]) / close[:-1])
+            returns_data[ticker] = rets[-lookback:]
+        except Exception:
+            continue
+
+    valid = [t for t in tickers if t in returns_data]
+    if len(valid) < 1:
+        return None
+
+    min_len = min(len(returns_data[t]) for t in valid)
+    ret_matrix = np.array([returns_data[t][-min_len:] for t in valid])
+    w = np.array([weights.get(t, 0.0) for t in valid])
+
+    cov = np.cov(ret_matrix)
+    if cov.ndim == 0:
+        cov = np.array([[float(cov)]])
+
+    portfolio_var = float(np.sqrt(w @ cov @ w))
+    z = norm.ppf(confidence)
+    var_pct = round(portfolio_var * z * 100, 4)
+
+    return var_pct
 
 
 def _infer_stop(trade: Trade) -> float | None:

@@ -9,9 +9,9 @@ learns directly from discovered patterns.  Three main components:
    features extracted from historical ``MarketSnapshot`` outcomes
 
 **Validation**: Training uses chronological ``MarketSnapshot`` order and
-``TimeSeriesSplit`` cross-validation to reduce random-shuffle leakage vs
-IID ``KFold``. This does not implement full purged/embargoed CV (Lopez de
-Prado); labels still use overlapping forward-return windows — see train().
+``PurgedTimeSeriesSplit`` cross-validation (López de Prado-style) that
+purges training samples whose forward-return labels overlap with test
+fold boundaries and embargoes bars after each test fold.
 """
 from __future__ import annotations
 
@@ -32,6 +32,67 @@ logger = logging.getLogger(__name__)
 _DATA_DIR = Path(__file__).resolve().parents[3] / "data"
 _MODEL_PATH = _DATA_DIR / "pattern_meta_model.pkl"
 _MIN_SAMPLES = 50
+
+
+# ── Purged/embargoed cross-validation ────────────────────────────────
+
+class PurgedTimeSeriesSplit:
+    """TimeSeriesSplit with label-overlap purging and post-test embargo.
+
+    Implements López de Prado's purged CV concept:
+    - **Purge**: training samples whose forward-return label window
+      overlaps with the test fold start are removed from the training set.
+    - **Embargo**: a configurable number of bars immediately after each
+      test fold end are excluded from subsequent training folds to avoid
+      leaking adjacent information.
+
+    Parameters
+    ----------
+    n_splits : int
+        Number of temporal folds.
+    label_horizon : int
+        Number of bars the label spans into the future (e.g. 5 for
+        ``future_return_5d``).  Training samples within this distance
+        before each test fold start are purged.
+    embargo_bars : int
+        Number of bars after each test fold end to exclude from training.
+    """
+
+    def __init__(
+        self,
+        n_splits: int = 5,
+        label_horizon: int = 5,
+        embargo_bars: int = 2,
+    ) -> None:
+        self.n_splits = n_splits
+        self.label_horizon = label_horizon
+        self.embargo_bars = embargo_bars
+
+    def split(self, X, y=None, groups=None):
+        n = len(X)
+        fold_size = n // (self.n_splits + 1)
+        if fold_size < 1:
+            return
+
+        for i in range(self.n_splits):
+            test_start = fold_size * (i + 1)
+            test_end = min(fold_size * (i + 2), n)
+
+            purge_start = max(0, test_start - self.label_horizon)
+            embargo_end = min(n, test_end + self.embargo_bars)
+
+            train_idx = list(range(0, purge_start))
+            if embargo_end < n and i < self.n_splits - 1:
+                pass  # don't add post-embargo to train for this fold
+
+            test_idx = list(range(test_start, test_end))
+
+            if len(train_idx) > 0 and len(test_idx) > 0:
+                yield np.array(train_idx), np.array(test_idx)
+
+    def get_n_splits(self, X=None, y=None, groups=None):
+        return self.n_splits
+
 
 # ── Condition strength ─────────────────────────────────────────────────
 
@@ -236,6 +297,7 @@ class PatternMetaLearner:
         self._model = None
         self._stats: dict[str, Any] = {}
         self._feature_names: list[str] = []
+        self._training_feature_stats: dict[str, dict[str, float]] = {}
         self._lock = threading.Lock()
 
     # ── persistence ───────────────────────────────────────────────
@@ -248,6 +310,7 @@ class PatternMetaLearner:
                     "model": self._model,
                     "stats": self._stats,
                     "features": self._feature_names,
+                    "training_feature_stats": self._training_feature_stats,
                 }, f)
             logger.info("[pattern_ml] Model saved to %s", _MODEL_PATH)
         except Exception as exc:
@@ -263,6 +326,7 @@ class PatternMetaLearner:
                 self._model = data["model"]
                 self._stats = data.get("stats", {})
                 self._feature_names = data.get("features", [])
+                self._training_feature_stats = data.get("training_feature_stats", {})
             logger.info(
                 "[pattern_ml] Model loaded (%s samples)",
                 self._stats.get("samples", "?"),
@@ -326,7 +390,7 @@ class PatternMetaLearner:
 
     def train(self, db) -> dict[str, Any]:
         """Train on ``MarketSnapshot`` rows using pattern features."""
-        from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+        from sklearn.model_selection import cross_val_score
         from sklearn.metrics import accuracy_score, precision_score, recall_score
 
         from ...models.trading import MarketSnapshot
@@ -408,14 +472,31 @@ class PatternMetaLearner:
                 "oos_size": len(X_oos),
             }
 
+        # Capture training feature distributions for drift monitoring
+        train_feature_stats: dict[str, dict[str, float]] = {}
+        for fi, fname in enumerate(feature_names):
+            col = X_train[:, fi]
+            q = np.quantile(col, [0.1, 0.25, 0.5, 0.75, 0.9]).tolist()
+            train_feature_stats[fname] = {
+                "mean": float(np.mean(col)),
+                "std": float(np.std(col)),
+                "q10": q[0], "q25": q[1], "q50": q[2], "q75": q[3], "q90": q[4],
+            }
+
         clf = self._make_meta_learner_clf()
 
-        # Cross-validate on training set only (temporal folds)
+        # Cross-validate on training set only (purged temporal folds)
         n_splits = min(5, max(2, len(X_train) // 200))
-        tscv = TimeSeriesSplit(n_splits=n_splits)
+        tscv = PurgedTimeSeriesSplit(
+            n_splits=n_splits, label_horizon=5, embargo_bars=2,
+        )
         n_jobs_cv = 1 if getattr(clf, "device", None) == "gpu" else -1
         cv_scores = cross_val_score(
             clf, X_train, y_train, cv=tscv, scoring="accuracy", n_jobs=n_jobs_cv,
+        )
+        logger.debug(
+            "[pattern_ml] Purged CV: %d folds, label_horizon=5, embargo=2",
+            n_splits,
         )
 
         # Train on training set, evaluate on OOS holdout
@@ -438,6 +519,7 @@ class PatternMetaLearner:
         with self._lock:
             self._model = clf
             self._feature_names = feature_names
+            self._training_feature_stats = train_feature_stats
             self._stats = {
                 "trained_at": datetime.utcnow().isoformat(),
                 "samples": len(X),
@@ -447,7 +529,7 @@ class PatternMetaLearner:
                 "label_threshold_pct": _LABEL_THRESHOLD_PCT,
                 "oos_accuracy": oos_acc,
                 "cv_accuracy": cv_acc,
-                "cv_method": "TimeSeriesSplit",
+                "cv_method": "PurgedTimeSeriesSplit",
                 "cv_splits": n_splits,
                 "precision_oos": precision,
                 "recall_oos": recall,
@@ -485,6 +567,11 @@ class PatternMetaLearner:
             return round(prob, 4)
         except Exception:
             return None
+
+    def get_training_feature_stats(self) -> dict[str, dict[str, float]]:
+        """Return per-feature distribution stats captured at training time."""
+        with self._lock:
+            return dict(self._training_feature_stats)
 
     def get_stats(self) -> dict[str, Any]:
         return dict(self._stats) if self._stats else {

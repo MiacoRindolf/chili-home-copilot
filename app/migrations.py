@@ -5576,6 +5576,20 @@ def _migration_106_split_c_secondary_cluster(conn) -> None:
     conn.commit()
 
 
+def _migration_107_scan_pattern_regime_affinity(conn) -> None:
+    """Add regime_affinity_json JSONB column to scan_patterns."""
+    if "scan_patterns" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "scan_patterns")
+    if "regime_affinity_json" not in cols:
+        conn.execute(text(
+            "ALTER TABLE scan_patterns "
+            "ADD COLUMN regime_affinity_json JSONB NOT NULL DEFAULT '{}'"
+        ))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -5684,6 +5698,7 @@ MIGRATIONS = [
     ("104_split_c_meta_cluster", _migration_104_split_c_meta_cluster),
     ("105_execution_context_venue_nodes", _migration_105_execution_context_venue_nodes),
     ("106_split_c_secondary_cluster", _migration_106_split_c_secondary_cluster),
+    ("107_scan_pattern_regime_affinity", _migration_107_scan_pattern_regime_affinity),
 ]
 
 

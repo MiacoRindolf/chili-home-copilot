@@ -726,3 +726,136 @@ def live_drift_v2_summary(contract: dict[str, Any] | None) -> dict[str, Any] | N
         "shadow_mode": contract.get("shadow_mode"),
     }
 
+
+# ── Feature / indicator distribution drift (PSI) ─────────────────────
+
+def _compute_psi(
+    expected: list[float],
+    actual: list[float],
+    n_bins: int = 10,
+) -> float:
+    """Compute Population Stability Index between two distributions.
+
+    PSI < 0.10  → stable
+    PSI 0.10-0.25 → moderate drift
+    PSI > 0.25 → significant drift
+    """
+    import numpy as np
+
+    e = np.array(expected, dtype=float)
+    a = np.array(actual, dtype=float)
+    if len(e) < 10 or len(a) < 10:
+        return 0.0
+
+    # Build bins from expected distribution
+    breakpoints = np.percentile(e, np.linspace(0, 100, n_bins + 1))
+    breakpoints[0] = -np.inf
+    breakpoints[-1] = np.inf
+    # Deduplicate (can happen if many identical values)
+    breakpoints = np.unique(breakpoints)
+    if len(breakpoints) < 3:
+        return 0.0
+
+    e_counts = np.histogram(e, bins=breakpoints)[0].astype(float)
+    a_counts = np.histogram(a, bins=breakpoints)[0].astype(float)
+
+    # Avoid division by zero with small floor
+    e_pct = np.maximum(e_counts / e_counts.sum(), 1e-4)
+    a_pct = np.maximum(a_counts / a_counts.sum(), 1e-4)
+
+    psi = float(np.sum((a_pct - e_pct) * np.log(a_pct / e_pct)))
+    return round(max(0.0, psi), 6)
+
+
+def check_feature_drift(
+    training_feature_stats: dict[str, dict[str, float]],
+    recent_feature_rows: list[dict[str, float]],
+    *,
+    psi_threshold_moderate: float = 0.10,
+    psi_threshold_significant: float = 0.25,
+) -> dict[str, Any]:
+    """Check whether ML input features have drifted from their training distribution.
+
+    Parameters
+    ----------
+    training_feature_stats : dict
+        Per-feature stats captured at training time (from
+        ``PatternMetaLearner.get_training_feature_stats()``).  Each entry
+        must contain ``mean`` and ``std``.
+    recent_feature_rows : list[dict]
+        Recent feature vectors (one dict per snapshot) using the same
+        feature names as training.
+
+    Returns
+    -------
+    dict with ``ok``, ``features_checked``, ``per_feature`` PSI values,
+    ``drifted_features`` list, and ``composite_tier``.
+    """
+    import numpy as np
+
+    if not training_feature_stats or not recent_feature_rows:
+        return {"ok": True, "skip_reason": "insufficient_data", "features_checked": 0}
+
+    per_feature: dict[str, dict[str, Any]] = {}
+    drifted: list[str] = []
+
+    for fname, stats in training_feature_stats.items():
+        # Reconstruct an approximate training distribution from stats
+        # (mean, std) via normal sampling — this is an approximation
+        mean = stats.get("mean", 0.0)
+        std = stats.get("std", 1.0)
+        if std <= 0:
+            std = 1e-6
+
+        # Synthetic expected from stored quantiles (more accurate than normal approx)
+        q_keys = ["q10", "q25", "q50", "q75", "q90"]
+        quantiles = [stats.get(k) for k in q_keys]
+        if all(q is not None for q in quantiles):
+            # Build a simple representative sample from quantiles
+            expected = np.concatenate([
+                np.random.default_rng(42).normal(quantiles[0], std * 0.3, 20),
+                np.random.default_rng(42).normal(quantiles[1], std * 0.2, 20),
+                np.random.default_rng(42).normal(quantiles[2], std * 0.1, 20),
+                np.random.default_rng(42).normal(quantiles[3], std * 0.2, 20),
+                np.random.default_rng(42).normal(quantiles[4], std * 0.3, 20),
+            ]).tolist()
+        else:
+            expected = np.random.default_rng(42).normal(mean, std, 100).tolist()
+
+        actual = [row.get(fname, 0.0) for row in recent_feature_rows]
+        psi = _compute_psi(expected, actual)
+
+        tier = "stable"
+        if psi >= psi_threshold_significant:
+            tier = "significant"
+            drifted.append(fname)
+        elif psi >= psi_threshold_moderate:
+            tier = "moderate"
+            drifted.append(fname)
+
+        per_feature[fname] = {"psi": psi, "tier": tier}
+
+    composite = "stable"
+    if any(v["tier"] == "significant" for v in per_feature.values()):
+        composite = "significant"
+    elif any(v["tier"] == "moderate" for v in per_feature.values()):
+        composite = "moderate"
+
+    result = {
+        "ok": composite == "stable",
+        "features_checked": len(per_feature),
+        "drifted_features": drifted,
+        "composite_tier": composite,
+        "per_feature": per_feature,
+        "evaluated_at": _utc_iso(),
+    }
+
+    if drifted:
+        logger.warning(
+            "[feature_drift] %d/%d features drifted (composite=%s): %s",
+            len(drifted), len(per_feature), composite,
+            ", ".join(drifted[:5]),
+        )
+
+    return result
+

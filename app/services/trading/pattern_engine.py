@@ -214,6 +214,7 @@ def get_active_patterns(db: Session, asset_class: str = "all") -> list[ScanPatte
 def evaluate_patterns(
     indicators: dict[str, Any],
     patterns: list[ScanPattern],
+    current_regime: str | None = None,
 ) -> list[dict[str, Any]]:
     """Check which patterns match the given indicator snapshot.
 
@@ -234,6 +235,11 @@ def evaluate_patterns(
             "vcp_count": 2,
             ...
         }
+
+    When *current_regime* is provided (e.g. ``"risk_on"``), each matched
+    pattern's ``score_boost`` is modulated by its regime affinity data:
+    patterns that perform well in the current regime get a boost, while
+    those that underperform are suppressed.
 
     Returns a list of matched patterns with their score boosts.
     """
@@ -259,10 +265,13 @@ def evaluate_patterns(
                 break
 
         if all_met:
+            boost = pattern.score_boost
+            if current_regime:
+                boost = regime_adjusted_score_boost(pattern, current_regime)
             matches.append({
                 "pattern_id": pattern.id,
                 "name": pattern.name,
-                "score_boost": pattern.score_boost,
+                "score_boost": boost,
                 "min_base_score": pattern.min_base_score,
                 "confidence": pattern.confidence,
                 "win_rate": pattern.win_rate,
@@ -593,4 +602,47 @@ def _pattern_to_dict(p: ScanPattern) -> dict[str, Any]:
         "hypothesis_family": getattr(p, "hypothesis_family", None),
         "created_at": p.created_at.isoformat() if p.created_at else None,
         "updated_at": p.updated_at.isoformat() if p.updated_at else None,
+        "regime_affinity_json": getattr(p, "regime_affinity_json", None),
     }
+
+
+# ── Regime-aware score modulation ─────────────────────────────────────
+
+def regime_adjusted_score_boost(
+    pattern: ScanPattern,
+    current_regime: str,
+    *,
+    boost_factor: float = 1.3,
+    suppress_factor: float = 0.4,
+    min_samples: int = 10,
+) -> float:
+    """Return a regime-modulated ``score_boost`` for *pattern*.
+
+    If the pattern has regime affinity data and the current regime has
+    enough samples:
+    - If win rate in current regime >= 55%: multiply score_boost by *boost_factor*
+    - If win rate in current regime < 45%: multiply score_boost by *suppress_factor*
+    - Otherwise: return unmodified score_boost
+
+    Falls back to the pattern's base ``score_boost`` if no affinity data
+    is available.
+    """
+    base = pattern.score_boost or 0.0
+    affinity = getattr(pattern, "regime_affinity_json", None)
+    if not affinity or not isinstance(affinity, dict):
+        return base
+
+    regime_data = affinity.get(current_regime)
+    if not regime_data or not isinstance(regime_data, dict):
+        return base
+
+    n = regime_data.get("n", 0)
+    if n < min_samples:
+        return base
+
+    wr = regime_data.get("win_rate", 0.5)
+    if wr >= 0.55:
+        return round(base * boost_factor, 4)
+    elif wr < 0.45:
+        return round(base * suppress_factor, 4)
+    return base

@@ -2125,3 +2125,105 @@ def backtest_pattern(
     result["pattern_name"] = pattern_name
     result["mapped_strategy"] = strategy_id
     return result
+
+
+# ── Adversarial / Stress Testing ──────────────────────────────────────
+
+CRISIS_PERIODS: dict[str, tuple[str, str]] = {
+    "covid_crash": ("2020-02-19", "2020-03-23"),
+    "covid_recovery": ("2020-03-24", "2020-06-08"),
+    "2022_bear": ("2022-01-03", "2022-10-12"),
+    "svb_crisis": ("2023-03-08", "2023-03-15"),
+    "tariff_shock_2025": ("2025-04-02", "2025-04-09"),
+}
+
+
+def run_stress_backtest(
+    db: Session,
+    pattern_id: int,
+    crisis_key: str,
+    *,
+    tickers: list[str] | None = None,
+    commission: float | None = None,
+    spread: float | None = None,
+) -> dict[str, Any]:
+    """Run a pattern backtest restricted to a historical crisis period.
+
+    Returns aggregated stats (win rate, max drawdown, avg return) across
+    the requested tickers, or an error dict if the crisis key is unknown
+    or data is insufficient.
+    """
+    from ..models.trading import ScanPattern
+
+    if crisis_key not in CRISIS_PERIODS:
+        return {"ok": False, "error": f"Unknown crisis key: {crisis_key}", "available": list(CRISIS_PERIODS)}
+
+    start_date, end_date = CRISIS_PERIODS[crisis_key]
+    pattern = db.query(ScanPattern).get(pattern_id)
+    if pattern is None:
+        return {"ok": False, "error": f"Pattern {pattern_id} not found"}
+
+    if tickers is None:
+        ac = (pattern.asset_class or "all").strip().lower()
+        if ac == "crypto":
+            tickers = ["BTC-USD", "ETH-USD", "SOL-USD"]
+        else:
+            tickers = ["SPY", "QQQ", "AAPL", "MSFT", "NVDA"]
+
+    results: list[dict[str, Any]] = []
+    for ticker in tickers:
+        try:
+            rules = pattern.rules_json
+            if isinstance(rules, dict):
+                rules = json.dumps(rules)
+            r = backtest_pattern(
+                ticker=ticker,
+                pattern_name=pattern.name,
+                rules_json=rules,
+                interval=pattern.timeframe or "1d",
+                period="max",
+                ohlc_start=start_date,
+                ohlc_end=end_date,
+                commission=commission,
+                spread=spread,
+            )
+            if r and r.get("return_pct") is not None:
+                results.append({
+                    "ticker": ticker,
+                    "return_pct": r.get("return_pct"),
+                    "win_rate": r.get("win_rate"),
+                    "max_drawdown": r.get("max_drawdown"),
+                    "trade_count": r.get("trade_count", 0),
+                    "sharpe": r.get("sharpe"),
+                })
+        except Exception as e:
+            logger.debug("[stress] %s/%s failed: %s", ticker, crisis_key, e)
+
+    if not results:
+        return {
+            "ok": False,
+            "crisis_key": crisis_key,
+            "period": f"{start_date} → {end_date}",
+            "error": "No usable backtest results (insufficient data for period)",
+        }
+
+    avg_return = sum(r["return_pct"] for r in results) / len(results)
+    avg_wr = sum((r["win_rate"] or 0) for r in results) / len(results)
+    worst_dd = min((r["max_drawdown"] or 0) for r in results)
+    total_trades = sum(r["trade_count"] for r in results)
+    survived = all((r["return_pct"] or 0) > -50 for r in results)
+
+    return {
+        "ok": True,
+        "crisis_key": crisis_key,
+        "period": f"{start_date} → {end_date}",
+        "pattern_id": pattern_id,
+        "pattern_name": pattern.name,
+        "tickers_tested": len(results),
+        "avg_return_pct": round(avg_return, 2),
+        "avg_win_rate": round(avg_wr, 1),
+        "worst_max_drawdown": round(worst_dd, 2),
+        "total_trades": total_trades,
+        "survived": survived,
+        "per_ticker": results,
+    }

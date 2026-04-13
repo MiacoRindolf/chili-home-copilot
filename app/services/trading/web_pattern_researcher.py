@@ -356,7 +356,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
 
     tf = getattr(pattern, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
-    bt_kw = brain_pattern_backtest_friction_kwargs()
+    bt_kw = brain_pattern_backtest_friction_kwargs(db)
 
     test_tickers = ["AAPL", "MSFT", "NVDA", "TSLA", "BTC-USD"]
     wins = 0

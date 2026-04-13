@@ -259,12 +259,38 @@ def brain_apply_bench_promotion_gate(
     return None, True
 
 
-def brain_pattern_backtest_friction_kwargs() -> dict[str, Any]:
-    """Spread, commission, and OOS holdout for pattern hypothesis backtests."""
+def brain_pattern_backtest_friction_kwargs(db: Session | None = None) -> dict[str, Any]:
+    """Spread, commission, and OOS holdout for pattern hypothesis backtests.
+
+    When *db* is provided, attempts to use realised execution slippage
+    (P90) via ``suggest_adaptive_spread`` so backtests reflect actual
+    fill quality.  Falls back to the static ``settings.backtest_spread``
+    when there is insufficient data or on error.
+    """
     from ...config import settings
 
+    spread = float(settings.backtest_spread)
+
+    if db is not None:
+        try:
+            from .execution_quality import suggest_adaptive_spread
+
+            suggestion = suggest_adaptive_spread(db)
+            if suggestion.get("should_update") and suggestion.get("suggested_spread") is not None:
+                spread = float(suggestion["suggested_spread"])
+                logger.info(
+                    "[friction] adaptive spread override: %.4f → %.4f  "
+                    "(p90=%.2f%%, trades=%d)",
+                    float(settings.backtest_spread),
+                    spread,
+                    suggestion.get("p90_slippage_pct", 0),
+                    suggestion.get("trades_measured", 0),
+                )
+        except Exception:
+            logger.debug("[friction] adaptive spread lookup failed; using static", exc_info=True)
+
     return {
-        "spread": float(settings.backtest_spread),
+        "spread": spread,
         "commission": float(settings.backtest_commission),
         "oos_holdout_fraction": float(settings.brain_oos_holdout_fraction),
     }
@@ -5597,7 +5623,7 @@ def test_pattern_hypothesis(
 
     tf = getattr(pattern, "timeframe", "1d") or "1d"
     bt_params = get_backtest_params(tf)
-    bt_kw = brain_pattern_backtest_friction_kwargs()
+    bt_kw = brain_pattern_backtest_friction_kwargs(db)
 
     wins = 0
     total = 0

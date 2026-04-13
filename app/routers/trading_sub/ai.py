@@ -353,6 +353,15 @@ def api_brain_performance(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(data)
 
 
+@router.get("/api/trading/dashboard/overview")
+def api_trading_dashboard_overview(request: Request, db: Session = Depends(get_db)):
+    """Consolidated trading dashboard: performance, equity curve, risk, regime, execution quality."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.portfolio import get_trading_dashboard_overview
+    data = get_trading_dashboard_overview(db, ctx["user_id"])
+    return JSONResponse(data)
+
+
 @router.get("/api/trading/opportunity-board")
 def api_trading_opportunity_board(
     request: Request,

@@ -451,6 +451,9 @@ class ScanPattern(Base):
     oos_validation_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     queue_tier: str = Column(String(16), nullable=False, default="full")
     paper_book_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    # Regime affinity: win-rate / avg-return breakdown by market regime
+    # e.g. {"risk_on": {"win_rate": 0.65, "n": 30}, "risk_off": {"win_rate": 0.40, "n": 12}}
+    regime_affinity_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     # Lifecycle FSM: candidate -> backtested -> validated | challenged -> promoted -> live -> decayed -> retired
     # ``challenged`` = repeatable-edge research (edge_evidence); inspectable, not live-eligible (see governance).
     lifecycle_stage: str = Column(String(20), nullable=False, default="candidate")

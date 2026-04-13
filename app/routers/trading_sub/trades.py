@@ -365,3 +365,138 @@ def api_stats_calendar(
 ):
     """Daily P&L for a given month. Returns { ok, days: [{ date, trade_count, pnl, trades }] }."""
     return _api_stats_calendar_impl(request, db, year, month)
+
+
+# ── Compliance / Audit Export ────────────────────────────────────────
+
+@router.get("/audit/export")
+def api_audit_export(
+    request: Request,
+    db: Session = Depends(get_db),
+    start: str | None = Query(None, description="Start date YYYY-MM-DD"),
+    end: str | None = Query(None, description="End date YYYY-MM-DD"),
+    fmt: str = Query("json", description="Export format: json or csv"),
+):
+    """Export trades, execution events, and pattern governance for audit/compliance.
+
+    Returns all user trades with TCA fields, execution events, and pattern
+    lifecycle changes within the date range.
+    """
+    import csv
+    import io
+
+    from ...models.trading import ScanPattern, Trade, TradingExecutionEvent
+    from fastapi.responses import StreamingResponse
+
+    ctx = get_identity_ctx(request, db)
+    user_id = ctx["user_id"]
+
+    start_dt = datetime.strptime(start, "%Y-%m-%d") if start else datetime(2020, 1, 1)
+    end_dt = datetime.strptime(end, "%Y-%m-%d") if end else datetime.utcnow()
+
+    # Trades
+    trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.entry_date >= start_dt,
+        Trade.entry_date <= end_dt,
+    ).order_by(Trade.entry_date).all()
+
+    trade_rows = [
+        {
+            "id": t.id,
+            "ticker": t.ticker,
+            "direction": t.direction,
+            "quantity": t.quantity,
+            "entry_price": t.entry_price,
+            "exit_price": t.exit_price,
+            "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+            "exit_date": t.exit_date.isoformat() if t.exit_date else None,
+            "pnl": t.pnl,
+            "status": t.status,
+            "broker_source": getattr(t, "broker_source", None),
+            "tca_entry_slippage_bps": getattr(t, "tca_entry_slippage_bps", None),
+            "tca_exit_slippage_bps": getattr(t, "tca_exit_slippage_bps", None),
+            "scan_pattern_id": t.scan_pattern_id,
+            "pattern_tags": getattr(t, "pattern_tags", None),
+        }
+        for t in trades
+    ]
+
+    # Execution events
+    events = db.query(TradingExecutionEvent).filter(
+        TradingExecutionEvent.user_id == user_id,
+        TradingExecutionEvent.event_at >= start_dt,
+        TradingExecutionEvent.event_at <= end_dt,
+    ).order_by(TradingExecutionEvent.event_at).all()
+
+    event_rows = [
+        {
+            "id": e.id,
+            "trade_id": e.trade_id,
+            "event_type": e.event_type,
+            "status": e.status,
+            "event_at": e.event_at.isoformat() if e.event_at else None,
+            "reference_price": getattr(e, "reference_price", None),
+            "average_fill_price": getattr(e, "average_fill_price", None),
+            "realized_slippage_bps": getattr(e, "realized_slippage_bps", None),
+            "spread_bps": getattr(e, "spread_bps", None),
+            "submit_to_ack_ms": getattr(e, "submit_to_ack_ms", None),
+            "execution_family": getattr(e, "execution_family", None),
+        }
+        for e in events
+    ]
+
+    # Pattern governance (lifecycle changes in the period)
+    patterns = db.query(ScanPattern).filter(
+        ScanPattern.lifecycle_changed_at >= start_dt,
+        ScanPattern.lifecycle_changed_at <= end_dt,
+    ).order_by(ScanPattern.lifecycle_changed_at).all()
+
+    pattern_rows = [
+        {
+            "id": p.id,
+            "name": p.name,
+            "lifecycle_stage": p.lifecycle_stage,
+            "lifecycle_changed_at": p.lifecycle_changed_at.isoformat() if p.lifecycle_changed_at else None,
+            "promotion_status": p.promotion_status,
+            "win_rate": p.win_rate,
+            "oos_win_rate": getattr(p, "oos_win_rate", None),
+            "backtest_count": p.backtest_count,
+            "origin": p.origin,
+        }
+        for p in patterns
+    ]
+
+    if fmt == "csv":
+        output = io.StringIO()
+        # Trades section
+        output.write("# TRADES\n")
+        if trade_rows:
+            writer = csv.DictWriter(output, fieldnames=trade_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(trade_rows)
+        output.write("\n# EXECUTION EVENTS\n")
+        if event_rows:
+            writer = csv.DictWriter(output, fieldnames=event_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(event_rows)
+        output.write("\n# PATTERN GOVERNANCE\n")
+        if pattern_rows:
+            writer = csv.DictWriter(output, fieldnames=pattern_rows[0].keys())
+            writer.writeheader()
+            writer.writerows(pattern_rows)
+
+        output.seek(0)
+        return StreamingResponse(
+            iter([output.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename=audit_{start or 'all'}_{end or 'now'}.csv"},
+        )
+
+    return JSONResponse({
+        "ok": True,
+        "period": {"start": start_dt.isoformat(), "end": end_dt.isoformat()},
+        "trades": trade_rows,
+        "execution_events": event_rows,
+        "pattern_governance": pattern_rows,
+    })

@@ -1346,6 +1346,32 @@ def get_market_regime() -> dict[str, Any]:
         regime = "cautious"
         regime_numeric = 0
 
+    # Enhanced: trend regime from SPY EMA cross + ADX
+    trend_regime = "ranging"
+    volatility_percentile: float | None = None
+    try:
+        df = fetch_ohlcv_df("SPY", period="3mo", interval="1d")
+        if df is not None and len(df) >= 50:
+            close = df["Close"]
+            ema20 = close.ewm(span=20, adjust=False).mean()
+            ema50 = close.ewm(span=50, adjust=False).mean()
+            if float(ema20.iloc[-1]) > float(ema50.iloc[-1]):
+                trend_regime = "trending_up"
+            elif float(ema20.iloc[-1]) < float(ema50.iloc[-1]):
+                trend_regime = "trending_down"
+    except Exception:
+        pass
+
+    try:
+        if vix_val is not None:
+            vix_df = fetch_ohlcv_df("^VIX", period="1y", interval="1d")
+            if vix_df is not None and len(vix_df) >= 20:
+                vix_hist = sorted(vix_df["Close"].dropna().tolist())
+                rank = sum(1 for v in vix_hist if v <= vix_val)
+                volatility_percentile = round(rank / len(vix_hist) * 100, 1)
+    except Exception:
+        pass
+
     result = {
         "spy_direction": spy_direction,
         "spy_momentum_5d": spy_momentum_5d,
@@ -1353,6 +1379,8 @@ def get_market_regime() -> dict[str, Any]:
         "vix_regime": vix_regime,
         "regime": regime,
         "regime_numeric": regime_numeric,
+        "trend_regime": trend_regime,
+        "volatility_percentile": volatility_percentile,
     }
     _market_regime_cache["data"] = result
     _market_regime_cache["ts"] = now

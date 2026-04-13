@@ -932,7 +932,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
                         },
                     )
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_regime_label)
                     for m in _pe_matches:
                         if score >= m.get("min_base_score", 0):
                             score += m["score_boost"]
@@ -2175,7 +2175,12 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                         resistance=resistance,
                         retest_info=retest_info,
                     )
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    _cbo_regime = None
+                    try:
+                        _cbo_regime = get_market_regime().get("regime")
+                    except Exception:
+                        pass
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_cbo_regime)
                     for m in _pe_matches:
                         if score >= m.get("min_base_score", 0):
                             score += m["score_boost"]
@@ -2909,7 +2914,12 @@ def _score_breakout(ticker: str) -> dict[str, Any] | None:
                         resistance=resistance,
                         retest_info=retest_info,
                     )
-                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns)
+                    _bo_regime = None
+                    try:
+                        _bo_regime = get_market_regime().get("regime")
+                    except Exception:
+                        pass
+                    _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_bo_regime)
                     for m in _pe_matches:
                         if score >= m.get("min_base_score", 0):
                             score += m["score_boost"]
