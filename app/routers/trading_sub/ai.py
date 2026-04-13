@@ -999,6 +999,16 @@ def api_scan_status():
 
     Each subsystem is loaded independently so one exception cannot blank the whole response.
     """
+    def _work_ledger_summary():
+        from ...db import SessionLocal
+        from ...services.trading.brain_work.ledger import get_work_ledger_summary
+
+        sdb = SessionLocal()
+        try:
+            return get_work_ledger_summary(sdb)
+        finally:
+            sdb.close()
+
     payload = {
         "ok": True,
         "scan": _safe_scan_status_part("scan", ts.get_scan_status, {}),
@@ -1009,6 +1019,7 @@ def api_scan_status():
             trading_scheduler.get_scheduler_info,
             {"running": False, "jobs": []},
         ),
+        "work_ledger": _safe_scan_status_part("work_ledger", _work_ledger_summary, {}),
     }
     try:
         return JSONResponse(to_jsonable(payload))
@@ -1022,6 +1033,7 @@ def api_scan_status():
                 "learning": {},
                 "prescreen": {},
                 "scheduler": {"running": False, "jobs": []},
+                "work_ledger": {},
                 "encode_error": True,
             }
         )

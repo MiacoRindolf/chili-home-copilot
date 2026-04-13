@@ -82,6 +82,8 @@ def transition(
     commit: bool = True,
 ) -> ScanPattern:
     """Move *pattern* to *target_stage* if the transition is allowed."""
+    old_promo = (pattern.promotion_status or "").strip()
+    old_lc = (pattern.lifecycle_stage or "").strip()
     current = pattern.lifecycle_stage or "candidate"
     if target_stage not in VALID_STAGES:
         raise LifecycleError(f"Unknown stage: {target_stage}")
@@ -118,6 +120,21 @@ def transition(
         pattern.name, pattern.id, prev, target_stage,
         f" ({reason})" if reason else "",
     )
+    new_promo = (pattern.promotion_status or "").strip()
+    new_lc = (pattern.lifecycle_stage or "").strip()
+    if (old_promo, old_lc) != (new_promo, new_lc):
+        from .brain_work.promotion_surface import emit_promotion_surface_change
+
+        emit_promotion_surface_change(
+            db,
+            scan_pattern_id=int(pattern.id),
+            old_promotion_status=old_promo,
+            old_lifecycle_stage=old_lc,
+            new_promotion_status=new_promo,
+            new_lifecycle_stage=new_lc,
+            source="lifecycle.transition",
+            extra={"reason": reason, "target_stage": target_stage},
+        )
     return pattern
 
 

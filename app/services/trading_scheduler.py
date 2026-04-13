@@ -145,6 +145,20 @@ def _run_brain_market_snapshot_job():
                 )
             except Exception as _nm_e:
                 logger.debug("[scheduler] neural mesh snapshot publish skipped: %s", _nm_e)
+            if getattr(_settings, "brain_work_snapshots_outcome_enabled", True):
+                try:
+                    from .trading.brain_work.emitters import emit_market_snapshots_batch_outcome
+
+                    emit_market_snapshots_batch_outcome(
+                        db,
+                        daily=int(out.get("snapshots_taken_daily") or 0),
+                        intraday=int(out.get("intraday_snapshots_taken") or 0),
+                        universe_size=int(out.get("universe_size") or 0),
+                        job_id=str(jid) if jid is not None else None,
+                        snapshot_driver=out.get("snapshot_driver"),
+                    )
+                except Exception as _le:
+                    logger.debug("[scheduler] work ledger snapshot outcome skipped: %s", _le)
             db.commit()
             logger.info(
                 "[scheduler] brain_market_snapshots ok daily=%s intra=%s universe=%s",

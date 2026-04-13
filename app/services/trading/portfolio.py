@@ -109,6 +109,13 @@ def close_trade(
     except Exception:
         pass
 
+    try:
+        from .brain_work.execution_hooks import on_live_trade_closed
+
+        on_live_trade_closed(db, trade, source="portfolio_close")
+    except Exception:
+        pass
+
     db.commit()
     db.refresh(trade)
     return trade

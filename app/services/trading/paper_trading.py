@@ -93,6 +93,14 @@ def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]
     if not open_trades:
         return {"checked": 0, "closed": 0}
 
+    def _paper_close_ledger(db_sess: Session, ptx: PaperTrade) -> None:
+        try:
+            from .brain_work.execution_hooks import on_paper_trade_closed
+
+            on_paper_trade_closed(db_sess, ptx)
+        except Exception:
+            pass
+
     closed = 0
     for pt in open_trades:
         try:
@@ -101,6 +109,7 @@ def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]
                 # Check expiry even without price
                 if pt.entry_date and (datetime.utcnow() - pt.entry_date).days >= PAPER_TRADE_EXPIRY_DAYS:
                     _close_paper_trade(pt, pt.entry_price, "expired")
+                    _paper_close_ledger(db, pt)
                     closed += 1
                 continue
 
@@ -110,20 +119,25 @@ def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]
             # Stop hit
             if is_long and pt.stop_price and price <= pt.stop_price:
                 _close_paper_trade(pt, pt.stop_price, "stop")
+                _paper_close_ledger(db, pt)
                 closed += 1
             elif not is_long and pt.stop_price and price >= pt.stop_price:
                 _close_paper_trade(pt, pt.stop_price, "stop")
+                _paper_close_ledger(db, pt)
                 closed += 1
             # Target hit
             elif is_long and pt.target_price and price >= pt.target_price:
                 _close_paper_trade(pt, pt.target_price, "target")
+                _paper_close_ledger(db, pt)
                 closed += 1
             elif not is_long and pt.target_price and price <= pt.target_price:
                 _close_paper_trade(pt, pt.target_price, "target")
+                _paper_close_ledger(db, pt)
                 closed += 1
             # Expiry
             elif pt.entry_date and (datetime.utcnow() - pt.entry_date).days >= PAPER_TRADE_EXPIRY_DAYS:
                 _close_paper_trade(pt, price, "expired")
+                _paper_close_ledger(db, pt)
                 closed += 1
         except Exception as e:
             logger.debug("[paper] Error checking %s: %s", pt.ticker, e)

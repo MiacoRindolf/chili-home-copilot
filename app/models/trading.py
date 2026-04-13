@@ -690,6 +690,34 @@ class BrainNodeState(Base):
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
 
 
+class BrainWorkEvent(Base):
+    """Durable work / outcome ledger for event-first Trading Brain (not mesh activations)."""
+
+    __tablename__ = "brain_work_events"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    domain: str = Column(String(32), nullable=False, default="trading", index=True)
+    event_type: str = Column(String(64), nullable=False, index=True)
+    event_kind: str = Column(String(16), nullable=False, default="work")
+    payload: Optional[dict] = Column(JSONB, nullable=True)
+    dedupe_key: str = Column(String(256), nullable=False, index=True)
+    lease_scope: str = Column(String(32), nullable=False, default="general", index=True)
+    status: str = Column(String(16), nullable=False, default="pending", index=True)
+    attempts: int = Column(Integer, nullable=False, default=0)
+    max_attempts: int = Column(Integer, nullable=False, default=5)
+    next_run_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+    lease_holder: Optional[str] = Column(String(128), nullable=True)
+    lease_expires_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_error: Optional[str] = Column(Text, nullable=True)
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    parent_event_id: Optional[int] = Column(
+        BigInteger, ForeignKey("brain_work_events.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    processed_at: Optional[datetime] = Column(DateTime, nullable=True)
+
+
 class BrainActivationEvent(Base):
     """Postgres-backed activation queue row."""
 

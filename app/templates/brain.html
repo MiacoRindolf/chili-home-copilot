@@ -1108,6 +1108,10 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
             <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
           </div>
         </div>
+        <div id="brain-work-ledger-strip" style="display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary, rgba(0,0,0,.04));border:1px solid var(--border);font-size:10px;color:var(--text-secondary);line-height:1.4">
+          <span style="font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:9px;letter-spacing:.04em">Work ledger</span>
+          <span id="brain-work-ledger-text" style="margin-left:8px">--</span>
+        </div>
         <div class="bsb-row" id="bsb-opp-summary-row" style="flex-wrap:wrap;gap:6px;align-items:center;padding-top:6px;margin-top:4px;border-top:1px solid var(--border)">
           <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-a" title="Scroll to Opportunity Board">Actionable: â€”</a>
           <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-b" title="Scroll to Opportunity Board">Watch soon: â€”</a>
@@ -6315,6 +6319,25 @@ function pollLearningStatus() {
   return fetch('/api/trading/scan/status').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     var learning = d.learning, scan = d.scan, scheduler = d.scheduler;
+    var wl = d.work_ledger || {};
+    var wlStrip = document.getElementById('brain-work-ledger-strip');
+    var wlText = document.getElementById('brain-work-ledger-text');
+    if (wlStrip && wlText && wl && wl.enabled !== false) {
+      wlStrip.style.display = '';
+      var pend = typeof wl.pending_work === 'number' ? wl.pending_work : 0;
+      var rw = typeof wl.retry_wait === 'number' ? wl.retry_wait : 0;
+      var dead = typeof wl.dead_last_24h === 'number' ? wl.dead_last_24h : 0;
+      var pbt = wl.pending_by_type && typeof wl.pending_by_type === 'object' ? wl.pending_by_type : {};
+      var pendTypes = Object.keys(pbt).map(function(k){ return k + ':' + pbt[k]; }).join(', ');
+      var proc = (wl.processing && wl.processing.length) ? wl.processing : [];
+      var procStr = proc.length ? proc.map(function(p){ return p.event_type + (p.lease_holder ? '@' + String(p.lease_holder).slice(0, 12) : ''); }).join(', ') : '—';
+      var rc = (wl.recent_meaningful_outcomes && wl.recent_meaningful_outcomes.length) ? wl.recent_meaningful_outcomes : ((wl.recent_completions && wl.recent_completions.length) ? wl.recent_completions : []);
+      var last = rc[0];
+      var lastStr = last ? last.event_type : 'none';
+      wlText.textContent = 'Pending ' + pend + (rw ? ' (retry_wait ' + rw + ')' : '') + ' · Dead 24h ' + dead + ' · By type: ' + (pendTypes || '—') + ' · Processing: ' + procStr + ' · Last outcome: ' + lastStr;
+    } else if (wlStrip) {
+      wlStrip.style.display = 'none';
+    }
     var pipelineSection = document.getElementById('brain-pipeline-section');
 
     if (learning.running) {

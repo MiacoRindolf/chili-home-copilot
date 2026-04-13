@@ -25,6 +25,7 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, set[str]] = {
     "momentum_context_refresh": {"signal_type"},
     "brain_market_snapshots": {"signal_type"},
     "learning_cycle_completed": {"signal_type"},
+    "brain_work_outcome": {"signal_type", "outcome_type"},
     "fired": {"signal_type", "from_edge"},
 }
 

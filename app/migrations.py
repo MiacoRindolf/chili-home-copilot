@@ -5640,6 +5640,87 @@ def _migration_107_scan_pattern_regime_affinity(conn) -> None:
     conn.commit()
 
 
+def _migration_109_brain_work_events(conn) -> None:
+    """Durable work ledger for event-first Trading Brain (separate from brain_activation_events)."""
+    if "brain_work_events" in _tables(conn):
+        conn.commit()
+        return
+    conn.execute(
+        text(
+            """
+            CREATE TABLE brain_work_events (
+                id BIGSERIAL PRIMARY KEY,
+                domain TEXT NOT NULL DEFAULT 'trading',
+                event_type TEXT NOT NULL,
+                event_kind TEXT NOT NULL DEFAULT 'work',
+                payload JSONB,
+                dedupe_key TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+                next_run_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                lease_holder TEXT,
+                lease_expires_at TIMESTAMP,
+                last_error TEXT,
+                correlation_id TEXT,
+                parent_event_id BIGINT REFERENCES brain_work_events(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                processed_at TIMESTAMP,
+                CONSTRAINT ck_brain_work_events_status CHECK (
+                    status IN ('pending', 'processing', 'retry_wait', 'done', 'dead')
+                ),
+                CONSTRAINT ck_brain_work_events_kind CHECK (event_kind IN ('work', 'outcome'))
+            )
+            """
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX ix_brain_work_events_domain_status_next "
+            "ON brain_work_events (domain, status, next_run_at)"
+        )
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX ix_brain_work_events_domain_type_created "
+            "ON brain_work_events (domain, event_type, created_at DESC)"
+        )
+    )
+    conn.execute(
+        text(
+            """
+            CREATE UNIQUE INDEX uq_brain_work_events_open_dedupe
+            ON brain_work_events (dedupe_key)
+            WHERE status IN ('pending', 'processing', 'retry_wait')
+            """
+        )
+    )
+    conn.commit()
+
+
+def _migration_110_brain_work_lease_scope(conn) -> None:
+    """Lease scope column for brain_work_events (handler-family visibility + future claim filters)."""
+    if "brain_work_events" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "brain_work_events")
+    if "lease_scope" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE brain_work_events "
+                "ADD COLUMN lease_scope TEXT NOT NULL DEFAULT 'general'"
+            )
+        )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_brain_work_events_scope_status_next "
+            "ON brain_work_events (lease_scope, status, next_run_at)"
+        )
+    )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -5750,6 +5831,8 @@ MIGRATIONS = [
     ("106_split_c_secondary_cluster", _migration_106_split_c_secondary_cluster),
     ("107_scan_pattern_regime_affinity", _migration_107_scan_pattern_regime_affinity),
     ("108_neural_mesh_lc_causal_edges", _migration_108_neural_mesh_lc_causal_edges),
+    ("109_brain_work_events", _migration_109_brain_work_events),
+    ("110_brain_work_lease_scope", _migration_110_brain_work_lease_scope),
 ]
 
 

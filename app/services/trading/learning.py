@@ -590,6 +590,8 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         if float(live_wr) < float(oos_wr) - max_gap:
             p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
             if p and p.active and (p.promotion_status or "") == "promoted":
+                _op = (p.promotion_status or "").strip()
+                _ol = (p.lifecycle_stage or "").strip()
                 from .lifecycle import transition_on_decay
                 try:
                     transition_on_decay(
@@ -601,6 +603,23 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
                     p.promotion_status = "degraded_live"
                     p.lifecycle_stage = "decayed"
                     p.lifecycle_changed_at = datetime.utcnow()
+                    try:
+                        from .brain_work.promotion_surface import emit_promotion_surface_change
+
+                        emit_promotion_surface_change(
+                            db,
+                            scan_pattern_id=int(p.id),
+                            old_promotion_status=_op,
+                            old_lifecycle_stage=_ol,
+                            new_promotion_status=(p.promotion_status or "").strip(),
+                            new_lifecycle_stage=(p.lifecycle_stage or "").strip(),
+                            source="run_live_pattern_depromotion_fallback",
+                        )
+                    except Exception:
+                        logger.debug(
+                            "[learning] depromotion_fallback promotion_surface emit failed",
+                            exc_info=True,
+                        )
                 demoted += 1
     if demoted:
         db.commit()
@@ -1467,6 +1486,12 @@ def ensure_mined_scan_pattern(
     )
     db.add(sp)
     db.flush()
+    try:
+        from .brain_work.emitters import emit_backtest_requested_for_pattern
+
+        emit_backtest_requested_for_pattern(db, sp.id, source="mining_new_pattern")
+    except Exception:
+        logger.debug("[learning] brain_work emit backtest_requested failed", exc_info=True)
     return sp.id
 
 
@@ -6147,6 +6172,11 @@ def test_pattern_hypothesis(
     except Exception as e:
         logger.debug("[learning] Lifecycle transition after promotion: %s", e)
 
+    try:
+        db.refresh(pattern)
+    except Exception:
+        pass
+
     _oos_log = f"{mean_oos_wr:.0f}%" if mean_oos_wr is not None else "n/a"
     _bench_log = (
         f", bench_pass={bench_passes}"
@@ -7577,10 +7607,12 @@ def run_learning_cycle(
     user_id: int | None,
     full_universe: bool = True,
 ) -> dict[str, Any]:
-    """Learning cycle: (optional inline snapshots) -> backfill -> mine -> backtest -> journal -> signals.
+    """Learning cycle: backfill -> mine -> backtest -> journal -> signals (no inline market snapshots).
 
-    Daily prescreen, market scan, and **market snapshots** default to APScheduler; set
-    ``BRAIN_SNAPSHOTS_ON_LEARNING_CYCLE=1`` to take snapshots inside this call again.
+    Prescreen, deep scan, and **market snapshots** are scheduler/source jobs
+    (``run_scheduled_market_snapshots`` / ``brain_market_snapshots``). Snapshot counts in the
+    cycle report are zeroed; the durable ``market_snapshots_batch`` outcome is emitted when the
+    scheduler job completes.
     """
     from .journal import daily_market_journal, check_signal_events
 
@@ -7834,7 +7866,25 @@ def run_learning_cycle(
         step_start = time.time()
         # graph-node: c_validation/bt_queue
         apply_learning_cycle_step_status(_learning_status, "c_validation", "bt_queue")
-        queue_result = _auto_backtest_from_queue(db, user_id)
+        from ...config import settings as _bw_settings
+
+        _delegate = bool(getattr(_bw_settings, "brain_work_delegate_queue_from_cycle", False)) and bool(
+            getattr(_bw_settings, "brain_work_ledger_enabled", True)
+        )
+        if _delegate:
+            from .backtest_queue import get_queue_status
+
+            qs = get_queue_status(db, use_cache=False)
+            queue_result = {
+                "backtests_run": 0,
+                "patterns_processed": 0,
+                "queue_exploration_added": 0,
+                "queue_empty": qs.get("queue_empty", True),
+                "queue_skipped_for_work_ledger": True,
+                **qs,
+            }
+        else:
+            queue_result = _auto_backtest_from_queue(db, user_id)
         report["queue_backtests_run"] = queue_result.get("backtests_run", 0)
         report["queue_patterns_processed"] = queue_result.get("patterns_processed", 0)
         report["queue_exploration_added"] = queue_result.get("queue_exploration_added", 0)

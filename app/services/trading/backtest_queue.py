@@ -117,6 +117,13 @@ def boost_pattern(db: Session, pattern_id: int, priority: int = 100) -> bool:
         return False
     
     pattern.backtest_priority = priority
+    db.flush()
+    try:
+        from .brain_work.emitters import emit_backtest_requested_for_pattern
+
+        emit_backtest_requested_for_pattern(db, pattern_id, source="operator_boost")
+    except Exception:
+        logger.debug("[backtest_queue] brain_work emit backtest_requested failed", exc_info=True)
     db.commit()
     invalidate_queue_status_cache()
 

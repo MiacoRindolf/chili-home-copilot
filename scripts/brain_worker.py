@@ -662,6 +662,27 @@ def _maybe_run_neural_activation_batch() -> None:
         db.close()
 
 
+def _maybe_run_brain_work_batch() -> None:
+    """Durable work ledger: dispatch round (execution_feedback_digest + backtest_requested)."""
+    db = SessionLocal()
+    try:
+        from app.config import settings as _settings
+        from app.services.trading.brain_work.dispatcher import run_brain_work_batch
+
+        _uid = getattr(_settings, "brain_default_user_id", None)
+        summary = run_brain_work_batch(db, user_id=_uid)
+        if summary.get("processed"):
+            logger.info("[brain] work ledger batch %s", summary)
+    except Exception as e:
+        logger.warning("[brain] work ledger batch failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+    finally:
+        db.close()
+
+
 def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
     """Default: full learning cycle + idle sleep policy."""
     while True:
@@ -673,6 +694,11 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
             time.sleep(10)
 
         status.status = "running"
+
+        try:
+            _maybe_run_brain_work_batch()
+        except Exception as _we:
+            logger.warning("[brain] work ledger batch before cycle skipped: %s", _we)
 
         logger.info("[brain] Starting learning cycle")
         cycle_start = time.time()
@@ -827,6 +853,10 @@ def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
             break
         status.status = "running"
         status.set_step("NeuralActivation", "Draining activation queue...")
+        try:
+            _maybe_run_brain_work_batch()
+        except Exception as _we:
+            logger.warning("[brain] work ledger before activation batch skipped: %s", _we)
         db = SessionLocal()
         try:
             from app.services.trading.brain_neural_mesh import run_activation_batch
@@ -899,6 +929,10 @@ def _run_backtest_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> N
         if check_stop_signal() or _check_db_stop_idle():
             break
         status.status = "running"
+        try:
+            _maybe_run_brain_work_batch()
+        except Exception as _we:
+            logger.warning("[brain] work ledger in backtest mode skipped: %s", _we)
         try:
             _run_subtask_fast_backtest(status)
         except Exception as e:

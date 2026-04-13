@@ -873,6 +873,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             apply_tca_on_trade_close(trade)
         except Exception:
             pass
+        try:
+            from .trading.brain_work.execution_hooks import on_broker_reconciled_close
+
+            on_broker_reconciled_close(db, trade, source="sync_positions_to_db")
+        except Exception:
+            pass
         closed += 1
 
     db.commit()
@@ -926,6 +932,12 @@ def cleanup_manual_trades(
 
                 trade.tca_reference_exit_price = exit_price
                 apply_tca_on_trade_close(trade)
+            except Exception:
+                pass
+            try:
+                from .trading.brain_work.execution_hooks import on_broker_reconciled_close
+
+                on_broker_reconciled_close(db, trade, source="cleanup_manual_trades")
             except Exception:
                 pass
             closed_manual += 1

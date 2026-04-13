@@ -210,3 +210,36 @@ def publish_learning_cycle_completed(db: Session, *, elapsed_s: Optional[float] 
         _log.debug("%s published learning_cycle_completed correlation=%s", LOG_PREFIX, cid)
     except Exception as e:
         _log.warning("%s publish_learning_cycle_completed failed: %s", LOG_PREFIX, e)
+
+
+def publish_brain_work_outcome(
+    db: Session,
+    *,
+    outcome_type: str,
+    scan_pattern_id: Optional[int] = None,
+    extra: Optional[dict[str, Any]] = None,
+) -> None:
+    """Neural mesh observation for durable work outcomes (not the work ledger)."""
+    if not mesh_enabled():
+        return
+    try:
+        cid = str(uuid.uuid4())
+        payload: dict[str, Any] = {
+            "signal_type": "brain_work_outcome",
+            "outcome_type": outcome_type,
+            "scan_pattern_id": scan_pattern_id,
+            **(extra or {}),
+        }
+        enqueue_activation(
+            db,
+            source_node_id="nm_evidence_bt",
+            cause="brain_work_outcome",
+            payload=payload,
+            confidence_delta=0.12,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug("%s brain_work_outcome type=%s pattern=%s", LOG_PREFIX, outcome_type, scan_pattern_id)
+    except Exception as e:
+        _log.warning("%s publish_brain_work_outcome failed: %s", LOG_PREFIX, e)

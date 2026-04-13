@@ -173,6 +173,20 @@ class Settings(BaseSettings):
     brain_mp_child_database_max_overflow: int = 2
     brain_smart_bt_max_workers_in_process: int = 8  # cap ticker-thread pool inside each process worker
     brain_queue_batch_size: int = 80      # patterns pulled from queue per learning cycle
+    # Durable work ledger (event-first brain; not mesh activations)
+    brain_work_ledger_enabled: bool = True
+    brain_work_dispatch_batch_size: int = 8  # backtest_requested items per worker tick
+    brain_work_lease_seconds: int = 900
+    brain_work_max_attempts_default: int = 5
+    brain_work_retry_base_seconds: int = 30
+    brain_work_retry_multiplier: int = 2
+    # When True, run_learning_cycle skips in-cycle queue drain; brain-worker work-ledger batch owns it.
+    brain_work_delegate_queue_from_cycle: bool = True
+    # Per-handler dispatch budgets (ledger round processes execution_feedback_digest before backtests).
+    brain_work_exec_feedback_batch_size: int = 3
+    brain_work_exec_feedback_debounce_seconds: int = 45
+    # Emit ``market_snapshots_batch`` outcome when scheduler snapshot job finishes.
+    brain_work_snapshots_outcome_enabled: bool = True
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
 
     @field_validator("brain_queue_backtest_executor", mode="before")

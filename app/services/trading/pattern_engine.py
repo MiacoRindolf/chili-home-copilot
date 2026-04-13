@@ -544,6 +544,10 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
     p = db.query(ScanPattern).get(pattern_id)
     if not p:
         return None
+    old_promo = (p.promotion_status or "").strip()
+    old_lc = (p.lifecycle_stage or "").strip()
+    surface_keys = ("promotion_status", "lifecycle_stage")
+    touch_surface = any(k in data for k in surface_keys)
     for key in ("name", "description", "rules_json", "active", "score_boost",
                 "min_base_score", "confidence", "evidence_count", "win_rate",
                 "avg_return_pct", "backtest_count", "asset_class", "timeframe",
@@ -553,6 +557,19 @@ def update_pattern(db: Session, pattern_id: int, data: dict[str, Any]) -> ScanPa
                 "oos_validation_json", "queue_tier", "paper_book_json"):
         if key in data:
             setattr(p, key, data[key])
+    db.flush()
+    if touch_surface:
+        from .brain_work.promotion_surface import emit_promotion_surface_change
+
+        emit_promotion_surface_change(
+            db,
+            scan_pattern_id=int(pattern_id),
+            old_promotion_status=old_promo,
+            old_lifecycle_stage=old_lc,
+            new_promotion_status=(p.promotion_status or "").strip(),
+            new_lifecycle_stage=(p.lifecycle_stage or "").strip(),
+            source="update_pattern",
+        )
     db.commit()
     db.refresh(p)
     return p

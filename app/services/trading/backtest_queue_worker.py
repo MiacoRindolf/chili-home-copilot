@@ -122,10 +122,26 @@ def execute_queue_backtest_for_pattern(pattern_id: int, user_id: int | None) -> 
                     related_insight_id=insight.id,
                 )
             elif pattern and total >= 2:
+                _op = (pattern.promotion_status or "").strip()
+                _ol = (pattern.lifecycle_stage or "").strip()
                 pattern.active = False
                 pattern.promotion_status = "rejected_prescreen"
                 pattern.lifecycle_stage = "retired"
                 pattern.lifecycle_changed_at = datetime.utcnow()
+                try:
+                    from .brain_work.promotion_surface import emit_promotion_surface_change
+
+                    emit_promotion_surface_change(
+                        db,
+                        scan_pattern_id=int(pattern.id),
+                        old_promotion_status=_op,
+                        old_lifecycle_stage=_ol,
+                        new_promotion_status=(pattern.promotion_status or "").strip(),
+                        new_lifecycle_stage=(pattern.lifecycle_stage or "").strip(),
+                        source="queue_prescreen_reject",
+                    )
+                except Exception:
+                    pass
                 db.commit()
                 from .backtest_queue import invalidate_queue_status_cache
 
