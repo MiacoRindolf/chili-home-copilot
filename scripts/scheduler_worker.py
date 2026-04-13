@@ -33,6 +33,13 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     from app.services.trading_scheduler import start_scheduler, stop_scheduler
 
+    try:
+        from app.services.trading.brain_io_concurrency import log_brain_io_profile
+
+        log_brain_io_profile(logger)
+    except Exception as _e:
+        logger.debug("[scheduler_worker] brain I/O profile log skipped: %s", _e)
+
     start_scheduler()
     logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", os.environ.get("CHILI_SCHEDULER_ROLE"))
     try:

@@ -27,6 +27,13 @@ from .market_data import (
 )
 from .portfolio import get_watchlist, get_trade_stats, get_insights, save_insight, preload_active_insights, get_trade_stats_by_pattern
 from .brain_resource_budget import BrainResourceBudget
+from .brain_io_concurrency import (
+    io_workers_high,
+    io_workers_low,
+    io_workers_med,
+    io_workers_for_snapshot_batch,
+    snapshot_batch_stats,
+)
 from .snapshot_bar_ops import (
     dedupe_sample_rows,
     normalize_bar_start_utc,
@@ -57,9 +64,6 @@ def _get_current_predictions_impl(*args, **kwargs):
 logger = logging.getLogger(__name__)
 
 _CPU_COUNT = os.cpu_count() or 4
-_IO_WORKERS_HIGH = min(80, max(24, _CPU_COUNT * 3))  # IO-heavy data fetching (64 GB / 32 cores)
-_IO_WORKERS_MED = min(48, max(16, _CPU_COUNT * 2))   # mixed IO/CPU work
-_IO_WORKERS_LOW = min(32, max(10, _CPU_COUNT))        # lighter parallel tasks
 
 _shutting_down = threading.Event()
 
@@ -914,11 +918,15 @@ def _snapshot_data(ticker: str, bar_interval: str = "1d") -> tuple[
     Returns bar_interval and bar_start_at (UTC-naive) for the OHLC row used as close price.
     """
     try:
-        snap = get_indicator_snapshot(ticker, bar_interval)
         period = "3mo" if bar_interval == "1d" else "60d"
         df = fetch_ohlcv_df(ticker, period=period, interval=bar_interval)
+        try:
+            snapshot_batch_stats().add_ohlcv(1)
+        except Exception:
+            pass
         if df is None or df.empty:
             return ticker, None, None, None, None, None, None, bar_interval, None
+        snap = get_indicator_snapshot(ticker, bar_interval, ohlcv_df=df)
         price = float(df.iloc[-1]["Close"])
         bar_start = normalize_bar_start_utc(df.index[-1])
         quote = {"price": price}
@@ -932,7 +940,7 @@ def _snapshot_data(ticker: str, bar_interval: str = "1d") -> tuple[
 def take_snapshots_parallel(
     db: Session,
     tickers: list[str],
-    max_workers: int = _IO_WORKERS_HIGH,
+    max_workers: int | None = None,
     *,
     bar_interval: str = "1d",
 ) -> int:
@@ -942,6 +950,19 @@ def take_snapshots_parallel(
     calling thread to avoid SQLAlchemy session issues.
     """
     from concurrent.futures import ThreadPoolExecutor, as_completed
+    from ...config import settings as _settings
+
+    resolved_workers = (
+        max_workers
+        if max_workers is not None
+        else io_workers_for_snapshot_batch(_settings)
+    )
+    resolved_workers = max(1, int(resolved_workers))
+    try:
+        snapshot_batch_stats().reset()
+        snapshot_batch_stats().set_snapshot_threads(resolved_workers)
+    except Exception:
+        pass
 
     # Pre-warm the OHLCV cache so indicator computation hits cache.
     # When Massive or Polygon is active the per-ticker cache inside the
@@ -959,7 +980,7 @@ def take_snapshots_parallel(
     _t0 = time.time()
     fetched: list[tuple] = []
     total = len(tickers)
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+    with ThreadPoolExecutor(max_workers=resolved_workers) as executor:
         futures = {executor.submit(_snapshot_data, t, bar_interval): t for t in tickers}
         for future in as_completed(futures):
             if _shutting_down.is_set():
@@ -980,9 +1001,10 @@ def take_snapshots_parallel(
                 )
 
     _fetch_elapsed = round(time.time() - _t0, 1)
+    _t_db0 = time.time()
     logger.info(
         f"[learning] Snapshot data fetch: {len(fetched)}/{len(tickers)} tickers "
-        f"in {_fetch_elapsed}s ({max_workers} workers) interval={bar_interval}"
+        f"in {_fetch_elapsed}s ({resolved_workers} workers) interval={bar_interval}"
     )
     vix = get_vix()
     count = 0
@@ -1017,6 +1039,22 @@ def take_snapshots_parallel(
             count += 1
         except Exception:
             logger.debug("[learning] take_snapshots_parallel: non-critical operation failed", exc_info=True)
+    _db_elapsed = round(time.time() - _t_db0, 1)
+    try:
+        _st = snapshot_batch_stats().snapshot()
+    except Exception:
+        _st = {}
+    logger.info(
+        "[chili_brain_io] snapshot_batch tickers=%s written=%s fetch_s=%s db_write_s=%s "
+        "workers=%s ohlcv_fetches_accounted=%s interval=%s",
+        len(tickers),
+        count,
+        _fetch_elapsed,
+        _db_elapsed,
+        resolved_workers,
+        _st.get("ohlcv_fetches", -1),
+        bar_interval,
+    )
     if count:
         db.commit()
     return count
@@ -1172,7 +1210,13 @@ def backfill_future_returns(db: Session) -> int:
                 _bf_stats["exc"] += 1
             return None
 
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    from ...config import settings as _bf_settings
+
+    _workers = (
+        io_workers_high(_bf_settings)
+        if (_use_massive() or _use_polygon())
+        else io_workers_med(_bf_settings)
+    )
     _t0 = time.time()
     results = []
     with ThreadPoolExecutor(max_workers=_workers) as executor:
@@ -1544,7 +1588,11 @@ def mine_patterns(
     except Exception:
         logger.debug("[learning] mine_patterns: non-critical operation failed", exc_info=True)
 
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    _workers = (
+        io_workers_high(settings)
+        if (_use_massive() or _use_polygon())
+        else io_workers_med(settings)
+    )
     _t0 = time.time()
     all_rows: list[dict] = []
     for bar_iv, tick_chunk in interval_jobs:
@@ -2203,7 +2251,13 @@ def seek_pattern_data(db: Session, user_id: int | None) -> dict[str, Any]:
         seek_tickers = list(ALL_SCAN_TICKERS)
 
     seek_tickers = seek_tickers[:400]
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    from ...config import settings as _seek_settings
+
+    _workers = (
+        io_workers_high(_seek_settings)
+        if (_use_massive() or _use_polygon())
+        else io_workers_med(_seek_settings)
+    )
     extra_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in seek_tickers}
@@ -2529,7 +2583,13 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
 
     rows: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    from ...config import settings as _ve_settings
+
+    _workers = (
+        io_workers_high(_ve_settings)
+        if (_use_massive() or _use_polygon())
+        else io_workers_med(_ve_settings)
+    )
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
         for f in as_completed(futs):
@@ -3252,7 +3312,9 @@ def mine_intraday_patterns(
     tickers = list(DEFAULT_CRYPTO_TICKERS)[:30] + list(DEFAULT_SCAN_TICKERS)[:30]
 
     rows: list[dict] = []
-    _workers = _IO_WORKERS_LOW
+    from ...config import settings as _intraday_settings
+
+    _workers = io_workers_low(_intraday_settings)
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_intraday_one_ticker, t, budget): t for t in tickers}
         for f in as_completed(futs):
@@ -3529,7 +3591,8 @@ def mine_high_vol_regime_patterns(
 
     tickers = [t for t in DEFAULT_CRYPTO_TICKERS if str(t).endswith("-USD")][:30]
     rows: list[dict] = []
-    with ThreadPoolExecutor(max_workers=_IO_WORKERS_LOW) as pool:
+    _hv_workers = io_workers_low(settings)
+    with ThreadPoolExecutor(max_workers=_hv_workers) as pool:
         futs = {pool.submit(_mine_high_vol_one_ticker, t, budget): t for t in tickers}
         for f in as_completed(futs):
             try:
@@ -4411,7 +4474,13 @@ def refine_patterns(db: Session, user_id: int | None) -> dict[str, Any]:
         return {"refined": 0, "note": "no patterns to refine"}
 
     mine_tickers = list(ALL_SCAN_TICKERS)[:600]
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    from ...config import settings as _ref_settings
+
+    _workers = (
+        io_workers_high(_ref_settings)
+        if (_use_massive() or _use_polygon())
+        else io_workers_med(_ref_settings)
+    )
     all_rows: list[dict] = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futs = {pool.submit(_mine_from_history, t): t for t in mine_tickers}
@@ -7592,8 +7661,15 @@ def build_cycle_ui_digest(report: dict[str, Any]) -> dict[str, Any]:
 
 def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str, Any]:
     """Daily + intraday ``trading_snapshots`` writes for APScheduler (``brain_market_snapshots`` job)."""
+    from ...config import settings as _snap_sched_settings
+    from .brain_io_concurrency import io_workers_for_snapshot_batch
     from .scanner import build_snapshot_ticker_universe
 
+    _sw = io_workers_for_snapshot_batch(_snap_sched_settings)
+    logger.info(
+        "[chili_brain_io] scheduled_market_snapshots_start universe_build=1 snapshot_workers=%s",
+        _sw,
+    )
     top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
     daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
     intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
@@ -7697,6 +7773,29 @@ def run_learning_cycle(
     )
     _learning_status["data_provider"] = _provider
     logger.info(f"[learning] Starting learning cycle — primary data provider: {_provider}")
+    try:
+        from ...config import settings as _lc_io_settings
+        from .brain_io_concurrency import (
+            effective_cpu_budget,
+            io_workers_for_predictions,
+            io_workers_for_snapshot_batch,
+            io_workers_high,
+            io_workers_med,
+        )
+
+        logger.info(
+            "[chili_brain_io] learning_cycle_start correlation_id=%s effective_cpus=%.1f "
+            "snapshot_workers=%s prediction_workers=%s high=%s med=%s provider=%s",
+            _learning_status.get("correlation_id"),
+            effective_cpu_budget(_lc_io_settings),
+            io_workers_for_snapshot_batch(_lc_io_settings),
+            io_workers_for_predictions(_lc_io_settings),
+            io_workers_high(_lc_io_settings),
+            io_workers_med(_lc_io_settings),
+            _provider,
+        )
+    except Exception:
+        pass
 
     def _step_time(name: str, t0: float, extra: str = "") -> None:
         elapsed = round(time.time() - t0, 1)
@@ -8240,6 +8339,11 @@ def run_learning_cycle(
         _learning_status["last_duration_s"] = round(elapsed, 1)
         persist_learning_live_snapshot_force()
         report["elapsed_s"] = round(elapsed, 1)
+        logger.info(
+            "[chili_brain_io] learning_cycle_end elapsed_s=%s correlation_done=1 error=%s",
+            report["elapsed_s"],
+            report.get("error"),
+        )
         report["step_timings"] = dict(_learning_status.get("step_timings", {}))
         report["funnel_snapshot"] = {
             "prescreen_candidates": report.get("prescreen_candidates"),

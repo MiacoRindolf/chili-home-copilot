@@ -15,13 +15,13 @@ The **`release` fingerprint was removed** on purpose: a wrong SHA is worse than 
 
 ## Do (deploy / runtime validation)
 
-- Assert **`release == {}`** at **`brain_runtime.release`** and top-level **`release`** (expected).
-- Assert **payload shape** (default `compat_mirrors=1`): `ok`, `brain_runtime`, `prescreen`, mirror keys, **`learning` last**; **`brain_runtime.activity_signals`** has exactly the four minimal keys; **`learning.status_role == "reconcile_compatibility"`**; **`brain_runtime.learning_summary`** includes **`status_role`** and **`tickers_processed`**; mirrors equal **`brain_runtime`** slices. With **`compat_mirrors=0`**, expect `ok`, `brain_runtime`, `prescreen`, `learning` only (no top-level mirror keys).
-- **Frozen `encode_error` response:** HTTP 200, `encode_error: true`, empty `brain_runtime` / `prescreen` / `learning` / `work_ledger` / `release` / `scan`, `scheduler` = `{"running": false, "jobs": []}` — see `docs/TRADING_BRAIN_WORK_LEDGER.md`. Do not alter when changing mirror defaults.
+- Assert **`release == {}`** at **`brain_runtime.release`** on the happy path. Top-level **`release`** is absent on success; it appears only on the frozen **`encode_error`** payload (empty `{}`).
+- Assert **happy-path payload shape:** `ok`, `brain_runtime`, `prescreen`, **`learning` last** — no root **`work_ledger`** / **`release`** / **`scheduler`** / **`scan`**. Assert **`brain_runtime.activity_signals`** has exactly the four minimal keys; **`learning.status_role == "reconcile_compatibility"`**; **`brain_runtime.learning_summary`** includes **`status_role`** and **`tickers_processed`**.
+- **Frozen `encode_error` response:** HTTP 200, `encode_error: true`, empty `brain_runtime` / `prescreen` / `learning` / `work_ledger` / `release` / `scan`, `scheduler` = `{"running": false, "jobs": []}` — see `docs/TRADING_BRAIN_WORK_LEDGER.md`. Do not alter without a versioned migration.
 - **Operator desk** should treat **`brain_runtime` as sufficient** for strip/scheduler/ledger/reconcile progress; **graph overlay** may still read top-level **`learning`** for mesh/cluster/step fields only.
 - Validate **`work_ledger`** fields and real DB-backed behavior where relevant (tests or staging scripts).
 - For production UX, rely on **Brain UI** copy/order/behavior and manual or browser checks — not JSON git SHAs.
 
-- **Mirror removal:** in-repo UI reads **`brain_runtime`** on happy path; top-level `work_ledger` / `scheduler` / `scan` / `release` are legacy duplicates — do not build new features against them. **`learning` stays** for graph overlay / full snapshot until explicitly migrated.
+- **Mirror removal:** happy path has **no** root duplicates — use **`brain_runtime`** only. Degraded **`encode_error`** responses still expose flat keys (empty). **`learning` stays** top-level for graph overlay / full snapshot until explicitly migrated.
 
 See **`tests/test_scan_status_brain_runtime.py`**, **`.cursor/plans/lc_shrink_validation_reset.plan.md`**, and **`.cursor/plans/scan_status_mirror_removal_readiness.plan.md`**.

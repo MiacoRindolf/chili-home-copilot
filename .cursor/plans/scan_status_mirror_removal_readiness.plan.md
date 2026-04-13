@@ -16,14 +16,19 @@ updated: 2026-04-13
 - [x] **`chili-scan-status-deploy-validation.mdc`**: mirror-removal guidance; points here.
 - [x] **`scripts/prove_execution_feedback_ledger.py`**: verify hint uses `brain_runtime.work_ledger`.
 
-## Remaining (explicit freeze before execution)
+## Done — API mirror removal (happy path)
 
-1. **External consumers:** audit forks, mobile, scripts, and third-party callers for top-level `work_ledger` / `release` / `scheduler` / `scan` only (no `brain_runtime`).
-2. **API change (future PR):** remove duplicate keys from JSON **or** gate with `?compat_mirrors=1` (default off) after audit; update `tests/test_scan_status_brain_runtime.py` and encode-error contract.
-3. **`learning` migration (later):** optional nested `brain_runtime.learning_full` + graph switch — **separate** from mirror removal; do not block mirror removal on this.
+- [x] **`api_scan_status`:** success responses omit root `work_ledger` / `release` / `scheduler` / `scan`; **`encode_error`** payload unchanged (frozen flat keys).
+- [x] **`tests/test_scan_status_brain_runtime.py`:** asserts mirror-free happy path.
+- [x] **Docs / rules:** `TRADING_BRAIN_WORK_LEDGER.md`, `chili-scan-status-deploy-validation.mdc`, `lc_shrink_validation_reset.plan.md` aligned.
 
-## Definition of done (mirror-removal PR)
+## Remaining (optional / separate)
+
+1. **External consumers:** out-of-repo callers still using root mirror keys must migrate to `brain_runtime` (breaking change for them).
+2. **`learning` migration:** optional nested `brain_runtime.learning_full` + graph switch — **separate** program.
+
+## Definition of done (mirror-removal PR) — met
 
 - No in-repo references require top-level mirrors on success responses.
 - Tests and docs match the new shape; Brain desk + graph overlay manually smoke-tested.
-- Rollback: restore mirrors or flip compat query default.
+- Rollback: redeploy prior image (or restore previous `api_scan_status` payload in git).

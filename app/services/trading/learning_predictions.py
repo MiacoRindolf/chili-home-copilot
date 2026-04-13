@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
@@ -26,12 +25,9 @@ from .market_data import (
     get_volatility_regime,
 )
 from .portfolio import get_watchlist
+from .brain_io_concurrency import io_workers_for_predictions
 
 logger = logging.getLogger(__name__)
-
-_CPU_COUNT = os.cpu_count() or 4
-_IO_WORKERS_HIGH = min(80, max(24, _CPU_COUNT * 3))
-_IO_WORKERS_MED = min(48, max(16, _CPU_COUNT * 2))
 
 def predict_direction(score: float) -> str:
     """Convert prediction score to a human-readable direction."""
@@ -523,7 +519,9 @@ def _get_current_predictions_impl(
 
     quotes_map = fetch_quotes_batch(ticker_batch)
 
-    _workers = _IO_WORKERS_HIGH if (_use_massive() or _use_polygon()) else _IO_WORKERS_MED
+    from ...config import settings as _pred_settings
+
+    _workers = io_workers_for_predictions(_pred_settings)
     results = []
     with ThreadPoolExecutor(max_workers=_workers) as pool:
         futures = {
@@ -540,6 +538,12 @@ def _get_current_predictions_impl(
             if entry is not None:
                 results.append(entry)
 
+    logger.info(
+        "[chili_brain_io] predictions_batch tickers=%s workers=%s results=%s",
+        len(ticker_batch),
+        _workers,
+        len(results),
+    )
     results.sort(key=lambda x: abs(x["score"]), reverse=True)
     return results
 

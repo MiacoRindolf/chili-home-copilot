@@ -993,18 +993,7 @@ def _safe_scan_status_part(label: str, fn, default):
 
 
 @router.get("/api/trading/scan/status")
-def api_scan_status(
-    compat_mirrors: int = Query(
-        1,
-        ge=0,
-        le=1,
-        description=(
-            "Temporary compatibility:1 (default) includes top-level work_ledger, release, "
-            "scheduler, scan duplicates of brain_runtime. 0 omits those keys (staging / "
-            "future default); top-level learning is unchanged. Not read on encode_error path."
-        ),
-    ),
-):
+def api_scan_status():
     """Aggregate Brain runtime, scan, reconcile-cycle, prescreen, and scheduler state.
 
     **Primary operator read path:** ``brain_runtime`` alone is sufficient for desk/runtime
@@ -1014,15 +1003,15 @@ def api_scan_status(
     mutex-backed shape; operators should prefer ``brain_runtime.learning_summary`` over
     duplicating those fields from ``learning``. ``release`` is always ``{}``.
 
-    **Top-level mirrors:** duplicated ``work_ledger`` / ``release`` / ``scheduler`` / ``scan`` are
-    included when ``compat_mirrors=1`` (default). Set ``compat_mirrors=0`` to omit them (narrow,
-    explicit opt-in for mirror-free shape); production should keep the default until a phased
-    rollout changes it.
+    **Happy-path JSON:** ``ok``, ``brain_runtime``, ``prescreen``, ``learning`` (``learning`` last).
+    Legacy top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan`` duplicates are **not**
+    emitted on success; read them under ``brain_runtime`` only.
 
     **encode_error path (frozen):** if JSON encoding fails after :func:`to_jsonable`, the handler
     returns 200 with ``encode_error: true``, empty ``brain_runtime``, empty prescreen, empty
     top-level mirrors and learning, and scheduler fallback ``{\"running\": false, \"jobs\": []}``.
-    Query params are ignored on that path.
+    That degraded shape still includes the flat mirror **keys** (empty objects) for last-resort
+    clients — do not change without a versioned migration (see docs).
 
     Values are passed through :func:`to_jsonable` so numpy/pandas scalars and
     non-finite floats cannot break JSON encoding (Starlette uses ``allow_nan=False``).
@@ -1087,11 +1076,10 @@ def api_scan_status(
         }
 
     _mirror_note = (
-        "Top-level work_ledger, release, scheduler, and scan duplicate brain_runtime for backward "
-        "compatibility; CHILI in-repo UI reads brain_runtime only (flat keys for encode_error / "
-        "legacy). External integrators should migrate to brain_runtime; these mirrors may be "
-        "removed or gated in a future release. Top-level learning remains for graph/mutex-adjacent "
-        "full reconcile snapshot."
+        "Happy-path responses no longer duplicate work_ledger, release, scheduler, or scan at the "
+        "JSON root — use brain_runtime only. encode_error responses may still include those keys "
+        "(empty) per the frozen degraded contract. Top-level learning remains for graph overlay and "
+        "full reconcile snapshot consumers."
     )
     activity_signals = _activity_signals(work_ledger_st, learning_summary)
     brain_runtime: dict[str, Any] = {
@@ -1108,19 +1096,13 @@ def api_scan_status(
     learning_out = dict(learning_st)
     learning_out["status_role"] = "reconcile_compatibility"
 
-    include_flat = compat_mirrors != 0
-    # Key order: learning last. With compat_mirrors=0, top-level mirror keys are omitted.
+    # Key order: learning last. No top-level mirror keys on happy path (Releases 2–3).
     payload: dict[str, Any] = {
         "ok": True,
         "brain_runtime": brain_runtime,
         "prescreen": prescreen_st,
+        "learning": learning_out,
     }
-    if include_flat:
-        payload["work_ledger"] = work_ledger_st
-        payload["release"] = release_st
-        payload["scheduler"] = scheduler_st
-        payload["scan"] = scan_st
-    payload["learning"] = learning_out
     try:
         return JSONResponse(to_jsonable(payload))
     except Exception:

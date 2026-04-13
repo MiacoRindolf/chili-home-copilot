@@ -189,6 +189,15 @@ class Settings(BaseSettings):
     brain_work_snapshots_outcome_enabled: bool = True
     brain_smart_bt_max_workers: int | None = 28  # max threads per insight ticker pool (None = max(8, cpu*2))
 
+    # Brain I/O thread pools: cgroup / CHILI_CONTAINER_CPU_LIMIT aware (see brain_io_concurrency).
+    brain_io_effective_cpus_override: float | None = None
+    brain_io_workers_high: int | None = None
+    brain_io_workers_med: int | None = None
+    brain_io_workers_low: int | None = None
+    brain_snapshot_io_workers: int | None = None
+    brain_prediction_io_workers: int | None = None
+    brain_market_snapshot_defer_while_learning_running: bool = True
+
     @field_validator("brain_queue_backtest_executor", mode="before")
     @classmethod
     def _normalize_queue_backtest_executor(cls, v: object) -> str:

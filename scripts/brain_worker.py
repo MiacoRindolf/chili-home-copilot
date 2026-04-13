@@ -36,6 +36,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db import SessionLocal
 
+try:
+    from app.services.trading.brain_io_concurrency import log_brain_io_profile
+except Exception:
+    log_brain_io_profile = None  # type: ignore[misc, assignment]
+
 # Global status reference for cleanup
 _global_status: "BrainWorkerStatus | None" = None
 
@@ -1048,7 +1053,9 @@ def main():
     logger.info(f"[brain] Brain Worker starting (PID: {status.pid}, mode: {args.mode})")
     logger.info(f"[brain] DATA_DIR (must match app DB / API): {DATA_DIR.resolve()}")
     logger.info(f"[brain] Cycle interval: {args.interval} minutes")
-    
+    if log_brain_io_profile:
+        log_brain_io_profile(logger)
+
     status.status = "running"
     status.save()
 

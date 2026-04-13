@@ -6324,7 +6324,7 @@ var _PIPELINE_STEPS = [
  * Resolve primary fields from ``/api/trading/scan/status``.
  * In-repo Brain desk uses ``brain_runtime`` only when the aggregate is present (happy path).
  * Top-level ``work_ledger`` / ``release`` / ``scheduler`` / ``scan`` are read only on
- * ``encode_error`` or other legacy edge cases (mirrors scheduled for removal — see docs).
+ * ``encode_error`` or other legacy edge cases (absent on happy path — see docs).
  * ``release`` is always empty. ``learning_summary`` + ``activity_signals`` drive operator strip;
  * ``pollLearningStatus`` merges ``learning_summary`` over top-level ``learning`` for those fields.
  * Neural graph overlay (``tbnUpdateNodeStatuses``) reads top-level ``learning`` only (mesh/step indices).

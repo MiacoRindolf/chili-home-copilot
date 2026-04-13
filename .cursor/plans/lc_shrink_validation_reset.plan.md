@@ -17,10 +17,10 @@ updated: 2026-04-13
 ## Phase 0 (runtime / regression) — use this checklist
 
 1. **`GET /api/trading/scan/status`** returns **`ok: true`** (happy path).
-2. **Top-level key order:** `ok`, `brain_runtime`, `prescreen`, `work_ledger`, `release`, `scheduler`, `scan`, `learning` (`learning` last).
+2. **Top-level key order:** `ok`, `brain_runtime`, `prescreen`, `learning` (`learning` last). Root **`work_ledger`** / **`release`** / **`scheduler`** / **`scan`** are absent on success.
 3. **`brain_runtime`:** `work_ledger`, `release`, `scheduler`, `scan`, `learning_summary`, `activity_signals`, `compatibility_mirror_keys`, `compatibility_mirror_note`.
-4. **`brain_runtime.release` and top-level `release`:** both **`{}`** (empty object, no `git_commit`).
-5. **Mirrors:** top-level `work_ledger`, `scheduler`, `scan` **deep-equal** the same fields inside `brain_runtime`.
+4. **`brain_runtime.release`:** **`{}`** (empty object, no `git_commit`). Top-level `release` exists only on **`encode_error`** (frozen empty `{}`).
+5. **Mirrors:** no top-level duplicates on happy path; ledger/scheduler/scan live under **`brain_runtime`** only.
 6. **`learning.status_role`:** **`reconcile_compatibility`**.
 7. **`activity_signals`:** exactly **`reconcile_active`**, **`ledger_busy`**, **`retry_or_dead_attention`**, **`outcome_head_id`** (minimal slice).
 8. **`learning_summary`:** includes **`status_role`** (`reconcile_compatibility`) and **`tickers_processed`**; operator UI should prefer **`brain_runtime`** for runtime strip (graph overlay may still use top-level **`learning`** for mesh/step fields).
@@ -45,7 +45,7 @@ Implemented on `main` (API + UI + tests + worker copy + docs):
 
 ## Copy-paste: reset Cursor validation (next session)
 
-> **Validation reset:** `brain_runtime.release` and top-level `release` are **always `{}`** (commit `31ca070`). Do **not** use `release.git_commit` or match API JSON to `git rev-parse HEAD`. Phase 0 = `scan/status` **shape**, **mirrors**, **`learning.status_role`**, **`activity_signals`**, **work_ledger**, and **Brain UI** behavior — see `.cursor/rules/chili-scan-status-deploy-validation.mdc` and `tests/test_scan_status_brain_runtime.py`.
+> **Validation reset:** `brain_runtime.release` is **`{}`** on happy path (commit `31ca070`). Root `release` is absent on success. Do **not** use `release.git_commit` or match API JSON to `git rev-parse HEAD`. Phase 0 = `scan/status` **shape**, **`learning.status_role`**, **`activity_signals`**, **`brain_runtime.work_ledger`**, and **Brain UI** behavior — see `.cursor/rules/chili-scan-status-deploy-validation.mdc` and `tests/test_scan_status_brain_runtime.py`.
 
 ## Next phase (out of this plan)
 

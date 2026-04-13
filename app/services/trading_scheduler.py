@@ -119,6 +119,20 @@ def _run_brain_market_snapshot_job():
     if not getattr(_settings, "brain_market_snapshot_scheduler_enabled", True):
         return
 
+    if getattr(_settings, "brain_market_snapshot_defer_while_learning_running", True):
+        try:
+            from .trading.learning import get_learning_status
+
+            _st = get_learning_status()
+            if _st.get("running"):
+                logger.info(
+                    "[scheduler] brain_market_snapshots deferred: learning cycle running "
+                    "(avoid parallel OHLCV with brain-worker; next interval will retry)"
+                )
+                return
+        except Exception as _def_e:
+            logger.debug("[scheduler] snapshot defer check skipped: %s", _def_e)
+
     from ..db import SessionLocal
     from .trading.batch_job_constants import JOB_BRAIN_MARKET_SNAPSHOTS
     from .trading.brain_batch_job_log import brain_batch_job_begin, brain_batch_job_finish

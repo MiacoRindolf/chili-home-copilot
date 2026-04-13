@@ -704,6 +704,7 @@ def compute_indicators(
     indicators: list[str] | None = None,
     *,
     allow_provider_fallback: bool | None = None,
+    preloaded_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Compute requested technical indicators for a ticker.
 
@@ -712,6 +713,7 @@ def compute_indicators(
 
     Results are cached for 5 minutes keyed on (ticker, interval, period,
     indicators) since the underlying OHLCV data is itself cached for 30 min.
+    When *preloaded_df* is passed, the LRU cache is bypassed (caller-owned OHLCV).
     """
     fb = _effective_allow_fallback(allow_provider_fallback)
     if indicators is None:
@@ -720,22 +722,29 @@ def compute_indicators(
     cache_key = (ticker.upper(), interval, period, frozenset(indicators), fb)
 
     now = _time.time()
-    with _ind_cache_lock:
-        entry = _ind_cache.get(cache_key)
-        if entry and now - entry[0] < _IND_CACHE_TTL:
-            return entry[1]
+    if preloaded_df is None:
+        with _ind_cache_lock:
+            entry = _ind_cache.get(cache_key)
+            if entry and now - entry[0] < _IND_CACHE_TTL:
+                return entry[1]
 
     result = _compute_indicators_fresh(
-        ticker, interval, period, indicators, allow_provider_fallback=fb,
+        ticker,
+        interval,
+        period,
+        indicators,
+        allow_provider_fallback=fb,
+        preloaded_df=preloaded_df,
     )
 
-    with _ind_cache_lock:
-        if len(_ind_cache) >= _IND_CACHE_MAX:
-            cutoff = now - _IND_CACHE_TTL
-            stale = [k for k, v in _ind_cache.items() if v[0] < cutoff]
-            for k in stale:
-                del _ind_cache[k]
-        _ind_cache[cache_key] = (now, result)
+    if preloaded_df is None:
+        with _ind_cache_lock:
+            if len(_ind_cache) >= _IND_CACHE_MAX:
+                cutoff = now - _IND_CACHE_TTL
+                stale = [k for k, v in _ind_cache.items() if v[0] < cutoff]
+                for k in stale:
+                    del _ind_cache[k]
+            _ind_cache[cache_key] = (now, result)
     return result
 
 
@@ -746,17 +755,23 @@ def _compute_indicators_fresh(
     indicators: list[str],
     *,
     allow_provider_fallback: bool = True,
+    preloaded_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Actual indicator computation (no cache).
 
-    Uses fetch_ohlcv_df() with the same provider fallback policy.
+    Uses fetch_ohlcv_df() with the same provider fallback policy unless
+    *preloaded_df* is set (avoids duplicate network for snapshot batches).
     """
-    df = fetch_ohlcv_df(
-        ticker, interval=interval, period=period, allow_provider_fallback=allow_provider_fallback,
-    )
-    if df.empty:
+    if preloaded_df is None:
+        df = fetch_ohlcv_df(
+            ticker, interval=interval, period=period, allow_provider_fallback=allow_provider_fallback,
+        )
+    else:
+        df = preloaded_df
+    if df is None or df.empty:
         return {}
 
+    df = df.copy()
     df.index = pd.to_datetime(df.index)
     timestamps = [int(pd.Timestamp(ts).timestamp()) for ts in df.index]
     result: dict[str, Any] = {}
@@ -1138,20 +1153,32 @@ def _snapshot_learned_v1_block(df: pd.DataFrame) -> dict[str, Any]:
     return out
 
 
-def get_indicator_snapshot(ticker: str, interval: str = "1d") -> dict[str, Any]:
+def get_indicator_snapshot(
+    ticker: str,
+    interval: str = "1d",
+    *,
+    ohlcv_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
     """Get latest indicator values (used for journal snapshots and AI context).
 
     Includes stochastic, EMA 20/50/100, extended vol/volume/momentum fields,
     optional ``equity_regime`` (SPY-based), and ``learned_v1`` OHLC stats.
+
+    When *ohlcv_df* is provided, indicators and ``learned_v1`` reuse that frame
+    (one provider pull per ticker in snapshot batches).
     """
+    _inds = [
+        "rsi", "rsi_7", "macd", "sma_20", "ema_20", "ema_50", "ema_100",
+        "bbands", "bb_pct_b", "stoch", "adx", "atr", "obv",
+        "roc_10", "realized_vol_20", "volume_z_20", "volume_z_60",
+        "obv_slope_5", "atr_percentile_60", "macd_hist_slope_3",
+    ]
     result = compute_indicators(
-        ticker, interval=interval, period="3mo",
-        indicators=[
-            "rsi", "rsi_7", "macd", "sma_20", "ema_20", "ema_50", "ema_100",
-            "bbands", "bb_pct_b", "stoch", "adx", "atr", "obv",
-            "roc_10", "realized_vol_20", "volume_z_20", "volume_z_60",
-            "obv_slope_5", "atr_percentile_60", "macd_hist_slope_3",
-        ],
+        ticker,
+        interval=interval,
+        period="3mo",
+        indicators=_inds,
+        preloaded_df=ohlcv_df,
     )
     snapshot: dict[str, Any] = {"ticker": ticker, "interval": interval}
     for ind_name, records in result.items():
@@ -1176,7 +1203,9 @@ def get_indicator_snapshot(ticker: str, interval: str = "1d") -> dict[str, Any]:
 
     if getattr(settings, "brain_snapshot_learned_v1_enabled", True):
         try:
-            ldf = fetch_ohlcv_df(ticker, interval=interval, period="3mo")
+            ldf = ohlcv_df
+            if ldf is None:
+                ldf = fetch_ohlcv_df(ticker, interval=interval, period="3mo")
             if ldf is not None and not ldf.empty:
                 snapshot["learned_v1"] = _snapshot_learned_v1_block(ldf)
         except Exception:

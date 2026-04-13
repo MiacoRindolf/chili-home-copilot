@@ -56,10 +56,9 @@
 ## API / UI
 
 - **`GET /api/trading/scan/status` — primary read path:** `brain_runtime` bundles `work_ledger`, `release`, `scheduler`, `scan`, `learning_summary`, and `activity_signals`. **Operator/runtime display** should use only `brain_runtime` (plus `prescreen` if needed). `learning_summary` includes `running`, `phase`, `current_step`, `steps_completed`, `total_steps`, `elapsed_s`, `tickers_processed`, `status_role` (`reconcile_compatibility`). Top-level `learning` remains for the **neural graph overlay** and any consumer that needs the full reconcile snapshot (mesh/step ids, indices, funnel, etc.).
-- **`compat_mirrors` query (temporary, narrow):** `compat_mirrors=1` (default) includes top-level `work_ledger`, `release`, `scheduler`, `scan` duplicates. `compat_mirrors=0` omits those keys; `brain_runtime` and top-level `learning` are unchanged. Production should keep the default until a phased rollout. **Not** applied on the `encode_error` path below.
-- **JSON key order (happy path, default):** `ok`, `brain_runtime`, `prescreen`, `work_ledger`, `release`, `scheduler`, `scan`, `learning` — `learning` is **last**. With `compat_mirrors=0`: `ok`, `brain_runtime`, `prescreen`, `learning`. Do not rely on object key order in clients if avoidable.
+- **JSON key order (happy path):** `ok`, `brain_runtime`, `prescreen`, `learning` — `learning` is **last**. Root-level `work_ledger`, `release`, `scheduler`, and `scan` are **not** emitted on success; read them under `brain_runtime` only. Do not rely on object key order in clients if avoidable.
 - **`brain_runtime.activity_signals` (minimal contract):** `reconcile_active` (bool), `ledger_busy` (bool), `retry_or_dead_attention` (bool), `outcome_head_id` (int or null — newest `recent_meaningful_outcomes[0].id` when present).
-- **One-release compatibility mirrors:** top-level `work_ledger`, `release`, `scheduler`, and `scan` duplicate `brain_runtime` when `compat_mirrors=1` (default). **Removal readiness:** in-repo `brain.html` uses **`brain_runtime` only** on the happy path; flat mirrors are used only when `encode_error` is true or `brain_runtime.work_ledger` is absent. **Do not remove** top-level **`learning`** without a separate plan — neural graph overlay and full snapshot consumers still need it.
+- **Legacy mirrors:** in-repo `brain.html` uses **`brain_runtime` only** on the happy path (`scanStatusBrainRuntime`). Flat mirror keys exist only on the frozen **`encode_error`** path (empty values). **Do not remove** top-level **`learning`** without a separate plan — neural graph overlay and full snapshot consumers still need it.
 
 ### Frozen `encode_error` contract (`GET /api/trading/scan/status`)
 
@@ -81,12 +80,13 @@ Do not change this contract when gating or removing happy-path mirrors; clients 
 - **`brain_runtime.work_ledger`**: `pending_work`, `retry_wait`, `dead_last_24h`, `pending_by_type`, `processing`, `last_done_by_type`, `recent_completions`, `recent_meaningful_outcomes`, `execution_pulse`, `execution_outcomes_24h`.
 - **Brain desk** renders handler-centric summary from `brain_runtime.work_ledger` (no mirror dependency on success responses).
 
-### Mirror removal checklist (future PR)
+### Mirror removal — happy path complete
 
-1. Confirm no external clients rely on top-level `work_ledger` / `release` / `scheduler` / `scan` (grep integrators, mobile, forks).
-2. Keep **`learning`** in the payload for graph overlay + full reconcile snapshot until those consumers read a nested field (e.g. `brain_runtime.learning_full`) — **separate migration**.
-3. Flip default to omit mirrors only after integrator audit; keep `?compat_mirrors=1` as explicit escape hatch until sunset. Update `tests/test_scan_status_brain_runtime.py`. **Do not** change the frozen `encode_error` payload without a versioned migration plan.
-4. Run `pytest` + manual Brain desk + graph overlay smoke test.
+Top-level duplicate keys were removed from the **success** response; external integrators must use `brain_runtime`. Remaining work (optional / separate):
+
+1. **`learning` migration:** nested `brain_runtime.learning_full` + graph switch — **separate** program.
+2. **`encode_error` slimming:** only with a versioned migration — **do not** change the frozen table above ad hoc.
+3. Run `pytest tests/test_scan_status_brain_runtime.py` + Brain desk + graph overlay smoke after API changes.
 - **`brain_runtime.release`**: always `{}` (reserved for API shape / future use). **Do not** use it for deploy revision; platform logs, image tags, or your host’s own metadata are the source of truth.
 
 ## Operational proof (execution feedback)
@@ -101,7 +101,7 @@ $env:CHILI_PROVE_EXEC_FEEDBACK_LEDGER = "1"
 conda run -n chili-env python scripts/prove_execution_feedback_ledger.py
 ```
 
-The script closes a synthetic `PaperTrade` (`CHILI-PROOF-USD`), backdates the debounced digest row, runs one `run_brain_work_dispatch_round`, prints recent ledger rows, then deletes the paper row (ledger outcomes remain). Verify with `GET /api/trading/scan/status` → `brain_runtime.work_ledger.recent_meaningful_outcomes` (top-level `work_ledger` is a duplicate mirror).
+The script closes a synthetic `PaperTrade` (`CHILI-PROOF-USD`), backdates the debounced digest row, runs one `run_brain_work_dispatch_round`, prints recent ledger rows, then deletes the paper row (ledger outcomes remain). Verify with `GET /api/trading/scan/status` → `brain_runtime.work_ledger.recent_meaningful_outcomes` (no top-level `work_ledger` on happy path).
 
 **Worker logs:** each lean-cycle iteration logs `[brain] work ledger dispatch round processed=...` so dispatch-before-cycle is visible even when idle.
 

@@ -1,15 +1,14 @@
-"""``/api/trading/scan/status`` — brain_runtime primary aggregate + compatibility mirrors.
+"""``/api/trading/scan/status`` — brain_runtime primary aggregate (no top-level mirrors).
 
 Post-``31ca070`` deploy validation contract (no SHA / ``release`` fingerprint):
 
-- ``brain_runtime.release`` and top-level ``release`` are always ``{}`` — expected; do not
-  assert ``git_commit`` or compare JSON to ``git rev-parse HEAD``.
-- Validate payload shape, ``learning`` last, mirror equality, ``learning.status_role``,
-  ``brain_runtime.learning_summary`` (incl. ``status_role``, ``tickers_processed``),
-  ``activity_signals`` (four minimal keys), and ``work_ledger`` via ``brain_runtime``.
-
-Top-level mirror equality assertions are **regression** until mirrors are removed from
-``api_scan_status`` (see ``.cursor/plans/scan_status_mirror_removal_readiness.plan.md``).
+- ``brain_runtime.release`` is always ``{}`` — expected; do not assert ``git_commit`` or compare
+  JSON to ``git rev-parse HEAD``.
+- Happy path: ``ok``, ``brain_runtime``, ``prescreen``, ``learning`` — ``learning`` last.
+  Legacy root keys ``work_ledger`` / ``release`` / ``scheduler`` / ``scan`` are **not** present;
+  read them only under ``brain_runtime``.
+- ``encode_error`` path (not exercised here) still returns flat mirror **keys** (empty) per frozen
+  contract — see ``docs/TRADING_BRAIN_WORK_LEDGER.md``.
 
 See ``.cursor/plans/lc_shrink_validation_reset.plan.md`` and
 ``.cursor/rules/chili-scan-status-deploy-validation.mdc``.
@@ -18,7 +17,7 @@ See ``.cursor/plans/lc_shrink_validation_reset.plan.md`` and
 from __future__ import annotations
 
 
-def test_scan_status_brain_runtime_first_after_ok(client):
+def test_scan_status_brain_runtime_key_order_no_top_level_mirrors(client):
     r = client.get("/api/trading/scan/status")
     assert r.status_code == 200
     data = r.json()
@@ -26,19 +25,12 @@ def test_scan_status_brain_runtime_first_after_ok(client):
     keys = list(data.keys())
     assert keys[0] == "ok"
     assert keys[1] == "brain_runtime"
-    assert keys == [
-        "ok",
-        "brain_runtime",
-        "prescreen",
-        "work_ledger",
-        "release",
-        "scheduler",
-        "scan",
-        "learning",
-    ]
+    assert keys == ["ok", "brain_runtime", "prescreen", "learning"]
+    for k in ("work_ledger", "release", "scheduler", "scan"):
+        assert k not in data
 
 
-def test_scan_status_brain_runtime_shape_and_mirrors(client):
+def test_scan_status_brain_runtime_shape_under_aggregate(client):
     r = client.get("/api/trading/scan/status")
     assert r.status_code == 200
     data = r.json()
@@ -68,37 +60,7 @@ def test_scan_status_brain_runtime_shape_and_mirrors(client):
     assert isinstance(asig.get("retry_or_dead_attention"), bool)
     assert asig.get("outcome_head_id") is None or isinstance(asig.get("outcome_head_id"), int)
 
-    assert data["work_ledger"] == br["work_ledger"]
-    assert data["release"] == br["release"]
-    assert data["scheduler"] == br["scheduler"]
-    assert data["scan"] == br["scan"]
-
     learn = data.get("learning") or {}
     assert learn.get("status_role") == "reconcile_compatibility"
 
     assert br.get("release") == {}
-    assert data.get("release") == {}
-
-
-def test_scan_status_compat_mirrors_zero_omits_top_level_duplicates(client):
-    """compat_mirrors=0 omits legacy top-level mirrors; brain_runtime and learning unchanged."""
-    r_full = client.get("/api/trading/scan/status")
-    r0 = client.get("/api/trading/scan/status?compat_mirrors=0")
-    assert r_full.status_code == 200 and r0.status_code == 200
-    d0 = r0.json()
-    assert d0.get("ok") is True
-    assert list(d0.keys()) == ["ok", "brain_runtime", "prescreen", "learning"]
-    assert "work_ledger" not in d0
-    assert "release" not in d0
-    assert "scheduler" not in d0
-    assert "scan" not in d0
-    br0 = d0.get("brain_runtime") or {}
-    brf = r_full.json().get("brain_runtime") or {}
-    assert br0.get("work_ledger") == brf.get("work_ledger")
-    assert (d0.get("learning") or {}).get("status_role") == "reconcile_compatibility"
-
-
-def test_scan_status_compat_mirrors_one_explicit_matches_default(client):
-    r_def = client.get("/api/trading/scan/status")
-    r1 = client.get("/api/trading/scan/status?compat_mirrors=1")
-    assert r_def.json() == r1.json()
