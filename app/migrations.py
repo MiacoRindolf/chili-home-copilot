@@ -6138,8 +6138,6 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
             ON CONFLICT (node_id) DO NOTHING
         """), {"nid": _nid})
 
-    # Edges: regime -> monitor, monitor -> risk_gate, monitor -> alerts,
-    #         monitor_review -> evidence_quality (feedback)
     for src, tgt, sig, w, pol in [
         ("nm_latent_regime", "nm_position_monitor", "regime_shift", 0.6, "excitatory"),
         ("nm_evidence_quality", "nm_position_monitor", "evidence_ok", 0.5, "excitatory"),
@@ -6150,8 +6148,11 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
         conn.execute(text("""
             INSERT INTO brain_graph_edges
                 (source_node_id, target_node_id, signal_type, weight, polarity,
-                 edge_type, graph_version, enabled)
-            SELECT :src, :tgt, :sig, :w, :pol, 'dataflow', 1, true
+                 delay_ms, min_confidence, enabled, graph_version,
+                 edge_type, created_at, updated_at)
+            SELECT :src, :tgt, :sig, :w, :pol,
+                   0, 0.0, true, 1,
+                   'dataflow', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
             WHERE EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :src)
               AND EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :tgt)
               AND NOT EXISTS (
