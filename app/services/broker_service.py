@@ -634,7 +634,7 @@ def poll_app_approval() -> dict[str, Any]:
 
     Returns {"status": "approved"}, {"status": "pending"}, or {"status": "error"}.
     """
-    global _logged_in, _last_login, _sms_state
+    global _logged_in, _last_login, _sms_state, _session_connected_at
 
     if not _sms_state or _sms_state.get("challenge_type") != "prompt":
         return {"status": "error", "message": "No pending app approval."}
@@ -644,61 +644,86 @@ def poll_app_approval() -> dict[str, Any]:
         from robin_stocks.robinhood.authentication import login_url
 
         challenge_id = _sms_state["challenge_id"]
+        inquiries_url = _sms_state["inquiries_url"]
+        login_payload = _sms_state["login_payload"]
+
+        # Check prompt status (may return None if rate-limited)
         prompt_url = f"https://api.robinhood.com/push/{challenge_id}/get_prompts_status/"
-
         resp = request_get(url=prompt_url)
-        logger.info(f"[broker] Prompt poll: {resp}")
+        status_validated = resp and resp.get("challenge_status") == "validated"
+        logger.info("[broker] Prompt poll: %s (validated=%s)", resp, status_validated)
 
-        if resp and resp.get("challenge_status") == "validated":
-            # Approved! Now finalize the workflow and re-login
-            inquiries_url = _sms_state["inquiries_url"]
-            login_payload = _sms_state["login_payload"]
+        # Track retries: after N polls, try the continuation anyway in case
+        # the approval went through but the status endpoint is 429'd.
+        poll_count = _sms_state.get("_poll_count", 0) + 1
+        _sms_state["_poll_count"] = poll_count
+        should_try_continue = status_validated or (poll_count >= 3 and poll_count % 3 == 0)
 
-            try:
-                cont_payload = {"sequence": 0, "user_input": {"status": "continue"}}
-                request_post(url=inquiries_url, payload=cont_payload, json=True)
-                time.sleep(1)
-            except Exception:
-                pass
-
-            data = request_post(login_url(), login_payload)
-            if data and "access_token" in data:
-                _complete_login(data)
+        if should_try_continue:
+            login_result = _try_finalize_approval(inquiries_url, login_payload)
+            if login_result:
                 _sms_state = {}
-                return {"status": "approved", "message": "Connected successfully!"}
+                return login_result
 
-            # Try checking if session is already valid
-            try:
-                import robin_stocks.robinhood as rh
-                profile = rh.load_account_profile()
-                if profile:
-                    _logged_in = True
-                    _last_login = time.time()
-                    _session_connected_at = _last_login
-                    try:
-                        from robin_stocks.robinhood.helper import request_headers
-                        _hdr = request_headers() if callable(request_headers) else request_headers
-                        if _hdr and _hdr.get("Authorization"):
-                            _save_session_to_db(
-                                broker="robinhood",
-                                username=settings.robinhood_username or "default",
-                                token_data={"Authorization": _hdr["Authorization"]},
-                            )
-                    except Exception:
-                        pass
-                    _sms_state = {}
-                    return {"status": "approved", "message": "Connected successfully!"}
-            except Exception:
-                pass
-
-            _sms_state = {}
-            return {"status": "error", "message": "Approval succeeded but login failed. Try again."}
+            if status_validated:
+                _sms_state = {}
+                return {"status": "error", "message": "Approval succeeded but login failed. Try connecting again."}
 
         return {"status": "pending", "message": "Waiting for approval in Robinhood app..."}
 
     except Exception as e:
-        logger.error(f"[broker] App approval poll failed: {e}")
+        logger.error("[broker] App approval poll failed: %s", e)
         return {"status": "pending", "message": "Still waiting..."}
+
+
+def _try_finalize_approval(inquiries_url: str, login_payload: dict) -> dict | None:
+    """Attempt to finalize a device-approval login.  Returns a status dict
+    on success, None if the approval hasn't cleared yet."""
+    global _logged_in, _last_login, _session_connected_at
+    try:
+        from robin_stocks.robinhood.helper import request_post
+        from robin_stocks.robinhood.authentication import login_url
+
+        # Continue the workflow
+        try:
+            cont_payload = {"sequence": 0, "user_input": {"status": "continue"}}
+            request_post(url=inquiries_url, payload=cont_payload, json=True)
+            time.sleep(1)
+        except Exception:
+            pass
+
+        data = request_post(login_url(), login_payload)
+        if data and "access_token" in data:
+            _complete_login(data)
+            return {"status": "approved", "message": "Connected successfully!"}
+
+        # Fallback: check if robin_stocks session is already live
+        try:
+            import robin_stocks.robinhood as rh
+            profile = rh.load_account_profile()
+            if profile:
+                _logged_in = True
+                _last_login = time.time()
+                _session_connected_at = _last_login
+                try:
+                    from robin_stocks.robinhood.helper import request_headers
+                    _hdr = request_headers() if callable(request_headers) else request_headers
+                    if _hdr and _hdr.get("Authorization"):
+                        _save_session_to_db(
+                            broker="robinhood",
+                            username=settings.robinhood_username or "default",
+                            token_data={"Authorization": _hdr["Authorization"]},
+                        )
+                except Exception:
+                    pass
+                return {"status": "approved", "message": "Connected successfully!"}
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.debug("[broker] Finalize approval attempt failed: %s", e)
+
+    return None
 
 
 # ── Connection status ────────────────────────────────────────────────────
@@ -708,6 +733,9 @@ def is_connected() -> bool:
     if not _rh_available or not _credentials_configured():
         return False
     if _logged_in and (time.time() - _last_login) < _LOGIN_TTL:
+        return True
+    # Try DB session (works for both TOTP and non-TOTP accounts)
+    if _try_load_db_session():
         return True
     if _has_totp():
         return login()
