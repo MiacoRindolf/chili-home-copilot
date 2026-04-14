@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from ..db import Base
 
@@ -17,7 +17,9 @@ class ReasoningUserModel(Base):
     __tablename__ = "reasoning_user_models"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     decision_style: str = Column(String, nullable=True)  # e.g. conservative|exploratory
     risk_tolerance: str = Column(String, nullable=True)  # e.g. low|medium|high
     communication_prefs: Optional[str] = Column(Text, nullable=True)  # JSON blob
@@ -32,7 +34,9 @@ class ReasoningInterest(Base):
     __tablename__ = "reasoning_interests"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     topic: str = Column(String, nullable=False, index=True)
     category: str = Column(String, nullable=False)  # explicit|inferred_trading|inferred_code|inferred_chat
     weight: float = Column(Float, default=0.0, nullable=False)
@@ -47,7 +51,9 @@ class ReasoningResearch(Base):
     __tablename__ = "reasoning_research"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     topic: str = Column(String, nullable=False, index=True)
     summary: str = Column(Text, nullable=False)
     sources: Optional[str] = Column(Text, nullable=True)  # JSON list of {title, url}
@@ -60,7 +66,9 @@ class ReasoningAnticipation(Base):
     __tablename__ = "reasoning_anticipations"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     description: str = Column(Text, nullable=False)
     domain: Optional[str] = Column(String, nullable=True)  # trading|code|general|...
     context: Optional[str] = Column(Text, nullable=True)  # JSON blob
@@ -74,7 +82,9 @@ class ReasoningEvent(Base):
     __tablename__ = "reasoning_events"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, index=True, nullable=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), index=True, nullable=True
+    )
     event_type: str = Column(String, nullable=False)  # cycle|web_research|model_update|anticipation|error
     description: str = Column(Text, nullable=False)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -84,7 +94,9 @@ class ReasoningLearningGoal(Base):
     __tablename__ = "reasoning_learning_goals"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     dimension: str = Column(String, nullable=False)  # e.g. risk_tolerance, work_schedule
     description: str = Column(Text, nullable=False)
     status: str = Column(String, nullable=False, default="pending")  # pending|active|completed|stale
@@ -99,7 +111,9 @@ class ReasoningHypothesis(Base):
     __tablename__ = "reasoning_hypotheses"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     claim: str = Column(Text, nullable=False)
     domain: str = Column(String, nullable=True)  # trading|code|general|life|other
     confidence: float = Column(Float, default=0.5, nullable=False)
@@ -114,7 +128,9 @@ class ReasoningConfidenceSnapshot(Base):
     __tablename__ = "reasoning_confidence_snapshots"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: int = Column(Integer, index=True, nullable=False)
+    user_id: int = Column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), index=True, nullable=False
+    )
     dimension: str = Column(String, nullable=False)
     confidence_value: float = Column(Float, default=0.0, nullable=False)
     snapshot_date: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

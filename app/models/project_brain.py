@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from ..db import Base
 
@@ -15,7 +15,9 @@ class ProjectAgentState(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     agent_name: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     state_json: Optional[str] = Column(Text, nullable=True)
     confidence: float = Column(Float, default=0.0)
     last_cycle_at: Optional[datetime] = Column(DateTime, nullable=True)
@@ -29,7 +31,9 @@ class AgentFinding(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     agent_name: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     category: str = Column(String(50), nullable=False)
     title: str = Column(String(300), nullable=False)
     description: str = Column(Text, nullable=False)
@@ -46,7 +50,9 @@ class AgentResearch(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     agent_name: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     topic: str = Column(String(300), nullable=False)
     query: str = Column(String(500), nullable=False)
     summary: str = Column(Text, nullable=False)
@@ -62,7 +68,9 @@ class AgentGoal(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     agent_name: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     description: str = Column(Text, nullable=False)
     goal_type: str = Column(String(30), nullable=False, default="learn")  # learn, improve, research, deliver
     status: str = Column(String(20), nullable=False, default="active")    # active, completed, cancelled
@@ -78,7 +86,9 @@ class AgentEvolution(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     agent_name: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     dimension: str = Column(String(100), nullable=False)
     description: str = Column(Text, nullable=False)
     confidence_before: float = Column(Float, default=0.0)
@@ -94,7 +104,9 @@ class AgentMessage(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     from_agent: str = Column(String(50), nullable=False, index=True)
     to_agent: str = Column(String(50), nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     message_type: str = Column(String(50), nullable=False)  # finding, requirement, question, alert
     content_json: str = Column(Text, nullable=False)
     acknowledged: bool = Column(Boolean, default=False, nullable=False)
@@ -108,7 +120,9 @@ class POQuestion(Base):
     __tablename__ = "po_questions"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     question: str = Column(Text, nullable=False)
     context: Optional[str] = Column(Text, nullable=True)
     category: str = Column(String(50), nullable=False, default="general")  # vision, features, priorities, tech_stack, users, success_criteria
@@ -125,7 +139,9 @@ class PORequirement(Base):
     __tablename__ = "po_requirements"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: str = Column(String(300), nullable=False)
     description: str = Column(Text, nullable=False)
     priority: str = Column(String(20), nullable=False, default="medium")  # critical, high, medium, low
@@ -143,7 +159,9 @@ class QATestCase(Base):
     __tablename__ = "qa_test_cases"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     name: str = Column(String(300), nullable=False)
     steps_json: Optional[str] = Column(Text, nullable=True)
     expected_json: Optional[str] = Column(Text, nullable=True)
@@ -158,7 +176,9 @@ class QATestRun(Base):
     __tablename__ = "qa_test_runs"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     test_name: str = Column(String(300), nullable=False)
     passed: bool = Column(Boolean, default=False, nullable=False)
     errors_json: Optional[str] = Column(Text, nullable=True)
@@ -172,7 +192,9 @@ class QABugReport(Base):
     __tablename__ = "qa_bug_reports"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     title: str = Column(String(300), nullable=False)
     description: str = Column(Text, nullable=False, default="")
     severity: str = Column(String(20), nullable=False, default="warn")  # info, warn, critical

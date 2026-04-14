@@ -28,7 +28,69 @@ from .household import (
     PairVerifyBody,
 )
 
+from .core import (
+    UserOut,
+    DeviceOut,
+    PairCodeOut,
+    BrokerCredentialOut,
+    BrainWorkerControlOut,
+)
+
+from .code_brain import (
+    CodeRepoOut,
+    CodeInsightOut,
+    CodeSnapshotOut,
+    CodeHotspotOut,
+    CodeReviewOut,
+    CodeDepAlertOut,
+    CodeQualitySnapshotOut,
+)
+
+from .reasoning_brain import (
+    ReasoningUserModelOut,
+    ReasoningInterestOut,
+    ReasoningResearchOut,
+    ReasoningAnticipationOut,
+    ReasoningHypothesisOut,
+    ReasoningLearningGoalOut,
+)
+
+from .project_brain import (
+    ProjectAgentStateOut,
+    AgentFindingOut,
+    AgentResearchOut,
+    AgentGoalOut,
+    POQuestionOut,
+    PORequirementOut,
+    QATestCaseOut,
+    QATestRunOut,
+    QABugReportOut,
+)
+
+from .intercom import IntercomMessageOut, IntercomConsentOut
+
+from .marketplace import MarketplaceModuleOut
+
+from .coding_task import (
+    PlanTaskCodingProfileOut,
+    TaskClarificationOut,
+    CodingTaskBriefOut,
+    CodingTaskValidationRunOut,
+    CodingAgentSuggestionOut,
+    CodingAgentSuggestionApplyOut,
+    CodingBlockerReportOut,
+)
+
+from .trading_brain_phase1 import (
+    BrainLearningCycleRunOut,
+    BrainStageJobOut,
+    BrainPredictionSnapshotOut,
+    BrainPredictionLineOut,
+    BrainIntegrationEventOut,
+)
+
 __all__ = [
+    # Household
     "ChoreCreate",
     "ChoreOut",
     "BirthdayCreate",
@@ -38,6 +100,69 @@ __all__ = [
     "AddBirthdayBody",
     "PairRequestBody",
     "PairVerifyBody",
+    # Trading
+    "WatchlistAdd",
+    "WatchlistOut",
+    "TradeCreate",
+    "TradeClose",
+    "TradeUpdate",
+    "TradeOut",
+    "JournalCreate",
+    "JournalOut",
+    "AnalyzeRequest",
+    "InsightOut",
+    "BacktestRequest",
+    "ScanRequest",
+    # Core
+    "UserOut",
+    "DeviceOut",
+    "PairCodeOut",
+    "BrokerCredentialOut",
+    "BrainWorkerControlOut",
+    # Code Brain
+    "CodeRepoOut",
+    "CodeInsightOut",
+    "CodeSnapshotOut",
+    "CodeHotspotOut",
+    "CodeReviewOut",
+    "CodeDepAlertOut",
+    "CodeQualitySnapshotOut",
+    # Reasoning Brain
+    "ReasoningUserModelOut",
+    "ReasoningInterestOut",
+    "ReasoningResearchOut",
+    "ReasoningAnticipationOut",
+    "ReasoningHypothesisOut",
+    "ReasoningLearningGoalOut",
+    # Project Brain
+    "ProjectAgentStateOut",
+    "AgentFindingOut",
+    "AgentResearchOut",
+    "AgentGoalOut",
+    "POQuestionOut",
+    "PORequirementOut",
+    "QATestCaseOut",
+    "QATestRunOut",
+    "QABugReportOut",
+    # Intercom
+    "IntercomMessageOut",
+    "IntercomConsentOut",
+    # Marketplace
+    "MarketplaceModuleOut",
+    # Coding Task
+    "PlanTaskCodingProfileOut",
+    "TaskClarificationOut",
+    "CodingTaskBriefOut",
+    "CodingTaskValidationRunOut",
+    "CodingAgentSuggestionOut",
+    "CodingAgentSuggestionApplyOut",
+    "CodingBlockerReportOut",
+    # Trading Brain Phase 1
+    "BrainLearningCycleRunOut",
+    "BrainStageJobOut",
+    "BrainPredictionSnapshotOut",
+    "BrainPredictionLineOut",
+    "BrainIntegrationEventOut",
 ]
 
 # The action planner (llm_planner.py) always needs validate_plan available,

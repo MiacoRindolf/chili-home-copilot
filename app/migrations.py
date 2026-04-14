@@ -5999,6 +5999,110 @@ def _migration_114_stop_decisions_and_delivery(conn) -> None:
     conn.commit()
 
 
+def _migration_115_schema_hardening_fks(conn) -> None:
+    """Add missing FK constraints across all domains after data repair."""
+    tables = _tables(conn)
+
+    fks_to_add: list[tuple[str, str, str, str, str, str]] = [
+        # (constraint_name, source_table, source_col, target_table, target_col, on_delete)
+        # --- Trading domain ---
+        ("fk_trades_user", "trading_trades", "user_id", "users", "id", "SET NULL"),
+        ("fk_trades_proposal", "trading_trades", "strategy_proposal_id", "trading_proposals", "id", "SET NULL"),
+        ("fk_journal_trade", "trading_journal", "trade_id", "trading_trades", "id", "CASCADE"),
+        ("fk_journal_user", "trading_journal", "user_id", "users", "id", "SET NULL"),
+        ("fk_paper_user", "trading_paper_trades", "user_id", "users", "id", "SET NULL"),
+        ("fk_watchlist_user", "trading_watchlist", "user_id", "users", "id", "SET NULL"),
+        ("fk_scans_user", "trading_scans", "user_id", "users", "id", "SET NULL"),
+        ("fk_alerts_sp", "trading_alerts", "scan_pattern_id", "scan_patterns", "id", "SET NULL"),
+        ("fk_alerts_user", "trading_alerts", "user_id", "users", "id", "SET NULL"),
+        ("fk_breakout_insight", "trading_breakout_alerts", "related_insight_id", "trading_insights", "id", "SET NULL"),
+        ("fk_breakout_user", "trading_breakout_alerts", "user_id", "users", "id", "SET NULL"),
+        ("fk_proposals_sp", "trading_proposals", "scan_pattern_id", "scan_patterns", "id", "SET NULL"),
+        ("fk_proposals_trade", "trading_proposals", "trade_id", "trading_trades", "id", "SET NULL"),
+        ("fk_proposals_user", "trading_proposals", "user_id", "users", "id", "SET NULL"),
+        ("fk_ptrades_sp", "trading_pattern_trades", "scan_pattern_id", "scan_patterns", "id", "SET NULL"),
+        ("fk_ptrades_insight", "trading_pattern_trades", "related_insight_id", "trading_insights", "id", "SET NULL"),
+        ("fk_ptrades_bt", "trading_pattern_trades", "backtest_result_id", "trading_backtests", "id", "SET NULL"),
+        ("fk_peh_sp", "trading_pattern_evidence_hypotheses", "scan_pattern_id", "scan_patterns", "id", "SET NULL"),
+        ("fk_levents_insight", "trading_learning_events", "related_insight_id", "trading_insights", "id", "SET NULL"),
+        ("fk_levents_user", "trading_learning_events", "user_id", "users", "id", "SET NULL"),
+        ("fk_bvsl_sp", "brain_validation_slice_ledger", "scan_pattern_id", "scan_patterns", "id", "CASCADE"),
+        ("fk_sp_parent", "scan_patterns", "parent_id", "scan_patterns", "id", "SET NULL"),
+        # --- Code brain ---
+        ("fk_cinsight_repo", "code_insights", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_cinsight_user", "code_insights", "user_id", "users", "id", "SET NULL"),
+        ("fk_csnapshot_repo", "code_snapshots", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_chotspot_repo", "code_hotspots", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_clevent_user", "code_learning_events", "user_id", "users", "id", "SET NULL"),
+        ("fk_cdep_repo", "code_dependencies", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_cqsnap_repo", "code_quality_snapshots", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_creview_repo", "code_reviews", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_creview_user", "code_reviews", "user_id", "users", "id", "SET NULL"),
+        ("fk_cdepalert_repo", "code_dep_alerts", "repo_id", "code_repos", "id", "CASCADE"),
+        ("fk_csearch_repo", "code_search_index", "repo_id", "code_repos", "id", "CASCADE"),
+        # --- Reasoning brain ---
+        ("fk_rum_user", "reasoning_user_models", "user_id", "users", "id", "CASCADE"),
+        ("fk_rint_user", "reasoning_interests", "user_id", "users", "id", "CASCADE"),
+        ("fk_rres_user", "reasoning_research", "user_id", "users", "id", "CASCADE"),
+        ("fk_rant_user", "reasoning_anticipations", "user_id", "users", "id", "CASCADE"),
+        ("fk_revt_user", "reasoning_events", "user_id", "users", "id", "SET NULL"),
+        ("fk_rlg_user", "reasoning_learning_goals", "user_id", "users", "id", "CASCADE"),
+        ("fk_rhyp_user", "reasoning_hypotheses", "user_id", "users", "id", "CASCADE"),
+        ("fk_rconf_user", "reasoning_confidence_snapshots", "user_id", "users", "id", "CASCADE"),
+        # --- Project brain ---
+        ("fk_pas_user", "project_agent_states", "user_id", "users", "id", "SET NULL"),
+        ("fk_afind_user", "agent_findings", "user_id", "users", "id", "SET NULL"),
+        ("fk_ares_user", "agent_research", "user_id", "users", "id", "SET NULL"),
+        ("fk_agoal_user", "agent_goals", "user_id", "users", "id", "SET NULL"),
+        ("fk_aevo_user", "agent_evolutions", "user_id", "users", "id", "SET NULL"),
+        ("fk_amsg_user", "agent_messages", "user_id", "users", "id", "SET NULL"),
+        ("fk_poq_user", "po_questions", "user_id", "users", "id", "SET NULL"),
+        ("fk_poreq_user", "po_requirements", "user_id", "users", "id", "SET NULL"),
+        ("fk_qatc_user", "qa_test_cases", "user_id", "users", "id", "SET NULL"),
+        ("fk_qatr_user", "qa_test_runs", "user_id", "users", "id", "SET NULL"),
+        ("fk_qabr_user", "qa_bug_reports", "user_id", "users", "id", "SET NULL"),
+        # --- Core (missing despite model FK declarations) ---
+        ("fk_devices_user", "devices", "user_id", "users", "id", "CASCADE"),
+        ("fk_paircodes_user", "pair_codes", "user_id", "users", "id", "CASCADE"),
+    ]
+
+    existing_constraints: set[str] = set()
+    try:
+        rows = conn.execute(text(
+            "SELECT constraint_name FROM information_schema.table_constraints "
+            "WHERE constraint_type = 'FOREIGN KEY' AND table_schema = 'public'"
+        )).fetchall()
+        existing_constraints = {r[0] for r in rows}
+    except Exception:
+        pass
+
+    for cname, src_table, src_col, tgt_table, tgt_col, on_del in fks_to_add:
+        if cname in existing_constraints:
+            continue
+        if src_table not in tables or tgt_table not in tables:
+            continue
+        try:
+            conn.execute(text(
+                f"ALTER TABLE {src_table} ADD CONSTRAINT {cname} "
+                f"FOREIGN KEY ({src_col}) REFERENCES {tgt_table}({tgt_col}) "
+                f"ON DELETE {on_del}"
+            ))
+        except Exception:
+            conn.rollback()
+
+    try:
+        conn.execute(text(
+            "UPDATE scan_patterns SET win_rate = NULL WHERE win_rate = 'NaN'::float"
+        ))
+        conn.execute(text(
+            "UPDATE scan_patterns SET oos_win_rate = NULL WHERE oos_win_rate = 'NaN'::float"
+        ))
+    except Exception:
+        pass
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6115,6 +6219,7 @@ MIGRATIONS = [
     ("112_trade_sector_and_governance_approvals", _migration_112_trade_sector_and_governance_approvals),
     ("113_trade_stop_columns", _migration_113_trade_stop_columns),
     ("114_stop_decisions_and_delivery", _migration_114_stop_decisions_and_delivery),
+    ("115_schema_hardening_fks", _migration_115_schema_hardening_fks),
 ]
 
 

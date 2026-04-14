@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, Column, DateTime, Float, Integer, String, Text
+from sqlalchemy import Boolean, Column, DateTime, Float, ForeignKey, Integer, String, Text
 
 from ..db import Base
 
@@ -32,8 +32,12 @@ class CodeInsight(Base):
     __tablename__ = "code_insights"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    repo_id: Optional[int] = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     category: str = Column(String(50), nullable=False)   # "convention", "architecture", "quality", "dependency", "pattern"
     description: str = Column(Text, nullable=False)
     confidence: float = Column(Float, nullable=False, default=0.5)
@@ -49,7 +53,9 @@ class CodeSnapshot(Base):
     __tablename__ = "code_snapshots"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     file_path: str = Column(String(500), nullable=False)
     language: Optional[str] = Column(String(30), nullable=True)
     line_count: int = Column(Integer, default=0)
@@ -65,7 +71,9 @@ class CodeHotspot(Base):
     __tablename__ = "code_hotspots"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     file_path: str = Column(String(500), nullable=False)
     churn_score: float = Column(Float, default=0.0)      # normalized commit frequency
     complexity_score: float = Column(Float, default=0.0)
@@ -80,9 +88,11 @@ class CodeLearningEvent(Base):
     __tablename__ = "code_learning_events"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     repo_id: Optional[int] = Column(Integer, nullable=True)
-    event_type: str = Column(String(30), nullable=False)  # "index", "insight", "hotspot", "error"
+    event_type: str = Column(String(30), nullable=False)
     description: str = Column(Text, nullable=False)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -92,7 +102,9 @@ class CodeDependency(Base):
     __tablename__ = "code_dependencies"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     source_file: str = Column(String(500), nullable=False)
     target_file: str = Column(String(500), nullable=False)
     import_name: Optional[str] = Column(String(300), nullable=True)
@@ -105,7 +117,9 @@ class CodeQualitySnapshot(Base):
     __tablename__ = "code_quality_snapshots"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     total_files: int = Column(Integer, default=0)
     total_lines: int = Column(Integer, default=0)
     avg_complexity: float = Column(Float, default=0.0)
@@ -122,8 +136,12 @@ class CodeReview(Base):
     __tablename__ = "code_reviews"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     commit_hash: str = Column(String(50), nullable=False, index=True)
     author: Optional[str] = Column(String(200), nullable=True)
     summary: Optional[str] = Column(Text, nullable=True)
@@ -137,7 +155,9 @@ class CodeDepAlert(Base):
     __tablename__ = "code_dep_alerts"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     package_name: str = Column(String(200), nullable=False)
     current_version: Optional[str] = Column(String(50), nullable=True)
     latest_version: Optional[str] = Column(String(50), nullable=True)
@@ -153,7 +173,9 @@ class CodeSearchEntry(Base):
     __tablename__ = "code_search_index"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    repo_id: int = Column(Integer, nullable=False, index=True)
+    repo_id: int = Column(
+        Integer, ForeignKey("code_repos.id", ondelete="CASCADE"), nullable=False, index=True
+    )
     file_path: str = Column(String(500), nullable=False)
     symbol_name: str = Column(String(300), nullable=False, index=True)
     symbol_type: str = Column(String(20), nullable=False)

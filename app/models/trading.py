@@ -26,7 +26,9 @@ class WatchlistItem(Base):
     __tablename__ = "trading_watchlist"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(20), nullable=False)
     added_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
@@ -35,7 +37,9 @@ class Trade(Base):
     __tablename__ = "trading_trades"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(20), nullable=False)
     sector: Optional[str] = Column(String(80), nullable=True, index=True)
     direction: str = Column(String(10), nullable=False, default="long")  # long / short
@@ -68,9 +72,13 @@ class Trade(Base):
     tca_reference_exit_price: Optional[float] = Column(Float, nullable=True)
     tca_exit_slippage_bps: Optional[float] = Column(Float, nullable=True)
     # Attribution: link live trades to proposal + promoted scan pattern
-    strategy_proposal_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
+    strategy_proposal_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_proposals.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    pattern_tags: Optional[str] = Column(String(500), nullable=True)
     # Stop engine: first-class stop/target/trail columns (migration 113)
     stop_loss: Optional[float] = Column(Float, nullable=True)
     take_profit: Optional[float] = Column(Float, nullable=True)
@@ -138,8 +146,12 @@ class JournalEntry(Base):
     __tablename__ = "trading_journal"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    trade_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    trade_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     content: str = Column(Text, nullable=False)
     indicator_snapshot: Optional[str] = Column(Text, nullable=True)  # JSON blob
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -171,7 +183,9 @@ class ScanResult(Base):
     __tablename__ = "trading_scans"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(20), nullable=False, index=True)
     score: float = Column(Float, nullable=False)  # 1-10 confluence score
     signal: str = Column(String(10), nullable=False)  # buy / sell / hold
@@ -215,7 +229,9 @@ class BrainValidationSliceLedger(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     research_run_key: str = Column(String(64), nullable=False)
     slice_key: str = Column(String(64), nullable=False)
-    scan_pattern_id: int = Column(Integer, nullable=False)
+    scan_pattern_id: int = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="CASCADE"), nullable=False
+    )
     rules_fingerprint: Optional[str] = Column(String(32), nullable=True)
     param_hash: Optional[str] = Column(String(64), nullable=True)
     recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -299,12 +315,16 @@ class LearningEvent(Base):
     __tablename__ = "trading_learning_events"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    event_type: str = Column(String(30), nullable=False)  # discovery / update / demotion / review / journal
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    event_type: str = Column(String(30), nullable=False)
     description: str = Column(Text, nullable=False)
     confidence_before: Optional[float] = Column(Float, nullable=True)
     confidence_after: Optional[float] = Column(Float, nullable=True)
-    related_insight_id: Optional[int] = Column(Integer, nullable=True)
+    related_insight_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_insights.id", ondelete="SET NULL"), nullable=True
+    )
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
@@ -313,13 +333,17 @@ class AlertHistory(Base):
     __tablename__ = "trading_alerts"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     alert_type: str = Column(String(30), nullable=False)
     ticker: str = Column(String(20), nullable=True)
     message: str = Column(Text, nullable=False)
     trade_type: Optional[str] = Column(String(30), nullable=True)
     duration_estimate: Optional[str] = Column(String(60), nullable=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
@@ -401,10 +425,15 @@ class BreakoutAlert(Base):
     sector: Optional[str] = Column(String(60), nullable=True)
     news_sentiment_at_alert: Optional[float] = Column(Float, nullable=True)
 
-    # Feedback linkage
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    related_insight_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_insights.id", ondelete="SET NULL"), nullable=True, index=True
+    )
 
 
 class StrategyProposal(Base):
@@ -412,10 +441,12 @@ class StrategyProposal(Base):
     __tablename__ = "trading_proposals"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(20), nullable=False, index=True)
-    direction: str = Column(String(10), nullable=False, default="long")  # long / short
-    status: str = Column(String(20), nullable=False, default="pending")  # pending / approved / rejected / executed / expired
+    direction: str = Column(String(10), nullable=False, default="long")
+    status: str = Column(String(20), nullable=False, default="pending")
 
     entry_price: float = Column(Float, nullable=False)
     stop_loss: float = Column(Float, nullable=False)
@@ -443,8 +474,12 @@ class StrategyProposal(Base):
     expires_at: Optional[datetime] = Column(DateTime, nullable=True)
 
     broker_order_id: Optional[str] = Column(String(100), nullable=True)
-    trade_id: Optional[int] = Column(Integer, nullable=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    trade_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     allocation_decision_json: dict = Column(JSONB, nullable=False, default=lambda: {})
 
 
@@ -467,7 +502,9 @@ class ScanPattern(Base):
     score_boost: float = Column(Float, nullable=False, default=0.0)
     min_base_score: float = Column(Float, nullable=False, default=0.0)
     active: bool = Column(Boolean, nullable=False, default=True)
-    parent_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    parent_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     exit_config: Optional[dict] = Column(JSONB, nullable=True)
     variant_label: Optional[str] = Column(String(40), nullable=True)
     generation: int = Column(Integer, nullable=False, default=0)
@@ -520,9 +557,15 @@ class PatternTradeRow(Base):
 
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    related_insight_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    backtest_result_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    related_insight_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_insights.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    backtest_result_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_backtests.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(20), nullable=False, index=True)
     as_of_ts: datetime = Column(DateTime, nullable=False, index=True)
     timeframe: str = Column(String(10), nullable=False, default="1d")
@@ -550,7 +593,9 @@ class PatternEvidenceHypothesis(Base):
     __tablename__ = "trading_pattern_evidence_hypotheses"
 
     id: int = Column(Integer, primary_key=True, index=True)
-    scan_pattern_id: int = Column(Integer, nullable=False, index=True)
+    scan_pattern_id: int = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=False, index=True
+    )
     title: str = Column(String(200), nullable=False)
     predicate_json: dict = Column(JSONB, nullable=False)
     status: str = Column(String(20), nullable=False, default="proposed")
@@ -642,8 +687,12 @@ class PaperTrade(Base):
     __tablename__ = "trading_paper_trades"
 
     id: int = Column(Integer, primary_key=True)
-    user_id: Optional[int] = Column(Integer, nullable=True, index=True)
-    scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     ticker: str = Column(String(32), nullable=False)
     direction: str = Column(String(8), nullable=False, default="long")
     entry_price: float = Column(Float, nullable=False)
@@ -671,7 +720,7 @@ class BrainBatchJob(Base):
     status: str = Column(String(24), nullable=False, default="running")
     started_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     ended_at: Optional[datetime] = Column(DateTime, nullable=True)
-    error_message: Optional[datetime] = Column(Text, nullable=True)
+    error_message: Optional[str] = Column(Text, nullable=True)
     meta_json: Optional[dict] = Column(JSONB, nullable=True)
     payload_json: Optional[dict] = Column(JSONB, nullable=True)
     user_id: Optional[int] = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
@@ -1179,3 +1228,22 @@ class MomentumAutomationOutcome(Base):
     evidence_weight: float = Column(Float, nullable=False, default=1.0)
     contributes_to_evolution: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class TradingGovernanceApproval(Base):
+    """Persistent governance approval/rejection record for trading actions."""
+
+    __tablename__ = "trading_governance_approvals"
+    __table_args__ = (
+        Index("ix_tga_status_submitted", "status", "submitted_at"),
+        Index("ix_tga_action_status", "action_type", "status"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    action_type: str = Column(String(64), nullable=False)
+    details_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    submitted_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    status: str = Column(String(24), nullable=False, default="pending")
+    decision: Optional[str] = Column(String(24), nullable=True)
+    decided_at: Optional[datetime] = Column(DateTime, nullable=True)
+    notes: str = Column(Text, nullable=False, default="")
