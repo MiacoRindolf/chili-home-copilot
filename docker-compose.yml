@@ -123,6 +123,9 @@ services:
       # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
+      # Autopilot real-time streaming: price bus + Coinbase WS for crypto quotes.
+      - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
+      - CHILI_COINBASE_WS_ENABLED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./docs:/app/docs
@@ -418,6 +421,9 @@ services:
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
       - PYTHONUNBUFFERED=1
+      # Autopilot real-time streaming: price bus + Coinbase WS in scheduler for event-driven runner.
+      - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
+      - CHILI_COINBASE_WS_ENABLED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app

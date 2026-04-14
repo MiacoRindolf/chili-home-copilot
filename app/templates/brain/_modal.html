@@ -1,0 +1,17 @@
+﻿<!-- Brain Detail Modal -->
+<div class="brain-modal-overlay" id="brain-modal-overlay" onclick="if(event.target===this)closeBrainModal()">
+  <div class="brain-modal-card" role="dialog" aria-modal="true" aria-labelledby="brain-modal-title">
+    <div class="brain-modal-header">
+      <span id="brain-modal-title">Details</span>
+      <!-- Pine controls must live in static HTML so they survive cached JS / are always in the page source. Visibility toggled via .bm-tools-visible in openBrainModal. -->
+      <div id="brain-modal-header-tools" aria-label="TradingView Pine strategy actions">
+        <span style="font-size:10px;font-weight:700;color:#8b5cf6;letter-spacing:.02em">Pine</span>
+        <button type="button" id="ev-pine-fetch-btn" class="btn btn-sm" style="font-size:10px" onclick="evPineStrategyFetch()">Load</button>
+        <button type="button" id="ev-pine-copy-btn" class="btn btn-sm" style="font-size:10px" disabled onclick="evPineStrategyCopy()">Copy</button>
+      </div>
+      <button class="bm-close" onclick="closeBrainModal()" aria-label="Close modal">&times;</button>
+    </div>
+    <div class="brain-modal-body" id="brain-modal-body"></div>
+    <div class="brain-modal-footer" id="brain-modal-footer" style="display:none"></div>
+  </div>
+</div>

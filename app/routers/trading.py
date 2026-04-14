@@ -1161,3 +1161,154 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
         with _live_clients_tlock:
             _live_clients.discard(ws)
         logger.info("[live-ws] Client disconnected for %s", ticker)
+
+
+# ── Autopilot streaming WebSocket ────────────────────────────────────────
+
+@router.websocket("/ws/autopilot/live")
+async def ws_autopilot_live(ws: WebSocket, symbols: str = ""):
+    """Stream real-time ticks + 1m candles for autopilot session symbols.
+
+    Query params:
+      symbols — comma-separated list of symbols to stream (e.g. "BTC-USD,LINK-USD")
+    """
+    await ws.accept()
+    sym_list = [s.strip().upper() for s in symbols.split(",") if s.strip()]
+    if not sym_list:
+        await ws.send_json({"type": "error", "message": "No symbols specified"})
+        await ws.close()
+        return
+
+    logger.info("[autopilot-ws] Client connected for %s", sym_list)
+
+    tick_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+    registered_cbs: list[tuple[str, Any, str]] = []  # (symbol, callback, type)
+    bus_available = False
+
+    try:
+        from ..config import settings as _settings
+        if _settings.chili_autopilot_price_bus_enabled:
+            from ..services.trading.price_bus import get_price_bus, BusQuote, BusCandle
+            bus = get_price_bus()
+            bus_available = True
+
+            def _make_tick_cb(sym: str):
+                def _on_tick(_symbol: str, quote: BusQuote) -> None:
+                    try:
+                        tick_queue.put_nowait({
+                            "type": "tick",
+                            "symbol": sym,
+                            "bid": quote.bid,
+                            "ask": quote.ask,
+                            "mid": quote.mid,
+                            "last": quote.last,
+                            "time": quote.timestamp,
+                            "source": quote.source,
+                        })
+                    except asyncio.QueueFull:
+                        pass
+                return _on_tick
+
+            def _make_candle_cb(sym: str):
+                def _on_candle(_symbol: str, candle: BusCandle) -> None:
+                    try:
+                        tick_queue.put_nowait({
+                            "type": "candle",
+                            "symbol": sym,
+                            "o": candle.open,
+                            "h": candle.high,
+                            "l": candle.low,
+                            "c": candle.close,
+                            "v": candle.volume,
+                            "t": candle.bucket_start,
+                            "interval": "1m",
+                            "trades": candle.trade_count,
+                        })
+                    except asyncio.QueueFull:
+                        pass
+                return _on_candle
+
+            for sym in sym_list:
+                tick_cb = _make_tick_cb(sym)
+                candle_cb = _make_candle_cb(sym)
+                bus.subscribe_symbol(sym)
+                bus.register_tick_listener(sym, tick_cb)
+                bus.register_candle_listener(sym, candle_cb)
+                registered_cbs.append((sym, tick_cb, "tick"))
+                registered_cbs.append((sym, candle_cb, "candle"))
+
+    except Exception as e:
+        logger.debug("[autopilot-ws] Price bus setup failed: %s", e)
+
+    if not bus_available:
+        # Fallback: poll fetch_quote every 5 seconds
+        async def _poll_fallback():
+            while True:
+                await asyncio.sleep(5.0)
+                for sym in sym_list:
+                    try:
+                        q = ts.fetch_quote(sym)
+                        if q and q.get("price"):
+                            try:
+                                tick_queue.put_nowait({
+                                    "type": "tick",
+                                    "symbol": sym,
+                                    "bid": q.get("bid"),
+                                    "ask": q.get("ask"),
+                                    "mid": q.get("price"),
+                                    "last": q.get("price"),
+                                    "time": __import__("time").time(),
+                                    "source": q.get("source", "rest_poll"),
+                                })
+                            except asyncio.QueueFull:
+                                pass
+                    except Exception:
+                        pass
+
+    poll_task = None
+    if not bus_available:
+        poll_task = asyncio.create_task(_poll_fallback())
+
+    try:
+        async def _sender():
+            while True:
+                msg = await tick_queue.get()
+                try:
+                    await ws.send_json(msg)
+                except Exception:
+                    return
+
+        async def _receiver():
+            try:
+                while True:
+                    text = await ws.receive_text()
+                    try:
+                        cmd = json.loads(text)
+                        if cmd.get("action") == "ping":
+                            await ws.send_json({"type": "pong"})
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+            except WebSocketDisconnect:
+                return
+
+        await asyncio.gather(_sender(), _receiver())
+
+    except WebSocketDisconnect:
+        pass
+    except Exception as exc:
+        logger.warning("[autopilot-ws] Handler error: %s", exc)
+    finally:
+        if poll_task:
+            poll_task.cancel()
+        if bus_available:
+            try:
+                from ..services.trading.price_bus import get_price_bus
+                bus = get_price_bus()
+                for sym, cb, cb_type in registered_cbs:
+                    if cb_type == "tick":
+                        bus.unregister_tick_listener(sym, cb)
+                    elif cb_type == "candle":
+                        bus.unregister_candle_listener(sym, cb)
+            except Exception:
+                pass
+        logger.info("[autopilot-ws] Client disconnected for %s", sym_list)

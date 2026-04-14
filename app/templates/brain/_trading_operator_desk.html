@@ -1,0 +1,93 @@
+﻿      <details class="desk-help-details">
+        <summary>How to read this desk</summary>
+        <div style="margin-top:8px;line-height:1.55;padding:8px 0">
+          <strong>Operator desk</strong> (top) answers: alive?, thesis, freshness, top trades, and whether each idea is a <em>repeatable edge</em> or <em>speculative momentum</em>.
+          <strong>Repeatable edges</strong> use promoted pattern imminent rules (Tier Aâ€“C). <strong>Explosive movers</strong> are a separate heuristic plane over scanner history â€” the brain can â€œseeâ€ them without treating them as core-quality setups.
+          Open <strong>Runtime &amp; worker controls</strong> for Start/Stop/Wake; use <strong>Network</strong> for the neural mesh graph. Research, cycle AI reports, and inspect JSON live under <strong>Deep dive</strong> tabs.
+        </div>
+      </details>
+      <div id="tb-momentum-neural-strip" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;margin-bottom:10px;border:1px solid var(--border);border-radius:8px;background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
+
+      <!-- â•â•â• OPERATOR DESK (above the fold) â•â•â• -->
+      <div class="operator-desk-hero" id="operator-desk-hero" role="region" aria-label="Operator desk">
+        <div class="odh-top">
+          <div>
+            <div style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text-muted);margin-bottom:6px">Trading operator desk</div>
+            <div class="odh-badges" id="odh-badges-row">
+              <span class="odh-badge health-offline" id="odh-health-badge">Loadingâ€¦</span>
+              <span class="odh-badge" id="odh-worker-badge">Worker: â€¦</span>
+            </div>
+          </div>
+          <div style="font-size:10px;color:var(--text-muted);text-align:right;max-width:280px;line-height:1.45" id="odh-governance-hint"></div>
+        </div>
+        <div class="odh-thesis-line" id="odh-thesis-line" aria-live="polite">Loading market thesisâ€¦</div>
+        <div class="odh-summary-line" id="odh-operator-narrative" aria-live="polite">Synthesizing session context and opportunity tiersâ€¦</div>
+        <div class="odh-fresh-row" id="odh-fresh-row"></div>
+        <div class="odh-top3" id="odh-top3"><div class="odh-card"><div class="odh-eng">â€”</div><div class="odh-tk">Loadingâ€¦</div></div></div>
+        <div class="odh-evidence-strip" id="odh-evidence-strip" aria-live="polite">Evidence strip loads after the opportunity board.</div>
+        <div class="odh-trust-panel" id="odh-trust-panel"><strong>Trust &amp; freshness</strong> â€” waiting for worker and board timestampsâ€¦</div>
+      </div>
+
+      <!-- â•â•â• ZONE 1: STATUS BAR (secondary â€” expandable) â•â•â• -->
+      <details class="desk-runtime-details" id="desk-runtime-details">
+        <summary>Runtime &amp; worker controls (Start / Stop / Wake / queue)</summary>
+        <div style="font-size:10px;color:var(--text-muted);margin:0 0 10px 0;padding:8px 10px;line-height:1.45;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
+          <strong>Brain worker controls:</strong> Start, Stop, and Wake drive the <code>brain-worker</code> process (dispatch round, then scheduled <em>full reconcile pass</em> / legacy cycle, plus maintenance subtasks).
+          Primary live truth is the <strong>Brain activity</strong> strip (work ledger) above. Actionable trades stay policy-gated through
+          <a href="/trading" style="color:var(--accent)">Trading</a> and <a href="/trading/autopilot" style="color:var(--accent)">Autopilot</a>.
+        </div>
+      <div class="brain-status-bar" id="brain-status-bar">
+        <div class="bsb-row">
+          <div class="bsb-left">
+            <span class="bw-status-dot stopped" id="bw-status-dot"></span>
+            <span class="bsb-label" id="bw-status">Stopped</span>
+            <div class="bsb-controls" id="bw-controls">
+              <button class="bw-ctrl-btn primary" id="bw-start-btn" onclick="startBrainWorker()">&#x25B6; Start</button>
+              <button class="bw-ctrl-btn" id="bw-wake-btn" onclick="wakeBrainWorker()" style="display:none" title="Skip idle wait and start the next worker iteration (dispatch + reconcile pass) now">&#x23ED; Wake</button>
+              <button class="bw-ctrl-btn" id="bw-pause-btn" onclick="pauseBrainWorker()" style="display:none">&#x23F8; Pause</button>
+              <button class="bw-ctrl-btn danger" id="bw-stop-btn" onclick="stopBrainWorker()" style="display:none">&#x23F9; Stop</button>
+            </div>
+          </div>
+          <div class="bsb-center">
+            <span class="bsb-chip" id="bsb-regime" title="Market regime">&#x1F7E1; --</span>
+            <span class="bsb-chip bsb-chip-ok" id="bsb-breaker" style="display:none" title="Circuit breaker status">&#x26A0; Breaker</span>
+          </div>
+          <div class="bsb-right">
+            <span class="bsb-meta" id="bsb-last-cycle">--</span>
+            <span class="bsb-meta" id="brain-scheduler-info"></span>
+          </div>
+        </div>
+        <div id="brain-work-ledger-strip" style="display:none;margin-top:6px;padding:6px 8px;border-radius:6px;background:var(--bg-secondary, rgba(0,0,0,.04));border:1px solid var(--border);font-size:10px;color:var(--text-secondary);line-height:1.4">
+          <span style="font-weight:700;color:var(--text-muted);text-transform:uppercase;font-size:9px;letter-spacing:.04em">Brain activity</span>
+          <span id="brain-work-ledger-text" style="margin-left:8px">--</span>
+        </div>
+        <details id="brain-reconcile-pipeline-details" class="brain-reconcile-pipeline-details" style="margin-top:6px;border-radius:6px;border:1px solid var(--border);padding:4px 8px;background:var(--bg-secondary, rgba(0,0,0,.02))">
+          <summary style="font-size:9px;font-weight:700;color:var(--text-muted);text-transform:uppercase;letter-spacing:.04em;cursor:pointer" title="Secondary: legacy step model. Expand only when a reconcile pass is running or for debugging.">Reconcile / compatibility detail (legacy step progress)</summary>
+          <div id="brain-pipeline-section" class="bsb-progress" style="display:none;margin-top:6px">
+            <div class="bsb-progress-inner" style="flex-direction:column;align-items:flex-start;gap:2px">
+              <span style="font-size:9px;font-weight:600;color:var(--text-muted);text-transform:none;letter-spacing:0">Full reconcile cycle status (legacy step model)</span>
+              <span id="brain-learning-step" style="font-size:10px;font-weight:600;color:#a78bfa"></span>
+              <span id="brain-learning-progress" style="font-size:10px;color:var(--text-muted)"></span>
+            </div>
+            <div style="height:3px;background:var(--border);border-radius:2px;margin-top:3px">
+              <div id="brain-progress-bar" style="height:100%;background:linear-gradient(90deg,#8b5cf6,#6d28d9);border-radius:2px;transition:width .3s;width:0%"></div>
+            </div>
+          </div>
+        </details>
+        <div class="bsb-row" id="bsb-opp-summary-row" style="flex-wrap:wrap;gap:6px;align-items:center;padding-top:6px;margin-top:4px;border-top:1px solid var(--border)">
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-a" title="Scroll to Opportunity Board">Actionable: â€”</a>
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-b" title="Scroll to Opportunity Board">Watch soon: â€”</a>
+          <a href="#brain-opportunity-board" class="bsb-chip" style="cursor:pointer;text-decoration:none;font-size:10px" id="opp-chip-c" title="Scroll to Opportunity Board">Watch today: â€”</a>
+          <span class="bsb-meta" id="opp-chip-refresh" style="font-size:10px">Board: â€”</span>
+        </div>
+      </div>
+      </details>
+
+      <!-- AI Learning Report (floating, hidden until triggered) -->
+      <div class="brain-reflection-box" id="brain-reflection">
+        <div style="display:flex;align-items:center;gap:4px;margin-bottom:4px">
+          <span>&#x1F52C;</span><strong style="font-size:11px">AI Learning Report</strong>
+          <button onclick="document.getElementById('brain-reflection').style.display='none'" style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text-muted);font-size:14px">&times;</button>
+        </div>
+        <div id="brain-reflection-content"></div>
+      </div>

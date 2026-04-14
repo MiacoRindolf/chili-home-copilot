@@ -1,0 +1,63 @@
+﻿      <!-- â•â•â• ZONE 2: TODAY'S EDGE â•â•â• -->
+      <div class="brain-edge-grid" id="brain-edge-grid">
+        <div class="brain-edge-col">
+          <div class="brain-section" id="brain-playbook-section">
+            <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+              <span class="bs-icon">&#x1F4CB;</span> Daily Playbook
+              <button type="button" onclick="loadPlaybook()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+            </div>
+            <div id="brain-playbook-content" style="font-size:11px;color:var(--text-muted)">Loading today's playbook...</div>
+          </div>
+        </div>
+        <div class="brain-edge-col">
+          <div class="brain-section" id="brain-perf-section">
+            <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+              <span class="bs-icon">&#x1F4C8;</span> P&amp;L Performance
+              <button type="button" onclick="loadPerfDashboard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+            </div>
+            <div id="brain-perf-content" style="font-size:11px;color:var(--text-muted)">Loading performance data...</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="brain-section" id="brain-opportunity-board">
+        <div id="opp-stale-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(245,158,11,.12);border:1px solid rgba(245,158,11,.35);font-size:11px;color:#b45309"></div>
+        <div id="opp-refresh-failed-banner" style="display:none;margin-bottom:8px;padding:8px 10px;border-radius:8px;background:rgba(239,68,68,.1);border:1px solid rgba(239,68,68,.35);font-size:11px;color:#b91c1c"></div>
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F3AF;</span> Repeatable edges (opportunity board)
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0">Tier Aâ€“C = core pattern imminent engine (same composite math as imminent alerts). Badges show engine vs context-only rows.</span>
+          <button type="button" onclick="loadOpportunityBoard()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600" title="Reload board from server">Manual refresh</button>
+        </div>
+        <div id="opp-operator-strip" style="font-size:11px;color:var(--text-secondary);line-height:1.5;margin-bottom:10px;padding:8px 10px;background:var(--bg-secondary, rgba(0,0,0,.04));border-radius:8px;border:1px solid var(--border)">
+          <span id="opp-op-sum">Loading opportunity boardâ€¦</span>
+        </div>
+        <div id="opp-no-trade" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:10px;padding:10px;border:1px dashed var(--border);border-radius:8px"></div>
+        <div id="opp-tier-a-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#22c55e;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier A â€” Actionable now</div>
+          <div id="opp-tier-a"></div>
+          <button type="button" id="opp-more-a" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('A')">Show more</button>
+        </div>
+        <div id="opp-tier-b-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#38bdf8;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier B â€” Watch soon</div>
+          <div id="opp-tier-b"></div>
+          <button type="button" id="opp-more-b" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('B')">Show more</button>
+        </div>
+        <div id="opp-tier-c-wrap" style="margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:#a78bfa;margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier C â€” Watch today / context</div>
+          <div id="opp-tier-c"></div>
+          <button type="button" id="opp-more-c" style="display:none;margin-top:6px;font-size:10px;padding:4px 12px;border-radius:6px;border:1px solid var(--border);background:var(--bg);cursor:pointer" onclick="oppExpandTier('C')">Show more</button>
+        </div>
+        <div id="opp-tier-d-wrap" style="display:none;margin-bottom:12px">
+          <div style="font-size:10px;font-weight:700;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em">Tier D â€” Pattern incubation</div>
+          <div id="opp-tier-d"></div>
+        </div>
+      </div>
+
+      <div class="brain-section spec-movers-section" id="speculative-movers-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F680;</span> Explosive / speculative movers
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:520px;line-height:1.35">Separate <strong>speculative momentum engine</strong> â€” heuristic scan history, not promoted pattern quality. Shown so fast movers do not â€œdisappearâ€; still avoid blind chasing when extension risk is high.</span>
+        </div>
+        <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0;line-height:1.45" id="spec-movers-methodology"></p>
+        <div id="spec-movers-body" style="font-size:11px;color:var(--text-muted)">Loads with the opportunity boardâ€¦</div>
+      </div>

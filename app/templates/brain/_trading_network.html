@@ -1,0 +1,101 @@
+﻿      <div class="tb-tabstrip" role="tablist" aria-label="Trading brain view">
+        <button type="button" class="tb-tab" role="tab" aria-selected="false" data-tb-tab="network" id="tb-tab-network" onclick="setTradingBrainSubtab('network')">Network</button>
+        <button type="button" class="tb-tab active" role="tab" aria-selected="true" data-tb-tab="runtime" id="tb-tab-runtime" onclick="setTradingBrainSubtab('runtime')">Runtime</button>
+      </div>
+      <div class="trading-brain-body-row">
+      <div id="trading-brain-pane-network" class="trading-brain-pane trading-brain-pane-network" style="display:none" role="tabpanel" aria-hidden="true">
+        <div class="tbn-hint-row" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+          {% if trading_brain_neural_first_paint|default(false) %}
+          <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Nodes react to incoming events and may fire together in the same activation wave. Pulsing edges and ripple halos show propagation (several nodes can be hot at once). Faint circular guides are layer structure, not activity. Muted nodes are stale, cooling, or disabled. Observer nodes (dashed ring) surface outputs without participating in the cognition core.</p>
+          {% else %}
+          <p class="tbn-hint" id="tbn-hint-text" style="flex:1;min-width:200px">Pan by dragging; scroll to zoom. Nodes react to incoming events and may fire together in the same activation wave.</p>
+          {% endif %}
+          <span class="tbn-wave-indicator" id="tbn-wave-indicator" aria-live="polite"></span>
+          <div id="tbn-graph-mode-wrap" class="tbn-graph-mode-row" style="display:none">
+            <label for="tbn-graph-mode">View</label>
+            <select id="tbn-graph-mode" aria-label="Graph view mode">
+              <option value="neural" selected>Neural mesh</option>
+            </select>
+            <label style="display:flex;align-items:center;gap:4px;cursor:pointer">
+              <input type="checkbox" id="tbn-live-activations" />
+              Live
+            </label>
+          </div>
+          <input type="text" id="tbn-search" placeholder="Search nodes..." aria-label="Search graph nodes" style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;width:140px" />
+          <button type="button" id="tbn-reset-view" title="Reset zoom & pan" style="padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Reset</button>
+          <button type="button" class="tbn-refresh-graph" id="tbn-refresh-graph" title="Reload graph from server">Refresh graph</button>
+        </div>
+        <div class="tbn-layer-filters" id="tbn-layer-filters" role="group" aria-label="Filter graph layers">
+          <span class="tbn-filter-label">Layers:</span>
+          <button type="button" class="tbn-layer-btn active" data-layer="all" onclick="tbnFilterLayer('all')">All</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="1" onclick="tbnFilterLayer('1')">Sensory</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="2" onclick="tbnFilterLayer('2')">Feature</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="3" onclick="tbnFilterLayer('3')">Latent</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="4" onclick="tbnFilterLayer('4')">Pattern</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="5" onclick="tbnFilterLayer('5')">Evidence</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="6" onclick="tbnFilterLayer('6')">Action</button>
+          <button type="button" class="tbn-layer-btn active" data-layer="7" onclick="tbnFilterLayer('7')">Meta</button>
+        </div>
+        <div id="tbn-legend" style="display:flex;gap:12px;padding:2px 8px;font-size:9px;color:var(--text-muted);flex-wrap:wrap">
+          {% if trading_brain_neural_first_paint|default(false) %}
+          <span style="color:var(--accent)">Layers</span>
+          <span>1 Sensory</span>
+          <span>2 Feature</span>
+          <span>3 Latent</span>
+          <span>4 Pattern</span>
+          <span>5 Evidence</span>
+          <span>6 Action</span>
+          <span>7 Meta</span>
+          <span>8 LC Cluster</span>
+          <span>9 LC Step</span>
+          <span style="border-left:1px solid var(--border);padding-left:8px"><span style="display:inline-block;width:14px;height:2px;background:rgba(34,197,94,.7);vertical-align:middle"></span> Excitatory</span>
+          <span><span style="display:inline-block;width:14px;height:2px;background:rgba(248,113,113,.7);vertical-align:middle;border-bottom:1px dashed"></span> Inhibitory</span>
+          <span>Observer: dashed ring</span>
+          <span>Hot + ripples: activation wave</span>
+          {% else %}
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#a78bfa;vertical-align:middle"></span> Root</span>
+          <span><span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#60a5fa;vertical-align:middle"></span> Cluster</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#94a3b8;vertical-align:middle"></span> Step</span>
+          <span style="border-left:2px dashed var(--accent);padding-left:6px">Pipeline</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#22c55e;vertical-align:middle"></span> Running</span>
+          <span><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:#f59e0b;vertical-align:middle"></span> Pending</span>
+          {% endif %}
+        </div>
+        <div id="trading-brain-network-viewport" class="tbn-viewport" aria-label="Trading brain architecture graph">
+          <div id="trading-brain-network-stage" class="tbn-stage">
+            <svg id="trading-brain-network-svg" viewBox="0 0 1600 950" width="1600" height="950" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Trading brain architecture graph">
+              <defs>
+                <radialGradient id="tbn-jewel-root" cx="32%" cy="28%" r="70%">
+                  <stop offset="0%" stop-color="rgba(255,255,255,.35)"/>
+                  <stop offset="40%" stop-color="rgba(167,139,250,.55)"/>
+                  <stop offset="100%" stop-color="rgba(91,33,182,.95)"/>
+                </radialGradient>
+                <radialGradient id="tbn-jewel-cluster" cx="35%" cy="30%" r="68%">
+                  <stop offset="0%" stop-color="rgba(255,255,255,.2)"/>
+                  <stop offset="50%" stop-color="rgba(99,102,241,.4)"/>
+                  <stop offset="100%" stop-color="rgba(49,46,129,.92)"/>
+                </radialGradient>
+              </defs>
+              <rect class="tbn-sky" x="0" y="0" width="1600" height="950"/>
+              <g id="tbn-neural-rings" pointer-events="none"></g>
+              <g id="tbn-layer-cues" pointer-events="none"></g>
+              <g id="tbn-edges"></g>
+              <g id="tbn-nodes"></g>
+            </svg>
+          </div>
+        </div>
+        <div class="tbn-minimap" id="tbn-minimap" aria-hidden="true">
+          <canvas id="tbn-minimap-canvas" width="160" height="95"></canvas>
+          <div class="tbn-minimap-viewport" id="tbn-minimap-viewport"></div>
+        </div>
+        <div id="tbn-momentum-desk-panel" class="tbn-momentum-desk-panel" style="display:none;font-size:10px;line-height:1.45;padding:8px 12px;border-top:1px solid var(--border);background:var(--bg-secondary, rgba(0,0,0,.04));color:var(--text-secondary)" aria-live="polite"></div>
+        <div id="tbn-node-detail" class="tbn-node-detail" role="dialog" aria-labelledby="tbn-node-detail-title" aria-hidden="true">
+          <div class="tbn-node-detail-inner">
+            <div class="tbn-node-detail-header">
+              <h4 id="tbn-node-detail-title">Node</h4>
+              <button type="button" id="tbn-node-detail-close" class="tbn-node-detail-close" title="Close" aria-label="Close">&times;</button>
+            </div>
+            <dl id="tbn-node-detail-body" class="tbn-node-detail-body"></dl>
+          </div>
+        </div>
+      </div>

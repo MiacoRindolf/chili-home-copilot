@@ -1,0 +1,23 @@
+﻿      <aside class="tba-panel" id="trading-brain-assistant-section" role="complementary" aria-label="Trading Brain Assistant">
+        <div class="tba-panel-header">&#x1F916; Trading Brain Assistant</div>
+        <div class="tba-panel-body">
+          <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Ask for market stance, trade ideas, execution readiness, operator focus, and what would change the current thesis. Recommendations are grounded in the live trading snapshot and stay execution-gated.</p>
+          <div class="tba-chips" id="tba-chips">
+            <button type="button" class="tba-chip" data-msg="What is the current market thesis?">Current market thesis</button>
+            <button type="button" class="tba-chip" data-msg="Give me the top actionable setup right now.">Top actionable setup</button>
+            <button type="button" class="tba-chip" data-msg="What should we evolve next?">What should we evolve next?</button>
+            <button type="button" class="tba-chip" data-msg="Which learned patterns have the strongest evidence (trade count, OOS, drawdown)?">Strongest pattern evidence</button>
+            <button type="button" class="tba-chip" data-msg="Explain how CHILI separates in-sample vs out-of-sample in pattern backtests and what to trust.">IS vs OOS in backtests</button>
+            <button type="button" class="tba-chip" data-msg="Search patterns mentioning BTC">Search patterns mentioning BTC</button>
+            <button type="button" class="tba-chip" data-msg="Summarize recent activity">Summarize recent activity</button>
+          </div>
+          <div class="tba-messages" id="tba-messages"></div>
+          <div class="tba-input-row">
+            <textarea id="tba-input" class="tba-input" rows="2" placeholder="Ask the trading brain..." maxlength="2000" aria-label="Message to Trading Brain Assistant"></textarea>
+            <div class="tba-buttons">
+              <button type="button" class="tba-btn tba-send" id="tba-send">Send</button>
+              <button type="button" class="tba-btn tba-clear" id="tba-clear">Clear</button>
+            </div>
+          </div>
+        </div>
+      </aside>

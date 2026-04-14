@@ -525,6 +525,7 @@ def _run_deferred_startup() -> None:
         if _sched_role != "none":
             _reinfer_pattern_timeframes()
         _start_massive_ws()
+        _start_price_bus()
         if _sched_role != "none":
             _recompute_all_ticker_scopes()
         if _sched_role != "none":
@@ -581,6 +582,27 @@ def _start_massive_ws():
             ws.start()
     except Exception:
         pass
+
+
+def _start_price_bus():
+    """Start the unified price bus if configured — bridges Massive + Coinbase WS."""
+    try:
+        from .config import settings
+        if not settings.chili_autopilot_price_bus_enabled:
+            return
+        from .services.trading.price_bus import get_price_bus
+        bus = get_price_bus()
+        bus.bridge_massive_ws()
+        if settings.chili_coinbase_ws_enabled:
+            from .services.trading.venue.coinbase_spot import get_coinbase_ws
+            cb_ws = get_coinbase_ws()
+            if not cb_ws._running:
+                result = cb_ws.start()
+                _log.info("[startup] Coinbase WS started for price bus: %s", result)
+            bus.bridge_coinbase_ws()
+        _log.info("[startup] Price bus started: %s", bus.describe())
+    except Exception:
+        _log.debug("[startup] Price bus start failed", exc_info=True)
 
 
 def _stop_massive_ws():

@@ -1,0 +1,134 @@
+/*
+ * Brain Design Tokens
+ * Extends base.html :root tokens with brain-specific semantics.
+ * Import BEFORE brain-trading.css so overrides cascade correctly.
+ */
+
+:root {
+  /* ── Typography scale (px-based, matches legacy brain CSS) ── */
+  --brain-font-2xs:  8px;
+  --brain-font-xs:   9px;
+  --brain-font-sm:  10px;
+  --brain-font-md:  11px;
+  --brain-font-base: 12px;
+  --brain-font-lg:  14px;
+  --brain-font-xl:  16px;
+  --brain-font-2xl: 18px;
+  --brain-font-3xl: 28px;
+
+  --brain-font-weight-normal: 500;
+  --brain-font-weight-bold:   600;
+  --brain-font-weight-heavy:  700;
+
+  --brain-line-height-tight:  1.3;
+  --brain-line-height-normal: 1.45;
+  --brain-line-height-relaxed: 1.55;
+
+  --brain-font-mono: ui-monospace, Consolas, 'Liberation Mono', monospace;
+  --brain-font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+
+  /* ── Spacing scale ── */
+  --brain-space-0:   0;
+  --brain-space-1:   2px;
+  --brain-space-2:   4px;
+  --brain-space-3:   6px;
+  --brain-space-4:   8px;
+  --brain-space-5:  10px;
+  --brain-space-6:  12px;
+  --brain-space-7:  14px;
+  --brain-space-8:  16px;
+  --brain-space-9:  18px;
+  --brain-space-10: 20px;
+  --brain-space-12: 24px;
+  --brain-space-16: 32px;
+
+  /* ── Border radius ── */
+  --brain-radius-xs:  2px;
+  --brain-radius-sm:  4px;
+  --brain-radius-md:  6px;
+  --brain-radius-lg:  8px;
+  --brain-radius-xl: 10px;
+  --brain-radius-2xl: 12px;
+  --brain-radius-3xl: 14px;
+  --brain-radius-pill: 999px;
+
+  /* ── Shadows ── */
+  --brain-shadow-xs:  0 1px 2px rgba(0,0,0,.04);
+  --brain-shadow-sm:  0 2px 4px rgba(0,0,0,.06);
+  --brain-shadow-md:  0 4px 12px rgba(0,0,0,.08);
+  --brain-shadow-lg:  0 4px 20px rgba(0,0,0,.06);
+  --brain-shadow-xl:  0 12px 40px rgba(0,0,0,.2);
+  --brain-shadow-card-hover: 0 2px 10px rgba(0,0,0,.06);
+  --brain-shadow-modal: 0 12px 40px rgba(0,0,0,.2);
+
+  /* ── Z-index layers ── */
+  --brain-z-header:   100;
+  --brain-z-sticky:   90;
+  --brain-z-dropdown: 110;
+  --brain-z-detail:   120;
+  --brain-z-modal:    200;
+
+  /* ── Accent / brand (indigo-500 based) ── */
+  --brain-indigo-rgb: 99, 102, 241;
+  --brain-accent-ghost:    rgba(var(--brain-indigo-rgb), .06);
+  --brain-accent-subtle:   rgba(var(--brain-indigo-rgb), .08);
+  --brain-accent-light:    rgba(var(--brain-indigo-rgb), .1);
+  --brain-accent-medium:   rgba(var(--brain-indigo-rgb), .12);
+  --brain-accent-ring:     rgba(var(--brain-indigo-rgb), .28);
+  --brain-accent-border:   rgba(var(--brain-indigo-rgb), .35);
+
+  /* ── Semantic status colors ── */
+  --brain-color-bullish:   #22c55e;
+  --brain-color-bearish:   #ef4444;
+  --brain-color-neutral:   #f59e0b;
+  --brain-color-running:   #22c55e;
+  --brain-color-pending:   #f59e0b;
+  --brain-color-stopped:   #ef4444;
+  --brain-color-idle:      #6b7280;
+
+  /* ── Tier / opportunity colors ── */
+  --brain-tier-a:     #22c55e;
+  --brain-tier-b:     #38bdf8;
+  --brain-tier-c:     #a78bfa;
+  --brain-tier-d-rgb: 148, 163, 184;
+
+  /* ── Pattern / graph palette ── */
+  --brain-purple:     #8b5cf6;
+  --brain-purple-dark:#6d28d9;
+  --brain-purple-deep:#5b21b6;
+  --brain-blue:       #60a5fa;
+  --brain-blue-light: #38bdf8;
+  --brain-cyan:       #22d3ee;
+  --brain-orange:     #f59e0b;
+  --brain-amber-dark: #b45309;
+
+  /* ── Gradient presets ── */
+  --brain-gradient-purple: linear-gradient(135deg, #8b5cf6, #6d28d9);
+  --brain-gradient-action: linear-gradient(135deg, #22c55e, #16a34a);
+  --brain-gradient-danger: linear-gradient(135deg, #ef4444, #dc2626);
+  --brain-gradient-progress: linear-gradient(90deg, #8b5cf6, #6d28d9);
+
+  /* ── Transition presets ── */
+  --brain-transition-fast:   all .12s ease;
+  --brain-transition-normal: all .15s ease;
+  --brain-transition-slow:   all .2s ease;
+  --brain-transition-bar:    width .3s ease;
+
+  /* ── Component-specific tokens ── */
+  --brain-header-height: 45px;
+  --brain-assistant-width: 310px;
+  --brain-card-padding: 12px 14px;
+  --brain-section-gap: 12px;
+  --brain-letter-spacing-caps: .04em;
+  --brain-letter-spacing-wide: .5px;
+}
+
+[data-theme="dark"] {
+  --brain-shadow-xs:  0 1px 2px rgba(0,0,0,.12);
+  --brain-shadow-sm:  0 2px 4px rgba(0,0,0,.18);
+  --brain-shadow-md:  0 4px 12px rgba(0,0,0,.25);
+  --brain-shadow-lg:  0 4px 20px rgba(0,0,0,.2);
+  --brain-shadow-xl:  0 12px 40px rgba(0,0,0,.4);
+  --brain-shadow-card-hover: 0 2px 10px rgba(0,0,0,.2);
+  --brain-shadow-modal: 0 12px 40px rgba(0,0,0,.4);
+}

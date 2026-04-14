@@ -546,10 +546,14 @@ class CoinbaseSpotAdapter:
 
 
 class CoinbaseWebSocketSeam:
-    """Coinbase Advanced Trade WebSocket for L2 book and trade tape streaming.
+    """Coinbase Advanced Trade WebSocket for L2 book, trade tape, and ticker streaming.
 
     Feeds ``microstructure`` ring buffers used by scanners for breakout
     confirmation (bid/ask imbalance, trade aggression, spread quality).
+
+    When the price bus is enabled, also updates a real-time quote cache
+    from the ``ticker`` channel (best bid/ask/last) and fires tick listeners
+    so the hybrid paper runner can react to price changes immediately.
     """
 
     def __init__(self) -> None:
@@ -558,6 +562,10 @@ class CoinbaseWebSocketSeam:
         self._thread: Any = None
         self._subscribed: set[str] = set()
         self._running = False
+        self._quote_cache: dict[str, dict[str, Any]] = {}
+        self._quote_cache_lock: Any = None  # lazy init
+        self._tick_listeners: dict[str, list] = {}
+        self._tick_listeners_lock: Any = None  # lazy init
 
     # ── lifecycle ───────────────────────────────────────────────────
     def start(self, product_ids: list[str] | None = None) -> dict[str, Any]:
@@ -610,6 +618,8 @@ class CoinbaseWebSocketSeam:
         try:
             self._ws.level2(product_ids=new_pids)
             self._ws.market_trades(product_ids=new_pids)
+            if hasattr(self._ws, "ticker"):
+                self._ws.ticker(product_ids=new_pids)
             self._subscribed.update(new_pids)
         except Exception as e:
             _log.warning("[coinbase_ws] subscribe error: %s", e)
@@ -620,9 +630,56 @@ class CoinbaseWebSocketSeam:
         try:
             self._ws.level2_unsubscribe(product_ids=product_ids)
             self._ws.market_trades_unsubscribe(product_ids=product_ids)
+            if hasattr(self._ws, "ticker_unsubscribe"):
+                self._ws.ticker_unsubscribe(product_ids=product_ids)
             self._subscribed -= set(product_ids)
         except Exception as e:
             _log.debug("[coinbase_ws] unsubscribe error: %s", e)
+
+    # ── quote cache + tick listeners ─────────────────────────────────
+    def _ensure_locks(self) -> None:
+        import threading
+        if self._quote_cache_lock is None:
+            self._quote_cache_lock = threading.Lock()
+        if self._tick_listeners_lock is None:
+            self._tick_listeners_lock = threading.Lock()
+
+    def get_quote(self, product_id: str) -> dict[str, Any] | None:
+        """Return latest cached quote for *product_id*, or None if stale/missing."""
+        import time as _time
+        self._ensure_locks()
+        with self._quote_cache_lock:
+            snap = self._quote_cache.get(product_id)
+        if snap is None:
+            return None
+        if _time.time() - snap.get("timestamp", 0) > 5.0:
+            return None
+        return snap
+
+    def register_tick_listener(self, product_id: str, callback) -> None:
+        self._ensure_locks()
+        with self._tick_listeners_lock:
+            self._tick_listeners.setdefault(product_id, []).append(callback)
+
+    def unregister_tick_listener(self, product_id: str, callback) -> None:
+        self._ensure_locks()
+        with self._tick_listeners_lock:
+            cbs = self._tick_listeners.get(product_id)
+            if cbs:
+                try:
+                    cbs.remove(callback)
+                except ValueError:
+                    pass
+
+    def _fire_tick(self, product_id: str, snap: dict[str, Any]) -> None:
+        self._ensure_locks()
+        with self._tick_listeners_lock:
+            cbs = list(self._tick_listeners.get(product_id, []))
+        for cb in cbs:
+            try:
+                cb(product_id, snap)
+            except Exception:
+                pass
 
     # ── message handler ─────────────────────────────────────────────
     def _on_message(self, msg: str) -> None:
@@ -639,6 +696,8 @@ class CoinbaseWebSocketSeam:
             self._handle_l2(events)
         elif channel == "market_trades":
             self._handle_trades(events)
+        elif channel == "ticker":
+            self._handle_ticker(events)
 
     def _on_close(self) -> None:
         _log.info("[coinbase_ws] connection closed")
@@ -680,10 +739,40 @@ class CoinbaseWebSocketSeam:
                 )
                 buf.update(snap)
 
+    def _handle_ticker(self, events: list[dict]) -> None:
+        """Process Coinbase ``ticker`` channel: consolidated BBO + last price."""
+        import time as _time
+        self._ensure_locks()
+        now = _time.time()
+        for ev in events:
+            tickers = ev.get("tickers", [])
+            for t in tickers:
+                pid = t.get("product_id", "")
+                if not pid:
+                    continue
+                try:
+                    bid = float(t.get("best_bid", 0) or 0)
+                    ask = float(t.get("best_ask", 0) or 0)
+                    last = float(t.get("price", 0) or 0)
+                except (TypeError, ValueError):
+                    continue
+                mid = (bid + ask) / 2.0 if bid > 0 and ask > 0 else last
+                if mid <= 0:
+                    continue
+                snap = {
+                    "bid": bid, "ask": ask, "mid": mid, "last": last,
+                    "product_id": pid, "timestamp": now, "source": "coinbase_ws_ticker",
+                }
+                with self._quote_cache_lock:
+                    self._quote_cache[pid] = snap
+                self._fire_tick(pid, snap)
+
     def _handle_trades(self, events: list[dict]) -> None:
         from ..microstructure import TapeTrade, get_trade_buffer
         import time as _time
 
+        self._ensure_locks()
+        now = _time.time()
         buf = get_trade_buffer()
         for ev in events:
             trades = ev.get("trades", [])
@@ -698,18 +787,44 @@ class CoinbaseWebSocketSeam:
                         price=px,
                         size=sz,
                         side=side,
-                        ts=_time.time(),
+                        ts=now,
                     ))
+                    # Update quote cache from trades (fallback when ticker channel unavailable)
+                    with self._quote_cache_lock:
+                        existing = self._quote_cache.get(pid)
+                    if existing is None or now - existing.get("timestamp", 0) > 2.0:
+                        snap = {
+                            "bid": None, "ask": None, "mid": px, "last": px,
+                            "product_id": pid, "timestamp": now, "source": "coinbase_ws_trade",
+                        }
+                        with self._quote_cache_lock:
+                            self._quote_cache[pid] = snap
+                        self._fire_tick(pid, snap)
 
     # ── status ──────────────────────────────────────────────────────
     def describe(self) -> dict[str, Any]:
+        self._ensure_locks()
+        with self._quote_cache_lock:
+            cached_symbols = sorted(self._quote_cache.keys())
         return {
             "enabled": self.enabled,
             "status": "running" if self._running else ("ready" if self.enabled else "disabled"),
             "subscribed_products": sorted(self._subscribed),
+            "cached_quotes": cached_symbols,
             "message": (
-                f"Streaming L2 + trades for {len(self._subscribed)} products"
+                f"Streaming L2 + trades + ticker for {len(self._subscribed)} products"
                 if self._running
                 else "Not running"
             ),
         }
+
+
+_coinbase_ws_singleton: CoinbaseWebSocketSeam | None = None
+
+
+def get_coinbase_ws() -> CoinbaseWebSocketSeam:
+    """Module-level singleton for the Coinbase WebSocket seam."""
+    global _coinbase_ws_singleton
+    if _coinbase_ws_singleton is None:
+        _coinbase_ws_singleton = CoinbaseWebSocketSeam()
+    return _coinbase_ws_singleton

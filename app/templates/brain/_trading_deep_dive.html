@@ -1,0 +1,224 @@
+﻿      <!-- â•â•â• ZONE 3: DEEP DIVE (tabbed, lazy-loaded) â•â•â• -->
+      <div class="brain-deep-dive" id="brain-deep-dive">
+        <div class="bdd-tabs" id="bdd-tabs">
+          <button class="bdd-tab" data-bdd="patterns" onclick="switchDeepDiveTab('patterns')">Patterns</button>
+          <button class="bdd-tab" data-bdd="cycles" onclick="switchDeepDiveTab('cycles')">Cycles</button>
+          <button class="bdd-tab" data-bdd="ops" onclick="switchDeepDiveTab('ops')">Ops</button>
+          <button class="bdd-tab" data-bdd="research" onclick="switchDeepDiveTab('research')">Research</button>
+          <button class="bdd-tab" data-bdd="analytics" onclick="switchDeepDiveTab('analytics')">Analytics</button>
+          <button class="bdd-tab" data-bdd="debug" onclick="switchDeepDiveTab('debug')">Debug</button>
+        </div>
+        <div class="bdd-content" id="bdd-content">
+
+          <!-- Patterns sub-tab -->
+          <div class="bdd-panel" id="bdd-patterns" style="display:none">
+            <div id="backfill-banner" style="display:none;padding:8px 12px;margin-bottom:8px;background:linear-gradient(90deg,rgba(139,92,246,.12),rgba(59,130,246,.08));border:1px solid rgba(139,92,246,.25);border-radius:8px;font-size:11px;color:var(--text-secondary)">
+              <div style="display:flex;align-items:center;gap:6px;margin-bottom:4px"><div class="brain-pulse" style="width:6px;height:6px"></div><strong style="color:#8b5cf6">Backtesting patterns...</strong> <span id="bf-progress-text"></span></div>
+              <div style="height:4px;background:rgba(139,92,246,.15);border-radius:2px;overflow:hidden"><div id="bf-progress-bar" style="height:100%;background:#8b5cf6;border-radius:2px;transition:width .5s ease;width:0%"></div></div>
+            </div>
+            <div class="pat-toolbar" id="pat-toolbar">
+              <select id="pat-sort" onchange="renderPatterns()">
+                <option value="confidence">Confidence</option>
+                <option value="win_rate">Win Rate</option>
+                <option value="evidence">Evidence</option>
+                <option value="newest">Newest</option>
+                <option value="recent">Recently Active</option>
+              </select>
+              <input type="text" id="pat-search" placeholder="Search patterns..." oninput="renderPatterns()">
+              <span class="pat-chip on bullish" data-sig="bullish" onclick="togglePatChip(this)">Bullish</span>
+              <span class="pat-chip on bearish" data-sig="bearish" onclick="togglePatChip(this)">Bearish</span>
+              <span class="pat-chip on" data-sig="neutral" onclick="togglePatChip(this)">Neutral</span>
+              <span class="pat-chip" data-sig="backtested" onclick="togglePatChip(this)">Has Backtests</span>
+              <span class="pat-chip" data-sig="demoted" onclick="togglePatChip(this)">Show Demoted</span>
+              <span class="pat-chip" data-sig="hideVariants" onclick="togglePatChip(this)">Hide Variants</span>
+              <span class="pat-sep"></span>
+              <span class="pat-chip sector-chip" data-sector="crypto" onclick="togglePatChip(this)">Crypto</span>
+              <span class="pat-chip sector-chip" data-sector="tech" onclick="togglePatChip(this)">Tech</span>
+              <span class="pat-chip sector-chip" data-sector="finance" onclick="togglePatChip(this)">Finance</span>
+              <span class="pat-chip sector-chip" data-sector="healthcare" onclick="togglePatChip(this)">Healthcare</span>
+              <span class="pat-chip sector-chip" data-sector="consumer" onclick="togglePatChip(this)">Consumer</span>
+              <span class="pat-chip sector-chip" data-sector="industrial" onclick="togglePatChip(this)">Industrial</span>
+              <span class="pat-chip sector-chip" data-sector="energy" onclick="togglePatChip(this)">Energy</span>
+            </div>
+            <div class="pat-count" id="pat-count"></div>
+            <div id="brain-patterns" style="max-height:600px;overflow-y:auto"></div>
+            <div id="brain-near-tradeable-candidates" style="font-size:11px;color:var(--text-muted);margin-top:10px"></div>
+          </div>
+
+          <!-- Cycles sub-tab -->
+          <div class="bdd-panel" id="bdd-cycles" style="display:none">
+            <div style="margin-bottom:10px;padding:4px 0">
+              <button onclick="triggerDeepStudy()" id="btn-deep-study" class="brain-act-btn brain-act-study">&#x1F52C; Deep Study</button>
+            </div>
+            <div class="brain-section" id="brain-cycle-reports-section" style="margin-bottom:14px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C4;</span> Reconcile digest (AI reports)</div>
+              <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Digest / audit: one summary per full reconcile pass (newest first). Flip for full report.</p>
+              <div id="cycle-report-empty" style="display:none;font-size:11px;color:var(--text-muted);padding:8px 0">No reports yet â€” run a worker reconcile pass or wait for the next iteration.</div>
+              <div id="cycle-report-ui" style="display:none">
+                <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+                  <button type="button" class="bw-ctrl-btn" id="cycle-report-prev" onclick="cycleReportNav(-1)">&#x2190; Newer</button>
+                  <span id="cycle-report-pos" style="font-size:10px;color:var(--text-muted)"></span>
+                  <button type="button" class="bw-ctrl-btn" id="cycle-report-next" onclick="cycleReportNav(1)">Older &#x2192;</button>
+                </div>
+                <div class="cr-flip-scene">
+                  <div class="cr-flip-inner" id="cycle-report-flip-inner" onclick="toggleCycleReportFlip(event)">
+                    <div class="cr-flip-face cr-flip-front">
+                      <div id="cycle-report-front-date" style="font-size:11px;font-weight:700;color:var(--accent)"></div>
+                      <div id="cycle-report-front-metrics" style="font-size:10px;color:var(--text-muted);margin-top:6px"></div>
+                      <div id="cycle-report-front-robustness" style="font-size:9px;color:var(--text-secondary);margin-top:5px;line-height:1.45"></div>
+                      <div class="cr-flip-front-preview" id="cycle-report-front-preview"></div>
+                      <div style="font-size:9px;color:var(--text-muted);margin-top:10px">Click to flip for full report</div>
+                    </div>
+                    <div class="cr-flip-face cr-flip-back">
+                      <div id="cycle-report-back-md" class="cr-back-scroll prose-dark"></div>
+                      <div style="font-size:9px;color:var(--text-muted);margin-top:8px">Click to flip back</div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+            <div id="brain-cycle-digest" style="font-size:10px;color:var(--text-secondary);line-height:1.5"></div>
+            <div class="brain-section" style="margin-top:10px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4CB;</span> Activity Timeline</div>
+              <div class="brain-filter-bar" id="brain-filter-bar">
+                <button class="brain-filter-btn active" data-filter="all" onclick="filterBrainEvents('all',this)">All</button>
+                <button class="brain-filter-btn" data-filter="discovery" onclick="filterBrainEvents('discovery',this)">Discovery</button>
+                <button class="brain-filter-btn" data-filter="scan" onclick="filterBrainEvents('scan',this)">Scan</button>
+                <button class="brain-filter-btn" data-filter="review" onclick="filterBrainEvents('review',this)">Review</button>
+              </div>
+              <div class="brain-timeline" id="brain-activity" style="max-height:400px;overflow-y:auto"></div>
+            </div>
+
+            <!-- Stop Engine Decisions -->
+            <div class="brain-card" style="margin-top:12px;">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F6E1;</span> Stop Engine Decisions</div>
+              <p style="font-size:10px;color:var(--text-muted);margin:2px 0 6px;">Recent stop-loss management decisions by Chili Brain.</p>
+              <div id="brain-stop-decisions" style="max-height:250px;overflow-y:auto;">
+                <div style="font-size:10px;color:var(--text-muted);padding:8px;text-align:center;">Loading...</div>
+              </div>
+            </div>
+
+          </div>
+
+          <!-- Ops sub-tab -->
+          <div class="bdd-panel" id="bdd-ops" style="display:none">
+            <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
+              <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Config Profile:</span>
+              <select id="ops-profile-select" style="padding:3px 8px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);font-size:10px;cursor:pointer">
+                <option value="">-- select --</option>
+                <option value="conservative">Conservative</option>
+                <option value="moderate">Moderate</option>
+                <option value="aggressive">Aggressive</option>
+              </select>
+              <button type="button" onclick="applyConfigProfile()" class="bw-ctrl-btn" style="font-size:10px">Apply</button>
+              <span id="ops-profile-status" style="font-size:9px;color:var(--text-muted)"></span>
+            </div>
+            <div id="bw-help" style="font-size:10px;color:var(--text-muted);line-height:1.45;margin:0 0 10px;padding:8px 10px;border-radius:6px;background:var(--card);border:1px solid var(--border)">
+              <strong>How it works:</strong> <strong>Start / Stop</strong> control the Docker Compose <code style="font-size:9px">brain-worker</code> service (same image as the app, running <code>scripts/brain_worker.py</code>), not a subprocess inside this web server.
+              Each iteration runs a <strong>work-ledger dispatch round</strong>, then a <strong>full reconcile pass</strong> (legacy in-process cycle), then maintenance subtasks. <strong>Wake</strong> only skips <em>idle sleep</em> between those iterations.
+              <a href="#" id="bw-queue-debug-link" style="color:var(--accent)">Eligible queue pattern IDs</a> (debug).
+            </div>
+            <div class="bw-status-row" style="margin-bottom:10px">
+              <span><span class="bw-status-label">Uptime:</span> <span class="bw-status-value" id="bw-uptime">--</span></span>
+              <span><span class="bw-status-label">Iterations:</span> <span class="bw-status-value" id="bw-cycles">0</span></span>
+            </div>
+            <div class="bw-current" id="bw-current" style="display:none;margin-bottom:10px">
+              <span class="bw-current-step" id="bw-current-step">Idle</span>
+              <span class="bw-current-progress" id="bw-current-progress"></span>
+            </div>
+            <div class="bw-stats-grid" id="bw-stats-grid">
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-scanned">0</div><div class="bw-stat-lbl">Scanned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-snapshots">0</div><div class="bw-stat-lbl">Snapshots</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-mined">0</div><div class="bw-stat-lbl">Mined</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-tested">0</div><div class="bw-stat-lbl">Tested</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-validated">0</div><div class="bw-stat-lbl">Validated</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-challenged">0</div><div class="bw-stat-lbl">Challenged</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-evolved">0</div><div class="bw-stat-lbl">Evolved</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-spawned">0</div><div class="bw-stat-lbl">Spawned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-promoted">0</div><div class="bw-stat-lbl">Promoted</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-pruned">0</div><div class="bw-stat-lbl">Pruned</div></div>
+              <div class="bw-stat"><div class="bw-stat-val" id="bw-stat-decayed">0</div><div class="bw-stat-lbl">Decayed</div></div>
+            </div>
+            <div class="bw-queue-status" id="bw-queue-status">
+              <div class="bw-queue-header">
+                <span style="font-size:10px;font-weight:600;color:var(--text-muted)">Backtest Queue</span>
+                <span class="bw-queue-badge" id="bw-queue-badge">--</span>
+              </div>
+              <div class="bw-queue-details">
+                <span><span class="bw-queue-label">Pending:</span> <span id="bw-queue-pending">--</span></span>
+                <span><span class="bw-queue-label">Boosted:</span> <span id="bw-queue-boosted">0</span></span>
+                <span><span class="bw-queue-label">Tested:</span> <span id="bw-queue-tested">--</span></span>
+              </div>
+              <div style="margin-top:8px;display:flex;flex-wrap:wrap;gap:6px;align-items:center">
+                <button type="button" class="bw-ctrl-btn" id="bw-queue-batch-btn" onclick="runQueueBatchFromWeb()" style="font-size:10px" title="Runs one queue batch inside the web server process (no brain_worker required)">Process queue on server</button>
+              </div>
+            </div>
+            <div class="bw-timings" id="bw-last-cycle-timings" style="font-size:10px;color:var(--text-muted);margin-top:8px">
+              <span class="bw-timings-label">Last reconcile pass: --</span>
+              <span class="bw-timings-steps" id="bw-step-timings"></span>
+            </div>
+            <div class="bw-cycle-chart-wrap" style="margin-top:10px">
+              <div style="font-size:10px;font-weight:600;margin-bottom:4px;color:var(--text-muted)">Reconcile history</div>
+              <div id="bw-cycle-chart" style="width:100%;height:100px;border-radius:6px;overflow:hidden;background:var(--card);border:1px solid var(--border)"></div>
+              <div id="bw-cycle-chart-legend" style="font-size:9px;color:var(--text-muted);margin-top:4px;display:flex;gap:12px;flex-wrap:wrap">
+                <span><span style="color:#8b5cf6">&#x25CF;</span> Patterns tested</span>
+                <span><span style="color:#22c55e">&#x25CF;</span> Duration (s)</span>
+              </div>
+            </div>
+            <div style="font-size:10px;font-weight:600;margin:10px 0 4px;color:var(--text-muted)">Recent Activity</div>
+            <div class="bw-activity" id="bw-activity">
+              <div style="color:var(--text-muted);font-style:italic">No activity yet</div>
+            </div>
+          </div>
+
+          <!-- Research sub-tab -->
+          <div class="bdd-panel" id="bdd-research" style="display:none">
+            <div class="brain-pipeline" id="brain-pipeline"></div>
+            <div id="brain-research-funnel" style="font-size:10px;color:var(--text-secondary);margin:6px 0 10px;line-height:1.5"></div>
+            <div id="brain-proposal-skips" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
+            <div id="brain-research-kpi-benchmarks" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.5"></div>
+            <div id="brain-pipeline-near" style="font-size:10px;color:var(--text-secondary);margin:0 0 10px;line-height:1.45"></div>
+            <div class="brain-kpis" id="brain-kpis">
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+              <div class="brain-kpi" style="opacity:.3"></div>
+            </div>
+            <div class="brain-section" style="margin-top:12px">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C9;</span> Confidence History</div>
+              <div id="brain-chart" style="width:100%;height:180px"></div>
+            </div>
+          </div>
+
+          <!-- Analytics sub-tab -->
+          <div class="bdd-panel" id="bdd-analytics" style="display:none">
+            <div class="brain-section">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F4C8;</span> Market Thesis</div>
+              <div class="brain-thesis-card neutral" id="brain-thesis-card">
+                <div style="display:flex;align-items:center;gap:6px;margin-bottom:3px">
+                  <span class="thesis-stance neutral" id="thesis-stance">Loading...</span>
+                  <span style="font-size:9px;color:var(--text-muted)" id="thesis-meta"></span>
+                </div>
+                <div class="thesis-gauge"><div class="thesis-gauge-fill" id="thesis-gauge" style="width:50%;background:#f59e0b"></div></div>
+                <div class="thesis-text" id="thesis-text" style="font-size:11px;color:var(--text-muted)">Generating...</div>
+              </div>
+            </div>
+            <div id="bdd-analytics-content" style="font-size:11px;color:var(--text-muted)">
+              <p style="padding:12px;text-align:center">Select the Analytics tab to load pattern attribution, signal hit rates, and paper trading results.</p>
+            </div>
+          </div>
+
+          <!-- Debug: opportunity-board raw + skip reasons (not default operator view) -->
+          <div class="bdd-panel" id="bdd-debug" style="display:none">
+            <p style="font-size:10px;color:var(--text-muted);margin:0 0 8px 0">Opportunity board API with <code>debug=1</code> (suppressions, skip counts). Scheduler / imminent dry-run: Ops tab or <code>POST /api/trading/alerts/run-pattern-imminent?dry_run=1</code>. Inspect API: <code>/api/trading/inspect/health</code> (session or Bearer).</p>
+            <div id="bdd-inspect-health-card" style="margin-bottom:10px;padding:10px;border:1px solid var(--border);border-radius:8px;font-size:10px;background:var(--bg-secondary, rgba(0,0,0,.03))">
+              <div style="font-weight:700;margin-bottom:6px">Inspect health</div>
+              <div id="bdd-inspect-health-body" style="color:var(--text-muted)">Open this tab to load.</div>
+              <button type="button" class="bw-ctrl-btn" style="margin-top:8px" onclick="loadInspectHealthCard()" title="Reload /api/trading/inspect/health">Manual refresh (inspect health)</button>
+            </div>
+            <button type="button" class="bw-ctrl-btn" onclick="loadOpportunityBoardDebug()">Load debug JSON</button>
+            <pre id="bdd-debug-opp-json" style="margin-top:10px;font-size:10px;max-height:480px;overflow:auto;background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px;white-space:pre-wrap;word-break:break-word">Not loaded.</pre>
+          </div>
+
+        </div><!-- .bdd-content -->
+      </div><!-- .brain-deep-dive -->

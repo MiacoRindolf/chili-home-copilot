@@ -1771,16 +1771,24 @@ def start_scheduler():
             and settings.chili_momentum_paper_runner_enabled
             and settings.chili_momentum_paper_runner_scheduler_enabled
         ):
-            _pr_m = max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
+            _bus_on = bool(settings.chili_autopilot_price_bus_enabled)
+            _pr_m = 1 if _bus_on else max(2, int(settings.chili_momentum_paper_runner_scheduler_interval_minutes))
             _scheduler.add_job(
                 _run_momentum_paper_runner_batch_job,
                 trigger=IntervalTrigger(minutes=_pr_m),
                 id="momentum_paper_runner_batch",
-                name=f"Momentum paper automation runner (every {_pr_m}min, simulated)",
+                name=f"Momentum paper automation runner (every {_pr_m}min, {'heartbeat' if _bus_on else 'simulated'})",
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=55),
             )
+            if _bus_on:
+                try:
+                    from .trading.momentum_neural.paper_runner_loop import start_runner_loop
+                    start_runner_loop()
+                    logger.info("[scheduler] Event-driven paper runner loop started (price bus active)")
+                except Exception as e:
+                    logger.warning("[scheduler] Event-driven runner loop failed to start: %s", e)
 
         if (
             include_web_light

@@ -284,33 +284,158 @@
     }).join('');
   }
 
+  function _createChart(chartEl) {
+    return LightweightCharts.createChart(chartEl, {
+      layout: { background: { color: '#020617' }, textColor: '#cbd5e1' },
+      grid: {
+        vertLines: { color: 'rgba(148,163,184,0.08)' },
+        horzLines: { color: 'rgba(148,163,184,0.08)' }
+      },
+      rightPriceScale: { borderColor: 'rgba(148,163,184,0.14)' },
+      timeScale: { borderColor: 'rgba(148,163,184,0.14)', timeVisible: true, secondsVisible: true },
+      crosshair: { mode: 0 }
+    });
+  }
+
+  function _parseOhlcvPoints(data) {
+    return (data || []).map(function(row) {
+      var timeVal = row.time || row.date || row.timestamp;
+      var ts;
+      if (typeof timeVal === 'number') {
+        ts = timeVal > 1e12 ? timeVal : timeVal * 1000;
+      } else {
+        ts = Date.parse(timeVal);
+      }
+      return {
+        time: Math.floor(ts / 1000),
+        open: safeNum(row.open, NaN), high: safeNum(row.high, NaN),
+        low: safeNum(row.low, NaN), close: safeNum(row.close, NaN)
+      };
+    }).filter(function(row) {
+      return isFinite(row.time) && isFinite(row.open) && isFinite(row.high) && isFinite(row.low) && isFinite(row.close);
+    }).sort(function(a, b) { return a.time - b.time; });
+  }
+
+  function _buildFillMarkers(fills) {
+    return (fills || []).map(function(fill) {
+      var timeVal = Date.parse(fill.ts || '');
+      if (!isFinite(timeVal) || !isFinite(Number(fill.price))) return null;
+      var isEnter = String(fill.action || '').indexOf('enter') === 0;
+      return {
+        time: Math.floor(timeVal / 1000),
+        position: isEnter ? 'belowBar' : 'aboveBar',
+        color: isEnter ? '#22c55e' : '#ef4444',
+        shape: isEnter ? 'arrowUp' : 'arrowDown',
+        text: fill.reason || fill.action || 'fill'
+      };
+    }).filter(Boolean).sort(function(a, b) { return a.time - b.time; });
+  }
+
+  // ── WebSocket streaming for real-time chart updates ──────────────
+  var _apWs = null;
+  var _apWsSymbols = new Set();
+
+  function _ensureAutopilotWs() {
+    if (_apWs && (_apWs.readyState === WebSocket.OPEN || _apWs.readyState === WebSocket.CONNECTING)) return;
+    var syms = Array.from(_apWsSymbols);
+    if (!syms.length) return;
+
+    var proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = proto + '//' + location.host + '/ws/autopilot/live?symbols=' + encodeURIComponent(syms.join(','));
+    _apWs = new WebSocket(url);
+
+    _apWs.onmessage = function(evt) {
+      try {
+        var msg = JSON.parse(evt.data);
+        if (msg.type === 'tick') {
+          _handleStreamTick(msg);
+        } else if (msg.type === 'candle') {
+          _handleStreamCandle(msg);
+        } else if (msg.type === 'fill') {
+          _handleStreamFill(msg);
+        }
+      } catch (_e) {}
+    };
+
+    _apWs.onclose = function() {
+      _apWs = null;
+      setTimeout(function() { _ensureAutopilotWs(); }, 5000);
+    };
+
+    _apWs.onerror = function() { /* onclose will fire */ };
+  }
+
+  function _handleStreamTick(msg) {
+    var sym = msg.symbol;
+    if (!sym) return;
+    // Update the last-price line on all charts showing this symbol
+    Object.keys(state.charts).forEach(function(sid) {
+      var c = state.charts[sid];
+      if (c && c.symbol === sym && c.series && msg.mid > 0) {
+        var now = Math.floor((msg.time || Date.now() / 1000));
+        var lastBar = c.lastBar || {};
+        if (lastBar.time === now) {
+          c.series.update({
+            time: now,
+            open: lastBar.open,
+            high: Math.max(lastBar.high, msg.mid),
+            low: Math.min(lastBar.low, msg.mid),
+            close: msg.mid
+          });
+          lastBar.high = Math.max(lastBar.high, msg.mid);
+          lastBar.low = Math.min(lastBar.low, msg.mid);
+          lastBar.close = msg.mid;
+        } else {
+          c.lastBar = { time: now, open: msg.mid, high: msg.mid, low: msg.mid, close: msg.mid };
+          c.series.update({ time: now, open: msg.mid, high: msg.mid, low: msg.mid, close: msg.mid });
+        }
+      }
+    });
+  }
+
+  function _handleStreamCandle(msg) {
+    var sym = msg.symbol;
+    if (!sym) return;
+    var candleTime = Math.floor(msg.t || 0);
+    if (!candleTime) return;
+    Object.keys(state.charts).forEach(function(sid) {
+      var c = state.charts[sid];
+      if (c && c.symbol === sym && c.series) {
+        c.series.update({
+          time: candleTime, open: msg.o, high: msg.h, low: msg.l, close: msg.c
+        });
+        c.lastBar = { time: candleTime, open: msg.o, high: msg.h, low: msg.l, close: msg.c };
+      }
+    });
+  }
+
+  function _handleStreamFill(msg) {
+    var sid = msg.session_id;
+    if (sid) apLoadSessionDetail(Number(sid), true);
+  }
+
+  function _closeAutopilotWs() {
+    if (_apWs) {
+      try { _apWs.close(); } catch (_e) {}
+      _apWs = null;
+    }
+    _apWsSymbols.clear();
+  }
+
   function loadChartForSession(sessionId, symbol, fills) {
     var chartEl = document.getElementById('ap-chart-' + sessionId);
     if (!chartEl || !state.visibleSessionIds[sessionId] || !symbol || typeof LightweightCharts === 'undefined') return;
-    fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(symbol) + '&interval=5m&period=1d', { credentials: 'same-origin' })
+
+    // Register symbol for WebSocket streaming
+    _apWsSymbols.add(symbol.toUpperCase());
+    _ensureAutopilotWs();
+
+    // Fetch historical 1m candles for backfill, then stream updates via WS
+    fetch('/api/trading/ohlcv?ticker=' + encodeURIComponent(symbol) + '&interval=1m&period=1d', { credentials: 'same-origin' })
       .then(function(resp) { return resp.json(); })
       .then(function(payload) {
         if (!state.visibleSessionIds[sessionId]) return;
-        var points = (payload.data || []).map(function(row) {
-          var timeVal = row.time || row.date || row.timestamp;
-          var ts;
-          if (typeof timeVal === 'number') {
-            ts = timeVal > 1e12 ? timeVal : timeVal * 1000;
-          } else {
-            ts = Date.parse(timeVal);
-          }
-          return {
-            time: Math.floor(ts / 1000),
-            open: safeNum(row.open, NaN),
-            high: safeNum(row.high, NaN),
-            low: safeNum(row.low, NaN),
-            close: safeNum(row.close, NaN)
-          };
-        }).filter(function(row) {
-          return isFinite(row.time) && isFinite(row.open) && isFinite(row.high) && isFinite(row.low) && isFinite(row.close);
-        }).sort(function(a, b) {
-          return a.time - b.time;
-        });
+        var points = _parseOhlcvPoints(payload.data);
         if (!points.length) {
           chartEl.innerHTML = '<div class="ap-chart-empty">No chart data returned for this symbol.</div>';
           return;
@@ -320,42 +445,20 @@
           try { existing.chart.remove(); } catch (_err) {}
         }
         chartEl.innerHTML = '';
-        var chart = LightweightCharts.createChart(chartEl, {
-          layout: {
-            background: { color: '#020617' },
-            textColor: '#cbd5e1'
-          },
-          grid: {
-            vertLines: { color: 'rgba(148,163,184,0.08)' },
-            horzLines: { color: 'rgba(148,163,184,0.08)' }
-          },
-          rightPriceScale: { borderColor: 'rgba(148,163,184,0.14)' },
-          timeScale: { borderColor: 'rgba(148,163,184,0.14)', timeVisible: true, secondsVisible: false },
-          crosshair: { mode: 0 }
-        });
+        var chart = _createChart(chartEl);
         var series = chart.addCandlestickSeries({
-          upColor: '#22c55e',
-          downColor: '#ef4444',
-          wickUpColor: '#22c55e',
-          wickDownColor: '#ef4444',
-          borderVisible: false
+          upColor: '#22c55e', downColor: '#ef4444',
+          wickUpColor: '#22c55e', wickDownColor: '#ef4444', borderVisible: false
         });
         series.setData(points);
-        var markers = (fills || []).map(function(fill) {
-          var timeVal = Date.parse(fill.ts || '');
-          if (!isFinite(timeVal) || !isFinite(Number(fill.price))) return null;
-          var isEnter = String(fill.action || '').indexOf('enter') === 0;
-          return {
-            time: Math.floor(timeVal / 1000),
-            position: isEnter ? 'belowBar' : 'aboveBar',
-            color: isEnter ? '#22c55e' : '#ef4444',
-            shape: isEnter ? 'arrowUp' : 'arrowDown',
-            text: fill.reason || fill.action || 'fill'
-          };
-        }).filter(Boolean).sort(function(a, b) { return a.time - b.time; });
+        var markers = _buildFillMarkers(fills);
         if (typeof series.setMarkers === 'function') series.setMarkers(markers);
         chart.timeScale().fitContent();
-        state.charts[sessionId] = { chart: chart, series: series };
+        var lastPt = points[points.length - 1];
+        state.charts[sessionId] = {
+          chart: chart, series: series, symbol: symbol.toUpperCase(),
+          lastBar: lastPt ? { time: lastPt.time, open: lastPt.open, high: lastPt.high, low: lastPt.low, close: lastPt.close } : null
+        };
       })
       .catch(function() {
         if (chartEl) chartEl.innerHTML = '<div class="ap-chart-empty">Chart failed to load.</div>';
@@ -375,6 +478,7 @@
     Object.keys(state.charts).forEach(function(key) {
       destroyChart(Number(key));
     });
+    _closeAutopilotWs();
   }
 
   function applySessionDetail(detail) {

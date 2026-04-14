@@ -1,0 +1,16 @@
+﻿<div class="b-header" role="banner">
+  <div style="display:flex;align-items:center;gap:8px">
+    <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:{% if _bd != 'hub' %}inline-block{% else %}none{% endif %}" title="Back to domain hub">&#8592; All domains</button>
+    <h1>&#x1F9E0; Chili Brain</h1>
+  </div>
+  <nav role="navigation" aria-label="Main navigation">
+    <a href="/">Home</a>
+    <a href="/chat">Chat</a>
+    <a href="/trading">Trading</a>
+    <a href="/brain" class="active">Brain</a>
+    {% if not is_guest %}<a href="/marketplace">Marketplace</a>{% endif %}
+  </nav>
+  <div>
+    <button id="theme-toggle" onclick="toggleTheme()" class="b-theme-btn" title="Toggle theme" aria-label="Toggle light or dark theme">&#127769;</button>
+  </div>
+</div>

@@ -547,13 +547,30 @@ def fetch_ohlcv_batch(
 # ── Quote ──────────────────────────────────────────────────────────────
 
 def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> dict[str, Any] | None:
-    """Current price + enriched info.  Massive WS → Massive REST → Polygon → yfinance.
+    """Current price + enriched info.  Price bus → Massive WS → Massive REST → Polygon → yfinance.
 
     *allow_provider_fallback* ``None`` uses ``settings.market_data_allow_provider_fallback``.
     ``False`` forces Massive-only (WS + REST).
     """
     fb = _effective_allow_fallback(allow_provider_fallback)
     fi: dict[str, Any] | None = None
+
+    # --- Price bus (fastest path — unified WS cache) ---
+    try:
+        from .price_bus import get_live_quote
+        bus_q = get_live_quote(ticker)
+        if bus_q and bus_q.get("price"):
+            from ..massive_client import is_crypto
+            _cr = is_crypto(ticker)
+            return {
+                "ticker": ticker.upper(),
+                "price": smart_round(bus_q["price"], crypto=_cr),
+                "bid": bus_q.get("bid"),
+                "ask": bus_q.get("ask"),
+                "source": bus_q.get("source", "price_bus"),
+            }
+    except Exception:
+        pass
 
     # --- Massive WebSocket cache (fastest path) ---
     if _use_massive():

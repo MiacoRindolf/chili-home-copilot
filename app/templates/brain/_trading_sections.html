@@ -1,0 +1,25 @@
+﻿      <div class="brain-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
+          <span class="bs-icon">&#x1F52E;</span> Live Predictions
+          <button onclick="loadBrainPredictions()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-predictions" style="font-size:11px;color:var(--text-muted)">Loading predictions...</div>
+      </div>
+
+      <div class="brain-section" id="brain-tradeable-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F9E0;</span> Tradeable Patterns
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:420px;line-height:1.35">Promoted patterns meeting OOS / sample-size gates.</span>
+          <button type="button" onclick="loadTradeablePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-tradeable-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
+      </div>
+
+      <div class="brain-section" id="brain-research-edge-section">
+        <div class="brain-section-title" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+          <span class="bs-icon">&#x1F9EA;</span> Edge research lane
+          <span style="font-size:9px;font-weight:500;color:var(--text-muted);text-transform:none;letter-spacing:0;max-width:480px;line-height:1.35">Patterns in <code style="font-size:9px">validated</code> or <code style="font-size:9px">challenged</code> lifecycle with persisted <code style="font-size:9px">edge_evidence</code> (v1 weak-null permutations). Display only; eligibility is enforced server-side.</span>
+          <button type="button" onclick="loadResearchEdgePatterns()" style="margin-left:auto;padding:3px 10px;border:1px solid var(--border);border-radius:4px;background:var(--bg);color:var(--text);cursor:pointer;font-size:10px;font-weight:600">Refresh</button>
+        </div>
+        <div id="brain-research-edge-patterns" style="font-size:11px;color:var(--text-muted)">Loading...</div>
+      </div>

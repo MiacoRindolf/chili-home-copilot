@@ -367,6 +367,10 @@ class Settings(BaseSettings):
         default=False,
         validation_alias=AliasChoices("CHILI_COINBASE_WS_ENABLED"),
     )
+    chili_autopilot_price_bus_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOPILOT_PRICE_BUS_ENABLED"),
+    )
     chili_coinbase_strict_freshness: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_COINBASE_STRICT_FRESHNESS"),

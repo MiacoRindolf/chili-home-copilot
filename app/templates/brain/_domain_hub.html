@@ -1,0 +1,9 @@
+﻿    <!-- Domain hub (default entry) -->
+    <div id="domain-hub" role="region" aria-label="Brain domain selection" style="display:{% if _bd == 'hub' %}flex{% else %}none{% endif %}">
+      <div class="b-hub-intro">
+        <h2>Brain domains</h2>
+        <p>Pick a domain to open its desk. Status dots reflect domain activity (including when a full reconcile pass is in progress).</p>
+      </div>
+      <div class="b-hub-grid" id="domain-hub-grid"></div>
+      <div class="b-hub-status-banner" id="hub-status-banner">Checking status...</div>
+    </div>
