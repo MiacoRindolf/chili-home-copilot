@@ -6115,15 +6115,17 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
     conn.execute(text("""
         INSERT INTO brain_graph_nodes (id, domain, graph_version, node_type, layer, label,
                                        fire_threshold, cooldown_seconds, enabled, version,
-                                       is_observer, display_meta)
+                                       is_observer, display_meta, created_at, updated_at)
         VALUES
             ('nm_position_monitor', 'trading', 1, 'action_position_monitor', 6,
              'Position monitor', 0.55, 60, true, 1, false,
-             '{"role":"action_position_monitor","desc":"Pattern-aware live position management"}'),
+             '{"role":"action_position_monitor","desc":"Pattern-aware live position management"}',
+             NOW(), NOW()),
             ('nm_lc_monitor_review', 'trading', 1, 'learning_step', 9,
              'Monitor decision review', 0.5, 120, true, 1, false,
              '{"role":"learning_step","cluster_id":"c_secondary_outcomes","step_sid":"monitor_review",'
-             '"desc":"Reviews pattern-monitor decision outcomes for threshold evolution"}')
+             '"desc":"Reviews pattern-monitor decision outcomes for threshold evolution"}',
+             NOW(), NOW())
         ON CONFLICT (id) DO NOTHING
     """))
 
