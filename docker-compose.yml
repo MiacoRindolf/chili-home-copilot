@@ -40,6 +40,14 @@ services:
       timeout: 5s
       retries: 10
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
 
   ollama:
     image: ollama/ollama:latest
@@ -60,6 +68,14 @@ services:
       timeout: 10s
       retries: 6
       start_period: 40s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 4G
+        reservations:
+          cpus: "0.25"
+          memory: 256M
 
   # Planner coding validation (Phase 1+): for Docker dev parity, use the Phase 4 mount below
   # (/workspace) + CODE_BRAIN_REPOS=/workspace. For prod-like runs, omit the repo mount and bake
@@ -130,6 +146,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 1536M
+        reservations:
+          cpus: "0.5"
+          memory: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -169,6 +193,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    deploy:
+      resources:
+        limits:
+          cpus: "1.0"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 128M
     depends_on:
       postgres:
         condition: service_healthy
@@ -204,7 +236,7 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=2
+      - CHILI_CONTAINER_CPU_LIMIT=3
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -218,8 +250,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2G
+          cpus: "3.0"
+          memory: 2560M
         reservations:
           cpus: "0.5"
           memory: 512M
@@ -385,6 +417,7 @@ services:
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1
       - CHILI_CONTAINER_CPU_LIMIT=2
+      - PYTHONUNBUFFERED=1
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -397,7 +430,7 @@ services:
       resources:
         limits:
           cpus: "2.0"
-          memory: 2G
+          memory: 2560M
         reservations:
           cpus: "0.5"
           memory: 512M

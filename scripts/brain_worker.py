@@ -797,6 +797,9 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
             logger.info("[brain] Single cycle mode, exiting")
             break
 
+        import gc as _gc
+        _gc.collect()
+
         if check_stop_signal() or _check_db_stop_idle():
             logger.info("[brain] Stop signal received, shutting down")
             break

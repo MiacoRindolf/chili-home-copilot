@@ -30,6 +30,8 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
     APScheduler must not crash the process on job failure; failures are recorded
     with ``logger.exception`` and a duration field for ops triage.
     """
+    import gc
+
     t0 = time.monotonic()
     logger.info("[scheduler_job] job_id=%s phase=start", job_id)
     try:
@@ -41,6 +43,7 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
             job_id,
             dur_ms,
         )
+        gc.collect()
         return
     dur_ms = int((time.monotonic() - t0) * 1000)
     logger.info(
@@ -48,6 +51,7 @@ def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
         job_id,
         dur_ms,
     )
+    gc.collect()
 
 
 def _run_daily_prescreen_job():
