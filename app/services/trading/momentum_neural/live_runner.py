@@ -305,14 +305,18 @@ def tick_live_session(
     if not settings.chili_momentum_live_runner_enabled:
         return {"ok": True, "skipped": "live_runner_disabled"}
 
-    sess = (
-        db.query(TradingAutomationSession)
-        .filter(
-            TradingAutomationSession.id == int(session_id),
-            TradingAutomationSession.mode == "live",
+    try:
+        sess = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.id == int(session_id),
+                TradingAutomationSession.mode == "live",
+            )
+            .with_for_update(nowait=True)
+            .one_or_none()
         )
-        .one_or_none()
-    )
+    except Exception:
+        return {"ok": True, "skipped": "concurrent_tick"}
     if sess is None:
         return {"ok": False, "error": "not_found"}
     if is_operator_paused(sess.risk_snapshot_json):

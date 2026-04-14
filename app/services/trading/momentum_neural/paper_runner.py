@@ -346,14 +346,18 @@ def tick_paper_session(
     if not settings.chili_momentum_paper_runner_enabled:
         return {"ok": True, "skipped": "paper_runner_disabled"}
 
-    sess = (
-        db.query(TradingAutomationSession)
-        .filter(
-            TradingAutomationSession.id == int(session_id),
-            TradingAutomationSession.mode == "paper",
+    try:
+        sess = (
+            db.query(TradingAutomationSession)
+            .filter(
+                TradingAutomationSession.id == int(session_id),
+                TradingAutomationSession.mode == "paper",
+            )
+            .with_for_update(nowait=True)
+            .one_or_none()
         )
-        .one_or_none()
-    )
+    except Exception:
+        return {"ok": True, "skipped": "concurrent_tick"}
     if sess is None:
         return {"ok": False, "error": "not_found"}
     if is_live_intent_state(sess.state):
@@ -594,7 +598,7 @@ def tick_paper_session(
             stop_atr_mult=float(params["stop_atr_mult"]),
             target_atr_mult=float(params["target_atr_mult"]),
         )
-        fees = roundtrip_fee_usd(notional, fee_ratio)
+        fees = roundtrip_fee_usd(notional, fee_ratio, entry=entry_px, target=target_px)
         opened = _utcnow()
         pe["position"] = {
             "side": "long",

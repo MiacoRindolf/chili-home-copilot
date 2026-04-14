@@ -57,10 +57,26 @@ def long_exit_fill_price(bid: float, mid: float, slippage_bps: float) -> float:
     return max(1e-12, bid - slip)
 
 
-def roundtrip_fee_usd(notional: float, fee_to_target_ratio: float) -> float:
-    """Two-sided fee proxy: ratio × notional × 2."""
+def roundtrip_fee_usd(
+    notional: float,
+    fee_to_target_ratio: float,
+    *,
+    entry: float = 0.0,
+    target: float = 0.0,
+) -> float:
+    """Estimate round-trip fees for a paper trade.
+
+    ``fee_to_target_ratio`` is the fraction of *expected target profit*
+    consumed by fees (e.g. 0.08 = 8 % of target PnL).  When ``entry``
+    and ``target`` are supplied we compute fees from the target P&L;
+    otherwise fall back to a conservative 0.5 % per-side exchange rate.
+    """
     r = float(fee_to_target_ratio)
-    return abs(notional) * r * 2.0
+    if entry > 0 and target > 0 and entry != target:
+        qty = abs(notional) / entry if entry else 0.0
+        expected_target_pnl = abs(target - entry) * qty
+        return max(0.0, expected_target_pnl * r)
+    return abs(notional) * 0.005 * 2.0
 
 
 def stop_target_prices(
