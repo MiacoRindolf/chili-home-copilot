@@ -365,6 +365,113 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .t-tab-content.active { display: block; animation: tabFadeIn .15s ease forwards; }
 @keyframes tabFadeIn { from { opacity: 0; transform: translateY(3px); } to { opacity: 1; transform: translateY(0); } }
 
+/* Pattern monitor tab */
+.mon-toolbar { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 12px; }
+.mon-summary-strip {
+  display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: stretch;
+  background: var(--bg, #12121c); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; flex: 1; min-width: 200px;
+}
+.mon-stat { display: flex; flex-direction: column; gap: 2px; min-width: 72px; }
+.mon-stat-wide { min-width: 140px; flex: 1 1 140px; }
+.mon-stat-val { font-size: 17px; font-weight: 800; color: var(--text); line-height: 1.1; }
+.mon-stat-val.mon-stat-sm { font-size: 12px; font-weight: 600; word-break: break-all; }
+.mon-stat-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.mon-stat.health-ok .mon-stat-val { color: #22c55e; }
+.mon-stat.health-warn .mon-stat-val { color: #eab308; }
+.mon-stat.health-bad .mon-stat-val { color: #ef4444; }
+.mon-toolbar-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.mon-sort-wrap { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.mon-sort-lbl { white-space: nowrap; }
+.mon-select {
+  padding: 5px 8px; font-size: 11px; border-radius: 6px; border: 1px solid var(--input-border); background: var(--input-bg); color: var(--text);
+  max-width: 200px;
+}
+.mon-btn { padding: 6px 12px; font-size: 11px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; }
+.mon-btn-primary { background: linear-gradient(135deg, #6366f1, #4f46e5); color: #fff; }
+.mon-btn-primary:hover { filter: brightness(1.08); }
+.mon-btn-primary:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+.mon-btn-secondary { background: var(--input-bg); color: var(--text); border: 1px solid var(--border); }
+.mon-btn-secondary:hover { border-color: var(--accent); }
+.mon-btn-sm { padding: 4px 10px; font-size: 10px; }
+.mon-status { font-size: 11px; padding: 8px 10px; border-radius: 8px; margin-bottom: 10px; }
+.mon-status.ok { background: rgba(34,197,94,0.12); color: #86efac; border: 1px solid rgba(34,197,94,0.35); }
+.mon-status.err { background: rgba(239,68,68,0.12); color: #fca5a5; border: 1px solid rgba(239,68,68,0.35); }
+.mon-cards-wrap { min-height: 80px; }
+.mon-cards-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px;
+}
+.mon-card {
+  background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.mon-card.mon-card-urgent { border-left: 3px solid #ef4444; }
+.mon-card.mon-card-watch { border-left: 3px solid #eab308; }
+.mon-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
+.mon-card-ticker { font-size: 15px; font-weight: 800; letter-spacing: 0.02em; }
+.mon-dir { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 6px; border-radius: 4px; }
+.mon-dir.long { background: rgba(34,197,94,0.15); color: #4ade80; }
+.mon-dir.short { background: rgba(239,68,68,0.15); color: #f87171; }
+.mon-pattern-line { font-size: 11px; color: var(--text-secondary); line-height: 1.35; }
+.mon-tf-pill {
+  display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 4px;
+  background: rgba(99,102,241,0.2); color: #a5b4fc; margin-left: 6px; vertical-align: middle;
+}
+.mon-health-row { display: flex; align-items: center; gap: 10px; }
+.mon-health-bar-wrap { flex: 1; height: 8px; border-radius: 4px; background: rgba(255,255,255,0.06); overflow: hidden; }
+.mon-health-bar {
+  height: 100%; border-radius: 4px;
+  background: linear-gradient(90deg, #ef4444 0%, #eab308 45%, #22c55e 100%);
+  background-size: 100% 100%;
+  transition: width .25s ease;
+}
+.mon-health-num { font-size: 13px; font-weight: 800; min-width: 42px; text-align: right; }
+.mon-meta-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 10px; }
+.mon-meta-row div { color: var(--text-muted); }
+.mon-meta-row div b { display: block; color: var(--text); font-size: 11px; margin-top: 2px; }
+.mon-badges { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.mon-badge {
+  font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+  padding: 2px 8px; border-radius: 999px;
+}
+.mon-badge-action-hold { background: rgba(107,114,128,0.25); color: #d1d5db; }
+.mon-badge-action-tighten_stop { background: rgba(234,179,8,0.2); color: #fde047; }
+.mon-badge-action-loosen_target { background: rgba(59,130,246,0.2); color: #93c5fd; }
+.mon-badge-action-exit_now { background: rgba(239,68,68,0.25); color: #fca5a5; }
+.mon-badge-src { background: rgba(168,85,247,0.2); color: #d8b4fe; font-size: 8px; }
+.mon-card-expand { margin-top: 4px; }
+.mon-expand-btn {
+  width: 100%; text-align: center; font-size: 10px; padding: 5px; border-radius: 6px;
+  border: 1px dashed var(--border); background: transparent; color: var(--text-muted); cursor: pointer;
+}
+.mon-expand-btn:hover { border-color: var(--accent); color: var(--accent); }
+.mon-card-details { display: none; font-size: 10px; color: var(--text-secondary); border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
+.mon-card-details.open { display: block; }
+.mon-reason { white-space: pre-wrap; word-break: break-word; margin-bottom: 8px; line-height: 1.45; }
+.mon-mini-timeline { display: flex; flex-direction: column; gap: 4px; max-height: 140px; overflow-y: auto; }
+.mon-mini-row { font-size: 9px; padding: 4px 6px; border-radius: 4px; background: rgba(0,0,0,0.2); }
+.mon-empty { text-align: center; padding: 28px 16px; color: var(--text-muted); border: 1px dashed var(--border); border-radius: 10px; }
+.mon-empty-title { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; }
+.mon-empty-hint { font-size: 11px; line-height: 1.5; margin: 0; max-width: 480px; margin-left: auto; margin-right: auto; }
+.mon-feed-details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--bg-header, #0f0f18); }
+.mon-feed-summary { font-size: 12px; font-weight: 700; cursor: pointer; }
+.mon-feed-hint { font-weight: 400; color: var(--text-muted); font-size: 10px; margin-left: 8px; }
+.mon-feed-toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 10px 0 8px; }
+.mon-feed-filter { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--text-muted); }
+.mon-feed-list { max-height: 220px; overflow-y: auto; display: flex; flex-direction: column; gap: 6px; }
+.mon-feed-row {
+  display: grid; grid-template-columns: 130px 72px 1fr; gap: 8px; align-items: start;
+  font-size: 10px; padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg, #1a1a2e);
+}
+.mon-feed-row.mon-feed-exit { border-left: 3px solid #ef4444; }
+.mon-feed-row.mon-feed-tighten { border-left: 3px solid #eab308; }
+.mon-feed-row.mon-feed-loosen { border-left: 3px solid #3b82f6; }
+.mon-feed-ts { color: var(--text-muted); font-size: 9px; }
+.mon-feed-tk { font-weight: 800; font-size: 11px; }
+.mon-feed-body { color: var(--text-secondary); line-height: 1.4; }
+@media (max-width: 520px) {
+  .mon-feed-row { grid-template-columns: 1fr; }
+}
+
 /* Journal */
 .j-form { display: flex; gap: 6px; margin-bottom: 8px; }
 .j-form input { flex: 1; padding: 6px 10px; border: 1px solid var(--input-border); border-radius: 8px; background: var(--input-bg); color: var(--text); font-size: 12px; }
@@ -2229,6 +2336,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
         <div class="t-tab" role="tab" draggable="true" data-tab="journal" title="Journal" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)"><span class="t-tab-icon">&#x1F4DD;</span>Journal</div>
         <div class="t-tab" role="tab" draggable="true" data-tab="stats" title="Stats" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)"><span class="t-tab-icon">&#x1F4C8;</span>Stats</div>
         <div class="t-tab" role="tab" draggable="true" data-tab="alerts" title="Alerts" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)"><span class="t-tab-icon">&#x1F514;</span>Alerts</div>
+        <div class="t-tab" role="tab" draggable="true" data-tab="monitor" title="Pattern monitor — active setups" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)"><span class="t-tab-icon">&#x1F441;</span>Monitor</div>
         <div class="t-tab" role="tab" draggable="true" data-tab="swap" title="Swap" onclick="handleTabClick(this)" ondragstart="tabDragStart(event)" ondragover="tabDragOver(event)" ondrop="tabDrop(event)" ondragend="tabDragEnd(event)"><span class="t-tab-icon">&#x1F98A;</span>Swap</div>
         <a href="/brain" class="t-tab" role="tab" title="Open Chili Brain" style="text-decoration:none;color:inherit"><span class="t-tab-icon">&#x1F9E0;</span>Brain</a>
       </div>
@@ -2242,6 +2350,7 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
       {% include "trading/_tab_journal.html" %}
       {% include "trading/_tab_stats.html" %}
       {% include "trading/_tab_alerts.html" %}
+      {% include "trading/_tab_monitor.html" %}
       {% include "trading/_tab_swap.html" %}
 
       <!-- Brain (moved to /brain page) -->
@@ -7579,6 +7688,9 @@ function switchTab(el) {
   if (tabName === 'alerts') {
     loadStopPositions();
   }
+  if (tabName === 'monitor') {
+    loadMonitorData(false);
+  }
 }
 
 function switchAiView(view) {
@@ -8487,6 +8599,291 @@ function loadStopPositions() {
     list.innerHTML = html;
   }).catch(function(e) {
     document.getElementById('stop-positions-list').innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Error loading positions</div>';
+  });
+}
+
+/* ── Pattern monitor (active setups) ─────────── */
+window.__monitorPayload = null;
+
+function escHtml(s) {
+  if (s == null || s === undefined) return '';
+  return String(s)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+function _monitorActionClass(act) {
+  if (!act) return 'mon-badge-action-hold';
+  var a = String(act).toLowerCase();
+  if (a === 'tighten_stop') return 'mon-badge-action-tighten_stop';
+  if (a === 'loosen_target') return 'mon-badge-action-loosen_target';
+  if (a === 'exit_now') return 'mon-badge-action-exit_now';
+  return 'mon-badge-action-hold';
+}
+
+function _monitorCardUrgencyClass(s) {
+  var ld = s.latest_decision;
+  if (ld && ld.action === 'exit_now') return 'mon-card-urgent';
+  var h = ld && ld.health_score != null ? Number(ld.health_score) : null;
+  if (h != null && h < 40) return 'mon-card-urgent';
+  if (h != null && h < 70) return 'mon-card-watch';
+  return '';
+}
+
+function _monitorSortSetups(list, mode) {
+  var arr = list.slice();
+  if (mode === 'ticker') {
+    arr.sort(function(a, b) { return String(a.ticker || '').localeCompare(String(b.ticker || '')); });
+    return arr;
+  }
+  if (mode === 'pnl') {
+    arr.sort(function(a, b) {
+      var pa = a.pnl_pct != null ? Number(a.pnl_pct) : -9999;
+      var pb = b.pnl_pct != null ? Number(b.pnl_pct) : -9999;
+      return pb - pa;
+    });
+    return arr;
+  }
+  arr.sort(function(a, b) {
+    var ha = (a.latest_decision && a.latest_decision.health_score != null) ? Number(a.latest_decision.health_score) : 999;
+    var hb = (b.latest_decision && b.latest_decision.health_score != null) ? Number(b.latest_decision.health_score) : 999;
+    return ha - hb;
+  });
+  return arr;
+}
+
+function applyMonitorSort() {
+  if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
+  var mode = (document.getElementById('monitor-sort') || {}).value || 'health';
+  var sorted = _monitorSortSetups(window.__monitorPayload.setups, mode);
+  renderMonitorCards(sorted);
+}
+
+function toggleMonitorCardDetails(tradeId) {
+  var el = document.getElementById('mon-details-' + tradeId);
+  var btn = document.getElementById('mon-expand-' + tradeId);
+  if (!el) return;
+  var open = el.classList.toggle('open');
+  if (btn) btn.textContent = open ? 'Hide details' : 'Details & history';
+}
+
+function renderMonitorCards(setups) {
+  var grid = document.getElementById('monitor-cards');
+  var empty = document.getElementById('monitor-empty');
+  if (!grid) return;
+  if (!setups || !setups.length) {
+    grid.innerHTML = '';
+    if (empty) empty.style.display = 'block';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+  var html = '';
+  setups.forEach(function(s) {
+    var ld = s.latest_decision;
+    var health = ld && ld.health_score != null ? Math.max(0, Math.min(100, Number(ld.health_score))) : null;
+    var hPct = health != null ? health : 0;
+    var delta = ld && ld.health_delta != null ? Number(ld.health_delta) : null;
+    var deltaStr = delta == null ? '' : (delta >= 0 ? '+' + delta.toFixed(1) : delta.toFixed(1));
+    var deltaColor = delta == null ? 'var(--text-muted)' : (delta >= 0 ? '#22c55e' : '#ef4444');
+    var act = ld ? ld.action : '—';
+    var src = ld && ld.decision_source ? ld.decision_source : '—';
+    var when = ld && ld.created_at ? ld.created_at : 'never';
+    var pnlStr = s.pnl_pct != null ? (Number(s.pnl_pct) >= 0 ? '+' : '') + Number(s.pnl_pct).toFixed(2) + '%' : '—';
+    var pnlColor = s.pnl_pct == null ? 'var(--text)' : (Number(s.pnl_pct) >= 0 ? '#22c55e' : '#ef4444');
+    var pat = s.pattern_name ? escHtml(s.pattern_name) : 'Pattern';
+    var tf = s.timeframe ? '<span class="mon-tf-pill">' + escHtml(s.timeframe) + '</span>' : '';
+    var snap = ld && ld.conditions_snapshot ? ld.conditions_snapshot : null;
+    var snapStr = snap ? escHtml(JSON.stringify(snap, null, 2)) : '';
+    var reason = ld && ld.llm_reasoning ? escHtml(ld.llm_reasoning) : '';
+    var cardClass = 'mon-card ' + _monitorCardUrgencyClass(s);
+    html += '<div class="' + cardClass + '">';
+    html += '<div class="mon-card-head">';
+    html += '<div><span class="mon-card-ticker">' + escHtml(s.ticker) + '</span> <span class="mon-dir ' + (s.direction === 'short' ? 'short' : 'long') + '">' + escHtml(s.direction || 'long') + '</span></div>';
+    html += '<div style="font-size:9px;color:var(--text-muted);">#' + s.trade_id + '</div>';
+    html += '</div>';
+    html += '<div class="mon-pattern-line">' + pat + tf + '</div>';
+    html += '<div class="mon-health-row">';
+    html += '<div class="mon-health-bar-wrap"><div class="mon-health-bar" style="width:' + hPct + '%;"></div></div>';
+    html += '<div class="mon-health-num">' + (health != null ? health.toFixed(0) : '—') + '</div>';
+    html += '</div>';
+    if (delta != null) html += '<div style="font-size:10px;color:' + deltaColor + ';">Δ health ' + deltaStr + '</div>';
+    html += '<div class="mon-meta-row">';
+    html += '<div>Entry<b>$' + (s.entry_price != null ? Number(s.entry_price).toFixed(4) : '—') + '</b></div>';
+    html += '<div>Price<b>' + (s.current_price != null ? '$' + Number(s.current_price).toFixed(4) : '—') + '</b></div>';
+    html += '<div>P&amp;L<b style="color:' + pnlColor + '">' + pnlStr + '</b></div>';
+    html += '</div>';
+    html += '<div class="mon-meta-row">';
+    html += '<div>Stop<b style="color:#f87171;">' + (s.stop_loss != null ? '$' + Number(s.stop_loss).toFixed(4) : '—') + '</b></div>';
+    html += '<div>Target<b style="color:#86efac;">' + (s.take_profit != null ? '$' + Number(s.take_profit).toFixed(4) : '—') + '</b></div>';
+    html += '<div>Decisions<b>' + (s.decision_count != null ? s.decision_count : 0) + '</b></div>';
+    html += '</div>';
+    html += '<div class="mon-badges">';
+    html += '<span class="mon-badge ' + _monitorActionClass(act) + '">' + escHtml(act) + '</span>';
+    html += '<span class="mon-badge mon-badge-src">' + escHtml(src) + '</span>';
+    html += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(when) + '</span>';
+    html += '</div>';
+    html += '<div class="mon-card-expand"><button type="button" class="mon-expand-btn" id="mon-expand-' + s.trade_id + '" onclick="toggleMonitorCardDetails(' + s.trade_id + ')">Details &amp; history</button></div>';
+    html += '<div class="mon-card-details" id="mon-details-' + s.trade_id + '">';
+    if (reason) html += '<div class="mon-reason"><b>Reasoning</b><br/>' + reason + '</div>';
+    if (snapStr) html += '<div style="margin-bottom:6px;"><b>Conditions snapshot</b></div><pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:9px;max-height:160px;overflow:auto;">' + snapStr + '</pre>';
+    html += '<div style="margin:8px 0 4px;font-weight:700;">Recent</div><div class="mon-mini-timeline">';
+    (s.recent_decisions || []).forEach(function(rd) {
+      html += '<div class="mon-mini-row">' + escHtml(rd.created_at || '') + ' · ' + escHtml(rd.action || '') + ' · h=' + (rd.health_score != null ? rd.health_score : '—') + '</div>';
+    });
+    html += '</div></div></div>';
+  });
+  grid.innerHTML = html;
+}
+
+function _monitorSetSummaryHealthClass(val) {
+  var el = document.getElementById('mon-sum-health');
+  if (!el || !el.parentElement) return;
+  el.parentElement.className = 'mon-stat';
+  if (val == null || val === '') return;
+  var n = Number(val);
+  if (n >= 70) el.parentElement.classList.add('health-ok');
+  else if (n >= 40) el.parentElement.classList.add('health-warn');
+  else el.parentElement.classList.add('health-bad');
+}
+
+function loadMonitorData(showRefreshFlash) {
+  var runBtn = document.getElementById('monitor-run-btn');
+  if (runBtn) {
+    runBtn.disabled = !!CHILI_TRADING_IS_GUEST;
+    if (CHILI_TRADING_IS_GUEST) runBtn.title = 'Sign in to run the pattern monitor';
+    else runBtn.title = 'Evaluate all monitored positions now';
+  }
+  var grid = document.getElementById('monitor-cards');
+  if (grid && !window.__monitorPayload) {
+    grid.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:16px;text-align:center;">Loading…</div>';
+  }
+  fetch('/api/trading/active-setups').then(function(r) {
+    if (!r.ok) {
+      return r.text().then(function() {
+        return { ok: false, _httpStatus: r.status };
+      });
+    }
+    return r.json();
+  }).then(function(d) {
+    var emptyEl = document.getElementById('monitor-empty');
+    if (!d || !d.ok) {
+      if (emptyEl) emptyEl.style.display = 'none';
+      var msg = 'Failed to load monitor data';
+      if (d && d._httpStatus) msg += ' (HTTP ' + d._httpStatus + ')';
+      if (grid) grid.innerHTML = '<div style="font-size:11px;color:#ef4444;padding:12px;">' + msg + '</div>';
+      return;
+    }
+    window.__monitorPayload = d;
+    var sum = d.summary || {};
+    var cEl = document.getElementById('mon-sum-count');
+    if (cEl) cEl.textContent = sum.active_count != null ? String(sum.active_count) : '0';
+    var hEl = document.getElementById('mon-sum-health');
+    if (hEl) {
+      hEl.textContent = sum.avg_health != null ? Number(sum.avg_health).toFixed(1) : '—';
+      _monitorSetSummaryHealthClass(sum.avg_health != null ? Number(sum.avg_health) : null);
+    }
+    var aEl = document.getElementById('mon-sum-actions');
+    if (aEl) aEl.textContent = sum.actions_today != null ? String(sum.actions_today) : '0';
+    var bEl = document.getElementById('mon-sum-benefit');
+    if (bEl) bEl.textContent = sum.benefit_rate != null ? (Number(sum.benefit_rate) * 100).toFixed(0) + '%' : '—';
+    var lEl = document.getElementById('mon-sum-last');
+    if (lEl) lEl.textContent = sum.last_check ? sum.last_check : '—';
+    var mode = (document.getElementById('monitor-sort') || {}).value || 'health';
+    renderMonitorCards(_monitorSortSetups(d.setups || [], mode));
+    if (emptyEl) emptyEl.style.display = (d.setups && d.setups.length) ? 'none' : 'block';
+    if (showRefreshFlash) {
+      var st = document.getElementById('monitor-status');
+      if (st) {
+        st.style.display = 'block';
+        st.className = 'mon-status ok';
+        st.textContent = 'Refreshed';
+        setTimeout(function() { st.style.display = 'none'; }, 2000);
+      }
+    }
+    loadMonitorDecisionFeed();
+  }).catch(function() {
+    var emptyEl2 = document.getElementById('monitor-empty');
+    if (emptyEl2) emptyEl2.style.display = 'none';
+    if (grid) grid.innerHTML = '<div style="font-size:11px;color:#ef4444;padding:12px;">Error loading monitor</div>';
+  });
+}
+
+function runMonitorNow() {
+  if (CHILI_TRADING_IS_GUEST) return;
+  var st = document.getElementById('monitor-status');
+  if (st) {
+    st.style.display = 'block';
+    st.className = 'mon-status ok';
+    st.textContent = 'Running pattern monitor…';
+  }
+  fetch('/api/trading/active-setups/run', { method: 'POST' }).then(function(r) {
+    if (!r.ok) {
+      return r.text().then(function(body) {
+        try { return JSON.parse(body); } catch (e) { return { ok: false, error: 'HTTP ' + r.status }; }
+      });
+    }
+    return r.json();
+  }).then(function(d) {
+    if (!d.ok) {
+      if (st) {
+        st.className = 'mon-status err';
+        st.textContent = d.error || 'Monitor run failed';
+      }
+      return;
+    }
+    if (st) {
+      st.className = 'mon-status ok';
+      st.textContent = 'Done: evaluated ' + (d.evaluated != null ? d.evaluated : 0) + ', actions ' + (d.actions != null ? d.actions : 0) + ' (' + (d.elapsed_s != null ? d.elapsed_s : '?') + 's)';
+    }
+    loadMonitorData(false);
+  }).catch(function() {
+    if (st) {
+      st.className = 'mon-status err';
+      st.textContent = 'Request failed';
+    }
+  });
+}
+
+function loadMonitorDecisionFeed() {
+  var list = document.getElementById('monitor-feed-list');
+  if (!list) return;
+  var sel = document.getElementById('monitor-feed-action');
+  var act = sel && sel.value ? '&action=' + encodeURIComponent(sel.value) : '';
+  fetch('/api/trading/active-setups/decisions?limit=40' + act).then(function(r) {
+    if (!r.ok) {
+      return { ok: false };
+    }
+    return r.json();
+  }).then(function(d) {
+    if (!d || !d.ok) {
+      list.innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Could not load decision feed</div>';
+      return;
+    }
+    if (!d.decisions || !d.decisions.length) {
+      list.innerHTML = '<div style="font-size:10px;color:var(--text-muted);padding:10px;">No decisions yet.</div>';
+      return;
+    }
+    var html = '';
+    d.decisions.forEach(function(x) {
+      var rowClass = 'mon-feed-row';
+      if (x.action === 'exit_now') rowClass += ' mon-feed-exit';
+      else if (x.action === 'tighten_stop') rowClass += ' mon-feed-tighten';
+      else if (x.action === 'loosen_target') rowClass += ' mon-feed-loosen';
+      var snippet = (x.llm_reasoning || '').slice(0, 220);
+      if ((x.llm_reasoning || '').length > 220) snippet += '…';
+      var stops = '';
+      if (x.old_stop != null || x.new_stop != null) stops = ' stop ' + (x.old_stop != null ? x.old_stop : '—') + '→' + (x.new_stop != null ? x.new_stop : '—');
+      html += '<div class="' + rowClass + '">';
+      html += '<div><div class="mon-feed-ts">' + escHtml(x.created_at || '') + '</div><div class="mon-feed-tk">' + escHtml(x.ticker || '') + '</div></div>';
+      html += '<div><span class="mon-badge ' + _monitorActionClass(x.action) + '">' + escHtml(x.action || '') + '</span></div>';
+      html += '<div class="mon-feed-body">h=' + (x.health_score != null ? x.health_score : '—') + stops + (snippet ? '<br/>' + escHtml(snippet) : '') + '</div>';
+      html += '</div>';
+    });
+    list.innerHTML = html;
+  }).catch(function() {
+    list.innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Error loading feed</div>';
   });
 }
 

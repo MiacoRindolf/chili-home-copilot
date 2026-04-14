@@ -1,0 +1,49 @@
+<!-- Pattern monitor: active alert-linked setups -->
+<div class="t-tab-content" id="tab-monitor">
+  <div class="mon-toolbar">
+    <div class="mon-summary-strip" id="monitor-summary-strip">
+      <div class="mon-stat"><span class="mon-stat-val" id="mon-sum-count">—</span><span class="mon-stat-lbl">Active</span></div>
+      <div class="mon-stat"><span class="mon-stat-val" id="mon-sum-health">—</span><span class="mon-stat-lbl">Avg health</span></div>
+      <div class="mon-stat"><span class="mon-stat-val" id="mon-sum-actions">—</span><span class="mon-stat-lbl">Actions 24h</span></div>
+      <div class="mon-stat"><span class="mon-stat-val" id="mon-sum-benefit">—</span><span class="mon-stat-lbl">Benefit rate</span></div>
+      <div class="mon-stat mon-stat-wide"><span class="mon-stat-val mon-stat-sm" id="mon-sum-last">—</span><span class="mon-stat-lbl">Last check</span></div>
+    </div>
+    <div class="mon-toolbar-actions">
+      <label class="mon-sort-wrap">
+        <span class="mon-sort-lbl">Sort</span>
+        <select id="monitor-sort" class="mon-select" onchange="applyMonitorSort()">
+          <option value="health">Health (needs attention)</option>
+          <option value="pnl">P&amp;L %</option>
+          <option value="ticker">Ticker</option>
+        </select>
+      </label>
+      <button type="button" class="mon-btn mon-btn-secondary" id="monitor-refresh-btn" onclick="loadMonitorData(true)">Refresh</button>
+      <button type="button" class="mon-btn mon-btn-primary" id="monitor-run-btn" onclick="runMonitorNow()">Run monitor now</button>
+    </div>
+  </div>
+  <div id="monitor-status" class="mon-status" style="display:none;"></div>
+  <div id="monitor-cards-wrap" class="mon-cards-wrap">
+    <div id="monitor-cards" class="mon-cards-grid"></div>
+    <div id="monitor-empty" class="mon-empty" style="display:none;">
+      <p class="mon-empty-title">No active pattern-monitored positions</p>
+      <p class="mon-empty-hint">Open trades linked to a breakout alert appear here. The scheduler evaluates pattern health and may suggest stop/target adjustments.</p>
+    </div>
+  </div>
+  <details class="mon-feed-details" id="monitor-feed-details">
+    <summary class="mon-feed-summary">Decision feed <span class="mon-feed-hint">recent pattern monitor evaluations</span></summary>
+    <div class="mon-feed-toolbar">
+      <label class="mon-feed-filter">
+        <span>Action</span>
+        <select id="monitor-feed-action" class="mon-select" onchange="loadMonitorDecisionFeed()">
+          <option value="">All</option>
+          <option value="hold">hold</option>
+          <option value="tighten_stop">tighten_stop</option>
+          <option value="loosen_target">loosen_target</option>
+          <option value="exit_now">exit_now</option>
+        </select>
+      </label>
+      <button type="button" class="mon-btn mon-btn-secondary mon-btn-sm" onclick="loadMonitorDecisionFeed()">Reload feed</button>
+    </div>
+    <div id="monitor-feed-list" class="mon-feed-list"></div>
+  </details>
+</div>
