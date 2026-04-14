@@ -121,6 +121,40 @@ _COMMUNITY_SEED_PATTERNS: list[dict[str, Any]] = [
             ],
         }),
     },
+    {
+        "name": "RSI + Fib 0.382 + FVG Pullback (Tagalog seed)",
+        "description": (
+            "Community seed: bullish pullback continuation. "
+            "HTF RSI must have exceeded 75 (strong trend), LTF RSI > 50 "
+            "(still supportive). Price retraces to Fibonacci 0.382 level of "
+            "the impulse leg. A Fair Value Gap must be present in confluence "
+            "with the Fib zone. Inspired by Filipino trader pullback criteria."
+        ),
+        "origin": "user_seeded",
+        "asset_class": "all",
+        "timeframe": "1h",
+        "score_boost": 2.0,
+        "min_base_score": 4.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "1d:rsi_14", "op": ">", "value": 75},
+                {"indicator": "rsi_14", "op": ">", "value": 50},
+                {"indicator": "fib_382_zone_hit", "op": "==", "value": True},
+                {"indicator": "fvg_fib_confluence", "op": "==", "value": True},
+            ],
+            "meta": {
+                "type": "pullback_continuation",
+                "side": "bullish",
+                "htf": "1d",
+                "ltf": "1h",
+                "fib_target": 0.382,
+                "fib_tolerance_pct": 0.5,
+                "fvg_fib_overlap_tolerance_pct": 0.5,
+                "requires_cross_tf": True,
+                "detector": "rsi_fib_fvg_pullback",
+            },
+        }),
+    },
 ]
 
 

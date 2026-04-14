@@ -710,6 +710,79 @@ def _score_ticker(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, 
     return result
 
 
+def _enrich_snapshot_cross_tf(
+    snap: dict[str, Any],
+    patterns: list,
+    ticker: str,
+    df,
+) -> dict[str, Any]:
+    """Inject cross-TF, Fib, and FVG indicators into *snap* when needed.
+
+    Scans the active patterns for ``meta.requires_cross_tf`` and, when found,
+    fetches HTF indicators and computes structural series from the LTF
+    DataFrame already available in the scorer.
+    """
+    import json as _j
+
+    needs_cross_tf = False
+    htf = "1d"
+    for p in patterns:
+        try:
+            rj = _j.loads(p.rules_json) if isinstance(p.rules_json, str) else (p.rules_json or {})
+            meta = rj.get("meta", {})
+            if meta.get("requires_cross_tf"):
+                needs_cross_tf = True
+                htf = meta.get("htf", "1d")
+                break
+        except Exception:
+            continue
+
+    if not needs_cross_tf:
+        return snap
+
+    try:
+        from .cross_timeframe import fetch_cross_timeframe_evidence, build_cross_tf_snapshot_keys
+        ev = fetch_cross_timeframe_evidence(ticker, htf=htf, ltf="1h")
+        cross_keys = build_cross_tf_snapshot_keys(ev)
+        for k, v in cross_keys.items():
+            if k not in snap:
+                snap[k] = v
+    except Exception:
+        pass
+
+    if df is not None and len(df) > 20:
+        try:
+            from .fibonacci import compute_fib_retracement_series
+            from .fvg import compute_fvg_series, compute_fvg_fib_confluence_series
+
+            high = df["High"]
+            low = df["Low"]
+            close = df["Close"]
+
+            fib = compute_fib_retracement_series(high, low, close, target_level=0.382)
+            for k in ("fib_382_zone_hit", "fib_382_level", "impulse_high", "impulse_low"):
+                arr = fib.get(k)
+                if arr and len(arr) > 0 and arr[-1] is not None:
+                    snap[k] = arr[-1]
+
+            fvg = compute_fvg_series(high, low, close)
+            for k in ("fvg_present", "fvg_high", "fvg_low"):
+                arr = fvg.get(k)
+                if arr and len(arr) > 0 and arr[-1] is not None:
+                    snap[k] = arr[-1]
+
+            fib_level_list = fib.get("fib_382_level", [None] * len(close))
+            conf = compute_fvg_fib_confluence_series(high, low, close, fib_level_list)
+            for k in ("fvg_fib_confluence", "fvg_fib_distance_pct"):
+                arr = conf.get(k)
+                if arr and len(arr) > 0 and arr[-1] is not None:
+                    snap[k] = arr[-1]
+        except Exception:
+            pass
+
+    return snap
+
+
 def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[str, Any] | None:
     """Actual scoring logic (no cache)."""
     try:
@@ -932,6 +1005,7 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
                         },
                     )
+                    _pe_snap = _enrich_snapshot_cross_tf(_pe_snap, _pe_patterns, ticker, df)
                     _pe_matches = evaluate_patterns(_pe_snap, _pe_patterns, current_regime=_regime_label)
                     for m in _pe_matches:
                         if score >= m.get("min_base_score", 0):

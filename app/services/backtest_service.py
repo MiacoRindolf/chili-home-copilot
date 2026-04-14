@@ -1111,6 +1111,41 @@ def _compute_series_for_conditions(
             vcp[i] = contractions
         result["vcp_count"] = vcp
 
+    # -- Fibonacci retracement series (reusable module) ------------------
+    _FIB_NEEDED = {"fib_382_zone_hit", "fib_382_level", "impulse_high", "impulse_low"}
+    if _FIB_NEEDED & needed:
+        try:
+            from app.services.trading.fibonacci import compute_fib_retracement_series
+            fib = compute_fib_retracement_series(high, low, close, target_level=0.382)
+            result.update(fib)
+        except Exception:
+            pass
+
+    # -- FVG series (reusable module) ------------------------------------
+    _FVG_NEEDED = {"fvg_present", "fvg_high", "fvg_low"}
+    if _FVG_NEEDED & needed:
+        try:
+            from app.services.trading.fvg import compute_fvg_series
+            fvg = compute_fvg_series(high, low, close)
+            result.update(fvg)
+        except Exception:
+            pass
+
+    # -- FVG + Fibonacci confluence --------------------------------------
+    if "fvg_fib_confluence" in needed:
+        try:
+            fib_level_list = result.get("fib_382_level")
+            if fib_level_list is None:
+                from app.services.trading.fibonacci import compute_fib_retracement_series
+                fib = compute_fib_retracement_series(high, low, close, target_level=0.382)
+                result.update(fib)
+                fib_level_list = fib.get("fib_382_level", [None] * n)
+            from app.services.trading.fvg import compute_fvg_fib_confluence_series
+            conf = compute_fvg_fib_confluence_series(high, low, close, fib_level_list)
+            result.update(conf)
+        except Exception:
+            pass
+
     return result
 
 

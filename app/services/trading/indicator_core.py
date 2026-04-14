@@ -215,4 +215,40 @@ def compute_all_from_df(
         dist = (res - close) / close.replace(0, np.nan) * 100
         result["dist_to_resistance_pct"] = _safe(dist)
 
+    # ── Fibonacci retracement series (lazy) ────────────────────────────
+    _FIB_KEYS = {"fib_382_zone_hit", "fib_382_level", "impulse_high", "impulse_low"}
+    if not compute_all and _FIB_KEYS & needed:
+        try:
+            from .fibonacci import compute_fib_retracement_series
+            fib = compute_fib_retracement_series(high, low, close, target_level=0.382)
+            result.update(fib)
+        except Exception:
+            logger.debug("[indicator_core] Fibonacci series computation failed", exc_info=True)
+
+    # ── FVG series (lazy) ──────────────────────────────────────────────
+    _FVG_KEYS = {"fvg_present", "fvg_high", "fvg_low"}
+    if not compute_all and _FVG_KEYS & needed:
+        try:
+            from .fvg import compute_fvg_series
+            fvg = compute_fvg_series(high, low, close)
+            result.update(fvg)
+        except Exception:
+            logger.debug("[indicator_core] FVG series computation failed", exc_info=True)
+
+    # ── FVG + Fibonacci confluence (lazy, requires fib series) ─────────
+    if not compute_all and "fvg_fib_confluence" in needed:
+        try:
+            fib_level_list = result.get("fib_382_level")
+            if fib_level_list is None:
+                from .fibonacci import compute_fib_retracement_series
+                fib = compute_fib_retracement_series(high, low, close, target_level=0.382)
+                result.update(fib)
+                fib_level_list = fib.get("fib_382_level", [None] * n)
+
+            from .fvg import compute_fvg_fib_confluence_series
+            conf = compute_fvg_fib_confluence_series(high, low, close, fib_level_list)
+            result.update(conf)
+        except Exception:
+            logger.debug("[indicator_core] FVG-Fib confluence computation failed", exc_info=True)
+
     return result
