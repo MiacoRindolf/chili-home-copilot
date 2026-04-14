@@ -12,6 +12,17 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from .alert_formatter import (
+    format_breakout,
+    format_legacy_stop_hit,
+    format_legacy_target_hit,
+    format_order_blocked,
+    format_order_failed,
+    format_order_filled,
+    format_order_placed,
+    format_strategy_proposed,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Throttle / dedup / quality tracking ───────────────────────────────
@@ -623,17 +634,11 @@ def generate_strategy_proposals(
         db.add(proposal)
         db.flush()
 
-        # Send SMS about the new proposal
-        _cr = ticker.endswith("-USD")
-        price_fmt = f"${price:,.6f}" if _cr and price < 1 else f"${price:,.2f}"
-        _dur_part = f" | Est. Hold {duration_label}" if duration_label else ""
-        sms_msg = (
-            f"CHILI {trade_type_label}: BUY {ticker} @ {price_fmt} | "
-            f"Stop ${stop:,.2f} | Target ${target:,.2f} | "
-            f"R:R {rr_ratio:.1f}:1 | "
-            f"+{projected_profit_pct:.1f}% profit | "
-            f"Conf {confidence:.0f}%{_dur_part} | "
-            f"Review in app"
+        sms_msg = format_strategy_proposed(
+            ticker, price, stop, target, rr_ratio,
+            projected_profit_pct, confidence,
+            trade_type_label=trade_type_label,
+            duration_label=duration_label or "",
         )
         dispatch_alert(
             db, user_id, STRATEGY_PROPOSED, ticker, sms_msg,
@@ -1132,20 +1137,18 @@ def _check_open_positions(db: Session, user_id: int | None) -> dict[str, int]:
 
                 if price >= target:
                     pnl_pct = round((price - trade.entry_price) / trade.entry_price * 100, 2)
-                    msg = (
-                        f"TARGET HIT{_tt_label}: {trade.ticker} reached ${price:,.2f} "
-                        f"(target ${target:,.2f}) | +{pnl_pct:.1f}% | "
-                        f"Consider taking profits"
+                    msg = format_legacy_target_hit(
+                        trade.ticker, price, target, pnl_pct,
+                        trade_type_label=_tt_label.strip(" []"),
                     )
                     dispatch_alert(db, user_id, TARGET_HIT, trade.ticker, msg, trade_type=_tt_type)
                     targets_hit += 1
 
                 elif price <= stop:
                     pnl_pct = round((price - trade.entry_price) / trade.entry_price * 100, 2)
-                    msg = (
-                        f"STOP HIT{_tt_label}: {trade.ticker} dropped to ${price:,.2f} "
-                        f"(stop ${stop:,.2f}) | {pnl_pct:.1f}% | "
-                        f"Consider cutting losses"
+                    msg = format_legacy_stop_hit(
+                        trade.ticker, price, stop, pnl_pct,
+                        trade_type_label=_tt_label.strip(" []"),
                     )
                     dispatch_alert(db, user_id, STOP_HIT, trade.ticker, msg, trade_type=_tt_type)
                     _expire_proposals_on_stop(db, user_id, trade.ticker)
@@ -1231,10 +1234,11 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
                         _l2_note += f" | wide spread {_mf.spread_bps:.0f}bps"
                 except Exception:
                     pass
-                msg = (
-                    f"BREAKOUT: {scan.ticker} broke ${resistance:,.2f} "
-                    f"now at ${price:,.2f} | Score {scan.score:.1f}/10{_dur}{_l2_note} | "
-                    f"{scan.rationale[:60] if scan.rationale else ''}"
+                msg = format_breakout(
+                    scan.ticker, price, resistance, scan.score,
+                    rationale=scan.rationale or "",
+                    dur_label=_dur.strip(" |"),
+                    l2_note=_l2_note.strip(" |"),
                 )
                 dispatch_alert(
                     db, user_id, BREAKOUT_TRIGGERED, scan.ticker, msg,
@@ -1356,7 +1360,7 @@ def _execute_proposal(
             risk_capital = 100000.0
         allowed, reason = check_new_trade_allowed(db, user_id, ticker, capital=risk_capital)
         if not allowed:
-            msg = f"ORDER BLOCKED: {ticker} — {reason}"
+            msg = format_order_blocked(ticker, reason)
             dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
             return {"status": "blocked", "error": reason}
     except Exception:
@@ -1579,22 +1583,22 @@ def _execute_proposal(
 
             broker_label = used_broker.title()
             if is_already_filled:
-                msg = (
-                    f"ORDER FILLED: BUY {quantity} {ticker} @ ${trade.entry_price:,.2f} "
-                    f"via {broker_label} | Proposal #{proposal.id}"
+                msg = format_order_filled(
+                    ticker, quantity, trade.entry_price,
+                    broker_label, proposal_id=proposal.id,
                 )
                 dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
                 return {"status": "executed", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
             else:
-                msg = (
-                    f"ORDER PLACED: BUY {quantity} {ticker} @ ${proposal.entry_price:,.2f} "
-                    f"(limit, waiting for fill) via {broker_label} | Proposal #{proposal.id}"
+                msg = format_order_placed(
+                    ticker, quantity, proposal.entry_price,
+                    broker_label, proposal_id=proposal.id,
                 )
                 dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
                 return {"status": "working", "order_id": result.get("order_id"), "trade_id": trade.id, "broker": used_broker}
         else:
             error = result.get("error", "Unknown error")
-            msg = f"ORDER FAILED: {ticker} — {error}"
+            msg = format_order_failed(ticker, error)
             dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
             return {"status": "failed", "error": error}
 

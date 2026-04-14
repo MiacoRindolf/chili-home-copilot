@@ -16,6 +16,7 @@ from zoneinfo import ZoneInfo
 
 from ...config import settings
 from ...models.trading import AlertHistory, BreakoutAlert, ScanPattern, ScanResult
+from .alert_formatter import format_pattern_imminent
 from .alerts import PATTERN_BREAKOUT_IMMINENT, dispatch_alert
 from .market_data import DEFAULT_CRYPTO_TICKERS, DEFAULT_SCAN_TICKERS, fetch_ohlcv_df, is_crypto
 from .opportunity_scoring import (
@@ -696,15 +697,20 @@ def run_pattern_imminent_scan(
         hold_line = c.get("duration_estimate") or c.get("hold_label") or ""
         sigs = "; ".join((sc.get("signals") or [])[:4])
 
-        msg = (
-            f"IMMINENT PATTERN: {pat.name} (#{pat.id})\n"
-            f"{ticker} @ ${sc.get('price')} | readiness {c['readiness']:.0%} | score {c['composite']:.2f}\n"
-            f"Est. Time to Breakout: {eta_txt} (heuristic)\n"
-            f"Est. Hold after entry: {hold_line}\n"
-            f"Entry ${sc.get('entry_price')} | Stop ${sc.get('stop_loss')} | "
-            f"Target ${sc.get('take_profit')}\n"
-            + (f"{desc}\n" if desc else "")
-            + (f"{sigs}" if sigs else "")
+        msg = format_pattern_imminent(
+            ticker=ticker,
+            pattern_name=pat.name,
+            pattern_id=pat.id,
+            price=sc.get("price"),
+            readiness=c["readiness"],
+            composite_score=c["composite"],
+            eta_txt=eta_txt,
+            hold_line=hold_line,
+            entry_price=sc.get("entry_price"),
+            stop_loss=sc.get("stop_loss"),
+            take_profit=sc.get("take_profit"),
+            description=desc,
+            signals=sigs,
         )
 
         delivered = do_dry

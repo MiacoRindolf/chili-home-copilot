@@ -734,12 +734,13 @@ def api_test_alert(request: Request, db: Session = Depends(get_db)):
     """Send a test SMS alert to verify the notification setup."""
     ctx = get_identity_ctx(request, db)
     from ..services.sms_service import send_sms, get_sms_status
+    from ..services.trading.alert_formatter import format_test_alert
 
     sms_status = get_sms_status()
     if not sms_status["configured"]:
         return JSONResponse({"ok": False, "error": "SMS not configured. Set SMS_PHONE and SMS_CARRIER (or Twilio) in .env"})
 
-    msg = "CHILI Test Alert: SMS notifications are working! You'll receive alerts for breakouts, targets, stops, and strategy proposals."
+    msg = format_test_alert()
     sent = send_sms(msg)
 
     if sent:

@@ -16,6 +16,12 @@ from apscheduler.triggers.interval import IntervalTrigger
 from apscheduler.triggers.cron import CronTrigger
 from sqlalchemy import func
 
+from .trading.alert_formatter import (
+    format_crypto_breakout,
+    format_momentum,
+    format_stock_breakout,
+)
+
 logger = logging.getLogger(__name__)
 
 _scheduler: BackgroundScheduler | None = None
@@ -813,19 +819,20 @@ def _run_crypto_breakout_job():
                 setup.get("signals", []), _hold_est,
                 setup, is_crypto=True,
             )
-            msg = (
-                f"{_tc['label']}: {ticker}\n"
-                f"Score {setup['score']}/10 | ${setup['price']} "
-                f"({setup.get('change_24h', 0):+.1f}% 24h)\n"
-                f"RVOL {setup.get('rvol', 0):.1f}x | "
-                f"EMA: {setup.get('ema_alignment', 'n/a').replace('_', ' ')}\n"
-                + (f"{flag_line}\n" if flag_line else "")
-                + f"Entry ${setup.get('entry_price')} | "
-                f"Stop ${setup.get('stop_loss')} | "
-                f"Target ${setup.get('take_profit')}\n"
-                + (f"Est. Hold: {_tc['duration']}\n" if _tc['duration'] else "")
-                + f"{sig_text}"
-                + "\nSource: crypto breakout scan (heuristic; not a Brain ScanPattern)."
+            msg = format_crypto_breakout(
+                ticker=ticker,
+                trade_label=_tc["label"],
+                score=setup["score"],
+                price=setup["price"],
+                change_24h=setup.get("change_24h", 0),
+                rvol=setup.get("rvol", 0),
+                ema_alignment=setup.get("ema_alignment", "n/a"),
+                flag_line=flag_line,
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                take_profit=setup.get("take_profit"),
+                duration=_tc["duration"] or "",
+                sig_text=sig_text,
             )
 
             dispatch_alert(
@@ -994,17 +1001,18 @@ def _run_stock_breakout_job():
                 setup.get("signals", []), _hold_est,
                 setup, is_crypto=False,
             )
-            msg = (
-                f"{_tc['label']}: {ticker}\n"
-                f"Score {setup['score']}/10 | ${setup['price']}\n"
-                f"Dist to breakout: {setup.get('dist_to_breakout', 0):.1f}%\n"
-                + (f"{flag_line}\n" if flag_line else "")
-                + f"Entry ${setup.get('entry_price')} | "
-                f"Stop ${setup.get('stop_loss')} | "
-                f"Target ${setup.get('take_profit')}\n"
-                + (f"Est. Hold: {_tc['duration']}\n" if _tc['duration'] else "")
-                + f"{sig_text}"
-                + "\nSource: stock breakout scan (heuristic; not a Brain ScanPattern)."
+            msg = format_stock_breakout(
+                ticker=ticker,
+                trade_label=_tc["label"],
+                score=setup["score"],
+                price=setup["price"],
+                dist_to_breakout=setup.get("dist_to_breakout", 0),
+                flag_line=flag_line,
+                entry_price=setup.get("entry_price"),
+                stop_loss=setup.get("stop_loss"),
+                take_profit=setup.get("take_profit"),
+                duration=_tc["duration"] or "",
+                sig_text=sig_text,
             )
 
             dispatch_alert(
@@ -1104,14 +1112,15 @@ def _run_momentum_scanner_job():
                 _tc = classify_trade_type(
                     setup.get("signals", []), _hold_est, setup,
                 )
-                _dur_part = f" | ETA {_tc['duration']}" if _tc["duration"] else ""
-                msg = (
-                    f"MOMENTUM {_tc['label']}: {setup['ticker']} "
-                    f"Score {setup['score']}/10 | "
-                    f"${setup['price']} | "
-                    f"Vol {setup.get('vol_ratio', 0):.1f}x | "
-                    f"R:R {setup.get('risk_reward', 0):.1f}{_dur_part} | "
-                    f"{', '.join(setup.get('signals', [])[:3])}"
+                msg = format_momentum(
+                    ticker=setup["ticker"],
+                    trade_label=_tc["label"],
+                    score=setup["score"],
+                    price=setup["price"],
+                    vol_ratio=setup.get("vol_ratio", 0),
+                    risk_reward=setup.get("risk_reward", 0),
+                    duration=_tc["duration"] or "",
+                    signals=", ".join(setup.get("signals", [])[:3]),
                 )
                 dispatch_alert(
                     ticker=setup["ticker"],

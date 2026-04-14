@@ -22,6 +22,15 @@ from typing import Any, Optional
 
 from sqlalchemy.orm import Session
 
+from .alert_formatter import (
+    format_breakeven,
+    format_stop_approaching,
+    format_stop_hit,
+    format_stop_tightened,
+    format_target_hit,
+    format_time_exit,
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -828,42 +837,36 @@ def dispatch_stop_alerts(
         strategy_tag = brain.get("pattern") or alert.get("model", "")
         lifecycle_tag = brain.get("lifecycle", "")
 
-        ctx_line = ""
-        if strategy_tag or lifecycle_tag:
-            parts = []
-            if strategy_tag:
-                parts.append(f"strategy: {strategy_tag}")
-            if lifecycle_tag:
-                parts.append(f"lifecycle: {lifecycle_tag}")
-            parts.append(f"regime: {regime}")
-            ctx_line = f" [{', '.join(parts)}]"
+        _fmt_kw = dict(
+            strategy_tag=strategy_tag, lifecycle_tag=lifecycle_tag, regime=regime,
+        )
 
         if event == "STOP_HIT" or event == "TIME_EXIT":
-            label = "STOP HIT" if event == "STOP_HIT" else "TIME EXIT"
-            msg = f"{label}: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
+            _fmt = format_time_exit if event == "TIME_EXIT" else format_stop_hit
+            msg = _fmt(ticker, price, reason, **_fmt_kw)
             dispatch_alert(db, user_id, STOP_HIT, ticker, msg, skip_throttle=True)
             dispatched += 1
             _try_auto_execute_stop(db, user_id, alert)
 
         elif event == "TARGET_HIT":
-            msg = f"TARGET HIT: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
+            msg = format_target_hit(ticker, price, reason, **_fmt_kw)
             dispatch_alert(db, user_id, TARGET_HIT, ticker, msg)
             dispatched += 1
 
         elif event == "STOP_APPROACHING":
-            msg = f"STOP APPROACHING: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
+            msg = format_stop_approaching(ticker, price, reason, **_fmt_kw)
             dispatch_alert(db, user_id, STOP_APPROACHING, ticker, msg)
             dispatched += 1
 
         elif event == "BREAKEVEN_REACHED":
-            msg = f"BREAKEVEN: {ticker} stop moved to entry{ctx_line} — {reason}"
+            msg = format_breakeven(ticker, reason, **_fmt_kw)
             dispatch_alert(db, user_id, BREAKEVEN_REACHED, ticker, msg, skip_throttle=True)
             dispatched += 1
 
         elif event == "STOP_TIGHTENED":
             old_s = alert.get("old_stop")
             new_s = alert.get("new_stop")
-            msg = f"STOP TIGHTENED: {ticker} ${old_s:,.2f}->${new_s:,.2f}{ctx_line} — {reason}"
+            msg = format_stop_tightened(ticker, old_s, new_s, reason, **_fmt_kw)
             dispatch_alert(db, user_id, STOP_TIGHTENED, ticker, msg, skip_throttle=True)
             dispatched += 1
 
