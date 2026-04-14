@@ -86,6 +86,7 @@ _ALLOWED_TRANSITIONS: frozenset[tuple[str, str]] = frozenset(
         (STATE_BAILOUT, STATE_EXITED),
         (STATE_EXITED, STATE_COOLDOWN),
         (STATE_COOLDOWN, STATE_FINISHED),
+        (STATE_COOLDOWN, STATE_WATCHING),  # recycle: loop back for next trade
         # Risk / operator
         (STATE_WATCHING, STATE_ERROR),
         (STATE_ENTRY_CANDIDATE, STATE_ERROR),

@@ -895,9 +895,14 @@ def tick_live_session(
         except Exception:
             until = _utcnow()
         if _utcnow() >= until:
-            sess.ended_at = _utcnow()
-            _safe_transition(db, sess, STATE_LIVE_FINISHED)
-            _emit(db, sess, "live_finished", {"realized_pnl_usd": le.get("realized_pnl_usd")})
+            le.pop("cooldown_until_utc", None)
+            le["trade_cycles"] = int(le.get("trade_cycles") or 0) + 1
+            _commit_le(sess, le)
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            _emit(db, sess, "live_recycled", {
+                "realized_pnl_usd": le.get("realized_pnl_usd"),
+                "trade_cycles": le["trade_cycles"],
+            })
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 

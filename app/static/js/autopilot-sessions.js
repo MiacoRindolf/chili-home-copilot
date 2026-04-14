@@ -316,6 +316,24 @@
     }).sort(function(a, b) { return a.time - b.time; });
   }
 
+  function _fmtPrice(p) {
+    var n = Number(p);
+    if (!isFinite(n)) return '';
+    return n < 1 ? n.toPrecision(4) : n.toFixed(2);
+  }
+
+  function _friendlyLabel(fill) {
+    var isEnter = String(fill.action || '').indexOf('enter') === 0;
+    var px = _fmtPrice(fill.price);
+    if (isEnter) return 'BUY ' + px;
+    var reason = String(fill.reason || '').replace(/_/g, ' ');
+    var pnl = '';
+    if (fill.pnl_usd != null && isFinite(Number(fill.pnl_usd))) {
+      pnl = ' | ' + (Number(fill.pnl_usd) >= 0 ? '+' : '') + Number(fill.pnl_usd).toFixed(2);
+    }
+    return 'SELL ' + px + (reason ? ' (' + reason + ')' : '') + pnl;
+  }
+
   function _buildFillMarkers(fills) {
     return (fills || []).map(function(fill) {
       var timeVal = Date.parse(fill.ts || '');
@@ -324,11 +342,41 @@
       return {
         time: Math.floor(timeVal / 1000),
         position: isEnter ? 'belowBar' : 'aboveBar',
-        color: isEnter ? '#22c55e' : '#ef4444',
+        color: isEnter ? '#facc15' : '#f97316',
         shape: isEnter ? 'arrowUp' : 'arrowDown',
-        text: fill.reason || fill.action || 'fill'
+        text: _friendlyLabel(fill)
       };
     }).filter(Boolean).sort(function(a, b) { return a.time - b.time; });
+  }
+
+  function _addPriceLines(series, fills) {
+    var lastEntry = null;
+    (fills || []).forEach(function(f) {
+      if (String(f.action || '').indexOf('enter') === 0) lastEntry = f;
+    });
+    if (!lastEntry) return;
+    var mj = lastEntry.marker_json || {};
+    if (mj.entry && isFinite(Number(mj.entry))) {
+      series.createPriceLine({
+        price: Number(mj.entry), color: '#facc15', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dashed,
+        axisLabelVisible: true, title: 'Entry'
+      });
+    }
+    if (mj.stop && isFinite(Number(mj.stop))) {
+      series.createPriceLine({
+        price: Number(mj.stop), color: '#ef4444', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true, title: 'Stop'
+      });
+    }
+    if (mj.target && isFinite(Number(mj.target))) {
+      series.createPriceLine({
+        price: Number(mj.target), color: '#22c55e', lineWidth: 1,
+        lineStyle: LightweightCharts.LineStyle.Dotted,
+        axisLabelVisible: true, title: 'Target'
+      });
+    }
   }
 
   // ── WebSocket streaming for real-time chart updates ──────────────
@@ -453,6 +501,7 @@
         series.setData(points);
         var markers = _buildFillMarkers(fills);
         if (typeof series.setMarkers === 'function') series.setMarkers(markers);
+        _addPriceLines(series, fills);
         chart.timeScale().fitContent();
         var lastPt = points[points.length - 1];
         state.charts[sessionId] = {

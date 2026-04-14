@@ -875,9 +875,14 @@ def tick_paper_session(
         except Exception:
             until = _utcnow()
         if _utcnow() >= until:
-            sess.ended_at = _utcnow()
-            _safe_transition(db, sess, STATE_FINISHED)
-            _emit(db, sess, "paper_finished", {"realized_pnl_usd": pe.get("realized_pnl_usd")})
+            pe.pop("cooldown_until_utc", None)
+            pe["trade_cycles"] = int(pe.get("trade_cycles") or 0) + 1
+            _commit_pe(sess, pe)
+            _safe_transition(db, sess, STATE_WATCHING)
+            _emit(db, sess, "paper_recycled", {
+                "realized_pnl_usd": pe.get("realized_pnl_usd"),
+                "trade_cycles": pe["trade_cycles"],
+            })
         _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
