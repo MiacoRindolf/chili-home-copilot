@@ -403,19 +403,39 @@
     return 'SELL ' + px + (reason ? ' (' + reason + ')' : '') + pnl;
   }
 
+  function _fillUtcSec(tsStr) {
+    if (!tsStr) return NaN;
+    var s = String(tsStr);
+    if (s.indexOf('Z') < 0 && s.indexOf('+') < 0 && !/\d{2}-\d{2}:\d{2}$/.test(s)) {
+      s = s.replace(' ', 'T') + 'Z';
+    }
+    return Math.floor(Date.parse(s) / 1000);
+  }
+
+  function _fillMinuteSec(tsStr) {
+    var sec = _fillUtcSec(tsStr);
+    return isFinite(sec) ? Math.floor(sec / 60) * 60 : NaN;
+  }
+
+  function _sortFillsAsc(fills) {
+    return (fills || []).slice().sort(function(a, b) {
+      return _fillUtcSec(a.ts) - _fillUtcSec(b.ts);
+    });
+  }
+
   function _buildFillMarkers(fills) {
-    return (fills || []).map(function(fill) {
-      var timeVal = Date.parse(fill.ts || '');
-      if (!isFinite(timeVal) || !isFinite(Number(fill.price))) return null;
+    return _sortFillsAsc(fills).map(function(fill) {
+      var t = _fillMinuteSec(fill.ts);
+      if (!isFinite(t) || !isFinite(Number(fill.price))) return null;
       var isEnter = String(fill.action || '').indexOf('enter') === 0;
       return {
-        time: Math.floor(timeVal / 1000),
+        time: t,
         position: isEnter ? 'belowBar' : 'aboveBar',
         color: isEnter ? '#facc15' : '#f97316',
         shape: isEnter ? 'arrowUp' : 'arrowDown',
         text: _friendlyLabel(fill)
       };
-    }).filter(Boolean).sort(function(a, b) { return a.time - b.time; });
+    }).filter(Boolean);
   }
 
   function _addLevelSegments(chartState, fills) {
@@ -423,18 +443,18 @@
     var pairs = _pairFills(fills);
     pairs.forEach(function(pair) {
       var mj = pair.entry.marker_json || {};
-      var t0 = Math.floor(Date.parse(pair.entry.ts || '') / 1000);
-      var t1 = pair.exit ? Math.floor(Date.parse(pair.exit.ts || '') / 1000) : null;
+      var t0 = _fillMinuteSec(pair.entry.ts);
+      var t1 = pair.exit ? _fillMinuteSec(pair.exit.ts) : NaN;
       if (!isFinite(t0)) return;
-      if (!t1 || !isFinite(t1)) {
+      if (!isFinite(t1)) {
         var lb = chartState.lastBar;
         t1 = lb ? lb.time : t0 + 3600;
       }
       if (t1 <= t0) t1 = t0 + 60;
       var levels = [
-        { price: mj.entry, color: '#facc15', style: LightweightCharts.LineStyle.Dashed },
-        { price: mj.stop,  color: '#ef4444', style: LightweightCharts.LineStyle.Dotted },
-        { price: mj.target, color: '#22c55e', style: LightweightCharts.LineStyle.Dotted }
+        { price: mj.entry, color: '#facc15', style: LightweightCharts.LineStyle.Dashed, label: 'Entry' },
+        { price: mj.stop,  color: '#ef4444', style: LightweightCharts.LineStyle.Dotted, label: 'Stop' },
+        { price: mj.target, color: '#22c55e', style: LightweightCharts.LineStyle.Dotted, label: 'Target' }
       ];
       levels.forEach(function(lv) {
         var px = Number(lv.price);
@@ -458,9 +478,10 @@
   }
 
   function _pairFills(fills) {
+    var sorted = _sortFillsAsc(fills);
     var pairs = [];
     var pending = null;
-    (fills || []).forEach(function(f) {
+    sorted.forEach(function(f) {
       if (String(f.action || '').indexOf('enter') === 0) {
         if (pending) pairs.push(pending);
         pending = { entry: f, exit: null };
