@@ -6219,6 +6219,28 @@ def _migration_116_trade_type_column(conn) -> None:
     conn.commit()
 
 
+def _migration_119_broker_sessions_table(conn) -> None:
+    """Create broker_sessions table for storing API session tokens in PostgreSQL."""
+    tables = _tables(conn)
+    if "broker_sessions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE broker_sessions (
+                id SERIAL PRIMARY KEY,
+                broker VARCHAR NOT NULL,
+                username VARCHAR NOT NULL,
+                token_data JSONB NOT NULL,
+                device_token VARCHAR,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                CONSTRAINT uq_broker_session UNIQUE (broker, username)
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_broker_sessions_broker ON broker_sessions (broker)"
+        ))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6339,6 +6361,7 @@ MIGRATIONS = [
     ("116_trade_type_column", _migration_116_trade_type_column),
     ("117_pattern_position_monitor", _migration_117_pattern_position_monitor),
     ("118_dynamic_trade_plan_monitor", _migration_118_dynamic_trade_plan_monitor),
+    ("119_broker_sessions_table", _migration_119_broker_sessions_table),
 ]
 
 

@@ -1,6 +1,6 @@
 """SQLAlchemy models. Re-export all for backward compatibility: from app.models import User, Chore, ..."""
 
-from .core import BrainWorkerControl, BrokerCredential, Device, PairCode, User
+from .core import BrainWorkerControl, BrokerCredential, BrokerSession, Device, PairCode, User
 from .projects import Project, ProjectFile
 from .chat import ChatLog, ChatMessage, Conversation
 from .household import ActivityLog, Birthday, Chore, HousemateProfile, UserMemory, UserStatus
@@ -124,6 +124,7 @@ __all__ = [
     "Device",
     "PairCode",
     "BrokerCredential",
+    "BrokerSession",
     "BrainWorkerControl",
     "Project",
     "ProjectFile",

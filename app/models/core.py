@@ -1,5 +1,6 @@
-"""Core identity: User, Device, PairCode, BrokerCredential."""
+"""Core identity: User, Device, PairCode, BrokerCredential, BrokerSession."""
 from sqlalchemy import Column, Integer, String, Boolean, DateTime, Text, ForeignKey, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -48,6 +49,22 @@ class BrokerCredential(Base):
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     broker = Column(String, nullable=False)
     encrypted_data = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class BrokerSession(Base):
+    """Stores broker API session tokens in PostgreSQL so all containers
+    (web, scheduler-worker, brain-worker) share a single session."""
+
+    __tablename__ = "broker_sessions"
+    __table_args__ = (UniqueConstraint("broker", "username", name="uq_broker_session"),)
+
+    id = Column(Integer, primary_key=True)
+    broker = Column(String, nullable=False, index=True)
+    username = Column(String, nullable=False)
+    token_data = Column(JSONB, nullable=False)
+    device_token = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

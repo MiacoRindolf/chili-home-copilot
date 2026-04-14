@@ -53,6 +53,64 @@ _CHALLENGE_POLL_TIMEOUT = int(getattr(settings, "broker_challenge_poll_timeout",
 _RECONCILE_CONFIRM_WINDOW = int(getattr(settings, "broker_reconcile_confirm_seconds", 300))
 
 
+# ── DB-backed session token storage ──────────────────────────────────────
+
+def _save_session_to_db(broker: str, username: str, token_data: dict, device_token: str | None = None) -> None:
+    """Persist a broker session token to PostgreSQL (upsert)."""
+    try:
+        from ..db import SessionLocal
+        from ..models.core import BrokerSession
+        db = SessionLocal()
+        try:
+            existing = (
+                db.query(BrokerSession)
+                .filter(BrokerSession.broker == broker, BrokerSession.username == username)
+                .first()
+            )
+            if existing:
+                existing.token_data = token_data
+                existing.device_token = device_token
+                existing.updated_at = datetime.utcnow()
+            else:
+                db.add(BrokerSession(
+                    broker=broker,
+                    username=username,
+                    token_data=token_data,
+                    device_token=device_token,
+                ))
+            db.commit()
+            logger.info("[broker] Session token persisted to DB for %s/%s", broker, username)
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning("[broker] Failed to persist session to DB: %s", e)
+
+
+def _load_session_from_db(broker: str, username: str) -> dict | None:
+    """Load a stored broker session token from PostgreSQL."""
+    try:
+        from ..db import SessionLocal
+        from ..models.core import BrokerSession
+        db = SessionLocal()
+        try:
+            row = (
+                db.query(BrokerSession)
+                .filter(BrokerSession.broker == broker, BrokerSession.username == username)
+                .first()
+            )
+            if row and row.token_data:
+                data = dict(row.token_data)
+                if row.device_token:
+                    data["device_token"] = row.device_token
+                return data
+            return None
+        finally:
+            db.close()
+    except Exception as e:
+        logger.debug("[broker] Failed to load session from DB: %s", e)
+        return None
+
+
 def _cache_get(key: str) -> Any | None:
     entry = _cache.get(key)
     if entry and (time.time() - entry[0]) < _CACHE_TTL:
@@ -76,12 +134,11 @@ def _has_totp() -> bool:
 
 def login(force: bool = False) -> bool:
     """Auto-login with TOTP, or check if an active session exists."""
-    global _logged_in, _last_login
+    global _logged_in, _last_login, _session_connected_at
 
     if not _rh_available or not _credentials_configured():
         return False
 
-    # If session still valid, reuse it
     if _logged_in and not force and (time.time() - _last_login) < _LOGIN_TTL:
         return True
 
@@ -92,20 +149,35 @@ def login(force: bool = False) -> bool:
         if _logged_in and not force and (time.time() - _last_login) < _LOGIN_TTL:
             return True
 
+        # Try DB session first (avoids rate-limited TOTP re-auth)
+        if not force and _try_load_db_session():
+            logger.info("[broker] TOTP login skipped — valid session loaded from DB")
+            return True
+
         try:
             import pyotp
             import robin_stocks.robinhood as rh
 
             totp = pyotp.TOTP(settings.robinhood_totp_secret)
-            rh.login(
+            result = rh.login(
                 settings.robinhood_username,
                 settings.robinhood_password,
                 mfa_code=totp.now(),
-                store_session=True,
+                store_session=False,
             )
+            if not result or not isinstance(result, dict) or not result.get("access_token"):
+                logger.warning("[broker] TOTP login returned no access token")
+                return False
+
             _logged_in = True
             _last_login = time.time()
             _session_connected_at = _last_login
+            _save_session_to_db(
+                broker="robinhood",
+                username=settings.robinhood_username or "default",
+                token_data=result,
+                device_token=result.get("device_token"),
+            )
             logger.info("[broker] Robinhood login successful (TOTP)")
             return True
         except Exception as e:
@@ -131,10 +203,10 @@ def try_restore_session() -> bool:
         if _logged_in:
             return True
 
-        # First attempt: load the stored pickle directly and validate
+        # First attempt: load the stored session from PostgreSQL and validate
         # without calling rh.login() (which triggers a full auth flow and
         # can hit Robinhood's rate limits).
-        if _try_load_pickle_session():
+        if _try_load_db_session():
             return True
 
         # Fallback: full TOTP login (only if TOTP is configured)
@@ -148,16 +220,15 @@ def try_restore_session() -> bool:
                     settings.robinhood_username,
                     settings.robinhood_password,
                     mfa_code=totp.now(),
-                    store_session=True,
+                    store_session=False,
                 )
             else:
                 result = rh.login(
                     settings.robinhood_username,
                     settings.robinhood_password,
-                    store_session=True,
+                    store_session=False,
                 )
 
-            # robin_stocks doesn't raise on failed login — verify result.
             if not result or not isinstance(result, dict) or not result.get("access_token"):
                 logger.warning("[broker] Robinhood login returned no access token")
                 return False
@@ -165,22 +236,24 @@ def try_restore_session() -> bool:
             _logged_in = True
             _last_login = time.time()
             _session_connected_at = _last_login
+            _save_session_to_db(
+                broker="robinhood",
+                username=settings.robinhood_username or "default",
+                token_data=result,
+                device_token=result.get("device_token"),
+            )
             logger.info("[broker] Robinhood session established via TOTP login")
             return True
         except Exception as e:
-            logger.info(f"[broker] No saved Robinhood session to restore: {e}")
+            logger.info("[broker] No saved Robinhood session to restore: %s", e)
             return False
 
 
-def _try_load_pickle_session() -> bool:
-    """Load a stored robin_stocks pickle and validate it with a lightweight
-    API call.  Sets module login state on success.  Returns False if no
-    pickle or if the stored token is stale."""
+def _try_load_db_session() -> bool:
+    """Load a stored session from PostgreSQL and validate with a lightweight
+    API call.  Sets module login state on success."""
     global _logged_in, _last_login, _session_connected_at
     try:
-        import pickle
-        from pathlib import Path
-        import robin_stocks.robinhood as rh
         from robin_stocks.robinhood.helper import (
             set_login_state,
             update_session,
@@ -188,24 +261,26 @@ def _try_load_pickle_session() -> bool:
         )
         from robin_stocks.robinhood.urls import positions_url
 
-        pickle_path = Path.home() / ".tokens" / "robinhood.pickle"
-        if not pickle_path.exists():
-            logger.debug("[broker] No stored session pickle at %s", pickle_path)
+        username = settings.robinhood_username or "default"
+        data = _load_session_from_db("robinhood", username)
+        if not data:
+            logger.debug("[broker] No stored session in DB for robinhood/%s", username)
             return False
-
-        with open(pickle_path, "rb") as f:
-            data = pickle.load(f)
 
         access_token = data.get("access_token")
         token_type = data.get("token_type", "Bearer")
-        if not access_token:
-            logger.debug("[broker] Pickle exists but has no access_token")
+        auth_header = data.get("Authorization")
+
+        if not access_token and not auth_header:
+            logger.debug("[broker] DB session row exists but has no token")
             return False
 
+        if auth_header:
+            update_session("Authorization", auth_header)
+        else:
+            update_session("Authorization", f"{token_type} {access_token}")
         set_login_state(True)
-        update_session("Authorization", f"{token_type} {access_token}")
 
-        # Validate with a lightweight API call
         res = request_get(
             positions_url(), "pagination", {"nonzero": "true"}, jsonify_data=False
         )
@@ -214,11 +289,11 @@ def _try_load_pickle_session() -> bool:
         _logged_in = True
         _last_login = time.time()
         _session_connected_at = _last_login
-        logger.info("[broker] Robinhood session restored from pickle (no re-auth)")
+        logger.info("[broker] Robinhood session restored from DB (no re-auth)")
         return True
 
     except Exception as e:
-        logger.debug("[broker] Pickle session restore failed: %s", e)
+        logger.debug("[broker] DB session restore failed: %s", e)
         return False
 
 
@@ -243,14 +318,21 @@ def login_with_credentials(username: str, password: str, totp_secret: str | None
                 import robin_stocks.robinhood as rh
 
                 totp = pyotp.TOTP(totp_secret)
-                rh.login(username, password, mfa_code=totp.now(), store_session=True)
+                result = rh.login(username, password, mfa_code=totp.now(), store_session=False)
+                if not result or not isinstance(result, dict) or not result.get("access_token"):
+                    return {"status": "error", "message": "TOTP login returned no token"}
                 _logged_in = True
                 _last_login = time.time()
+                _session_connected_at = time.time()
+                _save_session_to_db(
+                    broker="robinhood", username=username,
+                    token_data=result, device_token=result.get("device_token"),
+                )
                 logger.info("[broker] Robinhood login successful (TOTP, user creds)")
                 return {"status": "connected", "message": "Connected via TOTP"}
             except Exception as e:
                 _logged_in = False
-                logger.error(f"[broker] Robinhood TOTP login failed (user creds): {e}")
+                logger.error("[broker] Robinhood TOTP login failed (user creds): %s", e)
                 return {"status": "error", "message": f"TOTP login failed: {e}"}
 
     with _login_lock:
@@ -483,6 +565,19 @@ def login_step2_verify(sms_code: str) -> dict[str, Any]:
                 if profile:
                     _logged_in = True
                     _last_login = time.time()
+                    _session_connected_at = _last_login
+                    # Capture the current robin_stocks headers as session data
+                    try:
+                        from robin_stocks.robinhood.helper import request_headers
+                        _hdr = request_headers() if callable(request_headers) else request_headers
+                        if _hdr and _hdr.get("Authorization"):
+                            _save_session_to_db(
+                                broker="robinhood",
+                                username=settings.robinhood_username or "default",
+                                token_data={"Authorization": _hdr["Authorization"]},
+                            )
+                    except Exception:
+                        pass
                     _sms_state = {}
                     return {"status": "connected", "message": "Connected successfully!"}
             except Exception:
@@ -498,8 +593,8 @@ def login_step2_verify(sms_code: str) -> dict[str, Any]:
 
 
 def _complete_login(data: dict) -> None:
-    """Set session state after a successful login response and persist to disk."""
-    global _logged_in, _last_login
+    """Set session state after a successful login response and persist to DB."""
+    global _logged_in, _last_login, _session_connected_at
     from robin_stocks.robinhood.helper import update_session
     from robin_stocks.robinhood.authentication import set_login_state
 
@@ -508,20 +603,16 @@ def _complete_login(data: dict) -> None:
     set_login_state(True)
     _logged_in = True
     _last_login = time.time()
+    _session_connected_at = _last_login
 
-    try:
-        import pickle
-        from pathlib import Path
-        token_dir = Path.home() / ".tokens"
-        token_dir.mkdir(exist_ok=True)
-        token_file = token_dir / f"{settings.robinhood_username}.pickle"
-        with open(token_file, "wb") as f:
-            pickle.dump({"Authorization": token, **data}, f)
-        logger.info("[broker] Robinhood session persisted to disk")
-    except Exception as e:
-        logger.warning(f"[broker] Could not persist session: {e}")
+    _save_session_to_db(
+        broker="robinhood",
+        username=settings.robinhood_username or "default",
+        token_data={"Authorization": token, **data},
+        device_token=data.get("device_token"),
+    )
 
-    logger.info("[broker] Robinhood session established")
+    logger.info("[broker] Robinhood session established and persisted to DB")
 
 
 def _extract_machine_id(machine_data: Any) -> str | None:
@@ -609,6 +700,18 @@ def poll_app_approval() -> dict[str, Any]:
                 if profile:
                     _logged_in = True
                     _last_login = time.time()
+                    _session_connected_at = _last_login
+                    try:
+                        from robin_stocks.robinhood.helper import request_headers
+                        _hdr = request_headers() if callable(request_headers) else request_headers
+                        if _hdr and _hdr.get("Authorization"):
+                            _save_session_to_db(
+                                broker="robinhood",
+                                username=settings.robinhood_username or "default",
+                                token_data={"Authorization": _hdr["Authorization"]},
+                            )
+                    except Exception:
+                        pass
                     _sms_state = {}
                     return {"status": "approved", "message": "Connected successfully!"}
             except Exception:
