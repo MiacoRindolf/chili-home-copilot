@@ -6103,6 +6103,14 @@ def _migration_115_schema_hardening_fks(conn) -> None:
     conn.commit()
 
 
+def _migration_116_trade_type_column(conn) -> None:
+    """Add trade_type column to trading_trades for daytrade/scalp classification."""
+    cols = _columns(conn, "trading_trades")
+    if "trade_type" not in cols:
+        conn.execute(text("ALTER TABLE trading_trades ADD COLUMN trade_type VARCHAR(30)"))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6220,6 +6228,7 @@ MIGRATIONS = [
     ("113_trade_stop_columns", _migration_113_trade_stop_columns),
     ("114_stop_decisions_and_delivery", _migration_114_stop_decisions_and_delivery),
     ("115_schema_hardening_fks", _migration_115_schema_hardening_fks),
+    ("116_trade_type_column", _migration_116_trade_type_column),
 ]
 
 

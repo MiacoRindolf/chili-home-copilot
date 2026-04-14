@@ -74,7 +74,8 @@ def sync_initial_stage_from_viability(
     if not settings.brain_enable_deployment_ladder:
         st = get_or_create_deployment_state(db, scope_type="automation_session", scope_key=f"session:{session_id}", user_id=user_id)
         return st
-    st = get_or_create_deployment_state(db, *_scope_session(session_id), user_id=user_id)
+    _stype, _skey = _scope_session(session_id)
+    st = get_or_create_deployment_state(db, scope_type=_stype, scope_key=_skey, user_id=user_id)
     if st.current_stage in ("disabled",):
         return st
     if mode == "live" and live_eligible:
@@ -151,7 +152,8 @@ def record_trade_outcome_metrics(
 ) -> None:
     if not settings.brain_enable_deployment_ladder:
         return
-    st = get_or_create_deployment_state(db, *_scope_session(session_id), user_id=user_id)
+    _stype, _skey = _scope_session(session_id)
+    st = get_or_create_deployment_state(db, scope_type=_stype, scope_key=_skey, user_id=user_id)
     if mode == "live":
         st.live_trade_count = int(st.live_trade_count or 0) + 1
     else:
@@ -194,7 +196,8 @@ def record_trade_outcome_metrics(
     st.updated_at = datetime.utcnow()
     evaluate_de_escalation(db, st)
 
-    vst = get_or_create_deployment_state(db, *_scope_variant(variant_id), user_id=user_id)
+    _vtype, _vkey = _scope_variant(variant_id)
+    vst = get_or_create_deployment_state(db, scope_type=_vtype, scope_key=_vkey, user_id=user_id)
     vst.paper_trade_count = st.paper_trade_count
     vst.live_trade_count = st.live_trade_count
     vst.rolling_slippage_bps = st.rolling_slippage_bps

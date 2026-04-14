@@ -86,6 +86,7 @@ class Trade(Base):
     high_watermark: Optional[float] = Column(Float, nullable=True)
     stop_model: Optional[str] = Column(String(30), nullable=True)
     exit_reason: Optional[str] = Column(String(50), nullable=True)
+    trade_type: Optional[str] = Column(String(30), nullable=True)
 
 
 class TradingExecutionEvent(Base):
