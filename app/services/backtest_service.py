@@ -320,9 +320,13 @@ def list_strategies() -> list[dict[str, Any]]:
 
 _INDICATOR_LABELS: dict[str, str] = {
     "rsi_14": "RSI", "adx": "ADX", "macd_hist": "MACD",
-    "price": "Price", "rel_vol": "RelVol", "gap_pct": "Gap%",
-    "stoch_k": "Stoch", "bb_squeeze": "BB-Squeeze",
-    "bb_squeeze_firing": "BB-Fire",
+    "macd_histogram": "MACD", "price": "Price",
+    "rel_vol": "RelVol", "volume_ratio": "RelVol", "gap_pct": "Gap%",
+    "stoch_k": "Stoch", "stochastic_k": "Stoch",
+    "bb_squeeze": "BB-Squeeze", "bb_squeeze_firing": "BB-Fire",
+    "ema_stack": "EMA-Stack",
+    "stoch_bull_div": "Stoch-BullDiv", "stoch_bear_div": "Stoch-BearDiv",
+    "news_sentiment": "News",
     "ema_9": "EMA9", "ema_20": "EMA20", "ema_50": "EMA50",
     "ema_100": "EMA100", "sma_20": "SMA20", "sma_50": "SMA50",
     "sma_100": "SMA100", "sma_200": "SMA200",

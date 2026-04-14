@@ -1593,11 +1593,21 @@ def _matches_filter(row: dict, conditions: list[dict] | None) -> bool:
     snap.setdefault("rsi_14", row.get("rsi"))
     snap.setdefault("adx", row.get("adx"))
     snap.setdefault("macd_histogram", row.get("macd_hist"))
+    snap.setdefault("macd_hist", row.get("macd_hist"))
     snap.setdefault("macd", row.get("macd"))
     snap.setdefault("macd_signal", row.get("macd_sig"))
     snap.setdefault("bb_pct", row.get("bb_pct"))
+    snap.setdefault("bb_squeeze", row.get("bb_squeeze"))
     snap.setdefault("stochastic_k", row.get("stoch_k"))
+    snap.setdefault("stoch_k", row.get("stoch_k"))
     snap.setdefault("volume_ratio", row.get("vol_ratio"))
+    snap.setdefault("rel_vol", row.get("vol_ratio"))
+    snap.setdefault("ema_stack", row.get("ema_stack"))
+    snap.setdefault("stoch_bull_div", row.get("stoch_bull_div"))
+    snap.setdefault("stoch_bear_div", row.get("stoch_bear_div"))
+    snap.setdefault("news_sentiment", row.get("news_sentiment"))
+    snap.setdefault("atr", row.get("atr"))
+    snap.setdefault("gap_pct", row.get("gap_pct"))
     for cond in conditions:
         if not _eval_condition(cond, snap):
             return False
@@ -1878,242 +1888,362 @@ def mine_patterns(
     # Phase 1a: mine from discovery rows only; holdout is reserved for validation
     _mine_src = discovery_rows if discovery_rows else all_rows
 
-    _check([r for r in _mine_src if r["rsi"] < 30], "RSI oversold (<30)",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}])
-    _check([r for r in _mine_src if r["rsi"] > 70], "RSI overbought (>70) — sell signal",
-           conditions=[{"indicator": "rsi_14", "op": ">", "value": 70}])
-    _check([r for r in _mine_src if 30 <= r["rsi"] < 40], "RSI near-oversold (30-40)",
-           conditions=[{"indicator": "rsi_14", "op": ">=", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
-    _check([r for r in _mine_src if r["macd"] > r["macd_sig"]], "MACD bullish crossover",
-           conditions=[{"indicator": "macd", "op": ">", "ref": "macd_signal"}])
+    # ── RSI-based patterns (all upgraded to min 2 conditions) ──
+    _check([r for r in _mine_src if r["rsi"] < 30 and r["macd_hist"] > 0],
+           "RSI oversold (<30) + MACD histogram turning positive",
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 30},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
+    _check([r for r in _mine_src if r["rsi"] > 70 and r["macd_hist"] < 0],
+           "RSI overbought (>70) + MACD histogram negative — sell signal",
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 70},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0}])
+    _check([r for r in _mine_src if 30 <= r["rsi"] < 40 and r["macd_hist"] > 0],
+           "RSI near-oversold (30-40) + MACD histogram positive",
+           conditions=[{"indicator": "rsi_14", "op": ">=", "value": 30},
+                       {"indicator": "rsi_14", "op": "<", "value": 40},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
+
+    # ── MACD patterns (upgraded) ──
+    _check([r for r in _mine_src if r["macd"] > r["macd_sig"] and r["rsi"] < 60],
+           "MACD bullish crossover + RSI not overbought",
+           conditions=[{"indicator": "macd", "op": ">", "ref": "macd_signal"},
+                       {"indicator": "rsi_14", "op": "<", "value": 60}])
     _check([r for r in _mine_src if r["macd_hist"] > 0 and r["macd"] < 0],
            "MACD histogram positive while MACD negative (early reversal)",
-           conditions=[{"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "macd", "op": "<", "value": 0}])
-    _check([r for r in _mine_src if r["bb_pct"] < 0.1],
-           "Price below lower Bollinger Band (<10%)",
-           conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.1}])
-    _check([r for r in _mine_src if r["bb_pct"] > 0.9],
-           "Price above upper Bollinger Band (>90%) — sell signal",
-           conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.9}])
+           conditions=[{"indicator": "macd_histogram", "op": ">", "value": 0},
+                       {"indicator": "macd", "op": "<", "value": 0}])
+
+    # ── Bollinger Band patterns (upgraded) ──
+    _check([r for r in _mine_src if r["bb_pct"] < 0.1 and r["rsi"] < 35],
+           "Price below lower Bollinger Band (<10%) + RSI oversold",
+           conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.1},
+                       {"indicator": "rsi_14", "op": "<", "value": 35}])
+    _check([r for r in _mine_src if r["bb_pct"] > 0.9 and r["rsi"] > 65],
+           "Price above upper Bollinger Band (>90%) + RSI elevated — sell signal",
+           conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.9},
+                       {"indicator": "rsi_14", "op": ">", "value": 65}])
+
+    # ── ADX + RSI ──
     _check([r for r in _mine_src if r["adx"] > 30 and r["rsi"] < 40],
            "Strong trend (ADX>30) + RSI<40 (trending oversold)",
-           conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
-    _check([r for r in _mine_src if r["adx"] < 15],
-           "No trend (ADX<15) — range-bound, mean reversion expected",
-           conditions=[{"indicator": "adx", "op": "<", "value": 15}])
-    _check([r for r in _mine_src if r["ema_stack"]],
-           "EMA stacking bullish (Price > EMA20 > EMA50 > EMA100)",
-           conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "price", "op": ">", "ref": "ema_100"}])
+           conditions=[{"indicator": "adx", "op": ">", "value": 30},
+                       {"indicator": "rsi_14", "op": "<", "value": 40}])
+    _check([r for r in _mine_src if r["adx"] < 15 and 0.3 < r["bb_pct"] < 0.7],
+           "No trend (ADX<15) + mid-BB range (mean reversion zone)",
+           conditions=[{"indicator": "adx", "op": "<", "value": 15},
+                       {"indicator": "bb_pct", "op": ">", "value": 0.3},
+                       {"indicator": "bb_pct", "op": "<", "value": 0.7}])
+
+    # ── EMA stack patterns (use ema_stack boolean for parity) ──
+    _check([r for r in _mine_src if r["ema_stack"] and r["adx"] > 20],
+           "EMA stacking bullish + trending (ADX>20)",
+           conditions=[{"indicator": "ema_stack", "op": "==", "value": True},
+                       {"indicator": "adx", "op": ">", "value": 20}])
+
+    # ── Triple / multi-indicator confluence ──
     _check([r for r in _mine_src
             if r["rsi"] < 35 and r["macd"] > r["macd_sig"] and r["bb_pct"] < 0.2],
            "Triple confluence: RSI<35 + MACD bullish + near lower BB",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "bb_pct", "op": "<", "value": 0.2}])
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35},
+                       {"indicator": "macd", "op": ">", "ref": "macd_signal"},
+                       {"indicator": "bb_pct", "op": "<", "value": 0.2}])
     _check([r for r in _mine_src
             if r["rsi"] > 55 and r["adx"] > 25 and r["macd"] > r["macd_sig"]],
            "Momentum confluence: RSI>55 + ADX>25 + MACD bullish (trend continuation)",
-           conditions=[{"indicator": "rsi_14", "op": ">", "value": 55}, {"indicator": "adx", "op": ">", "value": 25}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}])
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 55},
+                       {"indicator": "adx", "op": ">", "value": 25},
+                       {"indicator": "macd", "op": ">", "ref": "macd_signal"}])
 
+    # ── ATR-relative patterns (use bb_squeeze as proxy for low vol) ──
     atr_vals = [r["atr"] for r in _mine_src if r["atr"] > 0]
     if atr_vals:
         atr_median = sorted(atr_vals)[len(atr_vals) // 2]
-        _check([r for r in _mine_src if r["atr"] > atr_median * 1.5 and r["rsi"] < 35],
-               "High volatility + oversold RSI (capitulation bounce)",
-               conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}])
-        _check([r for r in _mine_src if 0 < r["atr"] < atr_median * 0.5],
-               "Low volatility squeeze — breakout expected",
-               conditions=[{"indicator": "adx", "op": "<", "value": 20}])
+        _check([r for r in _mine_src if r["atr"] > atr_median * 1.5 and r["rsi"] < 35
+                and r["macd_hist"] > 0],
+               "High volatility + oversold RSI + MACD turning (capitulation bounce)",
+               conditions=[{"indicator": "rsi_14", "op": "<", "value": 35},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0}])
+        _check([r for r in _mine_src if r.get("bb_squeeze") and r["adx"] < 20],
+               "Low volatility squeeze (BB squeeze) + no trend — breakout expected",
+               conditions=[{"indicator": "bb_squeeze", "op": "==", "value": True},
+                           {"indicator": "adx", "op": "<", "value": 20}])
 
+    # ── Crypto-specific (min 2 conditions) ──
     crypto = [r for r in _mine_src if r["is_crypto"]]
     if crypto:
-        _check([r for r in crypto if r["rsi"] < 25],
-               "Crypto deep oversold (RSI<25)",
-               conditions=[{"indicator": "rsi_14", "op": "<", "value": 25}])
+        _check([r for r in crypto if r["rsi"] < 25 and r["stoch_k"] < 20],
+               "Crypto deep oversold (RSI<25 + Stoch<20)",
+               conditions=[{"indicator": "rsi_14", "op": "<", "value": 25},
+                           {"indicator": "stochastic_k", "op": "<", "value": 20}])
         _check([r for r in crypto if r["rsi"] < 35 and r["macd_hist"] > 0],
                "Crypto RSI<35 + MACD histogram positive — reversal",
-               conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+               conditions=[{"indicator": "rsi_14", "op": "<", "value": 35},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
+    # ── Trend continuation ──
     _check([r for r in _mine_src if r["above_sma20"] and r["rsi"] > 50 and r["adx"] > 20],
            "Above SMA20 + RSI>50 + ADX>20 (healthy uptrend)",
-           conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "adx", "op": ">", "value": 20}])
-    _check([r for r in _mine_src if r["stoch_k"] < 20],
-           "Stochastic oversold (K<20)",
-           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20}])
+           conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"},
+                       {"indicator": "rsi_14", "op": ">", "value": 50},
+                       {"indicator": "adx", "op": ">", "value": 20}])
+
+    # ── Stochastic patterns (upgraded to 2+ conditions) ──
+    _check([r for r in _mine_src if r["stoch_k"] < 20 and r["rsi"] < 40],
+           "Stochastic oversold (K<20) + RSI<40 (double confirmation)",
+           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20},
+                       {"indicator": "rsi_14", "op": "<", "value": 40}])
+
     _check([r for r in _mine_src if r["bb_pct"] < 0.15 and r["macd_hist"] > 0],
            "Lower BB + MACD turning positive (bounce setup)",
-           conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.15}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+           conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.15},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
+
     _check([r for r in _mine_src if r["above_sma20"] and r["ema_stack"] and r["adx"] > 20],
            "Full alignment: EMA stack + above SMA20 + ADX>20 (strong trend)",
-           conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "adx", "op": ">", "value": 20}])
+           conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"},
+                       {"indicator": "ema_stack", "op": "==", "value": True},
+                       {"indicator": "adx", "op": ">", "value": 20}])
 
-    # Stochastic + MACD confluence
+    # ── Stochastic + MACD confluence ──
     _check([r for r in _mine_src if r["stoch_k"] < 20 and r["macd_hist"] > 0],
            "Stochastic oversold + MACD turning positive (double bottom signal)",
-           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
     _check([r for r in _mine_src if r["stoch_k"] > 80 and r["macd_hist"] < 0],
            "Stochastic overbought + MACD turning negative — sell signal",
-           conditions=[{"indicator": "stochastic_k", "op": ">", "value": 80}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
+           conditions=[{"indicator": "stochastic_k", "op": ">", "value": 80},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
-    # EMA stack with RSI confirmation
+    # ── EMA stack with RSI confirmation ──
     _check([r for r in _mine_src if r["ema_stack"] and 40 <= r["rsi"] <= 60],
            "EMA stack + RSI neutral zone (healthy trend, not overextended)",
-           conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "rsi_14", "op": ">=", "value": 40}, {"indicator": "rsi_14", "op": "<=", "value": 60}])
+           conditions=[{"indicator": "ema_stack", "op": "==", "value": True},
+                       {"indicator": "rsi_14", "op": ">=", "value": 40},
+                       {"indicator": "rsi_14", "op": "<=", "value": 60}])
 
-    # Extreme RSI with trend
+    # ── Extreme RSI with trend ──
     _check([r for r in _mine_src if r["rsi"] < 25 and r["adx"] > 20],
            "Deep oversold RSI<25 in trending market (sharp reversal setup)",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 25}, {"indicator": "adx", "op": ">", "value": 20}])
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 25},
+                       {"indicator": "adx", "op": ">", "value": 20}])
 
-    # Consolidation breakout
+    # ── Consolidation breakout ──
     _check([r for r in _mine_src if r["bb_pct"] > 0.5 and r["bb_pct"] < 0.7
             and r["adx"] < 20 and r["macd_hist"] > 0],
            "Mid-BB range + low ADX + MACD positive (consolidation breakout)",
-           conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.5}, {"indicator": "bb_pct", "op": "<", "value": 0.7}, {"indicator": "adx", "op": "<", "value": 20}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+           conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.5},
+                       {"indicator": "bb_pct", "op": "<", "value": 0.7},
+                       {"indicator": "adx", "op": "<", "value": 20},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
-    # Bearish divergence patterns
+    # ── Bearish divergence ──
     _check([r for r in _mine_src if r["rsi"] > 60 and r["macd_hist"] < 0 and r["adx"] > 25],
            "RSI>60 but MACD negative + strong trend — bearish divergence sell signal",
-           conditions=[{"indicator": "rsi_14", "op": ">", "value": 60}, {"indicator": "macd_histogram", "op": "<", "value": 0}, {"indicator": "adx", "op": ">", "value": 25}])
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 60},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0},
+                       {"indicator": "adx", "op": ">", "value": 25}])
 
-    # Volume spike patterns
+    # ── Volume spike patterns ──
     vol_rows = [r for r in _mine_src if r.get("vol_ratio") is not None]
     if vol_rows:
         _check([r for r in vol_rows if r["vol_ratio"] > 2.0 and r["rsi"] < 40],
                "Volume spike 2x+ with RSI<40 (capitulation / accumulation)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "rsi_14", "op": "<", "value": 40}])
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0},
+                           {"indicator": "rsi_14", "op": "<", "value": 40}])
         _check([r for r in vol_rows if r["vol_ratio"] > 2.0 and r["ema_stack"]],
                "Volume spike 2x+ with EMA stack (breakout confirmation)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}])
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0},
+                           {"indicator": "ema_stack", "op": "==", "value": True}])
         _check([r for r in vol_rows if r["vol_ratio"] > 1.5 and r["macd_hist"] > 0
                 and r["rsi"] > 50],
                "Volume surge + MACD positive + RSI>50 (momentum ignition)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 1.5}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "rsi_14", "op": ">", "value": 50}])
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 1.5},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "rsi_14", "op": ">", "value": 50}])
 
-    # Gap patterns
+    # ── Gap patterns (upgraded to 3 conditions) ──
     gap_rows = [r for r in _mine_src if r.get("gap_pct") is not None]
     if gap_rows:
-        _check([r for r in gap_rows if r["gap_pct"] > 2.0 and r["rsi"] < 70],
-               "Gap up >2% with RSI not overbought (momentum gap)",
-               conditions=[{"indicator": "gap_pct", "op": ">", "value": 2.0}, {"indicator": "rsi_14", "op": "<", "value": 70}])
-        _check([r for r in gap_rows if r["gap_pct"] < -2.0 and r["rsi"] < 30],
-               "Gap down >2% into oversold RSI (gap-fill reversal)",
-               conditions=[{"indicator": "gap_pct", "op": "<", "value": -2.0}, {"indicator": "rsi_14", "op": "<", "value": 30}])
+        _check([r for r in gap_rows if r["gap_pct"] > 2.0 and r["rsi"] < 70
+                and r.get("vol_ratio") is not None and r["vol_ratio"] > 1.5],
+               "Gap up >2% + RSI not overbought + volume confirmation (momentum gap)",
+               conditions=[{"indicator": "gap_pct", "op": ">", "value": 2.0},
+                           {"indicator": "rsi_14", "op": "<", "value": 70},
+                           {"indicator": "volume_ratio", "op": ">", "value": 1.5}])
+        _check([r for r in gap_rows if r["gap_pct"] < -2.0 and r["rsi"] < 30
+                and r["macd_hist"] > 0],
+               "Gap down >2% + RSI oversold + MACD turning (gap-fill reversal)",
+               conditions=[{"indicator": "gap_pct", "op": "<", "value": -2.0},
+                           {"indicator": "rsi_14", "op": "<", "value": 30},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
-    # ── Momentum pullback patterns (inspired by day-trade best practices) ──
-
-    # MACD positive + high relative volume + pullback = bread-and-butter entry
+    # ── Momentum pullback patterns ──
     if vol_rows:
         _check([r for r in vol_rows if r["vol_ratio"] > 5.0
                 and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
                 and r["rsi"] < 65],
                "MACD positive + volume surge 5x+ (momentum pullback setup)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 5.0}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "rsi_14", "op": "<", "value": 65}])
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 5.0},
+                           {"indicator": "macd", "op": ">", "ref": "macd_signal"},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "rsi_14", "op": "<", "value": 65}])
 
-    # Topping tail warning (upper wick dominance on high volume)
     _check([r for r in _mine_src
             if r["rsi"] > 60 and r.get("vol_ratio") is not None
             and r["vol_ratio"] > 2.0 and r["macd_hist"] < 0],
            "High RSI + volume spike + MACD turning negative (topping/reversal warning)",
-           conditions=[{"indicator": "rsi_14", "op": ">", "value": 60}, {"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 60},
+                       {"indicator": "volume_ratio", "op": ">", "value": 2.0},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
-    # MACD flipped negative after extended run = setup invalidated
     _check([r for r in _mine_src
             if r["macd"] < r["macd_sig"] and r["macd_hist"] < 0
             and r["rsi"] > 40 and r["adx"] > 20],
            "MACD flipped negative in active trend — setup invalidated (avoid entry)",
-           conditions=[{"indicator": "macd", "op": "<", "ref": "macd_signal"}, {"indicator": "macd_histogram", "op": "<", "value": 0}, {"indicator": "rsi_14", "op": ">", "value": 40}, {"indicator": "adx", "op": ">", "value": 20}])
+           conditions=[{"indicator": "macd", "op": "<", "ref": "macd_signal"},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0},
+                       {"indicator": "rsi_14", "op": ">", "value": 40},
+                       {"indicator": "adx", "op": ">", "value": 20}])
 
-    # Low float + strong gapper + MACD confirmation
     if gap_rows and vol_rows:
         _check([r for r in gap_rows
                 if r["gap_pct"] > 10.0 and r["macd_hist"] > 0
                 and r.get("vol_ratio") is not None and r["vol_ratio"] > 3.0],
                "10%+ gapper + MACD positive + high volume (high-conviction momentum)",
-               conditions=[{"indicator": "gap_pct", "op": ">", "value": 10.0}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "volume_ratio", "op": ">", "value": 3.0}])
+               conditions=[{"indicator": "gap_pct", "op": ">", "value": 10.0},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "volume_ratio", "op": ">", "value": 3.0}])
 
-    # First pullback with clean volume profile
+    # ── First pullback (full parity: MACD + hist + EMA stack + volume) ──
     _check([r for r in _mine_src
             if r["rsi"] > 45 and r["rsi"] < 65
             and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
             and r["ema_stack"] and r.get("vol_ratio") is not None
             and r["vol_ratio"] > 1.5],
            "First pullback: MACD+, EMA stack, rising volume (bread-and-butter entry)",
-           conditions=[{"indicator": "rsi_14", "op": ">", "value": 45}, {"indicator": "rsi_14", "op": "<", "value": 65}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "volume_ratio", "op": ">", "value": 1.5}])
+           conditions=[{"indicator": "rsi_14", "op": ">", "value": 45},
+                       {"indicator": "rsi_14", "op": "<", "value": 65},
+                       {"indicator": "macd", "op": ">", "ref": "macd_signal"},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0},
+                       {"indicator": "ema_stack", "op": "==", "value": True},
+                       {"indicator": "volume_ratio", "op": ">", "value": 1.5}])
 
-    # Extended pullback (7+ candles = dead setup) — captured as sell signal
+    # ── Extended pullback (parity: broken EMA stack) ──
     _check([r for r in _mine_src
             if r["rsi"] < 35 and r["macd_hist"] < 0
             and r["adx"] > 15 and not r["ema_stack"]],
            "Extended pullback with MACD negative + broken EMA stack — setup dead",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd_histogram", "op": "<", "value": 0}, {"indicator": "adx", "op": ">", "value": 15}])
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0},
+                       {"indicator": "adx", "op": ">", "value": 15},
+                       {"indicator": "ema_stack", "op": "==", "value": False}])
 
-    # ── Stochastic divergence patterns ──
-    _check([r for r in _mine_src if r.get("stoch_bull_div")],
-           "Stochastic bullish divergence (price lower low, stoch higher low)",
-           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 30}])
-    _check([r for r in _mine_src if r.get("stoch_bear_div")],
-           "Stochastic bearish divergence (price higher high, stoch lower high) — sell signal",
-           conditions=[{"indicator": "stochastic_k", "op": ">", "value": 70}])
+    # ── Stochastic divergence patterns (true divergence boolean) ──
+    _check([r for r in _mine_src if r.get("stoch_bull_div") and r["rsi"] < 40],
+           "Stochastic bullish divergence + RSI<40",
+           conditions=[{"indicator": "stoch_bull_div", "op": "==", "value": True},
+                       {"indicator": "rsi_14", "op": "<", "value": 40}])
+    _check([r for r in _mine_src if r.get("stoch_bear_div") and r["rsi"] > 60],
+           "Stochastic bearish divergence + RSI>60 — sell signal",
+           conditions=[{"indicator": "stoch_bear_div", "op": "==", "value": True},
+                       {"indicator": "rsi_14", "op": ">", "value": 60}])
     _check([r for r in _mine_src if r.get("stoch_bull_div") and r["macd_hist"] > 0],
            "Stoch bullish divergence + MACD turning positive (reversal confirmation)",
-           conditions=[{"indicator": "stochastic_k", "op": "<", "value": 30}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+           conditions=[{"indicator": "stoch_bull_div", "op": "==", "value": True},
+                       {"indicator": "macd_histogram", "op": ">", "value": 0}])
     _check([r for r in _mine_src if r.get("stoch_bear_div") and r["macd_hist"] < 0],
            "Stoch bearish divergence + MACD turning negative (top confirmation)",
-           conditions=[{"indicator": "stochastic_k", "op": ">", "value": 70}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
+           conditions=[{"indicator": "stoch_bear_div", "op": "==", "value": True},
+                       {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
     # ── Multi-indicator confluence patterns ──
     _check([r for r in _mine_src
             if r["rsi"] < 35 and r["stoch_k"] < 25 and r["bb_pct"] < 0.15],
            "Triple oversold confluence: RSI<35 + Stoch<25 + BB<0.15",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "stochastic_k", "op": "<", "value": 25}, {"indicator": "bb_pct", "op": "<", "value": 0.15}])
+           conditions=[{"indicator": "rsi_14", "op": "<", "value": 35},
+                       {"indicator": "stochastic_k", "op": "<", "value": 25},
+                       {"indicator": "bb_pct", "op": "<", "value": 0.15}])
     _check([r for r in _mine_src
             if r["adx"] > 30 and r["stoch_k"] < 20 and r["ema_stack"]],
            "Trend pullback to oversold: ADX>30 + Stoch<20 + EMA stack",
-           conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "stochastic_k", "op": "<", "value": 20}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}])
+           conditions=[{"indicator": "adx", "op": ">", "value": 30},
+                       {"indicator": "stochastic_k", "op": "<", "value": 20},
+                       {"indicator": "ema_stack", "op": "==", "value": True}])
     _check([r for r in _mine_src
             if r.get("stoch_bull_div") and r["rsi"] < 40 and r["bb_pct"] < 0.25],
            "Multi-signal reversal: stoch bull divergence + RSI<40 + near lower BB",
-           conditions=[{"indicator": "rsi_14", "op": "<", "value": 40}, {"indicator": "bb_pct", "op": "<", "value": 0.25}, {"indicator": "stochastic_k", "op": "<", "value": 30}])
+           conditions=[{"indicator": "stoch_bull_div", "op": "==", "value": True},
+                       {"indicator": "rsi_14", "op": "<", "value": 40},
+                       {"indicator": "bb_pct", "op": "<", "value": 0.25}])
 
     # ── News sentiment + technical confluence patterns ──
     sent_rows = [r for r in _mine_src if r.get("news_sentiment") is not None]
     if len(sent_rows) >= 5:
-        _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["rsi"] < 35],
-               "Bullish news + RSI oversold (<35) — contrarian catalyst",
-               conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}])
-        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["rsi"] > 70],
-               "Bearish news + RSI overbought (>70) — sell signal confluence",
-               conditions=[{"indicator": "rsi_14", "op": ">", "value": 70}])
+        _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["rsi"] < 35
+                and r["macd_hist"] > 0],
+               "Bullish news + RSI oversold + MACD turning — contrarian catalyst",
+               conditions=[{"indicator": "news_sentiment", "op": ">", "value": 0.15},
+                           {"indicator": "rsi_14", "op": "<", "value": 35},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0}])
+        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["rsi"] > 70
+                and r["macd_hist"] < 0],
+               "Bearish news + RSI overbought + MACD negative — sell signal confluence",
+               conditions=[{"indicator": "news_sentiment", "op": "<", "value": -0.15},
+                           {"indicator": "rsi_14", "op": ">", "value": 70},
+                           {"indicator": "macd_histogram", "op": "<", "value": 0}])
         _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["macd_hist"] > 0
                 and r["ema_stack"]],
                "Bullish news + MACD positive + EMA stack — momentum confirmation",
-               conditions=[{"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}])
-        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["macd_hist"] < 0],
-               "Bearish news + MACD negative — downtrend confirmation",
-               conditions=[{"indicator": "macd_histogram", "op": "<", "value": 0}])
+               conditions=[{"indicator": "news_sentiment", "op": ">", "value": 0.15},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "ema_stack", "op": "==", "value": True}])
+        _check([r for r in sent_rows if r["news_sentiment"] < -0.15 and r["macd_hist"] < 0
+                and r["rsi"] > 50],
+               "Bearish news + MACD negative + RSI>50 — downtrend confirmation",
+               conditions=[{"indicator": "news_sentiment", "op": "<", "value": -0.15},
+                           {"indicator": "macd_histogram", "op": "<", "value": 0},
+                           {"indicator": "rsi_14", "op": ">", "value": 50}])
         _check([r for r in sent_rows if r.get("news_count", 0) >= 5
-                and r.get("vol_ratio") is not None and r["vol_ratio"] > 2],
-               "High news volume (5+) + high trading volume (2x) — event-driven breakout",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}])
-        _check([r for r in sent_rows if r["news_sentiment"] > 0.2 and r["stoch_k"] < 25],
-               "Strong bullish news + stochastic oversold — high-probability bounce",
-               conditions=[{"indicator": "stochastic_k", "op": "<", "value": 25}])
+                and r.get("vol_ratio") is not None and r["vol_ratio"] > 2
+                and r["adx"] > 20],
+               "High news volume + high trading volume + trending — event-driven breakout",
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0},
+                           {"indicator": "adx", "op": ">", "value": 20}])
+        _check([r for r in sent_rows if r["news_sentiment"] > 0.2 and r["stoch_k"] < 25
+                and r["rsi"] < 40],
+               "Strong bullish news + stochastic oversold + RSI<40 — bounce",
+               conditions=[{"indicator": "news_sentiment", "op": ">", "value": 0.2},
+                           {"indicator": "stochastic_k", "op": "<", "value": 25},
+                           {"indicator": "rsi_14", "op": "<", "value": 40}])
         _check([r for r in sent_rows if abs(r["news_sentiment"]) < 0.05
                 and r["adx"] > 30 and r["rsi"] < 40],
                "Neutral news + strong trend (ADX>30) + RSI<40 — trend pullback, no catalyst fear",
-               conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
+               conditions=[{"indicator": "adx", "op": ">", "value": 30},
+                           {"indicator": "rsi_14", "op": "<", "value": 40}])
 
     # ── Volume profile patterns ──
     vp_rows = [r for r in _mine_src if r.get("vol_ratio") is not None and r.get("atr") and r["atr"] > 0]
     if len(vp_rows) >= 20:
-        _check([r for r in vp_rows if r["vol_ratio"] > 3.0 and r["bb_pct"] > 0.8],
-               "Volume profile breakout: 3x volume + upper BB (institutional buying)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 3.0}, {"indicator": "bb_pct", "op": ">", "value": 0.8}])
-        _check([r for r in vp_rows if r["vol_ratio"] < 0.5 and r["bb_pct"] > 0.4 and r["bb_pct"] < 0.6],
-               "Volume dry-up in mid-range: coiling before expansion",
-               conditions=[{"indicator": "volume_ratio", "op": "<", "value": 0.5}, {"indicator": "bb_pct", "op": ">", "value": 0.4}, {"indicator": "bb_pct", "op": "<", "value": 0.6}])
-        _check([r for r in vp_rows if r["vol_ratio"] > 2.0 and r["rsi"] > 50 and r["macd_hist"] > 0 and r["ema_stack"]],
+        _check([r for r in vp_rows if r["vol_ratio"] > 3.0 and r["bb_pct"] > 0.8
+                and r["adx"] > 20],
+               "Volume profile breakout: 3x volume + upper BB + trending (institutional buying)",
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 3.0},
+                           {"indicator": "bb_pct", "op": ">", "value": 0.8},
+                           {"indicator": "adx", "op": ">", "value": 20}])
+        _check([r for r in vp_rows if r["vol_ratio"] < 0.5 and r["bb_pct"] > 0.4
+                and r["bb_pct"] < 0.6 and r["adx"] < 15],
+               "Volume dry-up + mid-BB + no trend: coiling before expansion",
+               conditions=[{"indicator": "volume_ratio", "op": "<", "value": 0.5},
+                           {"indicator": "bb_pct", "op": ">", "value": 0.4},
+                           {"indicator": "bb_pct", "op": "<", "value": 0.6},
+                           {"indicator": "adx", "op": "<", "value": 15}])
+        _check([r for r in vp_rows if r["vol_ratio"] > 2.0 and r["rsi"] > 50
+                and r["macd_hist"] > 0 and r["ema_stack"]],
                "Volume accumulation: 2x vol + RSI>50 + MACD+ + EMA stack (institutional trend)",
-               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "price", "op": ">", "ref": "ema_20"}])
+               conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0},
+                           {"indicator": "rsi_14", "op": ">", "value": 50},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "ema_stack", "op": "==", "value": True}])
 
     # ── Cross-asset / correlation patterns ──
     crypto_rows = [r for r in _mine_src if r["is_crypto"]]
@@ -2122,26 +2252,39 @@ def mine_patterns(
         crypto_avg = sum(r["ret_5d"] for r in crypto_rows) / len(crypto_rows)
         stock_avg = sum(r["ret_5d"] for r in stock_rows) / len(stock_rows)
         if crypto_avg > 0.5 and stock_avg < -0.5:
-            _check([r for r in crypto_rows if r["rsi"] > 50 and r["macd_hist"] > 0],
-                   "Crypto divergence: crypto bullish while stocks weak (risk-on rotation)",
-                   conditions=[{"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "regime_composite", "op": "!=", "value": "risk_on"}])
+            _check([r for r in crypto_rows if r["rsi"] > 50 and r["macd_hist"] > 0
+                    and r["ema_stack"]],
+                   "Crypto divergence: crypto bullish + EMA stack while stocks weak",
+                   conditions=[{"indicator": "rsi_14", "op": ">", "value": 50},
+                               {"indicator": "macd_histogram", "op": ">", "value": 0},
+                               {"indicator": "ema_stack", "op": "==", "value": True}])
         if stock_avg > 0.5 and crypto_avg < -0.5:
-            _check([r for r in stock_rows if r["ema_stack"] and r["adx"] > 20],
-                   "Stock leadership: stocks strong while crypto weak (traditional risk-on)",
-                   conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "adx", "op": ">", "value": 20}])
+            _check([r for r in stock_rows if r["ema_stack"] and r["adx"] > 20
+                    and r["rsi"] > 50],
+                   "Stock leadership: EMA stack + trending + RSI>50 (traditional risk-on)",
+                   conditions=[{"indicator": "ema_stack", "op": "==", "value": True},
+                               {"indicator": "adx", "op": ">", "value": 20},
+                               {"indicator": "rsi_14", "op": ">", "value": 50}])
 
     # ── Microstructure / price action patterns ──
     atr_rows = [r for r in _mine_src if r.get("atr") and r["atr"] > 0]
     if len(atr_rows) >= 20:
         atr_med = sorted([r["atr"] for r in atr_rows])[len(atr_rows) // 2]
-        _check([r for r in atr_rows if r["atr"] < atr_med * 0.4 and r["adx"] < 15 and r["bb_pct"] > 0.3 and r["bb_pct"] < 0.7],
-               "Extreme compression: ATR<40%med + ADX<15 + mid-BB (NR setup pre-breakout)",
-               conditions=[{"indicator": "adx", "op": "<", "value": 15}, {"indicator": "bb_pct", "op": ">", "value": 0.3}, {"indicator": "bb_pct", "op": "<", "value": 0.7}])
-        _check([r for r in atr_rows if r["atr"] > atr_med * 2.0 and r["rsi"] < 30 and r["macd_hist"] > 0],
-               "Volatility expansion + oversold + MACD turning: capitulation reversal",
-               conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
+        _check([r for r in atr_rows if r.get("bb_squeeze") and r["adx"] < 15
+                and r["bb_pct"] > 0.3 and r["bb_pct"] < 0.7],
+               "Extreme compression: BB squeeze + ADX<15 + mid-BB (NR setup pre-breakout)",
+               conditions=[{"indicator": "bb_squeeze", "op": "==", "value": True},
+                           {"indicator": "adx", "op": "<", "value": 15},
+                           {"indicator": "bb_pct", "op": ">", "value": 0.3},
+                           {"indicator": "bb_pct", "op": "<", "value": 0.7}])
+        _check([r for r in atr_rows if r["atr"] > atr_med * 2.0 and r["rsi"] < 30
+                and r["macd_hist"] > 0 and r["bb_pct"] < 0.15],
+               "Volatility expansion + oversold + MACD turning + lower BB: capitulation reversal",
+               conditions=[{"indicator": "rsi_14", "op": "<", "value": 30},
+                           {"indicator": "macd_histogram", "op": ">", "value": 0},
+                           {"indicator": "bb_pct", "op": "<", "value": 0.15}])
 
-    # ── Composite multi-signal miners (4+ conditions) ──
+    # ── Composite multi-signal miners (5+ conditions) ──
     _check([r for r in _mine_src
             if r["rsi"] > 45 and r["rsi"] < 65
             and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
@@ -2150,17 +2293,25 @@ def mine_patterns(
             and r["bb_pct"] > 0.4 and r["bb_pct"] < 0.8],
            "Full setup: RSI neutral + MACD+ + EMA stack + ADX>20 + vol surge + mid-BB (highest conviction)",
            conditions=[
-               {"indicator": "rsi_14", "op": ">=", "value": 45}, {"indicator": "rsi_14", "op": "<=", "value": 65},
-               {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "adx", "op": ">", "value": 20},
-               {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+               {"indicator": "rsi_14", "op": ">=", "value": 45},
+               {"indicator": "rsi_14", "op": "<=", "value": 65},
+               {"indicator": "macd", "op": ">", "ref": "macd_signal"},
+               {"indicator": "macd_histogram", "op": ">", "value": 0},
+               {"indicator": "ema_stack", "op": "==", "value": True},
+               {"indicator": "adx", "op": ">", "value": 20},
+               {"indicator": "volume_ratio", "op": ">", "value": 1.5},
+               {"indicator": "bb_pct", "op": ">", "value": 0.4},
+               {"indicator": "bb_pct", "op": "<", "value": 0.8},
            ])
     _check([r for r in _mine_src
             if r["stoch_k"] < 25 and r["rsi"] < 35 and r["bb_pct"] < 0.15
             and r["macd_hist"] > 0 and r.get("vol_ratio") is not None and r["vol_ratio"] > 1.5],
            "Quad oversold bounce: Stoch<25 + RSI<35 + BB<15% + MACD turning + volume (max-conviction reversal)",
            conditions=[
-               {"indicator": "stochastic_k", "op": "<", "value": 25}, {"indicator": "rsi_14", "op": "<", "value": 35},
-               {"indicator": "bb_pct", "op": "<", "value": 0.15}, {"indicator": "macd_histogram", "op": ">", "value": 0},
+               {"indicator": "stochastic_k", "op": "<", "value": 25},
+               {"indicator": "rsi_14", "op": "<", "value": 35},
+               {"indicator": "bb_pct", "op": "<", "value": 0.15},
+               {"indicator": "macd_histogram", "op": ">", "value": 0},
                {"indicator": "volume_ratio", "op": ">", "value": 1.5},
            ])
 
@@ -6855,14 +7006,17 @@ _COMPLEMENTARY_POOL: list[dict[str, Any]] = [
     {"indicator": "rsi_14", "op": ">", "value": 50},
     {"indicator": "rsi_14", "op": "<", "value": 40},
     {"indicator": "adx", "op": ">", "value": 25},
-    {"indicator": "macd_hist", "op": ">", "value": 0},
-    {"indicator": "rel_vol", "op": ">=", "value": 2.0},
+    {"indicator": "macd_histogram", "op": ">", "value": 0},
+    {"indicator": "volume_ratio", "op": ">=", "value": 2.0},
     {"indicator": "price", "op": ">", "ref": "ema_20"},
     {"indicator": "price", "op": ">", "ref": "ema_50"},
     {"indicator": "price", "op": ">", "ref": "sma_50"},
     {"indicator": "bb_squeeze", "op": "==", "value": True},
     {"indicator": "daily_change_pct", "op": ">=", "value": 3.0},
     {"indicator": "gap_pct", "op": ">", "value": 2.0},
+    {"indicator": "stochastic_k", "op": "<", "value": 30},
+    {"indicator": "bb_pct", "op": "<", "value": 0.2},
+    {"indicator": "ema_stack", "op": "==", "value": True},
     {"indicator": "resistance_retests", "op": ">=", "value": 2,
      "params": {"tolerance_pct": 1.5, "lookback": 20}},
 ]

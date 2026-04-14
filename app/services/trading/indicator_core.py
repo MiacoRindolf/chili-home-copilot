@@ -202,6 +202,45 @@ def compute_all_from_df(
     if compute_all or "gap_pct" in needed:
         result["gap_pct"] = _safe(compute_gap_pct(df["Open"].astype(float), close))
 
+    # ── Derived boolean indicators ────────────────────────────────────
+    _EMA_STACK_KEYS = {"ema_stack"}
+    if compute_all or _EMA_STACK_KEYS & needed:
+        _p = result.get("price") or _safe(close)
+        _e20 = result.get("ema_20") or _safe(compute_ema(close, 20))
+        _e50 = result.get("ema_50") or _safe(compute_ema(close, 50))
+        _e100 = result.get("ema_100") or _safe(compute_ema(close, 100))
+        result["ema_stack"] = [
+            (p is not None and e20 is not None and e50 is not None
+             and e100 is not None and p > e20 > e50 > e100)
+            for p, e20, e50, e100 in zip(_p, _e20, _e50, _e100)
+        ]
+
+    _STOCH_DIV_KEYS = {"stoch_bull_div", "stoch_bear_div"}
+    if compute_all or _STOCH_DIV_KEYS & needed:
+        _sk = result.get("stoch_k") or _safe(compute_stochastic(high, low, close)[0])
+        _pr = result.get("price") or _safe(close)
+        bull_div: list[bool] = [False] * n
+        bear_div: list[bool] = [False] * n
+        for _i in range(5, n):
+            prices_5 = [_pr[_j] for _j in range(_i - 4, _i + 1)]
+            stochs_5 = [_sk[_j] if _sk[_j] is not None else 50.0 for _j in range(_i - 4, _i + 1)]
+            if any(v is None for v in prices_5):
+                continue
+            if prices_5[-1] < min(prices_5[:-1]) and stochs_5[-1] > min(stochs_5[:-1]):
+                bull_div[_i] = True
+            if prices_5[-1] > max(prices_5[:-1]) and stochs_5[-1] < max(stochs_5[:-1]):
+                bear_div[_i] = True
+        result["stoch_bull_div"] = bull_div
+        result["stoch_bear_div"] = bear_div
+
+    _BB_SQUEEZE_KEYS = {"bb_squeeze"}
+    if compute_all or _BB_SQUEEZE_KEYS & needed:
+        _bw = result.get("bb_width")
+        if _bw is None:
+            bb_data = compute_bollinger(close)
+            _bw = _safe(bb_data["width"])
+        result["bb_squeeze"] = [(w is not None and w < 0.04) for w in _bw]
+
     if compute_all or "daily_change_pct" in needed:
         prev = close.shift(1)
         pct = (close - prev) / prev.replace(0, np.nan) * 100
