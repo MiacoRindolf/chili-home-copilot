@@ -40,6 +40,15 @@ def main() -> None:
     except Exception as _e:
         logger.debug("[scheduler_worker] brain I/O profile log skipped: %s", _e)
 
+    # Restore Robinhood session so broker sync can run.
+    try:
+        from app.services import broker_service
+
+        ok = broker_service.try_restore_session()
+        logger.info("[scheduler_worker] Broker session restore: %s", "ok" if ok else "no session")
+    except Exception as _e:
+        logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
+
     start_scheduler()
     logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", os.environ.get("CHILI_SCHEDULER_ROLE"))
     try:

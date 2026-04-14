@@ -123,39 +123,103 @@ def try_restore_session() -> bool:
     If a valid token file exists, this reuses it without re-authenticating.
     Called once at server startup.
     """
-    global _logged_in, _last_login
+    global _logged_in, _last_login, _session_connected_at
     if not _rh_available or not _credentials_configured():
         return False
 
     with _login_lock:
         if _logged_in:
             return True
+
+        # First attempt: load the stored pickle directly and validate
+        # without calling rh.login() (which triggers a full auth flow and
+        # can hit Robinhood's rate limits).
+        if _try_load_pickle_session():
+            return True
+
+        # Fallback: full TOTP login (only if TOTP is configured)
         try:
             import robin_stocks.robinhood as rh
 
             if _has_totp():
                 import pyotp
                 totp = pyotp.TOTP(settings.robinhood_totp_secret)
-                rh.login(
+                result = rh.login(
                     settings.robinhood_username,
                     settings.robinhood_password,
                     mfa_code=totp.now(),
                     store_session=True,
                 )
             else:
-                rh.login(
+                result = rh.login(
                     settings.robinhood_username,
                     settings.robinhood_password,
                     store_session=True,
                 )
 
+            # robin_stocks doesn't raise on failed login — verify result.
+            if not result or not isinstance(result, dict) or not result.get("access_token"):
+                logger.warning("[broker] Robinhood login returned no access token")
+                return False
+
             _logged_in = True
             _last_login = time.time()
-            logger.info("[broker] Robinhood session restored from disk")
+            _session_connected_at = _last_login
+            logger.info("[broker] Robinhood session established via TOTP login")
             return True
         except Exception as e:
             logger.info(f"[broker] No saved Robinhood session to restore: {e}")
             return False
+
+
+def _try_load_pickle_session() -> bool:
+    """Load a stored robin_stocks pickle and validate it with a lightweight
+    API call.  Sets module login state on success.  Returns False if no
+    pickle or if the stored token is stale."""
+    global _logged_in, _last_login, _session_connected_at
+    try:
+        import pickle
+        from pathlib import Path
+        import robin_stocks.robinhood as rh
+        from robin_stocks.robinhood.helper import (
+            set_login_state,
+            update_session,
+            request_get,
+        )
+        from robin_stocks.robinhood.urls import positions_url
+
+        pickle_path = Path.home() / ".tokens" / "robinhood.pickle"
+        if not pickle_path.exists():
+            logger.debug("[broker] No stored session pickle at %s", pickle_path)
+            return False
+
+        with open(pickle_path, "rb") as f:
+            data = pickle.load(f)
+
+        access_token = data.get("access_token")
+        token_type = data.get("token_type", "Bearer")
+        if not access_token:
+            logger.debug("[broker] Pickle exists but has no access_token")
+            return False
+
+        set_login_state(True)
+        update_session("Authorization", f"{token_type} {access_token}")
+
+        # Validate with a lightweight API call
+        res = request_get(
+            positions_url(), "pagination", {"nonzero": "true"}, jsonify_data=False
+        )
+        res.raise_for_status()
+
+        _logged_in = True
+        _last_login = time.time()
+        _session_connected_at = _last_login
+        logger.info("[broker] Robinhood session restored from pickle (no re-auth)")
+        return True
+
+    except Exception as e:
+        logger.debug("[broker] Pickle session restore failed: %s", e)
+        return False
 
 
 # ── Login with explicit credentials (per-user from DB) ──────────────────

@@ -1,5 +1,10 @@
 #!/bin/sh
 set -e
+# Share Robinhood session tokens across containers via /app/data/.tokens
+mkdir -p /app/data/.tokens
+if [ ! -e "$HOME/.tokens" ]; then
+  ln -s /app/data/.tokens "$HOME/.tokens"
+fi
 # docker-compose `command:` (e.g. brain-worker) passes args here — run them instead of uvicorn.
 if [ "$#" -gt 0 ]; then
   echo "[docker-entrypoint-chili] CHILI_SCHEDULER_ROLE=${CHILI_SCHEDULER_ROLE:-unset} (non-web command)"
