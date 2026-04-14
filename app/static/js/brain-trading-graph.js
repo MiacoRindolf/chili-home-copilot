@@ -176,6 +176,88 @@ function initTradingBrainNetworkGraph() {
     _tbnApplyStage();
   }, { passive: false });
 
+  /* ── Touch: single-finger pan, two-finger pinch-zoom ── */
+  var _touchPanId = null;
+  var _touchPinchDist = 0;
+  var _touchPinchScale = 0;
+
+  function _touchDist(t1, t2) {
+    var dx = t1.clientX - t2.clientX;
+    var dy = t1.clientY - t2.clientY;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  vp.addEventListener('touchstart', function(e) {
+    if (e.touches.length === 1) {
+      var t = e.touches[0];
+      if (t.target && t.target.closest && t.target.closest('.tbn-node')) return;
+      tbnCloseNodeDetail();
+      _touchPanId = t.identifier;
+      px = t.clientX;
+      py = t.clientY;
+      dragging = true;
+      vp.classList.add('tbn-dragging');
+    } else if (e.touches.length === 2) {
+      dragging = false;
+      _touchPanId = null;
+      _touchPinchDist = _touchDist(e.touches[0], e.touches[1]);
+      _touchPinchScale = _tbnState.scale;
+      e.preventDefault();
+    }
+  }, { passive: false });
+
+  vp.addEventListener('touchmove', function(e) {
+    if (e.touches.length === 2) {
+      e.preventDefault();
+      var dist = _touchDist(e.touches[0], e.touches[1]);
+      if (_touchPinchDist > 0) {
+        var ratio = dist / _touchPinchDist;
+        var rect = vp.getBoundingClientRect();
+        var mx = (e.touches[0].clientX + e.touches[1].clientX) / 2 - rect.left;
+        var my = (e.touches[0].clientY + e.touches[1].clientY) / 2 - rect.top;
+        var ns = Math.max(0.32, Math.min(2.6, _touchPinchScale * ratio));
+        var s = _tbnState.scale;
+        var wx = (mx - _tbnState.tx) / s;
+        var wy = (my - _tbnState.ty) / s;
+        _tbnState.tx = mx - wx * ns;
+        _tbnState.ty = my - wy * ns;
+        _tbnState.scale = ns;
+        _tbnApplyStage();
+      }
+      return;
+    }
+    if (!dragging || _touchPanId === null) return;
+    for (var i = 0; i < e.touches.length; i++) {
+      if (e.touches[i].identifier === _touchPanId) {
+        var t = e.touches[i];
+        var dx = t.clientX - px;
+        var dy = t.clientY - py;
+        px = t.clientX;
+        py = t.clientY;
+        _tbnState.tx += dx;
+        _tbnState.ty += dy;
+        _tbnApplyStage();
+        e.preventDefault();
+        break;
+      }
+    }
+  }, { passive: false });
+
+  vp.addEventListener('touchend', function(e) {
+    if (e.touches.length === 0) {
+      dragging = false;
+      _touchPanId = null;
+      _touchPinchDist = 0;
+      vp.classList.remove('tbn-dragging');
+    } else if (e.touches.length === 1) {
+      _touchPinchDist = 0;
+      _touchPanId = e.touches[0].identifier;
+      px = e.touches[0].clientX;
+      py = e.touches[0].clientY;
+      dragging = true;
+    }
+  });
+
   function tbnShowGraphError() {
     var mpErr = document.getElementById('tbn-momentum-desk-panel');
     if (mpErr) {

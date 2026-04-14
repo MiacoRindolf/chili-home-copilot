@@ -17,8 +17,9 @@
   .home-header nav { font-size: 13px; margin-top: 10px; display: flex; gap: 4px; flex-wrap: wrap; }
   .home-header nav a {
     color: var(--text-secondary); text-decoration: none;
-    padding: 4px 10px; border-radius: 6px;
-    transition: color .15s, background .15s;
+    padding: 8px 12px; border-radius: 6px;
+    transition: color .15s, background .15s; min-height: 36px;
+    display: inline-flex; align-items: center;
   }
   .home-header nav a:hover { color: var(--accent); background: rgba(37,99,235,.06); }
   .header-actions { display: flex; align-items: center; gap: 8px; }
@@ -186,12 +187,15 @@
   [data-theme="dark"] .chore-tag.recurring { background: #14532d; color: #86efac; }
 
   .btn-delete {
-    background: none; border: none; cursor: pointer; padding: 4px 6px;
+    background: none; border: none; cursor: pointer; padding: 8px;
     border-radius: 6px; font-size: 16px; color: var(--text-muted); line-height: 1;
-    opacity: 0; transition: .15s;
+    opacity: 0; transition: .15s; min-width: 40px; min-height: 40px;
+    display: flex; align-items: center; justify-content: center;
   }
   .item-list li:hover .btn-delete { opacity: 1; }
   .btn-delete:hover { background: rgba(239,68,68,.15); color: #ef4444; }
+  @media (pointer: coarse) { .btn-delete { opacity: .6; } }
+  @media (max-width: 768px) { .btn-delete { opacity: .6; } }
 
   /* ── Birthday ─────────────────────────────────────────────────── */
   .bday-days {
@@ -311,10 +315,31 @@
 
   /* ── Responsive ───────────────────────────────────────────────── */
   @media (max-width: 700px) {
-    .home-header { padding: 14px 16px; }
+    .home-header { padding: 14px 16px; flex-direction: column; align-items: flex-start; }
+    .home-header h1 { font-size: 20px; }
+    .home-header nav { margin-top: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; width: 100%; scrollbar-width: none; }
+    .home-header nav::-webkit-scrollbar { display: none; }
+    .home-header nav a { white-space: nowrap; font-size: 13px; }
+    .header-actions { position: absolute; right: 16px; top: 14px; }
     .dashboard { padding: 16px 12px 40px; }
-    .stats-row { grid-template-columns: repeat(2, 1fr); }
+    .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .stat-value { font-size: 24px; }
     .weather-widget { padding: 10px 14px; }
+    .add-row { flex-direction: column; }
+    .add-row input[type="text"] { min-width: 100%; }
+    .add-row input[type="date"] { width: 100%; }
+    .add-row select { width: 100%; }
+    .card { padding: 16px; }
+    .card-header-btn { min-height: 36px; padding: 6px 10px; font-size: 12px; }
+    .quick-actions { grid-template-columns: repeat(3, 1fr); }
+    .qa-tile { padding: 14px 8px; }
+  }
+  @media (max-width: 480px) {
+    .home-header h1 { font-size: 18px; }
+    .stats-row { grid-template-columns: 1fr 1fr; }
+    .stat-value { font-size: 22px; }
+    .quick-actions { grid-template-columns: repeat(2, 1fr); }
+    .cal-day { min-height: 36px; font-size: 11px; }
   }
 </style>
 {% endblock %}

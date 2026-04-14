@@ -410,12 +410,18 @@
   /* ── Responsive ─────────────────────────────────────────────── */
   @media (max-width: 700px) {
     .mkp-topbar { padding: 12px 16px; }
-    .mkp-search-row { flex-direction: column; }
-    .mkp-filter-tabs { overflow-x: auto; }
+    .mkp-search-row { flex-direction: column; gap: 8px; }
+    .mkp-search-row input { min-height: 44px; font-size: 16px; }
+    .mkp-filter-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .mkp-filter-tabs::-webkit-scrollbar { display: none; }
+    .mkp-filter-tab { min-height: 40px; padding: 8px 14px; font-size: 13px; }
     .mkp-stats { gap: 8px; }
     .mkp-stat { min-width: 140px; padding: 10px 14px; }
     .mkp-grid { grid-template-columns: 1fr; }
     .mkp-wrap { padding: 0 12px 40px; }
+    .mkp-btn { min-height: 44px; padding: 10px 16px; font-size: 13px; }
+    .mkp-card-slug, .mkp-tag { font-size: 12px; }
+    .mkp-toast { bottom: calc(16px + env(safe-area-inset-bottom, 0px)); left: 16px; right: 16px; }
   }
 </style>
 {% endblock %}

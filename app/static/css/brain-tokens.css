@@ -132,3 +132,29 @@
   --brain-shadow-card-hover: 0 2px 10px rgba(0,0,0,.2);
   --brain-shadow-modal: 0 12px 40px rgba(0,0,0,.4);
 }
+
+/* ── Mobile: bump brain font tokens for readability ── */
+@media (max-width: 768px) {
+  :root {
+    --brain-font-2xs:  10px;
+    --brain-font-xs:   11px;
+    --brain-font-sm:   12px;
+    --brain-font-md:   13px;
+    --brain-font-base: 14px;
+    --brain-font-lg:   15px;
+    --brain-font-xl:   17px;
+    --brain-font-2xl:  20px;
+    --brain-space-6:  14px;
+    --brain-space-8:  18px;
+    --brain-space-10: 22px;
+  }
+}
+@media (max-width: 480px) {
+  :root {
+    --brain-font-2xs:  11px;
+    --brain-font-xs:   12px;
+    --brain-font-sm:   13px;
+    --brain-font-md:   14px;
+    --brain-font-base: 15px;
+  }
+}

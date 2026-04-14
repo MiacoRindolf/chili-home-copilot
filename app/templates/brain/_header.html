@@ -1,9 +1,10 @@
 ﻿<div class="b-header" role="banner">
   <div style="display:flex;align-items:center;gap:8px">
+    <button type="button" id="brain-mobile-menu-btn" class="b-mobile-menu-btn" onclick="toggleBrainMobileNav()" aria-label="Toggle navigation" aria-expanded="false">&#9776;</button>
     <button type="button" id="brain-nav-all-domains" class="b-back-domains-btn" onclick="showBrainHub()" style="display:{% if _bd != 'hub' %}inline-block{% else %}none{% endif %}" title="Back to domain hub">&#8592; All domains</button>
     <h1>&#x1F9E0; Chili Brain</h1>
   </div>
-  <nav role="navigation" aria-label="Main navigation">
+  <nav role="navigation" aria-label="Main navigation" id="brain-main-nav" class="b-header-nav">
     <a href="/">Home</a>
     <a href="/chat">Chat</a>
     <a href="/trading">Trading</a>
@@ -14,3 +15,44 @@
     <button id="theme-toggle" onclick="toggleTheme()" class="b-theme-btn" title="Toggle theme" aria-label="Toggle light or dark theme">&#127769;</button>
   </div>
 </div>
+<style>
+  .b-mobile-menu-btn {
+    display: none; background: none; border: 1px solid var(--border); border-radius: 8px;
+    font-size: 18px; padding: 6px 10px; cursor: pointer; color: var(--text);
+    min-height: 40px; min-width: 40px; align-items: center; justify-content: center;
+  }
+  @media (max-width: 768px) {
+    .b-mobile-menu-btn { display: inline-flex; }
+    .b-header-nav {
+      display: none; position: absolute; top: 100%; left: 0; right: 0;
+      background: var(--bg-header); border-bottom: 1px solid var(--border);
+      flex-direction: column; padding: 8px 0; z-index: 200;
+      box-shadow: 0 4px 12px rgba(0,0,0,.1);
+    }
+    .b-header-nav.open { display: flex; }
+    .b-header-nav a {
+      padding: 12px 20px !important; font-size: 14px !important;
+      border-bottom: 1px solid var(--border); min-height: 48px;
+      display: flex; align-items: center;
+    }
+    .b-header-nav a:last-child { border-bottom: none; }
+  }
+</style>
+<script>
+function toggleBrainMobileNav() {
+  var nav = document.getElementById('brain-main-nav');
+  var btn = document.getElementById('brain-mobile-menu-btn');
+  var open = nav.classList.toggle('open');
+  btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  btn.innerHTML = open ? '&#10005;' : '&#9776;';
+}
+document.addEventListener('click', function(e) {
+  var nav = document.getElementById('brain-main-nav');
+  var btn = document.getElementById('brain-mobile-menu-btn');
+  if (nav && nav.classList.contains('open') && !nav.contains(e.target) && !btn.contains(e.target)) {
+    nav.classList.remove('open');
+    btn.setAttribute('aria-expanded', 'false');
+    btn.innerHTML = '&#9776;';
+  }
+});
+</script>

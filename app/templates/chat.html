@@ -439,21 +439,25 @@
     @media (max-width: 700px) {
       header { padding: 8px 12px; }
       header h1 { font-size: 17px; }
-      header nav { font-size: 12px; }
+      header nav { font-size: 13px; }
+      header nav a { padding: 4px 2px; display: inline; }
       #sidebar {
         position: fixed; left: 0; top: 0; bottom: 0; z-index: 100;
         width: 280px;
       }
       #sidebar.hidden { margin-left: -280px; }
       #chat-area { padding: 10px 8px; }
-      .msg { max-width: 95%; font-size: 14px; padding: 8px 12px; }
+      .msg { max-width: 95%; font-size: 14px; padding: 10px 12px; }
       #input-bar { padding: 8px 8px calc(8px + env(safe-area-inset-bottom)); }
       #chat-form { gap: 6px; }
       #msg-input { font-size: 16px; padding: 10px 12px; }
       #chat-form button, #action-btn { min-height: 44px; min-width: 44px; }
-      .convo-item { padding: 12px; min-height: 44px; }
+      .convo-item { padding: 12px; min-height: 44px; font-size: 14px; }
+      .convo-item .convo-delete { opacity: .5; }
       #welcome { margin-top: 12vh; }
-      #welcome h2 { font-size: 24px; }
+      #welcome h2 { font-size: 22px; }
+      #welcome p { font-size: 14px; padding: 0 8px; }
+      #sidebar-toggle-btn { min-height: 44px; min-width: 44px; font-size: 20px; }
     }
   </style>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/highlightjs/cdn-release@11.9.0/build/styles/github-dark.min.css"/>

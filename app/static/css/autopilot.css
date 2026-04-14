@@ -1115,3 +1115,31 @@
     font-size: var(--text-lg);
   }
 }
+
+/* ── Mobile tap target & readability ── */
+@media (max-width: 768px) {
+  .ap-nav-pill {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+  }
+  .ap-opp-header {
+    min-height: 48px;
+  }
+  .ap-btn, .ap-btn-sm {
+    min-height: 44px;
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+  .ap-tabs {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .ap-tabs::-webkit-scrollbar { display: none; }
+  .ap-tab {
+    min-height: 40px;
+    padding: 8px 14px;
+    font-size: 13px;
+    white-space: nowrap;
+  }
+}

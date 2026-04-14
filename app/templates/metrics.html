@@ -83,7 +83,18 @@
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
   .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; }
   @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
-  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .m-topbar { gap: 8px; }
+    .m-topbar h1 { font-size: 1.2rem; }
+    .m-topbar .m-subtitle { margin-left: 0; display: block; }
+    .m-topbar nav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .m-topbar nav::-webkit-scrollbar { display: none; }
+    .m-topbar nav a, .m-topbar nav button { font-size: .88rem; padding: 8px 14px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
+    .convo-grid { grid-template-columns: 1fr; gap: 8px; }
+    .card { padding: 16px; }
+    .stat-card { padding: 14px; }
+  }
 
   /* System health */
   .health-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: .88rem; }

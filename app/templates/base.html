@@ -61,6 +61,25 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* ── Global mobile utilities ─────────────────────────────── */
+    @media (max-width: 768px) {
+      html { overflow-x: hidden; }
+      body { overflow-x: hidden; -webkit-text-size-adjust: 100%; }
+      button, a, [role="button"], [role="tab"], select, input[type="submit"] {
+        min-height: 44px; min-width: 44px;
+      }
+      input[type="text"], input[type="date"], input[type="number"],
+      input[type="email"], input[type="password"], textarea, select {
+        font-size: 16px;
+      }
+    }
+    @media (max-width: 480px) {
+      body { font-size: 15px; }
+    }
+    @supports (padding: env(safe-area-inset-bottom)) {
+      body { padding-bottom: env(safe-area-inset-bottom); }
+    }
   </style>
   <script>
     (function(){var t=localStorage.getItem('chili-theme');if(t)document.documentElement.setAttribute('data-theme',t);})();

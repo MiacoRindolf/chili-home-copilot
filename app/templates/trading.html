@@ -1878,10 +1878,13 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
    ═══════════════════════════════════════════════════ */
 @media (max-width: 768px) {
   body { overflow: hidden; }
+  .t-header { padding: 6px 10px; gap: 8px; }
   .t-header h1 { font-size: 14px; }
-  .t-header nav a { font-size: 11px; padding: 3px 6px; }
-  .mobile-toggle { display: flex; align-items: center; justify-content: center; }
-  .fab-ai { display: flex; align-items: center; justify-content: center; }
+  .t-header nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
+  .t-header nav::-webkit-scrollbar { display: none; }
+  .t-header nav a { font-size: 12px; padding: 8px 10px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
+  .mobile-toggle { display: flex; align-items: center; justify-content: center; min-height: 40px; min-width: 40px; }
+  .fab-ai { display: flex; align-items: center; justify-content: center; min-height: 52px; min-width: 52px; }
 
   /* Sidebar becomes slide-out drawer */
   .t-sidebar {
@@ -1905,9 +1908,9 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   .t-toolbar { gap: 4px; padding: 4px 8px; }
   .t-toolbar .ticker-display { font-size: 13px; min-width: 50px; }
   .t-toolbar .price-display { font-size: 11px; margin-right: 4px; padding: 2px 6px; border-radius: 6px; }
-  .t-toolbar select, .t-toolbar button { padding: 3px 6px; font-size: 10px; }
-  .ind-panel { padding: 2px 8px 4px; gap: 3px; }
-  .ind-chip { padding: 2px 6px; font-size: 9px; }
+  .t-toolbar select, .t-toolbar button { padding: 6px 8px; font-size: 11px; min-height: 36px; }
+  .ind-panel { padding: 4px 8px; gap: 4px; }
+  .ind-chip { padding: 4px 8px; font-size: 11px; min-height: 32px; }
 
   /* Screener cards on mobile */
   .scr-header, .scr-dt-header, .scr-bo-header { display: none; }
@@ -1943,21 +1946,23 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   .ticker-news-row { padding: 3px 6px; gap: 4px; }
   .news-card { min-width: 150px; max-width: 200px; padding: 4px 8px; font-size: 9px; }
 
-  /* Bottom panel: tighter tabs on mobile (base is already horizontal) */
-  .t-tabs { scroll-snap-type: x mandatory; scroll-behavior: smooth; }
+  .t-tabs { scroll-snap-type: x mandatory; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
   .t-tab {
-    padding: 0 10px; font-size: 10px;
+    padding: 6px 12px; font-size: 12px; min-height: 40px;
     scroll-snap-align: start; white-space: nowrap;
+    display: inline-flex; align-items: center;
   }
   .t-tab .t-tab-icon { margin-right: 4px; }
 
-  /* Trade form stacks */
-  .trade-form { gap: 4px; }
-  .trade-form input { width: 60px; }
-  table.trades { font-size: 10px; }
-  table.trades th, table.trades td { padding: 3px 4px; }
-  .trades-toolbar { gap: 4px; }
-  .trade-badge, .trade-status-badge { font-size: 8px; padding: 1px 3px; }
+  .trade-form { gap: 6px; flex-wrap: wrap; }
+  .trade-form input { width: 80px; min-height: 36px; font-size: 14px; }
+  .trade-form select { min-height: 36px; font-size: 14px; }
+  .trade-form button { min-height: 40px; }
+  table.trades { font-size: 11px; }
+  table.trades th, table.trades td { padding: 6px 4px; }
+  .trades-toolbar { gap: 6px; flex-wrap: wrap; }
+  .trade-badge, .trade-status-badge { font-size: 10px; padding: 2px 6px; }
+  .t-content { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 }
 
 /* ═══════════════════════════════════════════════════

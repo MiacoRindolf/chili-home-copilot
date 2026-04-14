@@ -56,7 +56,18 @@
     color: var(--text-secondary); text-transform: uppercase; letter-spacing: .05em;
   }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .p-topbar { gap: 8px; }
+    .p-topbar h1 { font-size: 1.2rem; }
+    .p-topbar nav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .p-topbar nav::-webkit-scrollbar { display: none; }
+    .p-topbar nav a, .p-topbar nav button { font-size: .88rem; padding: 8px 14px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
+    .card { padding: 16px; }
+    .profile-header { flex-wrap: wrap; gap: 12px; }
+    .avatar { width: 56px; height: 56px; font-size: 1.5rem; }
+    .delete-btn { min-height: 36px; min-width: 36px; padding: 6px 10px; font-size: .82rem; }
+  }
 
   /* Profile header */
   .profile-header {

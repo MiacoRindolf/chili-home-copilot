@@ -70,7 +70,19 @@
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 16px; }
   @media (max-width: 900px) { .grid-3 { grid-template-columns: 1fr; } }
-  @media (max-width: 700px) { .grid-2 { grid-template-columns: 1fr; } }
+  @media (max-width: 700px) {
+    .grid-2 { grid-template-columns: 1fr; }
+    .admin-shell { padding: 16px 12px 40px; }
+    .admin-topbar { gap: 8px; }
+    .admin-topbar h1 { font-size: 1.2rem; }
+    .admin-topbar nav { overflow-x: auto; flex-wrap: nowrap; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+    .admin-topbar nav::-webkit-scrollbar { display: none; }
+    .nav-btn { font-size: .85rem; padding: 8px 14px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
+    .page-btn { padding: 8px 14px; min-height: 40px; font-size: .85rem; }
+    .activity-scroll { -webkit-overflow-scrolling: touch; }
+    .activity-scroll table { font-size: .82rem; }
+    .activity-scroll th, .activity-scroll td { padding: 8px 6px; }
+  }
 
   .card {
     background: var(--card-bg); border: 1px solid var(--border);

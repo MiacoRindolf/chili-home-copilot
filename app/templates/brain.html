@@ -94,41 +94,41 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
     {% include "brain_project_domain.html" %}
 
     <!-- Reasoning Domain -->
-    <div id="domain-reasoning" style="display:{% if _bd == 'reasoning' %}block{% else %}none{% endif %}">
+    <div id="domain-reasoning" style="display:{% if _bd == 'reasoning' %}block{% else %}none{% endif %}; overflow-y:auto;">
       <div class="b-main-header">
         <h2>Reasoning Brain</h2>
-        <span id="reasoning-status-info" style="font-size:10px;color:var(--text-muted)"></span>
+        <span id="reasoning-status-info" style="font-size:var(--brain-font-sm);color:var(--text-muted)"></span>
       </div>
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F4AC;</span> Insight Chat</div>
         <div class="brain-thesis-card neutral" id="reasoning-insight-card">
-          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
-            <span style="font-size:11px;font-weight:600">Exploring:</span>
-            <span id="reasoning-current-goal" style="font-size:11px;color:var(--text-muted)">Loading...</span>
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px;flex-wrap:wrap">
+            <span style="font-size:var(--brain-font-md);font-weight:600">Exploring:</span>
+            <span id="reasoning-current-goal" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading...</span>
           </div>
-          <div id="reasoning-insight-thread" style="font-size:11px;line-height:1.5;max-height:160px;overflow-y:auto;margin-bottom:8px">
+          <div id="reasoning-insight-thread" style="font-size:var(--brain-font-md);line-height:1.5;max-height:200px;overflow-y:auto;margin-bottom:8px">
             <div style="color:var(--text-muted)">Waiting for Chili to start the conversation...</div>
           </div>
           <div style="display:flex;gap:6px;align-items:flex-end">
-            <textarea id="reasoning-insight-input" rows="2" placeholder="Type your reply..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:8px;font-size:11px;resize:vertical;font-family:inherit"></textarea>
-            <button onclick="sendReasoningInsightReply()" id="btn-reasoning-insight-send" class="brain-act-btn brain-act-primary">&#x27A4;</button>
+            <textarea id="reasoning-insight-input" rows="2" placeholder="Type your reply..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:8px;color:var(--text);padding:10px;font-size:var(--brain-font-base);resize:vertical;font-family:inherit;min-height:44px"></textarea>
+            <button onclick="sendReasoningInsightReply()" id="btn-reasoning-insight-send" class="brain-act-btn brain-act-primary" style="min-height:44px;min-width:44px">&#x27A4;</button>
           </div>
         </div>
       </div>
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F3AF;</span> Learning Goals &amp; Hypotheses</div>
-        <div style="display:grid;grid-template-columns:2fr 2fr 1.5fr;gap:10px">
+        <div class="reasoning-goals-grid">
           <div>
-            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Active Goals</div>
-            <div id="reasoning-goals" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading goals...</div>
+            <div style="font-size:var(--brain-font-md);font-weight:600;margin-bottom:6px">Active Goals</div>
+            <div id="reasoning-goals" style="max-height:220px;overflow-y:auto;font-size:var(--brain-font-md);color:var(--text-muted)">Loading goals...</div>
           </div>
           <div>
-            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Hypothesis Board</div>
-            <div id="reasoning-hypotheses" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading hypotheses...</div>
+            <div style="font-size:var(--brain-font-md);font-weight:600;margin-bottom:6px">Hypothesis Board</div>
+            <div id="reasoning-hypotheses" style="max-height:220px;overflow-y:auto;font-size:var(--brain-font-md);color:var(--text-muted)">Loading hypotheses...</div>
           </div>
           <div>
-            <div style="font-size:11px;font-weight:600;margin-bottom:4px">Snapshot</div>
-            <div id="reasoning-metrics" style="font-size:11px;color:var(--text-muted)">Loading metrics...</div>
+            <div style="font-size:var(--brain-font-md);font-weight:600;margin-bottom:6px">Snapshot</div>
+            <div id="reasoning-metrics" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading metrics...</div>
           </div>
         </div>
       </div>
@@ -139,20 +139,20 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F464;</span> User Model</div>
         <div class="brain-thesis-card neutral" id="reasoning-user-model-card">
-          <div id="reasoning-user-model-content" style="font-size:11px;color:var(--text-muted)">Loading user model...</div>
+          <div id="reasoning-user-model-content" style="font-size:var(--brain-font-md);color:var(--text-muted)">Loading user model...</div>
         </div>
       </div>
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F4CA;</span> Interest Graph</div>
-        <div id="reasoning-interests" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading interests...</div>
+        <div id="reasoning-interests" style="max-height:220px;overflow-y:auto;font-size:var(--brain-font-md);color:var(--text-muted)">Loading interests...</div>
       </div>
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F4DA;</span> Research Feed</div>
-        <div id="reasoning-research" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading research...</div>
+        <div id="reasoning-research" style="max-height:220px;overflow-y:auto;font-size:var(--brain-font-md);color:var(--text-muted)">Loading research...</div>
       </div>
       <div class="brain-section">
         <div class="brain-section-title"><span class="bs-icon">&#x1F52E;</span> Anticipations</div>
-        <div id="reasoning-anticipations" style="max-height:180px;overflow-y:auto;font-size:11px;color:var(--text-muted)">Loading anticipations...</div>
+        <div id="reasoning-anticipations" style="max-height:220px;overflow-y:auto;font-size:var(--brain-font-md);color:var(--text-muted)">Loading anticipations...</div>
       </div>
     </div>
 
