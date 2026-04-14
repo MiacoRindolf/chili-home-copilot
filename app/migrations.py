@@ -6129,13 +6129,14 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
         ON CONFLICT (id) DO NOTHING
     """))
 
-    conn.execute(text("""
-        INSERT INTO brain_node_states (node_id, activation_score, confidence)
-        VALUES
-            ('nm_position_monitor', 0.0, 0.5),
-            ('nm_lc_monitor_review', 0.0, 0.5)
-        ON CONFLICT (node_id) DO NOTHING
-    """))
+    for _nid in ("nm_position_monitor", "nm_lc_monitor_review"):
+        conn.execute(text("""
+            INSERT INTO brain_node_states (
+                node_id, activation_score, confidence, local_state, staleness_at, updated_at
+            )
+            VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            ON CONFLICT (node_id) DO NOTHING
+        """), {"nid": _nid})
 
     # Edges: regime -> monitor, monitor -> risk_gate, monitor -> alerts,
     #         monitor_review -> evidence_quality (feedback)
