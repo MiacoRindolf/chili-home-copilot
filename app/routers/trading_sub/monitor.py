@@ -10,7 +10,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
-from ...models.trading import PatternMonitorDecision, ScanPattern, Trade
+from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 from ...services import trading_service as ts
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 from ._utils import json_safe
@@ -34,6 +34,32 @@ def _monitored_open_trades_query(db: Session, user_id: int | None):
     return _user_trade_filter(q, user_id)
 
 
+def _fraction_to_health_percent(score: float | None) -> float | None:
+    """Pattern monitor stores health_score on 0–1 (condition match ratio). UI uses 0–100."""
+    if score is None:
+        return None
+    try:
+        x = float(score)
+    except (TypeError, ValueError):
+        return None
+    if x <= 1.5:
+        return max(0.0, min(100.0, round(x * 100.0, 2)))
+    return max(0.0, min(100.0, round(x, 2)))
+
+
+def _fraction_to_delta_points(delta: float | None) -> float | None:
+    """health_delta is change on same 0–1 scale → points on 0–100 health scale."""
+    if delta is None:
+        return None
+    try:
+        x = float(delta)
+    except (TypeError, ValueError):
+        return None
+    if abs(x) <= 1.5:
+        return round(x * 100.0, 3)
+    return round(x, 3)
+
+
 def _quote_price(q: dict[str, Any] | None) -> float | None:
     if not q:
         return None
@@ -53,7 +79,9 @@ def _serialize_decision(d: PatternMonitorDecision) -> dict[str, Any]:
         "breakout_alert_id": d.breakout_alert_id,
         "scan_pattern_id": d.scan_pattern_id,
         "health_score": json_safe(d.health_score),
+        "health_score_pct": json_safe(_fraction_to_health_percent(d.health_score)),
         "health_delta": json_safe(d.health_delta) if d.health_delta is not None else None,
+        "health_delta_pts": json_safe(_fraction_to_delta_points(d.health_delta)),
         "conditions_snapshot": json_safe(d.conditions_snapshot) if d.conditions_snapshot else None,
         "action": d.action,
         "old_stop": json_safe(d.old_stop) if d.old_stop is not None else None,
@@ -101,6 +129,12 @@ def api_monitor_active(
         )
 
     trade_ids = [t.id for t in trades]
+    alert_ids = [t.related_alert_id for t in trades if t.related_alert_id]
+    alerts_by_id: dict[int, BreakoutAlert] = {}
+    if alert_ids:
+        for ba in db.query(BreakoutAlert).filter(BreakoutAlert.id.in_(alert_ids)).all():
+            alerts_by_id[ba.id] = ba
+
     pattern_ids = {t.scan_pattern_id for t in trades if t.scan_pattern_id}
     patterns: dict[int, ScanPattern] = {}
     if pattern_ids:
@@ -147,7 +181,9 @@ def api_monitor_active(
         decs = by_trade.get(trade.id, [])
         latest = decs[0] if decs else None
         if latest is not None:
-            health_scores.append(float(latest.health_score))
+            hpct = _fraction_to_health_percent(latest.health_score)
+            if hpct is not None:
+                health_scores.append(float(hpct))
 
         pat = patterns.get(trade.scan_pattern_id) if trade.scan_pattern_id else None
         if pat is None and latest and latest.scan_pattern_id:
@@ -170,6 +206,17 @@ def api_monitor_active(
 
         recent = [_serialize_decision(x) for x in decs[:5]]
 
+        eff_sl = trade.stop_loss
+        eff_tp = trade.take_profit
+        linked = alerts_by_id.get(trade.related_alert_id) if trade.related_alert_id else None
+        if linked is not None:
+            if eff_tp is None and linked.target_price is not None:
+                eff_tp = float(linked.target_price)
+            if eff_sl is None and linked.stop_loss is not None:
+                eff_sl = float(linked.stop_loss)
+        if eff_tp is None and latest is not None and latest.new_target is not None:
+            eff_tp = float(latest.new_target)
+
         setups.append(
             {
                 "trade_id": trade.id,
@@ -179,8 +226,8 @@ def api_monitor_active(
                 "pattern_id": trade.scan_pattern_id or (latest.scan_pattern_id if latest else None),
                 "timeframe": pat.timeframe if pat else None,
                 "entry_price": json_safe(trade.entry_price),
-                "stop_loss": json_safe(trade.stop_loss) if trade.stop_loss is not None else None,
-                "take_profit": json_safe(trade.take_profit) if trade.take_profit is not None else None,
+                "stop_loss": json_safe(eff_sl) if eff_sl is not None else None,
+                "take_profit": json_safe(eff_tp) if eff_tp is not None else None,
                 "entry_date": trade.entry_date.isoformat() if trade.entry_date else None,
                 "current_price": json_safe(cur) if cur is not None else None,
                 "pnl_pct": json_safe(pnl_pct) if pnl_pct is not None else None,
@@ -194,10 +241,19 @@ def api_monitor_active(
 
     def _health_sort_key(s: dict[str, Any]) -> float:
         ld = s.get("latest_decision")
-        if not ld or ld.get("health_score") is None:
+        if not ld:
+            return 999.0
+        p = ld.get("health_score_pct")
+        if p is not None:
+            try:
+                return float(p)
+            except (TypeError, ValueError):
+                pass
+        if ld.get("health_score") is None:
             return 999.0
         try:
-            return float(ld["health_score"])
+            alt = _fraction_to_health_percent(float(ld["health_score"]))
+            return float(alt) if alt is not None else 999.0
         except (TypeError, ValueError):
             return 999.0
 

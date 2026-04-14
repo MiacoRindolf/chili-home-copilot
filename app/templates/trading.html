@@ -416,15 +416,25 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 4px;
   background: rgba(99,102,241,0.2); color: #a5b4fc; margin-left: 6px; vertical-align: middle;
 }
+.mon-health-label-row { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-top: 4px; }
+.mon-health-lbl { font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); }
+.mon-health-scale-hint { font-size: 9px; color: var(--text-muted); opacity: 0.85; }
 .mon-health-row { display: flex; align-items: center; gap: 10px; }
-.mon-health-bar-wrap { flex: 1; height: 8px; border-radius: 4px; background: rgba(255,255,255,0.06); overflow: hidden; }
+.mon-health-bar-wrap {
+  flex: 1; height: 12px; border-radius: 6px;
+  background: rgba(255,255,255,0.08); overflow: hidden;
+  border: 1px solid rgba(255,255,255,0.06);
+}
 .mon-health-bar {
-  height: 100%; border-radius: 4px;
+  height: 100%; border-radius: 5px; min-width: 0;
   background: linear-gradient(90deg, #ef4444 0%, #eab308 45%, #22c55e 100%);
   background-size: 100% 100%;
-  transition: width .25s ease;
+  transition: width .28s ease;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.12);
 }
-.mon-health-num { font-size: 13px; font-weight: 800; min-width: 42px; text-align: right; }
+.mon-health-score-wrap { display: flex; flex-direction: column; align-items: flex-end; gap: 0; min-width: 52px; }
+.mon-health-num { font-size: 15px; font-weight: 800; line-height: 1; text-align: right; color: var(--text); }
+.mon-health-num-sub { font-size: 9px; font-weight: 600; color: var(--text-muted); text-align: right; }
 .mon-meta-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: 10px; }
 .mon-meta-row div { color: var(--text-muted); }
 .mon-meta-row div b { display: block; color: var(--text); font-size: 11px; margin-top: 2px; }
@@ -8623,10 +8633,36 @@ function _monitorActionClass(act) {
   return 'mon-badge-action-hold';
 }
 
+function _monitorHealthPct(ld) {
+  if (!ld) return null;
+  if (ld.health_score_pct != null && ld.health_score_pct !== '') {
+    var p = Number(ld.health_score_pct);
+    if (isFinite(p)) return Math.max(0, Math.min(100, p));
+  }
+  if (ld.health_score == null) return null;
+  var raw = Number(ld.health_score);
+  if (!isFinite(raw)) return null;
+  if (raw <= 1.5) return Math.max(0, Math.min(100, raw * 100));
+  return Math.max(0, Math.min(100, raw));
+}
+
+function _monitorDeltaPts(ld) {
+  if (!ld) return null;
+  if (ld.health_delta_pts != null && ld.health_delta_pts !== '') {
+    var pts = Number(ld.health_delta_pts);
+    if (isFinite(pts)) return pts;
+  }
+  if (ld.health_delta == null) return null;
+  var raw = Number(ld.health_delta);
+  if (!isFinite(raw)) return null;
+  if (Math.abs(raw) <= 1.5) return raw * 100;
+  return raw;
+}
+
 function _monitorCardUrgencyClass(s) {
   var ld = s.latest_decision;
   if (ld && ld.action === 'exit_now') return 'mon-card-urgent';
-  var h = ld && ld.health_score != null ? Number(ld.health_score) : null;
+  var h = _monitorHealthPct(ld);
   if (h != null && h < 40) return 'mon-card-urgent';
   if (h != null && h < 70) return 'mon-card-watch';
   return '';
@@ -8647,8 +8683,10 @@ function _monitorSortSetups(list, mode) {
     return arr;
   }
   arr.sort(function(a, b) {
-    var ha = (a.latest_decision && a.latest_decision.health_score != null) ? Number(a.latest_decision.health_score) : 999;
-    var hb = (b.latest_decision && b.latest_decision.health_score != null) ? Number(b.latest_decision.health_score) : 999;
+    var ha = _monitorHealthPct(a.latest_decision);
+    var hb = _monitorHealthPct(b.latest_decision);
+    if (ha == null) ha = 999;
+    if (hb == null) hb = 999;
     return ha - hb;
   });
   return arr;
@@ -8682,11 +8720,11 @@ function renderMonitorCards(setups) {
   var html = '';
   setups.forEach(function(s) {
     var ld = s.latest_decision;
-    var health = ld && ld.health_score != null ? Math.max(0, Math.min(100, Number(ld.health_score))) : null;
+    var health = _monitorHealthPct(ld);
     var hPct = health != null ? health : 0;
-    var delta = ld && ld.health_delta != null ? Number(ld.health_delta) : null;
-    var deltaStr = delta == null ? '' : (delta >= 0 ? '+' + delta.toFixed(1) : delta.toFixed(1));
-    var deltaColor = delta == null ? 'var(--text-muted)' : (delta >= 0 ? '#22c55e' : '#ef4444');
+    var deltaPts = _monitorDeltaPts(ld);
+    var deltaStr = deltaPts == null ? '' : (deltaPts >= 0 ? '+' + deltaPts.toFixed(1) : deltaPts.toFixed(1));
+    var deltaColor = deltaPts == null ? 'var(--text-muted)' : (deltaPts >= 0 ? '#22c55e' : '#ef4444');
     var act = ld ? ld.action : '—';
     var src = ld && ld.decision_source ? ld.decision_source : '—';
     var when = ld && ld.created_at ? ld.created_at : 'never';
@@ -8704,11 +8742,18 @@ function renderMonitorCards(setups) {
     html += '<div style="font-size:9px;color:var(--text-muted);">#' + s.trade_id + '</div>';
     html += '</div>';
     html += '<div class="mon-pattern-line">' + pat + tf + '</div>';
-    html += '<div class="mon-health-row">';
-    html += '<div class="mon-health-bar-wrap"><div class="mon-health-bar" style="width:' + hPct + '%;"></div></div>';
-    html += '<div class="mon-health-num">' + (health != null ? health.toFixed(0) : '—') + '</div>';
+    html += '<div class="mon-health-label-row">';
+    html += '<span class="mon-health-lbl">Pattern health</span>';
+    html += '<span class="mon-health-scale-hint">0–100 (conditions met)</span>';
     html += '</div>';
-    if (delta != null) html += '<div style="font-size:10px;color:' + deltaColor + ';">Δ health ' + deltaStr + '</div>';
+    html += '<div class="mon-health-row">';
+    html += '<div class="mon-health-bar-wrap" title="Share of pattern conditions still satisfied">';
+    html += '<div class="mon-health-bar" style="width:' + hPct + '%;"></div></div>';
+    html += '<div class="mon-health-score-wrap">';
+    html += '<span class="mon-health-num" title="Pattern health score (0–100)">' + (health != null ? Math.round(health) : '—') + '</span>';
+    html += '<span class="mon-health-num-sub">/ 100</span>';
+    html += '</div></div>';
+    if (deltaPts != null) html += '<div style="font-size:10px;color:' + deltaColor + ';">Δ vs last check: <b>' + deltaStr + '</b> pts on this scale</div>';
     html += '<div class="mon-meta-row">';
     html += '<div>Entry<b>$' + (s.entry_price != null ? Number(s.entry_price).toFixed(4) : '—') + '</b></div>';
     html += '<div>Price<b>' + (s.current_price != null ? '$' + Number(s.current_price).toFixed(4) : '—') + '</b></div>';
@@ -8730,7 +8775,8 @@ function renderMonitorCards(setups) {
     if (snapStr) html += '<div style="margin-bottom:6px;"><b>Conditions snapshot</b></div><pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:9px;max-height:160px;overflow:auto;">' + snapStr + '</pre>';
     html += '<div style="margin:8px 0 4px;font-weight:700;">Recent</div><div class="mon-mini-timeline">';
     (s.recent_decisions || []).forEach(function(rd) {
-      html += '<div class="mon-mini-row">' + escHtml(rd.created_at || '') + ' · ' + escHtml(rd.action || '') + ' · h=' + (rd.health_score != null ? rd.health_score : '—') + '</div>';
+      var hp = _monitorHealthPct(rd);
+      html += '<div class="mon-mini-row">' + escHtml(rd.created_at || '') + ' · ' + escHtml(rd.action || '') + ' · h=' + (hp != null ? Math.round(hp) : '—') + '/100</div>';
     });
     html += '</div></div></div>';
   });
@@ -8878,7 +8924,8 @@ function loadMonitorDecisionFeed() {
       html += '<div class="' + rowClass + '">';
       html += '<div><div class="mon-feed-ts">' + escHtml(x.created_at || '') + '</div><div class="mon-feed-tk">' + escHtml(x.ticker || '') + '</div></div>';
       html += '<div><span class="mon-badge ' + _monitorActionClass(x.action) + '">' + escHtml(x.action || '') + '</span></div>';
-      html += '<div class="mon-feed-body">h=' + (x.health_score != null ? x.health_score : '—') + stops + (snippet ? '<br/>' + escHtml(snippet) : '') + '</div>';
+      var fhp = _monitorHealthPct(x);
+      html += '<div class="mon-feed-body">health=' + (fhp != null ? Math.round(fhp) + '/100' : '—') + stops + (snippet ? '<br/>' + escHtml(snippet) : '') + '</div>';
       html += '</div>';
     });
     list.innerHTML = html;
