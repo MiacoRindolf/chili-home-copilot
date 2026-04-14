@@ -120,6 +120,88 @@ def _get_proposal_reminder(db: Session, ticker: str, user_id: int | None) -> str
     return "\n".join(lines)
 
 
+def _get_pattern_imminent_reminder(db: Session, ticker: str) -> str:
+    """Build a user-message-level reminder about pattern-imminent alerts.
+
+    Same strategy as _get_proposal_reminder: inject into the user message
+    so the LLM cannot overlook it in a long system prompt.
+    """
+    import json as _json
+    from datetime import datetime
+    from ..models.trading import BreakoutAlert, ScanPattern
+
+    ticker_up = ticker.upper()
+    alerts = (
+        db.query(BreakoutAlert)
+        .filter(
+            BreakoutAlert.ticker == ticker_up,
+            BreakoutAlert.alert_tier == "pattern_imminent",
+        )
+        .order_by(BreakoutAlert.alerted_at.desc())
+        .limit(2)
+        .all()
+    )
+    if not alerts:
+        return ""
+
+    a = alerts[0]
+    age_h = (datetime.utcnow() - a.alerted_at).total_seconds() / 3600 if a.alerted_at else 0
+
+    pat_name = "Unknown"
+    pat_desc = ""
+    conditions_text = ""
+    win_rate = 0
+    avg_ret = 0
+    if a.scan_pattern_id:
+        pat = db.get(ScanPattern, a.scan_pattern_id)
+        if pat:
+            pat_name = pat.name or f"Pattern #{pat.id}"
+            pat_desc = pat.description or ""
+            win_rate = (pat.win_rate or 0) * 100
+            avg_ret = pat.avg_return_pct or 0
+            rj = pat.rules_json
+            if isinstance(rj, str):
+                try:
+                    rj = _json.loads(rj)
+                except Exception:
+                    rj = {}
+            conds = (rj or {}).get("conditions", [])
+            if conds:
+                cond_lines = []
+                for c in conds:
+                    ind = c.get("indicator", "?")
+                    op = c.get("op", "?")
+                    val = c.get("value") if "value" in c else c.get("ref", "?")
+                    cond_lines.append(f"  - {ind} {op} {val}")
+                conditions_text = "\n".join(cond_lines)
+
+    outcomes = [al.outcome or "pending" for al in alerts]
+    wins = outcomes.count("winner")
+    losses = outcomes.count("loser")
+
+    lines = [
+        f"CRITICAL — MY BRAIN DETECTED A PATTERN on {ticker_up}. "
+        f"You MUST reference this in your analysis:",
+        f"Pattern: \"{pat_name}\" (Win rate: {win_rate:.1f}%, Avg return: {avg_ret:.1f}%)",
+    ]
+    if pat_desc:
+        lines.append(f"What it means: {pat_desc}")
+    lines.append(
+        f"Alert: {age_h:.0f}h ago at ${a.price_at_alert} | "
+        f"Entry: ${a.entry_price} | Stop: ${a.stop_loss} | Target: ${a.target_price}"
+    )
+    if wins or losses:
+        lines.append(f"Track record on {ticker_up}: {wins} winner(s), {losses} loser(s)")
+    if conditions_text:
+        lines.append(f"Pattern conditions (explain each in plain English):\n{conditions_text}")
+    lines.append(
+        "Use THESE entry/stop/target levels as your primary recommendation "
+        "(adjusted for any price movement since the alert). "
+        "Explain each condition so I understand why this pattern works."
+    )
+    return "\n".join(lines)
+
+
 # ── Page ────────────────────────────────────────────────────────────────
 
 
@@ -340,9 +422,12 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
     ai_context = ts.build_ai_context(db, ctx["user_id"], body.ticker, body.interval)
 
     proposal_reminder = _get_proposal_reminder(db, body.ticker, ctx.get("user_id"))
+    pattern_reminder = _get_pattern_imminent_reminder(db, body.ticker)
     user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. Give me a clear verdict: should I buy, sell, or hold? Include exact entry price, stop-loss, targets, hold duration, and confidence level."
     if proposal_reminder:
         user_msg += "\n\n" + proposal_reminder
+    if pattern_reminder:
+        user_msg += "\n\n" + pattern_reminder
 
     messages = []
     if body.history:
@@ -384,6 +469,7 @@ def api_analyze_stream(
     ai_context = ts.build_ai_context(db, ctx["user_id"], ticker, interval)
 
     proposal_reminder = _get_proposal_reminder(db, ticker, ctx.get("user_id"))
+    pattern_reminder = _get_pattern_imminent_reminder(db, ticker)
     user_msg = message or (
         f"Analyze {ticker} on the {interval} timeframe. "
         "Give me a clear verdict: should I buy, sell, or hold? "
@@ -391,6 +477,8 @@ def api_analyze_stream(
     )
     if proposal_reminder:
         user_msg += "\n\n" + proposal_reminder
+    if pattern_reminder:
+        user_msg += "\n\n" + pattern_reminder
 
     try:
         hist_list = json.loads(history) if history else []

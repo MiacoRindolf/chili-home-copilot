@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -830,6 +830,38 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             )
             db.add(trade)
             created += 1
+
+    # Link open trades to recent pattern-imminent alerts (if not already linked).
+    try:
+        from ..models.trading import BreakoutAlert
+        _link_cutoff = datetime.utcnow() - timedelta(hours=48)
+        _open_unlinked = (
+            db.query(Trade)
+            .filter(
+                Trade.user_id == user_id,
+                Trade.broker_source == "robinhood",
+                Trade.status == "open",
+                Trade.related_alert_id.is_(None),
+            )
+            .all()
+        )
+        for _t in _open_unlinked:
+            _best = (
+                db.query(BreakoutAlert)
+                .filter(
+                    BreakoutAlert.ticker == _t.ticker,
+                    BreakoutAlert.alert_tier == "pattern_imminent",
+                    BreakoutAlert.alerted_at >= _link_cutoff,
+                )
+                .order_by(BreakoutAlert.score_at_alert.desc())
+                .first()
+            )
+            if _best:
+                _t.related_alert_id = _best.id
+                if not _t.scan_pattern_id and _best.scan_pattern_id:
+                    _t.scan_pattern_id = _best.scan_pattern_id
+    except Exception:
+        logger.debug("[broker] alert-position link failed", exc_info=True)
 
     stale = (
         db.query(Trade)

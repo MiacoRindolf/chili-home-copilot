@@ -527,3 +527,71 @@ def format_test_alert() -> str:
         "Telegram notifications are working.",
         "You will receive alerts for breakouts, targets, stops, and strategy proposals.",
     ])
+
+
+def format_pattern_adjustment(
+    *,
+    ticker: str,
+    pattern_name: str,
+    action: str,
+    health_score: float,
+    health_delta: float | None = None,
+    old_stop: float | None = None,
+    new_stop: float | None = None,
+    old_target: float | None = None,
+    new_target: float | None = None,
+    current_price: float | None = None,
+    entry_price: float | None = None,
+    pnl_pct: float | None = None,
+    reasoning: str = "",
+    dry_run: bool = False,
+) -> str:
+    """Format a pattern monitor adjustment for Telegram delivery."""
+    action_emoji = {
+        "tighten_stop": "\U0001F6E1\uFE0F",
+        "loosen_target": "\U0001F3AF",
+        "hold": "\u23F8\uFE0F",
+        "exit_now": "\U0001F6A8",
+    }.get(action, "\U0001F4CA")
+
+    action_label = {
+        "tighten_stop": "TIGHTEN STOP",
+        "loosen_target": "LOOSEN TARGET",
+        "hold": "HOLD STEADY",
+        "exit_now": "EXIT NOW",
+    }.get(action, action.upper())
+
+    health_bar = _health_bar(health_score)
+    delta_str = f" ({health_delta:+.0%})" if health_delta is not None else ""
+    prefix = "<b>[DRY-RUN]</b> " if dry_run else ""
+
+    lines = [
+        f"{action_emoji} {prefix}<b>{ticker} — Pattern Monitor</b>",
+        f"Pattern: <i>{pattern_name}</i>",
+        f"Health: {health_bar} {health_score:.0%}{delta_str}",
+        "",
+        f"<b>Action: {action_label}</b>",
+    ]
+
+    if action == "tighten_stop" and new_stop is not None:
+        old_str = f"${old_stop:.2f}" if old_stop else "none"
+        lines.append(f"Stop: {old_str} \u2192 <b>${new_stop:.2f}</b>")
+    elif action == "loosen_target" and new_target is not None:
+        old_str = f"${old_target:.2f}" if old_target else "none"
+        lines.append(f"Target: {old_str} \u2192 <b>${new_target:.2f}</b>")
+
+    if reasoning:
+        lines.append(f"Reason: {reasoning[:200]}")
+
+    lines.append("")
+    price_str = f"${current_price:.2f}" if current_price else "?"
+    entry_str = f"${entry_price:.2f}" if entry_price else "?"
+    pnl_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "?"
+    lines.append(f"Price: {price_str} | Entry: {entry_str} | P&L: {pnl_str}")
+
+    return "\n".join(lines)
+
+
+def _health_bar(score: float) -> str:
+    filled = int(score * 5)
+    return "\u2588" * filled + "\u2591" * (5 - filled)

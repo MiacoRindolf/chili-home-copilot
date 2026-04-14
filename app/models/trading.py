@@ -87,6 +87,38 @@ class Trade(Base):
     stop_model: Optional[str] = Column(String(30), nullable=True)
     exit_reason: Optional[str] = Column(String(50), nullable=True)
     trade_type: Optional[str] = Column(String(30), nullable=True)
+    related_alert_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+
+
+class PatternMonitorDecision(Base):
+    """Logs each pattern-health evaluation and resulting stop/target adjustment."""
+    __tablename__ = "trading_pattern_monitor_decisions"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    trade_id: int = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=False)
+    breakout_alert_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True
+    )
+    health_score: float = Column(Float, nullable=False)
+    health_delta: Optional[float] = Column(Float, nullable=True)
+    conditions_snapshot: Optional[dict] = Column(JSONB, nullable=True)
+    action: str = Column(String(30), nullable=False)
+    old_stop: Optional[float] = Column(Float, nullable=True)
+    new_stop: Optional[float] = Column(Float, nullable=True)
+    old_target: Optional[float] = Column(Float, nullable=True)
+    new_target: Optional[float] = Column(Float, nullable=True)
+    llm_confidence: Optional[float] = Column(Float, nullable=True)
+    llm_reasoning: Optional[str] = Column(Text, nullable=True)
+    price_at_decision: Optional[float] = Column(Float, nullable=True)
+    price_after_1h: Optional[float] = Column(Float, nullable=True)
+    price_after_4h: Optional[float] = Column(Float, nullable=True)
+    was_beneficial: Optional[bool] = Column(Boolean, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class TradingExecutionEvent(Base):

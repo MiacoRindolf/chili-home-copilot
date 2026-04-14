@@ -467,6 +467,36 @@ def _run_crypto_stop_monitor_job():
     run_scheduler_job_guarded("crypto_stop_monitor", _work)
 
 
+def _run_pattern_position_monitor_job():
+    """Evaluate pattern-linked positions and adjust stops/targets."""
+    from ..db import SessionLocal
+    from ..models.trading import Trade
+    from sqlalchemy import distinct
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            from .trading.pattern_position_monitor import run_pattern_position_monitor
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    Trade.related_alert_id.isnot(None),
+                )
+                .all()
+            ]
+            for uid in user_ids:
+                try:
+                    run_pattern_position_monitor(db, uid)
+                except Exception:
+                    logger.warning("[scheduler] pattern_position_monitor failed uid=%s", uid, exc_info=True)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("pattern_position_monitor", _work)
+
+
 def _run_pattern_imminent_job():
     """Scan active ScanPatterns for near-complete setups; alert within configured ETA window.
 
@@ -1229,6 +1259,23 @@ def _run_intraday_signal_sweep_job():
         db.close()
 
 
+def _run_monitor_decision_review_job():
+    """Hourly: fill price_after_1h/4h and was_beneficial on pattern monitor decisions."""
+    from ..db import SessionLocal
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            from .trading.pattern_position_monitor import review_monitor_decisions
+            result = review_monitor_decisions(db)
+            if result.get("filled_1h") or result.get("filled_4h"):
+                logger.info("[scheduler] monitor decision review: %s", result)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("monitor_decision_review", _work)
+
+
 def _check_breakout_outcomes():
     """Hourly job: check price outcomes for pending breakout alerts.
 
@@ -1622,6 +1669,16 @@ def start_scheduler():
             )
 
             _scheduler.add_job(
+                _run_pattern_position_monitor_job,
+                trigger=IntervalTrigger(minutes=3),
+                id="pattern_position_monitor",
+                name="Pattern position monitor (every 3min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=45),
+            )
+
+            _scheduler.add_job(
                 _run_intraday_signal_sweep_job,
                 trigger=IntervalTrigger(minutes=15),
                 id="intraday_signal_sweep",
@@ -1697,6 +1754,15 @@ def start_scheduler():
                 trigger=IntervalTrigger(hours=1),
                 id="breakout_outcome_checker",
                 name="Breakout outcome checker (hourly)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_monitor_decision_review_job,
+                trigger=IntervalTrigger(hours=1),
+                id="monitor_decision_review",
+                name="Pattern monitor decision review (hourly)",
                 replace_existing=True,
                 max_instances=1,
             )

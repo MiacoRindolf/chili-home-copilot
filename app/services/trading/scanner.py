@@ -302,6 +302,13 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "crypto_bo_retest_pressure": 2.0,
     "crypto_bo_retest_consolidation": 1.5,
     "crypto_bo_mtf_retest_confirm": 1.0,
+
+    # ── Pattern position monitor thresholds ────────────────────────────
+    "monitor_health_healthy": 0.8,
+    "monitor_health_weakening": 0.5,
+    "monitor_delta_urgent": -0.3,
+    "monitor_llm_confidence_min": 0.5,
+    "monitor_cooldown_minutes": 15.0,
 }
 
 _adaptive_weights: dict[str, float] = dict(_DEFAULT_WEIGHTS)

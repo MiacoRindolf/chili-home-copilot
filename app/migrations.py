@@ -6103,6 +6103,53 @@ def _migration_115_schema_hardening_fks(conn) -> None:
     conn.commit()
 
 
+def _migration_117_pattern_position_monitor(conn) -> None:
+    """Add Trade.related_alert_id FK and create pattern monitor decisions table."""
+    cols = _columns(conn, "trading_trades")
+    if "related_alert_id" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_trades ADD COLUMN related_alert_id INTEGER "
+            "REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_related_alert "
+            "ON trading_trades (related_alert_id) WHERE related_alert_id IS NOT NULL"
+        ))
+
+    tables = _tables(conn)
+    if "trading_pattern_monitor_decisions" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_monitor_decisions (
+                id SERIAL PRIMARY KEY,
+                trade_id INTEGER REFERENCES trading_trades(id) ON DELETE CASCADE NOT NULL,
+                breakout_alert_id INTEGER REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL,
+                scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                health_score FLOAT NOT NULL,
+                health_delta FLOAT,
+                conditions_snapshot JSONB,
+                action VARCHAR(30) NOT NULL,
+                old_stop FLOAT,
+                new_stop FLOAT,
+                old_target FLOAT,
+                new_target FLOAT,
+                llm_confidence FLOAT,
+                llm_reasoning TEXT,
+                price_at_decision FLOAT,
+                price_after_1h FLOAT,
+                price_after_4h FLOAT,
+                was_beneficial BOOLEAN,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pmd_trade_created ON trading_pattern_monitor_decisions (trade_id, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pmd_pattern_created ON trading_pattern_monitor_decisions (scan_pattern_id, created_at DESC)"
+        ))
+    conn.commit()
+
+
 def _migration_116_trade_type_column(conn) -> None:
     """Add trade_type column to trading_trades for daytrade/scalp classification."""
     cols = _columns(conn, "trading_trades")
@@ -6229,6 +6276,7 @@ MIGRATIONS = [
     ("114_stop_decisions_and_delivery", _migration_114_stop_decisions_and_delivery),
     ("115_schema_hardening_fks", _migration_115_schema_hardening_fks),
     ("116_trade_type_column", _migration_116_trade_type_column),
+    ("117_pattern_position_monitor", _migration_117_pattern_position_monitor),
 ]
 
 

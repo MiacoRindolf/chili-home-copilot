@@ -538,11 +538,22 @@ def _record_stop_decision(db: Session, trade_id: int, result: StopDecisionResult
 
 
 def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None:
-    """Update the Trade row with any stop/watermark changes."""
+    """Update the Trade row with any stop/watermark changes.
+
+    If the trade is linked to a pattern-monitor alert (related_alert_id),
+    the engine will never WIDEN the stop — only tighten it.  This preserves
+    adjustments made by the pattern position monitor.
+    """
     changed = False
     if result.new_stop is not None and result.new_stop != trade.stop_loss:
-        trade.stop_loss = result.new_stop
-        changed = True
+        is_pattern_linked = getattr(trade, "related_alert_id", None) is not None
+        if is_pattern_linked and trade.stop_loss is not None:
+            if result.new_stop > trade.stop_loss:
+                trade.stop_loss = result.new_stop
+                changed = True
+        else:
+            trade.stop_loss = result.new_stop
+            changed = True
     if result.new_trail_stop is not None and result.new_trail_stop != trade.trail_stop:
         trade.trail_stop = result.new_trail_stop
         changed = True

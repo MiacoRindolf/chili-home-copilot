@@ -4082,6 +4082,76 @@ def update_pattern_stats_from_closed_trades(db: Session, user_id: int | None) ->
     return {"patterns_updated": updated, "trades_processed": len(closed)}
 
 
+# ── Pattern Monitor Decision Learning ────────────────────────────────
+
+def learn_from_monitor_decisions(db: Session, user_id: int | None) -> dict[str, Any]:
+    """Aggregate pattern-monitor decision outcomes and evolve adaptive thresholds.
+
+    Reads resolved ``PatternMonitorDecision`` rows (``was_beneficial`` is not null),
+    computes benefit rates per action type, and nudges the adaptive weight keys
+    ``monitor_health_healthy``, ``monitor_health_weakening``, and
+    ``monitor_llm_confidence_min`` accordingly.
+    """
+    from ...models.trading import PatternMonitorDecision
+    from .scanner import get_adaptive_weight, _adaptive_weights, _weights_lock
+
+    cutoff = datetime.utcnow() - timedelta(days=90)
+    rows = (
+        db.query(PatternMonitorDecision)
+        .filter(
+            PatternMonitorDecision.was_beneficial.isnot(None),
+            PatternMonitorDecision.created_at >= cutoff,
+        )
+        .all()
+    )
+    if not rows:
+        return {"decisions_reviewed": 0}
+
+    by_action: dict[str, list[bool]] = {}
+    for r in rows:
+        by_action.setdefault(r.action, []).append(bool(r.was_beneficial))
+
+    total = len(rows)
+    overall_benefit = sum(1 for r in rows if r.was_beneficial) / total if total else 0
+
+    nudge = 0.02
+    with _weights_lock:
+        # If tighten_stop decisions are mostly NOT beneficial, raise the
+        # weakening threshold so we trigger less often.
+        tighten_rate = (
+            sum(by_action.get("tighten_stop", [])) / len(by_action["tighten_stop"])
+            if by_action.get("tighten_stop") else 0.5
+        )
+        if tighten_rate < 0.4:
+            _adaptive_weights["monitor_health_weakening"] = max(
+                0.3, _adaptive_weights.get("monitor_health_weakening", 0.5) - nudge
+            )
+        elif tighten_rate > 0.7:
+            _adaptive_weights["monitor_health_weakening"] = min(
+                0.7, _adaptive_weights.get("monitor_health_weakening", 0.5) + nudge
+            )
+
+        if overall_benefit < 0.4:
+            _adaptive_weights["monitor_llm_confidence_min"] = min(
+                0.8, _adaptive_weights.get("monitor_llm_confidence_min", 0.5) + nudge
+            )
+        elif overall_benefit > 0.7:
+            _adaptive_weights["monitor_llm_confidence_min"] = max(
+                0.3, _adaptive_weights.get("monitor_llm_confidence_min", 0.5) - nudge
+            )
+
+    logger.info(
+        "[learning] Monitor decisions: %d reviewed, overall benefit %.0f%%, "
+        "tighten benefit %.0f%%",
+        total, overall_benefit * 100, tighten_rate * 100,
+    )
+    return {
+        "decisions_reviewed": total,
+        "overall_benefit_rate": round(overall_benefit, 3),
+        "by_action": {k: round(sum(v) / len(v), 3) for k, v in by_action.items()},
+    }
+
+
 # ── Exit Optimization Learning ────────────────────────────────────────
 
 def learn_exit_optimization(db: Session, user_id: int | None) -> dict[str, Any]:
@@ -4887,6 +4957,27 @@ def deep_study(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception:
         logger.debug("[learning] deep_study: non-critical operation failed", exc_info=True)
 
+    _monitor_decisions_text = "No pattern monitor decisions yet."
+    try:
+        from ...models.trading import PatternMonitorDecision as _PMD
+        _recent_md = db.query(_PMD).filter(
+            _PMD.was_beneficial.isnot(None),
+        ).order_by(_PMD.created_at.desc()).limit(20).all()
+        if _recent_md:
+            _md_lines = []
+            _beneficial = sum(1 for d in _recent_md if d.was_beneficial)
+            _md_lines.append(f"Last {len(_recent_md)} decisions: {_beneficial} beneficial ({_beneficial/len(_recent_md):.0%})")
+            for d in _recent_md[:8]:
+                _md_lines.append(
+                    f"  - {d.action} | health={d.health_score:.0%} | "
+                    f"confidence={d.llm_confidence or 0:.0%} | "
+                    f"beneficial={'yes' if d.was_beneficial else 'no'} | "
+                    f"{(d.llm_reasoning or '')[:60]}"
+                )
+            _monitor_decisions_text = "\n".join(_md_lines)
+    except Exception:
+        logger.debug("[learning] deep_study: monitor decisions query failed", exc_info=True)
+
     reflection_prompt = f"""You are an AI trading brain doing a self-reflection on what you've learned.
 
 ## SCAN PATTERNS (Composable Rule Engine)
@@ -4922,6 +5013,9 @@ These are the evolved, backtested trading patterns the brain has learned:
 ## ADAPTIVE WEIGHT DRIFT (what the brain is learning)
 {weights_text}
 
+## PATTERN MONITOR DECISIONS (live position management)
+{_monitor_decisions_text}
+
 ## RECENTLY CHALLENGED HYPOTHESES
 {challenged_text}
 
@@ -4944,6 +5038,9 @@ Write a LEARNING REPORT in this format:
 
 ### My Current Market Read
 (Based on the patterns + regime, what's the overall market telling you?)
+
+### Pattern Monitor Performance
+(Review the PATTERN MONITOR DECISIONS section. Are stop tightenings saving money or being premature? Are target loosenings capturing more profit? What should I adjust about my monitoring thresholds or LLM confidence requirements?)
 
 ### Next Study Goals
 (What should the brain focus on? More timeframe variants? Different exit strategies? New combo patterns?)
@@ -8289,6 +8386,14 @@ def run_learning_cycle(
         except Exception as _tf_err:
             logger.warning("[learning] Trade feedback failed: %s", _tf_err)
             report["trade_feedback_patterns"] = 0
+
+        # Pattern-monitor decision learning (fast; reads resolved decisions).
+        try:
+            _md_result = learn_from_monitor_decisions(db, user_id)
+            report["monitor_decisions_reviewed"] = _md_result.get("decisions_reviewed", 0)
+        except Exception as _md_err:
+            logger.warning("[learning] Monitor decision learning failed: %s", _md_err)
+            report["monitor_decisions_reviewed"] = 0
 
         _bump_cycle_step()
         _step_time("breakout_outcomes", step_start_bo,
