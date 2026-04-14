@@ -912,6 +912,19 @@ def api_stop_evaluate(
     return JSONResponse({"ok": True, **summary})
 
 
+@router.get("/api/trading/stops/review")
+def api_stop_review(
+    request: Request,
+    db: Session = Depends(get_db),
+    hours: int = Query(48),
+):
+    """Self-critical review of past stop alert outcomes."""
+    get_identity_ctx(request, db)
+    from ..services.trading.stop_engine import review_alert_outcomes
+    review = review_alert_outcomes(db, lookback_hours=hours)
+    return JSONResponse({"ok": True, **review})
+
+
 # ── Background Learning ───────────────────────────────────────────────
 
 def _start_learning_cycle_bg(

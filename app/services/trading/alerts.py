@@ -107,7 +107,8 @@ ALL_ALERT_TYPES = [
 ]
 
 # Stop-related alert types that must bypass throttle and force Tier A delivery
-_STOP_CRITICAL_TYPES = frozenset({STOP_HIT, STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED, TARGET_HIT})
+_STOP_CRITICAL_TYPES = frozenset({STOP_HIT})
+_STOP_ALL_TYPES = frozenset({STOP_HIT, STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED, TARGET_HIT})
 
 _PATTERN_KW = [
     "macd_bullish", "macd_positive", "macd_negative",

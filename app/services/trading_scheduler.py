@@ -298,27 +298,38 @@ def _run_weekly_review_job():
 
 
 def _run_broker_sync_job():
-    """Sync Robinhood + Coinbase orders and positions to local DB."""
+    """Sync Robinhood + Coinbase orders and positions for all users with open trades."""
     from . import broker_service, coinbase_service
 
     def _work() -> None:
         from ..db import SessionLocal
+        from ..models.trading import Trade
+        from sqlalchemy import distinct
 
         db = SessionLocal()
         try:
-            if broker_service.is_connected():
-                logger.info("[scheduler] Starting Robinhood order + position sync")
-                order_result = broker_service.sync_orders_to_db(db, user_id=None)
-                logger.info(f"[scheduler] RH order sync result: {order_result}")
-                pos_result = broker_service.sync_positions_to_db(db, user_id=None)
-                logger.info(f"[scheduler] RH position sync result: {pos_result}")
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(Trade.status == "open", Trade.broker_source.in_(["robinhood", "coinbase"]))
+                .all()
+            ]
+            if not user_ids:
+                user_ids = [None]
 
-            if coinbase_service.is_connected():
-                logger.info("[scheduler] Starting Coinbase order + position sync")
-                cb_order = coinbase_service.sync_orders_to_db(db, user_id=None)
-                logger.info(f"[scheduler] CB order sync result: {cb_order}")
-                cb_pos = coinbase_service.sync_positions_to_db(db, user_id=None)
-                logger.info(f"[scheduler] CB position sync result: {cb_pos}")
+            for uid in user_ids:
+                if broker_service.is_connected():
+                    logger.info("[scheduler] RH sync for user_id=%s", uid)
+                    order_result = broker_service.sync_orders_to_db(db, user_id=uid)
+                    logger.info("[scheduler] RH order sync (user=%s): %s", uid, order_result)
+                    pos_result = broker_service.sync_positions_to_db(db, user_id=uid)
+                    logger.info("[scheduler] RH position sync (user=%s): %s", uid, pos_result)
+
+                if coinbase_service.is_connected():
+                    logger.info("[scheduler] CB sync for user_id=%s", uid)
+                    cb_order = coinbase_service.sync_orders_to_db(db, user_id=uid)
+                    logger.info("[scheduler] CB order sync (user=%s): %s", uid, cb_order)
+                    cb_pos = coinbase_service.sync_positions_to_db(db, user_id=uid)
+                    logger.info("[scheduler] CB position sync (user=%s): %s", uid, cb_pos)
         finally:
             db.close()
 

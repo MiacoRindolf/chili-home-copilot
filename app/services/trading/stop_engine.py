@@ -563,6 +563,49 @@ def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketConte
     )
 
 
+# Per-event cooldown: how long to suppress identical alerts per trade.
+# STOP_HIT gets one alert then a reminder after 4h; others get longer cooldowns.
+_ALERT_COOLDOWN_SECS: dict[str, int] = {
+    "STOP_HIT": 4 * 3600,       # 4h reminder — user should act
+    "TARGET_HIT": 8 * 3600,     # 8h — target persists, low urgency
+    "STOP_APPROACHING": 3600,   # 1h — situation may change
+    "STOP_TIGHTENED": 0,        # always fire — stop actually moved (one-time)
+    "BREAKEVEN_REACHED": 0,     # always fire — one-time transition
+    "DATA_STALE": 1800,         # 30min
+}
+
+
+def _load_recent_decisions(db: Session, trade_ids: list[int]) -> dict[tuple[int, str], datetime]:
+    """Load the most recent decision per (trade_id, trigger) for dedup."""
+    from ...models.trading import StopDecision as SDModel
+    from sqlalchemy import func
+    if not trade_ids:
+        return {}
+    rows = (
+        db.query(SDModel.trade_id, SDModel.trigger, func.max(SDModel.as_of_ts))
+        .filter(SDModel.trade_id.in_(trade_ids), SDModel.trigger.isnot(None))
+        .group_by(SDModel.trade_id, SDModel.trigger)
+        .all()
+    )
+    return {(r[0], r[1]): r[2] for r in rows}
+
+
+def _should_suppress_alert(
+    trade_id: int, event: str, recent: dict[tuple[int, str], datetime],
+    cooldowns: dict[str, int] | None = None,
+) -> bool:
+    """Check if this alert was already fired within its cooldown window."""
+    effective = cooldowns or _ALERT_COOLDOWN_SECS
+    cooldown = effective.get(event, 3600)
+    if cooldown <= 0:
+        return False
+    last_ts = recent.get((trade_id, event))
+    if not last_ts:
+        return False
+    elapsed = (datetime.utcnow() - last_ts).total_seconds()
+    return elapsed < cooldown
+
+
 def evaluate_all(
     db: Session,
     user_id: int | None = None,
@@ -570,6 +613,7 @@ def evaluate_all(
     """
     Evaluate all open trades for a user (or all users if None).
     Consults brain context (pattern strategy, lifecycle, regime) per trade.
+    Suppresses duplicate alerts using per-trade+event cooldowns.
     Returns summary dict with counts and alert list.
     """
     from ...models.trading import Trade
@@ -588,11 +632,11 @@ def evaluate_all(
         "breakevens": 0,
         "warnings": 0,
         "data_stale": 0,
+        "suppressed": 0,
         "regime": "cautious",
         "alerts": [],
     }
 
-    # Cache regime for the batch (same for all trades in this evaluation)
     batch_regime = "cautious"
     try:
         from .regime import get_regime_indicators
@@ -602,6 +646,16 @@ def evaluate_all(
         pass
     summary["regime"] = batch_regime
 
+    # Pre-load recent decisions for dedup (single query, not N+1)
+    trade_ids = [t.id for t in trades]
+    recent_decisions = _load_recent_decisions(db, trade_ids)
+
+    # Self-learning: adapt cooldowns based on user behavior
+    try:
+        adaptive_cooldowns = get_adaptive_cooldowns(db)
+    except Exception:
+        adaptive_cooldowns = dict(_ALERT_COOLDOWN_SECS)
+
     for trade in trades:
         try:
             brain = _build_brain_context(trade, db)
@@ -609,19 +663,30 @@ def evaluate_all(
             result = evaluate_trade(trade, market, db, brain=brain)
             summary["total_checked"] += 1
 
+            if result.alert_event and result.alert_event != "DATA_STALE":
+                _record_stop_decision(db, trade.id, result)
+                _apply_stop_to_trade(db, trade, result)
+
             if result.alert_event:
-                summary["alerts"].append({
-                    "trade_id": trade.id,
-                    "ticker": trade.ticker,
-                    "event": result.alert_event,
-                    "state": result.state.value,
-                    "reason": result.reason,
-                    "price": market.price,
-                    "old_stop": result.old_stop,
-                    "new_stop": result.new_stop,
-                    "action": result.recommended_action,
-                    "brain": brain.summary_dict(),
-                })
+                if _should_suppress_alert(trade.id, result.alert_event, recent_decisions, adaptive_cooldowns):
+                    summary["suppressed"] += 1
+                    logger.debug(
+                        "[stop_engine] Suppressed duplicate %s for %s (trade %d)",
+                        result.alert_event, trade.ticker, trade.id,
+                    )
+                else:
+                    summary["alerts"].append({
+                        "trade_id": trade.id,
+                        "ticker": trade.ticker,
+                        "event": result.alert_event,
+                        "state": result.state.value,
+                        "reason": result.reason,
+                        "price": market.price,
+                        "old_stop": result.old_stop,
+                        "new_stop": result.new_stop,
+                        "action": result.recommended_action,
+                        "brain": brain.summary_dict(),
+                    })
 
             if result.alert_event == "STOP_HIT":
                 summary["stops_hit"] += 1
@@ -636,10 +701,6 @@ def evaluate_all(
             elif result.alert_event == "DATA_STALE":
                 summary["data_stale"] += 1
 
-            if result.alert_event and result.alert_event != "DATA_STALE":
-                _record_stop_decision(db, trade.id, result)
-                _apply_stop_to_trade(db, trade, result)
-
         except Exception as e:
             logger.warning("[stop_engine] Error evaluating %s (id=%s): %s", trade.ticker, trade.id, e)
 
@@ -650,10 +711,12 @@ def evaluate_all(
         logger.error("[stop_engine] Failed to commit stop updates", exc_info=True)
 
     logger.info(
-        "[stop_engine] Evaluated %d trades (regime=%s): %d stops hit, %d targets, %d tightened, %d warnings",
+        "[stop_engine] Evaluated %d trades (regime=%s): %d stops hit, %d targets, "
+        "%d tightened, %d warnings, %d suppressed",
         summary["total_checked"], batch_regime,
         summary["stops_hit"], summary["targets_hit"],
         summary["stops_tightened"], summary["warnings"],
+        summary["suppressed"],
     )
 
     return summary
@@ -706,12 +769,12 @@ def dispatch_stop_alerts(
 
         elif event == "TARGET_HIT":
             msg = f"TARGET HIT: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
-            dispatch_alert(db, user_id, TARGET_HIT, ticker, msg, skip_throttle=True)
+            dispatch_alert(db, user_id, TARGET_HIT, ticker, msg)
             dispatched += 1
 
         elif event == "STOP_APPROACHING":
             msg = f"STOP APPROACHING: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
-            dispatch_alert(db, user_id, STOP_APPROACHING, ticker, msg, skip_throttle=False)
+            dispatch_alert(db, user_id, STOP_APPROACHING, ticker, msg)
             dispatched += 1
 
         elif event == "BREAKEVEN_REACHED":
@@ -727,3 +790,144 @@ def dispatch_stop_alerts(
             dispatched += 1
 
     return dispatched
+
+
+# ── Self-learning: review past alert outcomes ────────────────────────
+
+def review_alert_outcomes(db: Session, lookback_hours: int = 48) -> dict[str, Any]:
+    """
+    Self-critical review: check past stop decisions and evaluate their accuracy.
+
+    For each STOP_HIT or TARGET_HIT decision, check whether:
+    - The trade was actually closed (user acted on the alert)
+    - The price recovered (false positive — stop hit was premature)
+    - The alert was ignored and the position is still open
+
+    Returns a learning summary that can be used to adjust future behavior.
+    """
+    from ...models.trading import StopDecision as SDModel, Trade
+
+    since = datetime.utcnow() - timedelta(hours=lookback_hours)
+
+    actionable_decisions = (
+        db.query(SDModel)
+        .filter(
+            SDModel.as_of_ts >= since,
+            SDModel.trigger.in_(["STOP_HIT", "TARGET_HIT"]),
+        )
+        .all()
+    )
+
+    if not actionable_decisions:
+        return {"reviewed": 0}
+
+    trade_ids = list({d.trade_id for d in actionable_decisions})
+    trades_by_id = {
+        t.id: t for t in db.query(Trade).filter(Trade.id.in_(trade_ids)).all()
+    }
+
+    stats: dict[str, Any] = {
+        "reviewed": len(actionable_decisions),
+        "acted_on": 0,
+        "ignored": 0,
+        "false_positives": 0,
+        "details": [],
+    }
+
+    for decision in actionable_decisions:
+        trade = trades_by_id.get(decision.trade_id)
+        if not trade:
+            continue
+
+        inputs = decision.inputs_json or {}
+        decision_price = inputs.get("price", 0)
+        entry = trade.entry_price or 0
+        is_long = (trade.direction or "long") == "long"
+
+        if trade.status == "closed":
+            stats["acted_on"] += 1
+            outcome = "acted"
+        else:
+            try:
+                market = _fetch_market_context(trade.ticker)
+                current_price = market.price
+            except Exception:
+                current_price = 0
+
+            if current_price > 0 and decision_price > 0:
+                if decision.trigger == "STOP_HIT":
+                    if is_long and current_price > decision_price * 1.02:
+                        stats["false_positives"] += 1
+                        outcome = "false_positive_recovered"
+                    elif not is_long and current_price < decision_price * 0.98:
+                        stats["false_positives"] += 1
+                        outcome = "false_positive_recovered"
+                    else:
+                        stats["ignored"] += 1
+                        outcome = "ignored_still_breached"
+                else:
+                    stats["ignored"] += 1
+                    outcome = "ignored"
+            else:
+                stats["ignored"] += 1
+                outcome = "no_price_data"
+
+        stats["details"].append({
+            "trade_id": decision.trade_id,
+            "ticker": trade.ticker,
+            "trigger": decision.trigger,
+            "decision_ts": decision.as_of_ts.isoformat() if decision.as_of_ts else None,
+            "outcome": outcome,
+        })
+
+    total = stats["reviewed"]
+    if total > 0:
+        stats["act_rate"] = round(stats["acted_on"] / total, 2)
+        stats["false_positive_rate"] = round(stats["false_positives"] / total, 2)
+        stats["ignore_rate"] = round(stats["ignored"] / total, 2)
+
+    logger.info(
+        "[stop_engine] Alert review: %d decisions, %d acted, %d ignored, %d false positives (%.0f%% act rate)",
+        total, stats["acted_on"], stats["ignored"], stats["false_positives"],
+        stats.get("act_rate", 0) * 100,
+    )
+
+    return stats
+
+
+def get_adaptive_cooldowns(db: Session) -> dict[str, int]:
+    """
+    Adjust alert cooldowns based on recent user behavior.
+
+    If the user consistently ignores TARGET_HIT alerts (>70% ignore rate),
+    double the cooldown. If they act on STOP_HIT quickly, keep it tight.
+    """
+    review = review_alert_outcomes(db, lookback_hours=168)  # 7 days
+    base = dict(_ALERT_COOLDOWN_SECS)
+
+    if review["reviewed"] < 5:
+        return base
+
+    target_decisions = [d for d in review.get("details", []) if d["trigger"] == "TARGET_HIT"]
+    if target_decisions:
+        ignored_targets = sum(1 for d in target_decisions if d["outcome"].startswith("ignored"))
+        if len(target_decisions) > 0 and ignored_targets / len(target_decisions) > 0.7:
+            base["TARGET_HIT"] = min(base["TARGET_HIT"] * 2, 24 * 3600)
+            logger.info(
+                "[stop_engine] User ignores %.0f%% of TARGET_HIT — extending cooldown to %dh",
+                (ignored_targets / len(target_decisions)) * 100,
+                base["TARGET_HIT"] // 3600,
+            )
+
+    stop_decisions = [d for d in review.get("details", []) if d["trigger"] == "STOP_HIT"]
+    if stop_decisions:
+        fp = sum(1 for d in stop_decisions if d["outcome"] == "false_positive_recovered")
+        if len(stop_decisions) > 3 and fp / len(stop_decisions) > 0.5:
+            base["STOP_HIT"] = min(base["STOP_HIT"] * 2, 12 * 3600)
+            logger.info(
+                "[stop_engine] %.0f%% of STOP_HIT were false positives — extending cooldown to %dh",
+                (fp / len(stop_decisions)) * 100,
+                base["STOP_HIT"] // 3600,
+            )
+
+    return base
