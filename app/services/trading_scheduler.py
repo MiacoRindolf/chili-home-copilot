@@ -195,7 +195,7 @@ def _run_brain_market_snapshot_job():
 
 
 def _run_paper_trade_check_job():
-    """Check open paper trades for stop/target/expiry exits."""
+    """Check open paper trades for stop/target/expiry exits, plus live exit engine recommendations."""
 
     def _work() -> None:
         from ..db import SessionLocal
@@ -207,6 +207,15 @@ def _run_paper_trade_check_job():
             if result.get("closed", 0) > 0:
                 logger.info("[scheduler] Paper trades: checked %d, closed %d",
                             result["checked"], result["closed"])
+            # Also run the live exit engine for pattern-based exit recommendations
+            try:
+                from .trading.live_exit_engine import run_exit_engine
+                exit_results = run_exit_engine(db)
+                exits = exit_results.get("actions", [])
+                if exits:
+                    logger.info("[scheduler] Live exit engine: %d recommendations", len(exits))
+            except Exception:
+                logger.debug("[scheduler] live_exit_engine error", exc_info=True)
         finally:
             db.close()
 
@@ -364,6 +373,42 @@ def _run_price_monitor_job():
             db.close()
 
     run_scheduler_job_guarded("price_monitor", _work)
+
+
+def _run_daytrade_fast_monitor_job():
+    """1-minute fast check for day-trade and scalp positions (tighter exit timing)."""
+    from ..db import SessionLocal
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from ..models.trading import Trade
+    from sqlalchemy import distinct
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            daytrade_types = ("scalp", "daytrade", "breakout", "momentum")
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    Trade.trade_type.in_(daytrade_types),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    results = evaluate_all(db, uid, staleness_secs=120)
+                    dispatch_stop_alerts(db, uid, results)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    logger.debug("[scheduler] daytrade fast monitor failed for uid=%s", uid, exc_info=True)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("daytrade_fast_monitor", _work)
 
 
 def _run_crypto_stop_monitor_job():
@@ -730,7 +775,7 @@ def _run_crypto_breakout_job():
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
+                + (f"Est. Hold: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
                 + "\nSource: crypto breakout scan (heuristic; not a Brain ScanPattern)."
             )
@@ -907,7 +952,7 @@ def _run_stock_breakout_job():
                 + f"Entry ${setup.get('entry_price')} | "
                 f"Stop ${setup.get('stop_loss')} | "
                 f"Target ${setup.get('take_profit')}\n"
-                + (f"ETA: {_tc['duration']}\n" if _tc['duration'] else "")
+                + (f"Est. Hold: {_tc['duration']}\n" if _tc['duration'] else "")
                 + f"{sig_text}"
                 + "\nSource: stock breakout scan (heuristic; not a Brain ScanPattern)."
             )
@@ -1464,6 +1509,19 @@ def start_scheduler():
                 ),
                 id="price_monitor",
                 name="Price monitor & alerts (market hours every 5min)",
+                replace_existing=True,
+                max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_daytrade_fast_monitor_job,
+                trigger=CronTrigger(
+                    day_of_week="mon-fri",
+                    hour="9-16",
+                    minute="*/1",
+                ),
+                id="daytrade_fast_monitor",
+                name="Day-trade fast stop/exit monitor (market hours every 1min)",
                 replace_existing=True,
                 max_instances=1,
             )

@@ -573,9 +573,11 @@ def gather_imminent_candidate_rows(
                 entry_f = float(entry or 0)
                 tgt_f = float(target or 0)
                 atr_use = float(atr_f) if atr_f else (entry_f * 0.02 if entry_f else 0.01)
+                _rvol_f = flat.get("rvol") or flat.get("volume_ratio")
                 hold_est = _estimate_hold_duration(
                     entry_f, tgt_f, atr_use,
                     (pat.timeframe or "1d"), adx_f,
+                    rvol=_rvol_f,
                 )
             except (TypeError, ValueError):
                 hold_est = {"label": "n/a", "hours_low": 0, "hours_high": 0}
@@ -697,8 +699,8 @@ def run_pattern_imminent_scan(
         msg = (
             f"IMMINENT PATTERN: {pat.name} (#{pat.id})\n"
             f"{ticker} @ ${sc.get('price')} | readiness {c['readiness']:.0%} | score {c['composite']:.2f}\n"
-            f"Breakout ETA: {eta_txt}\n"
-            f"Hold after entry: {hold_line}\n"
+            f"Est. Time to Breakout: {eta_txt} (heuristic)\n"
+            f"Est. Hold after entry: {hold_line}\n"
             f"Entry ${sc.get('entry_price')} | Stop ${sc.get('stop_loss')} | "
             f"Target ${sc.get('take_profit')}\n"
             + (f"{desc}\n" if desc else "")

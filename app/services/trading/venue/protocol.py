@@ -94,6 +94,8 @@ class NormalizedTicker:
     spread_bps: Optional[float] = None
     last_price: Optional[float] = None
     last_size: Optional[float] = None
+    bid_size: Optional[float] = None
+    ask_size: Optional[float] = None
     base_volume_24h: Optional[float] = None
     quote_volume_24h: Optional[float] = None
     freshness: Optional[FreshnessMeta] = None

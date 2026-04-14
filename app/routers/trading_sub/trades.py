@@ -65,16 +65,19 @@ def api_create_trade(
     db: Session = Depends(get_db),
 ):
     ctx = get_identity_ctx(request, db)
-    trade = ts.create_trade(
-        db, ctx["user_id"],
-        ticker=body.ticker.upper(),
-        direction=body.direction,
-        entry_price=body.entry_price,
-        quantity=body.quantity,
-        entry_date=body.entry_date,
-        tags=body.tags,
-        notes=body.notes,
-    )
+    try:
+        trade = ts.create_trade(
+            db, ctx["user_id"],
+            ticker=body.ticker.upper(),
+            direction=body.direction,
+            entry_price=body.entry_price,
+            quantity=body.quantity,
+            entry_date=body.entry_date,
+            tags=body.tags,
+            notes=body.notes,
+        )
+    except ValueError as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=403)
 
     from ...db import SessionLocal
 

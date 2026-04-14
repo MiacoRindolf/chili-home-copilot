@@ -1539,19 +1539,23 @@ _TIME_PER_BAR: dict[str, float] = {
 def _estimate_hold_duration(
     entry: float, target: float, atr: float,
     timeframe: str = "1d", adx: float | None = None,
+    rvol: float | None = None,
 ) -> dict[str, Any]:
     """Estimate how long a position should be held to reach the target.
 
-    Uses ATR-based distance, chart timeframe, and ADX trend strength
-    to produce a human-readable hold duration range.
+    Uses ATR-based distance, chart timeframe, ADX trend strength, and
+    relative volume to produce a realistic hold duration range with a
+    confidence qualifier.  The output ``label`` is an *estimated hold
+    time*, **not** a breakout ETA.
     """
     if atr <= 0 or entry <= 0 or target <= entry:
-        return {"hours_low": 0, "hours_high": 0, "label": "n/a"}
+        return {"hours_low": 0, "hours_high": 0, "label": "n/a", "confidence": "none"}
 
     atr_multiples = (target - entry) / atr
     hours_per_bar = _TIME_PER_BAR.get(timeframe, 6.5)
     raw_hours = atr_multiples * hours_per_bar
 
+    # ADX adjustment: strong trend shortens expected hold
     if adx is not None and adx > 30:
         adx_factor = 0.7
     elif adx is not None and adx > 20:
@@ -1559,9 +1563,37 @@ def _estimate_hold_duration(
     else:
         adx_factor = 1.2
 
-    center = raw_hours * adx_factor
+    # Volume adjustment: low volume means target takes longer to reach
+    if rvol is not None and rvol >= 3.0:
+        vol_factor = 0.75
+    elif rvol is not None and rvol >= 2.0:
+        vol_factor = 0.85
+    elif rvol is not None and rvol >= 1.0:
+        vol_factor = 1.0
+    elif rvol is not None and rvol > 0:
+        vol_factor = 1.5
+    else:
+        vol_factor = 1.2  # unknown volume = widen estimate
+
+    center = raw_hours * adx_factor * vol_factor
     hours_low = max(0.25, center * 0.6)
     hours_high = center * 1.5
+
+    # Confidence: high when ADX and volume both confirm
+    has_trend = adx is not None and adx > 25
+    has_volume = rvol is not None and rvol >= 2.0
+    if has_trend and has_volume:
+        confidence = "high"
+    elif has_trend or has_volume:
+        confidence = "medium"
+    else:
+        confidence = "low"
+
+    # Guard: sub-4h estimate on 15m bars without strong volume is unreliable
+    if timeframe in ("15m", "5m", "1m") and hours_high < 4 and not has_volume:
+        confidence = "low"
+        hours_low = max(hours_low, 1.0)
+        hours_high = max(hours_high, 6.0)
 
     if hours_high < 1:
         label = f"~{max(1, int(hours_low * 60))}-{int(hours_high * 60)} min"
@@ -1575,11 +1607,27 @@ def _estimate_hold_duration(
         else:
             label = f"~{days_low}-{days_high} days"
 
+    conf_tag = f" ({confidence} conf.)" if confidence != "high" else ""
+    label = f"{label}{conf_tag}"
+
     return {
         "hours_low": round(hours_low, 2),
         "hours_high": round(hours_high, 2),
         "label": label,
+        "confidence": confidence,
     }
+
+
+_MAX_HOLD_HOURS: dict[str, float | None] = {
+    "scalp": 4.0,
+    "daytrade": 8.0,
+    "swing": 5 * 24,
+    "position": None,
+    "breakout": 8.0,
+    "reversal": 5 * 24,
+    "momentum": 8.0,
+    "trend_follow": None,
+}
 
 
 def classify_trade_type(
@@ -1590,7 +1638,8 @@ def classify_trade_type(
 ) -> dict[str, str]:
     """Classify a trade into a type with a human-readable label.
 
-    Returns {"type": "swing", "label": "Swing Trade", "duration": "~3-5 days"}
+    Returns {"type": "swing", "label": "Swing Trade", "duration": "~3-5 days",
+             "confidence": "medium", "max_hold_hours": 120}
     """
     indicators = indicators or {}
     signals_text = " ".join(s.lower() for s in (signals or []))
@@ -1598,6 +1647,7 @@ def classify_trade_type(
     hours_high = (hold_estimate or {}).get("hours_high", 0)
     hours_low = (hold_estimate or {}).get("hours_low", 0)
     duration_label = (hold_estimate or {}).get("label", "")
+    confidence = (hold_estimate or {}).get("confidence", "")
 
     adx = indicators.get("adx")
 
@@ -1640,10 +1690,14 @@ def classify_trade_type(
                 days_high = max(days_low, round(hours_high / 24))
                 duration_label = f"~{days_low}-{days_high} days"
 
+    max_hold = _MAX_HOLD_HOURS.get(trade_type)
+
     return {
         "type": trade_type,
         "label": label,
         "duration": duration_label,
+        "confidence": confidence,
+        "max_hold_hours": max_hold,
     }
 
 
@@ -2253,6 +2307,30 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
                 score += get_adaptive_weight("crypto_bo_news_bearish_penalty")
                 signals.append("Recent news sentiment is bearish — breakout may face headwinds")
 
+        # ── L2 Microstructure Confirmation (Coinbase WS when available) ──
+        try:
+            from .microstructure import get_features
+            _mf = get_features(ticker)
+            if _mf.bid_ask_imbalance is not None and _mf.book_depth_levels >= 3:
+                if _mf.bid_ask_imbalance >= 2.0:
+                    score += 0.5
+                    signals.append(f"L2 bid/ask imbalance {_mf.bid_ask_imbalance:.1f}:1 — strong buyer wall")
+                elif _mf.bid_ask_imbalance <= 0.5:
+                    score -= 0.3
+                    signals.append(f"L2 ask-heavy imbalance {1/_mf.bid_ask_imbalance:.1f}:1 — sell pressure")
+            if _mf.trade_aggression is not None:
+                if _mf.trade_aggression >= 0.65:
+                    score += 0.3
+                    signals.append(f"Tape aggression {_mf.trade_aggression:.0%} taker-buy — bullish flow")
+                elif _mf.trade_aggression <= 0.35:
+                    score -= 0.3
+                    signals.append(f"Tape aggression {_mf.trade_aggression:.0%} taker-buy — bearish flow")
+            if _mf.spread_bps is not None and _mf.spread_bps > 50:
+                score -= 0.2
+                signals.append(f"Wide spread {_mf.spread_bps:.0f}bps — poor liquidity for entry")
+        except Exception:
+            pass
+
         # Cap + signal
         if macd_negative and not breakout_confirmed:
             score = min(score, get_adaptive_weight("crypto_bo_macd_neg_cap"))
@@ -2378,6 +2456,7 @@ def _score_crypto_breakout(ticker: str) -> dict[str, Any] | None:
             "hold_estimate": _estimate_hold_duration(
                 entry, target, atr_val, "15m",
                 float(adx_val) if pd.notna(adx_val) else None,
+                rvol=rvol,
             ),
         }
         _cache_put(_cbo_score_cache, _cbo_score_lock, key, result, _CBO_SCORE_TTL, _CBO_SCORE_MAX)
@@ -4407,6 +4486,7 @@ def _generate_top_picks_impl(db: Session, user_id: int | None) -> list[dict[str,
                 _p_entry, _p_target, _p_atr,
                 "15m" if _is_crypto else "1d",
                 _ind.get("adx"),
+                rvol=_ind.get("rvol") or _ind.get("volume_ratio"),
             )
             pick["hold_estimate"] = _he
 

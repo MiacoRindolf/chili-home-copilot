@@ -530,6 +530,11 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_INTERVAL_MINUTES"),
     )
 
+    chili_auto_execute_stops: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTO_EXECUTE_STOPS"),
+    )
+
     brain_market_snapshot_scheduler_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED"),

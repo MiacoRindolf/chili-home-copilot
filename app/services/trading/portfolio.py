@@ -53,6 +53,20 @@ def remove_from_watchlist(db: Session, user_id: int | None, ticker: str) -> bool
 # ── Trade CRUD ────────────────────────────────────────────────────────
 
 def create_trade(db: Session, user_id: int | None, **kwargs) -> Trade:
+    # Risk gate: check portfolio limits before creating any trade
+    _ticker = kwargs.get("ticker", "")
+    try:
+        from .portfolio_risk import check_new_trade_allowed
+        _allowed, _reason = check_new_trade_allowed(db, user_id, _ticker)
+        if not _allowed:
+            raise ValueError(f"Trade blocked by risk management: {_reason}")
+    except ImportError:
+        pass
+    except ValueError:
+        raise
+    except Exception as e:
+        logger.warning("[portfolio] risk check error (allowing trade): %s", e)
+
     trade = Trade(user_id=user_id, **kwargs)
     if trade.entry_date is None:
         trade.entry_date = datetime.utcnow()

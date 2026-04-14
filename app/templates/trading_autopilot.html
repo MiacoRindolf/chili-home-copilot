@@ -928,6 +928,33 @@
       + '</small></div>';
 
     var cards = [];
+    if (!paperRunner.enabled && !liveRunner.enabled) {
+      cards.push(
+        '<div class="ap-blocker" style="border-color:rgba(239,68,68,0.5);background:rgba(239,68,68,0.12)">'
+        + '<strong>Autopilot runners disabled</strong> '
+        + 'Both paper and live runners are OFF. Sessions will not advance automatically. '
+        + 'Set CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1 and CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1 in your environment '
+        + '(or docker-compose.yml) and restart the scheduler-worker service.'
+        + '</div>'
+      );
+    } else {
+      if (!paperRunner.enabled) {
+        cards.push(
+          '<div class="ap-blocker" style="border-color:rgba(245,158,11,0.5);background:rgba(245,158,11,0.10)">'
+          + '<strong>Paper runner disabled</strong> '
+          + 'Paper sessions will not tick. Set CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1 to enable.'
+          + '</div>'
+        );
+      }
+      if (!liveRunner.enabled) {
+        cards.push(
+          '<div class="ap-blocker" style="border-color:rgba(245,158,11,0.5);background:rgba(245,158,11,0.10)">'
+          + '<strong>Live runner disabled</strong> '
+          + 'Live sessions will not tick. Set CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1 to enable.'
+          + '</div>'
+        );
+      }
+    }
     if (paperRunner.blocked_reason) {
       cards.push(
         '<div class="ap-blocker"><strong>Paper runner blocked</strong>'

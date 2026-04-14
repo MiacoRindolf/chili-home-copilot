@@ -212,6 +212,8 @@ class RobinhoodSpotAdapter:
             bid = _sf(q.get("bid_price"))
             ask = _sf(q.get("ask_price"))
             last = _sf(q.get("last_trade_price"))
+            bid_size = _sf(q.get("bid_size"))
+            ask_size = _sf(q.get("ask_size"))
 
             if bid and ask and bid > 0 and ask > 0:
                 mid = (bid + ask) / 2.0
@@ -235,6 +237,8 @@ class RobinhoodSpotAdapter:
                 spread_bps=spread_bps,
                 last_price=last,
                 last_size=None,
+                bid_size=bid_size,
+                ask_size=ask_size,
                 base_volume_24h=None,
                 quote_volume_24h=None,
                 freshness=fresh,

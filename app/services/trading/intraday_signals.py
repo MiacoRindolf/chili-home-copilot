@@ -123,9 +123,12 @@ def scan_opening_range_breakout(
 def scan_momentum_continuation(
     tickers: list[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Find stocks/crypto in strong momentum that pulled back to support."""
+    """Find stocks/crypto in strong intraday momentum pulling back to EMA support.
+
+    Uses 15-minute bars over the last 5 days so the scan reflects actual
+    intraday structure rather than daily candles.
+    """
     from .market_data import fetch_ohlcv_df, DEFAULT_SCAN_TICKERS, DEFAULT_CRYPTO_TICKERS
-    import pandas as pd
 
     if tickers is None:
         tickers = list(DEFAULT_SCAN_TICKERS)[:30] + list(DEFAULT_CRYPTO_TICKERS)[:10]
@@ -133,11 +136,12 @@ def scan_momentum_continuation(
     signals = []
     for ticker in tickers:
         try:
-            df = fetch_ohlcv_df(ticker, period="1mo", interval="1d")
-            if df.empty or len(df) < 20:
+            df = fetch_ohlcv_df(ticker, period="5d", interval="15m")
+            if df.empty or len(df) < 40:
                 continue
 
             close = df["Close"].astype(float)
+            volume = df["Volume"].astype(float)
             ema9 = close.ewm(span=9, adjust=False).mean()
             ema21 = close.ewm(span=21, adjust=False).mean()
 
@@ -145,30 +149,37 @@ def scan_momentum_continuation(
             last_ema9 = float(ema9.iloc[-1])
             last_ema21 = float(ema21.iloc[-1])
 
-            # Strong uptrend: EMA9 > EMA21, price pulled back to EMA9
             if last_ema9 > last_ema21:
                 pullback_to_ema9 = abs(last_close - last_ema9) / last_close * 100
-                if pullback_to_ema9 < 1.5 and last_close > last_ema21:
-                    # 5-day momentum
-                    mom_5d = (last_close - float(close.iloc[-5])) / float(close.iloc[-5]) * 100 if len(close) >= 5 else 0
+                if pullback_to_ema9 < 1.0 and last_close > last_ema21:
+                    # Recent 20-bar momentum (5 hours on 15m)
+                    bars_back = min(20, len(close) - 1)
+                    mom_pct = (last_close - float(close.iloc[-bars_back])) / float(close.iloc[-bars_back]) * 100
 
-                    if mom_5d > 2:
+                    # Volume confirmation: recent volume vs prior average
+                    recent_vol = float(volume.iloc[-10:].mean()) if len(volume) >= 10 else 0
+                    prior_vol = float(volume.iloc[-40:-10].mean()) if len(volume) >= 40 else recent_vol
+                    rvol = round(recent_vol / prior_vol, 2) if prior_vol > 0 else 1.0
+
+                    if mom_pct > 1.0 and rvol >= 0.8:
                         signals.append({
                             "ticker": ticker,
-                            "price": round(last_close, 2),
-                            "ema9": round(last_ema9, 2),
-                            "ema21": round(last_ema21, 2),
+                            "price": round(last_close, 4 if ticker.endswith("-USD") else 2),
+                            "ema9": round(last_ema9, 4 if ticker.endswith("-USD") else 2),
+                            "ema21": round(last_ema21, 4 if ticker.endswith("-USD") else 2),
                             "pullback_pct": round(pullback_to_ema9, 2),
-                            "momentum_5d_pct": round(mom_5d, 2),
+                            "momentum_pct": round(mom_pct, 2),
+                            "rvol": rvol,
                             "direction": "long",
                             "signal_type": "momentum_continuation",
-                            "stop_price": round(last_ema21 * 0.99, 2),
-                            "target_price": round(last_close * 1.05, 2),
+                            "timeframe": "15m",
+                            "stop_price": round(last_ema21 * 0.995, 4 if ticker.endswith("-USD") else 2),
+                            "target_price": round(last_close * 1.03, 4 if ticker.endswith("-USD") else 2),
                         })
         except Exception:
             continue
 
-    signals.sort(key=lambda x: x.get("momentum_5d_pct", 0), reverse=True)
+    signals.sort(key=lambda x: x.get("momentum_pct", 0), reverse=True)
     return signals[:10]
 
 

@@ -339,6 +339,23 @@ def evaluate_trade(
         result.reason = "quote is stale — no stop changes"
         return result
 
+    # ── Time-based forced exit for day trades / scalps ──
+    _trade_type = getattr(trade, "trade_type", None)
+    if _trade_type and trade.entry_date:
+        from .scanner import _MAX_HOLD_HOURS
+        _max_h = _MAX_HOLD_HOURS.get(_trade_type)
+        if _max_h is not None:
+            _held_hours = (datetime.utcnow() - trade.entry_date).total_seconds() / 3600
+            if _held_hours >= _max_h:
+                result.state = StopState.TRAILING
+                result.alert_event = "TIME_EXIT"
+                result.reason = (
+                    f"{_trade_type} max hold {_max_h:.0f}h exceeded "
+                    f"(held {_held_hours:.1f}h) — close position"
+                )
+                result.new_stop = market.price
+                return result
+
     stop = trade.stop_loss
     target = trade.take_profit
     policy = _get_policy(trade.stop_model)
@@ -542,7 +559,10 @@ def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketConte
     if not price or price <= 0:
         return MarketContext(price=0, is_stale=True)
 
-    # ATR from the indicator snapshot cache or compute
+    quote_ts = q.get("quote_ts") or datetime.utcnow()
+    age_secs = (datetime.utcnow() - quote_ts).total_seconds() if quote_ts else 0
+    is_stale = age_secs > staleness_secs
+
     atr = None
     try:
         from .market_data import get_indicator_snapshot
@@ -559,7 +579,8 @@ def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketConte
         ask=q.get("ask"),
         atr=float(atr) if atr else None,
         volume=q.get("volume"),
-        quote_ts=datetime.utcnow(),
+        quote_ts=quote_ts,
+        is_stale=is_stale,
     )
 
 
@@ -722,6 +743,61 @@ def evaluate_all(
     return summary
 
 
+def _try_auto_execute_stop(
+    db: Session,
+    user_id: int | None,
+    alert: dict,
+) -> None:
+    """Auto-execute a sell order when a stop fires, if enabled and safe."""
+    from ...config import settings as _cfg
+    if not getattr(_cfg, "chili_auto_execute_stops", False):
+        return
+    from .governance import is_kill_switch_active
+    if is_kill_switch_active():
+        _log.info("[stop_engine] auto-exec skipped: kill switch active")
+        return
+
+    trade_id = alert.get("trade_id")
+    ticker = alert.get("ticker")
+    if not trade_id or not ticker:
+        return
+
+    try:
+        from ...models.trading import Trade
+        trade = db.query(Trade).filter(Trade.id == trade_id, Trade.status == "open").one_or_none()
+        if not trade:
+            return
+
+        broker_src = getattr(trade, "broker_source", None)
+        if not broker_src:
+            _log.debug("[stop_engine] auto-exec skipped: no broker_source on trade %s", trade_id)
+            return
+
+        from .broker_service import get_broker_manager
+        bm = get_broker_manager(db, user_id)
+        if not bm:
+            return
+
+        qty = trade.quantity or 0
+        if qty <= 0:
+            return
+
+        _log.warning(
+            "[stop_engine] AUTO-EXECUTING stop sell: ticker=%s qty=%s broker=%s trade_id=%s",
+            ticker, qty, broker_src, trade_id,
+        )
+        result = bm.sell(ticker, qty, order_type="market")
+        if result:
+            trade.status = "closed"
+            trade.exit_price = alert.get("price", 0)
+            trade.exit_date = datetime.utcnow()
+            trade.exit_reason = alert.get("event", "auto_stop")
+            db.add(trade)
+            db.flush()
+    except Exception:
+        _log.warning("[stop_engine] auto-exec failed for trade %s", trade_id, exc_info=True)
+
+
 def dispatch_stop_alerts(
     db: Session,
     user_id: int | None,
@@ -762,10 +838,12 @@ def dispatch_stop_alerts(
             parts.append(f"regime: {regime}")
             ctx_line = f" [{', '.join(parts)}]"
 
-        if event == "STOP_HIT":
-            msg = f"STOP HIT: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
+        if event == "STOP_HIT" or event == "TIME_EXIT":
+            label = "STOP HIT" if event == "STOP_HIT" else "TIME EXIT"
+            msg = f"{label}: {ticker} at ${price:,.2f}{ctx_line} — {reason}"
             dispatch_alert(db, user_id, STOP_HIT, ticker, msg, skip_throttle=True)
             dispatched += 1
+            _try_auto_execute_stop(db, user_id, alert)
 
         elif event == "TARGET_HIT":
             msg = f"TARGET HIT: {ticker} at ${price:,.2f}{ctx_line} — {reason}"

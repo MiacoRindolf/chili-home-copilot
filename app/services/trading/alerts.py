@@ -574,6 +574,7 @@ def generate_strategy_proposals(
             hold_est = _estimate_hold_duration(
                 price, target, indicators["atr"], _tf,
                 indicators.get("adx"),
+                rvol=indicators.get("rvol") or indicators.get("volume_ratio"),
             )
 
         trade_class = classify_trade_type(
@@ -625,7 +626,7 @@ def generate_strategy_proposals(
         # Send SMS about the new proposal
         _cr = ticker.endswith("-USD")
         price_fmt = f"${price:,.6f}" if _cr and price < 1 else f"${price:,.2f}"
-        _dur_part = f" | ETA {duration_label}" if duration_label else ""
+        _dur_part = f" | Est. Hold {duration_label}" if duration_label else ""
         sms_msg = (
             f"CHILI {trade_type_label}: BUY {ticker} @ {price_fmt} | "
             f"Stop ${stop:,.2f} | Target ${target:,.2f} | "
@@ -787,6 +788,7 @@ def create_proposal_from_pick(
         hold_est = _estimate_hold_duration(
             price, target, indicators["atr"], _tf,
             indicators.get("adx"),
+            rvol=indicators.get("rvol") or indicators.get("volume_ratio"),
         )
 
     trade_class = classify_trade_type(
@@ -1204,19 +1206,34 @@ def _check_breakout_candidates(db: Session, user_id: int | None) -> int:
                         _atr = _inds.get("atr", 0)
                         _adx = _inds.get("adx")
                         _sigs = _inds.get("signals", [])
+                        _rvol = _inds.get("rvol") or _inds.get("volume_ratio")
                         if _atr > 0:
-                            _he = _estimate_hold_duration(price, resistance * 1.05, _atr, "1d", _adx)
+                            _he = _estimate_hold_duration(price, resistance * 1.05, _atr, "1d", _adx, rvol=_rvol)
                             _tc = classify_trade_type(_sigs, _he, _inds)
                             _bk_trade_type = _tc["type"]
                             _bk_duration = _tc["duration"] or None
                             _dur = f" | {_tc['label']}"
                             if _tc["duration"]:
-                                _dur += f" ETA {_tc['duration']}"
+                                _dur += f" Est. Hold {_tc['duration']}"
                     except Exception:
                         pass
+                # L2 microstructure confirmation when available
+                _l2_note = ""
+                try:
+                    from .microstructure import get_features
+                    _mf = get_features(scan.ticker)
+                    if _mf.bid_ask_imbalance is not None and _mf.book_depth_levels >= 3:
+                        if _mf.bid_ask_imbalance >= 2.0:
+                            _l2_note = f" | L2 confirms: {_mf.bid_ask_imbalance:.1f}:1 bid wall"
+                        elif _mf.bid_ask_imbalance <= 0.5:
+                            _l2_note = f" | L2 caution: ask-heavy {1/_mf.bid_ask_imbalance:.1f}:1"
+                    if _mf.spread_bps is not None and _mf.spread_bps > 50:
+                        _l2_note += f" | wide spread {_mf.spread_bps:.0f}bps"
+                except Exception:
+                    pass
                 msg = (
                     f"BREAKOUT: {scan.ticker} broke ${resistance:,.2f} "
-                    f"now at ${price:,.2f} | Score {scan.score:.1f}/10{_dur} | "
+                    f"now at ${price:,.2f} | Score {scan.score:.1f}/10{_dur}{_l2_note} | "
                     f"{scan.rationale[:60] if scan.rationale else ''}"
                 )
                 dispatch_alert(
@@ -1726,6 +1743,7 @@ def _proposal_to_dict(p) -> dict[str, Any]:
             _he = _estimate_hold_duration(
                 p.entry_price, p.take_profit, _inds["atr"], _tf,
                 _inds.get("adx"),
+                rvol=_inds.get("rvol") or _inds.get("volume_ratio"),
             )
         trade_type_info = classify_trade_type(
             _sigs, _he, _inds,

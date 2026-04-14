@@ -560,11 +560,15 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
         try:
             ws_snap = _massive.get_ws_quote(ticker)
             if ws_snap and ws_snap.price:
+                from datetime import datetime as _dt
                 fi = {
                     "last_price": ws_snap.price,
                     "previous_close": None,
                     "bid": ws_snap.bid,
                     "ask": ws_snap.ask,
+                    "bid_size": ws_snap.bid_size,
+                    "ask_size": ws_snap.ask_size,
+                    "quote_ts": _dt.utcfromtimestamp(ws_snap.timestamp) if ws_snap.timestamp else None,
                 }
                 return _build_quote_result(ticker, fi)
         except Exception:
@@ -640,6 +644,14 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         result["year_low"] = smart_round(fi["year_low"], crypto=_cr)
     if fi.get("avg_volume"):
         result["avg_volume"] = fi["avg_volume"]
+    if fi.get("bid") is not None:
+        result["bid"] = fi["bid"]
+    if fi.get("ask") is not None:
+        result["ask"] = fi["ask"]
+    if fi.get("bid_size") is not None:
+        result["bid_size"] = fi["bid_size"]
+    if fi.get("ask_size") is not None:
+        result["ask_size"] = fi["ask_size"]
     try:
         from .emergency_liquidation import record_price_heartbeat
 

@@ -190,7 +190,8 @@ def check_new_trade_allowed(
         if not allowed:
             return False, reason
     except Exception:
-        logger.debug("[risk] sector concentration check failed; allowing", exc_info=True)
+        logger.warning("[risk] sector concentration check failed — flagging trade", exc_info=True)
+        return True, "ok (sector check unavailable — proceed with caution)"
 
     # Correlation risk check
     try:
@@ -198,7 +199,8 @@ def check_new_trade_allowed(
         if not allowed:
             return False, reason
     except Exception:
-        logger.debug("[risk] correlation check failed; allowing", exc_info=True)
+        logger.warning("[risk] correlation check failed — flagging trade", exc_info=True)
+        return True, "ok (correlation check unavailable — proceed with caution)"
 
     return True, "ok"
 

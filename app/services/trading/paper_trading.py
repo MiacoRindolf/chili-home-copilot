@@ -1,10 +1,23 @@
-"""Paper trading simulation for promoted patterns.
+"""Paper trading simulation for promoted patterns (LEGACY system).
 
 Auto-enters paper trades when a promoted pattern fires a signal,
 auto-exits on stop/target/expiry, and tracks simulated P&L.
 
 Supports ATR-based adaptive stops/targets, trailing stops, spread/slippage
 modeling, and pattern-specific exit_config.
+
+NOTE: This is the **legacy** paper trade system using ``PaperTrade`` rows
+(table ``trading_paper_trades``).  The **momentum autopilot** system uses
+``TradingAutomationSession`` rows instead (see ``momentum_neural/`` package).
+The two systems are **independent**:
+
+- Legacy: ``auto_enter_from_signals()`` + ``check_paper_exits()`` + scheduler
+  ``paper_trade_check`` job.  Simpler, pattern-driven.
+- Autopilot: ``paper_runner`` / ``live_runner`` FSMs with operator controls,
+  decision ledger, viability pipeline, and venue adapters.
+
+Both can run simultaneously.  Ensure you check the correct table when
+inspecting P&L or open positions.
 """
 from __future__ import annotations
 
@@ -276,6 +289,17 @@ def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]
                 _close_paper_trade(pt, _apply_slippage(pt.target_price, pt.direction, is_entry=False), "target")
                 _paper_close_ledger(db, pt)
                 closed += 1
+            # Time-based forced exit for day trades / scalps
+            elif pt.entry_date and meta.get("trade_type") in ("scalp", "daytrade", "breakout", "momentum"):
+                from .scanner import _MAX_HOLD_HOURS
+                _max_h = _MAX_HOLD_HOURS.get(meta["trade_type"])
+                if _max_h is not None:
+                    _held_h = (datetime.utcnow() - pt.entry_date).total_seconds() / 3600
+                    if _held_h >= _max_h:
+                        _close_paper_trade(pt, exit_price_with_slip, f"time_exit_{meta['trade_type']}")
+                        _paper_close_ledger(db, pt)
+                        closed += 1
+                        continue
             # Expiry
             elif pt.entry_date and (datetime.utcnow() - pt.entry_date).days >= expiry:
                 _close_paper_trade(pt, exit_price_with_slip, "expired")

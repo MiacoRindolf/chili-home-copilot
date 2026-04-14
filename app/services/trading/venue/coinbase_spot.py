@@ -546,14 +546,170 @@ class CoinbaseSpotAdapter:
 
 
 class CoinbaseWebSocketSeam:
-    """Feature-flagged placeholder for a future WS loop (no implementation in Phase 3)."""
+    """Coinbase Advanced Trade WebSocket for L2 book and trade tape streaming.
+
+    Feeds ``microstructure`` ring buffers used by scanners for breakout
+    confirmation (bid/ask imbalance, trade aggression, spread quality).
+    """
 
     def __init__(self) -> None:
         self.enabled = bool(getattr(settings, "chili_coinbase_ws_enabled", False))
+        self._ws = None
+        self._thread: Any = None
+        self._subscribed: set[str] = set()
+        self._running = False
 
+    # ── lifecycle ───────────────────────────────────────────────────
+    def start(self, product_ids: list[str] | None = None) -> dict[str, Any]:
+        if not self.enabled:
+            return {"ok": False, "reason": "coinbase_ws_disabled"}
+        if self._running:
+            return {"ok": True, "already_running": True}
+
+        try:
+            from coinbase.websocket import WSClient
+        except ImportError:
+            _log.warning("[coinbase_ws] coinbase-advanced-py WSClient not available")
+            return {"ok": False, "reason": "sdk_missing"}
+
+        api_key = getattr(settings, "coinbase_api_key", None)
+        api_secret = getattr(settings, "coinbase_api_secret", None)
+
+        self._ws = WSClient(
+            api_key=api_key or None,
+            api_secret=api_secret or None,
+            on_message=self._on_message,
+            on_close=self._on_close,
+            retry=True,
+        )
+        self._ws.open()
+        self._running = True
+
+        pids = product_ids or ["BTC-USD", "ETH-USD"]
+        self.subscribe(pids)
+        _log.info("[coinbase_ws] started for %s", pids)
+        return {"ok": True, "product_ids": pids}
+
+    def stop(self) -> None:
+        self._running = False
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+            self._ws = None
+        self._subscribed.clear()
+        _log.info("[coinbase_ws] stopped")
+
+    def subscribe(self, product_ids: list[str]) -> None:
+        if not self._ws or not self._running:
+            return
+        new_pids = [p for p in product_ids if p not in self._subscribed]
+        if not new_pids:
+            return
+        try:
+            self._ws.level2(product_ids=new_pids)
+            self._ws.market_trades(product_ids=new_pids)
+            self._subscribed.update(new_pids)
+        except Exception as e:
+            _log.warning("[coinbase_ws] subscribe error: %s", e)
+
+    def unsubscribe(self, product_ids: list[str]) -> None:
+        if not self._ws:
+            return
+        try:
+            self._ws.level2_unsubscribe(product_ids=product_ids)
+            self._ws.market_trades_unsubscribe(product_ids=product_ids)
+            self._subscribed -= set(product_ids)
+        except Exception as e:
+            _log.debug("[coinbase_ws] unsubscribe error: %s", e)
+
+    # ── message handler ─────────────────────────────────────────────
+    def _on_message(self, msg: str) -> None:
+        import json as _json
+        try:
+            data = _json.loads(msg) if isinstance(msg, str) else msg
+        except Exception:
+            return
+
+        channel = data.get("channel", "")
+        events = data.get("events", [])
+
+        if channel == "l2_data":
+            self._handle_l2(events)
+        elif channel == "market_trades":
+            self._handle_trades(events)
+
+    def _on_close(self) -> None:
+        _log.info("[coinbase_ws] connection closed")
+        self._running = False
+
+    def _handle_l2(self, events: list[dict]) -> None:
+        from ..microstructure import BookLevel, BookSnapshot, get_book_buffer
+        import time as _time
+
+        buf = get_book_buffer()
+        for ev in events:
+            pid = ev.get("product_id", "")
+            updates = ev.get("updates", [])
+            if not pid or not updates:
+                continue
+
+            bids = []
+            asks = []
+            for u in updates:
+                side = u.get("side", "")
+                px = float(u.get("price_level", 0) or u.get("new_price", 0) or 0)
+                sz = float(u.get("new_quantity", 0) or u.get("qty", 0) or 0)
+                if px <= 0:
+                    continue
+                lvl = BookLevel(price=px, size=sz, side="bid" if side == "bid" else "offer")
+                if side == "bid":
+                    bids.append(lvl)
+                else:
+                    asks.append(lvl)
+
+            if bids or asks:
+                bids.sort(key=lambda l: l.price, reverse=True)
+                asks.sort(key=lambda l: l.price)
+                snap = BookSnapshot(
+                    product_id=pid,
+                    bids=bids[:20],
+                    asks=asks[:20],
+                    ts=_time.time(),
+                )
+                buf.update(snap)
+
+    def _handle_trades(self, events: list[dict]) -> None:
+        from ..microstructure import TapeTrade, get_trade_buffer
+        import time as _time
+
+        buf = get_trade_buffer()
+        for ev in events:
+            trades = ev.get("trades", [])
+            for t in trades:
+                pid = t.get("product_id", "")
+                px = float(t.get("price", 0) or 0)
+                sz = float(t.get("size", 0) or 0)
+                side = t.get("side", "UNKNOWN")
+                if px > 0 and sz > 0 and pid:
+                    buf.append(TapeTrade(
+                        product_id=pid,
+                        price=px,
+                        size=sz,
+                        side=side,
+                        ts=_time.time(),
+                    ))
+
+    # ── status ──────────────────────────────────────────────────────
     def describe(self) -> dict[str, Any]:
         return {
             "enabled": self.enabled,
-            "status": "stub",
-            "message": "WebSocket trading loop not implemented (Phase 3 seam only).",
+            "status": "running" if self._running else ("ready" if self.enabled else "disabled"),
+            "subscribed_products": sorted(self._subscribed),
+            "message": (
+                f"Streaming L2 + trades for {len(self._subscribed)} products"
+                if self._running
+                else "Not running"
+            ),
         }

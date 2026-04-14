@@ -1,6 +1,6 @@
 """Guarded live automation runner (Phase 8) — spot adapter resolved by execution_family (Phase 11 seam).
 
-Only ``coinbase_spot`` is implemented; other families skip with ``execution_family_not_implemented``.
+Supported families: ``coinbase_spot``, ``robinhood_spot``; other families skip with ``execution_family_not_implemented``.
 
 Snapshot contract:
 - Never overwrite ``momentum_risk`` / admission keys.
@@ -331,6 +331,10 @@ def tick_live_session(
     if sess.state not in LIVE_RUNNER_RUNNABLE_STATES:
         return {"ok": True, "skipped": "not_runnable", "state": sess.state}
 
+    product_id = sess.symbol.upper().strip()
+    if not product_id.endswith("-USD"):
+        product_id = f"{product_id}-USD"
+
     # C2: Orphaned order recovery — reconcile with venue (rate-limited)
     _reconcile_venue_position(adapter, db, sess, product_id)
 
@@ -399,10 +403,6 @@ def tick_live_session(
         variant.params_json if variant is not None else {},
         family_id=variant.family if variant is not None else None,
     )
-
-    product_id = sess.symbol.upper().strip()
-    if not product_id.endswith("-USD"):
-        product_id = f"{product_id}-USD"
 
     tick, _fr = adapter.get_best_bid_ask(product_id)
     if tick is None or tick.mid is None or tick.mid <= 0:
