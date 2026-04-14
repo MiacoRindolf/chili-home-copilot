@@ -2583,6 +2583,7 @@ var activeIndicators = new Set();
 var _chartAnnotations = [];
 var _savedAnnotationSpecs = [];
 var _lastBreakoutData = null;
+var _activeBreakoutRow = null;
 var _magnetEnabled = false;
 var _drawUndoStack = [];
 var _rawOhlcData = null;
@@ -4468,6 +4469,7 @@ var _selectDebounce = null;
 function selectTicker(t) {
   _detachUserPriceAlertLines();
   currentTicker = t.toUpperCase();
+  _activeBreakoutRow = null;
   clearAnnotations();
   _loadDrawings();
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
@@ -6692,6 +6694,18 @@ function askSmartPick() {
 
 function runAnalysis() {
   var msg = 'Analyze ' + currentTicker + ' on the ' + currentInterval + ' timeframe. Give me a clear verdict: should I buy, sell, or hold?';
+  if (_activeBreakoutRow && _activeBreakoutRow.ticker.toUpperCase() === currentTicker) {
+    var bo = _activeBreakoutRow;
+    msg += '\n\nIMPORTANT: This ticker was selected from the BREAKOUT screener. ' +
+      'Status: ' + (bo.status || bo.signal || 'watch').toUpperCase() +
+      ', Resistance: $' + bo.resistance +
+      ', Breakout Entry: $' + bo.entry_price +
+      ', Stop: $' + bo.stop_loss +
+      ', Target: $' + bo.take_profit +
+      (bo.dist_to_breakout != null ? ', Distance to breakout: ' + bo.dist_to_breakout + '%' : '') +
+      (bo.bb_squeeze ? ', BB Squeeze: active' : '') +
+      '. Evaluate this as a BREAKOUT setup — use the breakout entry/stop/target levels, not general swing levels.';
+  }
   _streamAnalyze(msg, false);
 }
 
@@ -7453,6 +7467,7 @@ function _selectBreakout(idx) {
   var targetInterval = isCrypto ? '15m' : '1d';
   _pendingAnnotationFn = function() { drawBreakoutAnnotations(r); };
   currentTicker = r.ticker.toUpperCase();
+  _activeBreakoutRow = r;
   clearAnnotations();
   _loadDrawings();
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
@@ -7466,6 +7481,7 @@ function _selectDaytrade(idx) {
   var r = _lastDaytradeData[idx];
   _pendingAnnotationFn = function() { drawDaytradeAnnotations(r); };
   currentTicker = r.ticker.toUpperCase();
+  _activeBreakoutRow = null;
   clearAnnotations();
   _loadDrawings();
   document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });

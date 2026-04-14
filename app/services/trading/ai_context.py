@@ -229,20 +229,23 @@ def build_ai_context(
             f"Signals: {', '.join(scored['signals']) if scored['signals'] else 'None strong'}"
         )
 
-    # Per-ticker crypto intraday context: if the ticker being analyzed is in
-    # the breakout cache, surface its full 15m indicator data + candle snapshot
-    if _is_crypto:
-        try:
-            from .scanner import get_crypto_breakout_cache
-            _bo_cache = get_crypto_breakout_cache()
-            _bo_match = None
-            for _r in _bo_cache.get("results", []):
-                if _r["ticker"].upper() == ticker_up:
-                    _bo_match = _r
-                    break
-            if _bo_match:
-                ind = _bo_match.get("indicators", {})
-                _cr_lines = [f"## INTRADAY BREAKOUT ANALYSIS — {ticker_up} (15m candles)"]
+    # Breakout context: check the merged breakout cache (stock + crypto) so
+    # the LLM sees breakout-specific entry/stop/target when the ticker was
+    # flagged by the breakout scanner (not just the general swing scorer).
+    try:
+        from .scanner import get_breakout_cache
+        _bo_all = get_breakout_cache()
+        _bo_match = None
+        for _r in (_bo_all.get("results") or []):
+            if _r.get("ticker", "").upper() == ticker_up:
+                _bo_match = _r
+                break
+        if _bo_match:
+            ind = _bo_match.get("indicators", {})
+            _bo_is_crypto = _is_crypto or _bo_match.get("rvol") is not None
+
+            if _bo_is_crypto:
+                _cr_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (15m candles, breakout strategy)"]
                 _cr_lines.append(
                     f"Breakout Score: {_bo_match['score']}/10 | Signal: {_bo_match['signal'].upper()} | "
                     f"RVOL: {_bo_match.get('rvol', 0):.1f}x"
@@ -296,13 +299,69 @@ def build_ai_context(
                 )
                 sigs = ", ".join(_bo_match.get("signals", [])[:5])
                 _cr_lines.append(f"  Signals: {sigs}")
-
-                # Candle snapshots for this specific ticker
                 _cr_lines.append("")
                 _cr_lines.extend(_build_candle_snapshots([ticker_up]))
                 parts.append("\n".join(_cr_lines))
-        except Exception:
-            pass
+            else:
+                _st_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (daily, breakout strategy)"]
+                _status = _bo_match.get("status", _bo_match.get("signal", "watch")).upper()
+                _cr_flag = "crypto" if _is_crypto else "stock"
+                _st_lines.append(
+                    f"Breakout Score: {_bo_match['score']}/10 | Status: {_status} | Asset: {_cr_flag}"
+                )
+                _st_lines.append(
+                    f"  Resistance: ${_bo_match.get('resistance')} | "
+                    f"Distance to breakout: {_bo_match.get('dist_to_breakout', 'N/A')}%"
+                )
+                _st_lines.append(
+                    f"  Entry: ${_bo_match.get('entry_price')} (at resistance) | "
+                    f"Stop: ${_bo_match.get('stop_loss')} | Target: ${_bo_match.get('take_profit')}"
+                )
+                _st_lines.append(
+                    "NOTE: Entry/stop/target above are from the BREAKOUT strategy "
+                    "(entry triggers at resistance, not current price). "
+                    "If the AI Scanner Score section above shows different levels, "
+                    "that is the general swing strategy — use the breakout levels when "
+                    "the user is evaluating a breakout setup."
+                )
+                _bo_flags = []
+                if _bo_match.get("bb_squeeze"):
+                    _bo_flags.append("BB SQUEEZE active")
+                bb_pctile = _bo_match.get("bb_width_pctile")
+                if bb_pctile is not None:
+                    _bo_flags.append(f"BB width pctile: {bb_pctile}%")
+                if ind.get("adx") is not None:
+                    _bo_flags.append(f"ADX {ind['adx']:.0f}")
+                vol_trend = _bo_match.get("vol_trend_pct")
+                if vol_trend is not None:
+                    _bo_flags.append(f"Vol trend: {vol_trend:+.0f}%")
+                tight_days = _bo_match.get("tight_days")
+                if tight_days:
+                    _bo_flags.append(f"Tight range: {tight_days} days")
+                if _bo_flags:
+                    _st_lines.append("  " + " | ".join(_bo_flags))
+
+                ind_parts = []
+                if ind.get("rsi") is not None:
+                    ind_parts.append(f"RSI {ind['rsi']}")
+                if ind.get("macd_hist") is not None:
+                    ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
+                if ind.get("atr") is not None:
+                    ind_parts.append(f"ATR ${ind['atr']}")
+                for _ek in ("ema_20", "ema_50", "ema_100"):
+                    if ind.get(_ek) is not None:
+                        ind_parts.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
+                if ind_parts:
+                    _st_lines.append("  " + " | ".join(ind_parts))
+
+                sigs = ", ".join(_bo_match.get("signals", [])[:6])
+                _st_lines.append(f"  Signals: {sigs}")
+                hold_est = _bo_match.get("hold_estimate")
+                if hold_est:
+                    _st_lines.append(f"  Hold estimate: {hold_est}")
+                parts.append("\n".join(_st_lines))
+    except Exception:
+        pass
 
     # Active / pending strategy proposals — prevent contradictions
     from datetime import datetime, timedelta
