@@ -4140,15 +4140,68 @@ def learn_from_monitor_decisions(db: Session, user_id: int | None) -> dict[str, 
                 0.3, _adaptive_weights.get("monitor_llm_confidence_min", 0.5) - nudge
             )
 
+    # ── Trade plan signal predictiveness ──
+    signal_stats = _analyze_trade_plan_signals(rows)
+
     logger.info(
         "[learning] Monitor decisions: %d reviewed, overall benefit %.0f%%, "
-        "tighten benefit %.0f%%",
+        "tighten benefit %.0f%%, plan signals analyzed: %d",
         total, overall_benefit * 100, tighten_rate * 100,
+        signal_stats.get("signals_analyzed", 0),
     )
     return {
         "decisions_reviewed": total,
         "overall_benefit_rate": round(overall_benefit, 3),
         "by_action": {k: round(sum(v) / len(v), 3) for k, v in by_action.items()},
+        "plan_signal_stats": signal_stats,
+    }
+
+
+def _analyze_trade_plan_signals(rows: list) -> dict[str, Any]:
+    """Analyze which trade plan signals (invalidations, caution changes) were
+    predictive of beneficial/harmful outcomes.
+
+    Returns aggregated stats that can be fed back into the plan extractor
+    system prompt for calibration.
+    """
+    signal_outcomes: dict[str, list[bool]] = {}
+    total_signals = 0
+
+    for r in rows:
+        snap = r.conditions_snapshot
+        if not isinstance(snap, dict):
+            continue
+        tp = snap.get("trade_plan", {})
+        if not tp:
+            continue
+
+        beneficial = bool(r.was_beneficial)
+
+        for inv in tp.get("invalidations_triggered", []):
+            key = f"inv:{inv.get('indicator', 'unknown')}"
+            signal_outcomes.setdefault(key, []).append(beneficial)
+            total_signals += 1
+
+        for cc in tp.get("caution_signals_changed", []):
+            direction = cc.get("direction", "changed")
+            key = f"caution:{cc.get('indicator', 'unknown')}:{direction}"
+            signal_outcomes.setdefault(key, []).append(beneficial)
+            total_signals += 1
+
+    predictive_signals = {}
+    for key, outcomes in signal_outcomes.items():
+        if len(outcomes) < 3:
+            continue
+        rate = sum(outcomes) / len(outcomes)
+        predictive_signals[key] = {
+            "count": len(outcomes),
+            "benefit_rate": round(rate, 3),
+            "predictive": rate > 0.6 or rate < 0.3,
+        }
+
+    return {
+        "signals_analyzed": total_signals,
+        "predictive_signals": predictive_signals,
     }
 
 

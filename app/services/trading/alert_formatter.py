@@ -545,6 +545,8 @@ def format_pattern_adjustment(
     pnl_pct: float | None = None,
     reasoning: str = "",
     dry_run: bool = False,
+    invalidations: list | None = None,
+    caution_changes: list | None = None,
 ) -> str:
     """Format a pattern monitor adjustment for Telegram delivery."""
     action_emoji = {
@@ -566,7 +568,7 @@ def format_pattern_adjustment(
     prefix = "<b>[DRY-RUN]</b> " if dry_run else ""
 
     lines = [
-        f"{action_emoji} {prefix}<b>{ticker} — Pattern Monitor</b>",
+        f"{action_emoji} {prefix}<b>{ticker} \u2014 Pattern Monitor</b>",
         f"Pattern: <i>{pattern_name}</i>",
         f"Health: {health_bar} {health_score:.0%}{delta_str}",
         "",
@@ -579,6 +581,19 @@ def format_pattern_adjustment(
     elif action == "loosen_target" and new_target is not None:
         old_str = f"${old_target:.2f}" if old_target else "none"
         lines.append(f"Target: {old_str} \u2192 <b>${new_target:.2f}</b>")
+
+    if invalidations:
+        lines.append("")
+        for inv in invalidations[:3]:
+            sev = inv.get("severity", "warning").upper()
+            icon = "\u26A0\uFE0F" if sev == "WARNING" else "\U0001F6A8"
+            lines.append(f"{icon} <b>[{sev}]</b> {inv.get('desc', '')[:80]}")
+
+    if caution_changes:
+        for cc in caution_changes[:3]:
+            direction = cc.get("direction", "changed")
+            icon = "\u2705" if direction == "resolved" else "\u26A0\uFE0F"
+            lines.append(f"{icon} {cc.get('desc', '')[:60]}: <i>{direction}</i>")
 
     if reasoning:
         lines.append(f"Reason: {reasoning[:200]}")

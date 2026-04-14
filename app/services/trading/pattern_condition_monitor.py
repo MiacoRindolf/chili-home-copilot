@@ -1,8 +1,9 @@
 """Pattern condition health evaluator.
 
 Evaluates a ScanPattern's rules_json conditions against live indicator
-values and returns a structured health assessment.  Pure logic — no LLM,
-no DB writes.
+values and returns a structured health assessment.  Also evaluates
+LLM-generated trade plans (invalidation conditions, monitoring signals,
+key levels).  Pure logic — no LLM, no DB writes.
 """
 from __future__ import annotations
 
@@ -188,3 +189,188 @@ def evaluate_pattern_health(
         critical_failures=critical,
         human_summary="\n".join(summary_parts),
     )
+
+
+# ── Trade Plan evaluation ────────────────────────────────────────────────
+
+_OP_MAP = {
+    ">": lambda a, b: a > b,
+    ">=": lambda a, b: a >= b,
+    "<": lambda a, b: a < b,
+    "<=": lambda a, b: a <= b,
+    "==": lambda a, b: abs(a - b) < 1e-9 if isinstance(a, float) else a == b,
+}
+
+
+@dataclass
+class TradePlanHealth:
+    entry_validated: bool = False
+    invalidations_triggered: list[dict] = field(default_factory=list)
+    caution_signals_changed: list[dict] = field(default_factory=list)
+    levels_breached: list[dict] = field(default_factory=list)
+    plan_health_score: float = 1.0
+    human_summary: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "entry_validated": self.entry_validated,
+            "invalidations_triggered": self.invalidations_triggered,
+            "caution_signals_changed": self.caution_signals_changed,
+            "levels_breached": self.levels_breached,
+            "plan_health_score": round(self.plan_health_score, 3),
+        }
+
+    @property
+    def has_critical_invalidation(self) -> bool:
+        return any(i.get("severity") == "critical" for i in self.invalidations_triggered)
+
+    @property
+    def has_any_invalidation(self) -> bool:
+        return len(self.invalidations_triggered) > 0
+
+
+def evaluate_trade_plan(
+    trade_plan: dict | None,
+    indicators: dict[str, Any],
+    current_price: float,
+) -> TradePlanHealth:
+    """Evaluate a structured trade plan against live indicators.
+
+    Parameters
+    ----------
+    trade_plan : the JSON plan stored on BreakoutAlert.trade_plan
+    indicators : flat dict of indicator key -> current value
+    current_price : live price
+    """
+    if not trade_plan:
+        return TradePlanHealth(entry_validated=True, human_summary="No trade plan defined.")
+
+    result = TradePlanHealth()
+    summary_parts: list[str] = []
+
+    # 1. Entry validation.
+    ev = trade_plan.get("entry_validation", {})
+    reclaim = ev.get("required_reclaim")
+    if reclaim is not None:
+        result.entry_validated = current_price >= reclaim
+        status = "VALIDATED" if result.entry_validated else "NOT YET"
+        summary_parts.append(f"Entry reclaim ${reclaim:.2f}: {status} (price ${current_price:.2f})")
+    else:
+        result.entry_validated = True
+
+    # 2. Invalidation conditions.
+    penalty = 0.0
+    for cond in trade_plan.get("invalidation_conditions", []):
+        triggered = _eval_plan_condition(cond, indicators, current_price)
+        if triggered:
+            result.invalidations_triggered.append({
+                "desc": cond.get("desc", ""),
+                "indicator": cond.get("indicator", ""),
+                "severity": cond.get("severity", "warning"),
+            })
+            sev = cond.get("severity", "warning")
+            penalty += 0.3 if sev == "critical" else 0.15
+            summary_parts.append(f"  INVALIDATION [{sev.upper()}]: {cond.get('desc', '')}")
+
+    # 3. Monitoring signals — check if baseline has changed.
+    for sig in trade_plan.get("monitoring_signals", []):
+        change = _eval_signal_change(sig, indicators, current_price)
+        if change:
+            result.caution_signals_changed.append(change)
+            direction = change.get("direction", "changed")
+            if direction == "worsened":
+                penalty += 0.1
+            elif direction == "resolved":
+                penalty -= 0.05
+            summary_parts.append(f"  Signal {sig.get('desc', '')}: {direction}")
+
+    # 4. Key levels.
+    levels = trade_plan.get("key_levels", {})
+    for level_name in ("early_warning", "near_resistance"):
+        lv = levels.get(level_name)
+        if lv is None:
+            continue
+        if level_name == "early_warning" and current_price < lv:
+            result.levels_breached.append({"level": level_name, "value": lv, "price": current_price})
+            penalty += 0.1
+            summary_parts.append(f"  LEVEL BREACH: {level_name} ${lv:.2f} (price ${current_price:.2f})")
+
+    result.plan_health_score = max(0.0, min(1.0, 1.0 - penalty))
+
+    if not summary_parts:
+        summary_parts.append("Trade plan: all conditions nominal.")
+    result.human_summary = "\n".join(summary_parts)
+
+    return result
+
+
+def _eval_plan_condition(cond: dict, indicators: dict[str, Any], current_price: float) -> bool:
+    """Evaluate a single invalidation condition. Returns True if TRIGGERED (bad)."""
+    ind_key = cond.get("indicator", "")
+    op_str = cond.get("op", "")
+    ref_key = cond.get("ref")
+    value = cond.get("value")
+
+    actual = indicators.get(ind_key)
+    if actual is None:
+        if ind_key == "price":
+            actual = current_price
+        else:
+            return False
+
+    if ref_key:
+        compare_to = indicators.get(ref_key)
+        if compare_to is None and ref_key == "price":
+            compare_to = current_price
+        if compare_to is None:
+            return False
+    elif value is not None:
+        compare_to = value
+    else:
+        return False
+
+    op_fn = _OP_MAP.get(op_str)
+    if not op_fn:
+        return False
+
+    try:
+        return op_fn(float(actual), float(compare_to))
+    except (TypeError, ValueError):
+        return False
+
+
+def _eval_signal_change(sig: dict, indicators: dict[str, Any], current_price: float) -> dict | None:
+    """Check if a monitoring signal has changed from its baseline.
+
+    Returns a change dict with 'direction' = 'worsened' | 'resolved' | None.
+    """
+    watch = sig.get("watch", "")
+    baseline = sig.get("baseline", "")
+    ind_key = sig.get("indicator", "")
+
+    if watch == "direction":
+        actual = indicators.get(ind_key)
+        if actual is None:
+            return None
+        prev_key = f"{ind_key}_5d_direction"
+        direction_val = indicators.get(prev_key, indicators.get(f"{ind_key}_direction"))
+        if direction_val is None:
+            return None
+        current_dir = "falling" if str(direction_val).lower() in ("falling", "down", "negative") else "rising"
+        if baseline == "falling" and current_dir == "rising":
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "resolved"}
+        elif baseline == "rising" and current_dir == "falling":
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "worsened"}
+        return None
+
+    if watch == "level":
+        level = sig.get("level")
+        if level is None:
+            return None
+        if baseline == "below" and current_price >= level:
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "resolved"}
+        elif baseline == "above" and current_price < level:
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "worsened"}
+        return None
+
+    return None

@@ -669,6 +669,34 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
                 inputs=("Position and PnL history", "Risk caps from settings"),
                 outputs=("``report['sizing_adjustments']``", "Sizing hint columns/JSON"),
             ),
+            CycleStepDef(
+                sid="monitor_review",
+                label="Pattern monitor decision review",
+                code_ref="learning.learn_from_monitor_decisions",
+                runner_phase="monitor_decision_review",
+                description=(
+                    "Reviews pattern-monitor decision outcomes (was_beneficial) "
+                    "and trade plan signal predictiveness. Evolves adaptive "
+                    "thresholds for monitoring sensitivity."
+                ),
+                remarks=(
+                    "What: Aggregates outcomes from PatternMonitorDecision rows, "
+                    "analyzes which trade plan signals (invalidation conditions, caution "
+                    "signals) were actually predictive, and nudges adaptive weights.\n\n"
+                    "Where: ``learn_from_monitor_decisions(db, user_id)`` in ``learning.py``.\n\n"
+                    "Why: Self-improving position management — premature stop tightening "
+                    "should raise thresholds, successful invalidation catches should lower them."
+                ),
+                inputs=(
+                    "PatternMonitorDecision rows with was_beneficial filled",
+                    "conditions_snapshot containing trade_plan evaluation results",
+                ),
+                outputs=(
+                    "``report['monitor_decisions_reviewed']``",
+                    "Evolved adaptive weights: monitor_health_weakening, monitor_llm_confidence_min",
+                    "Trade plan signal predictiveness stats",
+                ),
+            ),
         ),
     ),
     CycleClusterDef(

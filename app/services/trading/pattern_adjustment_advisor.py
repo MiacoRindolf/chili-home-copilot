@@ -17,7 +17,13 @@ _SYSTEM_PROMPT = """\
 You are CHILI's pattern-position management engine.  You monitor open
 positions that were entered based on a specific learned pattern.  Your job
 is to decide whether the stop-loss or take-profit should be ADJUSTED based
-on whether the pattern's conditions are still holding.
+on whether the pattern's conditions are still holding AND whether the
+dynamic trade plan conditions are intact.
+
+You receive TWO types of health data:
+- PATTERN HEALTH: static rule conditions from the original pattern
+- TRADE PLAN STATUS: dynamic conditions including invalidation triggers,
+  monitoring signal changes, and key level breaches
 
 RULES (never violate):
 1. You may TIGHTEN a stop (move it closer to current price) but NEVER
@@ -28,8 +34,13 @@ RULES (never violate):
 4. When health is degrading, recommend tightening the stop.
 5. When health is critically low (<30%) and the position is at a loss,
    recommend EXIT_NOW.
-6. Always provide a brief reasoning the user can understand.
-7. Respond ONLY with valid JSON matching the schema below.
+6. CRITICAL INVALIDATION from the trade plan = strong signal for EXIT_NOW
+   or aggressive stop tightening.
+7. WARNING invalidation = signal to tighten stop conservatively.
+8. Monitoring signal WORSENED = factor into tighter management.
+9. Monitoring signal RESOLVED = positive, factor into hold/loosen.
+10. Always provide a brief reasoning the user can understand.
+11. Respond ONLY with valid JSON matching the schema below.
 
 Response schema:
 {
@@ -75,11 +86,12 @@ def _build_user_prompt(
     pattern_stop: float | None,
     pattern_target: float | None,
     pnl_pct: float | None,
+    trade_plan_health: Any = None,
 ) -> str:
     delta_str = f"{health_delta:+.0%}" if health_delta is not None else "N/A"
     pnl_str = f"{pnl_pct:+.1f}%" if pnl_pct is not None else "N/A"
 
-    return f"""\
+    parts = [f"""\
 Ticker: {ticker}
 Pattern: "{pattern_name}"
 Description: {pattern_description}
@@ -94,10 +106,34 @@ Original pattern stop: ${pattern_stop or 0:.4f}
 Original pattern target: ${pattern_target or 0:.4f}
 
 Pattern health: {health_score:.0%} (delta: {delta_str})
-{health_summary}
+{health_summary}"""]
 
-Based on the above, what adjustment (if any) should be made?
-"""
+    if trade_plan_health is not None:
+        tph = trade_plan_health
+        parts.append("\n--- TRADE PLAN STATUS ---")
+        parts.append(f"Entry validated: {'YES' if tph.entry_validated else 'NO'}")
+        parts.append(f"Plan health: {tph.plan_health_score:.0%}")
+
+        if tph.invalidations_triggered:
+            parts.append("INVALIDATION CONDITIONS TRIGGERED:")
+            for inv in tph.invalidations_triggered:
+                parts.append(f"  [{inv.get('severity', 'warning').upper()}] {inv.get('desc', '')}")
+
+        if tph.caution_signals_changed:
+            parts.append("MONITORING SIGNAL CHANGES:")
+            for sig in tph.caution_signals_changed:
+                parts.append(f"  {sig.get('desc', '')}: {sig.get('direction', 'changed')}")
+
+        if tph.levels_breached:
+            parts.append("KEY LEVELS BREACHED:")
+            for lb in tph.levels_breached:
+                parts.append(f"  {lb.get('level', '')}: ${lb.get('value', 0):.2f}")
+
+        parts.append(tph.human_summary)
+
+    parts.append("\nBased on ALL of the above (pattern health AND trade plan status), "
+                 "what adjustment (if any) should be made?")
+    return "\n".join(parts)
 
 
 def get_adjustment(
@@ -115,6 +151,7 @@ def get_adjustment(
     pattern_stop: float | None,
     pattern_target: float | None,
     pnl_pct: float | None,
+    trade_plan_health: Any = None,
 ) -> AdjustmentRecommendation:
     """Call LLM and return a validated adjustment recommendation."""
     from ..llm_caller import call_llm
@@ -133,6 +170,7 @@ def get_adjustment(
         pattern_stop=pattern_stop,
         pattern_target=pattern_target,
         pnl_pct=pnl_pct,
+        trade_plan_health=trade_plan_health,
     )
 
     messages = [

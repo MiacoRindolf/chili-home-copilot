@@ -467,6 +467,7 @@ class BreakoutAlert(Base):
     related_insight_id: Optional[int] = Column(
         Integer, ForeignKey("trading_insights.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    trade_plan: Optional[dict] = Column(JSONB, nullable=True)
 
 
 class StrategyProposal(Base):

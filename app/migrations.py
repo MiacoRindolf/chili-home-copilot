@@ -6103,6 +6103,63 @@ def _migration_115_schema_hardening_fks(conn) -> None:
     conn.commit()
 
 
+def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
+    """Add BreakoutAlert.trade_plan JSONB; insert position-monitor mesh nodes and edges."""
+    cols = _columns(conn, "trading_breakout_alerts")
+    if "trade_plan" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_breakout_alerts ADD COLUMN trade_plan JSONB"
+        ))
+
+    # Neural mesh: position monitor spine node (action tier, layer 6).
+    conn.execute(text("""
+        INSERT INTO brain_graph_nodes (id, domain, graph_version, node_type, layer, label,
+                                       fire_threshold, cooldown_seconds, enabled, version,
+                                       is_observer, display_meta)
+        VALUES
+            ('nm_position_monitor', 'trading', 1, 'action_position_monitor', 6,
+             'Position monitor', 0.55, 60, true, 1, false,
+             '{"role":"action_position_monitor","desc":"Pattern-aware live position management"}'),
+            ('nm_lc_monitor_review', 'trading', 1, 'learning_step', 9,
+             'Monitor decision review', 0.5, 120, true, 1, false,
+             '{"role":"learning_step","cluster_id":"c_secondary_outcomes","step_sid":"monitor_review",'
+             '"desc":"Reviews pattern-monitor decision outcomes for threshold evolution"}')
+        ON CONFLICT (id) DO NOTHING
+    """))
+
+    conn.execute(text("""
+        INSERT INTO brain_node_states (node_id, activation_score, confidence)
+        VALUES
+            ('nm_position_monitor', 0.0, 0.5),
+            ('nm_lc_monitor_review', 0.0, 0.5)
+        ON CONFLICT (node_id) DO NOTHING
+    """))
+
+    # Edges: regime -> monitor, monitor -> risk_gate, monitor -> alerts,
+    #         monitor_review -> evidence_quality (feedback)
+    for src, tgt, sig, w, pol in [
+        ("nm_latent_regime", "nm_position_monitor", "regime_shift", 0.6, "excitatory"),
+        ("nm_evidence_quality", "nm_position_monitor", "evidence_ok", 0.5, "excitatory"),
+        ("nm_position_monitor", "nm_risk_gate", "position_health", 0.7, "excitatory"),
+        ("nm_position_monitor", "nm_action_alerts", "monitor_alert", 0.65, "excitatory"),
+        ("nm_lc_monitor_review", "nm_evidence_quality", "monitor_feedback", 0.5, "excitatory"),
+    ]:
+        conn.execute(text("""
+            INSERT INTO brain_graph_edges
+                (source_node_id, target_node_id, signal_type, weight, polarity,
+                 edge_type, graph_version, enabled)
+            SELECT :src, :tgt, :sig, :w, :pol, 'dataflow', 1, true
+            WHERE EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :src)
+              AND EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :tgt)
+              AND NOT EXISTS (
+                  SELECT 1 FROM brain_graph_edges
+                  WHERE source_node_id = :src AND target_node_id = :tgt AND signal_type = :sig
+              )
+        """), {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol})
+
+    conn.commit()
+
+
 def _migration_117_pattern_position_monitor(conn) -> None:
     """Add Trade.related_alert_id FK and create pattern monitor decisions table."""
     cols = _columns(conn, "trading_trades")
@@ -6277,6 +6334,7 @@ MIGRATIONS = [
     ("115_schema_hardening_fks", _migration_115_schema_hardening_fks),
     ("116_trade_type_column", _migration_116_trade_type_column),
     ("117_pattern_position_monitor", _migration_117_pattern_position_monitor),
+    ("118_dynamic_trade_plan_monitor", _migration_118_dynamic_trade_plan_monitor),
 ]
 
 
