@@ -1,0 +1,34 @@
+<div class="ap-section-head">
+  <div>
+    <h2>Eligible Now
+      <button type="button" class="ap-collapse-toggle" id="ap-eligible-toggle"
+              onclick="apToggleEligible()"
+              aria-expanded="true" aria-controls="ap-eligible-body">Collapse</button>
+    </h2>
+    <p>
+      Ranked by live compatibility, scan signal strength, scan score, top variant viability, and freshness.
+      Stocks only qualify during market hours; crypto stays available 24/7 when data and venue checks are green.
+    </p>
+  </div>
+</div>
+<div class="ap-toolbar" role="toolbar" aria-label="Opportunity filters">
+  <div class="ap-segment" id="ap-mode-filters" role="tablist" aria-label="Trading mode">
+    <button type="button" class="ap-segment__btn" role="tab" data-mode="paper" aria-selected="false">Paper</button>
+    <button type="button" class="ap-segment__btn live" role="tab" data-mode="live" aria-selected="false">Live</button>
+  </div>
+  <div class="ap-segment" id="ap-asset-filters" role="tablist" aria-label="Asset class">
+    <button type="button" class="ap-segment__btn" role="tab" data-asset="all" aria-selected="false">All</button>
+    <button type="button" class="ap-segment__btn" role="tab" data-asset="stock" aria-selected="false">Stocks</button>
+    <button type="button" class="ap-segment__btn" role="tab" data-asset="crypto" aria-selected="false">Crypto</button>
+  </div>
+  <div class="ap-toolbar__search" id="ap-search-wrap">
+    <input id="ap-opportunity-search" type="text"
+           placeholder="Filter tickers or strategies"
+           aria-label="Filter tickers or strategies" />
+    <button type="button" class="ap-toolbar__search-clear" id="ap-search-clear"
+            aria-label="Clear search">&times;</button>
+  </div>
+  <div class="ap-toolbar__spacer"></div>
+  <button type="button" class="ap-icon-btn" onclick="apRefreshOpportunities()" aria-label="Refresh opportunity board" title="Refresh board">&#x21bb;</button>
+  <button type="button" class="ap-btn" onclick="apRefreshAll()" aria-label="Refresh all data">Refresh all</button>
+</div>

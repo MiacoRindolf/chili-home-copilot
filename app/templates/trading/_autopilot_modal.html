@@ -1,0 +1,18 @@
+<div id="ap-live-modal" class="ap-dialog" role="dialog" aria-modal="true" aria-labelledby="ap-modal-title" onclick="if (event.target === this) apCloseLiveModal()">
+  <div class="ap-dialog__box" onclick="event.stopPropagation()">
+    <div class="ap-dialog__header">
+      <h3 id="ap-modal-title">Confirm Live Arm</h3>
+    </div>
+    <div id="ap-live-modal-body" class="ap-dialog__body"></div>
+    <label class="ap-dialog__confirm-check" id="ap-live-confirm-label">
+      <input type="checkbox" id="ap-live-confirm-check" />
+      I understand the risks of live execution and confirm this action.
+    </label>
+    <div class="ap-dialog__footer">
+      <button type="button" class="ap-btn" onclick="apCloseLiveModal()">Cancel</button>
+      <button type="button" class="ap-btn ap-btn-live" id="ap-live-modal-confirm" onclick="apConfirmLiveArm()" disabled>
+        Confirm live arm
+      </button>
+    </div>
+  </div>
+</div>

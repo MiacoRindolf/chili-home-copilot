@@ -1,0 +1,21 @@
+<section class="ap-section">
+  <div class="ap-section-head">
+    <div>
+      <h2>Simulation Runtime</h2>
+      <p>
+        Every session now stays inline: controls, runner status, chart, fills, and event trail all live in the card
+        so the page reads as an operational list instead of a selected-session side panel.
+      </p>
+    </div>
+    <div class="ap-section-actions">
+      <label class="ap-muted"><input type="checkbox" id="ap-show-archived" /> Show archived</label>
+      <button type="button" class="ap-btn" onclick="apRefreshSessions()" aria-label="Refresh sessions">Refresh sessions</button>
+    </div>
+  </div>
+  <div class="ap-section-body">
+    <div id="ap-sessions" class="ap-session-list" aria-live="polite"></div>
+    <div id="ap-sessions-empty" class="ap-empty" style="display:none">
+      No Autopilot sessions yet. Start from an eligible symbol above to create a paper or live workflow.
+    </div>
+  </div>
+</section>

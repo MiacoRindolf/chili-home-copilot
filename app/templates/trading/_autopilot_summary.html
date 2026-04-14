@@ -1,0 +1,16 @@
+{% if automation_legacy_alias %}
+<div class="ap-banner">
+  Trading Automation compatibility path: this legacy URL now opens the Autopilot runtime surface while keeping the
+  existing momentum automation APIs and session identifiers intact.
+</div>
+{% else %}
+<div class="ap-banner">
+  Autopilot now starts from what is actually compatible now. The board below merges fresh scanner signals, crypto
+  breakouts, and live strategy viability so you can see which stocks and crypto pairs the current momentum scalping
+  family can trade, why a symbol is allowed, and exactly what is blocking it when it is not.
+</div>
+{% endif %}
+
+<div id="ap-summary-strip" class="ap-summary-ribbon" role="region" aria-label="System summary"></div>
+<div id="ap-decision-strip" class="ap-muted" style="font-size:var(--text-xs);line-height:1.45;margin:var(--space-2) 0 var(--space-3);"></div>
+<div id="ap-blockers" class="ap-blockers" aria-live="polite"></div>
