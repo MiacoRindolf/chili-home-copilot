@@ -8438,7 +8438,7 @@ function loadAlertHistory() {
         var ttCls = 'tt-' + a.trade_type;
         html += '<span class="alert-trade-type ' + ttCls + '">' + a.trade_type.replace(/_/g, ' ') + '</span>';
       }
-      html += '<span class="alert-ticker">' + (a.ticker || '') + '</span>';
+      html += '<span class="alert-ticker" style="cursor:pointer;text-decoration:underline" onclick="selectTicker(\'' + (a.ticker || '') + '\')">' + (a.ticker || '') + '</span>';
       html += '<span class="alert-msg" title="' + escHtml(a.message) + '">' + escHtml(a.message) + '</span>';
       if (a.duration_estimate) {
         html += '<span class="alert-eta" title="Estimated time to target">' + a.duration_estimate + '</span>';

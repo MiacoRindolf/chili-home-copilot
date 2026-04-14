@@ -10,7 +10,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import BacktestResult, Trade, StrategyProposal
+from ...models.trading import BacktestResult, BreakoutAlert, Trade, StrategyProposal
 from ..yf_session import get_fundamentals
 from .market_data import (
     compute_indicators, fetch_quote, _use_massive, _use_polygon,
@@ -216,152 +216,257 @@ def build_ai_context(
     except Exception:
         pass
 
+    # Breakout lookup first — needed to annotate the scanner score section.
+    _bo_match = None
+    try:
+        from .scanner import get_breakout_cache
+        _bo_all = get_breakout_cache()
+        for _r in (_bo_all.get("results") or []):
+            if _r.get("ticker", "").upper() == ticker_up:
+                _bo_match = _r
+                break
+    except Exception:
+        pass
+
     try:
         scored = futures["score"].result(timeout=15)
     except Exception:
         scored = None
     if scored:
+        _scanner_header = "## AI SCANNER SCORE"
+        if _bo_match:
+            _scanner_header += " (general swing strategy — see BREAKOUT ANALYSIS below for breakout-specific levels)"
         parts.append(
-            f"## AI SCANNER SCORE\n"
+            f"{_scanner_header}\n"
             f"Score: {scored['score']}/10 | Signal: {scored['signal'].upper()}\n"
             f"Entry: ${scored['entry_price']} | Stop: ${scored['stop_loss']} | Target: ${scored['take_profit']}\n"
             f"Risk: {scored['risk_level'].upper()}\n"
             f"Signals: {', '.join(scored['signals']) if scored['signals'] else 'None strong'}"
         )
 
-    # Breakout context: check the merged breakout cache (stock + crypto) so
-    # the LLM sees breakout-specific entry/stop/target when the ticker was
-    # flagged by the breakout scanner (not just the general swing scorer).
+    # Breakout context: inject breakout-specific entry/stop/target so the LLM
+    # uses the correct levels (at resistance, not current price).
+    if _bo_match:
+        ind = _bo_match.get("indicators", {})
+        _bo_is_crypto = _is_crypto or _bo_match.get("rvol") is not None
+        _bo_note = (
+            "IMPORTANT: The entry/stop/target in this BREAKOUT ANALYSIS section are the "
+            "authoritative levels for this breakout setup. The AI Scanner Score above "
+            "uses a different (general swing) strategy with wider levels based on current "
+            "price — when the user is evaluating a breakout, use THESE breakout levels "
+            "for your recommendation."
+        )
+
+        if _bo_is_crypto:
+            _cr_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (15m candles, breakout strategy)"]
+            _cr_lines.append(
+                f"Breakout Score: {_bo_match['score']}/10 | Signal: {_bo_match['signal'].upper()} | "
+                f"RVOL: {_bo_match.get('rvol', 0):.1f}x"
+            )
+            _flags = []
+            if _bo_match.get("breakout_confirmed"):
+                _flags.append(f"BREAKOUT CONFIRMED ({_bo_match.get('breakout_dir', '').upper()})")
+            if _bo_match.get("bb_squeeze_firing"):
+                _flags.append("BB SQUEEZE FIRING")
+            elif _bo_match.get("bb_squeeze"):
+                _flags.append("BB squeeze active")
+            if _bo_match.get("atr_state") != "normal":
+                _flags.append(f"ATR {_bo_match['atr_state']}")
+            _flags.append(f"EMA: {_bo_match.get('ema_alignment', 'neutral').replace('_', ' ')}")
+            _cr_lines.append("  " + " | ".join(_flags))
+
+            ind_parts = []
+            if ind.get("rsi") is not None:
+                ind_parts.append(f"RSI {ind['rsi']}")
+            if ind.get("macd_hist") is not None:
+                ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
+            if ind.get("adx") is not None:
+                ind_parts.append(f"ADX {ind['adx']:.0f}")
+            if ind.get("atr") is not None:
+                ind_parts.append(f"ATR ${ind['atr']:.4f}")
+            if ind.get("bb_width") is not None:
+                ind_parts.append(f"BB width {ind['bb_width']:.4f}")
+            if ind_parts:
+                _cr_lines.append("  " + " | ".join(ind_parts))
+
+            ema_vals = []
+            for _ek in ("ema_9", "ema_21", "ema_50"):
+                if ind.get(_ek) is not None:
+                    ema_vals.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
+            if ema_vals:
+                _cr_lines.append("  " + " > ".join(ema_vals))
+
+            stoch_parts = []
+            if ind.get("stoch_k") is not None:
+                stoch_parts.append(f"Stoch %K {ind['stoch_k']:.0f}")
+            if ind.get("stoch_d") is not None:
+                stoch_parts.append(f"%D {ind['stoch_d']:.0f}")
+            if _bo_match.get("vwap") is not None:
+                stoch_parts.append(f"VWAP ${_bo_match['vwap']} ({_bo_match.get('vwap_pct', 0):+.1f}%)")
+            if stoch_parts:
+                _cr_lines.append("  " + " | ".join(stoch_parts))
+
+            _cr_lines.append(
+                f"  Entry ${_bo_match.get('entry_price')} | Stop ${_bo_match.get('stop_loss')} | "
+                f"Target ${_bo_match.get('take_profit')} | R:R {_bo_match.get('risk_reward', 'n/a')}"
+            )
+            sigs = ", ".join(_bo_match.get("signals", [])[:5])
+            _cr_lines.append(f"  Signals: {sigs}")
+            _cr_lines.append(_bo_note)
+            _cr_lines.append("")
+            _cr_lines.extend(_build_candle_snapshots([ticker_up]))
+            parts.append("\n".join(_cr_lines))
+        else:
+            _st_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (daily, breakout strategy)"]
+            _status = _bo_match.get("status", _bo_match.get("signal", "watch")).upper()
+            _cr_flag = "crypto" if _is_crypto else "stock"
+            _st_lines.append(
+                f"Breakout Score: {_bo_match['score']}/10 | Status: {_status} | Asset: {_cr_flag}"
+            )
+            _st_lines.append(
+                f"  Resistance: ${_bo_match.get('resistance')} | "
+                f"Distance to breakout: {_bo_match.get('dist_to_breakout', 'N/A')}%"
+            )
+            _st_lines.append(
+                f"  Entry: ${_bo_match.get('entry_price')} (at resistance) | "
+                f"Stop: ${_bo_match.get('stop_loss')} | Target: ${_bo_match.get('take_profit')}"
+            )
+            _st_lines.append(_bo_note)
+            _bo_flags = []
+            if _bo_match.get("bb_squeeze"):
+                _bo_flags.append("BB SQUEEZE active")
+            bb_pctile = _bo_match.get("bb_width_pctile")
+            if bb_pctile is not None:
+                _bo_flags.append(f"BB width pctile: {bb_pctile}%")
+            if ind.get("adx") is not None:
+                _bo_flags.append(f"ADX {ind['adx']:.0f}")
+            vol_trend = _bo_match.get("vol_trend_pct")
+            if vol_trend is not None:
+                _bo_flags.append(f"Vol trend: {vol_trend:+.0f}%")
+            tight_days = _bo_match.get("tight_days")
+            if tight_days:
+                _bo_flags.append(f"Tight range: {tight_days} days")
+            if _bo_flags:
+                _st_lines.append("  " + " | ".join(_bo_flags))
+
+            ind_parts = []
+            if ind.get("rsi") is not None:
+                ind_parts.append(f"RSI {ind['rsi']}")
+            if ind.get("macd_hist") is not None:
+                ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
+            if ind.get("atr") is not None:
+                ind_parts.append(f"ATR ${ind['atr']}")
+            for _ek in ("ema_20", "ema_50", "ema_100"):
+                if ind.get(_ek) is not None:
+                    ind_parts.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
+            if ind_parts:
+                _st_lines.append("  " + " | ".join(ind_parts))
+
+            sigs = ", ".join(_bo_match.get("signals", [])[:6])
+            _st_lines.append(f"  Signals: {sigs}")
+            hold_est = _bo_match.get("hold_estimate")
+            if hold_est:
+                _st_lines.append(f"  Hold estimate: {hold_est}")
+            parts.append("\n".join(_st_lines))
+
+    # Recent pattern-imminent alerts for this ticker (from the brain's learned
+    # patterns, with entry/stop/target and the triggering pattern name).
     try:
-        from .scanner import get_breakout_cache
-        _bo_all = get_breakout_cache()
-        _bo_match = None
-        for _r in (_bo_all.get("results") or []):
-            if _r.get("ticker", "").upper() == ticker_up:
-                _bo_match = _r
-                break
-        if _bo_match:
-            ind = _bo_match.get("indicators", {})
-            _bo_is_crypto = _is_crypto or _bo_match.get("rvol") is not None
+        from datetime import datetime, timedelta
+        _alerts = (
+            db.query(BreakoutAlert)
+            .filter(
+                BreakoutAlert.ticker == ticker_up,
+                BreakoutAlert.alert_tier == "pattern_imminent",
+            )
+            .order_by(BreakoutAlert.alerted_at.desc())
+            .limit(3)
+            .all()
+        )
+        if _alerts:
+            _newest_age_h = (
+                (datetime.utcnow() - _alerts[0].alerted_at).total_seconds() / 3600
+                if _alerts[0].alerted_at else 999
+            )
+            _freshness = (
+                "FRESH" if _newest_age_h < 24
+                else "RECENT" if _newest_age_h < 72
+                else "OLDER (prices may have moved)"
+            )
+            _al = []
+            _al.append(f"## PATTERN-IMMINENT ALERTS — {ticker_up} ({_freshness})")
+            _al.append(
+                "These alerts are from CHILI's pattern-recognition engine (learned patterns). "
+                "The entry/stop/target below come from the specific pattern that triggered. "
+                "Use these levels as the primary reference for this setup, adjusting for "
+                "any price movement since the alert was generated."
+            )
+            _seen_pattern_ids: set[int] = set()
+            for _a in _alerts:
+                _pat_name = ""
+                _pat_obj = None
+                if _a.scan_pattern_id:
+                    from ...models.trading import ScanPattern as _SP
+                    _pat_obj = db.get(_SP, _a.scan_pattern_id)
+                    if _pat_obj:
+                        _pat_name = _pat_obj.name or f"Pattern #{_pat_obj.id}"
+                _age_h = (datetime.utcnow() - _a.alerted_at).total_seconds() / 3600 if _a.alerted_at else 0
+                _snap = _a.indicator_snapshot or {}
+                _sc = _snap.get("imminent_scorecard", {})
+                _sigs = (_a.signals_snapshot or {}).get("signals", [])
 
-            if _bo_is_crypto:
-                _cr_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (15m candles, breakout strategy)"]
-                _cr_lines.append(
-                    f"Breakout Score: {_bo_match['score']}/10 | Signal: {_bo_match['signal'].upper()} | "
-                    f"RVOL: {_bo_match.get('rvol', 0):.1f}x"
+                _al.append(f"  Pattern: {_pat_name or 'Unknown'} | Alert age: {_age_h:.1f}h ago")
+                _al.append(
+                    f"  Price at alert: ${_a.price_at_alert} | "
+                    f"Entry: ${_a.entry_price} | Stop: ${_a.stop_loss} | "
+                    f"Target: ${_a.target_price}"
                 )
-                _flags = []
-                if _bo_match.get("breakout_confirmed"):
-                    _flags.append(f"BREAKOUT CONFIRMED ({_bo_match.get('breakout_dir', '').upper()})")
-                if _bo_match.get("bb_squeeze_firing"):
-                    _flags.append("BB SQUEEZE FIRING")
-                elif _bo_match.get("bb_squeeze"):
-                    _flags.append("BB squeeze active")
-                if _bo_match.get("atr_state") != "normal":
-                    _flags.append(f"ATR {_bo_match['atr_state']}")
-                _flags.append(f"EMA: {_bo_match.get('ema_alignment', 'neutral').replace('_', ' ')}")
-                _cr_lines.append("  " + " | ".join(_flags))
+                if _sc.get("readiness") is not None:
+                    _eta = _sc.get("eta_hours", [None, None])
+                    _eta_lo = f"{_eta[0]:.1f}" if isinstance(_eta[0], (int, float)) else "?"
+                    _eta_hi = f"{_eta[1]:.1f}" if isinstance(_eta[1], (int, float)) else "?"
+                    _al.append(
+                        f"  Readiness: {_sc['readiness']:.0%} | "
+                        f"Composite: {_sc.get('composite', 0):.2f} | "
+                        f"ETA: {_eta_lo}-{_eta_hi}h"
+                    )
+                if _sigs:
+                    _al.append(f"  Signals: {', '.join(_sigs[:5])}")
+                _al.append(f"  Outcome: {_a.outcome or 'pending'}")
 
-                ind_parts = []
-                if ind.get("rsi") is not None:
-                    ind_parts.append(f"RSI {ind['rsi']}")
-                if ind.get("macd_hist") is not None:
-                    ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
-                if ind.get("adx") is not None:
-                    ind_parts.append(f"ADX {ind['adx']:.0f}")
-                if ind.get("atr") is not None:
-                    ind_parts.append(f"ATR ${ind['atr']:.4f}")
-                if ind.get("bb_width") is not None:
-                    ind_parts.append(f"BB width {ind['bb_width']:.4f}")
-                if ind_parts:
-                    _cr_lines.append("  " + " | ".join(ind_parts))
-
-                ema_vals = []
-                for _ek in ("ema_9", "ema_21", "ema_50"):
-                    if ind.get(_ek) is not None:
-                        ema_vals.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
-                if ema_vals:
-                    _cr_lines.append("  " + " > ".join(ema_vals))
-
-                stoch_parts = []
-                if ind.get("stoch_k") is not None:
-                    stoch_parts.append(f"Stoch %K {ind['stoch_k']:.0f}")
-                if ind.get("stoch_d") is not None:
-                    stoch_parts.append(f"%D {ind['stoch_d']:.0f}")
-                if _bo_match.get("vwap") is not None:
-                    stoch_parts.append(f"VWAP ${_bo_match['vwap']} ({_bo_match.get('vwap_pct', 0):+.1f}%)")
-                if stoch_parts:
-                    _cr_lines.append("  " + " | ".join(stoch_parts))
-
-                _cr_lines.append(
-                    f"  Entry ${_bo_match.get('entry_price')} | Stop ${_bo_match.get('stop_loss')} | "
-                    f"Target ${_bo_match.get('take_profit')} | R:R {_bo_match.get('risk_reward', 'n/a')}"
-                )
-                sigs = ", ".join(_bo_match.get("signals", [])[:5])
-                _cr_lines.append(f"  Signals: {sigs}")
-                _cr_lines.append("")
-                _cr_lines.extend(_build_candle_snapshots([ticker_up]))
-                parts.append("\n".join(_cr_lines))
-            else:
-                _st_lines = [f"## BREAKOUT ANALYSIS — {ticker_up} (daily, breakout strategy)"]
-                _status = _bo_match.get("status", _bo_match.get("signal", "watch")).upper()
-                _cr_flag = "crypto" if _is_crypto else "stock"
-                _st_lines.append(
-                    f"Breakout Score: {_bo_match['score']}/10 | Status: {_status} | Asset: {_cr_flag}"
-                )
-                _st_lines.append(
-                    f"  Resistance: ${_bo_match.get('resistance')} | "
-                    f"Distance to breakout: {_bo_match.get('dist_to_breakout', 'N/A')}%"
-                )
-                _st_lines.append(
-                    f"  Entry: ${_bo_match.get('entry_price')} (at resistance) | "
-                    f"Stop: ${_bo_match.get('stop_loss')} | Target: ${_bo_match.get('take_profit')}"
-                )
-                _st_lines.append(
-                    "NOTE: Entry/stop/target above are from the BREAKOUT strategy "
-                    "(entry triggers at resistance, not current price). "
-                    "If the AI Scanner Score section above shows different levels, "
-                    "that is the general swing strategy — use the breakout levels when "
-                    "the user is evaluating a breakout setup."
-                )
-                _bo_flags = []
-                if _bo_match.get("bb_squeeze"):
-                    _bo_flags.append("BB SQUEEZE active")
-                bb_pctile = _bo_match.get("bb_width_pctile")
-                if bb_pctile is not None:
-                    _bo_flags.append(f"BB width pctile: {bb_pctile}%")
-                if ind.get("adx") is not None:
-                    _bo_flags.append(f"ADX {ind['adx']:.0f}")
-                vol_trend = _bo_match.get("vol_trend_pct")
-                if vol_trend is not None:
-                    _bo_flags.append(f"Vol trend: {vol_trend:+.0f}%")
-                tight_days = _bo_match.get("tight_days")
-                if tight_days:
-                    _bo_flags.append(f"Tight range: {tight_days} days")
-                if _bo_flags:
-                    _st_lines.append("  " + " | ".join(_bo_flags))
-
-                ind_parts = []
-                if ind.get("rsi") is not None:
-                    ind_parts.append(f"RSI {ind['rsi']}")
-                if ind.get("macd_hist") is not None:
-                    ind_parts.append(f"MACD {ind['macd_hist']:+.4f}")
-                if ind.get("atr") is not None:
-                    ind_parts.append(f"ATR ${ind['atr']}")
-                for _ek in ("ema_20", "ema_50", "ema_100"):
-                    if ind.get(_ek) is not None:
-                        ind_parts.append(f"{_ek.upper().replace('_','')} ${ind[_ek]}")
-                if ind_parts:
-                    _st_lines.append("  " + " | ".join(ind_parts))
-
-                sigs = ", ".join(_bo_match.get("signals", [])[:6])
-                _st_lines.append(f"  Signals: {sigs}")
-                hold_est = _bo_match.get("hold_estimate")
-                if hold_est:
-                    _st_lines.append(f"  Hold estimate: {hold_est}")
-                parts.append("\n".join(_st_lines))
-    except Exception:
-        pass
+                # Full pattern conditions (once per pattern)
+                if _pat_obj and _a.scan_pattern_id not in _seen_pattern_ids:
+                    _seen_pattern_ids.add(_a.scan_pattern_id)
+                    _al.append(f"\n  --- Pattern Detail: {_pat_name} ---")
+                    if _pat_obj.description:
+                        _al.append(f"  Description: {_pat_obj.description}")
+                    _al.append(
+                        f"  Timeframe: {_pat_obj.timeframe or '?'} | "
+                        f"Win rate: {(_pat_obj.win_rate or 0) * 100:.1f}% | "
+                        f"Avg return: {_pat_obj.avg_return_pct or 0:.1f}%"
+                    )
+                    _rj = _pat_obj.rules_json
+                    if isinstance(_rj, str):
+                        try:
+                            _rj = json.loads(_rj)
+                        except Exception:
+                            _rj = {}
+                    _conditions = (_rj or {}).get("conditions", [])
+                    if _conditions:
+                        _al.append("  CONDITIONS (all must be true for pattern to fire):")
+                        for _c in _conditions:
+                            _ind = _c.get("indicator", "?")
+                            _op = _c.get("op", "?")
+                            _val = _c.get("value") if "value" in _c else _c.get("ref", "?")
+                            _al.append(f"    - {_ind} {_op} {_val}")
+                        _al.append(
+                            "  In your response, explain each condition above in plain English "
+                            "so the user understands WHY this pattern works and what market "
+                            "state it captures."
+                        )
+            parts.append("\n".join(_al))
+    except Exception as e:
+        logger.debug("[ai_context] pattern-imminent alert lookup failed: %s", e)
 
     # Active / pending strategy proposals — prevent contradictions
     from datetime import datetime, timedelta
@@ -666,6 +771,11 @@ def build_ai_context(
     try:
         portfolio_ctx = futures["portfolio_ctx"].result(timeout=10)
         if portfolio_ctx:
+            if ticker_up in portfolio_ctx.upper():
+                portfolio_ctx += (
+                    f"\n\n>>> YOU ARE CURRENTLY HOLDING {ticker_up}. "
+                    "Factor this into your recommendation (already in position)."
+                )
             parts.insert(0, portfolio_ctx)
     except Exception:
         pass
