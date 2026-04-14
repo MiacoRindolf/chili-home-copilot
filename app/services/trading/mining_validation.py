@@ -5,17 +5,46 @@ Includes:
 - Bootstrap resampling for confidence intervals
 - Ensemble confirmation (2-of-3 methods must agree for promotion)
 - Multiple hypothesis correction (Bonferroni-style)
+- Deflated Sharpe Ratio (DSR) — Bailey & Lopez de Prado
+- Probability of Backtest Overfitting (PBO) via CSCV
+- Temporal holdout enforcement (mining ≠ validation data)
+- Per-run trial counting for honest multiple-testing correction
 """
 from __future__ import annotations
 
 import logging
+import math
 import random
 from datetime import datetime
 from typing import Any, Callable
 
+import numpy as np
+from scipy import stats as sp_stats
+
 logger = logging.getLogger(__name__)
 
 MIN_TRADES_FOR_PROMOTION = 30
+
+# ── Per-run trial counter (reset each mine_patterns call) ─────────────
+
+_current_run_trial_count: int = 0
+
+
+def reset_trial_counter() -> None:
+    """Reset at the start of each mining run."""
+    global _current_run_trial_count
+    _current_run_trial_count = 0
+
+
+def increment_trial_counter() -> int:
+    """Call once per candidate filter evaluated. Returns new count."""
+    global _current_run_trial_count
+    _current_run_trial_count += 1
+    return _current_run_trial_count
+
+
+def get_trial_count() -> int:
+    return _current_run_trial_count
 
 
 def _row_time_key(row: dict[str, Any]) -> float:
@@ -278,4 +307,263 @@ def check_promotion_ready(
             return False, detail
 
     detail["ready"] = True
+    return True, detail
+
+
+# ── Deflated Sharpe Ratio (Bailey & Lopez de Prado, 2014) ────────────
+
+
+def compute_deflated_sharpe_ratio(
+    returns: list[float],
+    *,
+    n_trials: int,
+    risk_free_rate: float = 0.0,
+    annualization: float = 252.0,
+) -> dict[str, Any]:
+    """Compute the Deflated Sharpe Ratio that accounts for selection bias.
+
+    DSR tests the null hypothesis that the observed Sharpe ratio is no
+    better than the expected maximum Sharpe under the null of *n_trials*
+    independent strategies with zero true Sharpe.
+
+    Uses the Bailey & Lopez de Prado (2014) formula:
+        E[max(SR)] ≈ (1 - γ) * Φ^{-1}(1 - 1/N) + γ * Φ^{-1}(1 - 1/(N*e))
+    where γ ≈ 0.5772 (Euler-Mascheroni), N = n_trials.
+    Then DSR = Φ( (SR_obs - E[max(SR)]) / SE(SR_obs) ).
+    """
+    n = len(returns)
+    if n < 10 or n_trials < 1:
+        return {"dsr": None, "sharpe_observed": None, "reason": "insufficient_data"}
+
+    arr = np.array(returns, dtype=float)
+    excess = arr - risk_free_rate / annualization
+    mean_r = float(np.mean(excess))
+    std_r = float(np.std(excess, ddof=1))
+    if std_r < 1e-12:
+        return {"dsr": None, "sharpe_observed": 0.0, "reason": "zero_variance"}
+
+    sr_obs = mean_r / std_r * math.sqrt(annualization)
+    skew = float(sp_stats.skew(excess))
+    kurt = float(sp_stats.kurtosis(excess, fisher=True))
+
+    # SE of Sharpe accounting for non-normality (Lo, 2002)
+    se_sr = math.sqrt(
+        (1.0 + 0.5 * sr_obs**2 - skew * sr_obs + (kurt / 4.0) * sr_obs**2) / max(n - 1, 1)
+    )
+
+    # Expected max Sharpe under null (Bailey & Lopez de Prado approximation)
+    gamma = 0.5772156649  # Euler-Mascheroni
+    if n_trials <= 1:
+        e_max_sr = 0.0
+    else:
+        z1 = sp_stats.norm.ppf(1.0 - 1.0 / max(n_trials, 2))
+        z2 = sp_stats.norm.ppf(1.0 - 1.0 / (max(n_trials, 2) * math.e))
+        e_max_sr = float((1 - gamma) * z1 + gamma * z2)
+
+    if se_sr < 1e-12:
+        dsr_val = 0.0
+    else:
+        dsr_val = float(sp_stats.norm.cdf((sr_obs - e_max_sr) / se_sr))
+
+    return {
+        "dsr": round(dsr_val, 6),
+        "sharpe_observed": round(sr_obs, 4),
+        "sharpe_expected_max_null": round(e_max_sr, 4),
+        "se_sharpe": round(se_sr, 4),
+        "skewness": round(skew, 4),
+        "excess_kurtosis": round(kurt, 4),
+        "n_trials": n_trials,
+        "n_observations": n,
+        "passes": dsr_val > 0.95,
+    }
+
+
+# ── Probability of Backtest Overfitting (CSCV) ───────────────────────
+
+
+def compute_pbo(
+    returns_matrix: np.ndarray,
+    *,
+    n_partitions: int = 8,
+    n_combos: int = 100,
+    rng_seed: int = 42,
+) -> dict[str, Any]:
+    """Estimate Probability of Backtest Overfitting via CSCV.
+
+    *returns_matrix* has shape (n_bars, n_strategies) — each column is a
+    candidate strategy's per-bar returns.  Typically built from the same
+    pattern evaluated with different parameter sets or exit configs.
+
+    For a single-strategy evaluation, pass a (n_bars, 1) matrix and the
+    result degenerates to a stability check (PBO will be ~0.5 — neutral).
+
+    Returns PBO in [0, 1]: probability that the IS-selected best strategy
+    underperforms the median strategy OOS.
+    """
+    n_bars, n_strats = returns_matrix.shape
+    if n_strats < 2 or n_bars < 2 * n_partitions:
+        return {"pbo": None, "reason": "insufficient_strategies_or_bars"}
+
+    rng = np.random.default_rng(rng_seed)
+    n_per_partition = n_bars // n_partitions
+    partition_indices = list(range(n_partitions))
+
+    logit_ranks: list[float] = []
+    half = n_partitions // 2
+
+    for _ in range(n_combos):
+        rng.shuffle(partition_indices)
+        is_parts = partition_indices[:half]
+        oos_parts = partition_indices[half:]
+
+        is_mask = np.zeros(n_bars, dtype=bool)
+        oos_mask = np.zeros(n_bars, dtype=bool)
+        for p in is_parts:
+            start = p * n_per_partition
+            end = start + n_per_partition
+            is_mask[start:end] = True
+        for p in oos_parts:
+            start = p * n_per_partition
+            end = start + n_per_partition
+            oos_mask[start:end] = True
+
+        is_perf = returns_matrix[is_mask].sum(axis=0)
+        oos_perf = returns_matrix[oos_mask].sum(axis=0)
+
+        best_is_idx = int(np.argmax(is_perf))
+        oos_rank = float(sp_stats.rankdata(oos_perf)[best_is_idx])
+        # Normalize rank to [0, 1]
+        normalized_rank = oos_rank / n_strats
+
+        # Logit of rank (clamp away from 0/1)
+        clamped = max(0.01, min(0.99, normalized_rank))
+        logit_ranks.append(math.log(clamped / (1.0 - clamped)))
+
+    pbo = float(np.mean([1.0 if lr < 0 else 0.0 for lr in logit_ranks]))
+    mean_logit = float(np.mean(logit_ranks))
+
+    return {
+        "pbo": round(pbo, 4),
+        "mean_logit_rank": round(mean_logit, 4),
+        "n_combos": n_combos,
+        "n_partitions": n_partitions,
+        "n_strategies": n_strats,
+        "n_bars": n_bars,
+        "passes": pbo < 0.50,
+    }
+
+
+# ── Temporal holdout: split mining data from validation data ──────────
+
+
+def temporal_holdout_split(
+    rows: list[dict[str, Any]],
+    *,
+    holdout_fraction: float = 0.25,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split rows chronologically into discovery (early) and validation (late).
+
+    The discovery set is used for filter evaluation / mining.
+    The validation set is a locked-out forward period for promotion gates.
+    """
+    if not rows:
+        return [], []
+    ordered = sorted(rows, key=_row_time_key)
+    split_idx = max(1, int(len(ordered) * (1.0 - holdout_fraction)))
+    return ordered[:split_idx], ordered[split_idx:]
+
+
+def validate_on_holdout(
+    holdout_rows: list[dict[str, Any]],
+    predicate: Callable[[dict[str, Any]], bool],
+    *,
+    min_samples: int = 10,
+    min_win_rate: float = 0.50,
+    return_key: str = "ret_5d",
+) -> tuple[bool, dict[str, Any]]:
+    """Run promotion-style checks on the locked-out holdout set only.
+
+    This ensures the validation data was never seen during discovery/mining.
+    """
+    filtered = [r for r in holdout_rows if predicate(r)]
+    detail: dict[str, Any] = {"holdout_n": len(filtered), "holdout_total": len(holdout_rows)}
+
+    if len(filtered) < min_samples:
+        detail["blocked"] = "insufficient_holdout_samples"
+        return False, detail
+
+    rets = [float(r.get(return_key) or 0) for r in filtered]
+    wins = sum(1 for r in rets if r > 0)
+    wr = wins / len(rets) if rets else 0.0
+    avg_ret = sum(rets) / len(rets) if rets else 0.0
+
+    detail["holdout_win_rate"] = round(wr * 100, 2)
+    detail["holdout_avg_return"] = round(avg_ret, 4)
+    detail["holdout_wins"] = wins
+    detail["holdout_losses"] = len(rets) - wins
+
+    passes = wr >= min_win_rate and avg_ret > 0
+    detail["passes"] = passes
+    return passes, detail
+
+
+# ── Enhanced promotion gate with DSR + trial tracking ─────────────────
+
+
+def check_promotion_ready_v2(
+    filtered: list[dict[str, Any]],
+    *,
+    min_trades: int = MIN_TRADES_FOR_PROMOTION,
+    n_hypotheses_tested: int | None = None,
+    returns_for_dsr: list[float] | None = None,
+    dsr_threshold: float = 0.95,
+    holdout_rows: list[dict[str, Any]] | None = None,
+    holdout_predicate: Callable[[dict[str, Any]], bool] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    """V2 promotion gate: ensemble + DSR + temporal holdout.
+
+    Falls through to v1 logic when DSR data or holdout is unavailable,
+    but records the gap so operators can see what was skipped.
+    """
+    if n_hypotheses_tested is None:
+        n_hypotheses_tested = max(get_trial_count(), 1)
+
+    # Run the existing v1 gate first
+    ok_v1, detail = check_promotion_ready(
+        filtered,
+        min_trades=min_trades,
+        n_hypotheses_tested=n_hypotheses_tested,
+    )
+    if not ok_v1:
+        return False, detail
+
+    # DSR gate (hard when data available)
+    if returns_for_dsr and len(returns_for_dsr) >= 10:
+        dsr_result = compute_deflated_sharpe_ratio(
+            returns_for_dsr,
+            n_trials=max(n_hypotheses_tested, 1),
+        )
+        detail["deflated_sharpe"] = dsr_result
+        if dsr_result.get("dsr") is not None and dsr_result["dsr"] < dsr_threshold:
+            detail["blocked"] = "dsr_below_threshold"
+            return False, detail
+    else:
+        detail["deflated_sharpe"] = {"skipped": True, "reason": "no_returns_series"}
+
+    # Temporal holdout gate (hard when holdout provided)
+    if holdout_rows is not None and holdout_predicate is not None:
+        holdout_ok, holdout_detail = validate_on_holdout(
+            holdout_rows,
+            holdout_predicate,
+            min_samples=max(5, min_trades // 3),
+        )
+        detail["temporal_holdout"] = holdout_detail
+        if not holdout_ok:
+            detail["blocked"] = "temporal_holdout_failed"
+            return False, detail
+    else:
+        detail["temporal_holdout"] = {"skipped": True, "reason": "no_holdout_provided"}
+
+    detail["ready"] = True
+    detail["promotion_version"] = "v2"
     return True, detail

@@ -192,11 +192,38 @@ def transition_on_promotion(db: Session, pattern: ScanPattern) -> ScanPattern:
 
 
 def transition_to_live(db: Session, pattern: ScanPattern) -> ScanPattern:
-    """Mark a promoted pattern as live (generating signals)."""
+    """Mark a promoted pattern as live (generating signals).
+
+    Enforces regime-conditional eligibility: if the pattern has
+    ``regime_affinity_json``, it can only go live in a matching regime.
+    """
     current = pattern.lifecycle_stage or "candidate"
-    if current == "promoted":
-        return transition(db, pattern, "live", reason="signals_active")
-    return pattern
+    if current != "promoted":
+        return pattern
+
+    # Regime-conditional eligibility check
+    if pattern.regime_affinity_json:
+        import json
+        try:
+            affinity = pattern.regime_affinity_json
+            if isinstance(affinity, str):
+                affinity = json.loads(affinity)
+            validated_regimes = affinity.get("validated_regimes", [])
+            if validated_regimes:
+                from .market_data import get_market_regime
+                current_regime = get_market_regime()
+                composite = current_regime.get("regime", "unknown")
+                if composite not in validated_regimes and "all" not in validated_regimes:
+                    logger.warning(
+                        "[lifecycle] Pattern %s blocked from live: current regime '%s' "
+                        "not in validated regimes %s",
+                        pattern.name, composite, validated_regimes,
+                    )
+                    return pattern
+        except Exception:
+            pass
+
+    return transition(db, pattern, "live", reason="signals_active")
 
 
 def transition_on_decay(db: Session, pattern: ScanPattern, reason: str = "alpha_decay") -> ScanPattern:

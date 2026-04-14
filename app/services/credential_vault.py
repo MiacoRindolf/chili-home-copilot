@@ -109,3 +109,87 @@ def delete_broker_credentials(db: Session, user_id: int, broker: str) -> bool:
         db.commit()
         return True
     return False
+
+
+# ── Key Rotation ──────────────────────────────────────────────────────
+
+
+def rotate_encryption_key(
+    db: Session,
+    new_secret: str | None = None,
+) -> dict[str, Any]:
+    """Re-encrypt all stored credentials with a new key.
+
+    If *new_secret* is None, uses the current settings.session_secret
+    (useful for re-deriving after config change).
+
+    Steps:
+    1. Decrypt all credentials with the current key
+    2. Derive a new Fernet instance from *new_secret*
+    3. Re-encrypt all credentials
+    4. Update the global _fernet instance
+    """
+    global _fernet
+
+    all_creds = db.query(BrokerCredential).all()
+    if not all_creds:
+        return {"ok": True, "rotated": 0, "message": "No credentials to rotate"}
+
+    # Decrypt with current key
+    decrypted: list[tuple[BrokerCredential, dict]] = []
+    failed = 0
+    for rec in all_creds:
+        data = decrypt_credentials(rec.encrypted_data)
+        if data is not None:
+            decrypted.append((rec, data))
+        else:
+            failed += 1
+            logger.warning(
+                "[vault] Failed to decrypt cred for user=%s broker=%s during rotation",
+                rec.user_id, rec.broker,
+            )
+
+    # Derive new key
+    secret_bytes = (new_secret or settings.session_secret or "chili-default-key").encode()
+    kdf = PBKDF2HMAC(algorithm=hashes.SHA256(), length=32, salt=_SALT, iterations=480_000)
+    new_key = base64.urlsafe_b64encode(kdf.derive(secret_bytes))
+    new_fernet = Fernet(new_key)
+
+    # Re-encrypt
+    for rec, data in decrypted:
+        plaintext = json.dumps(data).encode()
+        rec.encrypted_data = new_fernet.encrypt(plaintext).decode()
+
+    db.commit()
+    _fernet = new_fernet
+
+    logger.info(
+        "[vault] Key rotation complete: %d credentials rotated, %d failed",
+        len(decrypted), failed,
+    )
+    return {
+        "ok": True,
+        "rotated": len(decrypted),
+        "failed": failed,
+    }
+
+
+def get_vault_health(db: Session) -> dict[str, Any]:
+    """Check vault health: can we decrypt all stored credentials?"""
+    all_creds = db.query(BrokerCredential).all()
+    healthy = 0
+    corrupted = 0
+    for rec in all_creds:
+        data = decrypt_credentials(rec.encrypted_data)
+        if data is not None:
+            healthy += 1
+        else:
+            corrupted += 1
+
+    return {
+        "total_credentials": len(all_creds),
+        "healthy": healthy,
+        "corrupted": corrupted,
+        "salt_version": "v1",
+        "kdf_iterations": 480_000,
+    }

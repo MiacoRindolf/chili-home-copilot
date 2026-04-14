@@ -280,3 +280,81 @@ def build_combined_portfolio_context() -> str:
     if cb_ctx:
         parts.append(cb_ctx)
     return "\n\n".join(parts)
+
+
+# ── Per-User Broker Session Isolation ─────────────────────────────────
+
+import threading
+import time
+
+_user_sessions: dict[int, dict[str, Any]] = {}
+_session_lock = threading.Lock()
+_SESSION_TTL = 3600  # 1 hour
+
+
+class UserBrokerSession:
+    """Isolated broker session state per user.
+
+    Prevents cross-user session bleed by maintaining separate cache,
+    connection state, and credential references per user_id.
+    """
+
+    def __init__(self, user_id: int):
+        self.user_id = user_id
+        self.created_at = time.time()
+        self.last_active = time.time()
+        self.connections: dict[str, bool] = {}
+        self._cache: dict[str, tuple[float, Any]] = {}
+        self._cache_ttl = 300
+
+    def is_expired(self) -> bool:
+        return (time.time() - self.last_active) > _SESSION_TTL
+
+    def touch(self) -> None:
+        self.last_active = time.time()
+
+    def cache_get(self, key: str) -> Any | None:
+        entry = self._cache.get(key)
+        if entry and (time.time() - entry[0]) < self._cache_ttl:
+            return entry[1]
+        return None
+
+    def cache_set(self, key: str, value: Any) -> None:
+        self._cache[key] = (time.time(), value)
+
+    def mark_connected(self, broker: str) -> None:
+        self.connections[broker] = True
+        self.touch()
+
+    def mark_disconnected(self, broker: str) -> None:
+        self.connections[broker] = False
+        self._cache.clear()
+
+    def is_connected(self, broker: str) -> bool:
+        return self.connections.get(broker, False)
+
+
+def get_user_session(user_id: int) -> UserBrokerSession:
+    """Get or create an isolated broker session for a user."""
+    with _session_lock:
+        session = _user_sessions.get(user_id)
+        if session and not session.is_expired():
+            session.touch()
+            return session
+        session = UserBrokerSession(user_id)
+        _user_sessions[user_id] = session
+        return session
+
+
+def cleanup_expired_sessions() -> int:
+    """Remove expired sessions. Call periodically from scheduler."""
+    with _session_lock:
+        expired = [uid for uid, s in _user_sessions.items() if s.is_expired()]
+        for uid in expired:
+            del _user_sessions[uid]
+        return len(expired)
+
+
+def get_active_session_count() -> int:
+    with _session_lock:
+        return sum(1 for s in _user_sessions.values() if not s.is_expired())

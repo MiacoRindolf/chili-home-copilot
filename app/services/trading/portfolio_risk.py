@@ -177,11 +177,14 @@ def check_new_trade_allowed(
     if same_ticker_count >= limits.max_same_ticker:
         return False, f"Already {same_ticker_count} open positions in {ticker}"
 
-    # Sector concentration check
+    # Sector concentration check (scoped to user to prevent cross-user leakage)
     try:
-        new_trade_sector = db.query(Trade.sector).filter(
+        sector_q = db.query(Trade.sector).filter(
             Trade.ticker == ticker.upper(),
-        ).order_by(Trade.id.desc()).first()
+        )
+        if user_id is not None:
+            sector_q = sector_q.filter(Trade.user_id == user_id)
+        new_trade_sector = sector_q.order_by(Trade.id.desc()).first()
         sector_label = new_trade_sector[0] if new_trade_sector else None
         allowed, reason = check_sector_concentration(db, user_id, sector_label, limits)
         if not allowed:
@@ -677,6 +680,36 @@ def get_drawdown_limits(settings: Any | None = None) -> DrawdownLimits:
     )
 
 
+def _compute_unrealized_pnl(db: Session, user_id: int | None) -> float:
+    """Compute mark-to-market unrealized P&L across open trades."""
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+    if not open_trades:
+        return 0.0
+
+    total_unrealized = 0.0
+    try:
+        from .market_data import fetch_quote
+    except ImportError:
+        return 0.0
+
+    for t in open_trades:
+        try:
+            q = fetch_quote(t.ticker)
+            if q and q.get("price"):
+                current_price = float(q["price"])
+                qty = float(t.quantity or 0)
+                entry = float(t.entry_price or 0)
+                if qty > 0 and entry > 0:
+                    total_unrealized += (current_price - entry) * qty
+        except Exception:
+            continue
+
+    return total_unrealized
+
+
 def check_drawdown_breaker(
     db: Session,
     user_id: int | None,
@@ -684,6 +717,9 @@ def check_drawdown_breaker(
     limits: DrawdownLimits | None = None,
 ) -> tuple[bool, str | None]:
     """Check if the circuit breaker should be tripped.
+
+    Includes both realized (closed) and **unrealized (mark-to-market)** P&L
+    to prevent the breaker from being blind to open losing positions.
 
     Returns (tripped: bool, reason: str | None).
     """
@@ -695,36 +731,64 @@ def check_drawdown_breaker(
 
     now = datetime.utcnow()
 
-    # 5-day rolling P&L
+    # Mark-to-market unrealized P&L
+    unrealized_pnl = 0.0
+    try:
+        unrealized_pnl = _compute_unrealized_pnl(db, user_id)
+    except Exception:
+        logger.debug("[circuit_breaker] Unrealized P&L computation failed", exc_info=True)
+
+    unrealized_pct = (unrealized_pnl / capital * 100) if capital > 0 else 0
+
+    # Trip immediately if unrealized loss exceeds 30-day threshold
+    if unrealized_pct < -limits.max_30day_dd_pct:
+        _breaker_tripped = True
+        _breaker_reason = (
+            f"Unrealized MTM drawdown {unrealized_pct:.1f}% "
+            f"exceeds -{limits.max_30day_dd_pct}% limit"
+        )
+        _persist_breaker_state(True, _breaker_reason)
+        logger.warning("[circuit_breaker] TRIPPED (MTM): %s", _breaker_reason)
+        return True, _breaker_reason
+
+    # 5-day rolling P&L (realized + unrealized)
     five_days_ago = now - timedelta(days=5)
     recent_5d = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
         Trade.exit_date >= five_days_ago,
     ).all()
-    pnl_5d = sum(t.pnl or 0 for t in recent_5d)
-    pnl_5d_pct = (pnl_5d / capital * 100) if capital > 0 else 0
+    pnl_5d_realized = sum(t.pnl or 0 for t in recent_5d)
+    pnl_5d_total = pnl_5d_realized + unrealized_pnl
+    pnl_5d_pct = (pnl_5d_total / capital * 100) if capital > 0 else 0
 
     if pnl_5d_pct < -limits.max_5day_dd_pct:
         _breaker_tripped = True
-        _breaker_reason = f"5-day drawdown {pnl_5d_pct:.1f}% exceeds -{limits.max_5day_dd_pct}% limit"
+        _breaker_reason = (
+            f"5-day drawdown {pnl_5d_pct:.1f}% (realized={pnl_5d_realized:.0f}, "
+            f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_5day_dd_pct}% limit"
+        )
         _persist_breaker_state(True, _breaker_reason)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
 
-    # 30-day rolling P&L
+    # 30-day rolling P&L (realized + unrealized)
     thirty_days_ago = now - timedelta(days=30)
     recent_30d = db.query(Trade).filter(
         Trade.user_id == user_id,
         Trade.status == "closed",
         Trade.exit_date >= thirty_days_ago,
     ).all()
-    pnl_30d = sum(t.pnl or 0 for t in recent_30d)
-    pnl_30d_pct = (pnl_30d / capital * 100) if capital > 0 else 0
+    pnl_30d_realized = sum(t.pnl or 0 for t in recent_30d)
+    pnl_30d_total = pnl_30d_realized + unrealized_pnl
+    pnl_30d_pct = (pnl_30d_total / capital * 100) if capital > 0 else 0
 
     if pnl_30d_pct < -limits.max_30day_dd_pct:
         _breaker_tripped = True
-        _breaker_reason = f"30-day drawdown {pnl_30d_pct:.1f}% exceeds -{limits.max_30day_dd_pct}% limit"
+        _breaker_reason = (
+            f"30-day drawdown {pnl_30d_pct:.1f}% (realized={pnl_30d_realized:.0f}, "
+            f"unrealized={unrealized_pnl:.0f}) exceeds -{limits.max_30day_dd_pct}% limit"
+        )
         _persist_breaker_state(True, _breaker_reason)
         logger.warning("[circuit_breaker] TRIPPED: %s", _breaker_reason)
         return True, _breaker_reason
@@ -805,3 +869,104 @@ def restore_breaker_from_db() -> None:
             sess.close()
     except Exception:
         logger.debug("[circuit_breaker] Could not restore breaker from DB", exc_info=True)
+
+
+# ── Unified Risk Gate ─────────────────────────────────────────────────
+
+
+def unified_risk_check(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+    *,
+    capital: float = 100_000.0,
+    entry_price: float | None = None,
+    stop_price: float | None = None,
+    execution_path: str = "unknown",
+) -> tuple[bool, str, dict[str, Any]]:
+    """Single risk gate for ALL execution paths (proposals, momentum, paper, live).
+
+    Returns (allowed: bool, reason: str, detail: dict).
+    This replaces the need for each path to call different risk functions.
+    """
+    detail: dict[str, Any] = {"execution_path": execution_path}
+
+    # 1. Kill switch
+    try:
+        from .governance import is_kill_switch_active
+        if is_kill_switch_active():
+            return False, "Kill switch active", detail
+    except Exception:
+        return False, "Kill-switch check failed — blocking as precaution", detail
+
+    # 2. Circuit breaker (now includes MTM)
+    tripped, reason = check_drawdown_breaker(db, user_id, capital)
+    if tripped:
+        detail["breaker_reason"] = reason
+        return False, f"Circuit breaker: {reason}", detail
+
+    # 3. Position limits
+    limits = get_risk_limits()
+    budget = get_portfolio_risk_snapshot(db, user_id, capital, limits)
+    detail["portfolio_heat_pct"] = budget.total_heat_pct
+    detail["open_positions"] = budget.open_positions
+
+    if not budget.can_open_new:
+        return False, budget.rejection_reason or "Risk limit exceeded", detail
+
+    # 4. Asset-class caps
+    is_crypto = ticker.upper().endswith("-USD")
+    if is_crypto and budget.crypto_positions >= limits.max_crypto_positions:
+        return False, f"Crypto cap ({limits.max_crypto_positions}) reached", detail
+    if not is_crypto and budget.stock_positions >= limits.max_stock_positions:
+        return False, f"Stock cap ({limits.max_stock_positions}) reached", detail
+
+    # 5. Same-ticker limit
+    same_count = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.ticker == ticker.upper(),
+        Trade.status == "open",
+    ).count()
+    if same_count >= limits.max_same_ticker:
+        return False, f"Already {same_count} open in {ticker}", detail
+
+    # 6. Sector concentration (user-scoped)
+    try:
+        sector_q = db.query(Trade.sector).filter(Trade.ticker == ticker.upper())
+        if user_id is not None:
+            sector_q = sector_q.filter(Trade.user_id == user_id)
+        sect = sector_q.order_by(Trade.id.desc()).first()
+        sect_label = sect[0] if sect else None
+        allowed, reason = check_sector_concentration(db, user_id, sect_label, limits)
+        if not allowed:
+            return False, reason, detail
+    except Exception:
+        pass
+
+    # 7. Correlation
+    try:
+        allowed, reason = check_correlation_risk(db, user_id, ticker, limits)
+        if not allowed:
+            return False, reason, detail
+    except Exception:
+        pass
+
+    # 8. Portfolio-level drawdown check (optimizer)
+    try:
+        from .portfolio_optimizer import check_portfolio_drawdown
+        dd = check_portfolio_drawdown(db, user_id, capital)
+        detail["portfolio_dd_pct"] = dd.get("dd_pct")
+        if dd.get("breached"):
+            return False, f"Portfolio drawdown {dd['dd_pct']:.1f}% breached limit", detail
+    except Exception:
+        pass
+
+    # 9. Compute recommended size if entry/stop provided
+    if entry_price and stop_price and entry_price > 0 and stop_price > 0:
+        qty = size_position(capital, entry_price, stop_price, limits=limits)
+        detail["recommended_quantity"] = qty
+        if qty <= 0:
+            return False, "Position size would be zero — risk too large", detail
+
+    detail["allowed"] = True
+    return True, "ok", detail

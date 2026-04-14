@@ -66,6 +66,52 @@ def exit_slippage_bps(
     return round((ref - fil) / ref * 10000.0, 2)
 
 
+def resolve_arrival_price(
+    ticker: str,
+    *,
+    signal_price: float | None = None,
+) -> dict[str, Any]:
+    """Resolve a consistent arrival price for IS decomposition.
+
+    Priority: live mid-quote > signal_price > last close.
+    Returns dict with price, source, and bid/ask when available.
+    """
+    result: dict[str, Any] = {"ticker": ticker, "source": "unknown"}
+
+    try:
+        from .market_data import fetch_quote
+        q = fetch_quote(ticker)
+        if q:
+            price = q.get("price")
+            bid = q.get("bid")
+            ask = q.get("ask")
+            if bid and ask and float(bid) > 0 and float(ask) > 0:
+                mid = (float(bid) + float(ask)) / 2
+                result["arrival_price"] = mid
+                result["source"] = "mid_quote"
+                result["bid"] = float(bid)
+                result["ask"] = float(ask)
+                result["quoted_spread_bps"] = round(
+                    (float(ask) - float(bid)) / mid * 10000, 2,
+                )
+                return result
+            elif price and float(price) > 0:
+                result["arrival_price"] = float(price)
+                result["source"] = "last_trade"
+                return result
+    except Exception:
+        pass
+
+    if signal_price and float(signal_price) > 0:
+        result["arrival_price"] = float(signal_price)
+        result["source"] = "signal_price"
+        return result
+
+    result["arrival_price"] = None
+    result["source"] = "unavailable"
+    return result
+
+
 def resolve_exit_reference_price(
     ticker: str,
     *,

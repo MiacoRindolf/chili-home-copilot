@@ -92,12 +92,19 @@ def check_alpha_decay(
 
     evidence_by_sp: dict[int, list[dict]] = {}
     for t in recent_trades:
+        # Compute pnl_pct from entry/exit since Trade has no pnl_pct column
+        pnl_pct = 0.0
+        if t.entry_price and t.entry_price > 0 and t.exit_price:
+            pnl_pct = ((t.exit_price - t.entry_price) / t.entry_price) * 100
         evidence_by_sp.setdefault(t.scan_pattern_id, []).append(
-            {"pnl": t.pnl or 0, "pnl_pct": getattr(t, "pnl_pct", None) or 0, "source": "live"}
+            {"pnl": t.pnl or 0, "pnl_pct": pnl_pct, "source": "live"}
         )
     for pt in recent_paper:
+        pnl_pct = 0.0
+        if pt.entry_price and pt.entry_price > 0 and pt.exit_price:
+            pnl_pct = ((pt.exit_price - pt.entry_price) / pt.entry_price) * 100
         evidence_by_sp.setdefault(pt.scan_pattern_id, []).append(
-            {"pnl": pt.pnl or 0, "pnl_pct": pt.pnl_pct or 0, "source": "paper"}
+            {"pnl": pt.pnl or 0, "pnl_pct": pnl_pct, "source": "paper"}
         )
 
     decayed: list[dict[str, Any]] = []
@@ -110,7 +117,9 @@ def check_alpha_decay(
 
         live_wins = sum(1 for e in evidence if e["pnl"] > 0)
         live_wr = live_wins / len(evidence)
-        live_avg_ret = sum(e["pnl"] for e in evidence) / len(evidence)
+        # Use percent returns for decay comparison (dollar PnL varies with position size)
+        live_avg_ret_pct = sum(e["pnl_pct"] for e in evidence) / len(evidence)
+        live_avg_ret_dollar = sum(e["pnl"] for e in evidence) / len(evidence)
 
         oos_wr = pat.oos_win_rate or pat.win_rate or 0.50
 
@@ -127,9 +136,12 @@ def check_alpha_decay(
                 f"({src_counts['live']} real + {src_counts['paper']} paper trades)"
             )
 
-        if live_avg_ret < return_floor:
+        # Compare using percent returns (return_floor is in percent, e.g. -1.0 = -1%)
+        if live_avg_ret_pct < return_floor:
             is_decayed = True
-            reason_parts.append(f"Avg return {live_avg_ret:.2f} < floor {return_floor}")
+            reason_parts.append(
+                f"Avg return {live_avg_ret_pct:.2f}% < floor {return_floor}%"
+            )
 
         if is_decayed:
             reason = "; ".join(reason_parts)
@@ -138,7 +150,8 @@ def check_alpha_decay(
                 "pattern_name": pat.name,
                 "live_wr": round(live_wr, 3),
                 "oos_wr": round(oos_wr, 3),
-                "live_avg_return": round(live_avg_ret, 2),
+                "live_avg_return_pct": round(live_avg_ret_pct, 2),
+                "live_avg_return_dollar": round(live_avg_ret_dollar, 2),
                 "trades": len(evidence),
                 "reason": reason,
             })
@@ -174,6 +187,7 @@ def estimate_half_life(
     """Estimate the half-life of a pattern's alpha (in days).
 
     Uses exponential decay fit on rolling win-rate over time.
+    Includes both live trades and paper trades for a complete picture.
     Returns None if insufficient data.
     """
     trade_q = (
@@ -186,19 +200,41 @@ def estimate_half_life(
     )
     if user_id:
         trade_q = trade_q.filter(Trade.user_id == user_id)
-    trades = trade_q.order_by(Trade.exit_date.asc()).all()
+    live_trades = trade_q.order_by(Trade.exit_date.asc()).all()
+
+    paper_q = (
+        db.query(PaperTrade)
+        .filter(
+            PaperTrade.scan_pattern_id == pattern_id,
+            PaperTrade.status == "closed",
+            PaperTrade.exit_date.isnot(None),
+        )
+    )
+    if user_id:
+        paper_q = paper_q.filter(PaperTrade.user_id == user_id)
+    paper_trades = paper_q.order_by(PaperTrade.exit_date.asc()).all()
+
+    # Merge and sort by exit date
+    all_evidence = []
+    for t in live_trades:
+        all_evidence.append({"exit_date": t.exit_date, "pnl": t.pnl or 0})
+    for pt in paper_trades:
+        all_evidence.append({"exit_date": pt.exit_date, "pnl": pt.pnl or 0})
+    all_evidence.sort(key=lambda x: x["exit_date"])
+    trades = all_evidence
+
     if len(trades) < 10:
         return None
 
     window = 5
     wr_points: list[tuple[float, float]] = []
-    first_date = trades[0].exit_date
+    first_date = trades[0]["exit_date"]
 
     for i in range(window, len(trades)):
         chunk = trades[i - window:i]
-        wins = sum(1 for t in chunk if (t.pnl or 0) > 0)
+        wins = sum(1 for t in chunk if (t["pnl"] or 0) > 0)
         wr = wins / window
-        days_elapsed = (chunk[-1].exit_date - first_date).total_seconds() / 86400
+        days_elapsed = (chunk[-1]["exit_date"] - first_date).total_seconds() / 86400
         if wr > 0:
             wr_points.append((days_elapsed, wr))
 

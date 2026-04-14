@@ -1583,6 +1583,27 @@ def ensure_mined_scan_pattern(
     return sp.id
 
 
+def _matches_filter(row: dict, conditions: list[dict] | None) -> bool:
+    """Check if a mining row matches the structured conditions for holdout validation."""
+    if not conditions:
+        return True
+    from .pattern_engine import _eval_condition
+    snap = dict(row)
+    snap.setdefault("price", row.get("price", 0))
+    snap.setdefault("rsi_14", row.get("rsi"))
+    snap.setdefault("adx", row.get("adx"))
+    snap.setdefault("macd_histogram", row.get("macd_hist"))
+    snap.setdefault("macd", row.get("macd"))
+    snap.setdefault("macd_signal", row.get("macd_sig"))
+    snap.setdefault("bb_pct", row.get("bb_pct"))
+    snap.setdefault("stochastic_k", row.get("stoch_k"))
+    snap.setdefault("volume_ratio", row.get("vol_ratio"))
+    for cond in conditions:
+        if not _eval_condition(cond, snap):
+            return False
+    return True
+
+
 def mine_patterns(
     db: Session,
     user_id: int | None,
@@ -1760,25 +1781,53 @@ def mine_patterns(
     MIN_WIN_RATE = float(getattr(settings, "brain_mining_min_win_rate", 0.58))
     _cpcv_on = getattr(settings, "brain_mining_purged_cpcv_enabled", True)
     _emit_scan_patterns = bool(getattr(settings, "brain_mining_emit_scan_patterns", True))
+    _use_v2_gates = bool(getattr(settings, "brain_mining_use_v2_promotion", True))
 
     _insight_cache = preload_active_insights(db, user_id)
 
+    # Phase 1a: reset trial counter and split data into discovery/holdout
+    from .mining_validation import (
+        reset_trial_counter, increment_trial_counter, get_trial_count,
+        check_promotion_ready, check_promotion_ready_v2,
+        temporal_holdout_split,
+    )
+    reset_trial_counter()
+    discovery_rows, holdout_rows = temporal_holdout_split(all_rows, holdout_fraction=0.25)
+
     def _check(filtered, label, conditions=None):
+        increment_trial_counter()
         if len(filtered) < MIN_SAMPLES:
             return
-        from .mining_validation import check_promotion_ready
 
         if _cpcv_on:
             from .mining_validation import mined_candidate_passes_purged_segments
             ok, _ = mined_candidate_passes_purged_segments(filtered)
             if not ok:
                 return
-        # Apply multiple-hypothesis correction / ensemble promotion check early in mining.
-        _ready, _detail = check_promotion_ready(
-            filtered,
-            min_trades=MIN_SAMPLES,
-            n_hypotheses_tested=max(1, int(getattr(settings, "brain_mining_hypotheses_tested", 50))),
-        )
+
+        # Build per-trade returns for DSR computation
+        _returns_for_dsr = [float(r.get("ret_5d") or 0) for r in filtered]
+
+        # Build holdout predicate matching this filter's conditions
+        def _holdout_pred(row: dict) -> bool:
+            return row in filtered  # placeholder — replaced below
+
+        if _use_v2_gates and holdout_rows:
+            # Re-apply the same filter logic on holdout rows
+            _holdout_filtered = [r for r in holdout_rows if _matches_filter(r, conditions)]
+            _ready, _detail = check_promotion_ready_v2(
+                filtered,
+                min_trades=MIN_SAMPLES,
+                returns_for_dsr=_returns_for_dsr,
+                holdout_rows=holdout_rows,
+                holdout_predicate=lambda r: _matches_filter(r, conditions),
+            )
+        else:
+            _ready, _detail = check_promotion_ready(
+                filtered,
+                min_trades=MIN_SAMPLES,
+                n_hypotheses_tested=max(get_trial_count(), 1),
+            )
         if not _ready:
             return
         avg_5d = sum(r["ret_5d"] for r in filtered) / len(filtered)
@@ -1821,54 +1870,60 @@ def mine_patterns(
             avg_return_pct=avg_return_pct, evidence_count=evidence_count,
         )
 
-    logger.info(f"[mine_patterns] Mining from {len(all_rows)} historical data points")
+    logger.info(
+        "[mine_patterns] Mining from %d data points (discovery=%d, holdout=%d)",
+        len(all_rows), len(discovery_rows), len(holdout_rows),
+    )
 
-    _check([r for r in all_rows if r["rsi"] < 30], "RSI oversold (<30)",
+    # Phase 1a: mine from discovery rows only; holdout is reserved for validation
+    _mine_src = discovery_rows if discovery_rows else all_rows
+
+    _check([r for r in _mine_src if r["rsi"] < 30], "RSI oversold (<30)",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}])
-    _check([r for r in all_rows if r["rsi"] > 70], "RSI overbought (>70) — sell signal",
+    _check([r for r in _mine_src if r["rsi"] > 70], "RSI overbought (>70) — sell signal",
            conditions=[{"indicator": "rsi_14", "op": ">", "value": 70}])
-    _check([r for r in all_rows if 30 <= r["rsi"] < 40], "RSI near-oversold (30-40)",
+    _check([r for r in _mine_src if 30 <= r["rsi"] < 40], "RSI near-oversold (30-40)",
            conditions=[{"indicator": "rsi_14", "op": ">=", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
-    _check([r for r in all_rows if r["macd"] > r["macd_sig"]], "MACD bullish crossover",
+    _check([r for r in _mine_src if r["macd"] > r["macd_sig"]], "MACD bullish crossover",
            conditions=[{"indicator": "macd", "op": ">", "ref": "macd_signal"}])
-    _check([r for r in all_rows if r["macd_hist"] > 0 and r["macd"] < 0],
+    _check([r for r in _mine_src if r["macd_hist"] > 0 and r["macd"] < 0],
            "MACD histogram positive while MACD negative (early reversal)",
            conditions=[{"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "macd", "op": "<", "value": 0}])
-    _check([r for r in all_rows if r["bb_pct"] < 0.1],
+    _check([r for r in _mine_src if r["bb_pct"] < 0.1],
            "Price below lower Bollinger Band (<10%)",
            conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.1}])
-    _check([r for r in all_rows if r["bb_pct"] > 0.9],
+    _check([r for r in _mine_src if r["bb_pct"] > 0.9],
            "Price above upper Bollinger Band (>90%) — sell signal",
            conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.9}])
-    _check([r for r in all_rows if r["adx"] > 30 and r["rsi"] < 40],
+    _check([r for r in _mine_src if r["adx"] > 30 and r["rsi"] < 40],
            "Strong trend (ADX>30) + RSI<40 (trending oversold)",
            conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
-    _check([r for r in all_rows if r["adx"] < 15],
+    _check([r for r in _mine_src if r["adx"] < 15],
            "No trend (ADX<15) — range-bound, mean reversion expected",
            conditions=[{"indicator": "adx", "op": "<", "value": 15}])
-    _check([r for r in all_rows if r["ema_stack"]],
+    _check([r for r in _mine_src if r["ema_stack"]],
            "EMA stacking bullish (Price > EMA20 > EMA50 > EMA100)",
            conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "price", "op": ">", "ref": "ema_100"}])
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] < 35 and r["macd"] > r["macd_sig"] and r["bb_pct"] < 0.2],
            "Triple confluence: RSI<35 + MACD bullish + near lower BB",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "bb_pct", "op": "<", "value": 0.2}])
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] > 55 and r["adx"] > 25 and r["macd"] > r["macd_sig"]],
            "Momentum confluence: RSI>55 + ADX>25 + MACD bullish (trend continuation)",
            conditions=[{"indicator": "rsi_14", "op": ">", "value": 55}, {"indicator": "adx", "op": ">", "value": 25}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}])
 
-    atr_vals = [r["atr"] for r in all_rows if r["atr"] > 0]
+    atr_vals = [r["atr"] for r in _mine_src if r["atr"] > 0]
     if atr_vals:
         atr_median = sorted(atr_vals)[len(atr_vals) // 2]
-        _check([r for r in all_rows if r["atr"] > atr_median * 1.5 and r["rsi"] < 35],
+        _check([r for r in _mine_src if r["atr"] > atr_median * 1.5 and r["rsi"] < 35],
                "High volatility + oversold RSI (capitulation bounce)",
                conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}])
-        _check([r for r in all_rows if 0 < r["atr"] < atr_median * 0.5],
+        _check([r for r in _mine_src if 0 < r["atr"] < atr_median * 0.5],
                "Low volatility squeeze — breakout expected",
                conditions=[{"indicator": "adx", "op": "<", "value": 20}])
 
-    crypto = [r for r in all_rows if r["is_crypto"]]
+    crypto = [r for r in _mine_src if r["is_crypto"]]
     if crypto:
         _check([r for r in crypto if r["rsi"] < 25],
                "Crypto deep oversold (RSI<25)",
@@ -1877,50 +1932,50 @@ def mine_patterns(
                "Crypto RSI<35 + MACD histogram positive — reversal",
                conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
-    _check([r for r in all_rows if r["above_sma20"] and r["rsi"] > 50 and r["adx"] > 20],
+    _check([r for r in _mine_src if r["above_sma20"] and r["rsi"] > 50 and r["adx"] > 20],
            "Above SMA20 + RSI>50 + ADX>20 (healthy uptrend)",
            conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "adx", "op": ">", "value": 20}])
-    _check([r for r in all_rows if r["stoch_k"] < 20],
+    _check([r for r in _mine_src if r["stoch_k"] < 20],
            "Stochastic oversold (K<20)",
            conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20}])
-    _check([r for r in all_rows if r["bb_pct"] < 0.15 and r["macd_hist"] > 0],
+    _check([r for r in _mine_src if r["bb_pct"] < 0.15 and r["macd_hist"] > 0],
            "Lower BB + MACD turning positive (bounce setup)",
            conditions=[{"indicator": "bb_pct", "op": "<", "value": 0.15}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
-    _check([r for r in all_rows if r["above_sma20"] and r["ema_stack"] and r["adx"] > 20],
+    _check([r for r in _mine_src if r["above_sma20"] and r["ema_stack"] and r["adx"] > 20],
            "Full alignment: EMA stack + above SMA20 + ADX>20 (strong trend)",
            conditions=[{"indicator": "price", "op": ">", "ref": "sma_20"}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "adx", "op": ">", "value": 20}])
 
     # Stochastic + MACD confluence
-    _check([r for r in all_rows if r["stoch_k"] < 20 and r["macd_hist"] > 0],
+    _check([r for r in _mine_src if r["stoch_k"] < 20 and r["macd_hist"] > 0],
            "Stochastic oversold + MACD turning positive (double bottom signal)",
            conditions=[{"indicator": "stochastic_k", "op": "<", "value": 20}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
-    _check([r for r in all_rows if r["stoch_k"] > 80 and r["macd_hist"] < 0],
+    _check([r for r in _mine_src if r["stoch_k"] > 80 and r["macd_hist"] < 0],
            "Stochastic overbought + MACD turning negative — sell signal",
            conditions=[{"indicator": "stochastic_k", "op": ">", "value": 80}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
     # EMA stack with RSI confirmation
-    _check([r for r in all_rows if r["ema_stack"] and 40 <= r["rsi"] <= 60],
+    _check([r for r in _mine_src if r["ema_stack"] and 40 <= r["rsi"] <= 60],
            "EMA stack + RSI neutral zone (healthy trend, not overextended)",
            conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}, {"indicator": "rsi_14", "op": ">=", "value": 40}, {"indicator": "rsi_14", "op": "<=", "value": 60}])
 
     # Extreme RSI with trend
-    _check([r for r in all_rows if r["rsi"] < 25 and r["adx"] > 20],
+    _check([r for r in _mine_src if r["rsi"] < 25 and r["adx"] > 20],
            "Deep oversold RSI<25 in trending market (sharp reversal setup)",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 25}, {"indicator": "adx", "op": ">", "value": 20}])
 
     # Consolidation breakout
-    _check([r for r in all_rows if r["bb_pct"] > 0.5 and r["bb_pct"] < 0.7
+    _check([r for r in _mine_src if r["bb_pct"] > 0.5 and r["bb_pct"] < 0.7
             and r["adx"] < 20 and r["macd_hist"] > 0],
            "Mid-BB range + low ADX + MACD positive (consolidation breakout)",
            conditions=[{"indicator": "bb_pct", "op": ">", "value": 0.5}, {"indicator": "bb_pct", "op": "<", "value": 0.7}, {"indicator": "adx", "op": "<", "value": 20}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
     # Bearish divergence patterns
-    _check([r for r in all_rows if r["rsi"] > 60 and r["macd_hist"] < 0 and r["adx"] > 25],
+    _check([r for r in _mine_src if r["rsi"] > 60 and r["macd_hist"] < 0 and r["adx"] > 25],
            "RSI>60 but MACD negative + strong trend — bearish divergence sell signal",
            conditions=[{"indicator": "rsi_14", "op": ">", "value": 60}, {"indicator": "macd_histogram", "op": "<", "value": 0}, {"indicator": "adx", "op": ">", "value": 25}])
 
     # Volume spike patterns
-    vol_rows = [r for r in all_rows if r.get("vol_ratio") is not None]
+    vol_rows = [r for r in _mine_src if r.get("vol_ratio") is not None]
     if vol_rows:
         _check([r for r in vol_rows if r["vol_ratio"] > 2.0 and r["rsi"] < 40],
                "Volume spike 2x+ with RSI<40 (capitulation / accumulation)",
@@ -1934,7 +1989,7 @@ def mine_patterns(
                conditions=[{"indicator": "volume_ratio", "op": ">", "value": 1.5}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "rsi_14", "op": ">", "value": 50}])
 
     # Gap patterns
-    gap_rows = [r for r in all_rows if r.get("gap_pct") is not None]
+    gap_rows = [r for r in _mine_src if r.get("gap_pct") is not None]
     if gap_rows:
         _check([r for r in gap_rows if r["gap_pct"] > 2.0 and r["rsi"] < 70],
                "Gap up >2% with RSI not overbought (momentum gap)",
@@ -1954,14 +2009,14 @@ def mine_patterns(
                conditions=[{"indicator": "volume_ratio", "op": ">", "value": 5.0}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "rsi_14", "op": "<", "value": 65}])
 
     # Topping tail warning (upper wick dominance on high volume)
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] > 60 and r.get("vol_ratio") is not None
             and r["vol_ratio"] > 2.0 and r["macd_hist"] < 0],
            "High RSI + volume spike + MACD turning negative (topping/reversal warning)",
            conditions=[{"indicator": "rsi_14", "op": ">", "value": 60}, {"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
     # MACD flipped negative after extended run = setup invalidated
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["macd"] < r["macd_sig"] and r["macd_hist"] < 0
             and r["rsi"] > 40 and r["adx"] > 20],
            "MACD flipped negative in active trend — setup invalidated (avoid entry)",
@@ -1976,7 +2031,7 @@ def mine_patterns(
                conditions=[{"indicator": "gap_pct", "op": ">", "value": 10.0}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "volume_ratio", "op": ">", "value": 3.0}])
 
     # First pullback with clean volume profile
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] > 45 and r["rsi"] < 65
             and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
             and r["ema_stack"] and r.get("vol_ratio") is not None
@@ -1985,42 +2040,42 @@ def mine_patterns(
            conditions=[{"indicator": "rsi_14", "op": ">", "value": 45}, {"indicator": "rsi_14", "op": "<", "value": 65}, {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "volume_ratio", "op": ">", "value": 1.5}])
 
     # Extended pullback (7+ candles = dead setup) — captured as sell signal
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] < 35 and r["macd_hist"] < 0
             and r["adx"] > 15 and not r["ema_stack"]],
            "Extended pullback with MACD negative + broken EMA stack — setup dead",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "macd_histogram", "op": "<", "value": 0}, {"indicator": "adx", "op": ">", "value": 15}])
 
     # ── Stochastic divergence patterns ──
-    _check([r for r in all_rows if r.get("stoch_bull_div")],
+    _check([r for r in _mine_src if r.get("stoch_bull_div")],
            "Stochastic bullish divergence (price lower low, stoch higher low)",
            conditions=[{"indicator": "stochastic_k", "op": "<", "value": 30}])
-    _check([r for r in all_rows if r.get("stoch_bear_div")],
+    _check([r for r in _mine_src if r.get("stoch_bear_div")],
            "Stochastic bearish divergence (price higher high, stoch lower high) — sell signal",
            conditions=[{"indicator": "stochastic_k", "op": ">", "value": 70}])
-    _check([r for r in all_rows if r.get("stoch_bull_div") and r["macd_hist"] > 0],
+    _check([r for r in _mine_src if r.get("stoch_bull_div") and r["macd_hist"] > 0],
            "Stoch bullish divergence + MACD turning positive (reversal confirmation)",
            conditions=[{"indicator": "stochastic_k", "op": "<", "value": 30}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
-    _check([r for r in all_rows if r.get("stoch_bear_div") and r["macd_hist"] < 0],
+    _check([r for r in _mine_src if r.get("stoch_bear_div") and r["macd_hist"] < 0],
            "Stoch bearish divergence + MACD turning negative (top confirmation)",
            conditions=[{"indicator": "stochastic_k", "op": ">", "value": 70}, {"indicator": "macd_histogram", "op": "<", "value": 0}])
 
     # ── Multi-indicator confluence patterns ──
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] < 35 and r["stoch_k"] < 25 and r["bb_pct"] < 0.15],
            "Triple oversold confluence: RSI<35 + Stoch<25 + BB<0.15",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 35}, {"indicator": "stochastic_k", "op": "<", "value": 25}, {"indicator": "bb_pct", "op": "<", "value": 0.15}])
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["adx"] > 30 and r["stoch_k"] < 20 and r["ema_stack"]],
            "Trend pullback to oversold: ADX>30 + Stoch<20 + EMA stack",
            conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "stochastic_k", "op": "<", "value": 20}, {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "price", "op": ">", "ref": "ema_50"}])
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r.get("stoch_bull_div") and r["rsi"] < 40 and r["bb_pct"] < 0.25],
            "Multi-signal reversal: stoch bull divergence + RSI<40 + near lower BB",
            conditions=[{"indicator": "rsi_14", "op": "<", "value": 40}, {"indicator": "bb_pct", "op": "<", "value": 0.25}, {"indicator": "stochastic_k", "op": "<", "value": 30}])
 
     # ── News sentiment + technical confluence patterns ──
-    sent_rows = [r for r in all_rows if r.get("news_sentiment") is not None]
+    sent_rows = [r for r in _mine_src if r.get("news_sentiment") is not None]
     if len(sent_rows) >= 5:
         _check([r for r in sent_rows if r["news_sentiment"] > 0.15 and r["rsi"] < 35],
                "Bullish news + RSI oversold (<35) — contrarian catalyst",
@@ -2048,7 +2103,7 @@ def mine_patterns(
                conditions=[{"indicator": "adx", "op": ">", "value": 30}, {"indicator": "rsi_14", "op": "<", "value": 40}])
 
     # ── Volume profile patterns ──
-    vp_rows = [r for r in all_rows if r.get("vol_ratio") is not None and r.get("atr") and r["atr"] > 0]
+    vp_rows = [r for r in _mine_src if r.get("vol_ratio") is not None and r.get("atr") and r["atr"] > 0]
     if len(vp_rows) >= 20:
         _check([r for r in vp_rows if r["vol_ratio"] > 3.0 and r["bb_pct"] > 0.8],
                "Volume profile breakout: 3x volume + upper BB (institutional buying)",
@@ -2061,8 +2116,8 @@ def mine_patterns(
                conditions=[{"indicator": "volume_ratio", "op": ">", "value": 2.0}, {"indicator": "rsi_14", "op": ">", "value": 50}, {"indicator": "macd_histogram", "op": ">", "value": 0}, {"indicator": "price", "op": ">", "ref": "ema_20"}])
 
     # ── Cross-asset / correlation patterns ──
-    crypto_rows = [r for r in all_rows if r["is_crypto"]]
-    stock_rows = [r for r in all_rows if not r["is_crypto"]]
+    crypto_rows = [r for r in _mine_src if r["is_crypto"]]
+    stock_rows = [r for r in _mine_src if not r["is_crypto"]]
     if len(crypto_rows) >= 10 and len(stock_rows) >= 10:
         crypto_avg = sum(r["ret_5d"] for r in crypto_rows) / len(crypto_rows)
         stock_avg = sum(r["ret_5d"] for r in stock_rows) / len(stock_rows)
@@ -2076,7 +2131,7 @@ def mine_patterns(
                    conditions=[{"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "adx", "op": ">", "value": 20}])
 
     # ── Microstructure / price action patterns ──
-    atr_rows = [r for r in all_rows if r.get("atr") and r["atr"] > 0]
+    atr_rows = [r for r in _mine_src if r.get("atr") and r["atr"] > 0]
     if len(atr_rows) >= 20:
         atr_med = sorted([r["atr"] for r in atr_rows])[len(atr_rows) // 2]
         _check([r for r in atr_rows if r["atr"] < atr_med * 0.4 and r["adx"] < 15 and r["bb_pct"] > 0.3 and r["bb_pct"] < 0.7],
@@ -2087,7 +2142,7 @@ def mine_patterns(
                conditions=[{"indicator": "rsi_14", "op": "<", "value": 30}, {"indicator": "macd_histogram", "op": ">", "value": 0}])
 
     # ── Composite multi-signal miners (4+ conditions) ──
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["rsi"] > 45 and r["rsi"] < 65
             and r["macd"] > r["macd_sig"] and r["macd_hist"] > 0
             and r["ema_stack"] and r["adx"] > 20
@@ -2099,7 +2154,7 @@ def mine_patterns(
                {"indicator": "macd", "op": ">", "ref": "macd_signal"}, {"indicator": "adx", "op": ">", "value": 20},
                {"indicator": "price", "op": ">", "ref": "ema_20"}, {"indicator": "volume_ratio", "op": ">", "value": 1.5},
            ])
-    _check([r for r in all_rows
+    _check([r for r in _mine_src
             if r["stoch_k"] < 25 and r["rsi"] < 35 and r["bb_pct"] < 0.15
             and r["macd_hist"] > 0 and r.get("vol_ratio") is not None and r["vol_ratio"] > 1.5],
            "Quad oversold bounce: Stoch<25 + RSI<35 + BB<15% + MACD turning + volume (max-conviction reversal)",
@@ -2167,7 +2222,12 @@ def mine_patterns(
             elif abs(ins.confidence - old_conf) > 0.01:
                 db.commit()
 
-    logger.info(f"[mine_patterns] Discovered {len(discoveries)} patterns from {len(all_rows)} data points")
+    logger.info(
+        "[mine_patterns] Discovered %d patterns from %d data points "
+        "(trials=%d, discovery=%d, holdout=%d)",
+        len(discoveries), len(all_rows), get_trial_count(),
+        len(discovery_rows), len(holdout_rows),
+    )
     return discoveries
 
 

@@ -81,9 +81,11 @@ class PurgedTimeSeriesSplit:
             purge_start = max(0, test_start - self.label_horizon)
             embargo_end = min(n, test_end + self.embargo_bars)
 
+            # Pre-test training: [0, purge_start)
             train_idx = list(range(0, purge_start))
-            if embargo_end < n and i < self.n_splits - 1:
-                pass  # don't add post-embargo to train for this fold
+            # Post-embargo training: [embargo_end, n) for expanding window
+            if embargo_end < n:
+                train_idx.extend(range(embargo_end, n))
 
             test_idx = list(range(test_start, test_end))
 
@@ -391,7 +393,10 @@ class PatternMetaLearner:
     def train(self, db) -> dict[str, Any]:
         """Train on ``MarketSnapshot`` rows using pattern features."""
         from sklearn.model_selection import cross_val_score
-        from sklearn.metrics import accuracy_score, precision_score, recall_score
+        from sklearn.metrics import (
+            accuracy_score, precision_score, recall_score,
+            log_loss, brier_score_loss,
+        )
 
         from ...models.trading import MarketSnapshot
         from .pattern_engine import get_active_patterns
@@ -491,7 +496,11 @@ class PatternMetaLearner:
             n_splits=n_splits, label_horizon=5, embargo_bars=2,
         )
         n_jobs_cv = 1 if getattr(clf, "device", None) == "gpu" else -1
-        cv_scores = cross_val_score(
+        # Use neg_log_loss for calibration-aware CV scoring instead of accuracy
+        cv_scores_logloss = cross_val_score(
+            clf, X_train, y_train, cv=tscv, scoring="neg_log_loss", n_jobs=n_jobs_cv,
+        )
+        cv_scores_acc = cross_val_score(
             clf, X_train, y_train, cv=tscv, scoring="accuracy", n_jobs=n_jobs_cv,
         )
         logger.debug(
@@ -502,11 +511,23 @@ class PatternMetaLearner:
         # Train on training set, evaluate on OOS holdout
         clf.fit(X_train, y_train)
         y_pred_oos = clf.predict(X_oos)
+        y_prob_oos = clf.predict_proba(X_oos)[:, 1] if hasattr(clf, "predict_proba") else None
 
         oos_acc = round(accuracy_score(y_oos, y_pred_oos) * 100, 1)
-        cv_acc = round(cv_scores.mean() * 100, 1)
+        cv_acc = round(cv_scores_acc.mean() * 100, 1)
+        cv_logloss = round(-cv_scores_logloss.mean(), 4)
         precision = round(precision_score(y_oos, y_pred_oos, zero_division=0) * 100, 1)
         recall = round(recall_score(y_oos, y_pred_oos, zero_division=0) * 100, 1)
+
+        # Calibration metrics (more meaningful than accuracy for trading)
+        oos_logloss = None
+        oos_brier = None
+        if y_prob_oos is not None:
+            try:
+                oos_logloss = round(log_loss(y_oos, y_prob_oos), 4)
+                oos_brier = round(brier_score_loss(y_oos, y_prob_oos), 4)
+            except Exception:
+                pass
 
         raw_importances = {
             feature_names[i]: round(float(clf.feature_importances_[i]), 4)
@@ -528,7 +549,10 @@ class PatternMetaLearner:
                 "positive_rate": round(float(y.mean()) * 100, 1),
                 "label_threshold_pct": _LABEL_THRESHOLD_PCT,
                 "oos_accuracy": oos_acc,
+                "oos_log_loss": oos_logloss,
+                "oos_brier_score": oos_brier,
                 "cv_accuracy": cv_acc,
+                "cv_log_loss": cv_logloss,
                 "cv_method": "PurgedTimeSeriesSplit",
                 "cv_splits": n_splits,
                 "precision_oos": precision,
@@ -664,12 +688,34 @@ def check_drift_and_retrain(db, threshold_z: float = 2.0) -> dict[str, Any]:
     if len(recent) < 50:
         return {"ok": False, "reason": "insufficient_recent_data", "retrained": False}
 
+    # Extract pattern features (pat_N_matched, etc.) from snapshots using
+    # the same feature engineering pipeline used during training.
+    from .pattern_engine import get_active_patterns
+    active_patterns = get_active_patterns(db)
+
     feature_vals: dict[str, list[float]] = {}
     for snap in recent:
         ind = snap.indicator_data or {}
+        if isinstance(ind, str):
+            try:
+                ind = json.loads(ind)
+            except (json.JSONDecodeError, TypeError):
+                ind = {}
+
+        # First check raw indicator keys (aggregate features like n_patterns_matched)
         for fname in train_stats:
             if fname in ind:
-                feature_vals.setdefault(fname, []).append(float(ind[fname]))
+                try:
+                    feature_vals.setdefault(fname, []).append(float(ind[fname]))
+                except (TypeError, ValueError):
+                    pass
+
+        # Then extract pattern-level features for pat_N_* keys
+        if active_patterns:
+            pat_features = extract_pattern_features(active_patterns, ind)
+            for fname in train_stats:
+                if fname.startswith("pat_") and fname in pat_features:
+                    feature_vals.setdefault(fname, []).append(float(pat_features[fname]))
 
     drifted_features = []
     for fname, stats in train_stats.items():

@@ -447,6 +447,8 @@ def run_backtest(
     if spread is None:
         spread = float(settings.backtest_spread)
 
+    spread, commission = _scale_costs_for_asset_class(ticker, spread, commission)
+
     if strategy_id not in STRATEGIES:
         return {"ok": False, "error": f"Unknown strategy: {strategy_id}"}
 
@@ -569,6 +571,7 @@ def run_backtest(
         "kpis": _kpis,
         "spread_used": spread,
         "commission_used": commission,
+        "was_optimized": optimize,
     }
     _enrich_generic_bt_result(
         payload,
@@ -1178,6 +1181,11 @@ class DynamicPatternStrategy(Strategy):
     Class attributes are set dynamically via ``type()`` before each run so that
     ``backtesting.py`` picks up the correct conditions and pre-computed data.
 
+    Entry uses **next-bar-open** by default (``_entry_delay_bars=1``) to avoid
+    same-bar lookahead: conditions are evaluated on bar *i*'s close, but the
+    buy order executes at bar *i+1*'s open.  Set ``_entry_delay_bars=0`` to
+    revert to legacy same-bar entry.
+
     Exit logic (three-pronged):
     1. ATR trailing stop — highest-since-entry minus ``_exit_atr_mult * ATR``
     2. Max hold period — ``_exit_max_bars`` bars since entry
@@ -1194,10 +1202,13 @@ class DynamicPatternStrategy(Strategy):
     _swing_low_array: list = []
     _explicit_bos_buffer: float | None = None
     _explicit_bos_grace: int | None = None
+    _entry_delay_bars: int = 1
 
     def init(self):
         self._bars_in_trade = 0
         self._highest_since_entry = 0.0
+        self._signal_pending = False
+        self._signal_bar = -1
 
         if self._explicit_bos_buffer is not None:
             self._bos_buffer_pct = self._explicit_bos_buffer
@@ -1237,11 +1248,27 @@ class DynamicPatternStrategy(Strategy):
                 all_met = False
                 break
 
-        if all_met and not self.position:
-            self.buy()
-            self._bars_in_trade = 0
-            self._highest_since_entry = float(self.data.Close[-1])
-        elif self.position:
+        # Next-bar-open entry: signal on bar i, execute on bar i+delay
+        if self._signal_pending and not self.position:
+            bars_since_signal = i - self._signal_bar
+            if bars_since_signal >= self._entry_delay_bars:
+                self.buy()
+                self._bars_in_trade = 0
+                self._highest_since_entry = float(self.data.Close[-1])
+                self._signal_pending = False
+
+        if all_met and not self.position and not self._signal_pending:
+            if self._entry_delay_bars <= 0:
+                self.buy()
+                self._bars_in_trade = 0
+                self._highest_since_entry = float(self.data.Close[-1])
+            else:
+                self._signal_pending = True
+                self._signal_bar = i
+        elif not all_met:
+            self._signal_pending = False
+
+        if self.position:
             self._bars_in_trade += 1
             price = float(self.data.Close[-1])
             self._highest_since_entry = max(self._highest_since_entry, price)
@@ -1692,6 +1719,35 @@ def backtest_metrics_for_promotion_gate(result: dict[str, Any]) -> tuple[float, 
     )
 
 
+def _scale_costs_for_asset_class(
+    ticker: str,
+    spread: float,
+    commission: float,
+) -> tuple[float, float]:
+    """Scale backtest spread/commission by asset class and liquidity proxy.
+
+    Crypto typically has wider spreads; intraday assets have tighter commission
+    but higher frequency costs.  Returns (adjusted_spread, adjusted_commission).
+    """
+    t = (ticker or "").upper()
+    is_crypto = t.endswith("-USD") and not t.replace("-USD", "").isdigit()
+
+    if is_crypto:
+        base = t.replace("-USD", "")
+        # Major crypto (BTC, ETH) have tighter spreads
+        if base in ("BTC", "ETH"):
+            spread = max(spread, 0.0005)   # 5 bps minimum
+        elif base in ("SOL", "DOGE", "ADA", "XRP", "AVAX", "LINK"):
+            spread = max(spread, 0.0010)   # 10 bps for mid-cap
+        else:
+            spread = max(spread, 0.0020)   # 20 bps for small-cap crypto
+    else:
+        # Equities: apply minimum spread floor
+        spread = max(spread, 0.0002)  # 2 bps floor
+
+    return spread, commission
+
+
 def run_pattern_backtest(
     ticker: str,
     conditions: list[dict[str, Any]],
@@ -1737,6 +1793,11 @@ def run_pattern_backtest(
         commission = float(settings.backtest_commission)
     if spread is None:
         spread = float(settings.backtest_spread)
+
+    # Asset-class cost scaling: crypto has wider spreads than equities
+    spread, commission = _scale_costs_for_asset_class(
+        ticker, spread, commission,
+    )
 
     if not pattern_name:
         pattern_name = generate_strategy_name(conditions)
