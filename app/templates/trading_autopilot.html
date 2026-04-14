@@ -223,6 +223,11 @@
   border-color: rgba(248, 113, 113, 0.34);
   color: #fecaca;
 }
+.ap-btn-assess {
+  border-color: rgba(250, 204, 21, 0.35);
+  background: rgba(250, 204, 21, 0.1);
+  color: #fef9c3;
+}
 .ap-search {
   min-width: 220px;
   padding: 8px 12px;
@@ -682,6 +687,14 @@
         <div id="ap-opportunities-empty" class="ap-empty" style="display:none">
           No compatible opportunities matched the current filters.
         </div>
+        <div id="ap-discovered-section" style="display:none; margin-top:24px;">
+          <h3 style="font-size:1rem; color:var(--text-muted); margin:0 0 10px 0;">Discovered by Scanner</h3>
+          <p class="ap-muted" style="margin:0 0 10px 0; font-size:.85rem;">
+            These symbols were found by the scanner but haven't been viability-assessed yet.
+            Click Assess to queue a viability check.
+          </p>
+          <div id="ap-discovered-list" class="ap-opportunity-list"></div>
+        </div>
       </div>
     </section>
 
@@ -733,6 +746,7 @@
     assetFilter: 'all',
     opportunitySearch: '',
     opportunities: [],
+    discovered: [],
     opportunityMeta: {},
     sessions: [],
     detailCache: {},
@@ -1031,12 +1045,16 @@
       metaEl.style.display = blurb ? 'block' : 'none';
     }
     var rows = (state.opportunities || []).filter(searchMatchesOpportunity);
-    if (!rows.length) {
+    var hasRows = rows.length > 0;
+    if (!hasRows) {
       list.innerHTML = '';
       empty.innerHTML = esc(opportunityEmptyMessage(meta));
       empty.style.display = 'block';
-      return;
+    } else {
+      empty.style.display = 'none';
     }
+    renderDiscovered();
+    if (!hasRows) return;
     empty.style.display = 'none';
     list.innerHTML = rows.map(function(row) {
       var scan = row.scan_context || {};
@@ -1099,6 +1117,66 @@
         + '</div>';
     }).join('');
   }
+
+  function renderDiscovered() {
+    var section = document.getElementById('ap-discovered-section');
+    var listEl = document.getElementById('ap-discovered-list');
+    if (!section || !listEl) return;
+    var disc = (state.discovered || []).filter(function(d) {
+      if (!state.opportunitySearch) return true;
+      return (d.symbol || '').toLowerCase().indexOf(state.opportunitySearch) >= 0;
+    });
+    if (!disc.length) {
+      section.style.display = 'none';
+      listEl.innerHTML = '';
+      return;
+    }
+    section.style.display = 'block';
+    listEl.innerHTML = disc.map(function(d) {
+      var scan = d.scan_context || {};
+      var marketBadge = d.asset_class === 'crypto'
+        ? badge('24x7', 'open')
+        : badge(d.market_open_now ? 'Market open' : 'Market closed', d.market_open_now ? 'open' : 'closed');
+      return ''
+        + '<div class="ap-opportunity-row" style="opacity:0.85;">'
+        + '  <div class="ap-op-top">'
+        + '    <div>'
+        + '      <div class="ap-symbol-lockup">'
+        + '        <span class="ap-symbol">' + esc(d.symbol) + '</span>'
+        +          badge(d.asset_class || 'unknown', d.asset_class || '')
+        +          marketBadge
+        +          badge('Needs assessment', 'warn')
+        + '      </div>'
+        + '      <div class="ap-subline" style="margin-top:6px;">'
+        + '        Scanner: <strong style="color:var(--text)">' + esc(scan.source || 'scanner') + '</strong>'
+        + '        | Score: ' + esc(safeNum(scan.score, 0).toFixed(1))
+        + (scan.signal ? ' | Signal: ' + esc(String(scan.signal)) : '')
+        + '      </div>'
+        + '    </div>'
+        + '    <div class="ap-actions">'
+        + '      <button type="button" class="ap-btn ap-btn-assess" data-symbol="' + esc(d.symbol) + '" onclick="apAssessSymbol(\'' + esc(d.symbol) + '\')">Assess</button>'
+        + '    </div>'
+        + '  </div>'
+        + '</div>';
+    }).join('');
+  }
+
+  window.apAssessSymbol = function(symbol) {
+    var btn = document.querySelector('.ap-btn-assess[data-symbol="' + symbol + '"]');
+    if (btn) { btn.disabled = true; btn.textContent = 'Queued...'; }
+    fetchJson('/api/trading/momentum/refresh', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ symbol: symbol, execution_family: 'coinbase_spot' }),
+    })
+    .then(function(data) {
+      if (data.accepted) {
+        setTimeout(function() { apRefreshOpportunities(); }, 4000);
+      }
+    })
+    .catch(function() {});
+  };
 
   function renderSessionWarningCallout(row, readiness, runner) {
     var parts = [];
@@ -1527,6 +1605,7 @@
     return fetchJson(url, { credentials: 'same-origin' })
       .then(function(data) {
         state.opportunities = data.opportunities || [];
+        state.discovered = data.discovered || [];
         state.opportunityMeta = data.metadata || {};
         renderOpportunities();
       })

@@ -268,6 +268,7 @@ def list_momentum_opportunities(
     filtered_scan_symbols: set[str] = set()
     hidden_scan_only_count = 0
     visible: list[dict[str, Any]] = []
+    discovered: list[dict[str, Any]] = []
     hidden_market_closed_count = 0
     hidden_non_actionable_count = 0
 
@@ -280,6 +281,13 @@ def list_momentum_opportunities(
         viability_pair = viability_by_symbol.get(sym)
         if viability_pair is None and sym in scan_map:
             hidden_scan_only_count += 1
+            discovered.append({
+                "symbol": sym,
+                "asset_class": asset_class,
+                "market_open_now": market_open_now(sym),
+                "needs_viability_assessment": True,
+                "scan_context": scan_map[sym],
+            })
             continue
 
         market_open = market_open_now(sym)
@@ -345,12 +353,14 @@ def list_momentum_opportunities(
         )
 
     visible.sort(key=_sort_key, reverse=True)
+    discovered.sort(key=lambda d: float((d.get("scan_context") or {}).get("score") or 0), reverse=True)
     pipeline = get_viability_pipeline_health(db)
     return {
         "ok": True,
         "mode": selected_mode,
         "asset_filter": selected_asset,
         "opportunities": visible[: max(1, min(int(limit), 200))],
+        "discovered": discovered[:20],
         "metadata": {
             "fresh_cutoff_utc": fresh_cutoff.isoformat(),
             "stock_scan_count": len(stock_rows),
@@ -358,6 +368,7 @@ def list_momentum_opportunities(
             "scan_symbol_count": len(filtered_scan_symbols),
             "viability_symbol_count": len(viability_by_symbol),
             "visible_opportunity_count": len(visible),
+            "discovered_count": len(discovered),
             "hidden_scan_only_count": hidden_scan_only_count,
             "hidden_non_actionable_count": hidden_non_actionable_count,
             "market_closed_hidden_count": hidden_market_closed_count,

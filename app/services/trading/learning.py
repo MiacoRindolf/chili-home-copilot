@@ -7892,6 +7892,7 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         "snapshots_taken": daily_count + intra_count,
         "universe_size": len(top_tickers),
         "snapshot_driver": _drv.get("snapshot_driver"),
+        "tickers": top_tickers,
     }
 
 

@@ -21,6 +21,8 @@ logger = logging.getLogger(__name__)
 _scheduler: BackgroundScheduler | None = None
 _lock = threading.Lock()
 
+_VIABILITY_BRIDGE_MAX_TICKERS = 30
+
 
 def run_scheduler_job_guarded(job_id: str, fn: Callable[[], None]) -> None:
     """Run a scheduler callback with structured logs; swallow exceptions after logging.
@@ -150,11 +152,13 @@ def _run_brain_market_snapshot_job():
             try:
                 from .trading.brain_neural_mesh.publisher import publish_market_snapshots_refreshed
 
+                _snap_tickers = out.get("tickers") or []
                 publish_market_snapshots_refreshed(
                     db,
                     meta={
                         "daily": out.get("snapshots_taken_daily"),
                         "intraday": out.get("intraday_snapshots_taken"),
+                        "tickers": _snap_tickers[:_VIABILITY_BRIDGE_MAX_TICKERS],
                     },
                 )
             except Exception as _nm_e:
@@ -586,6 +590,59 @@ def _record_breakout_alert(
         logger.warning(f"[scheduler] Failed to record breakout alert: {e}", exc_info=True)
 
 
+def _bridge_scanner_to_viability(
+    db: "Session",
+    results: list[dict],
+    *,
+    source: str = "scanner",
+) -> None:
+    """Publish momentum_context_refresh with scored tickers so symbol-level viability rows get created.
+
+    Without this bridge, scanners find symbols but the Autopilot board never shows them
+    because `list_momentum_opportunities` requires per-symbol viability rows (scope="symbol")
+    and the scheduled snapshot path only writes aggregate-scope rows.
+    """
+    tickers: list[str] = []
+    for r in results:
+        t = str(r.get("ticker") or r.get("symbol") or "").strip().upper()
+        if t and t not in tickers:
+            tickers.append(t)
+        if len(tickers) >= _VIABILITY_BRIDGE_MAX_TICKERS:
+            break
+    if not tickers:
+        return
+    try:
+        from .trading.brain_neural_mesh.publisher import publish_momentum_context_refresh
+
+        out = publish_momentum_context_refresh(db, meta={"tickers": tickers})
+        db.commit()
+        logger.info(
+            "[scheduler] viability bridge (%s): %d tickers → ok=%s",
+            source, len(tickers), out.get("ok"),
+        )
+    except Exception as e:
+        logger.warning("[scheduler] viability bridge (%s) failed: %s", source, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return
+
+    try:
+        from .trading.brain_neural_mesh.activation_runner import run_activation_batch
+
+        summary = run_activation_batch(db, time_budget_sec=3.0, max_events=8)
+        db.commit()
+        if summary.get("processed"):
+            logger.info("[scheduler] viability bridge drain (%s): %s", source, summary)
+    except Exception as e:
+        logger.debug("[scheduler] viability bridge drain (%s) skipped: %s", source, e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _run_crypto_breakout_job():
     """24/7 crypto breakout scanner: detect intraday setups on 15m candles.
 
@@ -835,6 +892,8 @@ def _run_crypto_breakout_job():
             payload_json=payload,
         )
         db.commit()
+
+        _bridge_scanner_to_viability(db, all_results, source="crypto_breakout")
     except Exception as e:
         logger.error(f"[scheduler] Crypto breakout scan failed: {e}")
         if jid:
@@ -1111,6 +1170,8 @@ def _run_momentum_scanner_job():
             payload_json=payload,
         )
         db.commit()
+
+        _bridge_scanner_to_viability(db, res_list, source="momentum_scanner")
     except Exception as e:
         logger.error(f"[scheduler] Momentum scanner failed: {e}")
         if jid:
@@ -1119,6 +1180,30 @@ def _run_momentum_scanner_job():
                 db.commit()
             except Exception:
                 logger.exception("[scheduler] momentum batch_job_finish failed")
+    finally:
+        db.close()
+
+
+def _run_crypto_viability_refresh_job():
+    """24/7 crypto viability refresh: pull latest breakout scan results and bridge to viability.
+
+    Complements the crypto breakout scanner by ensuring viability rows stay fresh
+    even between breakout scan runs. Uses the cached breakout results (no new scan).
+    """
+    from ..db import SessionLocal
+    from .trading.scanner import get_crypto_breakout_cache
+
+    logger.info("[scheduler] Running crypto viability refresh")
+    db = SessionLocal()
+    try:
+        cache = get_crypto_breakout_cache()
+        results = list(cache.get("results") or [])
+        if results:
+            _bridge_scanner_to_viability(db, results, source="crypto_viability_refresh")
+        else:
+            logger.debug("[scheduler] crypto viability refresh: no cached breakout results")
+    except Exception as e:
+        logger.warning("[scheduler] crypto viability refresh failed: %s", e)
     finally:
         db.close()
 
@@ -1572,6 +1657,16 @@ def start_scheduler():
             )
 
             _scheduler.add_job(
+                _run_crypto_viability_refresh_job,
+                trigger=IntervalTrigger(minutes=30),
+                id="crypto_viability_refresh",
+                name="Crypto viability refresh (every 30min, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=90),
+            )
+
+            _scheduler.add_job(
                 _run_stock_breakout_job,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
@@ -1736,6 +1831,7 @@ def start_scheduler():
             f"project brain every {_pb_minutes}min, "
             "weekly review Sun 6PM, broker sync market hours every 2min, price monitor every 5min, "
             "momentum scanner 9:30-11AM ET, crypto breakout scanner every 15min 24/7, "
+            "crypto viability refresh every 30min 24/7, "
             "stock breakout scanner market hours every 15min, "
             "pattern imminent scanner every 15min; "
             "web pattern research + variant evolution run inside the brain worker learning cycle)"
