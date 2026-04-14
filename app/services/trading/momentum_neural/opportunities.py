@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -15,6 +16,30 @@ from .operator_readiness import build_momentum_operator_readiness
 from .strategy_params import summarize_strategy_params
 from .viability_health import get_viability_pipeline_health
 from .viability_scope import VIABILITY_SCOPE_SYMBOL
+
+_log = logging.getLogger(__name__)
+
+_INLINE_ASSESS_MAX_TICKERS = 20
+
+
+def _auto_assess_scan_only(db: Session, tickers: list[str]) -> None:
+    """Seed viability rows for scan-only symbols inline so they appear on the next board refresh.
+
+    Calls run_momentum_neural_tick directly (no async queue) — the viability rows
+    are written in the same transaction, available by the next poll cycle.
+    """
+    try:
+        from .pipeline import run_momentum_neural_tick
+
+        run_momentum_neural_tick(db, meta={"tickers": tickers})
+        db.commit()
+        _log.info("[opportunities] auto-assessed %d scan-only tickers", len(tickers))
+    except Exception as e:
+        _log.warning("[opportunities] auto-assess failed: %s", e)
+        try:
+            db.rollback()
+        except Exception:
+            pass
 
 
 def _fresh_cutoff() -> datetime:
@@ -269,6 +294,7 @@ def list_momentum_opportunities(
     hidden_scan_only_count = 0
     visible: list[dict[str, Any]] = []
     discovered: list[dict[str, Any]] = []
+    scan_only_tickers: list[str] = []
     hidden_market_closed_count = 0
     hidden_non_actionable_count = 0
 
@@ -281,11 +307,12 @@ def list_momentum_opportunities(
         viability_pair = viability_by_symbol.get(sym)
         if viability_pair is None and sym in scan_map:
             hidden_scan_only_count += 1
+            scan_only_tickers.append(sym)
             discovered.append({
                 "symbol": sym,
                 "asset_class": asset_class,
                 "market_open_now": market_open_now(sym),
-                "needs_viability_assessment": True,
+                "assessing": True,
                 "scan_context": scan_map[sym],
             })
             continue
@@ -354,6 +381,10 @@ def list_momentum_opportunities(
 
     visible.sort(key=_sort_key, reverse=True)
     discovered.sort(key=lambda d: float((d.get("scan_context") or {}).get("score") or 0), reverse=True)
+
+    if scan_only_tickers:
+        _auto_assess_scan_only(db, scan_only_tickers[:_INLINE_ASSESS_MAX_TICKERS])
+
     pipeline = get_viability_pipeline_health(db)
     return {
         "ok": True,
