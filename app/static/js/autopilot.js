@@ -11,6 +11,7 @@
     discovered: [],
     opportunityMeta: {},
     sessions: [],
+    _prevSessions: [],
     detailCache: {},
     visibleSessionIds: {},
     charts: {},
