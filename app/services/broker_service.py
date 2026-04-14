@@ -36,6 +36,8 @@ except ImportError:
 _login_lock = threading.Lock()
 _logged_in = False
 _last_login: float = 0
+_last_login_attempt: float = 0
+_LOGIN_ATTEMPT_COOLDOWN = 300  # seconds between TOTP login attempts
 _session_connected_at: float | None = None  # exposed to runtime_status
 _last_sync_ts: float | None = None          # exposed to runtime_status
 _LOGIN_TTL = int(getattr(settings, "broker_login_ttl_seconds", 3600))
@@ -154,6 +156,13 @@ def login(force: bool = False) -> bool:
             logger.info("[broker] TOTP login skipped — valid session loaded from DB")
             return True
 
+        # Rate-limit TOTP attempts to avoid Robinhood 429s
+        global _last_login_attempt
+        if not force and (time.time() - _last_login_attempt) < _LOGIN_ATTEMPT_COOLDOWN:
+            logger.debug("[broker] TOTP login attempt skipped — cooldown active")
+            return False
+        _last_login_attempt = time.time()
+
         try:
             import pyotp
             import robin_stocks.robinhood as rh
@@ -203,50 +212,15 @@ def try_restore_session() -> bool:
         if _logged_in:
             return True
 
-        # First attempt: load the stored session from PostgreSQL and validate
-        # without calling rh.login() (which triggers a full auth flow and
-        # can hit Robinhood's rate limits).
+        # Load from PostgreSQL only — never trigger a fresh rh.login() at
+        # startup.  TOTP re-auth happens lazily in login() / is_connected()
+        # when an API call is actually needed.  This avoids Robinhood 429
+        # rate limits from repeated container restarts.
         if _try_load_db_session():
             return True
 
-        # Fallback: full TOTP login (only if TOTP is configured)
-        try:
-            import robin_stocks.robinhood as rh
-
-            if _has_totp():
-                import pyotp
-                totp = pyotp.TOTP(settings.robinhood_totp_secret)
-                result = rh.login(
-                    settings.robinhood_username,
-                    settings.robinhood_password,
-                    mfa_code=totp.now(),
-                    store_session=False,
-                )
-            else:
-                result = rh.login(
-                    settings.robinhood_username,
-                    settings.robinhood_password,
-                    store_session=False,
-                )
-
-            if not result or not isinstance(result, dict) or not result.get("access_token"):
-                logger.warning("[broker] Robinhood login returned no access token")
-                return False
-
-            _logged_in = True
-            _last_login = time.time()
-            _session_connected_at = _last_login
-            _save_session_to_db(
-                broker="robinhood",
-                username=settings.robinhood_username or "default",
-                token_data=result,
-                device_token=result.get("device_token"),
-            )
-            logger.info("[broker] Robinhood session established via TOTP login")
-            return True
-        except Exception as e:
-            logger.info("[broker] No saved Robinhood session to restore: %s", e)
-            return False
+        logger.info("[broker] No valid session in DB — user must re-authenticate via web UI")
+        return False
 
 
 def _try_load_db_session() -> bool:
