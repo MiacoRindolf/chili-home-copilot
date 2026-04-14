@@ -291,12 +291,48 @@ def _crypto_entries_volume_ok(entries: list[dict] | None, min_volume_usd: float)
 def _entries_to_crypto_tickers(entries: list[dict], min_volume_usd: float) -> list[str]:
     tickers: list[str] = []
     for e in entries:
-        if min_volume_usd > 0 and float(e.get("volume_usd") or 0.0) < min_volume_usd:
+        vu = float(e.get("volume_usd") or 0.0)
+        if min_volume_usd > 0 and vu < min_volume_usd and e.get("source") != "coinbase":
             continue
         t = e.get("ticker")
         if t:
             tickers.append(str(t))
     return tickers
+
+
+def _merge_coinbase_spot_crypto_entries(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Append Coinbase USD spot products not already in ``entries`` (same shape as CoinGecko rows)."""
+    from app.config import settings
+
+    if not bool(getattr(settings, "brain_merge_coinbase_spot_universe", True)):
+        return entries
+    try:
+        from app.services.trading.prescreener import _CRYPTO_EXCLUDE
+        from app.services.trading.venue.coinbase_spot import CoinbaseSpotAdapter
+
+        cb_rows = CoinbaseSpotAdapter().list_usd_spot_universe_entries(
+            exclude_bases_lower=_CRYPTO_EXCLUDE,
+        )
+    except Exception as e:
+        logger.warning("[ticker_universe] Coinbase universe merge skipped: %s", e)
+        return entries
+    if not cb_rows:
+        return entries
+    seen = {str(e.get("ticker", "")).upper() for e in entries if e.get("ticker")}
+    added = 0
+    for row in cb_rows:
+        t = str(row.get("ticker") or "").upper()
+        if t and t not in seen:
+            entries.append(row)
+            seen.add(t)
+            added += 1
+    if added:
+        logger.info(
+            "[ticker_universe] Merged Coinbase spot: +%s new tickers (rows %s)",
+            added,
+            len(entries),
+        )
+    return entries
 
 
 # ── Cache Management ───────────────────────────────────────────────────
@@ -366,16 +402,35 @@ def get_all_crypto_tickers(n: int | None = None, force_refresh: bool = False) ->
 
     cache_key = "crypto_entries"
 
+    extra_cb = int(getattr(settings, "brain_coinbase_universe_extra_cap", 600))
+
     def _materialize(entries: list[dict]) -> list[str]:
         tickers = _entries_to_crypto_tickers(entries, min_vol)
         if unlimited:
             return tickers
-        return tickers[:eff_cap]
+        base = tickers[:eff_cap]
+        if extra_cb <= 0:
+            return base
+        src = {str(e.get("ticker", "")).upper(): e.get("source") for e in entries}
+        seen = set(base)
+        out = list(base)
+        max_total = eff_cap + extra_cb
+        for t in tickers:
+            if len(out) >= max_total:
+                break
+            tu = str(t).upper()
+            if tu in seen:
+                continue
+            if src.get(tu) == "coinbase":
+                out.append(t)
+                seen.add(tu)
+        return out
 
     if not force_refresh and cache_key in _memory_cache:
         mem = _memory_cache[cache_key]
         if isinstance(mem, list) and _crypto_entries_volume_ok(mem, min_vol):
-            cand = _materialize(mem)
+            merged = _merge_coinbase_spot_crypto_entries(list(mem))
+            cand = _materialize(merged)
             if unlimited or len(cand) >= eff_cap:
                 logger.info("[ticker_universe] Loaded %s crypto from memory cache", len(cand))
                 return cand
@@ -383,7 +438,8 @@ def get_all_crypto_tickers(n: int | None = None, force_refresh: bool = False) ->
     if not force_refresh:
         cached = _load_cache(_CRYPTO_CACHE)
         if cached and _crypto_entries_volume_ok(cached, min_vol):
-            cand = _materialize(cached)
+            merged = _merge_coinbase_spot_crypto_entries(list(cached))
+            cand = _materialize(merged)
             if unlimited or len(cand) >= eff_cap:
                 _memory_cache[cache_key] = cached
                 logger.info("[ticker_universe] Loaded %s crypto from file cache", len(cand))
@@ -391,11 +447,17 @@ def get_all_crypto_tickers(n: int | None = None, force_refresh: bool = False) ->
 
     entries = _fetch_crypto_tickers(fetch_target, min_volume_usd=min_vol)
     if entries:
+        entries = _merge_coinbase_spot_crypto_entries(entries)
         _save_cache(_CRYPTO_CACHE, entries)
         _memory_cache[cache_key] = entries
         return _materialize(entries)
 
-    return [f"{s}-USD" for s in _STATIC_CRYPTO_TOP100[: max(1, eff_cap if not unlimited else 100)]]
+    static_entries: list[dict[str, Any]] = [
+        {"ticker": f"{s}-USD", "name": s, "type": "crypto", "volume_usd": 0.0}
+        for s in _STATIC_CRYPTO_TOP100[: max(1, eff_cap if not unlimited else 100)]
+    ]
+    static_entries = _merge_coinbase_spot_crypto_entries(static_entries)
+    return _materialize(static_entries)
 
 
 def get_full_ticker_universe(force_refresh: bool = False) -> list[str]:

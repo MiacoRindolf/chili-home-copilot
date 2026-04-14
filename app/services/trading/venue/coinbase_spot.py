@@ -209,6 +209,66 @@ class CoinbaseSpotAdapter:
     ):
         self._client_factory = client_factory or cb.get_coinbase_rest_client
 
+    def list_usd_spot_universe_entries(
+        self,
+        *,
+        exclude_bases_lower: frozenset[str] | set[str] | None = None,
+    ) -> list[dict[str, Any]]:
+        """Tradable USD spot products as CHILI crypto entries for ``ticker_universe``.
+
+        Uses REST credentials only (``coinbase_sdk_and_credentials_configured()``);
+        does not require ``coinbase_service.connect()`` UI session.
+        """
+        out: list[dict[str, Any]] = []
+        if not cb.coinbase_sdk_and_credentials_configured():
+            return out
+        c = self._client()
+        if not c:
+            return out
+        excl = exclude_bases_lower or frozenset()
+        try:
+            resp = c.get_products()
+            d = _as_dict(resp)
+            products = d.get("products") or d.get("data") or []
+            if not isinstance(products, list):
+                return out
+            seen: set[str] = set()
+            for p in products:
+                pd = p if isinstance(p, dict) else _as_dict(p)
+                if not (pd.get("product_id") or pd.get("productId")):
+                    continue
+                norm = _normalize_product(pd)
+                if not norm.tradable_for_spot_momentum():
+                    continue
+                pid = str(norm.product_id or "").strip().upper()
+                if not pid or pid in seen:
+                    continue
+                if not pid.endswith("-USD"):
+                    continue
+                qc = (norm.quote_currency or "").upper()
+                if qc and qc != "USD":
+                    continue
+                pt = (norm.product_type or "").upper()
+                if pt and "FUTURE" in pt:
+                    continue
+                base = pid.split("-")[0].lower()
+                if base in excl:
+                    continue
+                seen.add(pid)
+                display = (norm.base_currency or base.upper() or pid.replace("-USD", "")).upper()
+                out.append({
+                    "ticker": pid,
+                    "name": f"{display} (Coinbase)",
+                    "type": "crypto",
+                    "volume_usd": 0.0,
+                    "source": "coinbase",
+                })
+            if out:
+                _log.info("[coinbase_spot] universe merge: %s USD spot products", len(out))
+        except Exception as e:
+            _log.warning("[coinbase_spot] list_usd_spot_universe_entries failed: %s", e)
+        return out
+
     def is_enabled(self) -> bool:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return False

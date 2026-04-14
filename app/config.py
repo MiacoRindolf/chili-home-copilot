@@ -241,6 +241,12 @@ class Settings(BaseSettings):
 
     # Crypto universe for prescreen / ticker_universe: 0 = fetch all pages from provider (CoinGecko, capped by safety limit); N>0 = top N by market cap.
     brain_crypto_universe_max: int = 200
+    # When True, merge Coinbase Advanced Trade USD spot product_ids into the crypto universe
+    # (requires coinbase-advanced-py + COINBASE_API_KEY/SECRET; no UI connect() needed).
+    brain_merge_coinbase_spot_universe: bool = True
+    # After applying brain_crypto_universe_max, allow up to this many additional Coinbase-only
+    # symbols (not in the capped CoinGecko list) so listed spot products are still scannable.
+    brain_coinbase_universe_extra_cap: int = 600
     # Drop cryptos below this 24h USD volume when building universe (0 = off). Reduces illiquid tail when universe is large.
     brain_crypto_universe_min_volume_usd: float = 0.0
     # When False, prescreen uses a smaller crypto list (150) for faster cycles; True = merge full configured crypto universe into prescreen.
@@ -350,6 +356,26 @@ class Settings(BaseSettings):
     chili_momentum_neural_feedback_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_MOMENTUM_NEURAL_FEEDBACK_ENABLED"),
+    )
+    # Autopilot profitability: pattern/momentum/regime entry gates (paper runner).
+    chili_momentum_entry_gates_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_ENTRY_GATES_ENABLED"),
+    )
+    # Keep parent variant active when refining so paper A/B sessions can run in parallel.
+    chili_momentum_ab_test_on_refinement: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_AB_TEST_ON_REFINEMENT"),
+    )
+    # Scale allocator notional by rolling Sharpe-like score from recent outcomes.
+    chili_momentum_performance_sizing_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_PERFORMANCE_SIZING_ENABLED"),
+    )
+    # Block entries when family×regime×session history is clearly negative (queries DB).
+    chili_momentum_family_regime_prefilter_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MOMENTUM_FAMILY_REGIME_PREFILTER_ENABLED"),
     )
 
     # Robinhood spot venue adapter (execution layer; equities via robin_stocks).

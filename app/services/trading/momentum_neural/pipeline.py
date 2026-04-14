@@ -60,6 +60,27 @@ def run_momentum_neural_tick(
     """Compute regime + family viability; persist on hub and viability pool nodes."""
     _ = graph_version
     meta = dict(meta or {})
+    tickers = meta.get("tickers")
+    if isinstance(tickers, list) and tickers:
+        symbols = [str(t).strip().upper() for t in tickers if t][:32]
+        scope = VIABILITY_SCOPE_SYMBOL
+    else:
+        symbols = ["__aggregate__"]
+        scope = VIABILITY_SCOPE_AGGREGATE
+
+    # Phase 6c: optional Hurst proxy from first symbol's recent closes (feeds regime context).
+    if symbols and symbols[0].upper() != "__AGGREGATE__":
+        try:
+            from ..market_data import fetch_ohlcv_df
+
+            from .entry_gates import hurst_proxy_from_closes
+
+            df_h = fetch_ohlcv_df(symbols[0], interval="15m", period="5d")
+            if df_h is not None and not df_h.empty and "Close" in df_h.columns:
+                meta["hurst_proxy"] = hurst_proxy_from_closes(df_h["Close"])
+        except Exception:
+            pass
+
     ctx_meta = {
         k: meta[k]
         for k in (
@@ -71,6 +92,9 @@ def run_momentum_neural_tick(
             "breakout_continuity",
             "realized_vol_rank",
             "atr_pct",
+            "hurst_proxy",
+            "adx",
+            "adx_14",
         )
         if k in meta
     }
@@ -81,18 +105,10 @@ def run_momentum_neural_tick(
     )
     feats = ExecutionReadinessFeatures.from_meta(meta)
 
-    tickers = meta.get("tickers")
-    if isinstance(tickers, list) and tickers:
-        symbols = [str(t).strip().upper() for t in tickers if t][:32]
-        scope = VIABILITY_SCOPE_SYMBOL
-    else:
-        symbols = ["__aggregate__"]
-        scope = VIABILITY_SCOPE_AGGREGATE
-
     rows: list[dict[str, Any]] = []
     for sym in symbols:
         for family in iter_momentum_families():
-            vr = score_viability(sym, family, ctx, feats)
+            vr = score_viability(sym, family, ctx, feats, db=db)
             d = vr.to_public_dict()
             d["scope"] = scope
             d["label"] = family.label

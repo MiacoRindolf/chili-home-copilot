@@ -37,7 +37,10 @@ class MomentumRegimeContext:
     meta: dict[str, Any]
 
     def to_public_dict(self) -> dict[str, Any]:
-        return {
+        meta = dict(self.meta)
+        # Promote key microstructure / vol fields for consumers that read top-level only (e.g. regime_atr_pct).
+        atr_top = meta.get("atr_pct")
+        out: dict[str, Any] = {
             "utc_iso": self.utc_iso,
             "utc_hour": self.utc_hour,
             "session_label": self.session_label,
@@ -49,8 +52,23 @@ class MomentumRegimeContext:
             "exhaustion_cooldown": self.exhaustion_cooldown,
             "rolling_range_state": self.rolling_range_state,
             "breakout_continuity": self.breakout_continuity,
-            "meta": dict(self.meta),
+            "meta": meta,
         }
+        if atr_top is not None:
+            try:
+                out["atr_pct"] = float(atr_top)
+            except (TypeError, ValueError):
+                pass
+        # Phase 6c: continuous regime enrichments (optional; pipeline may omit).
+        for k in (
+            "chop_expansion_score",
+            "adx_strength",
+            "hurst_proxy",
+            "realized_vol_rank",
+        ):
+            if k in meta and k not in out:
+                out[k] = meta[k]
+        return out
 
 
 def _session_label_from_utc_hour(hour: int) -> str:
@@ -101,6 +119,23 @@ def build_momentum_regime_context(
         chop = ChopExpansionRegime.expansion if atr_pct > 0.025 else ChopExpansionRegime.chop
 
     m = dict(meta or {})
+    # Continuous regime score (Phase 6c): centered ~0.012 ATR/price, scaled.
+    if atr_pct is not None:
+        try:
+            ap = float(atr_pct)
+            m.setdefault("chop_expansion_score", max(-1.0, min(1.0, (ap - 0.012) / 0.02)))
+        except (TypeError, ValueError):
+            pass
+    # ADX strength 0..1 when pipeline supplies adx (14) in meta.
+    adx_raw = m.get("adx") or m.get("adx_14")
+    if adx_raw is not None and "adx_strength" not in m:
+        try:
+            m["adx_strength"] = max(0.0, min(1.0, float(adx_raw) / 50.0))
+        except (TypeError, ValueError):
+            pass
+    if m.get("hurst_proxy") is None:
+        m["hurst_proxy"] = 0.5
+
     return MomentumRegimeContext(
         utc_iso=now.isoformat(),
         utc_hour=hour,

@@ -16,7 +16,10 @@ class SyntheticQuote:
 
 
 def regime_atr_pct(regime_json: dict[str, Any]) -> float:
+    """Resolve ATR as fraction of price from regime snapshot (top-level or nested meta)."""
     raw = regime_json.get("atr_pct")
+    if raw is None and isinstance(regime_json.get("meta"), dict):
+        raw = regime_json["meta"].get("atr_pct")
     try:
         v = float(raw)
     except (TypeError, ValueError):
@@ -76,7 +79,8 @@ def roundtrip_fee_usd(
         qty = abs(notional) / entry if entry else 0.0
         expected_target_pnl = abs(target - entry) * qty
         return max(0.0, expected_target_pnl * r)
-    return abs(notional) * 0.005 * 2.0
+    # Conservative per-side estimate when target unknown (tiered venues ~0.04–0.6%).
+    return abs(notional) * 0.0025 * 2.0
 
 
 def stop_target_prices(

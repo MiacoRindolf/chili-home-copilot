@@ -9,6 +9,7 @@ from typing import Any, Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
+from ....config import settings
 from ....models.trading import MomentumAutomationOutcome, MomentumStrategyVariant, MomentumSymbolViability
 from .strategy_params import params_signature, refine_strategy_params
 from ..brain_neural_mesh.repository import get_or_create_state
@@ -20,10 +21,11 @@ _FEEDBACK_VERSION = 1
 # Decay: weight multiplier ~= exp(-age_days / TAU_DAYS)
 _TAU_DAYS = 14.0
 # Max |delta| applied to viability_score per ingest (protect base engine)
-_MAX_VIABILITY_DELTA = 0.03
+_MAX_VIABILITY_DELTA = 0.06
 # Minimum live samples before full live weighting kick-in
 _LIVE_WEIGHT_FULL_N = 3
-_REFINEMENT_MIN_OUTCOMES = 5
+_REFINEMENT_MIN_OUTCOMES = 3
+_MAX_REFINED_CHILDREN = 3
 _REFINEMENT_LOOKBACK_DAYS = 30
 
 
@@ -115,6 +117,8 @@ def ingest_session_outcome(db: Session, outcome_row: MomentumAutomationOutcome) 
     )
     if outcome_row.contributes_to_evolution:
         apply_outcome_feedback_to_viability(db, outcome_row)
+        maybe_pause_symbol_variant_after_losses(db, outcome_row)
+        maybe_kill_underperforming_variant(db, variant_id=int(outcome_row.variant_id))
         maybe_publish_refined_variant(db, variant_id=int(outcome_row.variant_id))
 
 
@@ -289,6 +293,79 @@ def apply_outcome_feedback_to_viability(db: Session, outcome_row: MomentumAutoma
     via.updated_at = datetime.utcnow()
 
 
+def maybe_pause_symbol_variant_after_losses(db: Session, outcome_row: MomentumAutomationOutcome) -> None:
+    """After 3 consecutive losses on symbol×variant, pause new entries 4h (explain_json on viability)."""
+    sym = outcome_row.symbol.strip().upper()
+    vid = int(outcome_row.variant_id)
+    rows = (
+        db.query(MomentumAutomationOutcome)
+        .filter(
+            MomentumAutomationOutcome.symbol == sym,
+            MomentumAutomationOutcome.variant_id == vid,
+        )
+        .order_by(MomentumAutomationOutcome.terminal_at.desc())
+        .limit(3)
+        .all()
+    )
+    if len(rows) < 3:
+        return
+    if not all((r.return_bps is not None and float(r.return_bps) < 0.0) for r in rows):
+        return
+    until = datetime.utcnow() + timedelta(hours=4)
+    uts = until.isoformat()
+    for via in (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.symbol == sym, MomentumSymbolViability.variant_id == vid)
+        .all()
+    ):
+        ex = dict(via.explain_json or {})
+        ex["variant_symbol_pause_until_utc"] = uts
+        via.explain_json = ex
+        via.updated_at = datetime.utcnow()
+
+
+def maybe_kill_underperforming_variant(db: Session, *, variant_id: int) -> dict[str, Any]:
+    """Deactivate variant + viability if sustained poor track record (Phase 5c)."""
+    outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant_id), days=90)
+    considered = [o for o in outcomes if o.return_bps is not None]
+    if len(considered) < 5:
+        return {"ok": True, "skipped": "insufficient"}
+    wins = sum(1 for o in considered if float(o.return_bps or 0.0) > 0.0)
+    wr = wins / len(considered)
+    mean_bps = sum(float(o.return_bps or 0.0) for o in considered) / len(considered)
+    if wr >= 0.35 or mean_bps >= -30.0:
+        return {"ok": True, "skipped": "above_threshold"}
+
+    v = (
+        db.query(MomentumStrategyVariant)
+        .filter(MomentumStrategyVariant.id == int(variant_id))
+        .one_or_none()
+    )
+    if v is None or not bool(v.is_active):
+        return {"ok": True, "skipped": "inactive_or_missing"}
+    v.is_active = False
+    v.updated_at = datetime.utcnow()
+    for row in (
+        db.query(MomentumSymbolViability)
+        .filter(MomentumSymbolViability.variant_id == int(variant_id))
+        .all()
+    ):
+        row.paper_eligible = False
+        row.live_eligible = False
+        row.updated_at = datetime.utcnow()
+    record_feedback_ingestion_trace(
+        db,
+        {
+            "variant_id": int(variant_id),
+            "event": "variant_killed_performance",
+            "win_rate": round(wr, 4),
+            "mean_return_bps": round(mean_bps, 4),
+            "sample_size": len(considered),
+        },
+    )
+    return {"ok": True, "killed": True, "win_rate": wr, "mean_return_bps": mean_bps}
+
+
 def _recent_outcomes_for_variant(db: Session, *, variant_id: int, days: int = _REFINEMENT_LOOKBACK_DAYS) -> list[MomentumAutomationOutcome]:
     since = datetime.utcnow() - timedelta(days=max(1, int(days)))
     return (
@@ -311,19 +388,21 @@ def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, 
     )
     if variant is None:
         return {"ok": False, "error": "variant_not_found"}
+    if not bool(variant.is_active):
+        return {"ok": True, "skipped": "variant_inactive"}
 
     outcomes = _recent_outcomes_for_variant(db, variant_id=int(variant.id))
     if len(outcomes) < _REFINEMENT_MIN_OUTCOMES:
         return {"ok": True, "skipped": "insufficient_outcomes", "sample_size": len(outcomes)}
 
-    existing_child = (
-        db.query(MomentumStrategyVariant)
+    child_count = int(
+        db.query(func.count(MomentumStrategyVariant.id))
         .filter(MomentumStrategyVariant.parent_variant_id == int(variant.id))
-        .order_by(MomentumStrategyVariant.version.desc())
-        .first()
+        .scalar()
+        or 0
     )
-    if existing_child is not None:
-        return {"ok": True, "skipped": "child_already_exists", "variant_id": int(existing_child.id)}
+    if child_count >= _MAX_REFINED_CHILDREN:
+        return {"ok": True, "skipped": "max_refined_children", "child_count": child_count}
 
     refined_params, meta = refine_strategy_params(variant.params_json, outcomes)
     if not meta.get("eligible"):
@@ -355,7 +434,19 @@ def maybe_publish_refined_variant(db: Session, *, variant_id: int) -> dict[str, 
     db.add(child)
     db.flush()
 
-    variant.is_active = False
+    ab_mode = bool(getattr(settings, "chili_momentum_ab_test_on_refinement", False))
+    if ab_mode:
+        pm = dict(variant.refinement_meta_json or {})
+        pm["ab_peer_variant_id"] = int(child.id)
+        pm["ab_role"] = "parent"
+        pm["ab_at_utc"] = datetime.utcnow().isoformat()
+        variant.refinement_meta_json = pm
+        cm = dict(child.refinement_meta_json or {})
+        cm["ab_peer_variant_id"] = int(variant.id)
+        cm["ab_role"] = "child"
+        child.refinement_meta_json = cm
+    else:
+        variant.is_active = False
     variant.updated_at = datetime.utcnow()
 
     source_rows = (
@@ -419,10 +510,10 @@ def _viability_delta_from_slices(paper: dict[str, Any], live: dict[str, Any]) ->
     # Paper-only channel
     delta = 0.0
     if p_n >= 2 and p_mean is not None:
-        delta += 0.01 * math.tanh(float(p_mean) / 120.0) * min(1.0, p_n / 10.0)
+        delta += 0.01 * math.tanh(float(p_mean) / 80.0) * min(1.0, p_n / 10.0)
     # Live channel (stronger when n>=3)
     if l_n >= _LIVE_WEIGHT_FULL_N and l_mean is not None:
-        delta += 0.015 * math.tanh(float(l_mean) / 100.0) * min(1.0, l_n / 8.0)
+        delta += 0.015 * math.tanh(float(l_mean) / 80.0) * min(1.0, l_n / 8.0)
     elif l_n > 0 and l_mean is not None and l_mean < -50:
         # Single/two harsh live losses: small degradation only
         delta += -0.008 * min(1.0, abs(float(l_mean)) / 200.0) * (0.4 if l_n < _LIVE_WEIGHT_FULL_N else 1.0)

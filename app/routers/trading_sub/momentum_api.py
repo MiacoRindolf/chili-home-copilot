@@ -583,14 +583,48 @@ def get_session_decision_summary(
         "deployment_scope": session_dep[0] if session_dep else None,
         "settings": {
             "brain_enable_decision_ledger": bool(getattr(settings, "brain_enable_decision_ledger", True)),
-            "brain_expectancy_allocator_shadow_mode": bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", True)),
+            "brain_expectancy_allocator_shadow_mode": bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", False)),
             "brain_enforce_net_expectancy_live": bool(getattr(settings, "brain_enforce_net_expectancy_live", False)),
             "brain_enforce_net_expectancy_paper": bool(getattr(settings, "brain_enforce_net_expectancy_paper", True)),
             "brain_live_deployment_enforcement": bool(getattr(settings, "brain_live_deployment_enforcement", False)),
             "brain_capacity_hard_block_live": bool(getattr(settings, "brain_capacity_hard_block_live", False)),
             "brain_capacity_hard_block_paper": bool(getattr(settings, "brain_capacity_hard_block_paper", True)),
+            "chili_momentum_entry_gates_enabled": bool(getattr(settings, "chili_momentum_entry_gates_enabled", True)),
+            "chili_momentum_ab_test_on_refinement": bool(getattr(settings, "chili_momentum_ab_test_on_refinement", False)),
+            "chili_momentum_performance_sizing_enabled": bool(
+                getattr(settings, "chili_momentum_performance_sizing_enabled", True)
+            ),
+            "chili_momentum_family_regime_prefilter_enabled": bool(
+                getattr(settings, "chili_momentum_family_regime_prefilter_enabled", False)
+            ),
         },
     }
+
+
+@router.get("/automation/analytics/family-regime-performance")
+def get_family_regime_performance(
+    request: Request,
+    db: Session = Depends(get_db),
+    days: int = Query(90, ge=7, le=365),
+) -> dict[str, Any]:
+    """Aggregated outcomes by strategy family × volatility regime × session (Phase 6a)."""
+    _ = _automation_user_id(request, db)
+    from ...services.trading.momentum_neural.family_regime_stats import aggregate_family_regime_performance
+
+    return {"ok": True, "days": int(days), "rows": aggregate_family_regime_performance(db, days=int(days))}
+
+
+@router.get("/automation/analytics/ab-variant-pairs")
+def get_ab_variant_pairs(
+    request: Request,
+    db: Session = Depends(get_db),
+    limit: int = Query(20, ge=1, le=100),
+) -> dict[str, Any]:
+    """Active A/B refinement pairs with quick performance comparison (Phase 6b)."""
+    _ = _automation_user_id(request, db)
+    from ...services.trading.momentum_neural.ab_test import list_ab_pairs
+
+    return {"ok": True, "pairs": list_ab_pairs(db, limit=int(limit))}
 
 
 @router.post("/automation/sessions/{session_id}/cancel")

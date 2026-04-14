@@ -6395,6 +6395,28 @@ def _migration_120_monitor_learning_engine(conn) -> None:
     conn.commit()
 
 
+def _migration_121_autopilot_profitability_outcomes(conn) -> None:
+    """Entry/exit regime snapshots on momentum outcomes; supports family-regime analytics."""
+    if "momentum_automation_outcomes" not in _tables(conn):
+        return
+    cols = _columns(conn, "momentum_automation_outcomes")
+    if "entry_regime_snapshot_json" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_automation_outcomes "
+                "ADD COLUMN entry_regime_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+    if "exit_regime_snapshot_json" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE momentum_automation_outcomes "
+                "ADD COLUMN exit_regime_snapshot_json JSONB NOT NULL DEFAULT '{}'::jsonb"
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6517,6 +6539,7 @@ MIGRATIONS = [
     ("118_dynamic_trade_plan_monitor", _migration_118_dynamic_trade_plan_monitor),
     ("119_broker_sessions_table", _migration_119_broker_sessions_table),
     ("120_monitor_learning_engine", _migration_120_monitor_learning_engine),
+    ("121_autopilot_profitability_outcomes", _migration_121_autopilot_profitability_outcomes),
 ]
 
 

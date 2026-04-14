@@ -448,6 +448,35 @@ def _paper_terminal_states() -> frozenset:
     return frozenset(PAPER_RUNNER_TERMINAL_STATES) | frozenset({"error"})
 
 
+def _momentum_variant_performance_size_mult(db: Session, variant_id: int) -> float:
+    """Scale notional by recent outcome Sharpe-like ratio (Phase 5d)."""
+    if variant_id <= 0:
+        return 1.0
+    if not bool(getattr(settings, "chili_momentum_performance_sizing_enabled", True)):
+        return 1.0
+    from statistics import mean, pstdev
+
+    from ...models.trading import MomentumAutomationOutcome
+
+    rows = (
+        db.query(MomentumAutomationOutcome.return_bps)
+        .filter(
+            MomentumAutomationOutcome.variant_id == int(variant_id),
+            MomentumAutomationOutcome.return_bps.isnot(None),
+        )
+        .order_by(MomentumAutomationOutcome.created_at.desc())
+        .limit(10)
+        .all()
+    )
+    vals = [float(r[0]) for r in rows if r[0] is not None]
+    if len(vals) < 3:
+        return 1.0
+    m = mean(vals)
+    s = pstdev(vals) if len(vals) > 1 else 0.0
+    sharpe_like = (m / s) if s > 1e-9 else 0.0
+    return max(0.3, min(1.0, sharpe_like / 0.5))
+
+
 def _peer_automation_sessions(
     db: Session,
     *,
@@ -522,6 +551,11 @@ def allocate_momentum_session_entry(
         mult = 1.0
 
     intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
+    try:
+        perf_mult = _momentum_variant_performance_size_mult(db, int(getattr(variant, "id", 0) or 0))
+        intended_notional = max(10.0, intended_notional * perf_mult)
+    except Exception:
+        pass
     erc_allocation: dict[str, Any] | None = None
     try:
         from .portfolio_optimizer import equal_risk_contribution
@@ -589,7 +623,7 @@ def allocate_momentum_session_entry(
     )
 
     floor = _safe_float(getattr(settings, "brain_minimum_net_expectancy_to_trade", 0.0), 0.0)
-    shadow = bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", True))
+    shadow = bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", False))
     enforce_exp = bool(getattr(settings, "brain_enforce_net_expectancy_live", False)) if execution_mode == "live" else bool(
         getattr(settings, "brain_enforce_net_expectancy_paper", True)
     )
@@ -632,11 +666,7 @@ def allocate_momentum_session_entry(
         abstain_code = abstain_code or "regime_rotation_risk_off"
         abstain_text = abstain_text or "risk_off_regime_requires_higher_edge"
 
-    if shadow and abstain_code in ("negative_net_expectancy",):
-        shadow_override = True
-        abstain_code = None
-        abstain_text = None
-
+    # Never override negative net expectancy — block the trade (future-proof risk).
     if shadow and abstain_code == "capacity_blocked":
         shadow_override = True
         abstain_code = None

@@ -71,6 +71,8 @@ from ..decision_ledger import (
     run_momentum_entry_decision,
 )
 from ..deployment_ladder_service import record_trade_outcome_metrics
+from ..market_data import fetch_ohlcv_df
+from .entry_gates import bos_exit_triggered_long, run_paper_entry_gates
 
 _log = logging.getLogger(__name__)
 
@@ -81,6 +83,36 @@ QuoteFn = Callable[[str], dict[str, Any]]
 
 def _utcnow() -> datetime:
     return datetime.utcnow()
+
+
+def _effective_viability(via: MomentumSymbolViability, max_age_sec: float) -> float:
+    """Linear decay of score when viability row is stale past half of policy max age."""
+    raw = float(via.viability_score or 0.0)
+    ft = getattr(via, "freshness_ts", None)
+    if ft is None:
+        return raw
+    try:
+        ft_naive = ft.replace(tzinfo=None) if getattr(ft, "tzinfo", None) else ft
+        age = (_utcnow() - ft_naive).total_seconds()
+    except Exception:
+        return raw
+    half = max(60.0, float(max_age_sec) / 2.0)
+    if age <= half:
+        return raw
+    decay = min(0.25, (age - half) / max(float(max_age_sec), 1.0) * 0.25)
+    return max(0.0, raw - decay)
+
+
+def _via_entry_paused(via: MomentumSymbolViability) -> bool:
+    ex = via.explain_json if isinstance(via.explain_json, dict) else {}
+    until_raw = ex.get("variant_symbol_pause_until_utc")
+    if not until_raw:
+        return False
+    try:
+        until = datetime.fromisoformat(str(until_raw).replace("Z", "+00:00")).replace(tzinfo=None)
+        return _utcnow() < until
+    except Exception:
+        return False
 
 
 def _policy_caps(snap: dict[str, Any]) -> dict[str, Any]:
@@ -405,13 +437,13 @@ def tick_paper_session(
 
     ex = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}
     try:
-        spread_bps = float(ex.get("spread_bps") or 8.0)
+        spread_bps = float(ex.get("spread_bps") or 12.0)
     except (TypeError, ValueError):
-        spread_bps = 8.0
+        spread_bps = 12.0
     try:
-        slip_bps = float(ex.get("slippage_estimate_bps") or 6.0)
+        slip_bps = float(ex.get("slippage_estimate_bps") or 10.0)
     except (TypeError, ValueError):
-        slip_bps = 6.0
+        slip_bps = 10.0
     try:
         fee_ratio = float(ex.get("fee_to_target_ratio") or 0.08)
     except (TypeError, ValueError):
@@ -429,6 +461,11 @@ def tick_paper_session(
         )
     except (TypeError, ValueError):
         max_notional = float(settings.chili_momentum_risk_max_notional_per_trade_usd)
+
+    try:
+        max_age_sec = float(getattr(settings, "chili_momentum_risk_viability_max_age_seconds", 600.0) or 600.0)
+    except (TypeError, ValueError):
+        max_age_sec = 600.0
 
     raw_quote = (quote_fn or _default_quote_fn)(sess.symbol) or {}
     try:
@@ -518,31 +555,55 @@ def tick_paper_session(
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_WATCHING:
-        if float(via.viability_score or 0) >= float(params["entry_viability_min"]) and via.paper_eligible:
+        if _via_entry_paused(via):
+            _sync_runtime_snapshot(db, sess, via=via)
+            db.flush()
+            return {"ok": True, "session_id": sess.id, "state": sess.state, "variant_pause": True}
+        eff_v = _effective_viability(via, max_age_sec)
+        if eff_v >= float(params["entry_viability_min"]) and via.paper_eligible:
             _safe_transition(db, sess, STATE_ENTRY_CANDIDATE)
             _emit(
                 db,
                 sess,
                 "paper_entry_candidate_detected",
-                {"viability_score": via.viability_score, "mid": mid},
+                {"viability_score": via.viability_score, "effective_viability": eff_v, "mid": mid},
             )
         _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_ENTRY_CANDIDATE:
-        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
+        eff_v = _effective_viability(via, max_age_sec)
+        if eff_v < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
             _safe_transition(db, sess, STATE_WATCHING)
             _emit(db, sess, "paper_watch_started", {"reason": "candidate_regressed"})
         else:
-            _safe_transition(db, sess, STATE_PENDING_ENTRY)
-            _emit(db, sess, "paper_entry_submitted", {"mid": mid})
+            regime_pre = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
+            ok_g, reason_g, dbg = run_paper_entry_gates(
+                db,
+                symbol=sess.symbol,
+                variant=variant,
+                regime_snapshot=regime_pre,
+                family_id=variant.family if variant is not None else None,
+            )
+            if not ok_g:
+                _safe_transition(db, sess, STATE_WATCHING)
+                _emit(
+                    db,
+                    sess,
+                    "paper_entry_gates_blocked",
+                    {"reason": reason_g, "debug": dbg, "mid": mid},
+                )
+            else:
+                _safe_transition(db, sess, STATE_PENDING_ENTRY)
+                _emit(db, sess, "paper_entry_submitted", {"mid": mid})
         _sync_runtime_snapshot(db, sess, via=via)
         db.flush()
         return {"ok": True, "session_id": sess.id, "state": sess.state}
 
     if st == STATE_PENDING_ENTRY:
-        if float(via.viability_score or 0) < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
+        eff_v = _effective_viability(via, max_age_sec)
+        if eff_v < float(params["entry_revalidate_floor"]) or not via.paper_eligible:
             _safe_transition(db, sess, STATE_WATCHING)
             _emit(db, sess, "paper_watch_started", {"reason": "entry_aborted"})
             _sync_runtime_snapshot(db, sess, via=via)
@@ -604,6 +665,7 @@ def tick_paper_session(
             "side": "long",
             "entry_price": entry_px,
             "quantity": qty,
+            "original_quantity": qty,
             "notional_usd": notional,
             "opened_at_utc": opened.isoformat(),
             "stop_price": stop_px,
@@ -613,6 +675,7 @@ def tick_paper_session(
             "fee_to_target_ratio": fee_ratio,
             "fees_est_usd": fees,
         }
+        pe["entry_regime_snapshot_json"] = dict(regime)
         pe["reference_mid_at_entry"] = ref_mid
         pe["last_entry_decision_packet_id"] = decision_packet_id
         _safe_transition(db, sess, STATE_ENTERED)
@@ -674,8 +737,13 @@ def tick_paper_session(
         except Exception:
             t0 = _utcnow()
         held = (_utcnow() - t0).total_seconds()
-        trail_activate_return = 1.0 + float(params["trail_activate_return_bps"]) / 10_000.0
-        trail_floor_return = 1.0 + float(params["trail_floor_return_bps"]) / 10_000.0
+        regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
+        atrp = regime_atr_pct(regime_live)
+        mult_trail = 1.0 + min(0.5, max(-0.2, (atrp - 0.015) / 0.03))
+        base_act = float(params["trail_activate_return_bps"]) * mult_trail
+        base_floor = float(params["trail_floor_return_bps"]) * mult_trail
+        trail_activate_return = 1.0 + base_act / 10_000.0
+        trail_floor_return = 1.0 + base_floor / 10_000.0
 
         if st == STATE_BAILOUT:
             pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
@@ -707,10 +775,68 @@ def tick_paper_session(
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
 
+        # Time-based stop tightening (no meaningful progress toward target)
+        progress_mid = entry + 0.25 * (target_px - entry)
+        progress_ok = mid >= progress_mid
+        if held >= 0.5 * max_hold and not progress_ok:
+            new_s = max(float(pos["stop_price"]), entry)
+            if new_s > float(pos["stop_price"]):
+                pos["stop_price"] = new_s
+        if held >= 0.75 * max_hold and not progress_ok:
+            new_s = max(float(pos["stop_price"]), entry * 1.0015)
+            if new_s > float(pos["stop_price"]):
+                pos["stop_price"] = new_s
+        stop_px = float(pos["stop_price"])
+        pe["position"] = pos
+        _commit_pe(sess, pe)
+
+        # Break of structure (last closed bar vs swing low)
+        try:
+            df_bos = fetch_ohlcv_df(sess.symbol, interval="15m", period="5d")
+            if df_bos is not None and not df_bos.empty:
+                last_close = float(df_bos["Close"].astype(float).iloc[-1])
+                if bos_exit_triggered_long(df_bos, current_close=last_close):
+                    pnl = (exit_px - entry) * qty - float(pos.get("fees_est_usd") or 0.0)
+                    pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl
+                    pe["last_exit_price"] = exit_px
+                    pe["last_exit_reason"] = "bos"
+                    pe["position"] = None
+                    _safe_transition(db, sess, STATE_EXITED)
+                    _commit_pe(sess, pe)
+                    dpid = pe.get("last_entry_decision_packet_id")
+                    _record_sim_fill(
+                        db,
+                        sess,
+                        action="exit_long",
+                        fill_type="exit",
+                        price=exit_px,
+                        quantity=qty,
+                        reference_price=mid,
+                        pnl_usd=pnl,
+                        position_state_before="long",
+                        position_state_after="flat",
+                        reason="bos",
+                        marker_json={"entry": entry, "stop": stop_px, "target": target_px},
+                        decision_packet_id=int(dpid) if dpid else None,
+                    )
+                    _finalize_paper_decision_after_exit(db, sess, pe=pe, realized_pnl_usd=pnl, slip_bps=slip_bps)
+                    _emit(db, sess, "paper_exit_filled", {"price": exit_px, "pnl_usd": pnl, "reason": "bos"})
+                    _sync_runtime_snapshot(db, sess, via=via)
+                    db.flush()
+                    return {"ok": True, "session_id": sess.id, "state": sess.state}
+        except Exception:
+            _log.debug("paper_runner BOS path skipped session=%s", sess.id, exc_info=True)
+
         # bailout: viability collapse
-        if float(via.viability_score or 0) < float(params["bailout_viability_floor"]):
+        eff_bail = _effective_viability(via, max_age_sec)
+        if eff_bail < float(params["bailout_viability_floor"]):
             _safe_transition(db, sess, STATE_BAILOUT)
-            _emit(db, sess, "paper_bailout", {"viability_score": via.viability_score, "bid": bid})
+            _emit(
+                db,
+                sess,
+                "paper_bailout",
+                {"viability_score": via.viability_score, "effective_viability": eff_bail, "bid": bid},
+            )
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
@@ -774,6 +900,54 @@ def tick_paper_session(
             _sync_runtime_snapshot(db, sess, via=via)
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        halfway = entry + 0.5 * (target_px - entry)
+        if (
+            st == STATE_ENTERED
+            and not pos.get("partial_taken")
+            and exit_px >= halfway
+            and qty > 1e-12
+        ):
+            orig_qty = float(pos.get("original_quantity") or qty)
+            partial_qty = orig_qty / 3.0
+            if partial_qty >= 1e-9 and qty + 1e-12 >= partial_qty:
+                total_fees = float(pos.get("fees_est_usd") or 0.0)
+                fee_part = total_fees * (partial_qty / orig_qty) if orig_qty > 0 else 0.0
+                pnl_p = (exit_px - entry) * partial_qty - fee_part
+                pe["realized_pnl_usd"] = float(pe.get("realized_pnl_usd") or 0.0) + pnl_p
+                pos["fees_est_usd"] = max(0.0, total_fees - fee_part)
+                remain = max(0.0, qty - partial_qty)
+                pos["quantity"] = remain
+                pos["partial_taken"] = True
+                pos["stop_price"] = max(float(pos["stop_price"]), entry)
+                pos.setdefault("original_quantity", orig_qty)
+                pe["position"] = pos
+                _commit_pe(sess, pe)
+                dpid = pe.get("last_entry_decision_packet_id")
+                _record_sim_fill(
+                    db,
+                    sess,
+                    action="exit_long",
+                    fill_type="exit",
+                    price=exit_px,
+                    quantity=partial_qty,
+                    reference_price=mid,
+                    pnl_usd=pnl_p,
+                    position_state_before="long",
+                    position_state_after="long",
+                    reason="partial_profit_halfway",
+                    marker_json={"entry": entry, "partial": True},
+                    decision_packet_id=int(dpid) if dpid else None,
+                )
+                _emit(
+                    db,
+                    sess,
+                    "paper_partial_exit",
+                    {"reason": "halfway_target", "qty": partial_qty, "remain": remain},
+                )
+                _sync_runtime_snapshot(db, sess, via=via)
+                db.flush()
+                return {"ok": True, "session_id": sess.id, "state": sess.state}
 
         if st == STATE_ENTERED and exit_px >= target_px * 0.995:
             _safe_transition(db, sess, STATE_SCALING_OUT)

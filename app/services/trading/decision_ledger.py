@@ -15,7 +15,7 @@ from .portfolio_allocator import allocate_momentum_session_entry, allocation_blo
 def _shadow_packet_flag(alloc_result: dict[str, Any]) -> bool:
     if bool(alloc_result.get("shadow_override")):
         return True
-    return bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", True)) and not bool(
+    return bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", False)) and not bool(
         alloc_result.get("capacity_blocked_flag")
     )
 

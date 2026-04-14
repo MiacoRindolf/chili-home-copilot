@@ -162,6 +162,10 @@ def extract_momentum_session_outcome(
         )
         .one_or_none()
     )
+    entry_regime_snapshot_json: dict[str, Any] = {}
+    if mode == "paper" and isinstance(pe.get("entry_regime_snapshot_json"), dict):
+        entry_regime_snapshot_json = dict(pe["entry_regime_snapshot_json"])
+
     if via:
         regime_snapshot_json = dict(via.regime_snapshot_json or {})
         readiness_snapshot_json = dict(via.execution_readiness_json or {})
@@ -278,6 +282,8 @@ def extract_momentum_session_outcome(
         "entry_occurred": entry_occurred,
         "partial_exit_occurred": partial_exit,
         "regime_snapshot_json": regime_snapshot_json,
+        "entry_regime_snapshot_json": entry_regime_snapshot_json,
+        "exit_regime_snapshot_json": dict(regime_snapshot_json),
         "readiness_snapshot_json": readiness_snapshot_json,
         "admission_snapshot_json": admission_snapshot_json,
         "governance_context_json": gov,
@@ -394,6 +400,8 @@ def outcome_row_from_extracted(
         hold_seconds=extracted.get("hold_seconds"),
         exit_reason=extracted.get("exit_reason"),
         regime_snapshot_json=dict(extracted.get("regime_snapshot_json") or {}),
+        entry_regime_snapshot_json=dict(extracted.get("entry_regime_snapshot_json") or {}),
+        exit_regime_snapshot_json=dict(extracted.get("exit_regime_snapshot_json") or {}),
         readiness_snapshot_json=dict(extracted.get("readiness_snapshot_json") or {}),
         admission_snapshot_json=dict(extracted.get("admission_snapshot_json") or {}),
         governance_context_json=dict(extracted.get("governance_context_json") or {}),

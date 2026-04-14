@@ -27,8 +27,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.38,
         "stop_atr_mult": 0.60,
         "target_atr_mult": 0.90,
-        "trail_activate_return_bps": 80.0,
-        "trail_floor_return_bps": 20.0,
+        "trail_activate_return_bps": 50.0,
+        "trail_floor_return_bps": 30.0,
         "max_hold_seconds": 86400.0,
     },
     "impulse_breakout": {
@@ -37,8 +37,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.40,
         "stop_atr_mult": 0.65,
         "target_atr_mult": 1.10,
-        "trail_activate_return_bps": 90.0,
-        "trail_floor_return_bps": 30.0,
+        "trail_activate_return_bps": 55.0,
+        "trail_floor_return_bps": 28.0,
         "max_hold_seconds": 14400.0,
     },
     "micro_pullback_continuation": {
@@ -47,8 +47,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.39,
         "stop_atr_mult": 0.55,
         "target_atr_mult": 0.95,
-        "trail_activate_return_bps": 70.0,
-        "trail_floor_return_bps": 18.0,
+        "trail_activate_return_bps": 48.0,
+        "trail_floor_return_bps": 22.0,
         "max_hold_seconds": 10800.0,
     },
     "rolling_range_high_breakout": {
@@ -57,8 +57,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.37,
         "stop_atr_mult": 0.75,
         "target_atr_mult": 1.25,
-        "trail_activate_return_bps": 100.0,
-        "trail_floor_return_bps": 35.0,
+        "trail_activate_return_bps": 62.0,
+        "trail_floor_return_bps": 32.0,
         "max_hold_seconds": 21600.0,
     },
     "breakout_reclaim": {
@@ -67,8 +67,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.36,
         "stop_atr_mult": 0.62,
         "target_atr_mult": 1.00,
-        "trail_activate_return_bps": 80.0,
-        "trail_floor_return_bps": 22.0,
+        "trail_activate_return_bps": 52.0,
+        "trail_floor_return_bps": 24.0,
         "max_hold_seconds": 14400.0,
     },
     "vwap_reclaim_continuation": {
@@ -77,8 +77,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.38,
         "stop_atr_mult": 0.58,
         "target_atr_mult": 0.92,
-        "trail_activate_return_bps": 75.0,
-        "trail_floor_return_bps": 20.0,
+        "trail_activate_return_bps": 50.0,
+        "trail_floor_return_bps": 22.0,
         "max_hold_seconds": 10800.0,
     },
     "ema_reclaim_continuation": {
@@ -87,8 +87,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.37,
         "stop_atr_mult": 0.56,
         "target_atr_mult": 0.88,
-        "trail_activate_return_bps": 72.0,
-        "trail_floor_return_bps": 18.0,
+        "trail_activate_return_bps": 48.0,
+        "trail_floor_return_bps": 20.0,
         "max_hold_seconds": 10800.0,
     },
     "compression_expansion_breakout": {
@@ -97,8 +97,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.40,
         "stop_atr_mult": 0.68,
         "target_atr_mult": 1.20,
-        "trail_activate_return_bps": 95.0,
-        "trail_floor_return_bps": 28.0,
+        "trail_activate_return_bps": 58.0,
+        "trail_floor_return_bps": 26.0,
         "max_hold_seconds": 18000.0,
     },
     "momentum_follow_through_scalp": {
@@ -107,8 +107,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.41,
         "stop_atr_mult": 0.50,
         "target_atr_mult": 0.82,
-        "trail_activate_return_bps": 60.0,
-        "trail_floor_return_bps": 16.0,
+        "trail_activate_return_bps": 45.0,
+        "trail_floor_return_bps": 18.0,
         "max_hold_seconds": 7200.0,
     },
     "failed_breakout_bailout": {
@@ -117,8 +117,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.43,
         "stop_atr_mult": 0.45,
         "target_atr_mult": 0.70,
-        "trail_activate_return_bps": 45.0,
-        "trail_floor_return_bps": 12.0,
+        "trail_activate_return_bps": 38.0,
+        "trail_floor_return_bps": 14.0,
         "max_hold_seconds": 5400.0,
     },
     "no_follow_through_exit": {
@@ -127,8 +127,8 @@ _DEFAULTS: dict[str, dict[str, float]] = {
         "bailout_viability_floor": 0.44,
         "stop_atr_mult": 0.48,
         "target_atr_mult": 0.78,
-        "trail_activate_return_bps": 50.0,
-        "trail_floor_return_bps": 12.0,
+        "trail_activate_return_bps": 40.0,
+        "trail_floor_return_bps": 14.0,
         "max_hold_seconds": 3600.0,
     },
 }
@@ -240,7 +240,7 @@ def refine_strategy_params(
     live_mean_return_bps = live_return_sum / live_n if live_n else None
 
     refined = dict(base)
-    quality = math.tanh(mean_return_bps / 120.0)
+    quality = math.tanh(mean_return_bps / 80.0)
     caution = max(0.0, -quality)
     confidence = max(0.0, quality)
 

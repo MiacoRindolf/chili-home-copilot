@@ -1311,6 +1311,8 @@ class MomentumAutomationOutcome(Base):
     hold_seconds: Optional[int] = Column(Integer, nullable=True)
     exit_reason: Optional[str] = Column(String(64), nullable=True)
     regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    entry_regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    exit_regime_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     readiness_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     admission_snapshot_json: dict = Column(JSONB, nullable=False, default=lambda: {})
     governance_context_json: dict = Column(JSONB, nullable=False, default=lambda: {})
