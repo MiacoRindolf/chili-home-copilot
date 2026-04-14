@@ -671,31 +671,123 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             ),
             CycleStepDef(
                 sid="monitor_review",
-                label="Pattern monitor decision review",
+                label="Pattern monitor decision review + rules engine learning",
                 code_ref="learning.learn_from_monitor_decisions",
                 runner_phase="monitor_decision_review",
                 description=(
-                    "Reviews pattern-monitor decision outcomes (was_beneficial) "
-                    "and trade plan signal predictiveness. Evolves adaptive "
-                    "thresholds for monitoring sensitivity."
+                    "Reviews pattern-monitor decision outcomes (was_beneficial), "
+                    "evolves adaptive thresholds, aggregates outcomes into learned "
+                    "decision rules (MonitorDecisionRule), and tracks mechanical vs "
+                    "LLM plan accuracy (MonitorPlanAccuracy). Drives the "
+                    "c_monitor_learning neural mesh cluster."
                 ),
                 remarks=(
                     "What: Aggregates outcomes from PatternMonitorDecision rows, "
-                    "analyzes which trade plan signals (invalidation conditions, caution "
-                    "signals) were actually predictive, and nudges adaptive weights.\n\n"
+                    "analyzes trade plan signal predictiveness, updates decision "
+                    "rules via aggregate_decision_outcomes(), and tracks plan "
+                    "accuracy via _update_plan_accuracy_from_decisions().\n\n"
                     "Where: ``learn_from_monitor_decisions(db, user_id)`` in ``learning.py``.\n\n"
-                    "Why: Self-improving position management — premature stop tightening "
-                    "should raise thresholds, successful invalidation catches should lower them."
+                    "Why: Self-learning monitor — LLM decisions bootstrap the rules engine. "
+                    "As rules graduate (>30 samples, >80% agreement, >55% benefit), "
+                    "the system stops needing LLM for that pattern type.\n\n"
+                    "Mesh: Activates nm_monitor_rules_learner → nm_plan_accuracy_tracker "
+                    "→ nm_monitor_graduation chain in c_monitor_learning cluster."
                 ),
                 inputs=(
                     "PatternMonitorDecision rows with was_beneficial filled",
-                    "conditions_snapshot containing trade_plan evaluation results",
+                    "conditions_snapshot containing trade_plan evaluation + pnl/price bands",
+                    "mechanical_action/mechanical_stop/decision_source dual-path fields",
                 ),
                 outputs=(
                     "``report['monitor_decisions_reviewed']``",
+                    "``report['rules_engine']`` with rules_updated and rows_processed",
                     "Evolved adaptive weights: monitor_health_weakening, monitor_llm_confidence_min",
-                    "Trade plan signal predictiveness stats",
+                    "Updated MonitorDecisionRule rows with graduation status",
+                    "Updated MonitorPlanAccuracy rows per pattern type",
+                    "Mesh node states: nm_monitor_rules_learner, nm_plan_accuracy_tracker",
                 ),
+            ),
+        ),
+    ),
+    # ── Monitor self-learning cluster ──
+    CycleClusterDef(
+        id="c_monitor_learning",
+        label="Monitor self-learning engine",
+        phase_summary="Driven by monitor_review step in c_secondary_outcomes",
+        description=(
+            "Three neural mesh nodes that manage the lifecycle of the self-learning "
+            "rules engine: rule aggregation, plan accuracy tracking, and per-pattern-type "
+            "graduation from LLM-dependent to mechanical-only decisions."
+        ),
+        remarks=(
+            "What: nm_monitor_rules_learner aggregates decision outcomes into "
+            "MonitorDecisionRule rows. nm_plan_accuracy_tracker compares LLM vs "
+            "mechanical trade plan accuracy. nm_monitor_graduation manages the "
+            "bootstrap → shadow → graduated → demoted lifecycle.\n\n"
+            "Where: Nodes defined in migration 120; state updates driven by "
+            "learn_from_monitor_decisions() in learning.py via monitor_rules_engine.py.\n\n"
+            "Why: Reduces LLM cost over time by proving mechanical rules are as good "
+            "or better than LLM advisory. Regression detection auto-demotes rules "
+            "that stop working back to LLM-supervised."
+        ),
+        inputs=(
+            "PatternMonitorDecision outcome data from monitor_review step",
+            "MonitorDecisionRule current state",
+            "MonitorPlanAccuracy current state",
+        ),
+        outputs=(
+            "Graduation status per pattern type",
+            "Mesh node states: rules_count, accuracy_rate, graduation_rate",
+        ),
+        steps=(
+            CycleStepDef(
+                sid="rules_learner",
+                label="Aggregate decisions into rules",
+                code_ref="monitor_rules_engine.aggregate_decision_outcomes",
+                runner_phase="monitor_decision_review",
+                description=(
+                    "Groups resolved PatternMonitorDecision rows by (pattern_type, "
+                    "signal_signature) and upserts MonitorDecisionRule rows with "
+                    "benefit rates, agreement rates, and graduation status."
+                ),
+                remarks=(
+                    "What: Called inside learn_from_monitor_decisions after adaptive "
+                    "weight updates. Updates nm_monitor_rules_learner mesh state."
+                ),
+                inputs=("Resolved PatternMonitorDecision rows (90-day window)",),
+                outputs=("MonitorDecisionRule upserts", "nm_monitor_rules_learner state"),
+            ),
+            CycleStepDef(
+                sid="plan_accuracy",
+                label="Track LLM vs mechanical plan accuracy",
+                code_ref="learning._update_plan_accuracy_from_decisions",
+                runner_phase="monitor_decision_review",
+                description=(
+                    "For decisions with dual-path data (mechanical_action + LLM action), "
+                    "updates MonitorPlanAccuracy counters per pattern type and complexity."
+                ),
+                remarks=(
+                    "What: Called inside learn_from_monitor_decisions. "
+                    "Updates nm_plan_accuracy_tracker mesh state."
+                ),
+                inputs=("Dual-path PatternMonitorDecision rows",),
+                outputs=("MonitorPlanAccuracy upserts", "nm_plan_accuracy_tracker state"),
+            ),
+            CycleStepDef(
+                sid="graduation_check",
+                label="Update graduation status",
+                code_ref="monitor_rules_engine._compute_graduation",
+                runner_phase="monitor_decision_review",
+                description=(
+                    "Evaluates sample count, benefit rate, agreement rate, and rolling "
+                    "benefit to advance or demote rules through the graduation lifecycle."
+                ),
+                remarks=(
+                    "What: Part of aggregate_decision_outcomes. "
+                    "Updates nm_monitor_graduation mesh state."
+                ),
+                inputs=("MonitorDecisionRule sample counts and rates",),
+                outputs=("Updated graduation_status on MonitorDecisionRule rows",),
             ),
         ),
     ),

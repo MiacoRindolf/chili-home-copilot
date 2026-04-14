@@ -50,6 +50,8 @@ from .trading import (
     MomentumAutomationOutcome,
     MomentumStrategyVariant,
     MomentumSymbolViability,
+    MonitorDecisionRule,
+    MonitorPlanAccuracy,
     PaperTrade,
     PatternEvidenceHypothesis,
     PatternTradeRow,

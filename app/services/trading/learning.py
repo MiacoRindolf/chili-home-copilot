@@ -4143,17 +4143,44 @@ def learn_from_monitor_decisions(db: Session, user_id: int | None) -> dict[str, 
     # ── Trade plan signal predictiveness ──
     signal_stats = _analyze_trade_plan_signals(rows)
 
+    # ── Rules engine aggregation (self-learning) ──
+    rules_stats: dict[str, Any] = {}
+    try:
+        from .monitor_rules_engine import (
+            aggregate_decision_outcomes,
+            update_mesh_node_state,
+            update_plan_accuracy,
+        )
+
+        rules_stats = aggregate_decision_outcomes(db)
+        logger.info("[learning] Rules engine: %s", rules_stats)
+
+        # Update neural mesh node state
+        update_mesh_node_state(db, "nm_monitor_rules_learner", {
+            "rules_count": rules_stats.get("rules_updated", 0),
+            "total_samples": rules_stats.get("rows_processed", 0),
+            "last_aggregation_ts": datetime.utcnow().isoformat(),
+        })
+
+        # Plan accuracy tracking from dual-path decisions
+        _update_plan_accuracy_from_decisions(db, rows)
+
+    except Exception:
+        logger.debug("[learning] Rules engine aggregation failed", exc_info=True)
+
     logger.info(
         "[learning] Monitor decisions: %d reviewed, overall benefit %.0f%%, "
-        "tighten benefit %.0f%%, plan signals analyzed: %d",
+        "tighten benefit %.0f%%, plan signals analyzed: %d, rules updated: %d",
         total, overall_benefit * 100, tighten_rate * 100,
         signal_stats.get("signals_analyzed", 0),
+        rules_stats.get("rules_updated", 0),
     )
     return {
         "decisions_reviewed": total,
         "overall_benefit_rate": round(overall_benefit, 3),
         "by_action": {k: round(sum(v) / len(v), 3) for k, v in by_action.items()},
         "plan_signal_stats": signal_stats,
+        "rules_engine": rules_stats,
     }
 
 
@@ -4203,6 +4230,62 @@ def _analyze_trade_plan_signals(rows: list) -> dict[str, Any]:
         "signals_analyzed": total_signals,
         "predictive_signals": predictive_signals,
     }
+
+
+def _update_plan_accuracy_from_decisions(db: Session, rows: list) -> None:
+    """Compare LLM vs mechanical decisions in resolved rows and update plan accuracy."""
+    from .monitor_rules_engine import update_plan_accuracy, update_mesh_node_state
+    from ...models.trading import ScanPattern
+
+    stats = {"tracked": 0, "agreed": 0}
+    for r in rows:
+        if not r.mechanical_action or not r.action:
+            continue
+        if not r.scan_pattern_id:
+            continue
+
+        sp = db.query(ScanPattern).filter(ScanPattern.id == r.scan_pattern_id).first()
+        if not sp:
+            continue
+
+        ptype = (sp.name or f"pattern_{sp.id}")[:120]
+        rules = sp.rules_json
+        if isinstance(rules, str):
+            try:
+                import json as _json
+                rules = _json.loads(rules)
+            except Exception:
+                rules = {}
+        n_conds = len((rules or {}).get("conditions", []))
+        complexity_band = "simple" if n_conds < 5 else "complex"
+
+        agreed = r.mechanical_action == r.action
+        llm_correct = bool(r.was_beneficial) and r.decision_source == "llm"
+        mech_correct = bool(r.was_beneficial) and r.decision_source == "mechanical"
+        # If both sources agree and decision was beneficial, both are correct
+        if agreed and r.was_beneficial:
+            llm_correct = True
+            mech_correct = True
+
+        update_plan_accuracy(
+            db, ptype, complexity_band,
+            llm_correct=llm_correct,
+            mechanical_correct=mech_correct,
+            agreed=agreed,
+        )
+        stats["tracked"] += 1
+        if agreed:
+            stats["agreed"] += 1
+
+    if stats["tracked"]:
+        try:
+            update_mesh_node_state(db, "nm_plan_accuracy_tracker", {
+                "decisions_tracked": stats["tracked"],
+                "agreement_count": stats["agreed"],
+                "agreement_rate": round(stats["agreed"] / stats["tracked"], 3),
+            })
+        except Exception:
+            pass
 
 
 # ── Exit Optimization Learning ────────────────────────────────────────

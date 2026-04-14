@@ -309,6 +309,16 @@ _DEFAULT_WEIGHTS: dict[str, float] = {
     "monitor_delta_urgent": -0.3,
     "monitor_llm_confidence_min": 0.5,
     "monitor_cooldown_minutes": 15.0,
+
+    # ── Self-learning monitor (event-driven + rules engine) ──────────
+    "monitor_price_change_pct": 1.5,
+    "monitor_danger_zone_pct": 5.0,
+    "monitor_graduation_min_samples": 30.0,
+    "monitor_graduation_agreement_min": 0.80,
+    "monitor_graduation_benefit_min": 0.55,
+    "monitor_shadow_llm_rate": 0.20,
+    "monitor_graduated_llm_rate": 0.05,
+    "monitor_heartbeat_minutes": 30.0,
 }
 
 _adaptive_weights: dict[str, float] = dict(_DEFAULT_WEIGHTS)

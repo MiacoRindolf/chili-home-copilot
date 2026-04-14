@@ -547,6 +547,8 @@ def format_pattern_adjustment(
     dry_run: bool = False,
     invalidations: list | None = None,
     caution_changes: list | None = None,
+    structural_support: float | None = None,
+    structural_support_label: str = "",
 ) -> str:
     """Format a pattern monitor adjustment for Telegram delivery."""
     action_emoji = {
@@ -581,6 +583,17 @@ def format_pattern_adjustment(
     elif action == "loosen_target" and new_target is not None:
         old_str = f"${old_target:.2f}" if old_target else "none"
         lines.append(f"Target: {old_str} \u2192 <b>${new_target:.2f}</b>")
+
+    if action in ("exit_now", "tighten_stop") and structural_support is not None:
+        lab = structural_support_label or "trade_plan"
+        lines.append(
+            f"Support: {_price(structural_support, crypto=_is_crypto(ticker))} "
+            f"({_h(lab)})"
+        )
+        lines.append(
+            "<i>If lost below this level on a closing basis, the pattern thesis is fully dead — "
+            "exit or reduce immediately.</i>"
+        )
 
     if invalidations:
         lines.append("")

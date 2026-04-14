@@ -360,13 +360,17 @@ def _run_broker_sync_job():
 
 
 def _run_price_monitor_job():
-    """Check positions/breakouts/picks and dispatch alerts for all users with open trades."""
+    """Check positions/breakouts/picks and dispatch alerts for all users with open trades.
+
+    Also triggers event-driven pattern monitor for tickers where alerts fired.
+    """
     from ..db import SessionLocal
     from .trading.alerts import run_price_monitor
 
     def _work() -> None:
         logger.info("[scheduler] Starting price monitor check")
         db = SessionLocal()
+        alerted_tickers: list[str] = []
         try:
             from ..models.trading import Trade
             from sqlalchemy import distinct
@@ -381,8 +385,22 @@ def _run_price_monitor_job():
                 try:
                     result = run_price_monitor(db, user_id=uid)
                     logger.info(f"[scheduler] Price monitor user_id={uid}: {result}")
+                    if isinstance(result, dict):
+                        alerted_tickers.extend(result.get("alerted_tickers", []))
                 except Exception:
                     logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
+
+            # Trigger event-driven pattern monitor for all open pattern-linked tickers
+            pattern_tickers = [
+                r[0] for r in db.query(distinct(Trade.ticker))
+                .filter(
+                    Trade.status == "open",
+                    Trade.related_alert_id.isnot(None),
+                )
+                .all()
+            ]
+            if pattern_tickers:
+                trigger_pattern_monitor_for_tickers(pattern_tickers, reason="price_monitor")
         finally:
             db.close()
 
@@ -468,7 +486,11 @@ def _run_crypto_stop_monitor_job():
 
 
 def _run_pattern_position_monitor_job():
-    """Evaluate pattern-linked positions and adjust stops/targets."""
+    """Heartbeat: evaluate pattern-linked positions (event-driven mode).
+
+    Runs less frequently (30-min heartbeat) as the primary evaluation path
+    is now event-driven via the price monitor and broker sync callbacks.
+    """
     from ..db import SessionLocal
     from ..models.trading import Trade
     from sqlalchemy import distinct
@@ -488,13 +510,49 @@ def _run_pattern_position_monitor_job():
             ]
             for uid in user_ids:
                 try:
-                    run_pattern_position_monitor(db, uid)
+                    run_pattern_position_monitor(db, uid, event_driven=True)
                 except Exception:
                     logger.warning("[scheduler] pattern_position_monitor failed uid=%s", uid, exc_info=True)
         finally:
             db.close()
 
     run_scheduler_job_guarded("pattern_position_monitor", _work)
+
+
+def trigger_pattern_monitor_for_tickers(tickers: list[str], reason: str = "event") -> None:
+    """Event-driven trigger: evaluate pattern-linked positions for specific tickers.
+
+    Called by the price monitor and broker sync when a material change is detected.
+    """
+    from ..db import SessionLocal
+    from ..models.trading import Trade
+
+    db = SessionLocal()
+    try:
+        from .trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
+
+        trades = (
+            db.query(Trade)
+            .filter(
+                Trade.status == "open",
+                Trade.related_alert_id.isnot(None),
+                Trade.ticker.in_(tickers),
+            )
+            .all()
+        )
+        if not trades:
+            return
+
+        logger.info(
+            "[scheduler] Event-driven pattern monitor for %d trades (%s): %s",
+            len(trades), reason, [t.ticker for t in trades],
+        )
+        run_pattern_position_monitor_for_trades(db, trades, event_driven=True)
+        db.commit()
+    except Exception:
+        logger.warning("[scheduler] Event-driven pattern monitor failed", exc_info=True)
+    finally:
+        db.close()
 
 
 def _run_pattern_imminent_job():
@@ -1672,9 +1730,9 @@ def start_scheduler():
 
             _scheduler.add_job(
                 _run_pattern_position_monitor_job,
-                trigger=IntervalTrigger(minutes=3),
+                trigger=IntervalTrigger(minutes=30),
                 id="pattern_position_monitor",
-                name="Pattern position monitor (every 3min)",
+                name="Pattern position monitor heartbeat (every 30min, event-driven primary)",
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=45),

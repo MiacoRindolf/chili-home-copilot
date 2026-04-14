@@ -168,6 +168,115 @@ def _validate_plan(
     return plan
 
 
+def extract_trade_plan_mechanical(
+    *,
+    pattern_conditions: list[dict],
+    entry_price: float,
+    stop_loss: float,
+    target_price: float,
+    current_price: float,
+    indicators: dict[str, Any],
+) -> dict:
+    """Derive a trade plan mechanically from pattern conditions — no LLM.
+
+    Every condition that was met at alert time becomes an invalidation
+    condition if it flips.  Top indicators become the monitoring signals.
+    """
+    invalidations: list[dict] = []
+    monitoring_signals: list[dict] = []
+
+    VALID_INDICATORS = {
+        "price", "sma_20", "sma_50", "ema_20", "ema_50", "ema_100", "ema_200",
+        "rsi_14", "macd_hist", "macd", "macd_signal", "adx", "atr", "obv",
+        "mfi", "vwap", "bb_pct", "volume_ratio", "stochastic_k",
+        "dist_to_resistance_pct", "high_watermark",
+    }
+
+    for cond in pattern_conditions:
+        ind = cond.get("indicator", "")
+        op = cond.get("op", "")
+        val = cond.get("value")
+        ref = cond.get("ref")
+
+        if ind not in VALID_INDICATORS:
+            continue
+
+        # Invert the condition for invalidation:
+        # if the pattern required `rsi_14 > 50`, invalidation is `rsi_14 < 50`
+        inv_op = _invert_op(op)
+        if inv_op:
+            severity = "critical" if ind in ("price", "ema_50", "sma_50") else "warning"
+            inv_entry: dict[str, Any] = {
+                "desc": f"{ind} no longer meets pattern condition ({ind} {op} {val or ref})",
+                "indicator": ind,
+                "op": inv_op,
+                "severity": severity,
+            }
+            if ref:
+                inv_entry["ref"] = ref
+            elif val is not None:
+                inv_entry["value"] = val
+            invalidations.append(inv_entry)
+
+        # Use top conditions as monitoring signals
+        if len(monitoring_signals) < 4:
+            actual = indicators.get(ind)
+            baseline = "unknown"
+            if actual is not None and val is not None:
+                try:
+                    baseline = "above" if float(actual) >= float(val) else "below"
+                except (TypeError, ValueError):
+                    pass
+
+            monitoring_signals.append({
+                "desc": f"Watch {ind} ({op} {val or ref})",
+                "indicator": ind,
+                "watch": "level" if val is not None else "direction",
+                "baseline": baseline,
+                "level": val if isinstance(val, (int, float)) else None,
+            })
+
+    # Sort invalidations: critical first
+    invalidations.sort(key=lambda x: 0 if x.get("severity") == "critical" else 1)
+
+    # Compute early warning level
+    early_warning = None
+    if stop_loss and entry_price:
+        early_warning = round(stop_loss + (entry_price - stop_loss) * 0.3, 4)
+
+    plan = {
+        "entry_validation": {
+            "required_reclaim": entry_price,
+            "method": "buy_stop_above_entry",
+        },
+        "invalidation_conditions": invalidations[:5],
+        "monitoring_signals": monitoring_signals[:4],
+        "key_levels": {
+            "entry": entry_price,
+            "stop": stop_loss,
+            "target": target_price,
+            "early_warning": early_warning,
+            "near_resistance": None,
+            "vwap": indicators.get("vwap"),
+        },
+        "position_rules": {
+            "max_risk_pct": min(2.0, max(0.5, 1.0)),
+            "sizing_note": "mechanical plan — derived from pattern conditions",
+        },
+    }
+    return _validate_plan(plan, entry_price=entry_price, stop_loss=stop_loss, target_price=target_price)
+
+
+def _invert_op(op: str) -> str | None:
+    """Return the inverse comparison operator."""
+    _map = {
+        ">": "<=", ">=": "<",
+        "<": ">=", "<=": ">",
+        "==": "!=", "!=": "==",
+    }
+    return _map.get(op)
+
+
 def _format_indicators(indicators: dict[str, Any]) -> str:
     lines = []
     for k, v in sorted(indicators.items()):

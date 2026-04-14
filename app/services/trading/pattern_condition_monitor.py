@@ -210,6 +210,9 @@ class TradePlanHealth:
     levels_breached: list[dict] = field(default_factory=list)
     plan_health_score: float = 1.0
     human_summary: str = ""
+    # Nearest structural support below current price (longs), from trade plan key levels.
+    nearest_support: float | None = None
+    nearest_support_label: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -218,6 +221,8 @@ class TradePlanHealth:
             "caution_signals_changed": self.caution_signals_changed,
             "levels_breached": self.levels_breached,
             "plan_health_score": round(self.plan_health_score, 3),
+            "nearest_support": self.nearest_support,
+            "nearest_support_label": self.nearest_support_label,
         }
 
     @property
@@ -296,6 +301,27 @@ def evaluate_trade_plan(
             summary_parts.append(f"  LEVEL BREACH: {level_name} ${lv:.2f} (price ${current_price:.2f})")
 
     result.plan_health_score = max(0.0, min(1.0, 1.0 - penalty))
+
+    # Nearest support below current price (for long risk / graduated exit logic).
+    _candidates: list[tuple[float, str]] = []
+    for level_name in ("early_warning", "stop", "vwap", "entry"):
+        lv = levels.get(level_name)
+        if lv is None:
+            continue
+        try:
+            fv = float(lv)
+        except (TypeError, ValueError):
+            continue
+        if fv > 0 and fv < current_price:
+            _candidates.append((fv, level_name))
+    if _candidates:
+        # Highest level still below price = closest support from below.
+        best_v, best_n = max(_candidates, key=lambda x: x[0])
+        result.nearest_support = best_v
+        result.nearest_support_label = best_n
+        summary_parts.append(
+            f"  NEAREST SUPPORT (below price): ${best_v:.4f} ({best_n})"
+        )
 
     if not summary_parts:
         summary_parts.append("Trade plan: all conditions nominal.")

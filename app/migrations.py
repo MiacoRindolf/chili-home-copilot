@@ -6241,6 +6241,160 @@ def _migration_119_broker_sessions_table(conn) -> None:
     conn.commit()
 
 
+def _migration_120_monitor_learning_engine(conn) -> None:
+    """Tables for the self-learning monitor: decision rules, plan accuracy, and
+    new columns on existing tables for dual-path (mechanical vs LLM) tracking.
+    Also inserts c_monitor_learning neural mesh cluster (3 nodes + 4 edges)."""
+    tables = _tables(conn)
+
+    # ── MonitorDecisionRule ──
+    if "trading_monitor_decision_rules" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_monitor_decision_rules (
+                id SERIAL PRIMARY KEY,
+                pattern_type VARCHAR(120) NOT NULL,
+                signal_signature VARCHAR(200) NOT NULL,
+                action VARCHAR(30) NOT NULL,
+                stop_ratio FLOAT,
+                target_ratio FLOAT,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                benefit_rate FLOAT NOT NULL DEFAULT 0,
+                llm_agreement_rate FLOAT NOT NULL DEFAULT 0,
+                graduation_status VARCHAR(20) NOT NULL DEFAULT 'bootstrap',
+                rolling_benefit JSONB,
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_mdr_pattern_type ON trading_monitor_decision_rules (pattern_type)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_mdr_signal_sig ON trading_monitor_decision_rules (signal_signature)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_mdr_pt_sig ON trading_monitor_decision_rules (pattern_type, signal_signature)"
+        ))
+
+    # ── MonitorPlanAccuracy ──
+    if "trading_monitor_plan_accuracy" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_monitor_plan_accuracy (
+                id SERIAL PRIMARY KEY,
+                pattern_type VARCHAR(120) NOT NULL,
+                complexity_band VARCHAR(20) NOT NULL DEFAULT 'simple',
+                llm_correct_count INTEGER NOT NULL DEFAULT 0,
+                mechanical_correct_count INTEGER NOT NULL DEFAULT 0,
+                agreement_count INTEGER NOT NULL DEFAULT 0,
+                total_count INTEGER NOT NULL DEFAULT 0,
+                graduation_status VARCHAR(20) NOT NULL DEFAULT 'bootstrap',
+                updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_mpa_pattern_type ON trading_monitor_plan_accuracy (pattern_type)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_mpa_pt_cb ON trading_monitor_plan_accuracy (pattern_type, complexity_band)"
+        ))
+
+    # ── New columns on PatternMonitorDecision for dual-path tracking ──
+    pmd_cols = _columns(conn, "trading_pattern_monitor_decisions")
+    for col, typedef in [
+        ("mechanical_action", "VARCHAR(30)"),
+        ("mechanical_stop", "FLOAT"),
+        ("mechanical_target", "FLOAT"),
+        ("decision_source", "VARCHAR(20)"),
+    ]:
+        if col not in pmd_cols:
+            conn.execute(text(
+                f"ALTER TABLE trading_pattern_monitor_decisions ADD COLUMN {col} {typedef}"
+            ))
+
+    # ── New column on BreakoutAlert for mechanical trade plan ──
+    ba_cols = _columns(conn, "trading_breakout_alerts")
+    if "trade_plan_mechanical" not in ba_cols:
+        conn.execute(text(
+            "ALTER TABLE trading_breakout_alerts ADD COLUMN trade_plan_mechanical JSONB"
+        ))
+
+    # ── Neural mesh: c_monitor_learning cluster (3 nodes + 4 edges) ──
+    _existing_nodes = set()
+    try:
+        rows = conn.execute(text(
+            "SELECT id FROM brain_graph_nodes WHERE id LIKE 'nm_monitor_%'"
+        )).fetchall()
+        _existing_nodes = {r[0] for r in rows}
+    except Exception:
+        pass
+
+    _nodes = [
+        ("nm_monitor_rules_learner", "learning_step",
+         "Monitor rules learner", "c_monitor_learning",
+         "Aggregates decision outcomes into learned rules per signal signature"),
+        ("nm_plan_accuracy_tracker", "learning_step",
+         "Plan accuracy tracker", "c_monitor_learning",
+         "Compares mechanical vs LLM trade plan accuracy per pattern type"),
+        ("nm_monitor_graduation", "learning_step",
+         "Monitor graduation manager", "c_monitor_learning",
+         "Manages per-pattern-type graduation lifecycle"),
+    ]
+    for nid, ntype, label, cluster, desc in _nodes:
+        if nid not in _existing_nodes:
+            conn.execute(text("""
+                INSERT INTO brain_graph_nodes
+                    (id, domain, graph_version, node_type, layer, label,
+                     fire_threshold, cooldown_seconds, enabled, version,
+                     is_observer, display_meta, created_at, updated_at)
+                VALUES
+                    (:nid, 'trading', 1, :ntype, 9, :label,
+                     0.5, 120, true, 1, false,
+                     :meta, NOW(), NOW())
+            """), {
+                "nid": nid, "ntype": ntype, "label": label,
+                "meta": (
+                    '{"role":"' + ntype + '","cluster_id":"' + cluster + '",'
+                    '"desc":"' + desc + '"}'
+                ),
+            })
+            _state_exists = conn.execute(text(
+                "SELECT 1 FROM brain_node_states WHERE node_id = :nid"
+            ), {"nid": nid}).fetchone()
+            if not _state_exists:
+                conn.execute(text("""
+                    INSERT INTO brain_node_states
+                        (node_id, activation_score, confidence, local_state, updated_at)
+                    VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP)
+                """), {"nid": nid})
+
+    _edges = [
+        ("nm_lc_monitor_review", "nm_monitor_rules_learner", "outcome_data_ready"),
+        ("nm_monitor_rules_learner", "nm_plan_accuracy_tracker", "rules_updated"),
+        ("nm_plan_accuracy_tracker", "nm_monitor_graduation", "accuracy_computed"),
+        ("nm_monitor_graduation", "nm_position_monitor", "graduation_status_changed"),
+    ]
+    for src, tgt, sig in _edges:
+        exists = conn.execute(text(
+            "SELECT 1 FROM brain_graph_edges "
+            "WHERE source_node_id = :src AND target_node_id = :tgt AND signal_type = :sig"
+        ), {"src": src, "tgt": tgt, "sig": sig}).fetchone()
+        if not exists:
+            conn.execute(text("""
+                INSERT INTO brain_graph_edges
+                    (source_node_id, target_node_id, signal_type, weight, polarity,
+                     delay_ms, min_confidence, enabled, graph_version,
+                     edge_type, created_at, updated_at)
+                SELECT :src, :tgt, :sig, 0.5, 'excitatory',
+                       0, 0.0, true, 1,
+                       'dataflow', NOW(), NOW()
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes WHERE id = :tgt)
+            """), {"src": src, "tgt": tgt, "sig": sig})
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6362,6 +6516,7 @@ MIGRATIONS = [
     ("117_pattern_position_monitor", _migration_117_pattern_position_monitor),
     ("118_dynamic_trade_plan_monitor", _migration_118_dynamic_trade_plan_monitor),
     ("119_broker_sessions_table", _migration_119_broker_sessions_table),
+    ("120_monitor_learning_engine", _migration_120_monitor_learning_engine),
 ]
 
 

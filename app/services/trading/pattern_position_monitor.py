@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import time
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -18,6 +19,7 @@ from ...models.trading import (
     BreakoutAlert,
     PatternMonitorDecision,
     ScanPattern,
+    StopDecision,
     Trade,
 )
 from .market_data import fetch_quote, get_indicator_snapshot
@@ -35,11 +37,222 @@ logger = logging.getLogger(__name__)
 _last_health: dict[int, float] = {}
 
 
+@dataclass
+class PositionVerdict:
+    """Unified view for AI context / alerts: reconciles monitor + stops + plan levels."""
+
+    action: str  # exit_now | tighten_to_support | hold_with_stop | hold
+    stop_level: float | None
+    reasoning: str
+    urgency: str  # critical | warning | info
+
+
+def resolve_position_verdict(
+    db: Session,
+    trade: Trade,
+    *,
+    current_price: float | None = None,
+) -> PositionVerdict | None:
+    """Reconcile latest pattern monitor decision, stop-engine state, and trade-plan levels.
+
+    Returns None if trade is not open. ``current_price`` may be fetched via ``fetch_quote``.
+    """
+    if trade.status != "open":
+        return None
+
+    if current_price is None or current_price <= 0:
+        try:
+            q = fetch_quote(trade.ticker)
+            current_price = float(q.get("price") or q.get("last") or 0) if q else 0.0
+        except Exception:
+            current_price = 0.0
+
+    tiny_float = current_price > 0 and current_price < 5.0
+
+    last_mon = (
+        db.query(PatternMonitorDecision)
+        .filter(PatternMonitorDecision.trade_id == trade.id)
+        .order_by(PatternMonitorDecision.created_at.desc())
+        .first()
+    )
+
+    last_stop = (
+        db.query(StopDecision)
+        .filter(StopDecision.trade_id == trade.id)
+        .order_by(StopDecision.as_of_ts.desc())
+        .first()
+    )
+
+    plan_stop = None
+    plan_early = None
+    if trade.related_alert_id:
+        alert = db.get(BreakoutAlert, trade.related_alert_id)
+        if alert and isinstance(alert.trade_plan, dict):
+            kl = alert.trade_plan.get("key_levels") or {}
+            try:
+                if kl.get("stop") is not None:
+                    plan_stop = float(kl["stop"])
+            except (TypeError, ValueError):
+                pass
+            try:
+                if kl.get("early_warning") is not None:
+                    plan_early = float(kl["early_warning"])
+            except (TypeError, ValueError):
+                pass
+
+    bits: list[str] = []
+    action = "hold"
+    urgency = "info"
+    stop_level = trade.stop_loss
+
+    if last_mon:
+        age_h = (datetime.utcnow() - last_mon.created_at).total_seconds() / 3600.0
+        if last_mon.action == "exit_now" and age_h <= 48:
+            action = "exit_now"
+            urgency = "critical"
+            bits.append(
+                f"Pattern monitor: EXIT_NOW {age_h:.1f}h ago "
+                f"(health {last_mon.health_score:.0%} at decision, "
+                f"price @ decision ${last_mon.price_at_decision or 0:.4f})"
+            )
+        elif last_mon.action == "tighten_stop" and last_mon.new_stop is not None and age_h <= 48:
+            action = "tighten_to_support"
+            stop_level = last_mon.new_stop
+            urgency = "warning"
+            bits.append(
+                f"Pattern monitor: TIGHTEN_STOP to ${last_mon.new_stop:.4f} ({age_h:.1f}h ago)"
+            )
+        elif last_mon.action in ("loosen_target", "hold") and age_h <= 24:
+            bits.append(
+                f"Pattern monitor: {last_mon.action.upper()} ({age_h:.1f}h ago, "
+                f"health {last_mon.health_score:.0%})"
+            )
+
+    if trade.stop_loss is not None and current_price > 0:
+        if action == "hold":
+            action = "hold_with_stop"
+        dist_pct = (current_price - trade.stop_loss) / current_price * 100
+        bits.append(
+            f"Trade stop on file: ${trade.stop_loss:.4f} (~{dist_pct:.1f}% below spot)"
+        )
+
+    if plan_stop is not None or plan_early is not None:
+        bits.append(
+            f"Plan key levels: stop ${plan_stop or 'n/a'}, early_warning ${plan_early or 'n/a'}"
+        )
+
+    if last_stop:
+        st = (last_stop.state or "").lower()
+        tr = (last_stop.trigger or "").upper()
+        if st == "triggered" or tr in ("STOP_HIT", "STOP_BREACH"):
+            bits.append(
+                f"Stop engine: state={last_stop.state} trigger={last_stop.trigger!r}"
+            )
+
+    if tiny_float and urgency != "critical":
+        bits.append("Risk note: sub-$5 float — higher gap/dilution risk; favor explicit stops.")
+
+    reasoning = " | ".join(bits) if bits else "No recent pattern-monitor or stop-engine signals."
+
+    return PositionVerdict(
+        action=action,
+        stop_level=stop_level,
+        reasoning=reasoning,
+        urgency=urgency,
+    )
+
+
+def _structural_support_for_graduated_exit(
+    *,
+    current_price: float,
+    alert: BreakoutAlert,
+    plan_health: TradePlanHealth,
+) -> tuple[float | None, str]:
+    """Nearest support below price from trade plan + pattern stop; label for messaging."""
+    if current_price <= 0:
+        return None, ""
+
+    candidates: list[tuple[float, str]] = []
+    if plan_health.nearest_support is not None and plan_health.nearest_support < current_price:
+        candidates.append(
+            (plan_health.nearest_support, plan_health.nearest_support_label or "trade_plan"),
+        )
+    if alert.stop_loss is not None:
+        try:
+            ps = float(alert.stop_loss)
+        except (TypeError, ValueError):
+            ps = None
+        if ps is not None and 0 < ps < current_price:
+            candidates.append((ps, "pattern_stop"))
+
+    if not candidates:
+        return None, ""
+
+    # Highest below price = closest support from below (long).
+    best_v, best_lab = max(candidates, key=lambda x: x[0])
+    return best_v, best_lab
+
+
+def _apply_graduated_critical_override(
+    primary: Any,
+    *,
+    urgent_invalidation: bool,
+    pnl_pct: float | None,
+    current_price: float,
+    alert: BreakoutAlert,
+    plan_health: TradePlanHealth,
+    trade: Trade,
+) -> None:
+    """Mutate ``primary`` (AdjustmentRecommendation) when thesis is critically broken + loss.
+
+    Uses structural support within 3% below spot to prefer tighten_stop over market exit;
+    catastrophic loss still forces exit_now.
+    """
+    if not urgent_invalidation or pnl_pct is None:
+        return
+
+    from .pattern_adjustment_advisor import AdjustmentRecommendation
+
+    # Catastrophic: always exit regardless of nearby support.
+    if pnl_pct < -15:
+        primary.action = "exit_now"
+        primary.reasoning = (primary.reasoning or "") + (
+            " [Critical: catastrophic loss override — exit regardless of nearby support]"
+        )
+        return
+
+    if pnl_pct >= -5:
+        return
+
+    sup, lab = _structural_support_for_graduated_exit(
+        current_price=current_price, alert=alert, plan_health=plan_health,
+    )
+    if sup is not None and current_price > 0:
+        pct_to_support = (current_price - sup) / current_price * 100.0
+        # Long: tighten only if support is *above* current trade stop (tighter = higher stop).
+        old_sl = trade.stop_loss
+        widens = old_sl is not None and sup < old_sl
+        if 0 <= pct_to_support <= 3.0 and not widens:
+            primary.action = "tighten_stop"
+            primary.new_stop = sup
+            primary.reasoning = (primary.reasoning or "") + (
+                f" [Graduated: structural support ({lab}) @ ${sup:.4f} within 3% — "
+                f"tighten stop vs exit at market]"
+            )
+            return
+
+    primary.action = "exit_now"
+    primary.reasoning = (primary.reasoning or "") + (
+        " [Critical invalidation + loss — exit (no usable nearby support or would widen stop)]"
+    )
+
+
 def run_pattern_position_monitor(
     db: Session,
     user_id: int | None = None,
     *,
     dry_run: bool = False,
+    event_driven: bool = False,
 ) -> dict[str, Any]:
     """Main entry point — evaluate all pattern-linked positions for a user."""
     t0 = time.monotonic()
@@ -54,6 +267,32 @@ def run_pattern_position_monitor(
     trades = query.all()
     if not trades:
         return {"ok": True, "evaluated": 0, "actions": 0, "skipped": 0}
+
+    return _run_for_trades(db, trades, dry_run=dry_run, event_driven=event_driven)
+
+
+def run_pattern_position_monitor_for_trades(
+    db: Session,
+    trades: list[Trade],
+    *,
+    dry_run: bool = False,
+    event_driven: bool = True,
+) -> dict[str, Any]:
+    """Event-driven entry: evaluate a specific set of trades."""
+    if not trades:
+        return {"ok": True, "evaluated": 0, "actions": 0, "skipped": 0}
+    return _run_for_trades(db, trades, dry_run=dry_run, event_driven=event_driven)
+
+
+def _run_for_trades(
+    db: Session,
+    trades: list[Trade],
+    *,
+    dry_run: bool = False,
+    event_driven: bool = False,
+) -> dict[str, Any]:
+    """Shared evaluation loop."""
+    t0 = time.monotonic()
 
     cooldown_min = get_adaptive_weight("monitor_cooldown_minutes")
     health_healthy = get_adaptive_weight("monitor_health_healthy")
@@ -75,6 +314,7 @@ def run_pattern_position_monitor(
                 health_weakening=health_weakening,
                 delta_urgent=delta_urgent,
                 llm_conf_min=llm_conf_min,
+                event_driven=event_driven,
             )
             evaluated += 1
             if result == "action":
@@ -109,8 +349,25 @@ def _evaluate_single(
     health_weakening: float,
     delta_urgent: float,
     llm_conf_min: float,
+    event_driven: bool = False,
 ) -> str:
-    """Evaluate one pattern-linked trade. Returns 'action', 'hold', or 'skipped'."""
+    """Evaluate one pattern-linked trade.  Returns 'action', 'hold', or 'skipped'.
+
+    Uses the self-learning dual-path engine:
+    - Simple patterns: mechanical rule is primary, LLM shadow-validates on sample basis.
+    - Complex patterns: LLM is authoritative, mechanical rule shadow-learns.
+    - Graduated rules: mechanical-only with rare LLM drift checks.
+    """
+    from .monitor_rules_engine import (
+        apply_level_ratios,
+        build_signal_snapshot,
+        compute_signal_signature,
+        get_graduation_status,
+        is_pattern_simple,
+        lookup_rule,
+        should_evaluate,
+        should_shadow_llm,
+    )
 
     # Cooldown: skip if we made a decision recently.
     recent_cutoff = datetime.utcnow() - timedelta(minutes=cooldown_min)
@@ -157,6 +414,24 @@ def _evaluate_single(
     if not current_price:
         return "skipped"
 
+    # ── Materiality gate (event-driven mode) ──
+    if event_driven:
+        last_snap = recent.conditions_snapshot if recent else None
+        last_price = recent.price_at_decision if recent else None
+        mat_ok, mat_reason = should_evaluate(
+            current_price=current_price,
+            last_price=last_price,
+            current_indicators=flat,
+            last_snapshot=last_snap,
+            stop_price=trade.stop_loss or alert.stop_loss,
+            target_price=trade.take_profit or alert.target_price,
+            price_change_pct=get_adaptive_weight("monitor_price_change_pct"),
+            danger_zone_pct=get_adaptive_weight("monitor_danger_zone_pct"),
+        )
+        if not mat_ok:
+            return "skipped"
+        logger.debug("[pattern_monitor] materiality gate passed for %s: %s", trade.ticker, mat_reason)
+
     pnl_pct = ((current_price - trade.entry_price) / trade.entry_price * 100) if trade.entry_price else None
 
     # ── Lazy trade plan generation ──
@@ -175,65 +450,139 @@ def _evaluate_single(
     # ── Evaluate trade plan (dynamic conditions) ──
     plan_health = evaluate_trade_plan(trade_plan, flat, current_price)
 
-    # ── Decide whether LLM consultation is needed ──
-    needs_llm = False
+    # ── Decide whether action is needed ──
+    needs_action = False
     urgent_invalidation = False
 
-    # Trade plan invalidation always triggers action.
     if plan_health.has_critical_invalidation:
-        needs_llm = True
+        needs_action = True
         urgent_invalidation = True
     elif plan_health.has_any_invalidation:
-        needs_llm = True
+        needs_action = True
     elif plan_health.caution_signals_changed:
-        needs_llm = True
+        needs_action = True
 
-    # Pattern health triggers (existing logic).
     if health.health_delta is not None and health.health_delta <= delta_urgent:
-        needs_llm = True
+        needs_action = True
     elif health.health_score < health_weakening:
-        needs_llm = True
+        needs_action = True
     elif previous_health is not None and abs(health.health_score - previous_health) >= 0.2:
-        needs_llm = True
+        needs_action = True
 
-    if not needs_llm:
+    if not needs_action:
         return "hold"
 
-    # ── Call LLM advisor with combined context ──
-    from .pattern_adjustment_advisor import get_adjustment
-
-    combined_summary = health.human_summary
-    if plan_health.human_summary:
-        combined_summary += "\n\n--- Trade Plan Status ---\n" + plan_health.human_summary
-
-    rec = get_adjustment(
-        ticker=trade.ticker,
-        pattern_name=pattern.name or f"Pattern #{pattern.id}",
-        pattern_description=pattern.description or "",
-        health_summary=combined_summary,
-        health_score=health.health_score,
-        health_delta=health.health_delta,
-        current_price=current_price,
-        entry_price=trade.entry_price,
-        current_stop=trade.stop_loss,
-        current_target=trade.take_profit,
-        pattern_stop=alert.stop_loss,
-        pattern_target=alert.target_price,
+    # ── Build signal snapshot for rules engine ──
+    pattern_type = (pattern.name or f"pattern_{pattern.id}")[:120]
+    sig_snap = build_signal_snapshot(
+        plan_health=plan_health,
+        condition_health=health,
         pnl_pct=pnl_pct,
-        trade_plan_health=plan_health,
+        current_price=current_price,
+        stop_price=trade.stop_loss or alert.stop_loss,
+        target_price=trade.take_profit or alert.target_price,
+    )
+    signal_sig = compute_signal_signature(sig_snap)
+    simple = is_pattern_simple(pattern.rules_json if isinstance(pattern.rules_json, dict) else None)
+    grad_status = get_graduation_status(db, pattern_type, signal_sig)
+
+    # ── Mechanical rule lookup ──
+    mech = lookup_rule(db, pattern_type, signal_sig)
+    if mech and mech.rule_id:
+        mech = apply_level_ratios(
+            mech, mech.rule_id, current_price,
+            trade.stop_loss or alert.stop_loss, db,
+        )
+
+    # ── Decide which path is authoritative ──
+    use_llm = True
+    decision_source = "llm"
+
+    if grad_status == "graduated" and mech:
+        use_llm = should_shadow_llm(grad_status)
+        decision_source = "mechanical"
+    elif simple and mech and grad_status == "shadow":
+        use_llm = should_shadow_llm(grad_status)
+        decision_source = "mechanical"
+    elif not simple and grad_status in ("bootstrap", "shadow", "demoted"):
+        use_llm = True
+        decision_source = "llm"
+    elif simple and grad_status == "bootstrap":
+        use_llm = True
+        decision_source = "llm"
+
+    # ── LLM advisory (when needed) ──
+    rec = None
+    if use_llm:
+        from .pattern_adjustment_advisor import get_adjustment
+
+        combined_summary = health.human_summary
+        if plan_health.human_summary:
+            combined_summary += "\n\n--- Trade Plan Status ---\n" + plan_health.human_summary
+
+        rec = get_adjustment(
+            ticker=trade.ticker,
+            pattern_name=pattern.name or f"Pattern #{pattern.id}",
+            pattern_description=pattern.description or "",
+            health_summary=combined_summary,
+            health_score=health.health_score,
+            health_delta=health.health_delta,
+            current_price=current_price,
+            entry_price=trade.entry_price,
+            current_stop=trade.stop_loss,
+            current_target=trade.take_profit,
+            pattern_stop=alert.stop_loss,
+            pattern_target=alert.target_price,
+            pnl_pct=pnl_pct,
+            trade_plan_health=plan_health,
+        )
+
+    # ── Select primary recommendation ──
+    if decision_source == "mechanical" and mech:
+        from .pattern_adjustment_advisor import AdjustmentRecommendation
+        primary = AdjustmentRecommendation(
+            action=mech.action,
+            new_stop=mech.new_stop,
+            new_target=mech.new_target,
+            confidence=mech.confidence,
+            reasoning=mech.reasoning,
+        )
+    elif rec:
+        primary = rec
+    else:
+        from .pattern_adjustment_advisor import AdjustmentRecommendation
+        primary = AdjustmentRecommendation(action="hold", confidence=0.0, reasoning="No decision available")
+
+    # Critical invalidation + loss: graduated exit vs tighten to structural support.
+    _apply_graduated_critical_override(
+        primary,
+        urgent_invalidation=urgent_invalidation,
+        pnl_pct=pnl_pct,
+        current_price=current_price,
+        alert=alert,
+        plan_health=plan_health,
+        trade=trade,
     )
 
-    # Critical invalidation with loss overrides to exit_now regardless of LLM.
-    if urgent_invalidation and pnl_pct is not None and pnl_pct < -5:
-        rec.action = "exit_now"
-        rec.reasoning = (rec.reasoning or "") + " [Critical invalidation + loss override]"
+    if primary.confidence < llm_conf_min and primary.action not in ("exit_now", "tighten_stop"):
+        primary.action = "hold"
 
-    if rec.confidence < llm_conf_min and rec.action != "exit_now":
-        rec.action = "hold"
-
-    # ── Log decision ──
+    # ── Log decision with dual-path data ──
     conditions_snap = health.to_dict()
     conditions_snap["trade_plan"] = plan_health.to_dict()
+    conditions_snap["pnl_pct"] = pnl_pct
+    conditions_snap["price_vs_stop_pct"] = sig_snap.price_vs_stop_pct
+    conditions_snap["price_vs_target_pct"] = sig_snap.price_vs_target_pct
+    _atr = flat.get("atr")
+    if _atr is None:
+        _atr = flat.get("atr_14")
+    try:
+        conditions_snap["atr_snapshot"] = float(_atr) if _atr is not None else None
+    except (TypeError, ValueError):
+        conditions_snap["atr_snapshot"] = None
+    if plan_health.nearest_support is not None:
+        conditions_snap["nearest_support"] = plan_health.nearest_support
+        conditions_snap["nearest_support_label"] = plan_health.nearest_support_label
 
     decision = PatternMonitorDecision(
         trade_id=trade.id,
@@ -242,13 +591,17 @@ def _evaluate_single(
         health_score=health.health_score,
         health_delta=health.health_delta,
         conditions_snapshot=conditions_snap,
-        action=rec.action,
+        action=primary.action,
         old_stop=trade.stop_loss,
-        new_stop=rec.new_stop,
+        new_stop=primary.new_stop,
         old_target=trade.take_profit,
-        new_target=rec.new_target,
-        llm_confidence=rec.confidence,
-        llm_reasoning=rec.reasoning,
+        new_target=primary.new_target,
+        llm_confidence=rec.confidence if rec else None,
+        llm_reasoning=rec.reasoning if rec else None,
+        mechanical_action=mech.action if mech else None,
+        mechanical_stop=mech.new_stop if mech else None,
+        mechanical_target=mech.new_target if mech else None,
+        decision_source=decision_source,
         price_at_decision=current_price,
     )
     db.add(decision)
@@ -256,13 +609,13 @@ def _evaluate_single(
     # ── Apply adjustment ──
     applied = False
     if not dry_run:
-        if rec.action == "tighten_stop" and rec.new_stop is not None:
-            trade.stop_loss = rec.new_stop
+        if primary.action == "tighten_stop" and primary.new_stop is not None:
+            trade.stop_loss = primary.new_stop
             applied = True
-        elif rec.action == "loosen_target" and rec.new_target is not None:
-            trade.take_profit = rec.new_target
+        elif primary.action == "loosen_target" and primary.new_target is not None:
+            trade.take_profit = primary.new_target
             applied = True
-        elif rec.action == "exit_now":
+        elif primary.action == "exit_now":
             applied = True
 
     # ── Dispatch Telegram alert ──
@@ -271,7 +624,7 @@ def _evaluate_single(
             db,
             trade=trade,
             pattern_name=pattern.name or f"Pattern #{pattern.id}",
-            rec=rec,
+            rec=primary,
             health=health,
             plan_health=plan_health,
             current_price=current_price,
@@ -281,7 +634,7 @@ def _evaluate_single(
     except Exception:
         logger.debug("[pattern_monitor] alert dispatch failed for %s", trade.ticker, exc_info=True)
 
-    return "action" if applied or rec.action != "hold" else "hold"
+    return "action" if applied or primary.action != "hold" else "hold"
 
 
 def _ensure_trade_plan(
@@ -291,34 +644,77 @@ def _ensure_trade_plan(
     indicators: dict[str, Any],
     current_price: float,
 ) -> None:
-    """Lazy-generate a trade plan for the alert if one doesn't exist yet."""
-    if alert.trade_plan:
+    """Lazy-generate a trade plan for the alert using the hybrid path.
+
+    Simple patterns (<5 conditions): mechanical plan is primary, LLM shadow.
+    Complex patterns (>=5 conditions): LLM plan is primary, mechanical shadow.
+    Both plans are stored for accuracy tracking.
+    """
+    if alert.trade_plan and alert.trade_plan_mechanical:
         return
 
     try:
         import json as _json
-        from .trade_plan_extractor import extract_trade_plan
+        from .monitor_rules_engine import get_complexity_band, is_pattern_simple
+        from .trade_plan_extractor import extract_trade_plan, extract_trade_plan_mechanical
 
         rules = pattern.rules_json
         if isinstance(rules, str):
             rules = _json.loads(rules)
         conditions = (rules or {}).get("conditions", [])
 
-        plan = extract_trade_plan(
-            ticker=alert.ticker,
-            pattern_name=pattern.name or f"Pattern #{pattern.id}",
-            pattern_description=pattern.description or "",
-            pattern_conditions=conditions,
-            entry_price=alert.entry_price or current_price,
-            stop_loss=alert.stop_loss or 0,
-            target_price=alert.target_price or 0,
-            current_price=current_price,
-            indicators=indicators,
-        )
-        if plan:
-            alert.trade_plan = plan
-            db.add(alert)
-            logger.info("[pattern_monitor] Generated trade plan for alert %s (%s)", alert.id, alert.ticker)
+        simple = is_pattern_simple(rules if isinstance(rules, dict) else None)
+        entry = alert.entry_price or current_price
+        stop = alert.stop_loss or 0
+        target = alert.target_price or 0
+
+        # Always generate mechanical plan (cheap, no LLM)
+        if not alert.trade_plan_mechanical:
+            mech_plan = extract_trade_plan_mechanical(
+                pattern_conditions=conditions,
+                entry_price=entry,
+                stop_loss=stop,
+                target_price=target,
+                current_price=current_price,
+                indicators=indicators,
+            )
+            alert.trade_plan_mechanical = mech_plan
+
+        # For simple patterns: mechanical is primary, LLM as shadow
+        if simple and not alert.trade_plan:
+            alert.trade_plan = alert.trade_plan_mechanical
+            logger.info(
+                "[pattern_monitor] Mechanical trade plan for alert %s (%s) — simple pattern",
+                alert.id, alert.ticker,
+            )
+
+        # For complex patterns (or if LLM plan is missing): call LLM
+        if not alert.trade_plan:
+            llm_plan = extract_trade_plan(
+                ticker=alert.ticker,
+                pattern_name=pattern.name or f"Pattern #{pattern.id}",
+                pattern_description=pattern.description or "",
+                pattern_conditions=conditions,
+                entry_price=entry,
+                stop_loss=stop,
+                target_price=target,
+                current_price=current_price,
+                indicators=indicators,
+            )
+            if llm_plan:
+                alert.trade_plan = llm_plan
+                logger.info(
+                    "[pattern_monitor] LLM trade plan for alert %s (%s) — complex pattern",
+                    alert.id, alert.ticker,
+                )
+            elif alert.trade_plan_mechanical:
+                alert.trade_plan = alert.trade_plan_mechanical
+                logger.info(
+                    "[pattern_monitor] LLM failed, using mechanical plan for alert %s (%s)",
+                    alert.id, alert.ticker,
+                )
+
+        db.add(alert)
     except Exception:
         logger.debug("[pattern_monitor] trade plan generation failed for alert %s", alert.id, exc_info=True)
 
@@ -345,6 +741,8 @@ def _dispatch_monitor_alert(
     invalidations = plan_health.invalidations_triggered if plan_health else []
     caution_changes = plan_health.caution_signals_changed if plan_health else []
 
+    _sup = plan_health.nearest_support if plan_health else None
+    _sup_lab = plan_health.nearest_support_label if plan_health else ""
     msg = format_pattern_adjustment(
         ticker=trade.ticker,
         pattern_name=pattern_name,
@@ -362,6 +760,8 @@ def _dispatch_monitor_alert(
         dry_run=dry_run,
         invalidations=invalidations,
         caution_changes=caution_changes,
+        structural_support=_sup,
+        structural_support_label=_sup_lab,
     )
 
     dispatch_alert(
@@ -480,8 +880,19 @@ def _score_benefit(d: PatternMonitorDecision) -> None:
         # Beneficial if price went up toward the new target.
         d.was_beneficial = move > 0
     elif d.action == "exit_now":
-        # Beneficial if price continued to drop.
-        d.was_beneficial = move < 0
+        # Beneficial if price dropped meaningfully after exit (not noise).
+        atr = None
+        if d.conditions_snapshot and isinstance(d.conditions_snapshot, dict):
+            atr = d.conditions_snapshot.get("atr_snapshot")
+        try:
+            atr_f = float(atr) if atr is not None else 0.0
+        except (TypeError, ValueError):
+            atr_f = 0.0
+        if atr_f > 0:
+            threshold = atr_f * 0.5
+        else:
+            threshold = max(abs(d.price_at_decision or 0) * 0.005, 0.01)
+        d.was_beneficial = move < -threshold
     elif d.action == "hold":
         # Beneficial if price stayed roughly stable or went up.
         d.was_beneficial = move >= -abs(d.price_at_decision * 0.01)

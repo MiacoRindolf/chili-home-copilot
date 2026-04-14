@@ -6,11 +6,18 @@ import logging
 import threading
 import time as _time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy.orm import Session
 
-from ...models.trading import BacktestResult, BreakoutAlert, Trade, StrategyProposal
+from ...models.trading import (
+    BacktestResult,
+    BreakoutAlert,
+    PatternMonitorDecision,
+    StrategyProposal,
+    Trade,
+)
 from ..yf_session import get_fundamentals
 from .market_data import (
     compute_indicators, fetch_quote, _use_massive, _use_polygon,
@@ -21,6 +28,72 @@ from .journal import get_journal
 from .scanner import _score_ticker
 
 logger = logging.getLogger(__name__)
+
+
+def _build_pattern_monitor_alignment_block(
+    db: Session,
+    open_trades: list,
+    current_price: float | None,
+) -> str | None:
+    """Inject recent pattern-monitor decisions + reconciled verdict for AI Analysis."""
+    if not open_trades:
+        return None
+
+    from .pattern_position_monitor import resolve_position_verdict
+
+    trade_ids = [t.id for t in open_trades]
+    cutoff = datetime.utcnow() - timedelta(hours=4)
+    recent = (
+        db.query(PatternMonitorDecision)
+        .filter(
+            PatternMonitorDecision.trade_id.in_(trade_ids),
+            PatternMonitorDecision.created_at >= cutoff,
+        )
+        .order_by(PatternMonitorDecision.created_at.desc())
+        .limit(20)
+        .all()
+    )
+
+    lines = ["## PATTERN MONITOR ALIGNMENT (same brain as Telegram alerts)"]
+    sig = [d for d in recent if d.action != "hold"]
+    for d in sig[:5]:
+        age_m = (datetime.utcnow() - d.created_at).total_seconds() / 60.0
+        lines.append(
+            f"- Trade #{d.trade_id}: **{d.action.upper()}** {age_m:.0f}m ago @ "
+            f"${d.price_at_decision or 0:.4f} (pattern health {d.health_score:.0%}, "
+            f"source={d.decision_source or 'n/a'})"
+        )
+        if d.action == "exit_now":
+            lines.append(
+                "  The live position monitor **recommended EXIT** for this DB-linked trade. "
+                "You must address this in your verdict — do not ignore it."
+            )
+
+    for tr in open_trades:
+        if not tr.related_alert_id:
+            continue
+        v = resolve_position_verdict(db, tr, current_price=current_price)
+        if not v:
+            continue
+        sl = f"${v.stop_level:.4f}" if v.stop_level is not None else "n/a"
+        lines.append(
+            f"- **Reconciled verdict** (trade #{tr.id}): `{v.action}` | urgency={v.urgency} | "
+            f"reference level: {sl}"
+        )
+        lines.append(f"  _{v.reasoning}_")
+
+    if len(lines) <= 1:
+        return None
+
+    lines.append("")
+    lines.append(
+        "If the pattern monitor fired **EXIT NOW** and you recommend **HOLD**, you MUST: "
+        "(1) state the monitor recommends EXIT, (2) cite a structural level (price) that justifies holding, "
+        "(3) give an exact hard-stop price where HOLD becomes EXIT, "
+        "(4) acknowledge the risk of holding against a dead pattern."
+    )
+    return "\n".join(lines)
+
 
 # ---------------------------------------------------------------------------
 # Market-context cache (avoids re-scoring 20 tickers on every analyze call)
@@ -672,6 +745,16 @@ def build_ai_context(
                     f"P&L: ${tr.pnl} ({result})"
                 )
         parts.append("\n".join(lines))
+
+        try:
+            _qpx = None
+            if quote:
+                _qpx = float(quote.get("price") or quote.get("last") or 0) or None
+        except (TypeError, ValueError):
+            _qpx = None
+        _align = _build_pattern_monitor_alignment_block(db, open_trades, _qpx)
+        if _align:
+            parts.append(_align)
 
     stats = get_trade_stats(db, user_id)
     if stats.get("total_trades", 0) > 0:

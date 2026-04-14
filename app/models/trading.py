@@ -114,6 +114,10 @@ class PatternMonitorDecision(Base):
     new_target: Optional[float] = Column(Float, nullable=True)
     llm_confidence: Optional[float] = Column(Float, nullable=True)
     llm_reasoning: Optional[str] = Column(Text, nullable=True)
+    mechanical_action: Optional[str] = Column(String(30), nullable=True)
+    mechanical_stop: Optional[float] = Column(Float, nullable=True)
+    mechanical_target: Optional[float] = Column(Float, nullable=True)
+    decision_source: Optional[str] = Column(String(20), nullable=True)
     price_at_decision: Optional[float] = Column(Float, nullable=True)
     price_after_1h: Optional[float] = Column(Float, nullable=True)
     price_after_4h: Optional[float] = Column(Float, nullable=True)
@@ -468,6 +472,58 @@ class BreakoutAlert(Base):
         Integer, ForeignKey("trading_insights.id", ondelete="SET NULL"), nullable=True, index=True
     )
     trade_plan: Optional[dict] = Column(JSONB, nullable=True)
+    trade_plan_mechanical: Optional[dict] = Column(JSONB, nullable=True)
+
+
+class MonitorDecisionRule(Base):
+    """Learned decision rule mapping a signal signature to an action.
+
+    Populated by the learning cycle from PatternMonitorDecision outcomes.
+    Used by the rules engine to make mechanical decisions without LLM.
+    """
+    __tablename__ = "trading_monitor_decision_rules"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    pattern_type: str = Column(String(120), nullable=False, index=True)
+    signal_signature: str = Column(String(200), nullable=False, index=True)
+    action: str = Column(String(30), nullable=False)
+    stop_ratio: Optional[float] = Column(Float, nullable=True)
+    target_ratio: Optional[float] = Column(Float, nullable=True)
+    sample_count: int = Column(Integer, nullable=False, default=0)
+    benefit_rate: float = Column(Float, nullable=False, default=0.0)
+    llm_agreement_rate: float = Column(Float, nullable=False, default=0.0)
+    graduation_status: str = Column(
+        String(20), nullable=False, default="bootstrap",
+    )
+    rolling_benefit: Optional[dict] = Column(JSONB, nullable=True)
+    updated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False,
+    )
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MonitorPlanAccuracy(Base):
+    """Tracks LLM vs mechanical trade-plan accuracy per pattern type.
+
+    Each row represents a pattern type + complexity band.  The learning cycle
+    updates counts after outcome scoring.
+    """
+    __tablename__ = "trading_monitor_plan_accuracy"
+
+    id: int = Column(Integer, primary_key=True, index=True)
+    pattern_type: str = Column(String(120), nullable=False, index=True)
+    complexity_band: str = Column(String(20), nullable=False, default="simple")
+    llm_correct_count: int = Column(Integer, nullable=False, default=0)
+    mechanical_correct_count: int = Column(Integer, nullable=False, default=0)
+    agreement_count: int = Column(Integer, nullable=False, default=0)
+    total_count: int = Column(Integer, nullable=False, default=0)
+    graduation_status: str = Column(
+        String(20), nullable=False, default="bootstrap",
+    )
+    updated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False,
+    )
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class StrategyProposal(Base):
