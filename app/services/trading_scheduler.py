@@ -596,11 +596,13 @@ def _bridge_scanner_to_viability(
     *,
     source: str = "scanner",
 ) -> None:
-    """Publish momentum_context_refresh with scored tickers so symbol-level viability rows get created.
+    """Run momentum neural tick directly for scanner-discovered tickers.
 
-    Without this bridge, scanners find symbols but the Autopilot board never shows them
-    because `list_momentum_opportunities` requires per-symbol viability rows (scope="symbol")
-    and the scheduled snapshot path only writes aggregate-scope rows.
+    Writes symbol-level viability rows synchronously so the Autopilot board sees them
+    on the next poll.  Uses run_momentum_neural_tick (same path as _auto_assess_scan_only
+    in opportunities.py) instead of enqueueing activation events — avoids stale pending
+    events that trigger the "viability pipeline stale" warning when the brain worker is
+    slow or not running.
     """
     tickers: list[str] = []
     for r in results:
@@ -612,31 +614,16 @@ def _bridge_scanner_to_viability(
     if not tickers:
         return
     try:
-        from .trading.brain_neural_mesh.publisher import publish_momentum_context_refresh
+        from .trading.momentum_neural.pipeline import run_momentum_neural_tick
 
-        out = publish_momentum_context_refresh(db, meta={"tickers": tickers})
+        run_momentum_neural_tick(db, meta={"tickers": tickers})
         db.commit()
         logger.info(
-            "[scheduler] viability bridge (%s): %d tickers → ok=%s",
-            source, len(tickers), out.get("ok"),
+            "[scheduler] viability bridge (%s): %d tickers → direct tick ok",
+            source, len(tickers),
         )
     except Exception as e:
         logger.warning("[scheduler] viability bridge (%s) failed: %s", source, e)
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        return
-
-    try:
-        from .trading.brain_neural_mesh.activation_runner import run_activation_batch
-
-        summary = run_activation_batch(db, time_budget_sec=3.0, max_events=8)
-        db.commit()
-        if summary.get("processed"):
-            logger.info("[scheduler] viability bridge drain (%s): %s", source, summary)
-    except Exception as e:
-        logger.debug("[scheduler] viability bridge drain (%s) skipped: %s", source, e)
         try:
             db.rollback()
         except Exception:

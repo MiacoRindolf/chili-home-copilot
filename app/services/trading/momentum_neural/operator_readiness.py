@@ -12,6 +12,8 @@ from ..governance import get_kill_switch_status
 
 
 def _scheduler_includes_web_light() -> bool:
+    if getattr(settings, "chili_scheduler_runs_externally", False):
+        return True
     role = (getattr(settings, "chili_scheduler_role", None) or "all").strip().lower()
     return role in ("all", "web")
 

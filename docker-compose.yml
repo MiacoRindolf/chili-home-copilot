@@ -97,6 +97,8 @@ services:
       # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
       # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
       - CHILI_SCHEDULER_ROLE=none
+      # Tell operator readiness that a scheduler-worker runs web-light jobs externally.
+      - CHILI_SCHEDULER_RUNS_EXTERNALLY=1
       # Local Autopilot default: paper + live sessions should advance without extra env setup.
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1

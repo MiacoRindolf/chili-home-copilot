@@ -329,6 +329,12 @@ class Settings(BaseSettings):
         default="all",
         validation_alias=AliasChoices("CHILI_SCHEDULER_ROLE"),
     )
+    # Set to true in the web (chili) container when a separate scheduler-worker runs APScheduler.
+    # Operator readiness will treat web-light jobs as available even though the local role is "none".
+    chili_scheduler_runs_externally: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_SCHEDULER_RUNS_EXTERNALLY"),
+    )
 
     # Brain learning worker: UI starts the Docker Compose ``brain-worker`` service (not subprocess).
     brain_worker_compose_service: str = "brain-worker"
