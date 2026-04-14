@@ -6132,9 +6132,9 @@ def _migration_118_dynamic_trade_plan_monitor(conn) -> None:
     for _nid in ("nm_position_monitor", "nm_lc_monitor_review"):
         conn.execute(text("""
             INSERT INTO brain_node_states (
-                node_id, activation_score, confidence, local_state, staleness_at, updated_at
+                node_id, activation_score, confidence, local_state, updated_at
             )
-            VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP)
             ON CONFLICT (node_id) DO NOTHING
         """), {"nid": _nid})
 
