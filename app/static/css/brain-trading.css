@@ -956,11 +956,12 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 
 /* ═══ Responsive ═══ */
 @media (max-width: 768px) {
-  .b-header { padding: 8px 12px; gap: 6px; flex-wrap: wrap; }
-  .b-header nav { gap: 0; overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
-  .b-header nav::-webkit-scrollbar { display: none; }
-  .b-header nav a { font-size: 12px; padding: 8px 12px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
-  .b-back-domains-btn { font-size: 12px; padding: 8px 14px; min-height: 40px; }
+  .b-header { padding: 8px 12px; gap: 6px; flex-wrap: nowrap; position: relative; }
+  .b-header > div:first-child { min-width: 0; flex: 1; overflow: hidden; }
+  .b-header > div:last-child { flex-shrink: 0; }
+  .b-header h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 15px; }
+  .b-back-domains-btn { font-size: 11px; padding: 6px 10px; min-height: 36px; flex-shrink: 0; white-space: nowrap; }
+  .b-theme-btn { min-height: 40px; min-width: 40px; flex-shrink: 0; }
   .b-main { padding: 12px 10px; }
   .b-body { flex-direction: column; height: auto; min-height: calc(100vh - 50px); overflow-y: auto; }
   .brain-kpis { grid-template-columns: repeat(2, 1fr); }

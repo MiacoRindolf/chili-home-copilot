@@ -43,6 +43,18 @@
   .welcome { color: #484f58; line-height: 1.8; }
   .welcome strong { color: #c9d1d9; }
   .welcome code { background: #161b22; padding: 2px 6px; border-radius: 3px; color: #d2a8ff; }
+
+  @media (max-width: 768px) {
+    #terminal { padding: 0 10px; }
+    #header { flex-wrap: wrap; gap: 8px; padding: 10px 0 8px; }
+    #header h1 { font-size: 13px; }
+    #header .nav-links { margin-left: 0; gap: 8px; width: 100%; }
+    #header .nav-links a { font-size: 12px; padding: 6px 0; }
+    #input-bar input { font-size: 16px; }
+    .entry .actions { flex-wrap: wrap; }
+    .entry .actions button { padding: 10px 16px; font-size: 13px; min-height: 44px; }
+    .entry .response .diff-block { font-size: 11px; padding: 6px 8px; }
+  }
 </style>
 {% endblock %}
 {% block content %}

@@ -67,6 +67,22 @@
 }
 .ta-empty { color: var(--text-muted); font-size: 12px; padding: 24px; text-align: center; }
 .ta-future { opacity: .45; pointer-events: none; }
+
+@media (max-width: 768px) {
+  .ta-header { padding: 8px 12px; gap: 6px; }
+  .ta-header h1 { font-size: 14px; }
+  .ta-header nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
+  .ta-header nav::-webkit-scrollbar { display: none; }
+  .ta-header nav a { font-size: 12px; padding: 8px 10px; white-space: nowrap; min-height: 36px; display: inline-flex; align-items: center; }
+  .ta-btn { font-size: 12px; padding: 8px 14px; min-height: 36px; }
+  .ta-table { font-size: 12px; }
+  .ta-table th, .ta-table td { padding: 8px 6px; }
+  .ta-main { padding: 10px; }
+  .ta-side { padding: 10px; }
+  .ta-strip { font-size: 12px; }
+  .ta-events { font-size: 11px; }
+  .ta-detail { font-size: 12px; }
+}
 </style>
 {% endblock %}
 

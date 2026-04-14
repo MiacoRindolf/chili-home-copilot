@@ -128,10 +128,11 @@
   .consent-box .btn-cancel { background: var(--code-bg); color: var(--text); }
 
   @media (max-width: 700px) {
-    header { padding: 10px 14px; flex-wrap: wrap; gap: 8px; }
-    header h1 { font-size: 18px; }
-    header nav { margin-top: 2px; }
-    header nav a { font-size: 14px; padding: 6px 8px; min-height: 36px; display: inline-flex; align-items: center; }
+    header { padding: 10px 14px; flex-wrap: wrap; gap: 4px; position: relative; }
+    header h1 { font-size: 18px; max-width: calc(100% - 56px); }
+    header nav { margin-top: 2px; display: flex; gap: 8px; }
+    header nav a { font-size: 13px; padding: 6px 8px; }
+    #theme-toggle { min-height: 40px; min-width: 40px; position: absolute; right: 14px; top: 10px; }
     .ic-container { padding: 16px 12px; gap: 16px; }
     .ic-status-bar { padding: 10px 12px; flex-wrap: wrap; gap: 8px; }
     .ic-status-bar .ws-indicator { font-size: 12px; }

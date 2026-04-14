@@ -1878,13 +1878,13 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
    ═══════════════════════════════════════════════════ */
 @media (max-width: 768px) {
   body { overflow: hidden; }
-  .t-header { padding: 6px 10px; gap: 8px; }
-  .t-header h1 { font-size: 14px; }
-  .t-header nav { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; flex-wrap: nowrap; }
-  .t-header nav::-webkit-scrollbar { display: none; }
-  .t-header nav a { font-size: 12px; padding: 8px 10px; min-height: 40px; display: inline-flex; align-items: center; white-space: nowrap; }
+  .t-header { padding: 6px 10px; gap: 6px; }
+  .t-header h1 { font-size: 14px; overflow: hidden; text-overflow: ellipsis; }
   .mobile-toggle { display: flex; align-items: center; justify-content: center; min-height: 40px; min-width: 40px; }
   .fab-ai { display: flex; align-items: center; justify-content: center; min-height: 52px; min-width: 52px; }
+  .t-header-actions { flex-shrink: 0; }
+  .t-header-actions button, .t-header-actions select { min-height: 36px; }
+  #theme-toggle-t { min-height: 40px; min-width: 40px; display: flex; align-items: center; justify-content: center; }
 
   /* Sidebar becomes slide-out drawer */
   .t-sidebar {
@@ -1946,11 +1946,10 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
   .ticker-news-row { padding: 3px 6px; gap: 4px; }
   .news-card { min-width: 150px; max-width: 200px; padding: 4px 8px; font-size: 9px; }
 
-  .t-tabs { scroll-snap-type: x mandatory; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; }
+  .t-tabs { scroll-snap-type: x mandatory; scroll-behavior: smooth; -webkit-overflow-scrolling: touch; height: auto; }
   .t-tab {
-    padding: 6px 12px; font-size: 12px; min-height: 40px;
+    padding: 6px 12px; font-size: 12px; height: auto; min-height: 36px;
     scroll-snap-align: start; white-space: nowrap;
-    display: inline-flex; align-items: center;
   }
   .t-tab .t-tab-icon { margin-right: 4px; }
 
@@ -1969,9 +1968,8 @@ table.trades tr:hover { background: rgba(255,255,255,0.02); }
    RESPONSIVE — Small phone (<=480px)
    ═══════════════════════════════════════════════════ */
 @media (max-width: 480px) {
-  .t-header { padding: 6px 8px; }
+  .t-header { padding: 4px 8px; }
   .t-header h1 { font-size: 13px; gap: 4px; }
-  .t-header nav a { font-size: 10px; padding: 2px 4px; }
   .t-body { height: calc(100vh - 40px); }
   .t-chart-area { min-height: 150px; }
   .t-bottom { height: 200px; min-height: 100px; }

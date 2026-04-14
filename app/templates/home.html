@@ -315,12 +315,18 @@
 
   /* ── Responsive ───────────────────────────────────────────────── */
   @media (max-width: 700px) {
-    .home-header { padding: 14px 16px; flex-direction: column; align-items: flex-start; }
-    .home-header h1 { font-size: 20px; }
-    .home-header nav { margin-top: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch; flex-wrap: nowrap; width: 100%; scrollbar-width: none; }
+    .home-header { padding: 14px 16px; flex-direction: column; align-items: flex-start; position: relative; }
+    .home-header h1 { font-size: 20px; max-width: calc(100% - 60px); }
+    .home-header .subtitle { max-width: calc(100% - 60px); }
+    .home-header nav {
+      margin-top: 8px; overflow-x: auto; -webkit-overflow-scrolling: touch;
+      flex-wrap: nowrap; width: 100%; scrollbar-width: none;
+      padding-bottom: 4px;
+    }
     .home-header nav::-webkit-scrollbar { display: none; }
-    .home-header nav a { white-space: nowrap; font-size: 13px; }
+    .home-header nav a { white-space: nowrap; font-size: 13px; padding: 8px 10px; min-height: 36px; }
     .header-actions { position: absolute; right: 16px; top: 14px; }
+    #theme-toggle { min-height: 44px; min-width: 44px; }
     .dashboard { padding: 16px 12px 40px; }
     .stats-row { grid-template-columns: repeat(2, 1fr); gap: 8px; }
     .stat-value { font-size: 24px; }
@@ -329,10 +335,14 @@
     .add-row input[type="text"] { min-width: 100%; }
     .add-row input[type="date"] { width: 100%; }
     .add-row select { width: 100%; }
+    .add-btn { min-height: 44px; font-size: 14px; }
     .card { padding: 16px; }
-    .card-header-btn { min-height: 36px; padding: 6px 10px; font-size: 12px; }
+    .card-header-btn { padding: 6px 10px; font-size: 12px; min-height: 36px; }
     .quick-actions { grid-template-columns: repeat(3, 1fr); }
-    .qa-tile { padding: 14px 8px; }
+    .qa-tile { padding: 14px 8px; min-height: 70px; }
+    .quick-chat-form button { min-height: 44px; min-width: 60px; }
+    .cal-nav button { min-height: 36px; min-width: 36px; }
+    .chore-check { width: 28px; height: 28px; }
   }
   @media (max-width: 480px) {
     .home-header h1 { font-size: 18px; }
