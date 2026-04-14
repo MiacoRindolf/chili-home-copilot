@@ -625,13 +625,40 @@ def build_ai_context(
     trades = db.query(Trade).filter(
         Trade.user_id == user_id, Trade.ticker == ticker_up,
     ).order_by(Trade.entry_date.desc()).limit(10).all()
-    if trades:
-        open_trades = [t for t in trades if t.status == "open"]
-        closed_trades = [t for t in trades if t.status == "closed"]
 
-        lines = [f"## USER'S TRADES ON {ticker_up}"]
+    # Live broker position for this ticker (independent of DB Trade rows).
+    _live_pos = None
+    try:
+        from .. import broker_service
+        _live_pos = broker_service.get_position_for_ticker(ticker_up)
+    except Exception:
+        pass
+
+    if trades or _live_pos:
+        open_trades = [t for t in trades if t.status == "open"] if trades else []
+        closed_trades = [t for t in trades if t.status == "closed"] if trades else []
+
+        lines = [f"## USER'S POSITION & TRADES — {ticker_up}"]
+
+        if _live_pos:
+            _lq = _live_pos.get("quantity", 0)
+            _la = _live_pos.get("average_buy_price", 0)
+            _lc = _live_pos.get("current_price", _la)
+            _lpnl = (_lc - _la) * _lq if _la and _lc and _lq else 0
+            _lpct = ((_lc / _la - 1) * 100) if _la and _lc else 0
+            _pnl_sign = "+" if _lpnl >= 0 else ""
+            lines.append(
+                f">>> LIVE BROKER POSITION (Robinhood): "
+                f"HOLDING {_lq} shares @ ${_la:,.4f} avg cost | "
+                f"Current ${_lc:,.4f} | P&L {_pnl_sign}${_lpnl:,.2f} ({_pnl_sign}{_lpct:.1f}%)"
+            )
+            lines.append(
+                "The user OWNS this stock right now. Your analysis MUST acknowledge "
+                "this position, reference their avg cost, and advise on hold/add/trim/exit."
+            )
+
         if open_trades:
-            lines.append("OPEN POSITIONS:")
+            lines.append("OPEN DB POSITIONS:")
             for tr in open_trades:
                 lines.append(
                     f"  - {tr.direction.upper()} {tr.quantity}x @ ${tr.entry_price} (entered {tr.entry_date.strftime('%Y-%m-%d') if tr.entry_date else 'N/A'})"
@@ -771,11 +798,6 @@ def build_ai_context(
     try:
         portfolio_ctx = futures["portfolio_ctx"].result(timeout=10)
         if portfolio_ctx:
-            if ticker_up in portfolio_ctx.upper():
-                portfolio_ctx += (
-                    f"\n\n>>> YOU ARE CURRENTLY HOLDING {ticker_up}. "
-                    "Factor this into your recommendation (already in position)."
-                )
             parts.insert(0, portfolio_ctx)
     except Exception:
         pass

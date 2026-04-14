@@ -1623,11 +1623,12 @@ def start_scheduler():
                 _run_broker_sync_job,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
-                    hour="9-16",
+                    hour="8-20",
                     minute="*/2",
+                    timezone="US/Eastern",
                 ),
                 id="broker_sync",
-                name="Robinhood order+position sync (market hours every 2min)",
+                name="Robinhood order+position sync (ET 8am-8pm every 2min)",
                 replace_existing=True,
                 max_instances=1,
             )
@@ -1636,11 +1637,12 @@ def start_scheduler():
                 _run_price_monitor_job,
                 trigger=CronTrigger(
                     day_of_week="mon-fri",
-                    hour="9-16",
+                    hour="8-20",
                     minute="*/5",
+                    timezone="US/Eastern",
                 ),
                 id="price_monitor",
-                name="Price monitor & alerts (market hours every 5min)",
+                name="Price monitor & alerts (ET 8am-8pm every 5min)",
                 replace_existing=True,
                 max_instances=1,
             )

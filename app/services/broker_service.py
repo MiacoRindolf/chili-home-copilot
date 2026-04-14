@@ -832,9 +832,10 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             created += 1
 
     # Link open trades to recent pattern-imminent alerts (if not already linked).
+    # 14-day window: positions can be held well beyond the alert timestamp.
     try:
         from ..models.trading import BreakoutAlert
-        _link_cutoff = datetime.utcnow() - timedelta(hours=48)
+        _link_cutoff = datetime.utcnow() - timedelta(days=14)
         _open_unlinked = (
             db.query(Trade)
             .filter(
@@ -1017,6 +1018,24 @@ def backfill_closed_trade_pnl(db: Session, user_id: int | None) -> int:
         db.commit()
         logger.info(f"[broker] Backfilled exit_price/pnl for {patched} closed trade(s)")
     return patched
+
+
+def get_position_for_ticker(ticker: str) -> dict[str, Any] | None:
+    """Return the live broker position for *ticker*, or None if not held.
+
+    Checks both stock and crypto positions from Robinhood (cached).
+    """
+    if not is_connected():
+        return None
+
+    ticker_up = ticker.upper().strip()
+    for pos in get_positions() + get_crypto_positions():
+        pos_ticker = pos.get("ticker", "").upper().strip()
+        if pos_ticker == ticker_up:
+            qty = pos.get("quantity", 0)
+            if qty and qty > 0:
+                return pos
+    return None
 
 
 def build_portfolio_context() -> str:
