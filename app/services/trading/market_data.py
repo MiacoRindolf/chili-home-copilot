@@ -630,6 +630,16 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
     return _build_quote_result(ticker, fi)
 
 
+def _serialize_ts(val: Any) -> str | None:
+    """Convert a datetime/date to ISO string; pass through strings and None."""
+    from datetime import datetime as _dt, date as _d
+    if val is None:
+        return None
+    if isinstance(val, (_dt, _d)):
+        return val.isoformat()
+    return str(val)
+
+
 def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | None:
     """Assemble a standardised quote dict from raw provider data."""
     from datetime import datetime as _dt
@@ -647,7 +657,7 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         "change_pct": round((price - prev) / prev * 100, 2) if prev else None,
         "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
         "currency": "USD",
-        "quote_ts": fi.get("quote_ts") or _dt.utcnow(),
+        "quote_ts": _serialize_ts(fi.get("quote_ts") or _dt.utcnow()),
     }
     if fi.get("day_high"):
         result["day_high"] = smart_round(fi["day_high"], crypto=_cr)
