@@ -787,6 +787,8 @@ def api_stop_positions(
         Trade.status == "open",
     ).order_by(Trade.entry_date.desc()).all()
 
+    from ..services.trading.stop_engine import _build_brain_context
+
     result = []
     for t in trades:
         entry = t.entry_price or 0
@@ -831,6 +833,13 @@ def api_stop_positions(
             elif R > 0 and abs(price - stop) / R <= 0.25:
                 state = "warn"
 
+        brain_ctx = {}
+        try:
+            brain = _build_brain_context(t, db)
+            brain_ctx = brain.summary_dict()
+        except Exception:
+            pass
+
         result.append({
             "id": t.id,
             "ticker": t.ticker,
@@ -850,6 +859,7 @@ def api_stop_positions(
             "pnl_pct": pnl_pct,
             "state": state,
             "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+            "brain": brain_ctx,
         })
 
     return JSONResponse({"ok": True, "positions": result})
