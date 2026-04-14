@@ -422,21 +422,30 @@ def _run_subtask_signal_refresh(status: "BrainWorkerStatus") -> dict:
 
 
 def _run_subtask_fast_backtest(status: "BrainWorkerStatus") -> dict:
-    """Process backtest queue items without running a full cycle."""
+    """Process up to 5 backtest queue items without running a full cycle."""
     status.set_step("FastBacktest", "Processing backtest queue...")
-    db = SessionLocal()
-    try:
-        from app.services.trading.backtest_engine import smart_backtest_insight
-        from app.config import settings as _s
-        result = smart_backtest_insight(
-            db, user_id=getattr(_s, "brain_default_user_id", None), max_patterns=5,
-        )
-        return result or {}
-    except Exception as e:
-        logger.warning("[brain:subtask] fast_backtest failed: %s", e)
-        return {"error": str(e)}
-    finally:
-        db.close()
+    from app.services.trading.backtest_queue import get_pending_patterns
+    from app.config import settings as _s
+
+    uid = getattr(_s, "brain_default_user_id", None)
+    completed = 0
+    errors = 0
+    for _ in range(5):
+        db = SessionLocal()
+        try:
+            patterns = get_pending_patterns(db, limit=1)
+            if not patterns:
+                break
+            pat = patterns[0]
+            from app.services.trading.backtest_queue_worker import execute_queue_backtest_for_pattern
+            bt_count, _err = execute_queue_backtest_for_pattern(pat.id, uid)
+            completed += bt_count
+        except Exception as e:
+            logger.warning("[brain:subtask] fast_backtest item failed: %s", e)
+            errors += 1
+        finally:
+            db.close()
+    return {"completed": completed, "errors": errors}
 
 
 # Subtask registry: (name, function, run_every_n_cycles) — maintenance / edge refresh, not primary operator truth

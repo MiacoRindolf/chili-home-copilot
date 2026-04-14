@@ -255,6 +255,10 @@ def apply_decay_to_state(
     ref = state.last_activated_at
     if ref is None:
         return False
+    if now.tzinfo is not None and ref.tzinfo is None:
+        now = now.replace(tzinfo=None)
+    elif now.tzinfo is None and ref.tzinfo is not None:
+        ref = ref.replace(tzinfo=None)
     dt = (now - ref).total_seconds()
     if dt <= 0:
         return False

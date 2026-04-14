@@ -18,6 +18,7 @@ services:
     image: postgres:16-alpine
     # Headroom for chili + brain + brain-worker; process-pool queue uses P * (child pool) connections.
     command: ["postgres", "-c", "max_connections=350"]
+    restart: unless-stopped
     environment:
       POSTGRES_USER: chili
       POSTGRES_PASSWORD: chili
@@ -28,6 +29,11 @@ services:
       # Host port 5433 avoids clashing with a local PostgreSQL on 5432.
       # From the host: postgresql://chili:chili@localhost:5433/chili
       - "5433:5432"
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U chili -d chili"]
       interval: 5s
@@ -37,16 +43,22 @@ services:
 
   ollama:
     image: ollama/ollama:latest
+    restart: unless-stopped
     ports:
       - "11434:11434"
     volumes:
       - D:/CHILI-Docker/ollama:/root/.ollama
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     # ollama image has no curl/wget; use CLI against the local daemon
     healthcheck:
       test: ["CMD", "ollama", "list"]
-      interval: 10s
+      interval: 30s
       timeout: 10s
-      retries: 12
+      retries: 6
       start_period: 40s
 
   # Planner coding validation (Phase 1+): for Docker dev parity, use the Phase 4 mount below
@@ -85,9 +97,11 @@ services:
       # No APScheduler in Uvicorn: all cron jobs run in ``scheduler-worker`` (see CHILI_SCHEDULER_ROLE there).
       # Also disables Massive WebSocket in this process (continuous quote stream); trading UI uses REST polling.
       - CHILI_SCHEDULER_ROLE=none
-      # Local Autopilot default: paper sessions should advance without extra env setup.
+      # Local Autopilot default: paper + live sessions should advance without extra env setup.
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
+      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
+      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
       # Trading Brain desk: neural mesh graph + APIs (overrides host .env when unset/false).
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
@@ -102,18 +116,33 @@ services:
       - .:/workspace:ro
       # Brain Worker UI controls the separate ``brain-worker`` service — needs engine access
       - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import ssl,urllib.request; urllib.request.urlopen('https://localhost:8000/api/brain/status',context=ssl._create_unverified_context())\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
         condition: service_healthy
 
-  # Brain HTTP service (strangler — see chili-brain/README.md)
+  # Brain HTTP service (strangler — see chili-brain/README.md).
+  # Behind ``brain-http`` profile: not started by default since CHILI_USE_BRAIN_SERVICE defaults to 0.
+  # Start with: docker compose --profile brain-http up brain
   brain:
     build:
       context: .
       dockerfile: chili-brain/Dockerfile
     image: chili-brain:local
+    restart: unless-stopped
     ports:
       - "8090:8090"
     env_file:
@@ -125,6 +154,19 @@ services:
       - CHILI_BRAIN_INTERNAL_SECRET=${CHILI_BRAIN_INTERNAL_SECRET:-changeme}
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
+    profiles:
+      - brain-http
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8090/health')\""]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     depends_on:
       postgres:
         condition: service_healthy
@@ -135,6 +177,7 @@ services:
   # after each successful cycle when TRADING_BRAIN_NEURAL_MESH_ENABLED=1.
   brain-worker:
     image: chili-app:local
+    restart: unless-stopped
     labels:
       com.chili.service: brain-worker
       com.chili.entrypoint: brain_worker_lean_cycle
@@ -142,6 +185,11 @@ services:
     env_file:
       - path: .env
         required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
@@ -183,10 +231,16 @@ services:
   # Continuous pattern mining worker. Discovers new ScanPatterns and feeds the backtest queue.
   mining-worker:
     image: chili-app:local
+    restart: unless-stopped
     command: ["python", "scripts/brain_worker.py", "--mode", "mining"]
     env_file:
       - path: .env
         required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
@@ -218,10 +272,16 @@ services:
   # Continuous backtest worker. Drains the ScanPattern queue with walk-forward backtests.
   backtest-worker:
     image: chili-app:local
+    restart: unless-stopped
     command: ["python", "scripts/brain_worker.py", "--mode", "backtest"]
     env_file:
       - path: .env
         required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - DATABASE_POOL_SIZE=6
@@ -254,10 +314,16 @@ services:
   # Fast scan worker. 1-5 min breakout/momentum detection on promoted patterns, fires alerts.
   fast-scan-worker:
     image: chili-app:local
+    restart: unless-stopped
     command: ["python", "scripts/brain_worker.py", "--mode", "fast-scan"]
     env_file:
       - path: .env
         required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - DATABASE_POOL_SIZE=4
@@ -288,6 +354,7 @@ services:
   # All APScheduler jobs (broker sync, scans, code/reasoning cycles, …). ``chili`` uses role ``none``.
   scheduler-worker:
     image: chili-app:local
+    restart: unless-stopped
     labels:
       com.chili.service: scheduler-worker
       com.chili.entrypoint: scheduler_worker
@@ -295,6 +362,11 @@ services:
     env_file:
       - path: .env
         required: false
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "3"
     environment:
       - DATABASE_URL=postgresql://chili:chili@postgres:5432/chili
       - OLLAMA_HOST=http://ollama:11434
@@ -302,6 +374,8 @@ services:
       - CHILI_SCHEDULER_EMIT_HEARTBEAT=1
       - CHILI_MOMENTUM_PAPER_RUNNER_ENABLED=1
       - CHILI_MOMENTUM_PAPER_RUNNER_SCHEDULER_ENABLED=1
+      - CHILI_MOMENTUM_LIVE_RUNNER_ENABLED=1
+      - CHILI_MOMENTUM_LIVE_RUNNER_SCHEDULER_ENABLED=1
       - DATABASE_POOL_SIZE=8
       - DATABASE_MAX_OVERFLOW=12
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false

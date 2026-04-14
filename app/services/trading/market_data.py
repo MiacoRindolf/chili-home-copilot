@@ -54,7 +54,7 @@ def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider
 
         out = clean_ohlcv(out)
         integrity = validate_ohlcv_integrity(out)
-        if not integrity.get("ok", False):
+        if not integrity.get("clean", False):
             logger.warning(
                 "[market_data] OHLCV integrity failed ticker=%s interval=%s provider=%s: %s",
                 ticker,
@@ -611,6 +611,8 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
 
 def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | None:
     """Assemble a standardised quote dict from raw provider data."""
+    from datetime import datetime as _dt
+
     price = fi.get("last_price")
     if price is None:
         return None
@@ -624,6 +626,7 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         "change_pct": round((price - prev) / prev * 100, 2) if prev else None,
         "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
         "currency": "USD",
+        "quote_ts": fi.get("quote_ts") or _dt.utcnow(),
     }
     if fi.get("day_high"):
         result["day_high"] = smart_round(fi["day_high"], crypto=_cr)

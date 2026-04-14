@@ -601,6 +601,21 @@ def preload_active_insights(db: Session, user_id: int | None) -> list["TradingIn
     ).all()
 
 
+def _fix_insight_sequence(db: Session) -> None:
+    """Reset trading_insights_id_seq to MAX(id) — recovers from sequence drift after restores."""
+    try:
+        from sqlalchemy import text as _text
+        db.execute(_text(
+            "SELECT setval('trading_insights_id_seq', COALESCE((SELECT MAX(id) FROM trading_insights), 1))"
+        ))
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def save_insight(
     db: Session, user_id: int | None,
     pattern: str, confidence: float = 0.5,
@@ -661,7 +676,13 @@ def save_insight(
         loss_count=losses,
     )
     db.add(insight)
-    db.commit()
+    try:
+        db.commit()
+    except Exception as _commit_exc:
+        db.rollback()
+        _fix_insight_sequence(db)
+        db.add(insight)
+        db.commit()
     db.refresh(insight)
     log_learning_event(
         db, user_id, "discovery",
