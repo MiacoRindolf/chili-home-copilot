@@ -220,12 +220,14 @@ def api_ohlcv(
     interval: str = Query("1d"),
     period: str = Query("6mo"),
 ):
+    _is_crypto = ticker.strip().upper().endswith("-USD")
+    fb = True if _is_crypto else _TRADING_UI_ALLOW_PROVIDER_FALLBACK
     try:
         data = ts.fetch_ohlcv(
             ticker,
             interval=interval,
             period=period,
-            allow_provider_fallback=_TRADING_UI_ALLOW_PROVIDER_FALLBACK,
+            allow_provider_fallback=fb,
         )
     except Exception:
         data = []

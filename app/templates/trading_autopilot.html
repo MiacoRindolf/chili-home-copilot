@@ -235,6 +235,27 @@
 .ap-section-body {
   padding: 16px 18px 18px;
 }
+.ap-section-body.ap-scrollable {
+  max-height: 520px;
+  overflow-y: auto;
+}
+.ap-section-body.ap-collapsed {
+  display: none;
+}
+.ap-collapse-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+.ap-collapse-toggle:hover {
+  color: var(--text);
+  background: rgba(148, 163, 184, 0.1);
+}
 .ap-empty {
   padding: 26px 20px;
   border: 1px dashed rgba(148, 163, 184, 0.28);
@@ -651,10 +672,10 @@
     <div id="ap-decision-strip" class="ap-strip ap-muted" style="font-size:12px;line-height:1.45;margin-top:4px;"></div>
     <div id="ap-blockers" class="ap-blockers"></div>
 
-    <section class="ap-section">
+    <section class="ap-section" id="ap-eligible-section">
       <div class="ap-section-head">
         <div>
-          <h2>Eligible Now</h2>
+          <h2>Eligible Now <button type="button" class="ap-collapse-toggle" id="ap-eligible-toggle" onclick="apToggleEligible()">Collapse</button></h2>
           <p>
             Ranked by live compatibility, scan signal strength, scan score, top variant viability, and freshness.
             Stocks only qualify during market hours; crypto stays available 24/7 when data and venue checks are green.
@@ -675,7 +696,7 @@
           <button type="button" class="ap-btn" onclick="apRefreshAll()">Refresh all</button>
         </div>
       </div>
-      <div class="ap-section-body">
+      <div class="ap-section-body ap-scrollable" id="ap-eligible-body">
         <div id="ap-guest" class="ap-empty" style="display:none">Sign in to inspect opportunities and control sessions.</div>
         <div id="ap-opportunities-meta" class="ap-muted" style="display:none; margin-bottom:10px;"></div>
         <div id="ap-opportunities" class="ap-opportunity-list"></div>
@@ -1403,7 +1424,12 @@
         if (!state.visibleSessionIds[sessionId]) return;
         var points = (payload.data || []).map(function(row) {
           var timeVal = row.time || row.date || row.timestamp;
-          var ts = Date.parse(timeVal);
+          var ts;
+          if (typeof timeVal === 'number') {
+            ts = timeVal > 1e12 ? timeVal : timeVal * 1000;
+          } else {
+            ts = Date.parse(timeVal);
+          }
           return {
             time: Math.floor(ts / 1000),
             open: safeNum(row.open, NaN),
@@ -1610,6 +1636,14 @@
       apRefreshOpportunities(),
       apRefreshSessions()
     ]);
+  };
+
+  window.apToggleEligible = function() {
+    var body = document.getElementById('ap-eligible-body');
+    var btn = document.getElementById('ap-eligible-toggle');
+    if (!body || !btn) return;
+    var collapsed = body.classList.toggle('ap-collapsed');
+    btn.textContent = collapsed ? 'Expand' : 'Collapse';
   };
 
   window.apLoadSessionDetail = function(sessionId, force) {
