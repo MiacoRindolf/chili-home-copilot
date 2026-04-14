@@ -984,7 +984,31 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
         "stops_hit": 0,
         "breakouts": 0,
         "proposals_generated": 0,
+        "emergency_action": "none",
     }
+
+    # 0. Emergency guardrail: evaluate catastrophic drawdown/disconnect first.
+    try:
+        from .emergency_liquidation import (
+            check_emergency_conditions,
+            emergency_close_all,
+            partial_reduce_exposure,
+        )
+
+        emergency = check_emergency_conditions(db, user_id)
+        action = emergency.get("recommended_action")
+        if action == "emergency_close_all":
+            out = emergency_close_all(db, user_id, reason="price_monitor_guardrail")
+            results["emergency_action"] = "emergency_close_all"
+            results["emergency_result"] = out
+            logger.critical("[alerts] Emergency liquidation executed from price monitor: %s", out)
+            return results
+        if action == "partial_reduce":
+            out = partial_reduce_exposure(db, user_id, reason="price_monitor_drawdown_warning")
+            results["emergency_action"] = "partial_reduce"
+            results["emergency_result"] = out
+    except Exception:
+        logger.warning("[alerts] emergency guardrail check failed", exc_info=True)
 
     # 1. Check open positions for target/stop hits
     results.update(_check_open_positions(db, user_id))
@@ -995,6 +1019,12 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
     # 3. Check for new high-confidence picks → auto-generate proposals
     proposals = _check_top_picks_for_proposals(db, user_id)
     results["proposals_generated"] = len(proposals)
+    try:
+        from .execution_quality import suggest_adaptive_spread
+
+        results["execution_spread_suggestion"] = suggest_adaptive_spread(db, user_id)
+    except Exception:
+        results["execution_spread_suggestion"] = None
 
     logger.info(f"[alerts] Price monitor: {results}")
     return results
@@ -1248,6 +1278,22 @@ def _execute_proposal(
     ticker = proposal.ticker
     quantity = proposal.quantity
 
+    # Enforce the same portfolio risk gate used by paper auto-entry before any live/manual placement.
+    try:
+        from .portfolio_risk import check_new_trade_allowed
+
+        risk_capital = float(_get_buying_power() or 0.0)
+        if risk_capital <= 0:
+            risk_capital = 100000.0
+        allowed, reason = check_new_trade_allowed(db, user_id, ticker, capital=risk_capital)
+        if not allowed:
+            msg = f"ORDER BLOCKED: {ticker} — {reason}"
+            dispatch_alert(db, user_id, POSITION_OPENED, ticker, msg)
+            return {"status": "blocked", "error": reason}
+    except Exception:
+        logger.error("[alerts] risk gate check failed; blocking proposal execution as safety", exc_info=True)
+        return {"status": "blocked", "error": "risk gate check failed"}
+
     if not quantity or quantity <= 0:
         buying_power = _get_buying_power()
         stop = proposal.stop_loss or proposal.entry_price
@@ -1278,11 +1324,18 @@ def _execute_proposal(
 
     target_broker = broker or get_best_broker_for(ticker)
     now = datetime.utcnow()
+    try:
+        from .backtest_engine import TICKER_TO_SECTOR
+
+        sector_label = TICKER_TO_SECTOR.get((ticker or "").upper())
+    except Exception:
+        sector_label = None
 
     if not is_any_connected() or target_broker == "manual":
         trade = Trade(
             user_id=user_id,
             ticker=ticker,
+            sector=sector_label,
             direction="long",
             entry_price=proposal.entry_price,
             quantity=quantity,
@@ -1381,6 +1434,7 @@ def _execute_proposal(
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
+                sector=sector_label,
                 direction="long",
                 entry_price=avg_price if is_already_filled and avg_price else proposal.entry_price,
                 quantity=quantity,

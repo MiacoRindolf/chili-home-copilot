@@ -87,6 +87,27 @@ def win_loss_payoff_ratio_from_trades(trades_df: pd.DataFrame) -> float | None:
     return float(aw / abs(al))
 
 
+def deflated_sharpe_ratio_proxy(
+    sharpe_ratio: float | None,
+    *,
+    n_observations: int,
+    n_trials: int = 50,
+) -> float | None:
+    """Conservative Sharpe deflation proxy for strategy-selection bias.
+
+    Uses a simple multiple-testing penalty term:
+      DSR ~= SR - sqrt(2 * ln(n_trials) / (n_observations - 1))
+    """
+    sr = _finite_float(sharpe_ratio)
+    if sr is None:
+        return None
+    if n_observations <= 2:
+        return None
+    n_trials = max(1, int(n_trials))
+    penalty = math.sqrt(max(0.0, 2.0 * math.log(float(n_trials)) / max(float(n_observations - 1), 1.0)))
+    return float(sr - penalty)
+
+
 def build_research_kpis(
     stats: Any,
     *,
@@ -118,8 +139,19 @@ def build_research_kpis(
 
     wl = win_loss_payoff_ratio_from_trades(raw_trades) if raw_trades is not None else None
 
+    sharpe = stat("Sharpe Ratio")
+    n_obs = 0
+    if raw_trades is not None and not raw_trades.empty:
+        n_obs = len(raw_trades)
+    elif equity_df is not None and not equity_df.empty:
+        n_obs = len(equity_df)
+    elif close_series is not None:
+        n_obs = len(close_series)
+    dsr = deflated_sharpe_ratio_proxy(sharpe, n_observations=max(1, n_obs), n_trials=50)
+
     out: dict[str, Any] = {
-        "sharpe_ratio": _round_opt(stat("Sharpe Ratio"), 3),
+        "sharpe_ratio": _round_opt(sharpe, 3),
+        "deflated_sharpe_ratio": _round_opt(dsr, 3),
         "sortino_ratio": _round_opt(stat("Sortino Ratio"), 3),
         "calmar_ratio": _round_opt(stat("Calmar Ratio"), 3),
         "max_drawdown_pct": _round_opt(stat("Max. Drawdown [%]"), 2),

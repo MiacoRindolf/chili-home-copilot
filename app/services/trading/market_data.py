@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import threading
 import time as _time
+from datetime import datetime
 from typing import Any
 
 import numpy as np
@@ -41,6 +42,35 @@ def _log_ohlcv_outcome(
         reason,
         rc,
     )
+
+
+def _finalize_ohlcv_df(df: pd.DataFrame, *, ticker: str, interval: str, provider: str) -> pd.DataFrame:
+    """Clean, validate, and annotate OHLCV data with provenance metadata."""
+    if df is None or df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    try:
+        from .data_quality import clean_ohlcv, validate_ohlcv_integrity
+
+        out = clean_ohlcv(out)
+        integrity = validate_ohlcv_integrity(out)
+        if not integrity.get("ok", False):
+            logger.warning(
+                "[market_data] OHLCV integrity failed ticker=%s interval=%s provider=%s: %s",
+                ticker,
+                interval,
+                provider,
+                integrity,
+            )
+            return pd.DataFrame()
+        out.attrs["integrity_ok"] = True
+    except Exception:
+        out.attrs["integrity_ok"] = False
+    out.attrs["provider"] = provider
+    out.attrs["fetched_at_utc"] = datetime.utcnow().isoformat() + "Z"
+    out.attrs["ticker"] = ticker.upper()
+    out.attrs["interval"] = interval
+    return out
 
 
 
@@ -371,7 +401,9 @@ def fetch_ohlcv_df(
                 _log_ohlcv_outcome(
                     ticker, interval, provider="massive", reason="ok", row_count=len(df),
                 )
-                return _store_and_return(df)
+                return _store_and_return(
+                    _finalize_ohlcv_df(df, ticker=ticker, interval=interval, provider="massive")
+                )
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
             else:
@@ -407,7 +439,9 @@ def fetch_ohlcv_df(
                 _log_ohlcv_outcome(
                     ticker, interval, provider="polygon", reason="ok", row_count=len(df),
                 )
-                return _store_and_return(df)
+                return _store_and_return(
+                    _finalize_ohlcv_df(df, ticker=ticker, interval=interval, provider="polygon")
+                )
             _log_ohlcv_outcome(
                 ticker, interval, provider="polygon", reason="empty_try_fallback", row_count=0,
             )
@@ -439,7 +473,9 @@ def fetch_ohlcv_df(
         _log_ohlcv_outcome(
             ticker, interval, provider="yfinance", reason="ok", row_count=len(_df),
         )
-    return _store_and_return(_df)
+    return _store_and_return(
+        _finalize_ohlcv_df(_df, ticker=ticker, interval=interval, provider="yfinance")
+    )
 
 
 def fetch_ohlcv_batch(
@@ -601,6 +637,12 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         result["year_low"] = smart_round(fi["year_low"], crypto=_cr)
     if fi.get("avg_volume"):
         result["avg_volume"] = fi["avg_volume"]
+    try:
+        from .emergency_liquidation import record_price_heartbeat
+
+        record_price_heartbeat()
+    except Exception:
+        pass
     return result
 
 

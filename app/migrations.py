@@ -5883,6 +5883,48 @@ def _migration_111_trading_decision_stack(conn) -> None:
     conn.commit()
 
 
+def _migration_112_trade_sector_and_governance_approvals(conn) -> None:
+    """Add Trade.sector and persistent governance approvals table."""
+    tables = _tables(conn)
+    if "trading_trades" in tables:
+        cols = _columns(conn, "trading_trades")
+        if "sector" not in cols:
+            conn.execute(text("ALTER TABLE trading_trades ADD COLUMN sector VARCHAR(80)"))
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_trading_trades_sector ON trading_trades (sector)")
+            )
+    if "trading_governance_approvals" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_governance_approvals (
+                    id BIGSERIAL PRIMARY KEY,
+                    action_type VARCHAR(64) NOT NULL,
+                    details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    submitted_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    decision VARCHAR(24),
+                    decided_at TIMESTAMP,
+                    notes TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tga_status_submitted "
+                "ON trading_governance_approvals (status, submitted_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tga_action_status "
+                "ON trading_governance_approvals (action_type, status)"
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -5996,6 +6038,7 @@ MIGRATIONS = [
     ("109_brain_work_events", _migration_109_brain_work_events),
     ("110_brain_work_lease_scope", _migration_110_brain_work_lease_scope),
     ("111_trading_decision_stack", _migration_111_trading_decision_stack),
+    ("112_trade_sector_and_governance_approvals", _migration_112_trade_sector_and_governance_approvals),
 ]
 
 

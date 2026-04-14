@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from backtesting import Backtest, Strategy
+from backtesting import Strategy
 from backtesting.lib import FractionalBacktest, crossover
 from sqlalchemy.orm import Session
 
@@ -435,12 +435,18 @@ def run_backtest(
     strategy_id: str = "sma_cross",
     period: str = "1y",
     cash: float = 10000,
-    commission: float = 0.001,
+    commission: float | None = None,
+    spread: float | None = None,
     optimize: bool = False,
     interval: str = "1d",
     strategy_params: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run a backtest and return results dict."""
+    if commission is None:
+        commission = float(settings.backtest_commission)
+    if spread is None:
+        spread = float(settings.backtest_spread)
+
     if strategy_id not in STRATEGIES:
         return {"ok": False, "error": f"Unknown strategy: {strategy_id}"}
 
@@ -456,11 +462,12 @@ def run_backtest(
     strat_cls = strat_info["cls"]
     coerced = _coerce_strategy_params(strat_cls, strategy_id, strategy_params)
 
-    bt = Backtest(
+    bt = FractionalBacktest(
         df,
         strat_cls,
         cash=cash,
         commission=commission,
+        spread=float(spread or 0.0),
         exclusive_orders=True,
         finalize_trades=True,
     )
@@ -560,6 +567,8 @@ def run_backtest(
         "trades": trades_list,
         "indicators": indicators,
         "kpis": _kpis,
+        "spread_used": spread,
+        "commission_used": commission,
     }
     _enrich_generic_bt_result(
         payload,

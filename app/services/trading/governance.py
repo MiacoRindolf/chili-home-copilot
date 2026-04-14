@@ -8,11 +8,13 @@ Provides safety mechanisms:
 """
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...config import settings
@@ -103,6 +105,117 @@ _approval_queue: list[dict[str, Any]] = []
 _approval_lock = threading.Lock()
 
 
+def _insert_approval_row(action_type: str, details: dict[str, Any]) -> int | None:
+    """Persist approval request and return DB id when available."""
+    try:
+        from ...db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            row = sess.execute(
+                text(
+                    """
+                    INSERT INTO trading_governance_approvals (
+                        action_type, details_json, submitted_at, status
+                    ) VALUES (
+                        :action_type, CAST(:details_json AS JSONB), NOW(), 'pending'
+                    )
+                    RETURNING id
+                    """
+                ),
+                {
+                    "action_type": action_type,
+                    "details_json": json.dumps(details or {}, ensure_ascii=True),
+                },
+            ).fetchone()
+            sess.commit()
+            return int(row[0]) if row and row[0] is not None else None
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Failed to persist approval request", exc_info=True)
+        return None
+
+
+def _fetch_pending_approvals_from_db() -> list[dict[str, Any]]:
+    try:
+        from ...db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            rows = sess.execute(
+                text(
+                    """
+                    SELECT id, action_type, details_json, submitted_at, status, decision, decided_at, notes
+                    FROM trading_governance_approvals
+                    WHERE status = 'pending'
+                    ORDER BY submitted_at DESC
+                    """
+                )
+            ).fetchall()
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                details = row[2] or {}
+                if isinstance(details, str):
+                    try:
+                        details = json.loads(details)
+                    except Exception:
+                        details = {}
+                out.append(
+                    {
+                        "id": int(row[0]),
+                        "action_type": row[1],
+                        "details": details if isinstance(details, dict) else {},
+                        "submitted_at": row[3].isoformat() + "Z" if row[3] else None,
+                        "status": row[4],
+                        "decision": row[5],
+                        "decided_at": row[6].isoformat() + "Z" if row[6] else None,
+                        "notes": row[7] or "",
+                    }
+                )
+            return out
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Failed to fetch DB approvals", exc_info=True)
+        return []
+
+
+def _set_approval_decision_db(approval_id: int, decision: str, notes: str = "") -> bool:
+    try:
+        from ...db import SessionLocal
+
+        sess = SessionLocal()
+        try:
+            row = sess.execute(
+                text(
+                    """
+                    UPDATE trading_governance_approvals
+                    SET status = :status,
+                        decision = :decision,
+                        decided_at = NOW(),
+                        notes = :notes
+                    WHERE id = :approval_id
+                      AND status = 'pending'
+                    RETURNING id
+                    """
+                ),
+                {
+                    "status": "approved" if decision == "approved" else "rejected",
+                    "decision": decision,
+                    "notes": notes or "",
+                    "approval_id": int(approval_id),
+                },
+            ).fetchone()
+            sess.commit()
+            return bool(row)
+        finally:
+            sess.close()
+    except Exception:
+        logger.debug("[governance] Failed to update DB approval decision", exc_info=True)
+        return False
+
+
 def submit_for_approval(
     action_type: str,
     details: dict[str, Any],
@@ -117,7 +230,7 @@ def submit_for_approval(
         return {"approved": True, "auto": True}
 
     entry = {
-        "id": len(_approval_queue) + 1,
+        "id": None,
         "action_type": action_type,
         "details": details,
         "submitted_at": datetime.utcnow().isoformat() + "Z",
@@ -125,7 +238,12 @@ def submit_for_approval(
         "decision": None,
         "decided_at": None,
     }
+    db_id = _insert_approval_row(action_type, details)
+    if db_id is not None:
+        entry["id"] = db_id
     with _approval_lock:
+        if entry["id"] is None:
+            entry["id"] = len(_approval_queue) + 1
         _approval_queue.append(entry)
 
     logger.info("[governance] Submitted for approval: %s #%d", action_type, entry["id"])
@@ -134,12 +252,18 @@ def submit_for_approval(
 
 def get_pending_approvals() -> list[dict[str, Any]]:
     """Get all pending approval requests."""
+    db_rows = _fetch_pending_approvals_from_db()
+    if db_rows:
+        return db_rows
     with _approval_lock:
         return [a for a in _approval_queue if a["status"] == "pending"]
 
 
 def approve(approval_id: int, *, notes: str = "") -> bool:
     """Approve a pending request."""
+    if _set_approval_decision_db(approval_id, "approved", notes=notes):
+        logger.info("[governance] Approved #%d via DB", approval_id)
+        return True
     with _approval_lock:
         for a in _approval_queue:
             if a["id"] == approval_id and a["status"] == "pending":
@@ -154,6 +278,9 @@ def approve(approval_id: int, *, notes: str = "") -> bool:
 
 def reject(approval_id: int, *, reason: str = "") -> bool:
     """Reject a pending request."""
+    if _set_approval_decision_db(approval_id, "rejected", notes=reason):
+        logger.info("[governance] Rejected #%d via DB (%s)", approval_id, reason)
+        return True
     with _approval_lock:
         for a in _approval_queue:
             if a["id"] == approval_id and a["status"] == "pending":

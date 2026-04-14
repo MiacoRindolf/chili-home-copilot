@@ -984,6 +984,36 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                 _pe_patterns = get_active_patterns(_pe_db, asset_class=_asset_class)
                 if _pe_patterns:
                     _sw_resistance = float(high.rolling(20).max().iloc[-1])
+                    _pe_conditions: list[dict[str, Any]] = []
+                    for _p in _pe_patterns:
+                        try:
+                            _rules = json.loads(_p.rules_json or "{}")
+                            _conds = _rules.get("conditions") or []
+                            if isinstance(_conds, dict):
+                                _conds = [_conds]
+                            if isinstance(_conds, list):
+                                _pe_conditions.extend(
+                                    c for c in _conds if isinstance(c, dict) and c
+                                )
+                        except Exception:
+                            continue
+                    _series_last: dict[str, Any] = {}
+                    if _pe_conditions:
+                        try:
+                            from app.services.backtest_service import _compute_series_for_conditions
+
+                            _series = _compute_series_for_conditions(df, _pe_conditions)
+                            for _k, _vals in _series.items():
+                                if isinstance(_vals, list) and _vals:
+                                    _series_last[_k] = _vals[-1]
+                            _res = _series_last.get("resistance")
+                            if _res is not None:
+                                _sw_resistance = float(_res)
+                        except Exception:
+                            logger.debug(
+                                "[scanner] _score_ticker_impl: series parity enrich failed",
+                                exc_info=True,
+                            )
                     _pe_snap = build_indicator_snapshot(
                         price=price,
                         indicators={
@@ -999,10 +1029,13 @@ def _score_ticker_impl(ticker: str, *, skip_fundamentals: bool = False) -> dict[
                             "ema_50": float(ema_50) if pd.notna(ema_50) else None,
                             "sma_20": float(sma_20) if pd.notna(sma_20) else None,
                             "sma_50": float(sma_50) if pd.notna(sma_50) else None,
+                            **_series_last,
                         },
                         resistance=_sw_resistance,
                         extra={
                             "stoch_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                            "stochastic_k": float(stoch_k) if pd.notna(stoch_k) else None,
+                            "macd_histogram": float(macd_hist) if pd.notna(macd_hist) else None,
                         },
                     )
                     _pe_snap = _enrich_snapshot_cross_tf(_pe_snap, _pe_patterns, ticker, df)

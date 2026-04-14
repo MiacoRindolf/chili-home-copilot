@@ -15,6 +15,7 @@ from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...models.trading import PaperTrade, ScanPattern
 
 logger = logging.getLogger(__name__)
@@ -76,7 +77,8 @@ def _compute_atr_levels(ticker: str, entry_price: float, exit_cfg: dict) -> tupl
 
 def _apply_slippage(price: float, direction: str, is_entry: bool) -> float:
     """Apply simulated slippage to a fill price."""
-    slip = price * DEFAULT_SLIPPAGE_PCT / 100
+    spread_pct = float(getattr(settings, "backtest_spread", DEFAULT_SLIPPAGE_PCT / 100) or 0.0) * 100
+    slip = price * spread_pct / 100
     if is_entry:
         return price + slip if direction == "long" else price - slip
     else:
@@ -296,11 +298,19 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
     pt.exit_reason = reason
 
     if pt.direction == "long":
-        pt.pnl = round((exit_price - pt.entry_price) * pt.quantity, 2)
-        pt.pnl_pct = round((exit_price - pt.entry_price) / pt.entry_price * 100, 2)
+        gross_pnl = (exit_price - pt.entry_price) * pt.quantity
+        gross_pct = (exit_price - pt.entry_price) / pt.entry_price * 100
     else:
-        pt.pnl = round((pt.entry_price - exit_price) * pt.quantity, 2)
-        pt.pnl_pct = round((pt.entry_price - exit_price) / pt.entry_price * 100, 2)
+        gross_pnl = (pt.entry_price - exit_price) * pt.quantity
+        gross_pct = (pt.entry_price - exit_price) / pt.entry_price * 100
+
+    commission_rate = float(getattr(settings, "backtest_commission", 0.0) or 0.0)
+    commission_cost = (pt.entry_price + exit_price) * pt.quantity * commission_rate
+    net_pnl = gross_pnl - commission_cost
+    notional = max(pt.entry_price * pt.quantity, 1e-9)
+    net_pct = (net_pnl / notional) * 100
+    pt.pnl = round(net_pnl, 2)
+    pt.pnl_pct = round(net_pct, 2)
 
     logger.info("[paper] Closed %s %s @ %.2f (%s) P&L: $%.2f (%.2f%%)",
                 pt.direction, pt.ticker, exit_price, reason, pt.pnl, pt.pnl_pct)

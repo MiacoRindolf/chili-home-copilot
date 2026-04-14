@@ -31,6 +31,7 @@ class RiskBudget:
     rejection_reason: str | None = None
     sector_exposure: dict[str, float] = field(default_factory=dict)
     portfolio_var_pct: float | None = None
+    portfolio_cvar_pct: float | None = None
 
 
 @dataclass
@@ -122,6 +123,10 @@ def get_portfolio_risk_snapshot(
     if budget.open_positions > 0:
         try:
             budget.portfolio_var_pct = estimate_portfolio_var(db, user_id, capital)
+        except Exception:
+            pass
+        try:
+            budget.portfolio_cvar_pct = estimate_portfolio_cvar(db, user_id, capital)
         except Exception:
             pass
 
@@ -568,6 +573,59 @@ def estimate_portfolio_var(
     var_pct = round(portfolio_var * z * 100, 4)
 
     return var_pct
+
+
+def estimate_portfolio_cvar(
+    db: Session,
+    user_id: int | None,
+    capital: float = 100_000.0,
+    confidence: float = 0.95,
+    lookback: int = 60,
+) -> float | None:
+    """Estimate historical portfolio CVaR (%) from open-position return series."""
+    import numpy as np
+    from .market_data import fetch_ohlcv_df
+
+    open_trades = db.query(Trade).filter(
+        Trade.user_id == user_id,
+        Trade.status == "open",
+    ).all()
+    if not open_trades or capital <= 0:
+        return None
+
+    tickers = list({t.ticker for t in open_trades})
+    weights: dict[str, float] = {}
+    for t in open_trades:
+        notional = t.entry_price * t.quantity
+        weights[t.ticker] = weights.get(t.ticker, 0.0) + notional / capital
+
+    returns_data: dict[str, list[float]] = {}
+    for ticker in tickers:
+        try:
+            df = fetch_ohlcv_df(ticker, interval="1d", period=f"{lookback + 10}d")
+            if df is None or len(df) < 20:
+                continue
+            close = df["Close"].values
+            rets = list((close[1:] - close[:-1]) / close[:-1])
+            returns_data[ticker] = rets[-lookback:]
+        except Exception:
+            continue
+
+    valid = [t for t in tickers if t in returns_data]
+    if not valid:
+        return None
+    min_len = min(len(returns_data[t]) for t in valid)
+    if min_len < 5:
+        return None
+    mat = np.array([returns_data[t][-min_len:] for t in valid])
+    w = np.array([weights.get(t, 0.0) for t in valid])
+    portfolio_returns = np.dot(mat.T, w)
+    losses = -portfolio_returns
+    var_cut = np.quantile(losses, confidence)
+    tail = losses[losses >= var_cut]
+    if len(tail) == 0:
+        return None
+    return round(float(np.mean(tail) * 100.0), 4)
 
 
 def _infer_stop(trade: Trade) -> float | None:

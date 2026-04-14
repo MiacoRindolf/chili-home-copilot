@@ -522,6 +522,21 @@ def allocate_momentum_session_entry(
         mult = 1.0
 
     intended_notional = max(10.0, base_cap * max(0.0, min(1.0, mult)))
+    erc_allocation: dict[str, Any] | None = None
+    try:
+        from .portfolio_optimizer import equal_risk_contribution
+
+        erc = equal_risk_contribution(db)
+        if erc.get("ok"):
+            for item in erc.get("allocations", []):
+                if int(item.get("pattern_id") or 0) == int(scan_pattern_id or 0):
+                    erc_allocation = item
+                    cap = _safe_float(item.get("capital"), 0.0)
+                    if cap > 0:
+                        intended_notional = min(intended_notional, cap)
+                    break
+    except Exception:
+        erc_allocation = None
 
     realism = estimate_execution_realism(
         symbol=symbol,
@@ -578,6 +593,12 @@ def allocate_momentum_session_entry(
     enforce_exp = bool(getattr(settings, "brain_enforce_net_expectancy_live", False)) if execution_mode == "live" else bool(
         getattr(settings, "brain_enforce_net_expectancy_paper", True)
     )
+    regime_label = str(
+        (regime_snapshot or {}).get("regime")
+        or (regime_snapshot or {}).get("composite")
+        or (regime_snapshot or {}).get("regime_composite")
+        or ""
+    ).strip().lower()
 
     abstain_code = None
     abstain_text = None
@@ -603,6 +624,13 @@ def allocate_momentum_session_entry(
     if exp["expected_edge_net"] < floor and enforce_exp:
         abstain_code = abstain_code or "negative_net_expectancy"
         abstain_text = abstain_text or "net_expectancy_below_floor"
+    if (
+        regime_label == "risk_off"
+        and execution_mode == "live"
+        and exp["expected_edge_net"] < max(0.15, floor)
+    ):
+        abstain_code = abstain_code or "regime_rotation_risk_off"
+        abstain_text = abstain_text or "risk_off_regime_requires_higher_edge"
 
     if shadow and abstain_code in ("negative_net_expectancy",):
         shadow_override = True
@@ -668,5 +696,6 @@ def allocate_momentum_session_entry(
         "execution_penalty": _safe_float(realism.get("execution_penalty"), 0.0),
         "shadow_override": shadow_override,
         "capacity_blocked_flag": bool(cap_eval.get("capacity_hard_signals")),
+        "erc_allocation": erc_allocation,
     }
 

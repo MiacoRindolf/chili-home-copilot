@@ -573,7 +573,7 @@ class Settings(BaseSettings):
 
     # Benchmark walk-forward (SPY/QQQ-style) after hypothesis test; optional extra promotion gate.
     brain_bench_walk_forward_enabled: bool = True
-    brain_bench_walk_forward_gate_enabled: bool = False
+    brain_bench_walk_forward_gate_enabled: bool = True
     brain_bench_tickers: str = "SPY,QQQ"
     brain_bench_period: str = "10y"
     brain_bench_interval: str = "1d"
@@ -640,7 +640,7 @@ class Settings(BaseSettings):
     brain_queue_stored_stale_days: int = 14  # refresh if ran_at older than this (UTC)
 
     # Live vs research: downgrade patterns when realized win rate lags research OOS materially.
-    brain_live_depromotion_enabled: bool = False
+    brain_live_depromotion_enabled: bool = True
     brain_live_depromotion_min_closed_trades: int = 8
     brain_live_depromotion_max_gap_pct: float = 25.0
 
@@ -712,9 +712,9 @@ class Settings(BaseSettings):
     brain_max_open_per_sector: int = 0
     brain_max_correlated_positions: int = 0
     brain_allocator_enabled: bool = True
-    brain_allocator_shadow_mode: bool = True
+    brain_allocator_shadow_mode: bool = False
     brain_allocator_live_soft_block_enabled: bool = False
-    brain_allocator_live_hard_block_enabled: bool = False
+    brain_allocator_live_hard_block_enabled: bool = True
     brain_allocator_incumbent_score_margin: float = 0.08
 
     # Decision ledger + net-expectancy allocator (momentum autopilot / brain). Live enforcement OFF by default.
@@ -723,7 +723,7 @@ class Settings(BaseSettings):
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_DECISION_PACKET_REQUIRED_FOR_RUNNERS")
     )
     brain_expectancy_allocator_shadow_mode: bool = Field(
-        default=True, validation_alias=AliasChoices("CHILI_BRAIN_EXPECTANCY_ALLOCATOR_SHADOW_MODE")
+        default=False, validation_alias=AliasChoices("CHILI_BRAIN_EXPECTANCY_ALLOCATOR_SHADOW_MODE")
     )
     brain_enable_execution_realism: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_EXECUTION_REALISM"))
     brain_enable_capacity_governor: bool = Field(default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENABLE_CAPACITY_GOVERNOR"))
@@ -735,19 +735,19 @@ class Settings(BaseSettings):
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_PAPER")
     )
     brain_enforce_net_expectancy_live: bool = Field(
-        default=False, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_LIVE")
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_ENFORCE_NET_EXPECTANCY_LIVE")
     )
     brain_capacity_hard_block_paper: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_PAPER")
     )
     brain_capacity_hard_block_live: bool = Field(
-        default=False, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_LIVE")
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_CAPACITY_HARD_BLOCK_LIVE")
     )
     brain_paper_deployment_enforcement: bool = Field(
         default=True, validation_alias=AliasChoices("CHILI_BRAIN_PAPER_DEPLOYMENT_ENFORCEMENT")
     )
     brain_live_deployment_enforcement: bool = Field(
-        default=False, validation_alias=AliasChoices("CHILI_BRAIN_LIVE_DEPLOYMENT_ENFORCEMENT")
+        default=True, validation_alias=AliasChoices("CHILI_BRAIN_LIVE_DEPLOYMENT_ENFORCEMENT")
     )
     brain_max_adv_notional_pct: float = Field(
         default=0.25,

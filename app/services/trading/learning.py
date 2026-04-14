@@ -871,6 +871,29 @@ def _fetch_fundamentals(ticker: str) -> tuple[float | None, float | None]:
         return None, None
 
 
+_event_calendar_cache: tuple[float, set[str]] = (0.0, set())
+
+
+def _fetch_event_context(ticker: str) -> dict[str, Any]:
+    """Event-calendar and lightweight alt-data flags for snapshot provenance."""
+    global _event_calendar_cache
+    now = time.time()
+    cached_at, symbols = _event_calendar_cache
+    if now - cached_at > 1800:
+        try:
+            from .prescreener import _massive_earnings
+
+            symbols = {str(s).strip().upper() for s in _massive_earnings()}
+            _event_calendar_cache = (now, symbols)
+        except Exception:
+            symbols = set()
+    sym = (ticker or "").strip().upper()
+    return {
+        "earnings_upcoming": sym in symbols,
+        "event_source": "massive_earnings",
+    }
+
+
 def take_market_snapshot(db: Session, ticker: str, bar_interval: str = "1d") -> None:
     """Upsert one snapshot row for the latest *closed* bar in ``bar_interval`` (UTC bar open key)."""
     try:
@@ -881,6 +904,13 @@ def take_market_snapshot(db: Session, ticker: str, bar_interval: str = "1d") -> 
             return
         price = float(df.iloc[-1]["Close"])
         bar_start = normalize_bar_start_utc(df.index[-1])
+        snap["data_provenance"] = {
+            "provider": df.attrs.get("provider"),
+            "fetched_at_utc": df.attrs.get("fetched_at_utc"),
+            "integrity_ok": df.attrs.get("integrity_ok"),
+            "bar_interval": bar_interval,
+        }
+        snap["event_context"] = _fetch_event_context(ticker)
         ind_data = {k: v for k, v in snap.items() if k not in ("ticker", "interval")}
         pred_score = compute_prediction(ind_data) if ind_data else None
         vix = get_vix()
@@ -932,6 +962,13 @@ def _snapshot_data(ticker: str, bar_interval: str = "1d") -> tuple[
         snap = get_indicator_snapshot(ticker, bar_interval, ohlcv_df=df)
         price = float(df.iloc[-1]["Close"])
         bar_start = normalize_bar_start_utc(df.index[-1])
+        snap["data_provenance"] = {
+            "provider": df.attrs.get("provider"),
+            "fetched_at_utc": df.attrs.get("fetched_at_utc"),
+            "integrity_ok": df.attrs.get("integrity_ok"),
+            "bar_interval": bar_interval,
+        }
+        snap["event_context"] = _fetch_event_context(ticker)
         quote = {"price": price}
         sent_score, sent_count = _fetch_news_sentiment(ticker)
         pe, mcap = _fetch_fundamentals(ticker)
@@ -1729,11 +1766,21 @@ def mine_patterns(
     def _check(filtered, label, conditions=None):
         if len(filtered) < MIN_SAMPLES:
             return
+        from .mining_validation import check_promotion_ready
+
         if _cpcv_on:
             from .mining_validation import mined_candidate_passes_purged_segments
             ok, _ = mined_candidate_passes_purged_segments(filtered)
             if not ok:
                 return
+        # Apply multiple-hypothesis correction / ensemble promotion check early in mining.
+        _ready, _detail = check_promotion_ready(
+            filtered,
+            min_trades=MIN_SAMPLES,
+            n_hypotheses_tested=max(1, int(getattr(settings, "brain_mining_hypotheses_tested", 50))),
+        )
+        if not _ready:
+            return
         avg_5d = sum(r["ret_5d"] for r in filtered) / len(filtered)
         avg_10d_vals = [r["ret_10d"] for r in filtered if r.get("ret_10d") is not None]
         avg_10d = (sum(avg_10d_vals) / len(avg_10d_vals)) if avg_10d_vals else None
@@ -2626,6 +2673,7 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
     rows: list[dict] = []
     from concurrent.futures import ThreadPoolExecutor, as_completed
     from ...config import settings as _ve_settings
+    import random
 
     _workers = (
         io_workers_high(_ve_settings)
@@ -2691,12 +2739,29 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
         wr_a = sum(1 for r in group_a if r["ret_5d"] > 0) / len(group_a) * 100
         wr_b = sum(1 for r in group_b if r["ret_5d"] > 0) / len(group_b) * 100
 
-        MIN_DELTA = 1.5  # Require 1.5% difference to be meaningful
-        delta = avg_a - avg_b
+        # Bootstrap mean-difference significance to reduce heuristic confirmations.
+        rng = random.Random(42 + int(hyp.id or 0) + int(hyp.times_tested or 0))
+        n_boot = max(200, int(getattr(_ve_settings, "brain_hypothesis_bootstrap_iterations", 500)))
+        a_vals = [float(r["ret_5d"]) for r in group_a]
+        b_vals = [float(r["ret_5d"]) for r in group_b]
+        deltas: list[float] = []
+        for _ in range(n_boot):
+            sa = rng.choices(a_vals, k=len(a_vals))
+            sb = rng.choices(b_vals, k=len(b_vals))
+            deltas.append((sum(sa) / len(sa)) - (sum(sb) / len(sb)))
+        deltas.sort()
+        lo_i = max(0, int(n_boot * 0.025))
+        hi_i = min(n_boot - 1, int(n_boot * 0.975))
+        ci_low = deltas[lo_i]
+        ci_high = deltas[hi_i]
+        mean_delta = sum(deltas) / len(deltas)
+        p_nonpos = sum(1 for d in deltas if d <= 0) / len(deltas)
+        p_nonneg = sum(1 for d in deltas if d >= 0) / len(deltas)
+        p_value = min(1.0, 2 * min(p_nonpos, p_nonneg))
         if hyp.expected_winner == "a":
-            confirmed = delta > MIN_DELTA
+            confirmed = mean_delta > 0 and ci_low > 0 and p_value < 0.05
         else:
-            confirmed = -delta > MIN_DELTA
+            confirmed = mean_delta < 0 and ci_high < 0 and p_value < 0.05
 
         finding = {
             "hypothesis": hyp.description,
@@ -2708,6 +2773,13 @@ def validate_and_evolve(db: Session, user_id: int | None) -> dict[str, Any]:
             "group_b_wr": round(wr_b, 1),
             "group_a_n": len(group_a),
             "group_b_n": len(group_b),
+            "bootstrap": {
+                "mean_delta": round(mean_delta, 4),
+                "ci_low": round(ci_low, 4),
+                "ci_high": round(ci_high, 4),
+                "p_value": round(p_value, 6),
+                "iterations": n_boot,
+            },
         }
         results.append(finding)
 
@@ -5942,6 +6014,12 @@ def test_pattern_hypothesis(
         oos_bootstrap_wr_ci_low=ci_low,
         **_oos_kw,
     )
+    min_wr_pct = float(_oos_kw.get("min_oos_win_rate_pct", 0.0) or 0.0)
+    pass_count = sum(1 for wr in oos_wrs if float(wr) >= min_wr_pct)
+    per_ticker_oos_pass_ratio = (pass_count / len(oos_wrs)) if oos_wrs else 0.0
+    if prom_stat == "promoted" and oos_wrs and per_ticker_oos_pass_ratio < 0.6:
+        prom_stat = "rejected_oos"
+        allow_active = False
 
     prev_ov = getattr(pattern, "oos_validation_json", None) or {}
     if not isinstance(prev_ov, dict):
@@ -5962,10 +6040,42 @@ def test_pattern_hypothesis(
             if ci_low is not None and ci_high is not None
             else None
         ),
+        "per_ticker_oos_pass_ratio": round(per_ticker_oos_pass_ratio, 4),
+        "per_ticker_oos_min_wr_pct": round(min_wr_pct, 4),
+        "per_ticker_oos_pass_count": pass_count,
+        "per_ticker_oos_total": len(oos_wrs),
         "research_integrity": aggregate_promotion_integrity(integrity_rows),
     }
 
     from ...models.trading import BacktestResult as _BT
+    from ...models.trading import PatternTradeRow as _PTR
+    from .mining_validation import check_promotion_ready
+
+    _ptr_rows = (
+        db.query(_PTR)
+        .filter(
+            _PTR.scan_pattern_id == pattern.id,
+            _PTR.outcome_return_pct.isnot(None),
+        )
+        .order_by(_PTR.as_of_ts.asc())
+        .all()
+    )
+    _ensemble_rows = [
+        {
+            "ret_5d": float(r.outcome_return_pct or 0.0),
+            "bar_start_utc": r.as_of_ts,
+        }
+        for r in _ptr_rows
+    ]
+    _ensemble_ok, _ensemble_detail = check_promotion_ready(
+        _ensemble_rows,
+        min_trades=30,
+        n_hypotheses_tested=max(1, int(total or 1)),
+    )
+    oos_validation_merged["ensemble_promotion_gate"] = _ensemble_detail
+    if prom_stat == "promoted" and not _ensemble_ok:
+        prom_stat = "rejected_oos"
+
     actual_bt_count = db.query(func.count(_BT.id)).filter(
         _BT.scan_pattern_id == pattern.id
     ).scalar() or 0

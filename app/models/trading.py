@@ -37,6 +37,7 @@ class Trade(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
     ticker: str = Column(String(20), nullable=False)
+    sector: Optional[str] = Column(String(80), nullable=True, index=True)
     direction: str = Column(String(10), nullable=False, default="long")  # long / short
     entry_price: float = Column(Float, nullable=False)
     exit_price: Optional[float] = Column(Float, nullable=True)

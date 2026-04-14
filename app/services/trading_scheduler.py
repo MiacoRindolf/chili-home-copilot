@@ -1007,6 +1007,27 @@ def _run_momentum_scanner_job():
         db.close()
 
 
+def _run_intraday_signal_sweep_job():
+    """Run intraday signal sweep and optionally route into paper automation."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.intraday_signals import run_intraday_signal_sweep
+
+    logger.info("[scheduler] Running intraday signal sweep")
+    db = SessionLocal()
+    try:
+        uid = getattr(_settings, "brain_default_user_id", None)
+        auto_paper = bool(
+            getattr(_settings, "chili_momentum_paper_runner_enabled", False)
+            and getattr(_settings, "chili_momentum_paper_runner_scheduler_enabled", False)
+        )
+        out = run_intraday_signal_sweep(db, user_id=uid, auto_paper=auto_paper)
+        db.commit()
+        logger.info("[scheduler] Intraday signal sweep result: %s", out)
+    finally:
+        db.close()
+
+
 def _check_breakout_outcomes():
     """Hourly job: check price outcomes for pending breakout alerts.
 
@@ -1374,6 +1395,16 @@ def start_scheduler():
                 name="Price monitor & alerts (market hours every 5min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_intraday_signal_sweep_job,
+                trigger=IntervalTrigger(minutes=15),
+                id="intraday_signal_sweep",
+                name="Intraday signal sweep (every 15min)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=55),
             )
 
         if include_heavy:

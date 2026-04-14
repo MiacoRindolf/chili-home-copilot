@@ -50,7 +50,7 @@ def check_alpha_decay(
         try:
             from .market_data import get_market_regime
             regime = get_market_regime()
-            composite = regime.get("composite", "cautious")
+            composite = regime.get("regime", "cautious")
             adj = REGIME_DECAY_ADJUSTMENTS.get(composite, {})
             window_days = adj.get("window_days", window_days)
             wr_gap = adj.get("wr_gap", wr_gap)

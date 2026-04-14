@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime
 from typing import Any
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ...models.trading import JournalEntry, Trade, TradingInsight, WatchlistItem
@@ -258,6 +260,109 @@ def get_daily_pnl(
     return result
 
 
+def _compute_live_metrics_from_daily(daily: list[dict[str, Any]]) -> dict[str, Any]:
+    if not daily:
+        return {"sharpe_annualized": None, "max_drawdown_pct": 0.0}
+    returns = [float(row.get("pnl", 0.0)) for row in daily]
+    mean_ret = sum(returns) / len(returns)
+    var_ret = (
+        sum((r - mean_ret) ** 2 for r in returns) / max(len(returns) - 1, 1)
+        if len(returns) > 1
+        else 0.0
+    )
+    std_ret = math.sqrt(var_ret) if var_ret > 0 else 0.0
+    sharpe = (mean_ret / std_ret * math.sqrt(252)) if std_ret > 0 else None
+
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for r in returns:
+        equity += r
+        peak = max(peak, equity)
+        if peak > 0:
+            dd = (equity - peak) / peak * 100
+            max_dd = min(max_dd, dd)
+    return {
+        "sharpe_annualized": round(sharpe, 3) if sharpe is not None else None,
+        "max_drawdown_pct": round(max_dd, 2),
+    }
+
+
+def _upsert_performance_daily(db: Session, user_id: int | None, as_of: datetime) -> None:
+    """Persist one row in trading_brain_performance_daily for the UTC calendar date."""
+    from ...models.trading import ScanPattern
+
+    day_start = datetime(as_of.year, as_of.month, as_of.day)
+    day_end = day_start.replace(hour=23, minute=59, second=59, microsecond=999999)
+    day_trades = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.status == "closed",
+            Trade.exit_date.isnot(None),
+            Trade.exit_date >= day_start,
+            Trade.exit_date <= day_end,
+        )
+        .all()
+    )
+    pnls = [float(t.pnl or 0.0) for t in day_trades]
+    total_pnl = sum(pnls)
+    wins = sum(1 for p in pnls if p > 0)
+    losses = sum(1 for p in pnls if p <= 0)
+    trade_count = len(day_trades)
+    win_rate = (wins / trade_count * 100.0) if trade_count else None
+    avg_pnl = (total_pnl / trade_count) if trade_count else None
+    max_win = max(pnls) if pnls else None
+    max_loss = min(pnls) if pnls else None
+
+    base_patterns = db.query(ScanPattern).filter(ScanPattern.user_id == user_id)
+    patterns_active = base_patterns.filter(ScanPattern.active.is_(True)).count()
+    patterns_promoted = base_patterns.filter(ScanPattern.promotion_status == "promoted").count()
+
+    db.execute(
+        text(
+            """
+            INSERT INTO trading_brain_performance_daily (
+                user_id, perf_date, total_pnl, trade_count, win_count, loss_count,
+                win_rate, avg_pnl, max_win, max_loss, patterns_active, patterns_promoted, signals_generated
+            ) VALUES (
+                :user_id, :perf_date, :total_pnl, :trade_count, :win_count, :loss_count,
+                :win_rate, :avg_pnl, :max_win, :max_loss, :patterns_active, :patterns_promoted, :signals_generated
+            )
+            ON CONFLICT (user_id, perf_date)
+            DO UPDATE SET
+                total_pnl = EXCLUDED.total_pnl,
+                trade_count = EXCLUDED.trade_count,
+                win_count = EXCLUDED.win_count,
+                loss_count = EXCLUDED.loss_count,
+                win_rate = EXCLUDED.win_rate,
+                avg_pnl = EXCLUDED.avg_pnl,
+                max_win = EXCLUDED.max_win,
+                max_loss = EXCLUDED.max_loss,
+                patterns_active = EXCLUDED.patterns_active,
+                patterns_promoted = EXCLUDED.patterns_promoted,
+                signals_generated = EXCLUDED.signals_generated
+            """
+        ),
+        {
+            "user_id": user_id,
+            "perf_date": day_start.date(),
+            "total_pnl": round(total_pnl, 2),
+            "trade_count": trade_count,
+            "win_count": wins,
+            "loss_count": losses,
+            "win_rate": round(win_rate, 3) if win_rate is not None else None,
+            "avg_pnl": round(avg_pnl, 3) if avg_pnl is not None else None,
+            "max_win": round(max_win, 3) if max_win is not None else None,
+            "max_loss": round(max_loss, 3) if max_loss is not None else None,
+            "patterns_active": patterns_active,
+            "patterns_promoted": patterns_promoted,
+            "signals_generated": 0,
+        },
+    )
+    db.commit()
+
+
 def get_performance_dashboard(
     db: Session, user_id: int | None,
 ) -> dict[str, Any]:
@@ -266,6 +371,11 @@ def get_performance_dashboard(
     from datetime import datetime, timedelta
 
     now = datetime.utcnow()
+    try:
+        _upsert_performance_daily(db, user_id, now)
+    except Exception:
+        logger.debug("[portfolio] failed to upsert trading_brain_performance_daily", exc_info=True)
+
     stats = get_trade_stats(db, user_id)
     by_source = get_trade_stats_by_source(db, user_id)
 
@@ -273,6 +383,7 @@ def get_performance_dashboard(
     daily = get_daily_pnl(
         db, user_id, now - timedelta(days=30), now, include_day_trades=False
     )
+    live_metrics = _compute_live_metrics_from_daily(daily)
 
     # Per-pattern attribution via scan_pattern_id
     closed_with_sp = db.query(Trade).filter(
@@ -317,6 +428,7 @@ def get_performance_dashboard(
         "overall": stats,
         "by_source": by_source,
         "daily_pnl": daily,
+        "live_metrics": live_metrics,
         "attribution": attribution[:20],
         "week": {
             "trades": len(recent_week),
@@ -384,10 +496,13 @@ def get_trading_dashboard_overview(
 
     # Execution quality
     try:
-        from .execution_quality import compute_execution_stats
+        from .execution_quality import compute_execution_stats, suggest_adaptive_spread
+
         overview["execution_quality"] = compute_execution_stats(db, user_id)
+        overview["execution_spread_suggestion"] = suggest_adaptive_spread(db, user_id)
     except Exception:
         overview["execution_quality"] = None
+        overview["execution_spread_suggestion"] = None
 
     # Current market regime
     try:

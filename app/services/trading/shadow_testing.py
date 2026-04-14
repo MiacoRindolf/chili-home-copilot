@@ -5,14 +5,12 @@ then uses statistical tests to determine if the new variant is significantly bet
 """
 from __future__ import annotations
 
-import json
 import logging
 import math
 import random
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Any
 
-import numpy as np
 from sqlalchemy.orm import Session
 
 from ...models.trading import PaperTrade, ScanPattern
@@ -89,22 +87,37 @@ def evaluate_shadow_test(
     if len(variant_trades) < MIN_TRADES_FOR_COMPARISON:
         return {"ok": False, "reason": "insufficient_variant_trades", "n": len(variant_trades)}
 
-    control_returns = [t.pnl_pct or 0 for t in control_trades]
-    variant_returns = [t.pnl_pct or 0 for t in variant_trades]
+    control_returns, control_hold_days = _extract_trade_returns(control_trades)
+    variant_returns, variant_hold_days = _extract_trade_returns(variant_trades)
+    control_daily = _dailyize_returns(control_returns, control_hold_days)
+    variant_daily = _dailyize_returns(variant_returns, variant_hold_days)
 
     result: dict[str, Any] = {"ok": True}
 
-    result["control_stats"] = _compute_strategy_stats(control_returns)
-    result["variant_stats"] = _compute_strategy_stats(variant_returns)
+    result["control_stats"] = _compute_strategy_stats(control_returns, control_daily)
+    result["variant_stats"] = _compute_strategy_stats(variant_returns, variant_daily)
 
-    result["paired_ttest"] = _paired_return_ttest(control_returns, variant_returns)
+    result["paired_ttest"] = _welch_return_ttest(control_returns, variant_returns)
 
-    result["bootstrap_sharpe"] = _bootstrap_sharpe_difference(control_returns, variant_returns)
+    result["bootstrap_sharpe"] = _bootstrap_sharpe_difference(control_daily, variant_daily)
 
-    result["sharpe_ztest"] = _sharpe_ratio_ztest(control_returns, variant_returns)
+    result["sharpe_ztest"] = _sharpe_ratio_ztest(control_daily, variant_daily)
 
-    tests_passed = sum(1 for t in ["paired_ttest", "bootstrap_sharpe", "sharpe_ztest"]
-                       if result[t].get("significant", False))
+    pvals = {
+        "paired_ttest": float(result["paired_ttest"].get("p_value", 1.0)),
+        "bootstrap_sharpe": float(result["bootstrap_sharpe"].get("p_value", 1.0)),
+        "sharpe_ztest": float(result["sharpe_ztest"].get("p_value", 1.0)),
+    }
+    adjusted = _holm_bonferroni(pvals, alpha=SIGNIFICANCE_LEVEL)
+    for k, v in adjusted.items():
+        result[k]["significant"] = bool(v["significant"])
+        result[k]["p_value_adjusted"] = round(v["p_value_adjusted"], 6)
+    result["multiple_testing"] = {"method": "holm_bonferroni", "alpha": SIGNIFICANCE_LEVEL}
+
+    tests_passed = sum(
+        1 for t in ["paired_ttest", "bootstrap_sharpe", "sharpe_ztest"]
+        if result[t].get("significant", False)
+    )
     result["tests_passed"] = tests_passed
     result["promote_variant"] = tests_passed >= 2
     result["recommendation"] = (
@@ -132,15 +145,45 @@ def _get_closed_trades(db: Session, pattern_id: int) -> list[PaperTrade]:
     )
 
 
-def _compute_strategy_stats(returns: list[float]) -> dict[str, Any]:
+def _extract_trade_returns(trades: list[PaperTrade]) -> tuple[list[float], list[float]]:
+    returns: list[float] = []
+    hold_days: list[float] = []
+    for t in trades:
+        returns.append(float(t.pnl_pct or 0.0))
+        entry = getattr(t, "entry_date", None)
+        exit_ = getattr(t, "exit_date", None)
+        if entry and exit_:
+            days = max((exit_ - entry).total_seconds() / 86400.0, 1.0)
+        else:
+            days = 1.0
+        hold_days.append(days)
+    return returns, hold_days
+
+
+def _dailyize_returns(returns: list[float], hold_days: list[float]) -> list[float]:
+    out: list[float] = []
+    for idx, value in enumerate(returns):
+        d = hold_days[idx] if idx < len(hold_days) else 1.0
+        out.append(float(value) / max(float(d), 1.0))
+    return out
+
+
+def _compute_strategy_stats(returns: list[float], daily_returns: list[float]) -> dict[str, Any]:
     if not returns:
         return {}
     n = len(returns)
     mean_ret = sum(returns) / n
     var_ret = sum((r - mean_ret) ** 2 for r in returns) / max(n - 1, 1)
     std_ret = math.sqrt(var_ret)
+    mean_daily = sum(daily_returns) / len(daily_returns) if daily_returns else 0.0
+    var_daily = (
+        sum((r - mean_daily) ** 2 for r in daily_returns) / max(len(daily_returns) - 1, 1)
+        if daily_returns
+        else 0.0
+    )
+    std_daily = math.sqrt(var_daily) if var_daily > 0 else 0.0
     wins = sum(1 for r in returns if r > 0)
-    sharpe = (mean_ret / std_ret * math.sqrt(252)) if std_ret > 0 else 0
+    sharpe = (mean_daily / std_daily * math.sqrt(252)) if std_daily > 0 else 0
     max_dd = _max_drawdown(returns)
 
     return {
@@ -167,31 +210,47 @@ def _max_drawdown(returns: list[float]) -> float:
     return max_dd
 
 
-def _paired_return_ttest(
+def _welch_return_ttest(
     control: list[float],
     variant: list[float],
 ) -> dict[str, Any]:
-    """Paired t-test on matched daily returns (or trade returns if not daily-aligned)."""
-    min_n = min(len(control), len(variant))
-    c = control[:min_n]
-    v = variant[:min_n]
+    """Welch t-test for independent samples (paper trades are not naturally paired)."""
+    n_c = len(control)
+    n_v = len(variant)
+    if n_c < 2 or n_v < 2:
+        return {
+            "t_statistic": 0.0,
+            "p_value": 1.0,
+            "mean_diff": 0.0,
+            "n_pairs": min(n_c, n_v),
+            "significant": False,
+            "variant_better": False,
+            "method": "welch_ttest_independent",
+        }
 
-    diffs = [v[i] - c[i] for i in range(min_n)]
-    mean_diff = sum(diffs) / min_n
-    var_diff = sum((d - mean_diff) ** 2 for d in diffs) / max(min_n - 1, 1)
-    se = math.sqrt(var_diff / min_n) if var_diff > 0 else 1e-10
-    t_stat = mean_diff / se
+    m_c = sum(control) / n_c
+    m_v = sum(variant) / n_v
+    var_c = sum((x - m_c) ** 2 for x in control) / max(n_c - 1, 1)
+    var_v = sum((x - m_v) ** 2 for x in variant) / max(n_v - 1, 1)
+    se = math.sqrt((var_c / n_c) + (var_v / n_v))
+    if se <= 1e-12:
+        t_stat = 0.0
+    else:
+        t_stat = (m_v - m_c) / se
 
-    df = min_n - 1
+    df_num = (var_c / n_c + var_v / n_v) ** 2
+    df_den = ((var_c / n_c) ** 2 / max(n_c - 1, 1)) + ((var_v / n_v) ** 2 / max(n_v - 1, 1))
+    df = int(round(df_num / df_den)) if df_den > 0 else max(min(n_c, n_v) - 1, 1)
     p_value = _t_to_p(abs(t_stat), df) * 2
 
     return {
         "t_statistic": round(t_stat, 4),
         "p_value": round(p_value, 6),
-        "mean_diff": round(mean_diff, 4),
-        "n_pairs": min_n,
+        "mean_diff": round(m_v - m_c, 4),
+        "n_pairs": min(n_c, n_v),
         "significant": p_value < SIGNIFICANCE_LEVEL,
-        "variant_better": mean_diff > 0,
+        "variant_better": (m_v - m_c) > 0,
+        "method": "welch_ttest_independent",
     }
 
 
@@ -216,12 +275,16 @@ def _bootstrap_sharpe_difference(
     hi = diffs[int(0.975 * n_resamples)]
     mean_diff = sum(diffs) / n_resamples
 
-    significant = lo > 0
+    p_nonpos = sum(1 for d in diffs if d <= 0) / n_resamples
+    p_nonneg = sum(1 for d in diffs if d >= 0) / n_resamples
+    p_value = min(1.0, 2 * min(p_nonpos, p_nonneg))
+    significant = p_value < SIGNIFICANCE_LEVEL
 
     return {
         "mean_sharpe_diff": round(mean_diff, 4),
         "ci_lower": round(lo, 4),
         "ci_upper": round(hi, 4),
+        "p_value": round(p_value, 6),
         "significant": significant,
         "variant_better": mean_diff > 0,
     }
@@ -261,6 +324,22 @@ def _sharpe(returns: list[float]) -> float:
     var_r = sum((r - mean_r) ** 2 for r in returns) / max(len(returns) - 1, 1)
     std_r = math.sqrt(var_r)
     return (mean_r / std_r * math.sqrt(252)) if std_r > 0 else 0.0
+
+
+def _holm_bonferroni(pvals: dict[str, float], alpha: float = 0.05) -> dict[str, dict[str, float | bool]]:
+    """Holm-Bonferroni correction for a small family of tests."""
+    m = len(pvals)
+    ordered = sorted(pvals.items(), key=lambda kv: kv[1])
+    out: dict[str, dict[str, float | bool]] = {}
+    stop = False
+    for i, (name, p) in enumerate(ordered):
+        threshold = alpha / max(m - i, 1)
+        significant = (not stop) and (p <= threshold)
+        if not significant:
+            stop = True
+        adjusted = min(1.0, p * max(m - i, 1))
+        out[name] = {"significant": significant, "p_value_adjusted": adjusted}
+    return out
 
 
 def _norm_cdf(x: float) -> float:
