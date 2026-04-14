@@ -772,6 +772,136 @@ def api_run_pattern_imminent_scan(
     return JSONResponse(result)
 
 
+# ── Stop Engine ──────────────────────────────────────────────────────
+
+@router.get("/api/trading/stops/positions")
+def api_stop_positions(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Return all open positions with stop-engine state for the UI."""
+    ctx = get_identity_ctx(request, db)
+    from ..models.trading import Trade
+    trades = db.query(Trade).filter(
+        Trade.user_id == ctx["user_id"],
+        Trade.status == "open",
+    ).order_by(Trade.entry_date.desc()).all()
+
+    result = []
+    for t in trades:
+        entry = t.entry_price or 0
+        stop = t.stop_loss
+        target = t.take_profit
+        R = abs(entry - stop) if stop and entry else 0
+        hwm = t.high_watermark or entry
+
+        try:
+            from ..services.trading.market_data import fetch_quote
+            q = fetch_quote(t.ticker)
+            price = q.get("price", 0) if q else 0
+        except Exception:
+            price = 0
+
+        current_r = 0
+        if R > 0 and price and entry:
+            if t.direction == "long":
+                current_r = round((price - entry) / R, 2)
+            else:
+                current_r = round((entry - price) / R, 2)
+
+        stop_distance_pct = 0
+        if stop and price and price > 0:
+            stop_distance_pct = round(abs(price - stop) / price * 100, 2)
+
+        pnl_pct = 0
+        if entry and price and entry > 0:
+            if t.direction == "long":
+                pnl_pct = round((price - entry) / entry * 100, 2)
+            else:
+                pnl_pct = round((entry - price) / entry * 100, 2)
+
+        state = "initial"
+        if current_r >= 2.0:
+            state = "trailing"
+        elif current_r >= 1.0:
+            state = "breakeven"
+        if stop and price:
+            if (t.direction == "long" and price <= stop) or (t.direction != "long" and price >= stop):
+                state = "triggered"
+            elif R > 0 and abs(price - stop) / R <= 0.25:
+                state = "warn"
+
+        result.append({
+            "id": t.id,
+            "ticker": t.ticker,
+            "direction": t.direction,
+            "entry_price": entry,
+            "current_price": price,
+            "stop_loss": stop,
+            "take_profit": target,
+            "trail_stop": t.trail_stop,
+            "high_watermark": hwm,
+            "stop_model": t.stop_model,
+            "quantity": t.quantity,
+            "broker_source": t.broker_source,
+            "R": round(R, 4),
+            "current_r": current_r,
+            "stop_distance_pct": stop_distance_pct,
+            "pnl_pct": pnl_pct,
+            "state": state,
+            "entry_date": t.entry_date.isoformat() if t.entry_date else None,
+        })
+
+    return JSONResponse({"ok": True, "positions": result})
+
+
+@router.get("/api/trading/stops/decisions")
+def api_stop_decisions(
+    request: Request,
+    db: Session = Depends(get_db),
+    trade_id: int | None = Query(None),
+    limit: int = Query(50),
+):
+    """Return recent stop decisions (audit trail)."""
+    ctx = get_identity_ctx(request, db)
+    from ..models.trading import StopDecision, Trade
+    q = db.query(StopDecision).join(Trade, StopDecision.trade_id == Trade.id)
+    if trade_id:
+        q = q.filter(StopDecision.trade_id == trade_id)
+    q = q.filter(Trade.user_id == ctx["user_id"])
+    decisions = q.order_by(StopDecision.as_of_ts.desc()).limit(limit).all()
+
+    result = []
+    for d in decisions:
+        result.append({
+            "id": d.id,
+            "trade_id": d.trade_id,
+            "as_of_ts": d.as_of_ts.isoformat() if d.as_of_ts else None,
+            "state": d.state,
+            "old_stop": d.old_stop,
+            "new_stop": d.new_stop,
+            "trigger": d.trigger,
+            "reason": d.reason,
+            "executed": d.executed,
+        })
+    return JSONResponse({"ok": True, "decisions": result})
+
+
+@router.post("/api/trading/stops/evaluate")
+def api_stop_evaluate(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Manually trigger the stop engine for the current user."""
+    ctx = get_identity_ctx(request, db)
+    from ..services.trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    summary = evaluate_all(db, ctx["user_id"])
+    dispatched = dispatch_stop_alerts(db, ctx["user_id"], summary)
+    summary["dispatched"] = dispatched
+    summary.pop("alerts", None)
+    return JSONResponse({"ok": True, **summary})
+
+
 # ── Background Learning ───────────────────────────────────────────────
 
 def _start_learning_cycle_bg(

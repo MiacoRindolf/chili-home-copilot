@@ -1313,6 +1313,16 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
               </div>
               <div class="brain-timeline" id="brain-activity" style="max-height:400px;overflow-y:auto"></div>
             </div>
+
+            <!-- Stop Engine Decisions -->
+            <div class="brain-card" style="margin-top:12px;">
+              <div class="brain-section-title"><span class="bs-icon">&#x1F6E1;</span> Stop Engine Decisions</div>
+              <p style="font-size:10px;color:var(--text-muted);margin:2px 0 6px;">Recent stop-loss management decisions by Chili Brain.</p>
+              <div id="brain-stop-decisions" style="max-height:250px;overflow-y:auto;">
+                <div style="font-size:10px;color:var(--text-muted);padding:8px;text-align:center;">Loading...</div>
+              </div>
+            </div>
+
           </div>
 
           <!-- Ops sub-tab -->
@@ -6565,6 +6575,34 @@ function brainBootstrapTradingDesk() {
   loadBrainDashboard();
   initTradingBrainAssistant();
   startBwPolling();
+  loadBrainStopDecisions();
+}
+
+function loadBrainStopDecisions() {
+  fetch('/api/trading/stops/decisions?limit=20').then(function(r){return r.json();}).then(function(d) {
+    var el = document.getElementById('brain-stop-decisions');
+    if (!el) return;
+    if (!d.ok || !d.decisions || !d.decisions.length) {
+      el.innerHTML = '<div style="font-size:10px;color:var(--text-muted);padding:8px;text-align:center;">No stop decisions yet. The stop engine evaluates your open positions on a schedule.</div>';
+      return;
+    }
+    var html = '';
+    d.decisions.forEach(function(sd) {
+      var tc = {'STOP_HIT':'#ef4444','TARGET_HIT':'#22c55e','STOP_APPROACHING':'#f59e0b','BREAKEVEN_REACHED':'#22c55e','STOP_TIGHTENED':'#3b82f6'}[sd.trigger] || '#888';
+      var time = sd.as_of_ts ? new Date(sd.as_of_ts).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+      html += '<div style="display:flex;gap:6px;align-items:center;padding:4px 0;border-bottom:1px solid var(--border);font-size:10px;">';
+      html += '<span style="padding:1px 5px;border-radius:4px;font-size:8px;font-weight:700;background:'+tc+'22;color:'+tc+';white-space:nowrap;">'+(sd.trigger||sd.state)+'</span>';
+      html += '<span style="font-weight:600;">Trade #'+sd.trade_id+'</span>';
+      if(sd.old_stop && sd.new_stop && sd.old_stop !== sd.new_stop) html += '<span>$'+sd.old_stop.toFixed(2)+' &rarr; $'+sd.new_stop.toFixed(2)+'</span>';
+      html += '<span style="flex:1;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+sd.reason+'</span>';
+      html += '<span style="color:var(--text-muted);font-size:9px;white-space:nowrap;">'+time+'</span>';
+      html += '</div>';
+    });
+    el.innerHTML = html;
+  }).catch(function() {
+    var el = document.getElementById('brain-stop-decisions');
+    if (el) el.innerHTML = '<div style="font-size:10px;color:var(--text-muted);padding:8px;">Failed to load.</div>';
+  });
 }
 
 function brainSetUrlDomain(which) {

@@ -71,6 +71,13 @@ class Trade(Base):
     strategy_proposal_id: Optional[int] = Column(Integer, nullable=True, index=True)
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     pattern_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated insight/pattern labels
+    # Stop engine: first-class stop/target/trail columns (migration 113)
+    stop_loss: Optional[float] = Column(Float, nullable=True)
+    take_profit: Optional[float] = Column(Float, nullable=True)
+    trail_stop: Optional[float] = Column(Float, nullable=True)
+    high_watermark: Optional[float] = Column(Float, nullable=True)
+    stop_model: Optional[str] = Column(String(30), nullable=True)
+    exit_reason: Optional[str] = Column(String(50), nullable=True)
 
 
 class TradingExecutionEvent(Base):
@@ -315,6 +322,43 @@ class AlertHistory(Base):
     scan_pattern_id: Optional[int] = Column(Integer, nullable=True, index=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class StopDecision(Base):
+    """Audit log of every stop-engine evaluation / stop change per trade."""
+    __tablename__ = "trading_stop_decisions"
+    __table_args__ = (
+        Index("ix_tsd_trade_ts", "trade_id", "as_of_ts"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: int = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=False, index=True)
+    as_of_ts: datetime = Column(DateTime, nullable=False, default=datetime.utcnow)
+    state: str = Column(String(24), nullable=False)
+    old_stop: Optional[float] = Column(Float, nullable=True)
+    new_stop: Optional[float] = Column(Float, nullable=True)
+    trigger: Optional[str] = Column(String(50), nullable=True)
+    inputs_json: Optional[dict] = Column(JSONB, nullable=True, default=dict)
+    reason: Optional[str] = Column(Text, nullable=True, default="")
+    executed: bool = Column(Boolean, nullable=False, default=False)
+
+
+class AlertDeliveryAttempt(Base):
+    """Per-channel delivery attempt tracking with retry support."""
+    __tablename__ = "trading_alert_delivery_attempts"
+    __table_args__ = (
+        Index("ix_tada_alert_status", "alert_id", "status"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    alert_id: int = Column(Integer, ForeignKey("trading_alerts.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel: str = Column(String(30), nullable=False)
+    provider_msg_id: Optional[str] = Column(String(200), nullable=True)
+    status: str = Column(String(20), nullable=False, default="queued")
+    attempt_n: int = Column(Integer, nullable=False, default=1)
+    next_retry_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_error: Optional[str] = Column(Text, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 

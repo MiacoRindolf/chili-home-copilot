@@ -7557,6 +7557,9 @@ function switchTab(el) {
   if (tabName === 'screener' && !document.getElementById('screen-preset').options.length > 1) {
     loadScreenerPresets();
   }
+  if (tabName === 'alerts') {
+    loadStopPositions();
+  }
 }
 
 function switchAiView(view) {
@@ -7793,6 +7796,7 @@ function loadBestIdeas() {
 
     loadAlertHistory();
     loadAlertSettings();
+    loadStopPositions();
   }).catch(function() {
     if (status) status.textContent = '';
     var listEl = document.getElementById('best-ideas-list');
@@ -8425,6 +8429,94 @@ function loadAlertHistory() {
     });
     list.innerHTML = html;
   }).catch(function() {});
+}
+
+/* ── Stop Management ──────────────────────────── */
+
+function loadStopPositions() {
+  fetch('/api/trading/stops/positions').then(function(r){return r.json();}).then(function(d) {
+    var list = document.getElementById('stop-positions-list');
+    if (!d.ok || !d.positions || !d.positions.length) {
+      list.innerHTML = '<div style="font-size:11px;color:var(--text-muted);padding:12px;text-align:center;">No open positions with stop data.</div>';
+      return;
+    }
+    var html = '<div style="display:grid;gap:6px;">';
+    d.positions.forEach(function(p) {
+      var stateColor = {'initial':'#888','breakeven':'#22c55e','trailing':'#3b82f6','warn':'#f59e0b','triggered':'#ef4444'}[p.state] || '#888';
+      var pnlColor = p.pnl_pct >= 0 ? '#22c55e' : '#ef4444';
+      var pnlSign = p.pnl_pct >= 0 ? '+' : '';
+      html += '<div style="background:var(--card-bg,#1a1a2e);border:1px solid var(--border);border-left:3px solid '+stateColor+';border-radius:8px;padding:8px 10px;font-size:10px;">';
+      html += '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px;">';
+      html += '<div><span style="font-weight:700;font-size:12px;">'+p.ticker+'</span> <span style="color:var(--text-muted);font-size:9px;">'+p.direction+' via '+(p.broker_source||'manual')+'</span></div>';
+      html += '<span style="padding:1px 6px;border-radius:4px;font-size:9px;font-weight:700;background:'+stateColor+'22;color:'+stateColor+';text-transform:uppercase;">'+p.state+'</span>';
+      html += '</div>';
+      html += '<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px;margin-top:4px;">';
+      html += '<div><div style="color:var(--text-muted);font-size:8px;">Entry</div><div>$'+(p.entry_price?p.entry_price.toFixed(2):'—')+'</div></div>';
+      html += '<div><div style="color:var(--text-muted);font-size:8px;">Price</div><div>$'+(p.current_price?p.current_price.toFixed(2):'—')+'</div></div>';
+      html += '<div><div style="color:var(--text-muted);font-size:8px;">Stop</div><div style="color:#ef4444;">$'+(p.stop_loss?p.stop_loss.toFixed(2):'—')+'</div></div>';
+      html += '<div><div style="color:var(--text-muted);font-size:8px;">Target</div><div style="color:#22c55e;">$'+(p.take_profit?p.take_profit.toFixed(2):'—')+'</div></div>';
+      html += '</div>';
+      html += '<div style="display:flex;gap:12px;margin-top:5px;color:var(--text-muted);font-size:9px;">';
+      html += '<span>P&L: <b style="color:'+pnlColor+'">'+pnlSign+p.pnl_pct+'%</b></span>';
+      html += '<span>R: <b>'+p.current_r+'</b></span>';
+      html += '<span>Stop dist: <b>'+p.stop_distance_pct+'%</b></span>';
+      if(p.stop_model) html += '<span>Model: '+p.stop_model+'</span>';
+      html += '</div>';
+      html += '</div>';
+    });
+    html += '</div>';
+    list.innerHTML = html;
+  }).catch(function(e) {
+    document.getElementById('stop-positions-list').innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Error loading positions</div>';
+  });
+}
+
+function loadStopDecisions() {
+  fetch('/api/trading/stops/decisions?limit=30').then(function(r){return r.json();}).then(function(d) {
+    var list = document.getElementById('stop-decisions-list');
+    if (!d.ok || !d.decisions || !d.decisions.length) {
+      list.innerHTML = '<div style="font-size:10px;color:var(--text-muted);padding:8px;text-align:center;">No stop decisions yet.</div>';
+      return;
+    }
+    var html = '';
+    d.decisions.forEach(function(sd) {
+      var tc = {'STOP_HIT':'#ef4444','TARGET_HIT':'#22c55e','STOP_APPROACHING':'#f59e0b','BREAKEVEN_REACHED':'#22c55e','STOP_TIGHTENED':'#3b82f6'}[sd.trigger] || '#888';
+      var time = sd.as_of_ts ? new Date(sd.as_of_ts).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+      html += '<div style="display:flex;gap:6px;align-items:center;padding:3px 0;border-bottom:1px solid var(--border);font-size:10px;">';
+      html += '<span style="padding:1px 5px;border-radius:4px;font-size:8px;font-weight:700;background:'+tc+'22;color:'+tc+';">'+(sd.trigger||sd.state)+'</span>';
+      html += '<span style="font-weight:600;">Trade #'+sd.trade_id+'</span>';
+      if(sd.old_stop && sd.new_stop && sd.old_stop !== sd.new_stop) html += '<span>$'+sd.old_stop.toFixed(2)+' → $'+sd.new_stop.toFixed(2)+'</span>';
+      html += '<span style="flex:1;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">'+escHtml(sd.reason||'')+'</span>';
+      html += '<span style="color:var(--text-muted);font-size:9px;">'+time+'</span>';
+      html += '</div>';
+    });
+    list.innerHTML = html;
+  }).catch(function() {});
+}
+
+function runStopEvaluate() {
+  var result = document.getElementById('stop-evaluate-result');
+  result.style.display = 'block';
+  result.textContent = 'Running stop check...';
+  result.style.color = 'var(--text-muted)';
+  fetch('/api/trading/stops/evaluate', {method:'POST'}).then(function(r){return r.json();}).then(function(d) {
+    if (d.ok) {
+      var parts = [];
+      parts.push('Checked: '+d.total_checked);
+      if (d.stops_hit) parts.push('Stops hit: '+d.stops_hit);
+      if (d.targets_hit) parts.push('Targets hit: '+d.targets_hit);
+      if (d.stops_tightened) parts.push('Tightened: '+d.stops_tightened);
+      if (d.breakevens) parts.push('Break-even: '+d.breakevens);
+      if (d.warnings) parts.push('Warnings: '+d.warnings);
+      result.textContent = parts.join(' | ');
+      result.style.color = d.stops_hit ? '#ef4444' : '#22c55e';
+      loadStopPositions();
+      loadStopDecisions();
+    } else {
+      result.textContent = 'Failed';
+      result.style.color = '#ef4444';
+    }
+  }).catch(function() { result.textContent = 'Error'; result.style.color = '#ef4444'; });
 }
 
 /* ── Portfolio ─────────────────────────────────── */

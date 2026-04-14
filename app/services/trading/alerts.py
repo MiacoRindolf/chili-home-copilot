@@ -70,7 +70,10 @@ def classify_alert_tier(
     confidence: float = 0.0,
 ) -> str:
     """Classify alert into A/B/C tiers based on signal source and confidence."""
-    if alert_type in (TARGET_HIT, STOP_HIT, POSITION_CLOSED, POSITION_OPENED):
+    if alert_type in (
+        TARGET_HIT, STOP_HIT, POSITION_CLOSED, POSITION_OPENED,
+        STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED,
+    ):
         return TIER_A
     if scan_pattern_id and confidence >= 0.7:
         return TIER_A
@@ -91,13 +94,20 @@ POSITION_CLOSED = "position_closed"
 STRATEGY_PROPOSED = "strategy_proposed"
 WEEKLY_REVIEW = "weekly_review"
 PATTERN_BREAKOUT_IMMINENT = "pattern_breakout_imminent"
+STOP_APPROACHING = "stop_approaching"
+BREAKEVEN_REACHED = "breakeven_reached"
+STOP_TIGHTENED = "stop_tightened"
 
 ALL_ALERT_TYPES = [
     BREAKOUT_TRIGGERED, CRYPTO_BREAKOUT, CRYPTO_SQUEEZE_FIRING,
     TARGET_HIT, STOP_HIT, NEW_TOP_PICK,
     POSITION_OPENED, POSITION_CLOSED, STRATEGY_PROPOSED, WEEKLY_REVIEW,
     PATTERN_BREAKOUT_IMMINENT,
+    STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED,
 ]
+
+# Stop-related alert types that must bypass throttle and force Tier A delivery
+_STOP_CRITICAL_TYPES = frozenset({STOP_HIT, STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED, TARGET_HIT})
 
 _PATTERN_KW = [
     "macd_bullish", "macd_positive", "macd_negative",
@@ -284,6 +294,10 @@ def dispatch_alert(
     """
     from ..sms_service import is_configured as sms_is_configured, send_sms
 
+    is_stop_critical = alert_type in _STOP_CRITICAL_TYPES
+    if is_stop_critical:
+        skip_throttle = True
+
     if not skip_throttle:
         allowed, reason = _check_throttle(alert_type, ticker)
         if not allowed:
@@ -304,6 +318,16 @@ def dispatch_alert(
     try:
         if sms_is_configured() and tier in (TIER_A, TIER_B):
             sent = send_sms(message, tier=tier)
+            # Retry for critical stop alerts (up to 2 retries with backoff)
+            if not sent and is_stop_critical:
+                import time as _time
+                for attempt, delay in enumerate([2, 8], start=2):
+                    _time.sleep(delay)
+                    sent = send_sms(message, tier=tier)
+                    if sent:
+                        logger.info("[alerts] Retry #%d succeeded for %s/%s", attempt, alert_type, ticker)
+                        break
+                    logger.warning("[alerts] Retry #%d failed for %s/%s", attempt, alert_type, ticker)
             sent_via = ("twilio" if sent else "sms_failed")
             if sent:
                 logger.info(f"[alerts] Sent {alert_type} alert for {ticker}: {message[:80]}")
@@ -314,7 +338,7 @@ def dispatch_alert(
 
         _record_alert_sent(alert_type, ticker)
 
-        from ...models.trading import AlertHistory
+        from ...models.trading import AlertHistory, AlertDeliveryAttempt
         record = AlertHistory(
             user_id=user_id,
             alert_type=alert_type,
@@ -327,6 +351,17 @@ def dispatch_alert(
             success=sent,
         )
         db.add(record)
+        db.flush()
+
+        if is_stop_critical and record.id:
+            attempt = AlertDeliveryAttempt(
+                alert_id=record.id,
+                channel=sent_via,
+                status="delivered" if sent else "failed",
+                attempt_n=1,
+            )
+            db.add(attempt)
+
         db.commit()
 
         try:
@@ -1010,8 +1045,24 @@ def run_price_monitor(db: Session, user_id: int | None) -> dict[str, Any]:
     except Exception:
         logger.warning("[alerts] emergency guardrail check failed", exc_info=True)
 
-    # 1. Check open positions for target/stop hits
-    results.update(_check_open_positions(db, user_id))
+    # 1. Check open positions via stop engine (replaces legacy _check_open_positions)
+    try:
+        from .stop_engine import evaluate_all, dispatch_stop_alerts
+        stop_summary = evaluate_all(db, user_id)
+        dispatched = dispatch_stop_alerts(db, user_id, stop_summary)
+        results["targets_hit"] = stop_summary.get("targets_hit", 0)
+        results["stops_hit"] = stop_summary.get("stops_hit", 0)
+        results["stop_engine"] = {
+            "checked": stop_summary.get("total_checked", 0),
+            "tightened": stop_summary.get("stops_tightened", 0),
+            "breakevens": stop_summary.get("breakevens", 0),
+            "warnings": stop_summary.get("warnings", 0),
+            "stale": stop_summary.get("data_stale", 0),
+            "dispatched": dispatched,
+        }
+    except Exception:
+        logger.warning("[alerts] stop engine failed, falling back to legacy", exc_info=True)
+        results.update(_check_open_positions(db, user_id))
 
     # 2. Check breakout candidates
     results["breakouts"] = _check_breakout_candidates(db, user_id)

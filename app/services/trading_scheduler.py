@@ -298,22 +298,27 @@ def _run_weekly_review_job():
 
 
 def _run_broker_sync_job():
-    """Sync Robinhood orders + positions to local DB during market hours."""
-    from . import broker_service
-
-    if not broker_service.is_connected():
-        return
+    """Sync Robinhood + Coinbase orders and positions to local DB."""
+    from . import broker_service, coinbase_service
 
     def _work() -> None:
         from ..db import SessionLocal
 
-        logger.info("[scheduler] Starting Robinhood order + position sync")
         db = SessionLocal()
         try:
-            order_result = broker_service.sync_orders_to_db(db, user_id=None)
-            logger.info(f"[scheduler] Order sync result: {order_result}")
-            pos_result = broker_service.sync_positions_to_db(db, user_id=None)
-            logger.info(f"[scheduler] Position sync result: {pos_result}")
+            if broker_service.is_connected():
+                logger.info("[scheduler] Starting Robinhood order + position sync")
+                order_result = broker_service.sync_orders_to_db(db, user_id=None)
+                logger.info(f"[scheduler] RH order sync result: {order_result}")
+                pos_result = broker_service.sync_positions_to_db(db, user_id=None)
+                logger.info(f"[scheduler] RH position sync result: {pos_result}")
+
+            if coinbase_service.is_connected():
+                logger.info("[scheduler] Starting Coinbase order + position sync")
+                cb_order = coinbase_service.sync_orders_to_db(db, user_id=None)
+                logger.info(f"[scheduler] CB order sync result: {cb_order}")
+                cb_pos = coinbase_service.sync_positions_to_db(db, user_id=None)
+                logger.info(f"[scheduler] CB position sync result: {cb_pos}")
         finally:
             db.close()
 
@@ -321,7 +326,7 @@ def _run_broker_sync_job():
 
 
 def _run_price_monitor_job():
-    """Check positions/breakouts/picks and dispatch alerts every 5 minutes."""
+    """Check positions/breakouts/picks and dispatch alerts for all users with open trades."""
     from ..db import SessionLocal
     from .trading.alerts import run_price_monitor
 
@@ -329,12 +334,67 @@ def _run_price_monitor_job():
         logger.info("[scheduler] Starting price monitor check")
         db = SessionLocal()
         try:
-            result = run_price_monitor(db, user_id=None)
-            logger.info(f"[scheduler] Price monitor result: {result}")
+            from ..models.trading import Trade
+            from sqlalchemy import distinct
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(Trade.status == "open", Trade.user_id.isnot(None))
+                .all()
+            ]
+            if not user_ids:
+                user_ids = [None]
+            for uid in user_ids:
+                try:
+                    result = run_price_monitor(db, user_id=uid)
+                    logger.info(f"[scheduler] Price monitor user_id={uid}: {result}")
+                except Exception:
+                    logger.warning(f"[scheduler] Price monitor failed for user_id={uid}", exc_info=True)
         finally:
             db.close()
 
     run_scheduler_job_guarded("price_monitor", _work)
+
+
+def _run_crypto_stop_monitor_job():
+    """24/7 stop-engine check for crypto positions only (every 2 minutes)."""
+    from ..db import SessionLocal
+    from .trading.stop_engine import evaluate_all, dispatch_stop_alerts
+    from ..models.trading import Trade
+    from sqlalchemy import distinct
+
+    def _work() -> None:
+        db = SessionLocal()
+        try:
+            user_ids = [
+                r[0] for r in db.query(distinct(Trade.user_id))
+                .filter(
+                    Trade.status == "open",
+                    Trade.user_id.isnot(None),
+                    Trade.ticker.like("%-USD"),
+                )
+                .all()
+            ]
+            if not user_ids:
+                return
+            for uid in user_ids:
+                try:
+                    crypto_trades = db.query(Trade).filter(
+                        Trade.status == "open",
+                        Trade.user_id == uid,
+                        Trade.ticker.like("%-USD"),
+                    ).all()
+                    if not crypto_trades:
+                        continue
+                    summary = evaluate_all(db, uid)
+                    dispatched = dispatch_stop_alerts(db, uid, summary)
+                    if dispatched:
+                        logger.info("[scheduler] Crypto stop monitor uid=%s: %d alerts dispatched", uid, dispatched)
+                except Exception:
+                    logger.warning("[scheduler] Crypto stop monitor failed for uid=%s", uid, exc_info=True)
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("crypto_stop_monitor", _work)
 
 
 def _run_pattern_imminent_job():
@@ -1395,6 +1455,16 @@ def start_scheduler():
                 name="Price monitor & alerts (market hours every 5min)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+            _scheduler.add_job(
+                _run_crypto_stop_monitor_job,
+                trigger=IntervalTrigger(minutes=2),
+                id="crypto_stop_monitor",
+                name="Crypto stop-loss monitor (every 2min, 24/7)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
             _scheduler.add_job(

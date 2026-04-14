@@ -807,11 +807,13 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         if existing:
             existing.quantity = qty
             existing.entry_price = avg_price
+            existing.last_broker_sync = datetime.utcnow()
             if not existing.indicator_snapshot:
                 existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
         else:
             snapshot = _compute_trade_snapshot(ticker, avg_price)
+            is_crypto = ticker.upper().endswith("-USD")
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
@@ -822,6 +824,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 broker_source="robinhood",
                 tags="robinhood-sync",
                 indicator_snapshot=snapshot,
+                last_broker_sync=datetime.utcnow(),
+                stop_model="atr_crypto_breakout" if is_crypto else "atr_swing",
                 notes=f"Auto-synced from Robinhood on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)

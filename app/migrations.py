@@ -5925,6 +5925,80 @@ def _migration_112_trade_sector_and_governance_approvals(conn) -> None:
     conn.commit()
 
 
+def _migration_113_trade_stop_columns(conn) -> None:
+    """First-class stop/target/trail columns on trading_trades for the stop engine."""
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "trading_trades")
+    for col, typ in [
+        ("stop_loss", "DOUBLE PRECISION"),
+        ("take_profit", "DOUBLE PRECISION"),
+        ("trail_stop", "DOUBLE PRECISION"),
+        ("high_watermark", "DOUBLE PRECISION"),
+        ("stop_model", "VARCHAR(30)"),
+        ("exit_reason", "VARCHAR(50)"),
+    ]:
+        if col not in cols:
+            conn.execute(text(f"ALTER TABLE trading_trades ADD COLUMN {col} {typ}"))
+    conn.commit()
+
+
+def _migration_114_stop_decisions_and_delivery(conn) -> None:
+    """Audit table for stop-engine decisions and alert delivery attempts."""
+    tables = _tables(conn)
+    if "trading_stop_decisions" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_stop_decisions (
+                    id BIGSERIAL PRIMARY KEY,
+                    trade_id INTEGER NOT NULL REFERENCES trading_trades(id) ON DELETE CASCADE,
+                    as_of_ts TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    state VARCHAR(24) NOT NULL,
+                    old_stop DOUBLE PRECISION,
+                    new_stop DOUBLE PRECISION,
+                    trigger VARCHAR(50),
+                    inputs_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                    reason TEXT NOT NULL DEFAULT '',
+                    executed BOOLEAN NOT NULL DEFAULT FALSE
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tsd_trade_ts "
+                "ON trading_stop_decisions (trade_id, as_of_ts DESC)"
+            )
+        )
+    if "trading_alert_delivery_attempts" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_alert_delivery_attempts (
+                    id BIGSERIAL PRIMARY KEY,
+                    alert_id INTEGER NOT NULL REFERENCES trading_alerts(id) ON DELETE CASCADE,
+                    channel VARCHAR(30) NOT NULL,
+                    provider_msg_id VARCHAR(200),
+                    status VARCHAR(20) NOT NULL DEFAULT 'queued',
+                    attempt_n INTEGER NOT NULL DEFAULT 1,
+                    next_retry_at TIMESTAMP,
+                    last_error TEXT,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_tada_alert_status "
+                "ON trading_alert_delivery_attempts (alert_id, status)"
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6039,6 +6113,8 @@ MIGRATIONS = [
     ("110_brain_work_lease_scope", _migration_110_brain_work_lease_scope),
     ("111_trading_decision_stack", _migration_111_trading_decision_stack),
     ("112_trade_sector_and_governance_approvals", _migration_112_trade_sector_and_governance_approvals),
+    ("113_trade_stop_columns", _migration_113_trade_stop_columns),
+    ("114_stop_decisions_and_delivery", _migration_114_stop_decisions_and_delivery),
 ]
 
 

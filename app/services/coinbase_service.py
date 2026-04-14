@@ -128,10 +128,25 @@ def connect_with_credentials(api_key: str, api_secret: str) -> dict[str, Any]:
 
 def is_connected() -> bool:
     global _connected, _last_check
-    if not _cb_available or not _credentials_configured():
+    if not _cb_available:
+        return False
+    # Accept either env-var credentials or a prior connect_with_credentials session
+    if not _credentials_configured() and not _connected:
         return False
     if _connected and (time.time() - _last_check) < _CHECK_TTL:
         return True
+    if _client is not None:
+        # Vault-connected client exists; verify it still works
+        try:
+            resp = _client.get_accounts(limit=1)
+            accounts = resp.get("accounts", []) if isinstance(resp, dict) else getattr(resp, "accounts", [])
+            if accounts is not None:
+                _connected = True
+                _last_check = time.time()
+                return True
+        except Exception:
+            _connected = False
+            return False
     result = connect()
     return result.get("status") == "connected"
 
@@ -198,8 +213,40 @@ def get_portfolio() -> dict[str, Any]:
     return result
 
 
+def _get_cost_basis_from_fills(product_id: str) -> float:
+    """
+    Compute weighted-average cost basis for a product from historical fills.
+    Returns average buy price per unit, or 0 if unavailable.
+    """
+    cached = _cache_get(f"cost_basis_{product_id}")
+    if cached is not None:
+        return cached
+    client = _get_client()
+    if not client:
+        return 0.0
+    try:
+        resp = client.get_fills(product_id=product_id, limit=100)
+        fills_raw = resp.get("fills", []) if isinstance(resp, dict) else getattr(resp, "fills", [])
+        total_cost = 0.0
+        total_qty = 0.0
+        for f in (fills_raw or []):
+            fd = f if isinstance(f, dict) else f.__dict__ if hasattr(f, "__dict__") else {}
+            side = fd.get("side", "")
+            price = _safe_float(fd.get("price", 0))
+            size = _safe_float(fd.get("size", 0))
+            if side == "BUY" and price > 0 and size > 0:
+                total_cost += price * size
+                total_qty += size
+        avg = round(total_cost / total_qty, 8) if total_qty > 0 else 0.0
+        _cache_set(f"cost_basis_{product_id}", avg)
+        return avg
+    except Exception as e:
+        logger.debug("[coinbase] cost basis from fills failed for %s: %s", product_id, e)
+        return 0.0
+
+
 def get_positions() -> list[dict[str, Any]]:
-    """Current crypto holdings with non-zero balances."""
+    """Current crypto holdings with non-zero balances, with cost basis from fills."""
     cached = _cache_get("positions")
     if cached is not None:
         return cached
@@ -216,10 +263,12 @@ def get_positions() -> list[dict[str, Any]]:
         hold_bal = acc.get("hold", {})
         hold_val = _safe_float(hold_bal.get("value") if isinstance(hold_bal, dict) else getattr(hold_bal, "value", 0))
         total_qty = val + hold_val
+        ticker = f"{currency}-USD"
+        avg_price = _get_cost_basis_from_fills(ticker)
         positions.append({
-            "ticker": f"{currency}-USD",
+            "ticker": ticker,
             "quantity": total_qty,
-            "average_buy_price": 0,
+            "average_buy_price": avg_price,
             "equity": 0,
             "current_price": 0,
             "name": acc.get("name", currency),
@@ -535,17 +584,22 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         if existing:
             existing.quantity = qty
+            avg_price = pos.get("average_buy_price", 0)
+            if avg_price and avg_price > 0 and (not existing.entry_price or existing.entry_price == 0):
+                existing.entry_price = avg_price
             updated += 1
         else:
+            avg_price = pos.get("average_buy_price", 0)
             trade = Trade(
                 user_id=user_id,
                 ticker=ticker,
                 direction="long",
-                entry_price=pos.get("average_buy_price", 0),
+                entry_price=avg_price,
                 quantity=qty,
                 status="open",
                 broker_source="coinbase",
                 tags="coinbase-sync",
+                stop_model="atr_crypto_breakout",
                 notes=f"Auto-synced from Coinbase on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)
