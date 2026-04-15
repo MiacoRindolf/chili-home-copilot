@@ -31,6 +31,7 @@ def _user_trade_filter(query, user_id: int | None):
 def _monitored_open_trades_query(db: Session, user_id: int | None):
     q = db.query(Trade).filter(
         Trade.status == "open",
+        Trade.entry_price > 0,
         or_(
             Trade.related_alert_id.isnot(None),
             Trade.broker_source.isnot(None),
