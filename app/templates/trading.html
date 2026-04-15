@@ -75,6 +75,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .wl-item.active .wl-change { color: #fff; }
 .wl-rm { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 14px; padding: 0 2px; }
 .wl-rm:hover { color: #ef4444; }
+.wl-broker-badge { display: inline-block; font-size: 9px; font-weight: 700; padding: 1px 4px; margin-left: 5px; border-radius: 3px; background: rgba(99,102,241,.18); color: var(--accent); vertical-align: middle; letter-spacing: .3px; }
+.wl-item.active .wl-broker-badge { background: rgba(255,255,255,.2); color: #fff; }
 .wl-group { border-bottom: 1px solid var(--border); }
 .wl-group-head { display: flex; align-items: center; gap: 6px; padding: 6px 10px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .4px; color: var(--text-secondary); cursor: pointer; user-select: none; background: var(--bg); }
 .wl-group-head:hover { color: var(--text); }
@@ -5541,14 +5543,24 @@ function loadWatchlist() {
 
     var ungrouped = [];
     var byGroup = {};
+    var brokerBuckets = {};
+    var _brokerLabels = { robinhood: 'Robinhood', coinbase: 'Coinbase' };
     st.groups.forEach(function(g) { byGroup[g.id] = []; });
     d.items.forEach(function(item) {
       var gid = st.tickerToGroupId[item.ticker];
-      if (gid && Object.prototype.hasOwnProperty.call(byGroup, gid)) byGroup[gid].push(item);
-      else ungrouped.push(item);
+      if (gid && Object.prototype.hasOwnProperty.call(byGroup, gid)) {
+        byGroup[gid].push(item);
+      } else if (item.source && item.source !== 'manual') {
+        var bk = item.source;
+        if (!brokerBuckets[bk]) brokerBuckets[bk] = [];
+        brokerBuckets[bk].push(item);
+      } else {
+        ungrouped.push(item);
+      }
     });
 
     function appendItem(parentEl, item) {
+      var isBroker = item.source && item.source !== 'manual';
       var div = document.createElement('div');
       div.className = 'wl-item' + (item.ticker === currentTicker ? ' active' : '');
       div.dataset.ticker = item.ticker;
@@ -5573,6 +5585,14 @@ function loadWatchlist() {
       tEl.className = 'wl-ticker';
       tEl.textContent = item.ticker;
 
+      if (isBroker) {
+        var badge = document.createElement('span');
+        badge.className = 'wl-broker-badge';
+        badge.textContent = item.source === 'coinbase' ? 'CB' : 'RH';
+        badge.title = 'Open position (' + item.source + ')';
+        tEl.appendChild(badge);
+      }
+
       var pEl = document.createElement('span');
       pEl.className = 'wl-price';
       pEl.id = 'wl-p-' + item.ticker;
@@ -5580,21 +5600,23 @@ function loadWatchlist() {
       var spacer = document.createElement('span');
       spacer.style.flex = '1';
 
-      var rm = document.createElement('button');
-      rm.type = 'button';
-      rm.className = 'wl-rm';
-      rm.innerHTML = '&times;';
-      rm.title = 'Remove';
-      rm.onclick = function(ev) {
-        ev.stopPropagation();
-        removeWatchlist(item.ticker);
-      };
-
       div.appendChild(handle);
       div.appendChild(tEl);
       div.appendChild(pEl);
       div.appendChild(spacer);
-      div.appendChild(rm);
+
+      if (!isBroker) {
+        var rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'wl-rm';
+        rm.innerHTML = '&times;';
+        rm.title = 'Remove';
+        rm.onclick = function(ev) {
+          ev.stopPropagation();
+          removeWatchlist(item.ticker);
+        };
+        div.appendChild(rm);
+      }
 
       div.onclick = function(ev) {
         if (ev.target.closest && (ev.target.closest('.wl-drag-handle') || ev.target.closest('.wl-rm'))) return;
@@ -5643,7 +5665,11 @@ function loadWatchlist() {
       list.appendChild(sec);
     }
 
-    appendSection('Ungrouped', '', ungrouped, false);
+    Object.keys(brokerBuckets).forEach(function(bk) {
+      var label = _brokerLabels[bk] || bk;
+      appendSection(label, '_broker_' + bk, brokerBuckets[bk], true);
+    });
+    if (ungrouped.length) appendSection('Watchlist', '', ungrouped, false);
     st.groups.forEach(function(g) {
       appendSection(g.name, g.id, byGroup[g.id] || [], true);
     });

@@ -409,11 +409,8 @@ def api_indicators(
 @router.get("/api/trading/watchlist")
 def api_get_watchlist(request: Request, db: Session = Depends(get_db)):
     ctx = get_identity_ctx(request, db)
-    items = ts.get_watchlist(db, ctx["user_id"])
-    return JSONResponse({"ok": True, "items": [
-        {"id": w.id, "ticker": w.ticker, "added_at": w.added_at.isoformat()}
-        for w in items
-    ]})
+    items = ts.get_effective_watchlist(db, ctx["user_id"])
+    return JSONResponse({"ok": True, "items": items})
 
 
 @router.post("/api/trading/watchlist")

@@ -27,6 +27,50 @@ def get_watchlist(db: Session, user_id: int | None) -> list[WatchlistItem]:
     ).order_by(WatchlistItem.added_at.desc()).all()
 
 
+def get_effective_watchlist(db: Session, user_id: int | None) -> list[dict]:
+    """Unified watchlist: manual adds + open broker/exchange positions (deduplicated)."""
+    manual_items = get_watchlist(db, user_id)
+    seen: set[str] = set()
+    result: list[dict] = []
+
+    for w in manual_items:
+        tk = w.ticker.upper()
+        if tk in seen:
+            continue
+        seen.add(tk)
+        result.append({
+            "id": w.id,
+            "ticker": tk,
+            "added_at": w.added_at.isoformat(),
+            "source": "manual",
+        })
+
+    broker_positions = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.status == "open",
+            Trade.broker_source.isnot(None),
+            Trade.broker_source != "manual",
+        )
+        .order_by(Trade.entry_date.desc())
+        .all()
+    )
+    for t in broker_positions:
+        tk = t.ticker.upper()
+        if tk in seen:
+            continue
+        seen.add(tk)
+        result.append({
+            "id": -t.id,
+            "ticker": tk,
+            "added_at": t.entry_date.isoformat(),
+            "source": t.broker_source,
+        })
+
+    return result
+
+
 def add_to_watchlist(db: Session, user_id: int | None, ticker: str) -> WatchlistItem:
     existing = db.query(WatchlistItem).filter(
         WatchlistItem.user_id == user_id,

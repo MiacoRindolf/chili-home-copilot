@@ -42,6 +42,7 @@ from ..yf_session import get_ticker_info, get_ticker_news
 # Portfolio
 from .portfolio import (
     get_watchlist,
+    get_effective_watchlist,
     add_to_watchlist,
     remove_from_watchlist,
     create_trade,
