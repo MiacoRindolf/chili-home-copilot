@@ -251,6 +251,8 @@ Example:
   "stop_loss": 1.40,
   "take_profit": 2.57,
   "take_profit_trim": 2.00,
+  "verdict": "hold",
+  "confidence": 0.66,
   "label": "Damage-control: hard stop + trim + breakeven target"
 }
 ```
@@ -258,5 +260,7 @@ Example:
 Rules:
 - Include **stop_loss** and/or **take_profit** (breakeven or main exit) as numbers > 0.
 - Optional **take_profit_trim**: first scale-out level (stored in trade notes).
+- **verdict** (required): your action recommendation — one of `"buy"`, `"sell"`, `"hold"`, `"add"`, `"exit"`, `"trim"`. Use `"exit"` or `"sell"` when advising to close the position.
+- **confidence** (required): your confidence as a decimal 0–1 (e.g. 0.72 for 72%).
 - Optional **label**: short description (one line).
 - Omit the entire trade_plan_levels block if you did not give specific numeric stops/targets for their **existing** position.

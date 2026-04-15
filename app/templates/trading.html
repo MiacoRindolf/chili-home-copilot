@@ -11935,6 +11935,16 @@ function _findOpenTradeIdForTicker(ticker) {
   return null;
 }
 
+function _getOpenTradeCurrentPrice(tradeId) {
+  if (!_allTrades || !tradeId) return null;
+  for (var i = 0; i < _allTrades.length; i++) {
+    if (_allTrades[i].id === tradeId && _allTrades[i].current_price != null) {
+      return Number(_allTrades[i].current_price);
+    }
+  }
+  return null;
+}
+
 function _attachPatternImminentButton(bodyEl, payload) {
   if (!bodyEl || !payload || CHILI_TRADING_IS_GUEST) return;
   var prevP = bodyEl.querySelector('.pattern-imminent-attach-wrap');
@@ -12019,6 +12029,10 @@ function applyAiTradePlanLevels(payload) {
   if (payload.take_profit != null && isFinite(Number(payload.take_profit))) body.take_profit = Number(payload.take_profit);
   if (payload.take_profit_trim != null && isFinite(Number(payload.take_profit_trim))) body.take_profit_trim = Number(payload.take_profit_trim);
   if (payload.label) body.note = String(payload.label);
+  if (payload.verdict) body.verdict = String(payload.verdict);
+  if (payload.confidence != null && isFinite(Number(payload.confidence))) body.confidence = Number(payload.confidence);
+  var tradePrice = _getOpenTradeCurrentPrice(tid);
+  if (tradePrice != null) body.price_at_decision = tradePrice;
   if (!body.stop_loss && !body.take_profit) {
     alert('Nothing to apply (need stop and/or take profit).');
     return;

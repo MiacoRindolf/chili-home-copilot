@@ -10,7 +10,10 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...models.trading import BreakoutAlert, JournalEntry, ScanPattern, Trade, TradingInsight, WatchlistItem
+from ...models.trading import (
+    BreakoutAlert, JournalEntry, PatternMonitorDecision, ScanPattern,
+    Trade, TradingInsight, WatchlistItem,
+)
 from .market_data import fetch_quote, get_indicator_snapshot, is_crypto
 
 logger = logging.getLogger(__name__)
@@ -329,6 +332,16 @@ def attach_breakout_alert_to_open_trade(
     return trade, None
 
 
+_VERDICT_TO_MONITOR_ACTION = {
+    "hold": "hold",
+    "buy": "hold",
+    "add": "hold",
+    "sell": "exit_now",
+    "exit": "exit_now",
+    "trim": "tighten_stop",
+}
+
+
 def apply_trade_plan_levels(
     db: Session,
     trade_id: int,
@@ -338,10 +351,15 @@ def apply_trade_plan_levels(
     take_profit: float | None = None,
     take_profit_trim: float | None = None,
     note: str | None = None,
+    verdict: str | None = None,
+    confidence: float | None = None,
+    price_at_decision: float | None = None,
 ) -> tuple[Trade | None, str | None]:
     """Set stop / take-profit on an open trade so Monitor and brokers reflect an AI or manual plan.
 
     Updates linked BreakoutAlert levels when present. Optional trim target is appended to notes.
+    When *verdict* is provided (from AI analyze), creates a PatternMonitorDecision so the
+    Monitor tab immediately shows the decision.
     """
     if stop_loss is None and take_profit is None:
         return None, "no_levels"
@@ -351,6 +369,9 @@ def apply_trade_plan_levels(
         return None, "not_found"
     if trade.status != "open":
         return None, "not_open"
+
+    old_stop = trade.stop_loss
+    old_target = trade.take_profit
 
     if stop_loss is not None:
         trade.stop_loss = float(stop_loss)
@@ -373,6 +394,35 @@ def apply_trade_plan_levels(
                 alert.stop_loss = float(stop_loss)
             if take_profit is not None:
                 alert.target_price = float(take_profit)
+
+    if verdict:
+        action = _VERDICT_TO_MONITOR_ACTION.get(verdict.lower(), "hold")
+        label = note or verdict
+        decision = PatternMonitorDecision(
+            trade_id=trade.id,
+            breakout_alert_id=trade.related_alert_id,
+            scan_pattern_id=None,
+            health_score=float(confidence) if confidence is not None else 0.5,
+            health_delta=None,
+            conditions_snapshot={
+                "source": "ai_analyze",
+                "verdict": verdict,
+                "label": label,
+            },
+            action=action,
+            old_stop=old_stop,
+            new_stop=stop_loss,
+            old_target=old_target,
+            new_target=take_profit,
+            llm_confidence=float(confidence) if confidence is not None else None,
+            llm_reasoning=label,
+            mechanical_action=None,
+            mechanical_stop=None,
+            mechanical_target=None,
+            decision_source="ai_analyze",
+            price_at_decision=float(price_at_decision) if price_at_decision else None,
+        )
+        db.add(decision)
 
     db.commit()
     db.refresh(trade)

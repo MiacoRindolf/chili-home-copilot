@@ -493,7 +493,7 @@ _TRADE_PLAN_LEVELS_RE = re.compile(
 
 
 def _normalize_trade_plan_levels(raw: dict[str, Any] | None) -> dict[str, Any] | None:
-    """Parse AI fence for apply-levels API (stop / targets)."""
+    """Parse AI fence for apply-levels API (stop / targets / verdict / confidence)."""
     if not raw or not isinstance(raw, dict):
         return None
     out: dict[str, Any] = {}
@@ -506,6 +506,15 @@ def _normalize_trade_plan_levels(raw: dict[str, Any] | None) -> dict[str, Any] |
     lab = raw.get("label") or raw.get("summary")
     if isinstance(lab, str) and lab.strip():
         out["label"] = lab.strip()[:500]
+
+    _VALID_VERDICTS = {"buy", "sell", "hold", "add", "exit", "trim"}
+    verdict = raw.get("verdict")
+    if isinstance(verdict, str) and verdict.strip().lower() in _VALID_VERDICTS:
+        out["verdict"] = verdict.strip().lower()
+    conf = raw.get("confidence")
+    if isinstance(conf, (int, float)) and 0 <= float(conf) <= 1:
+        out["confidence"] = round(float(conf), 4)
+
     if not out.get("stop_loss") and not out.get("take_profit"):
         return None
     return out

@@ -66,6 +66,21 @@ class TradeApplyLevels(BaseModel):
         description="Optional trim level stored in trade notes (single take_profit column holds primary target).",
     )
     note: Optional[str] = Field(None, max_length=2000)
+    verdict: Optional[str] = Field(
+        None,
+        description="AI action recommendation (buy/sell/hold/add/exit/trim). Creates a PatternMonitorDecision.",
+    )
+    confidence: Optional[float] = Field(
+        None,
+        ge=0,
+        le=1,
+        description="AI confidence as a decimal 0–1.",
+    )
+    price_at_decision: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Current price when the AI made the recommendation.",
+    )
 
 
 class TradeOut(BaseModel):

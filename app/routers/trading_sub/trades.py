@@ -209,6 +209,9 @@ def api_apply_trade_levels(
         take_profit=body.take_profit,
         take_profit_trim=body.take_profit_trim,
         note=body.note,
+        verdict=body.verdict,
+        confidence=body.confidence,
+        price_at_decision=body.price_at_decision,
     )
     if err == "not_found":
         return JSONResponse({"ok": False, "error": "Trade not found"}, status_code=404)
