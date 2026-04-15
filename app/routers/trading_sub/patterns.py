@@ -57,7 +57,7 @@ def api_list_patterns(
 ):
     from ...services.trading.public_api import list_patterns
     patterns = list_patterns(db, active_only=active_only)
-    return JSONResponse({"ok": True, "patterns": patterns})
+    return JSONResponse({"ok": True, "patterns": json_safe(patterns)})
 
 
 @router.post("/patterns")
