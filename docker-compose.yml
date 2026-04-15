@@ -43,11 +43,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 512M
+          cpus: "2.0"
+          memory: 1G
         reservations:
-          cpus: "0.25"
-          memory: 128M
+          cpus: "0.5"
+          memory: 256M
 
   ollama:
     image: ollama/ollama:latest
@@ -71,11 +71,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 4G
+          cpus: "4.0"
+          memory: 6G
         reservations:
-          cpus: "0.25"
-          memory: 256M
+          cpus: "0.5"
+          memory: 512M
 
   # Planner coding validation (Phase 1+): for Docker dev parity, use the Phase 4 mount below
   # (/workspace) + CODE_BRAIN_REPOS=/workspace. For prod-like runs, omit the repo mount and bake
@@ -152,11 +152,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 1536M
+          cpus: "4.0"
+          memory: 3G
         reservations:
-          cpus: "0.5"
-          memory: 256M
+          cpus: "1.0"
+          memory: 512M
     depends_on:
       postgres:
         condition: service_healthy
@@ -199,11 +199,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 512M
+          cpus: "2.0"
+          memory: 1G
         reservations:
-          cpus: "0.25"
-          memory: 128M
+          cpus: "0.5"
+          memory: 256M
     depends_on:
       postgres:
         condition: service_healthy
@@ -239,7 +239,7 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=3
+      - CHILI_CONTAINER_CPU_LIMIT=5
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -253,11 +253,11 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "3.0"
-          memory: 2560M
+          cpus: "5.0"
+          memory: 4G
         reservations:
-          cpus: "0.5"
-          memory: 512M
+          cpus: "1.0"
+          memory: 1G
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
       interval: 30s
@@ -285,7 +285,7 @@ services:
       - DATABASE_MAX_OVERFLOW=6
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=1.5
+      - CHILI_CONTAINER_CPU_LIMIT=3
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -297,8 +297,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.5"
-          memory: 1536M
+          cpus: "3.0"
+          memory: 3G
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
       interval: 30s
@@ -327,7 +327,7 @@ services:
       - BRAIN_QUEUE_PROCESS_CAP=${BRAIN_QUEUE_PROCESS_CAP:-8}
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=3
+      - CHILI_CONTAINER_CPU_LIMIT=5
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -339,8 +339,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "3.0"
-          memory: 3G
+          cpus: "5.0"
+          memory: 5G
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
       interval: 30s
@@ -367,7 +367,7 @@ services:
       - DATABASE_MAX_OVERFLOW=4
       - MARKET_DATA_ALLOW_PROVIDER_FALLBACK=false
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=1
+      - CHILI_CONTAINER_CPU_LIMIT=2
     volumes:
       - D:/CHILI-Docker/chili-data:/app/data
       - ./app:/app/app
@@ -379,8 +379,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "1.0"
-          memory: 1G
+          cpus: "2.0"
+          memory: 2G
     healthcheck:
       test: ["CMD-SHELL", "python -c \"import sys; sys.exit(0)\""]
       interval: 30s
@@ -419,7 +419,7 @@ services:
       - TRADING_BRAIN_NEURAL_MESH_ENABLED=1
       - TRADING_BRAIN_GRAPH_MODE=neural
       - CHILI_RUNNING_IN_DOCKER=1
-      - CHILI_CONTAINER_CPU_LIMIT=2
+      - CHILI_CONTAINER_CPU_LIMIT=4
       - PYTHONUNBUFFERED=1
       # Autopilot real-time streaming: price bus + Coinbase WS in scheduler for event-driven runner.
       - CHILI_AUTOPILOT_PRICE_BUS_ENABLED=1
@@ -435,8 +435,8 @@ services:
     deploy:
       resources:
         limits:
-          cpus: "2.0"
-          memory: 2560M
+          cpus: "4.0"
+          memory: 4G
         reservations:
-          cpus: "0.5"
-          memory: 512M
+          cpus: "1.0"
+          memory: 1G
