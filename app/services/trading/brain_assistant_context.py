@@ -258,6 +258,31 @@ def build_snapshot(
     decision_ctx = _decision_context(db, user_id)
     opportunity_ctx = _opportunity_board_summary(db, user_id)
 
+    position_plans_ctx = {}
+    try:
+        from .position_plan_generator import get_latest_plans
+        pp = get_latest_plans(db, user_id)
+        if pp and pp.get("position_plans"):
+            plans = pp["position_plans"]
+            position_plans_ctx = {
+                "count": len(plans),
+                "generated_at": pp.get("generated_at"),
+                "stale": pp.get("stale", False),
+                "summary": [
+                    {
+                        "ticker": p.get("ticker"),
+                        "assessment": p.get("assessment"),
+                        "action": (p.get("action") or {}).get("primary"),
+                        "urgency": (p.get("action") or {}).get("urgency"),
+                        "one_liner": p.get("one_liner"),
+                        "confidence": p.get("confidence"),
+                    }
+                    for p in plans[:20]
+                ],
+            }
+    except Exception as e:
+        logger.debug("[brain_assistant_context] position plans failed: %s", e)
+
     snapshot = {
         "backtest_queue": queue,
         "worker": {
@@ -278,6 +303,7 @@ def build_snapshot(
         "automation_focus": automation_focus,
         "decision_context": decision_ctx,
         "opportunity_board": opportunity_ctx,
+        "position_plans": position_plans_ctx,
         "snapshot_at": datetime.utcnow().isoformat() + "Z",
     }
 

@@ -6417,6 +6417,30 @@ def _migration_121_autopilot_profitability_outcomes(conn) -> None:
     conn.commit()
 
 
+def _migration_122_position_plans_table(conn) -> None:
+    """Table for cached LLM-generated position evaluation plans."""
+    if "trading_position_plans" not in _tables(conn):
+        conn.execute(
+            text(
+                "CREATE TABLE trading_position_plans ("
+                "  id SERIAL PRIMARY KEY,"
+                "  user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,"
+                "  trade_ids JSONB NOT NULL DEFAULT '[]'::jsonb,"
+                "  plan_json JSONB NOT NULL DEFAULT '{}'::jsonb,"
+                "  generated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+                "  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                ")"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_position_plans_user_gen "
+                "ON trading_position_plans (user_id, generated_at DESC)"
+            )
+        )
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6540,6 +6564,7 @@ MIGRATIONS = [
     ("119_broker_sessions_table", _migration_119_broker_sessions_table),
     ("120_monitor_learning_engine", _migration_120_monitor_learning_engine),
     ("121_autopilot_profitability_outcomes", _migration_121_autopilot_profitability_outcomes),
+    ("122_position_plans_table", _migration_122_position_plans_table),
 ]
 
 

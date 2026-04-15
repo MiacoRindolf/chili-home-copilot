@@ -402,8 +402,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 }
 .mon-card {
   background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px;
-  display: flex; flex-direction: column; gap: 8px;
+  display: flex; flex-direction: column; gap: 8px; cursor: pointer; transition: border-color .15s, box-shadow .15s, transform .1s;
 }
+.mon-card:hover { border-color: var(--accent, #6366f1); box-shadow: 0 0 0 1px var(--accent, #6366f1); transform: translateY(-1px); }
+.mon-card.mon-card-selected { border-color: var(--accent, #6366f1); box-shadow: 0 0 8px rgba(99,102,241,0.35); }
 .mon-card.mon-card-urgent { border-left: 3px solid #ef4444; }
 .mon-card.mon-card-watch { border-left: 3px solid #eab308; }
 .mon-card-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 8px; }
@@ -462,6 +464,54 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .mon-empty { text-align: center; padding: 28px 16px; color: var(--text-muted); border: 1px dashed var(--border); border-radius: 10px; }
 .mon-empty-title { font-size: 13px; font-weight: 700; color: var(--text-secondary); margin: 0 0 8px; }
 .mon-empty-hint { font-size: 11px; line-height: 1.5; margin: 0; max-width: 480px; margin-left: auto; margin-right: auto; }
+.mon-btn-ai {
+  background: linear-gradient(135deg, #f59e0b, #d97706); color: #fff;
+}
+.mon-btn-ai:hover { filter: brightness(1.1); }
+.mon-btn-ai:disabled { opacity: 0.45; cursor: not-allowed; filter: none; }
+.mon-btn-ai.loading { animation: pulse-ai 1.2s ease-in-out infinite; }
+@keyframes pulse-ai { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
+
+.mon-plans-section { margin-top: 14px; }
+.mon-plans-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.mon-plans-title { font-size: 13px; font-weight: 800; color: var(--text); }
+.mon-plans-meta { font-size: 9px; color: var(--text-muted); }
+.mon-plans-portfolio {
+  background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 14px; margin-bottom: 10px; font-size: 11px; line-height: 1.5;
+}
+.mon-plans-portfolio .plan-heat { font-weight: 700; text-transform: uppercase; font-size: 10px; padding: 2px 8px; border-radius: 999px; }
+.plan-heat-low { background: rgba(34,197,94,0.15); color: #4ade80; }
+.plan-heat-moderate { background: rgba(234,179,8,0.15); color: #fde047; }
+.plan-heat-elevated { background: rgba(249,115,22,0.15); color: #fb923c; }
+.plan-heat-high { background: rgba(239,68,68,0.15); color: #fca5a5; }
+.mon-plans-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
+.mon-plan-card {
+  background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px;
+  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer;
+  transition: border-color .15s, box-shadow .15s;
+}
+.mon-plan-card:hover { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b; }
+.mon-plan-head { display: flex; justify-content: space-between; align-items: center; }
+.mon-plan-ticker { font-size: 14px; font-weight: 800; }
+.mon-plan-assessment { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
+.assess-bullish { background: rgba(34,197,94,0.2); color: #4ade80; }
+.assess-neutral { background: rgba(107,114,128,0.25); color: #d1d5db; }
+.assess-bearish { background: rgba(239,68,68,0.2); color: #fca5a5; }
+.mon-plan-action { font-size: 10px; font-weight: 700; padding: 2px 8px; border-radius: 999px; }
+.action-hold { background: rgba(107,114,128,0.2); color: #d1d5db; }
+.action-add { background: rgba(34,197,94,0.2); color: #4ade80; }
+.action-trim { background: rgba(234,179,8,0.2); color: #fde047; }
+.action-exit { background: rgba(239,68,68,0.2); color: #fca5a5; }
+.action-tighten_stop { background: rgba(234,179,8,0.2); color: #fde047; }
+.action-widen_target { background: rgba(59,130,246,0.2); color: #93c5fd; }
+.mon-plan-oneliner { font-size: 10px; color: var(--text-secondary); line-height: 1.4; font-style: italic; }
+.mon-plan-details { font-size: 10px; color: var(--text-secondary); line-height: 1.45; }
+.mon-plan-levels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 10px; }
+.mon-plan-levels div { color: var(--text-muted); }
+.mon-plan-levels div b { display: block; color: var(--text); font-size: 11px; margin-top: 1px; }
+.mon-plan-confidence { font-size: 9px; color: var(--text-muted); text-align: right; }
+
 .mon-feed-details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--bg-header, #0f0f18); }
 .mon-feed-summary { font-size: 12px; font-weight: 700; cursor: pointer; }
 .mon-feed-hint { font-weight: 400; color: var(--text-muted); font-size: 10px; margin-left: 8px; }
@@ -8926,10 +8976,11 @@ function renderMonitorCards(setups) {
     var snapStr = snap ? escHtml(JSON.stringify(snap, null, 2)) : '';
     var reason = ld && ld.llm_reasoning ? escHtml(ld.llm_reasoning) : '';
     var cardClass = 'mon-card ' + _monitorCardUrgencyClass(s);
-    html += '<div class="' + cardClass + '">';
+    var selClass = (_selectedMonitorTradeId === s.trade_id) ? ' mon-card-selected' : '';
+    html += '<div class="' + cardClass + selClass + '" id="mon-card-' + s.trade_id + '" onclick="_selectMonitorCard(' + s.trade_id + ')">';
     html += '<div class="mon-card-head">';
     html += '<div><span class="mon-card-ticker">' + escHtml(s.ticker) + '</span> <span class="mon-dir ' + (s.direction === 'short' ? 'short' : 'long') + '">' + escHtml(s.direction || 'long') + '</span></div>';
-    html += '<div style="font-size:9px;color:var(--text-muted);">#' + s.trade_id + '</div>';
+    html += '<div style="font-size:9px;color:var(--text-muted);">#' + s.trade_id + ' · <span style="color:var(--accent);font-size:8px;">click to chart</span></div>';
     html += '</div>';
     html += '<div class="mon-pattern-line">' + pat + tf + '</div>';
     html += '<div class="mon-health-label-row">';
@@ -8959,7 +9010,7 @@ function renderMonitorCards(setups) {
     html += '<span class="mon-badge mon-badge-src">' + escHtml(src) + '</span>';
     html += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(when) + '</span>';
     html += '</div>';
-    html += '<div class="mon-card-expand"><button type="button" class="mon-expand-btn" id="mon-expand-' + s.trade_id + '" onclick="toggleMonitorCardDetails(' + s.trade_id + ')">Details &amp; history</button></div>';
+    html += '<div class="mon-card-expand"><button type="button" class="mon-expand-btn" id="mon-expand-' + s.trade_id + '" onclick="event.stopPropagation(); toggleMonitorCardDetails(' + s.trade_id + ')">Details &amp; history</button></div>';
     html += '<div class="mon-card-details" id="mon-details-' + s.trade_id + '">';
     if (reason) html += '<div class="mon-reason"><b>Reasoning</b><br/>' + reason + '</div>';
     if (snapStr) html += '<div style="margin-bottom:6px;"><b>Conditions snapshot</b></div><pre style="margin:0;white-space:pre-wrap;word-break:break-all;font-size:9px;max-height:160px;overflow:auto;">' + snapStr + '</pre>';
@@ -8997,6 +9048,12 @@ function loadMonitorData(showRefreshFlash) {
     runBtn.disabled = !!CHILI_TRADING_IS_GUEST;
     if (CHILI_TRADING_IS_GUEST) runBtn.title = 'Sign in to run the pattern monitor';
     else runBtn.title = 'Evaluate all monitored positions now';
+  }
+  var evalBtn = document.getElementById('monitor-eval-btn');
+  if (evalBtn) {
+    evalBtn.disabled = !!CHILI_TRADING_IS_GUEST;
+    if (CHILI_TRADING_IS_GUEST) evalBtn.title = 'Sign in to evaluate positions';
+    else evalBtn.title = 'AI evaluates all open positions with custom plans';
   }
   var grid = document.getElementById('monitor-cards');
   if (grid && !window.__monitorPayload) {
@@ -9046,6 +9103,8 @@ function loadMonitorData(showRefreshFlash) {
       }
     }
     loadMonitorDecisionFeed();
+    if (!window.__positionPlans) _loadCachedPositionPlans();
+    else _injectPlanBadgesIntoMonitorCards(window.__positionPlans.position_plans || []);
   }).catch(function() {
     var emptyEl2 = document.getElementById('monitor-empty');
     if (emptyEl2) emptyEl2.style.display = 'none';
@@ -9128,6 +9187,293 @@ function loadMonitorDecisionFeed() {
     list.innerHTML = html;
   }).catch(function() {
     list.innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Error loading feed</div>';
+  });
+}
+
+/* ── Monitor card → chart interaction ─────────── */
+var _selectedMonitorTradeId = null;
+
+function _selectMonitorCard(tradeId) {
+  if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
+  var setup = null;
+  window.__monitorPayload.setups.forEach(function(s) {
+    if (s.trade_id === tradeId) setup = s;
+  });
+  if (!setup) return;
+
+  _selectedMonitorTradeId = tradeId;
+  document.querySelectorAll('.mon-card').forEach(function(el) { el.classList.remove('mon-card-selected'); });
+  var card = document.getElementById('mon-card-' + tradeId);
+  if (card) card.classList.add('mon-card-selected');
+
+  var isCrypto = (setup.ticker || '').indexOf('-USD') !== -1;
+  var targetInterval = setup.timeframe || (isCrypto ? '15m' : '1d');
+
+  _pendingAnnotationFn = function(ohlcData) { drawMonitorAnnotations(setup, ohlcData); };
+  currentTicker = setup.ticker.toUpperCase();
+  _activeBreakoutRow = null;
+  clearAnnotations();
+  _loadDrawings();
+  document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
+  document.getElementById('ticker-label').textContent = currentTicker;
+  if (_selectDebounce) clearTimeout(_selectDebounce);
+  changeInterval(targetInterval);
+
+  var chartArea = document.getElementById('chart-area');
+  if (chartArea) {
+    chartArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    chartArea.classList.remove('glow'); void chartArea.offsetWidth; chartArea.classList.add('glow');
+  }
+}
+
+function drawMonitorAnnotations(setup, ohlcData) {
+  clearAnnotations();
+  var cr = (setup.ticker || '').indexOf('-USD') !== -1;
+  var sp = function(v) { return smartPrice(v, cr); };
+  var legendItems = [];
+
+  if (setup.entry_price != null && isFinite(Number(setup.entry_price))) {
+    _addPriceLine(Number(setup.entry_price), '#3b82f6', 'Entry $' + sp(setup.entry_price), LightweightCharts.LineStyle.Solid, 2);
+    legendItems.push({ color: '#3b82f6', label: 'Entry $' + sp(setup.entry_price) });
+  }
+  if (setup.stop_loss != null && isFinite(Number(setup.stop_loss))) {
+    _addPriceLine(Number(setup.stop_loss), '#ef4444', 'Stop $' + sp(setup.stop_loss), LightweightCharts.LineStyle.Dotted, 2);
+    legendItems.push({ color: '#ef4444', label: 'Stop $' + sp(setup.stop_loss), dashed: true });
+  }
+  if (setup.take_profit != null && isFinite(Number(setup.take_profit))) {
+    _addPriceLine(Number(setup.take_profit), '#22c55e', 'Target $' + sp(setup.take_profit), LightweightCharts.LineStyle.Dashed, 2);
+    legendItems.push({ color: '#22c55e', label: 'Target $' + sp(setup.take_profit), dashed: true });
+  }
+
+  var ld = setup.latest_decision;
+  if (ld && ld.conditions_snapshot) {
+    var snap = ld.conditions_snapshot;
+    if (snap.nearest_support != null && isFinite(Number(snap.nearest_support))) {
+      _addPriceLine(Number(snap.nearest_support), '#06b6d4', (snap.nearest_support_label || 'Support') + ' $' + sp(snap.nearest_support), LightweightCharts.LineStyle.Dashed, 1);
+      legendItems.push({ color: '#06b6d4', label: (snap.nearest_support_label || 'Support') + ' $' + sp(snap.nearest_support), dashed: true });
+    }
+    if (snap.atr_snapshot != null && isFinite(Number(snap.atr_snapshot))) {
+      legendItems.push({ color: '#a855f7', label: 'ATR ' + sp(snap.atr_snapshot) });
+    }
+  }
+
+  if (ld && ld.new_stop != null && ld.old_stop != null && Number(ld.new_stop) !== Number(ld.old_stop) && isFinite(Number(ld.old_stop))) {
+    _addPriceLine(Number(ld.old_stop), '#f87171', 'Prev Stop $' + sp(ld.old_stop), LightweightCharts.LineStyle.SparseDotted, 1);
+    legendItems.push({ color: '#f87171', label: 'Prev Stop $' + sp(ld.old_stop), dashed: true });
+  }
+  if (ld && ld.new_target != null && ld.old_target != null && Number(ld.new_target) !== Number(ld.old_target) && isFinite(Number(ld.old_target))) {
+    _addPriceLine(Number(ld.old_target), '#86efac', 'Prev Target $' + sp(ld.old_target), LightweightCharts.LineStyle.SparseDotted, 1);
+    legendItems.push({ color: '#86efac', label: 'Prev Target $' + sp(ld.old_target), dashed: true });
+  }
+
+  var markers = [];
+  var decisions = setup.recent_decisions || [];
+  var actionColors = {
+    hold: '#6b7280', tighten_stop: '#eab308', loosen_target: '#3b82f6', exit_now: '#ef4444'
+  };
+  if (decisions.length && ohlcData && ohlcData.length && _chartBarTimes && _chartBarTimes.length) {
+    var actionShapes = {
+      hold: 'circle', tighten_stop: 'arrowDown', loosen_target: 'arrowUp', exit_now: 'arrowDown'
+    };
+    decisions.slice().reverse().forEach(function(dec) {
+      if (!dec.created_at) return;
+      var ts = new Date(dec.created_at).getTime() / 1000;
+      var barTime = _getNearestBarTime(ts);
+      if (barTime == null) return;
+      var act = (dec.action || 'hold').toLowerCase();
+      var hp = _monitorHealthPct(dec);
+      var hLabel = hp != null ? ' h=' + Math.round(hp) : '';
+      markers.push({
+        time: barTime,
+        position: (act === 'exit_now' || act === 'tighten_stop') ? 'aboveBar' : 'belowBar',
+        color: actionColors[act] || '#6b7280',
+        shape: actionShapes[act] || 'circle',
+        text: act.replace(/_/g, ' ') + hLabel,
+      });
+    });
+  }
+  if (markers.length) {
+    markers.sort(function(a, b) { return a.time - b.time; });
+    try { candleSeries.setMarkers(markers); } catch(e) {}
+  }
+
+  if (ld && ld.action) {
+    var actLabel = ld.action.replace(/_/g, ' ');
+    var srcLabel = ld.decision_source || '';
+    legendItems.push({ color: actionColors[ld.action] || '#6b7280', label: 'Latest: ' + actLabel + (srcLabel ? ' (' + srcLabel + ')' : '') });
+  }
+
+  if (legendItems.length) _showAnnotationLegend(legendItems);
+}
+
+/* ── AI Position Plans ─────────────────────────── */
+window.__positionPlans = null;
+
+function evaluateAllPositions() {
+  if (CHILI_TRADING_IS_GUEST) return;
+  var btn = document.getElementById('monitor-eval-btn');
+  var st = document.getElementById('monitor-status');
+  if (btn) { btn.disabled = true; btn.classList.add('loading'); btn.textContent = 'Evaluating…'; }
+  if (st) { st.style.display = 'block'; st.className = 'mon-status ok'; st.textContent = 'AI is evaluating all open positions…'; }
+
+  fetch('/api/trading/brain/evaluate-positions?force=true', { method: 'POST' })
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (btn) { btn.disabled = false; btn.classList.remove('loading'); btn.textContent = 'AI Evaluate All'; }
+      if (!d.ok) {
+        if (st) { st.className = 'mon-status err'; st.textContent = d.error || 'Evaluation failed'; }
+        return;
+      }
+      if (st) {
+        var n = (d.position_plans || []).length;
+        st.className = 'mon-status ok';
+        st.textContent = 'AI evaluated ' + n + ' position' + (n !== 1 ? 's' : '');
+        setTimeout(function() { st.style.display = 'none'; }, 4000);
+      }
+      window.__positionPlans = d;
+      renderPositionPlans(d);
+      _injectPlanBadgesIntoMonitorCards(d.position_plans || []);
+    }).catch(function() {
+      if (btn) { btn.disabled = false; btn.classList.remove('loading'); btn.textContent = 'AI Evaluate All'; }
+      if (st) { st.className = 'mon-status err'; st.textContent = 'Request failed'; }
+    });
+}
+
+function _loadCachedPositionPlans() {
+  fetch('/api/trading/brain/position-plans')
+    .then(function(r) { return r.json(); })
+    .then(function(d) {
+      if (d.ok && d.position_plans && d.position_plans.length) {
+        window.__positionPlans = d;
+        renderPositionPlans(d);
+        _injectPlanBadgesIntoMonitorCards(d.position_plans);
+      }
+    }).catch(function() {});
+}
+
+function renderPositionPlans(data) {
+  var section = document.getElementById('position-plans-section');
+  if (!section) return;
+  var plans = data.position_plans || [];
+  if (!plans.length) { section.style.display = 'none'; return; }
+  section.style.display = 'block';
+
+  var meta = document.getElementById('plans-meta');
+  if (meta) {
+    var genAt = data.generated_at ? new Date(data.generated_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+    meta.textContent = plans.length + ' plan' + (plans.length !== 1 ? 's' : '') + (genAt ? ' · ' + genAt : '') + (data.cached ? ' (cached)' : '');
+  }
+
+  var pSum = data.portfolio_summary || {};
+  var pEl = document.getElementById('plans-portfolio-summary');
+  if (pEl && pSum.overall_assessment) {
+    var heatClass = 'plan-heat-' + (pSum.portfolio_heat || 'low').toLowerCase();
+    var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">';
+    html += '<span class="plan-heat ' + heatClass + '">' + escHtml(pSum.portfolio_heat || 'low') + '</span>';
+    html += '<span style="font-weight:700;">Portfolio: ' + (pSum.total_positions || 0) + ' positions</span>';
+    html += '<span style="color:var(--text-muted);">Regime: ' + escHtml(pSum.regime || 'unknown') + '</span>';
+    html += '</div>';
+    html += '<div>' + escHtml(pSum.overall_assessment) + '</div>';
+    if (pSum.concentration_warnings && pSum.concentration_warnings.length) {
+      html += '<div style="margin-top:4px;color:#f59e0b;font-size:10px;">Warnings: ' + pSum.concentration_warnings.map(escHtml).join('; ') + '</div>';
+    }
+    pEl.innerHTML = html;
+  }
+
+  var grid = document.getElementById('plans-grid');
+  if (!grid) return;
+  var gh = '';
+  plans.forEach(function(p) {
+    var assessClass = 'assess-' + (p.assessment || 'neutral').toLowerCase();
+    var actClass = 'action-' + ((p.action && p.action.primary) || 'hold').toLowerCase().replace(/ /g, '_');
+    var cr = (p.ticker || '').indexOf('-USD') !== -1;
+    var sp = function(v) { return smartPrice(v, cr); };
+
+    gh += '<div class="mon-plan-card" onclick="_selectMonitorCardByTicker(\'' + escHtml(p.ticker) + '\')">';
+    gh += '<div class="mon-plan-head">';
+    gh += '<span class="mon-plan-ticker">' + escHtml(p.ticker) + '</span>';
+    gh += '<span class="mon-plan-assessment ' + assessClass + '">' + escHtml(p.assessment || '?') + '</span>';
+    gh += '</div>';
+
+    if (p.one_liner) gh += '<div class="mon-plan-oneliner">' + escHtml(p.one_liner) + '</div>';
+
+    gh += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">';
+    if (p.action && p.action.primary) {
+      gh += '<span class="mon-plan-action ' + actClass + '">' + escHtml(p.action.primary) + '</span>';
+    }
+    if (p.action && p.action.urgency) {
+      gh += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(p.action.urgency) + '</span>';
+    }
+    if (p.opportunity && p.opportunity.momentum) {
+      var momCol = {strong:'#22c55e',moderate:'#eab308',weak:'#f59e0b',negative:'#ef4444'}[p.opportunity.momentum] || '#888';
+      gh += '<span style="font-size:9px;color:' + momCol + ';">momentum: ' + escHtml(p.opportunity.momentum) + '</span>';
+    }
+    gh += '</div>';
+
+    if (p.risk_management) {
+      var rm = p.risk_management;
+      gh += '<div class="mon-plan-levels">';
+      gh += '<div>Stop<b style="color:#f87171;">' + (rm.recommended_stop != null ? '$' + sp(rm.recommended_stop) : '—') + '</b></div>';
+      gh += '<div>R:R<b>' + escHtml(rm.risk_reward_ratio || '—') + '</b></div>';
+      gh += '<div>Size<b>' + escHtml(rm.position_size_advice || '—') + '</b></div>';
+      gh += '</div>';
+    }
+
+    if (p.key_levels) {
+      var kl = p.key_levels;
+      gh += '<div class="mon-plan-levels">';
+      gh += '<div>Support<b style="color:#06b6d4;">' + ((kl.support && kl.support[0]) != null ? '$' + sp(kl.support[0]) : '—') + '</b></div>';
+      gh += '<div>Resist<b style="color:#f59e0b;">' + ((kl.resistance && kl.resistance[0]) != null ? '$' + sp(kl.resistance[0]) : '—') + '</b></div>';
+      gh += '<div>Target<b style="color:#22c55e;">' + (kl.take_profit != null ? '$' + sp(kl.take_profit) : '—') + '</b></div>';
+      gh += '</div>';
+    }
+
+    if (p.timeline) {
+      gh += '<div class="mon-plan-details"><b>Near-term:</b> ' + escHtml(p.timeline.near_term || '—') + '</div>';
+    }
+
+    gh += '<div class="mon-plan-confidence">confidence: ' + (p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—') + '</div>';
+    gh += '</div>';
+  });
+  grid.innerHTML = gh;
+}
+
+function _selectMonitorCardByTicker(ticker) {
+  if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
+  var setup = null;
+  window.__monitorPayload.setups.forEach(function(s) {
+    if (s.ticker.toUpperCase() === ticker.toUpperCase()) setup = s;
+  });
+  if (setup) {
+    _selectMonitorCard(setup.trade_id);
+  } else {
+    selectTicker(ticker);
+  }
+}
+
+function _injectPlanBadgesIntoMonitorCards(plans) {
+  if (!plans || !plans.length) return;
+  var byTicker = {};
+  plans.forEach(function(p) { if (p.ticker) byTicker[p.ticker.toUpperCase()] = p; });
+
+  if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
+  window.__monitorPayload.setups.forEach(function(s) {
+    var plan = byTicker[s.ticker.toUpperCase()];
+    if (!plan) return;
+    var card = document.getElementById('mon-card-' + s.trade_id);
+    if (!card) return;
+    var existing = card.querySelector('.mon-plan-badge');
+    if (existing) existing.remove();
+    var badge = document.createElement('div');
+    badge.className = 'mon-plan-badge';
+    var actClass = 'action-' + ((plan.action && plan.action.primary) || 'hold').toLowerCase().replace(/ /g, '_');
+    badge.innerHTML = '<span class="mon-plan-action ' + actClass + '" style="font-size:8px;">' +
+      escHtml((plan.action && plan.action.primary) || '') + '</span> ' +
+      '<span style="font-size:9px;color:var(--text-secondary);font-style:italic;">' + escHtml(plan.one_liner || '') + '</span>';
+    badge.style.cssText = 'margin-top:4px;padding-top:6px;border-top:1px dashed var(--border);';
+    var expand = card.querySelector('.mon-card-expand');
+    if (expand) card.insertBefore(badge, expand);
+    else card.appendChild(badge);
   });
 }
 

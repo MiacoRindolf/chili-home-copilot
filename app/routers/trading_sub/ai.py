@@ -510,6 +510,40 @@ def api_daily_playbook(request: Request, db: Session = Depends(get_db)):
     return JSONResponse(data)
 
 
+@router.post("/api/trading/brain/evaluate-positions")
+def api_evaluate_positions(
+    request: Request,
+    db: Session = Depends(get_db),
+    force: bool = Query(False, description="Force refresh even if cached plans exist"),
+):
+    """Evaluate all open positions and generate comprehensive AI plans."""
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest"):
+        return JSONResponse({"ok": False, "error": "Sign in to evaluate positions"}, status_code=403)
+    from ...services.trading.position_plan_generator import generate_position_plans
+    result = generate_position_plans(db, ctx["user_id"], force_refresh=force)
+    return JSONResponse(result)
+
+
+@router.get("/api/trading/brain/position-plans")
+def api_get_position_plans(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Retrieve the latest cached position plans (no new LLM call)."""
+    ctx = get_identity_ctx(request, db)
+    from ...services.trading.position_plan_generator import get_latest_plans
+    result = get_latest_plans(db, ctx["user_id"])
+    if result is None:
+        return JSONResponse({
+            "ok": True,
+            "position_plans": [],
+            "portfolio_summary": None,
+            "message": "No position plans generated yet. Use POST /api/trading/brain/evaluate-positions to generate.",
+        })
+    return JSONResponse(result)
+
+
 @router.get("/api/trading/brain/governance")
 def api_governance_dashboard(request: Request):
     """Governance dashboard: kill switch, approvals, velocity."""
