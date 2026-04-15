@@ -181,6 +181,127 @@ def apply_level_ratios(
     return decision
 
 
+def heuristic_adjustment(
+    *,
+    plan_health: Any,
+    condition_health: Any,
+    pnl_pct: float | None,
+    current_price: float,
+    current_stop: float | None,
+    current_target: float | None,
+    pattern_stop: float | None,
+    delta_urgent: float = -0.3,
+    health_healthy: float = 0.8,
+    trade_direction: str = "long",
+) -> MechanicalDecision | None:
+    """Deterministic position action for clear-cut cases. Returns None → caller may use LLM.
+
+    Only consulted when the orchestrator would otherwise call the premium LLM. Preserves
+    quality on unambiguous risk/health combinations; ambiguous states return None.
+    """
+    if current_price <= 0:
+        return None
+
+    is_long = (trade_direction or "long").lower() != "short"
+
+    has_crit = bool(getattr(plan_health, "has_critical_invalidation", False))
+    has_any = bool(getattr(plan_health, "has_any_invalidation", False))
+    caution = bool(getattr(plan_health, "caution_signals_changed", []))
+    h_score = float(getattr(condition_health, "health_score", 1.0) or 1.0)
+    h_delta = getattr(condition_health, "health_delta", None)
+
+    # Clear risk-off: critical thesis break + meaningful loss (same pnl sign convention as monitor).
+    if has_crit and pnl_pct is not None and pnl_pct < -5.0:
+        return MechanicalDecision(
+            action="exit_now",
+            confidence=0.9,
+            reasoning="Heuristic: critical invalidation with loss beyond -5% — exit.",
+            graduation_status="heuristic",
+        )
+
+    # Healthy structure, no plan warnings — no premium model needed.
+    if not has_any and not caution and h_score >= health_healthy:
+        return MechanicalDecision(
+            action="hold",
+            confidence=0.88,
+            reasoning="Heuristic: pattern health strong, no invalidations or caution flips — hold.",
+            graduation_status="heuristic",
+        )
+
+    # Rapid deterioration very close to stop → mechanical tighten (long).
+    if is_long:
+        if (
+            h_delta is not None
+            and h_delta <= delta_urgent
+            and current_stop is not None
+            and current_stop > 0
+            and current_price > current_stop
+        ):
+            dist_pct = (current_price - current_stop) / max(current_price, 1e-9) * 100.0
+            if dist_pct <= 2.0:
+                mid = (current_price + current_stop) / 2.0
+                floor = float(pattern_stop) if pattern_stop is not None else current_stop
+                new_stop = max(mid, floor, current_stop)
+                if new_stop < current_price * 0.999:
+                    return MechanicalDecision(
+                        action="tighten_stop",
+                        new_stop=round(new_stop, 6),
+                        confidence=0.82,
+                        reasoning=(
+                            "Heuristic: urgent health delta with price within ~2% of stop — "
+                            "tighten toward midpoint."
+                        ),
+                        graduation_status="heuristic",
+                    )
+        if current_target is not None and current_target > 0 and current_price >= current_target * 0.998:
+            new_t = max(current_target, current_price * 1.02)
+            if new_t > current_price * 1.001:
+                return MechanicalDecision(
+                    action="loosen_target",
+                    new_target=round(new_t, 6),
+                    confidence=0.78,
+                    reasoning="Heuristic: spot at/above plan target — raise target to trail.",
+                    graduation_status="heuristic",
+                )
+    else:
+        # Short: stop above price
+        if (
+            h_delta is not None
+            and h_delta <= delta_urgent
+            and current_stop is not None
+            and current_stop > 0
+            and current_price < current_stop
+        ):
+            dist_pct = (current_stop - current_price) / max(current_price, 1e-9) * 100.0
+            if dist_pct <= 2.0:
+                mid = (current_price + current_stop) / 2.0
+                cap = float(pattern_stop) if pattern_stop is not None else current_stop
+                new_stop = min(mid, cap, current_stop)
+                if new_stop > current_price * 1.001:
+                    return MechanicalDecision(
+                        action="tighten_stop",
+                        new_stop=round(new_stop, 6),
+                        confidence=0.82,
+                        reasoning=(
+                            "Heuristic: urgent health delta with price within ~2% of stop (short) — "
+                            "tighten toward midpoint."
+                        ),
+                        graduation_status="heuristic",
+                    )
+        if current_target is not None and current_target > 0 and current_price <= current_target * 1.002:
+            new_t = min(current_target, current_price * 0.98)
+            if 0 < new_t < current_price * 0.999:
+                return MechanicalDecision(
+                    action="loosen_target",
+                    new_target=round(new_t, 6),
+                    confidence=0.78,
+                    reasoning="Heuristic: spot at/below plan target (short) — lower target to trail.",
+                    graduation_status="heuristic",
+                )
+
+    return None
+
+
 # ── Graduation Logic ─────────────────────────────────────────────────
 
 def get_graduation_status(

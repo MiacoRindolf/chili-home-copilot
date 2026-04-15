@@ -1,17 +1,22 @@
-"""Reconcile-pass digest: bounded cycle metrics + LLM + DB persist (audit/history, not live operator truth)."""
+"""Reconcile-pass digest: bounded cycle metrics + template report + optional LLM polish + DB persist."""
 from __future__ import annotations
 
 import json
 import logging
+import threading
 from datetime import datetime
 from typing import Any
 
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...models.trading import LearningCycleAiReport
 from ..llm_caller import call_llm
 
 logger = logging.getLogger(__name__)
+
+_cycle_report_invocation_lock = threading.Lock()
+_cycle_report_invocation_count = 0
 
 # Top-level keys safe to copy into metrics_json (no huge nested blobs).
 _WHITELIST_KEYS: frozenset[str] = frozenset(
@@ -142,43 +147,183 @@ def _fallback_markdown(metrics: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def _int_metric(m: dict[str, Any], key: str, default: int = 0) -> int:
+    v = m.get(key)
+    if isinstance(v, bool):
+        return int(v)
+    if isinstance(v, (int, float)):
+        return int(v)
+    return default
+
+
+def build_template_cycle_report_markdown(metrics: dict[str, Any]) -> str:
+    """Deterministic reconcile digest from whitelisted metrics (no LLM)."""
+    ts = datetime.utcnow().strftime("%Y-%m-%d %H:%M")
+    lines: list[str] = [
+        f"# Reconcile pass digest — {ts} UTC",
+        "",
+        "_Template summary from cycle counters (auditable, reproducible)._",
+        "",
+        "## Executive summary",
+        "",
+    ]
+
+    prescreen = _int_metric(metrics, "prescreen_candidates")
+    scanned = _int_metric(metrics, "tickers_scanned")
+    scored = _int_metric(metrics, "tickers_scored")
+    snaps = _int_metric(metrics, "snapshots_taken")
+    patterns_new = _int_metric(metrics, "patterns_discovered")
+    patterns_boost = _int_metric(metrics, "patterns_boosted")
+    patterns_engine = _int_metric(metrics, "patterns_discovered_engine")
+    bt_run = _int_metric(metrics, "backtests_run")
+    q_bt = _int_metric(metrics, "queue_backtests_run")
+    q_pending = _int_metric(metrics, "queue_pending")
+    hypo_t = _int_metric(metrics, "hypotheses_tested")
+    ml_tr = _int_metric(metrics, "ml_trained")
+    elapsed = metrics.get("elapsed_s")
+    err = metrics.get("error")
+
+    lines.append(f"- Prescreen candidates: **{prescreen}**; tickers scanned **{scanned}**, scored **{scored}**; snapshots **{snaps}**.")
+    if patterns_new or patterns_boost or patterns_engine:
+        lines.append(
+            f"- Patterns: **{patterns_new}** discovered, **{patterns_boost}** boosted, **{patterns_engine}** from pattern engine."
+        )
+    else:
+        lines.append("- Patterns: no new discoveries this pass (counters at zero).")
+
+    # Backtest throughput (heuristic thresholds; no historical median in single payload)
+    if bt_run >= 8 or q_bt >= 5:
+        bt_note = "Active backtest throughput."
+    elif bt_run <= 1 and q_pending > 20:
+        bt_note = "Backtest pipeline may be backing up (low runs, elevated queue pending)."
+    elif bt_run <= 2:
+        bt_note = "Backtest throughput light this pass."
+    else:
+        bt_note = "Steady backtest activity."
+    lines.append(f"- Backtests: **{bt_run}** run, queue processed **{q_bt}**, **{q_pending}** pending — {bt_note}")
+
+    if hypo_t:
+        lines.append(f"- Hypotheses tested: **{hypo_t}**.")
+    if ml_tr:
+        lines.append(f"- ML training step ran (**{ml_tr}**).")
+    if isinstance(elapsed, (int, float)):
+        lines.append(f"- Wall time ~**{elapsed:.1f}s**.")
+    if err:
+        lines.append(f"- **Cycle reported an error:** `{err}`.")
+
+    lines.extend(["", "## What changed", ""])
+
+    ch: list[str] = []
+    if _int_metric(metrics, "insights_decayed") or _int_metric(metrics, "insights_pruned"):
+        ch.append(
+            f"Insights maintenance: decayed **{_int_metric(metrics, 'insights_decayed')}**, pruned **{_int_metric(metrics, 'insights_pruned')}**."
+        )
+    if _int_metric(metrics, "weights_evolved"):
+        ch.append(f"Adaptive weights evolved (**{_int_metric(metrics, 'weights_evolved')}** nudges).")
+    if _int_metric(metrics, "proposals_generated"):
+        ch.append(f"Strategy proposals generated: **{_int_metric(metrics, 'proposals_generated')}**.")
+    if _int_metric(metrics, "intraday_discoveries") or _int_metric(metrics, "high_vol_discoveries"):
+        ch.append(
+            f"Secondary miners: intraday **{_int_metric(metrics, 'intraday_discoveries')}**, high-vol **{_int_metric(metrics, 'high_vol_discoveries')}**."
+        )
+    if _int_metric(metrics, "synergies_found"):
+        ch.append(f"Synergies found: **{_int_metric(metrics, 'synergies_found')}**.")
+    evo = metrics.get("evolution")
+    if isinstance(evo, dict) and evo:
+        ch.append(f"Evolution snapshot keys: {', '.join(list(evo.keys())[:12])}{'…' if len(evo) > 12 else ''}.")
+    if not ch:
+        ch.append("No major counter deltas beyond routine scanning/mining (see metrics block below).")
+    lines.extend(ch)
+
+    lines.extend(["", "## Risks and caveats", ""])
+    risks: list[str] = []
+    if q_pending > 80:
+        risks.append("Large backtest queue pending — promotion latency may increase.")
+    if bt_run == 0 and q_pending > 0:
+        risks.append("Zero backtests completed this pass while work remains queued — check worker health or caps.")
+    if err:
+        risks.append("This pass ended with a recorded error; downstream steps may be partial.")
+    acc = metrics.get("ml_accuracy")
+    if isinstance(acc, (int, float)) and acc < 0.52 and ml_tr:
+        risks.append("ML accuracy reported below coin-flip; treat meta-learner signals cautiously.")
+    if not risks:
+        risks.append("No anomalies flagged from counters alone; validate live book and data freshness separately.")
+    lines.extend(f"- {r}" for r in risks)
+
+    lines.extend(["", "## Suggested focus next cycle", ""])
+    focus: list[str] = []
+    if q_pending > 40:
+        focus.append("Drain or inspect the backtest queue (budget, locks, executor).")
+    if patterns_new == 0 and scanned > 100:
+        focus.append("Prescreen volume is high but pattern discovery is flat — review mining thresholds or universe overlap.")
+    if _int_metric(metrics, "returns_backfilled") or _int_metric(metrics, "scores_backfilled"):
+        focus.append("Continue backfilling returns/scores where gaps remain.")
+    if not focus:
+        focus.append("Maintain current reconcile cadence; watch queue_pending and patterns_discovered trends.")
+    lines.extend(f"- {f}" for f in focus)
+
+    lines.extend(
+        [
+            "",
+            "## Cycle metrics (raw)",
+            "",
+            "```json",
+            json.dumps(metrics, indent=2, default=str)[:12000],
+            "```",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def generate_and_store_cycle_report(db: Session, user_id: int | None, report: dict[str, Any]) -> int | None:
-    """Build payload, call LLM, insert row (always), return new id."""
+    """Build payload, template report by default; optional LLM polish every Nth invocation."""
+    global _cycle_report_invocation_count
     metrics = build_report_payload(report)
     metrics_json_str = json.dumps(metrics, default=str)
     if len(metrics_json_str) > 24000:
         metrics_json_str = metrics_json_str[:24000] + "…"
 
-    system = (
-        "You are CHILI's trading brain analyst. Write a clear markdown report for the user "
-        "based only on the reconcile-pass metrics provided. No disclaimers about not being "
-        "financial advice unless one short line at the end."
-    )
-    user_prompt = (
-        "Here is JSON from one automated reconcile pass (scans, patterns, backtests, "
-        "hypotheses, ML, proposals, timings). Produce a structured markdown report with:\n\n"
-        "## Executive summary\n"
-        "3-5 bullets on what this cycle accomplished.\n\n"
-        "## What changed\n"
-        "Patterns, weights, hypotheses, ML, signals — only what the data supports.\n\n"
-        "## Risks and caveats\n"
-        "Data limits, low sample sizes, or anomalies if implied by the numbers.\n\n"
-        "## Suggested focus next cycle\n"
-        "2-4 concrete priorities.\n\n"
-        f"CYCLE_METRICS_JSON:\n{metrics_json_str}"
-    )
+    content = build_template_cycle_report_markdown(metrics)
 
-    reply = call_llm(
-        messages=[
-            {"role": "system", "content": system},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=1800,
-        trace_id="learning-cycle-report",
-    )
-    content = (reply or "").strip()
-    if not content:
-        content = _fallback_markdown(metrics)
+    every_n = max(0, int(getattr(settings, "learning_cycle_report_llm_every_n", 0) or 0))
+    use_llm = False
+    if every_n > 0:
+        with _cycle_report_invocation_lock:
+            _cycle_report_invocation_count += 1
+            use_llm = _cycle_report_invocation_count % every_n == 0
+
+    if use_llm:
+        system = (
+            "You are CHILI's trading brain analyst. Write a clear markdown report for the user "
+            "based only on the reconcile-pass metrics provided. No disclaimers about not being "
+            "financial advice unless one short line at the end."
+        )
+        user_prompt = (
+            "Here is JSON from one automated reconcile pass (scans, patterns, backtests, "
+            "hypotheses, ML, proposals, timings). Produce a structured markdown report with:\n\n"
+            "## Executive summary\n"
+            "3-5 bullets on what this cycle accomplished.\n\n"
+            "## What changed\n"
+            "Patterns, weights, hypotheses, ML, signals — only what the data supports.\n\n"
+            "## Risks and caveats\n"
+            "Data limits, low sample sizes, or anomalies if implied by the numbers.\n\n"
+            "## Suggested focus next cycle\n"
+            "2-4 concrete priorities.\n\n"
+            f"CYCLE_METRICS_JSON:\n{metrics_json_str}"
+        )
+        reply = call_llm(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=1800,
+            trace_id="learning-cycle-report",
+        )
+        polished = (reply or "").strip()
+        if polished:
+            content = polished
+        else:
+            content = _fallback_markdown(metrics)
 
     row = LearningCycleAiReport(
         user_id=user_id,

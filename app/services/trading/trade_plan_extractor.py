@@ -1,8 +1,7 @@
-"""LLM-based trade plan extractor.
+"""Trade plan extraction: rich mechanical planner + optional LLM fallback.
 
-Given a pattern's conditions, current indicators, and alert levels, asks the
-LLM to produce a structured monitoring plan with entry validation,
-invalidation conditions, monitoring signals, and key levels.
+Mechanical path derives invalidations and monitoring from pattern conditions.
+``extract_trade_plan`` is used only when the mechanical plan is too sparse (complex patterns).
 """
 from __future__ import annotations
 
@@ -168,6 +167,23 @@ def _validate_plan(
     return plan
 
 
+def _mechanical_severity(ind: str) -> str:
+    """Map indicator family to invalidation severity (complex patterns)."""
+    price_level = {"price", "ema_50", "ema_100", "ema_200", "sma_50", "vwap", "high_watermark"}
+    trend = {"ema_20", "sma_20", "macd", "macd_signal"}
+    momentum = {"rsi_14", "macd_hist", "stochastic_k", "mfi", "bb_pct", "bb_pct_b"}
+    volume = {"volume_ratio", "obv", "adx", "atr"}
+    if ind in price_level:
+        return "critical"
+    if ind in trend:
+        return "critical"
+    if ind in momentum:
+        return "warning"
+    if ind in volume:
+        return "info"
+    return "warning"
+
+
 def extract_trade_plan_mechanical(
     *,
     pattern_conditions: list[dict],
@@ -181,6 +197,8 @@ def extract_trade_plan_mechanical(
 
     Every condition that was met at alert time becomes an invalidation
     condition if it flips.  Top indicators become the monitoring signals.
+    For complex patterns (5+ conditions), severity is tiered and extra
+    levels (Fib-style cushion, resistance hint) are added.
     """
     invalidations: list[dict] = []
     monitoring_signals: list[dict] = []
@@ -188,9 +206,17 @@ def extract_trade_plan_mechanical(
     VALID_INDICATORS = {
         "price", "sma_20", "sma_50", "ema_20", "ema_50", "ema_100", "ema_200",
         "rsi_14", "macd_hist", "macd", "macd_signal", "adx", "atr", "obv",
-        "mfi", "vwap", "bb_pct", "volume_ratio", "stochastic_k",
+        "mfi", "vwap", "bb_pct", "bb_pct_b", "volume_ratio", "stochastic_k",
         "dist_to_resistance_pct", "high_watermark",
     }
+
+    n_cond = len(pattern_conditions or [])
+    complex_pattern = n_cond >= 5
+
+    # Normalize indicator aliases from flattened snapshots
+    ind_alias = dict(indicators)
+    if "bb_pct_b" not in ind_alias and ind_alias.get("bb_pct") is not None:
+        ind_alias["bb_pct_b"] = ind_alias["bb_pct"]
 
     for cond in pattern_conditions:
         ind = cond.get("indicator", "")
@@ -205,7 +231,10 @@ def extract_trade_plan_mechanical(
         # if the pattern required `rsi_14 > 50`, invalidation is `rsi_14 < 50`
         inv_op = _invert_op(op)
         if inv_op:
-            severity = "critical" if ind in ("price", "ema_50", "sma_50") else "warning"
+            if complex_pattern:
+                severity = _mechanical_severity(ind)
+            else:
+                severity = "critical" if ind in ("price", "ema_50", "sma_50") else "warning"
             inv_entry: dict[str, Any] = {
                 "desc": f"{ind} no longer meets pattern condition ({ind} {op} {val or ref})",
                 "indicator": ind,
@@ -219,8 +248,8 @@ def extract_trade_plan_mechanical(
             invalidations.append(inv_entry)
 
         # Use top conditions as monitoring signals
-        if len(monitoring_signals) < 4:
-            actual = indicators.get(ind)
+        if len(monitoring_signals) < (6 if complex_pattern else 4):
+            actual = ind_alias.get(ind)
             baseline = "unknown"
             if actual is not None and val is not None:
                 try:
@@ -236,32 +265,67 @@ def extract_trade_plan_mechanical(
                 "level": val if isinstance(val, (int, float)) else None,
             })
 
-    # Sort invalidations: critical first
-    invalidations.sort(key=lambda x: 0 if x.get("severity") == "critical" else 1)
+    # Severity order: critical < warning < info
+    _sev_rank = {"critical": 0, "warning": 1, "info": 2}
 
-    # Compute early warning level
+    def _inv_key(x: dict) -> tuple:
+        return (_sev_rank.get(x.get("severity"), 1), x.get("indicator", ""))
+
+    invalidations.sort(key=_inv_key)
+
+    cap_inv = 8 if complex_pattern else 5
+    invalidations = invalidations[:cap_inv]
+
+    # Compute early warning + optional Fib-style cushion (long bias; still useful as distance)
     early_warning = None
     if stop_loss and entry_price:
-        early_warning = round(stop_loss + (entry_price - stop_loss) * 0.3, 4)
+        risk_width = abs(entry_price - stop_loss)
+        if risk_width > 0 and entry_price > stop_loss:
+            fib_cushion = entry_price - 0.382 * risk_width
+            linear_cushion = stop_loss + (entry_price - stop_loss) * 0.3
+            early_warning = round(max(fib_cushion, linear_cushion), 6)
+        else:
+            early_warning = round(stop_loss + (entry_price - stop_loss) * 0.3, 4)
+
+    near_resistance = None
+    if target_price and current_price and target_price > current_price:
+        near_resistance = round(target_price, 6)
+    else:
+        dr = ind_alias.get("dist_to_resistance_pct")
+        try:
+            if dr is not None and current_price:
+                near_resistance = round(float(current_price) * (1.0 + float(dr) / 100.0), 6)
+        except (TypeError, ValueError):
+            pass
+
+    risk_pct = abs(entry_price - stop_loss) / entry_price * 100 if entry_price and stop_loss else 0.0
+    reward_pct = abs(target_price - entry_price) / entry_price * 100 if entry_price and target_price else 0.0
+    rr = (reward_pct / risk_pct) if risk_pct > 0.01 else 0.0
+    if complex_pattern and rr >= 2.0:
+        sizing_note = f"mechanical plan — pattern R:R ~ {rr:.1f}:1; derived from {n_cond} conditions"
+    elif complex_pattern:
+        sizing_note = f"mechanical plan — {n_cond} conditions; moderate R:R"
+    else:
+        sizing_note = "mechanical plan — derived from pattern conditions"
 
     plan = {
         "entry_validation": {
             "required_reclaim": entry_price,
             "method": "buy_stop_above_entry",
         },
-        "invalidation_conditions": invalidations[:5],
-        "monitoring_signals": monitoring_signals[:4],
+        "invalidation_conditions": invalidations,
+        "monitoring_signals": monitoring_signals[: (6 if complex_pattern else 4)],
         "key_levels": {
             "entry": entry_price,
             "stop": stop_loss,
             "target": target_price,
             "early_warning": early_warning,
-            "near_resistance": None,
-            "vwap": indicators.get("vwap"),
+            "near_resistance": near_resistance,
+            "vwap": ind_alias.get("vwap"),
         },
         "position_rules": {
-            "max_risk_pct": min(2.0, max(0.5, 1.0)),
-            "sizing_note": "mechanical plan — derived from pattern conditions",
+            "max_risk_pct": min(2.0, max(0.5, round(1.0 if risk_pct < 10 else 0.75, 2))),
+            "sizing_note": sizing_note,
         },
     }
     return _validate_plan(plan, entry_price=entry_price, stop_loss=stop_loss, target_price=target_price)

@@ -212,6 +212,8 @@ class Settings(BaseSettings):
 
     # Full learning cycle (run_learning_cycle): optional slim mode
     brain_secondary_miners_on_cycle: bool = True   # intraday/refine/exit/fakeout/sizing/inter-alert/timeframe/synergy steps
+    # Learning cycle AI report: 0 = template-only (no LLM); N>0 = call LLM every Nth stored report for polish.
+    learning_cycle_report_llm_every_n: int = 0
 
     # Pattern backtest queue: how soon a pattern is eligible again (was hardcoded 7).
     brain_retest_interval_days: int = 7

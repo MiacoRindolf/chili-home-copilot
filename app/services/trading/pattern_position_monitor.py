@@ -607,6 +607,7 @@ def _evaluate_single(
         build_signal_snapshot,
         compute_signal_signature,
         get_graduation_status,
+        heuristic_adjustment,
         is_pattern_simple,
         lookup_rule,
         should_evaluate,
@@ -625,6 +626,14 @@ def _evaluate_single(
     )
     if recent:
         return "skipped"
+
+    # Latest decision any time (for materiality gate; cooldown uses ``recent`` above).
+    last_any = (
+        db.query(PatternMonitorDecision)
+        .filter(PatternMonitorDecision.trade_id == trade.id)
+        .order_by(PatternMonitorDecision.created_at.desc())
+        .first()
+    )
 
     # Resolve the alert and pattern.
     alert: BreakoutAlert | None = db.get(BreakoutAlert, trade.related_alert_id) if trade.related_alert_id else None
@@ -660,8 +669,8 @@ def _evaluate_single(
 
     # ── Materiality gate (event-driven mode) ──
     if event_driven:
-        last_snap = recent.conditions_snapshot if recent else None
-        last_price = recent.price_at_decision if recent else None
+        last_snap = last_any.conditions_snapshot if last_any else None
+        last_price = last_any.price_at_decision if last_any else None
         mat_ok, mat_reason = should_evaluate(
             current_price=current_price,
             last_price=last_price,
@@ -755,6 +764,25 @@ def _evaluate_single(
         use_llm = True
         decision_source = "llm"
 
+    # ── Heuristic pre-filter (skips LLM on unambiguous cases) ──
+    heuristic_dec = None
+    if use_llm:
+        heuristic_dec = heuristic_adjustment(
+            plan_health=plan_health,
+            condition_health=health,
+            pnl_pct=pnl_pct,
+            current_price=current_price,
+            current_stop=trade.stop_loss,
+            current_target=trade.take_profit,
+            pattern_stop=alert.stop_loss,
+            delta_urgent=delta_urgent,
+            health_healthy=health_healthy,
+            trade_direction=trade.direction or "long",
+        )
+        if heuristic_dec is not None:
+            use_llm = False
+            decision_source = "heuristic"
+
     # ── LLM advisory (when needed) ──
     rec = None
     if use_llm:
@@ -790,6 +818,15 @@ def _evaluate_single(
             new_target=mech.new_target,
             confidence=mech.confidence,
             reasoning=mech.reasoning,
+        )
+    elif decision_source == "heuristic" and heuristic_dec is not None:
+        from .pattern_adjustment_advisor import AdjustmentRecommendation
+        primary = AdjustmentRecommendation(
+            action=heuristic_dec.action,
+            new_stop=heuristic_dec.new_stop,
+            new_target=heuristic_dec.new_target,
+            confidence=heuristic_dec.confidence,
+            reasoning=heuristic_dec.reasoning,
         )
     elif rec:
         primary = rec
@@ -842,9 +879,21 @@ def _evaluate_single(
         new_target=primary.new_target,
         llm_confidence=rec.confidence if rec else None,
         llm_reasoning=rec.reasoning if rec else None,
-        mechanical_action=mech.action if mech else None,
-        mechanical_stop=mech.new_stop if mech else None,
-        mechanical_target=mech.new_target if mech else None,
+        mechanical_action=(
+            mech.action
+            if mech
+            else (heuristic_dec.action if heuristic_dec else None)
+        ),
+        mechanical_stop=(
+            mech.new_stop
+            if mech
+            else (heuristic_dec.new_stop if heuristic_dec else None)
+        ),
+        mechanical_target=(
+            mech.new_target
+            if mech
+            else (heuristic_dec.new_target if heuristic_dec else None)
+        ),
         decision_source=decision_source,
         price_at_decision=current_price,
     )
@@ -890,8 +939,8 @@ def _ensure_trade_plan(
 ) -> None:
     """Lazy-generate a trade plan for the alert using the hybrid path.
 
-    Simple patterns (<5 conditions): mechanical plan is primary, LLM shadow.
-    Complex patterns (>=5 conditions): LLM plan is primary, mechanical shadow.
+    Simple patterns (<5 conditions): mechanical plan is primary (no LLM).
+    Complex patterns: rich mechanical plan first; LLM only if invalidations < 2.
     Both plans are stored for accuracy tracking.
     """
     if alert.trade_plan and alert.trade_plan_mechanical:
@@ -932,7 +981,17 @@ def _ensure_trade_plan(
                 alert.id, alert.ticker,
             )
 
-        # For complex patterns (or if LLM plan is missing): call LLM
+        # Complex patterns: prefer mechanical when it has enough invalidations; else LLM
+        if not simple and not alert.trade_plan:
+            mech = alert.trade_plan_mechanical or {}
+            inv_n = len(mech.get("invalidation_conditions") or [])
+            if inv_n >= 2:
+                alert.trade_plan = mech
+                logger.info(
+                    "[pattern_monitor] Mechanical trade plan for alert %s (%s) — complex (%s invalidations)",
+                    alert.id, alert.ticker, inv_n,
+                )
+
         if not alert.trade_plan:
             llm_plan = extract_trade_plan(
                 ticker=alert.ticker,
@@ -948,7 +1007,7 @@ def _ensure_trade_plan(
             if llm_plan:
                 alert.trade_plan = llm_plan
                 logger.info(
-                    "[pattern_monitor] LLM trade plan for alert %s (%s) — complex pattern",
+                    "[pattern_monitor] LLM trade plan for alert %s (%s) — sparse mechanical or fallback",
                     alert.id, alert.ticker,
                 )
             elif alert.trade_plan_mechanical:

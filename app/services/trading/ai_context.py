@@ -1033,82 +1033,117 @@ def build_market_context(db: Session, user_id: int | None) -> str:
 
 
 def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Ask the LLM to summarize its current market thesis."""
+    """Deterministic market thesis from scan votes + brain stats (no LLM)."""
     import time as _time
-    from .scanner import get_scan_status
-    from .learning import get_brain_stats
 
-    _thesis_cache = getattr(generate_market_thesis, "_cache", {})
+    from .learning import get_brain_stats
+    from .portfolio import get_insights
+    from ...models.trading import ScanResult
+
+    _thesis_cache: dict = getattr(generate_market_thesis, "_cache", {})
     _THESIS_TTL = 3600
     cache_key = f"thesis:{user_id}"
     cached = _thesis_cache.get(cache_key)
     if cached and (_time.time() - cached[0]) < _THESIS_TTL:
         return cached[1]
 
-    parts: list[str] = []
+    stats = get_brain_stats(db, user_id)
+    market_ctx = build_market_context(db, user_id) or ""
 
-    market_ctx = build_market_context(db, user_id)
-    if market_ctx:
-        parts.append(market_ctx)
+    recent_scans = (
+        db.query(ScanResult)
+        .filter((ScanResult.user_id == user_id) | (ScanResult.user_id.is_(None)))
+        .order_by(ScanResult.scanned_at.desc())
+        .limit(24)
+        .all()
+    )
+    buy_count = sum(1 for s in recent_scans if s.signal == "buy")
+    sell_count = sum(1 for s in recent_scans if s.signal == "sell")
+    hold_count = sum(1 for s in recent_scans if s.signal == "hold")
+    denom = buy_count + sell_count + hold_count
+    if denom == 0:
+        stance = "neutral"
+    else:
+        bull_ratio = buy_count / denom
+        bear_ratio = sell_count / denom
+        if bull_ratio >= 0.6:
+            stance = "bullish"
+        elif bear_ratio >= 0.4 or bull_ratio <= 0.25:
+            stance = "bearish"
+        else:
+            stance = "neutral"
 
-    insights = get_insights(db, user_id, limit=15)
+    buys_sorted = sorted(
+        (s for s in recent_scans if s.signal == "buy"),
+        key=lambda s: float(s.score or 0),
+        reverse=True,
+    )[:3]
+    idea_lines: list[str] = []
+    for s in buys_sorted:
+        r = (s.rationale or "").strip().replace("\n", " ")
+        tail = f" — {r[:100]}…" if len(r) > 100 else (f" — {r}" if r else "")
+        idea_lines.append(f"- {s.ticker} (score {float(s.score):.1f}){tail}")
+
+    risks: list[str] = []
+    mc_low = market_ctx.lower()
+    if "risk_off" in mc_low or "caution" in mc_low or "bearish" in mc_low[:800]:
+        risks.append("Market pulse skews cautious — favor tighter risk.")
+    try:
+        acc = float(stats.get("prediction_accuracy") or 0)
+        if acc > 0 and acc < 48:
+            risks.append("Brain prediction accuracy is soft — size down on scanner-only ideas.")
+    except (TypeError, ValueError):
+        pass
+    if sell_count > buy_count and denom > 3:
+        risks.append("Recent scan sample has more sell than buy rows.")
+    if not risks:
+        risks.append("No major flags from automated counters; still use stops and plan risk.")
+
+    insights = get_insights(db, user_id, limit=8)
+    ins_line = ""
     if insights:
-        lines = ["LEARNED PATTERNS:"]
-        for ins in insights:
-            lines.append(
-                f"- [{ins.confidence:.0%} conf, {ins.evidence_count} evidence] {ins.pattern_description}"
-            )
-        parts.append("\n".join(lines))
-
-    from ...models.trading import ScanResult
-    recent_scans = db.query(ScanResult).filter(
-        (ScanResult.user_id == user_id) | (ScanResult.user_id.is_(None)),
-    ).order_by(ScanResult.scanned_at.desc()).limit(20).all()
-    if recent_scans:
-        buy_count = sum(1 for s in recent_scans if s.signal == "buy")
-        sell_count = sum(1 for s in recent_scans if s.signal == "sell")
-        hold_count = sum(1 for s in recent_scans if s.signal == "hold")
-        top_picks = [s for s in recent_scans if s.signal == "buy"][:5]
-        parts.append(
-            f"RECENT SCAN: {buy_count} buy, {hold_count} hold, {sell_count} sell signals\n"
-            f"Top picks: {', '.join(s.ticker + ' (' + str(round(s.score, 1)) + ')' for s in top_picks)}"
+        top_i = max(insights, key=lambda x: float(x.confidence or 0))
+        ins_line = (
+            f"\nStrongest learned pattern signal: [{top_i.confidence:.0%}] "
+            f"{(top_i.pattern_description or '')[:160]}"
         )
 
-    stats = get_brain_stats(db, user_id)
-    parts.append(
-        f"BRAIN STATE: {stats['total_patterns']} patterns learned, "
-        f"{stats['avg_confidence']}% avg confidence, "
-        f"{stats['prediction_accuracy']}% overall accuracy ({stats['total_predictions']} predictions), "
-        f"{stats.get('strong_accuracy', 0)}% strong-signal accuracy ({stats.get('strong_predictions', 0)} high-conviction)"
+    stance_tag = stance.upper()
+    reply_parts: list[str] = [
+        f"**STANCE: {stance_tag}**",
+        "",
+    ]
+    if market_ctx.strip():
+        reply_parts.extend(
+            [
+                "Market pulse (cached):",
+                market_ctx[:1200] + ("…" if len(market_ctx) > 1200 else ""),
+                "",
+            ]
+        )
+    reply_parts.extend(
+        [
+            f"Scan mix (last {len(recent_scans)} rows): {buy_count} buy, {hold_count} hold, {sell_count} sell.",
+            "",
+            "Top buy-scored ideas:",
+            *(idea_lines if idea_lines else ["- (No buy signals in recent sample)"]),
+            "",
+            "Risks:",
+            *[f"- {r}" for r in risks[:5]],
+            "",
+            (
+                f"Brain: {stats['total_patterns']} patterns, "
+                f"{stats['avg_confidence']}% avg confidence, "
+                f"{stats['prediction_accuracy']}% accuracy "
+                f"({stats['total_predictions']} predictions)."
+            ),
+        ]
     )
+    if ins_line.strip():
+        reply_parts.append(ins_line)
+    reply_parts.extend(["", "_Template thesis (no LLM)._"])
 
-    context = "\n\n".join(parts) if parts else "No market data available yet."
-
-    thesis_prompt = (
-        "Based on the market data, learned patterns, and scan results below, write a concise "
-        "market thesis in 3-5 sentences. Include:\n"
-        "1. Overall market stance: BULLISH, BEARISH, or NEUTRAL (pick one)\n"
-        "2. Top 2-3 highest-conviction trade ideas with specific tickers\n"
-        "3. Key risks to watch\n"
-        "Format: Start with **STANCE: [BULLISH/BEARISH/NEUTRAL]** on the first line.\n"
-        "Keep it actionable and specific. No disclaimers needed here.\n\n"
-        f"DATA:\n{context}"
-    )
-
-    from ...openai_client import chat
-    result = chat(
-        messages=[{"role": "user", "content": thesis_prompt}],
-        system_prompt="You are CHILI's market strategist. Summarize the current market thesis concisely.",
-        trace_id="brain-thesis",
-        max_tokens=512,
-    )
-
-    reply = result.get("reply", "").strip()
-    stance = "neutral"
-    if "BULLISH" in reply.upper()[:100]:
-        stance = "bullish"
-    elif "BEARISH" in reply.upper()[:100]:
-        stance = "bearish"
+    reply = "\n".join(reply_parts).strip()
 
     thesis_data = {
         "thesis": reply,
@@ -1121,5 +1156,6 @@ def generate_market_thesis(db: Session, user_id: int | None) -> dict[str, Any]:
         "last_scan": stats.get("last_scan"),
     }
 
-    generate_market_thesis._cache = {cache_key: (_time.time(), thesis_data)}
+    _thesis_cache[cache_key] = (_time.time(), thesis_data)
+    generate_market_thesis._cache = _thesis_cache
     return thesis_data

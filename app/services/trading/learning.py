@@ -18,7 +18,12 @@ from sqlalchemy.orm import Session
 from sqlalchemy import func
 
 from ...models.trading import (
-    LearningEvent, MarketSnapshot, ScanResult, TradingInsight, Trade,
+    LearningEvent,
+    MarketSnapshot,
+    ScanPattern,
+    ScanResult,
+    TradingInsight,
+    Trade,
 )
 from .market_data import (
     fetch_quote, fetch_quotes_batch, fetch_ohlcv_df, get_indicator_snapshot,
@@ -706,76 +711,249 @@ from .learning_events import log_learning_event, get_learning_events  # noqa: F4
 
 # ── AI Self-Learning ──────────────────────────────────────────────────
 
+CLOSED_TRADE_LLM_ENRICH_MIN_MOVE_PCT = 5.0
+
+
+def _trade_exit_snapshot_flat(trade: Trade) -> dict[str, Any]:
+    """Flatten stored exit indicator snapshot for rule evaluation."""
+    raw = trade.indicator_snapshot
+    if raw is None:
+        return {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            return {}
+    if not isinstance(raw, dict):
+        return {}
+    from .pattern_position_monitor import _flatten_indicators
+
+    return _flatten_indicators(raw)
+
+
+def _closed_trade_price_move_pct(trade: Trade) -> float:
+    try:
+        ep = float(trade.exit_price or 0)
+        xp = float(trade.entry_price or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    if xp <= 0:
+        return 0.0
+    if (trade.direction or "long").lower() == "short":
+        return abs((xp - ep) / xp * 100.0)
+    return abs((ep - xp) / xp * 100.0)
+
+
+def _reinforce_patterns_at_trade_close(
+    db: Session,
+    trade: Trade,
+    flat: dict[str, Any],
+    *,
+    trade_won: bool,
+) -> list[str]:
+    """Boost linked insights when exit-time indicators still match pattern rules (no LLM)."""
+    from .pattern_engine import _eval_condition
+
+    if trade.user_id is None or not flat:
+        return []
+
+    touched: list[str] = []
+    pattern_ids: list[int] = []
+    if trade.scan_pattern_id:
+        pattern_ids.append(int(trade.scan_pattern_id))
+    for (pid,) in (
+        db.query(ScanPattern.id)
+        .filter(ScanPattern.active.is_(True))
+        .order_by(ScanPattern.confidence.desc())
+        .limit(24)
+        .all()
+    ):
+        if pid not in pattern_ids:
+            pattern_ids.append(pid)
+
+    for pid in pattern_ids[:32]:
+        sp = db.get(ScanPattern, pid)
+        if not sp or not sp.rules_json:
+            continue
+        rj = sp.rules_json
+        if not isinstance(rj, dict):
+            continue
+        conds = rj.get("conditions") or []
+        if len(conds) < 2:
+            continue
+        ok = 0
+        total = 0
+        for c in conds:
+            if not isinstance(c, dict):
+                continue
+            total += 1
+            try:
+                if _eval_condition(c, flat):
+                    ok += 1
+            except Exception:
+                continue
+        if total == 0:
+            continue
+        ratio = ok / total
+        if ratio < 0.65:
+            continue
+
+        ins = (
+            db.query(TradingInsight)
+            .filter(TradingInsight.scan_pattern_id == sp.id)
+            .filter(TradingInsight.user_id == trade.user_id)
+            .filter(TradingInsight.active.is_(True))
+            .first()
+        )
+        if not ins:
+            continue
+        old_conf = ins.confidence
+        ins.evidence_count = (ins.evidence_count or 0) + 1
+        ins.win_count = (ins.win_count or 0) + (1 if trade_won else 0)
+        ins.loss_count = (ins.loss_count or 0) + (0 if trade_won else 1)
+        delta = 0.04 if trade_won else -0.02
+        ins.confidence = max(0.05, min(0.95, float(old_conf) + delta))
+        ins.last_seen = datetime.utcnow()
+        touched.append(sp.name or f"pattern_{sp.id}")
+        log_learning_event(
+            db,
+            trade.user_id,
+            "update",
+            f"Post-close rule match ({ratio:.0%} conditions) reinforced: {sp.name}",
+            confidence_before=old_conf,
+            confidence_after=ins.confidence,
+            related_insight_id=ins.id,
+        )
+
+    if touched:
+        try:
+            db.commit()
+        except Exception:
+            logger.debug("[learning] reinforce_patterns_at_close commit failed", exc_info=True)
+
+    return touched
+
+
+def _closed_trade_journal_template(
+    trade: Trade,
+    flat: dict[str, Any],
+    reinforced: list[str],
+) -> str:
+    pnl_label = "PROFIT" if (trade.pnl or 0) > 0 else "LOSS"
+    lines = [
+        f"[Close] Trade #{trade.id} {trade.ticker} {trade.direction} — {pnl_label} "
+        f"${trade.pnl} (entry {trade.entry_price} → exit {trade.exit_price}).",
+    ]
+    if trade.exit_reason:
+        lines.append(f"Exit reason: {trade.exit_reason}")
+    ind_bits = []
+    for k in ("rsi_14", "macd_hist", "adx", "ema_20", "ema_50", "volume_ratio", "bb_pct_b"):
+        if k in flat and flat[k] is not None:
+            try:
+                ind_bits.append(f"{k}={float(flat[k]):.4g}")
+            except (TypeError, ValueError):
+                ind_bits.append(f"{k}={flat[k]}")
+    if ind_bits:
+        lines.append("Indicators at exit: " + ", ".join(ind_bits[:8]))
+    if reinforced:
+        lines.append("Reinforced pattern insights (rule match): " + ", ".join(reinforced[:6]))
+    return "\n".join(lines)
+
+
 def analyze_closed_trade(db: Session, trade: Trade) -> str | None:
-    """Called after a trade is closed. Asks the AI to review and extract patterns."""
+    """Post-close: structured rule reinforcement + template journal; optional LLM on large moves."""
     from ...prompts import load_prompt
     from ... import openai_client
     from ...logger import log_info, new_trace_id
     from .journal import add_journal_entry
 
     trace_id = new_trace_id()
+    trade_won = trade.pnl is not None and trade.pnl > 0
+    pnl_label = "PROFIT" if trade_won else "LOSS"
 
-    snap_data = ""
-    if trade.indicator_snapshot:
-        try:
-            snap_data = json.dumps(json.loads(trade.indicator_snapshot), indent=2)
-        except Exception:
-            snap_data = trade.indicator_snapshot
-
-    pnl_label = "PROFIT" if (trade.pnl or 0) > 0 else "LOSS"
-    trade_summary = (
-        f"Ticker: {trade.ticker}\n"
-        f"Direction: {trade.direction}\n"
-        f"Entry: ${trade.entry_price} on {trade.entry_date}\n"
-        f"Exit: ${trade.exit_price} on {trade.exit_date}\n"
-        f"P&L: ${trade.pnl} ({pnl_label})\n"
-        f"Indicator snapshot at exit:\n{snap_data}"
-    )
-
-    existing_insights = get_insights(db, trade.user_id, limit=10)
-    insight_text = ""
-    if existing_insights:
-        insight_text = "\n".join(
-            f"- [{ins.confidence:.0%}] {ins.pattern_description}"
-            for ins in existing_insights
-        )
-
-    user_msg = (
-        f"A trade was just closed. Analyze it and extract trading patterns.\n\n"
-        f"## Trade Details\n{trade_summary}\n\n"
-        f"## Existing Learned Patterns\n{insight_text or 'None yet.'}\n\n"
-        f"Instructions:\n"
-        f"1. Explain why this trade was a {pnl_label} based on the indicator state.\n"
-        f"2. Extract 1-3 reusable patterns as JSON array:\n"
-        f'   [{{"pattern": "description", "confidence": 0.0-1.0}}]\n'
-        f"3. If an existing pattern is confirmed, note its description so we can boost its confidence.\n"
-        f"4. Put the JSON array on a line starting with PATTERNS:"
-    )
-
+    flat = _trade_exit_snapshot_flat(trade)
+    reinforced: list[str] = []
     try:
-        system_prompt = load_prompt("trading_analyst")
-        result = openai_client.chat(
-            messages=[{"role": "user", "content": user_msg}],
-            system_prompt=system_prompt,
-            trace_id=trace_id,
-            user_message=user_msg,
-            max_tokens=2048,
-        )
-        reply = result.get("reply", "")
+        reinforced = _reinforce_patterns_at_trade_close(db, trade, flat, trade_won=trade_won)
     except Exception as e:
-        log_info(trace_id, f"[trading] post-trade analysis error: {e}")
-        return None
+        logger.warning("[learning] Structured post-close reinforcement failed: %s", e)
 
-    _extract_and_store_patterns(db, trade.user_id, reply, existing_insights,
-                                trade_won=trade.pnl is not None and trade.pnl > 0)
+    journal_base = _closed_trade_journal_template(trade, flat, reinforced)
+    llm_reply = ""
 
-    add_journal_entry(
-        db, trade.user_id,
-        content=f"[AI] Trade #{trade.id} ({trade.ticker} {pnl_label} ${trade.pnl}): {reply[:500]}",
-        trade_id=trade.id,
-    )
+    move_pct = _closed_trade_price_move_pct(trade)
+    existing_insights = get_insights(db, trade.user_id, limit=10)
 
-    return reply
+    if move_pct >= CLOSED_TRADE_LLM_ENRICH_MIN_MOVE_PCT:
+        snap_data = ""
+        if trade.indicator_snapshot:
+            try:
+                raw = trade.indicator_snapshot
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                snap_data = json.dumps(raw, indent=2, default=str)
+            except Exception:
+                snap_data = str(trade.indicator_snapshot)
+
+        trade_summary = (
+            f"Ticker: {trade.ticker}\n"
+            f"Direction: {trade.direction}\n"
+            f"Entry: ${trade.entry_price} on {trade.entry_date}\n"
+            f"Exit: ${trade.exit_price} on {trade.exit_date}\n"
+            f"P&L: ${trade.pnl} ({pnl_label}, ~{move_pct:.1f}% price move)\n"
+            f"Indicator snapshot at exit:\n{snap_data}"
+        )
+        insight_text = ""
+        if existing_insights:
+            insight_text = "\n".join(
+                f"- [{ins.confidence:.0%}] {ins.pattern_description}"
+                for ins in existing_insights
+            )
+        user_msg = (
+            f"A trade was just closed (large move). Analyze and extract patterns.\n\n"
+            f"## Trade Details\n{trade_summary}\n\n"
+            f"## Existing Learned Patterns\n{insight_text or 'None yet.'}\n\n"
+            f"Instructions:\n"
+            f"1. Briefly explain the outcome vs indicator state.\n"
+            f"2. Extract 1-3 reusable patterns as JSON array:\n"
+            f'   [{{"pattern": "description", "confidence": 0.0-1.0}}]\n'
+            f"3. Put the JSON array on a line starting with PATTERNS:"
+        )
+        try:
+            system_prompt = load_prompt("trading_analyst")
+            result = openai_client.chat(
+                messages=[{"role": "user", "content": user_msg}],
+                system_prompt=system_prompt,
+                trace_id=trace_id,
+                user_message=user_msg,
+                max_tokens=2048,
+            )
+            llm_reply = (result.get("reply") or "").strip()
+        except Exception as e:
+            log_info(trace_id, f"[trading] post-trade LLM enrichment error: {e}")
+
+        if llm_reply:
+            _extract_and_store_patterns(
+                db,
+                trade.user_id,
+                llm_reply,
+                existing_insights,
+                trade_won=trade_won,
+            )
+
+    full_journal = journal_base
+    if llm_reply:
+        full_journal += "\n\n[AI enrichment]\n" + llm_reply[:1200]
+
+    if trade.user_id is not None:
+        add_journal_entry(
+            db,
+            trade.user_id,
+            content=full_journal[:8000],
+            trade_id=trade.id,
+        )
+
+    return llm_reply or journal_base
 
 
 def _extract_and_store_patterns(
@@ -6086,7 +6264,7 @@ def _run_pattern_engine_cycle(db: Session, user_id: int | None) -> dict[str, Any
         from .pattern_engine import get_active_patterns, update_pattern
         from ..backtest_service import backtest_pattern
 
-        # Step A: LLM-based hypothesis discovery from internal data
+        # Step A: Statistical + insight-keyword hypothesis discovery (no LLM)
         hypotheses = discover_pattern_hypotheses(db, user_id)
         result["hypotheses_generated"] = len(hypotheses)
 
@@ -6126,16 +6304,38 @@ def discover_pattern_hypotheses(
     user_id: int | None,
     max_hypotheses: int = 3,
 ) -> list[dict[str, Any]]:
-    """Use LLM + recent trading data to propose new ScanPattern hypotheses.
+    """Propose new ScanPattern hypotheses from snapshot lift + insight keywords (no LLM).
 
-    Analyzes recent high-scoring breakouts and missed opportunities to
-    generate new pattern rules that the current patterns don't capture.
+    Primary: statistical templates ranked on ``future_return_5d`` vs baseline.
+    Secondary: pair conditions from high-confidence insight text keyword matches.
     """
-    from .pattern_engine import create_pattern, list_patterns, get_active_patterns
-    from ...models.trading import TradingInsight, ScanPattern
+    import json as _json
+
+    from .pattern_engine import create_pattern, list_patterns
+    from .statistical_pattern_hypotheses import (
+        mine_proposals_from_insights,
+        mine_proposals_from_snapshots,
+    )
+    from ...models.trading import TradingInsight
 
     existing = list_patterns(db)
     existing_names = {p["name"].lower() for p in existing}
+
+    def _fp_for_pattern(p: dict) -> str | None:
+        try:
+            rj = p.get("rules_json")
+            if isinstance(rj, str):
+                rj = _json.loads(rj)
+            conds = (rj or {}).get("conditions") or []
+            return _json.dumps(conds, sort_keys=True, default=str)
+        except Exception:
+            return None
+
+    existing_fps: set[str] = set()
+    for p in existing:
+        fp = _fp_for_pattern(p)
+        if fp:
+            existing_fps.add(fp)
 
     insights = (
         db.query(TradingInsight)
@@ -6149,52 +6349,43 @@ def discover_pattern_hypotheses(
     if len(insights) < 3:
         return []
 
-    insight_summaries = []
-    for ins in insights[:15]:
-        insight_summaries.append(
-            f"- {ins.pattern_description} (confidence={ins.confidence:.2f}, seen={ins.evidence_count}x)"
+    proposals: list[dict[str, Any]] = []
+    try:
+        proposals.extend(
+            mine_proposals_from_snapshots(db, max_proposals=max_hypotheses + 2)
         )
-
-    existing_summaries = []
-    for p in existing[:10]:
-        existing_summaries.append(f"- {p['name']}: {p.get('description', '')}")
-
-    prompt = (
-        "You are a quantitative trading pattern researcher. Based on these high-confidence "
-        "learned trading insights, propose 1-3 NEW composable breakout patterns that are NOT "
-        "already covered by the existing patterns.\n\n"
-        "## Learned Insights:\n" + "\n".join(insight_summaries) + "\n\n"
-        "## Existing Patterns:\n" + ("\n".join(existing_summaries) if existing_summaries else "(none)") + "\n\n"
-        "For each proposed pattern, respond with JSON array. Each element:\n"
-        '{"name": "...", "description": "...", "conditions": [{"indicator": "...", "op": "...", "value": ...}], '
-        '"score_boost": 1.5, "min_base_score": 4.0}\n\n'
-        "Available indicators: rsi_14, ema_9, ema_20, ema_50, ema_100, price, bb_squeeze, "
-        "bb_squeeze_firing, adx, rel_vol, macd_hist, resistance_retests, "
-        "dist_to_resistance_pct, narrow_range, vcp_count, vwap_reclaim, "
-        "daily_change_pct, gap_pct, "
-        "bullish_engulfing, bearish_engulfing, hammer, inverted_hammer, "
-        "morning_star, doji.\n"
-        "Available ops: >, >=, <, <=, ==, between, any_of.\n"
-        "Respond ONLY with the JSON array, no other text."
-    )
+    except Exception as e:
+        logger.warning("[learning] Statistical snapshot hypothesis mining failed: %s", e)
 
     try:
-        from ..llm_caller import call_llm
-        response = call_llm(prompt, max_tokens=1500)
-        if not response:
-            return []
+        proposals.extend(
+            mine_proposals_from_insights(
+                insights[:15],
+                existing_condition_fps=existing_fps.copy(),
+                max_proposals=max(1, max_hypotheses),
+            )
+        )
+    except Exception as e:
+        logger.warning("[learning] Insight keyword hypothesis mining failed: %s", e)
 
-        import json as _json
-        text = response.strip()
-        if text.startswith("```"):
-            text = text.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+    # Dedupe by condition fingerprint; prefer earlier (snapshot lift ranked first).
+    merged: list[dict[str, Any]] = []
+    seen_local: set[str] = set(existing_fps)
+    for prop in proposals:
+        conds = prop.get("conditions") or []
+        if len(conds) < 2:
+            continue
+        fp = _json.dumps(conds, sort_keys=True, default=str)
+        if fp in seen_local:
+            continue
+        seen_local.add(fp)
+        merged.append(prop)
+        if len(merged) >= max_hypotheses * 2:
+            break
 
-        proposals = _json.loads(text)
-        if not isinstance(proposals, list):
-            proposals = [proposals]
-
+    try:
         created = []
-        for prop in proposals[:max_hypotheses]:
+        for prop in merged[:max_hypotheses]:
             name = prop.get("name", "").strip()
             if not name or name.lower() in existing_names:
                 continue
@@ -6239,7 +6430,7 @@ def discover_pattern_hypotheses(
         return created
 
     except Exception as e:
-        logger.warning(f"[learning] Pattern hypothesis discovery failed: {e}")
+        logger.warning("[learning] Pattern hypothesis discovery failed: %s", e)
         return []
 
 
