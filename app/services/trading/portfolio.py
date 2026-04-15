@@ -249,6 +249,136 @@ def assign_scan_pattern_to_trade(
     return trade, None
 
 
+def _trade_ticker_key(ticker: str | None) -> str:
+    raw = (ticker or "").strip().upper()
+    if raw.startswith("$"):
+        raw = raw[1:]
+    return raw
+
+
+def get_recent_pattern_imminent_alerts_for_user(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+    *,
+    limit: int = 2,
+) -> list[BreakoutAlert]:
+    """User-scoped pattern_imminent rows for a symbol (Analyze reminder + attach UI)."""
+    if user_id is None:
+        return []
+    tu = _trade_ticker_key(ticker)
+    if not tu:
+        return []
+    return (
+        db.query(BreakoutAlert)
+        .filter(
+            BreakoutAlert.ticker == tu,
+            BreakoutAlert.alert_tier == "pattern_imminent",
+            BreakoutAlert.user_id == user_id,
+        )
+        .order_by(BreakoutAlert.alerted_at.desc())
+        .limit(limit)
+        .all()
+    )
+
+
+def attach_breakout_alert_to_open_trade(
+    db: Session,
+    alert_id: int,
+    user_id: int | None,
+) -> tuple[Trade | None, str | None]:
+    """Link an existing pattern-imminent BreakoutAlert to the user's open trade on that ticker.
+
+    Use when broker auto-link skipped the trade (non-Robinhood source) or the user opened
+    the position after the alert. Enables Monitor pattern health for that position.
+    """
+    if user_id is None:
+        return None, "forbidden"
+
+    alert = db.get(BreakoutAlert, alert_id)
+    if not alert:
+        return None, "alert_not_found"
+    if alert.user_id is not None and alert.user_id != user_id:
+        return None, "forbidden"
+
+    alert_tk = _trade_ticker_key(alert.ticker)
+    candidates = (
+        db.query(Trade)
+        .filter(Trade.user_id == user_id, Trade.status == "open")
+        .order_by(Trade.entry_date.desc())
+        .all()
+    )
+    trade = None
+    for tr in candidates:
+        if _trade_ticker_key(tr.ticker) == alert_tk:
+            trade = tr
+            break
+    if not trade:
+        return None, "no_open_trade"
+
+    trade.related_alert_id = alert.id
+    if alert.scan_pattern_id and not trade.scan_pattern_id:
+        trade.scan_pattern_id = alert.scan_pattern_id
+    if trade.stop_loss is None and alert.stop_loss is not None:
+        trade.stop_loss = float(alert.stop_loss)
+    if trade.take_profit is None and alert.target_price is not None:
+        trade.take_profit = float(alert.target_price)
+
+    db.commit()
+    db.refresh(trade)
+    return trade, None
+
+
+def apply_trade_plan_levels(
+    db: Session,
+    trade_id: int,
+    user_id: int | None,
+    *,
+    stop_loss: float | None = None,
+    take_profit: float | None = None,
+    take_profit_trim: float | None = None,
+    note: str | None = None,
+) -> tuple[Trade | None, str | None]:
+    """Set stop / take-profit on an open trade so Monitor and brokers reflect an AI or manual plan.
+
+    Updates linked BreakoutAlert levels when present. Optional trim target is appended to notes.
+    """
+    if stop_loss is None and take_profit is None:
+        return None, "no_levels"
+
+    trade = db.query(Trade).filter(Trade.id == trade_id, Trade.user_id == user_id).first()
+    if not trade:
+        return None, "not_found"
+    if trade.status != "open":
+        return None, "not_open"
+
+    if stop_loss is not None:
+        trade.stop_loss = float(stop_loss)
+    if take_profit is not None:
+        trade.take_profit = float(take_profit)
+
+    note_lines = []
+    if take_profit_trim is not None:
+        note_lines.append(f"Trim target (partial exit): ${float(take_profit_trim):.4g}")
+    if note:
+        note_lines.append(note.strip())
+    if note_lines:
+        extra = " | ".join(note_lines)
+        trade.notes = (trade.notes + "\n" if trade.notes else "") + f"[plan] {extra}"
+
+    if trade.related_alert_id:
+        alert = db.get(BreakoutAlert, trade.related_alert_id)
+        if alert:
+            if stop_loss is not None:
+                alert.stop_loss = float(stop_loss)
+            if take_profit is not None:
+                alert.target_price = float(take_profit)
+
+    db.commit()
+    db.refresh(trade)
+    return trade, None
+
+
 def _calc_pnl(trade: Trade) -> float:
     if trade.exit_price is None:
         return 0.0

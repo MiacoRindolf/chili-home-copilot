@@ -14,6 +14,8 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, WebSock
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
+from ..models.trading import Trade
+
 from ..deps import get_db, get_identity_ctx
 from ..logger import log_info, new_trace_id
 from ..prompts import load_prompt
@@ -122,27 +124,19 @@ def _get_proposal_reminder(db: Session, ticker: str, user_id: int | None) -> str
     return "\n".join(lines)
 
 
-def _get_pattern_imminent_reminder(db: Session, ticker: str) -> str:
+def _get_pattern_imminent_reminder(db: Session, ticker: str, user_id: int | None) -> str:
     """Build a user-message-level reminder about pattern-imminent alerts.
 
     Same strategy as _get_proposal_reminder: inject into the user message
     so the LLM cannot overlook it in a long system prompt.
+    Scoped to the signed-in user (guests get no reminder).
     """
     import json as _json
     from datetime import datetime
-    from ..models.trading import BreakoutAlert, ScanPattern
+    from ..models.trading import ScanPattern
 
     ticker_up = ticker.upper()
-    alerts = (
-        db.query(BreakoutAlert)
-        .filter(
-            BreakoutAlert.ticker == ticker_up,
-            BreakoutAlert.alert_tier == "pattern_imminent",
-        )
-        .order_by(BreakoutAlert.alerted_at.desc())
-        .limit(2)
-        .all()
-    )
+    alerts = ts.get_recent_pattern_imminent_alerts_for_user(db, user_id, ticker, limit=2)
     if not alerts:
         return ""
 
@@ -202,6 +196,37 @@ def _get_pattern_imminent_reminder(db: Session, ticker: str) -> str:
         "Explain each condition so I understand why this pattern works."
     )
     return "\n".join(lines)
+
+
+def _build_pattern_imminent_attach_payload(
+    db: Session,
+    user_id: int | None,
+    ticker: str,
+) -> dict[str, Any] | None:
+    """SSE/JSON payload for linking the latest user imminent alert to an open trade (Monitor)."""
+    if not user_id:
+        return None
+    from ..models.trading import ScanPattern
+
+    alerts = ts.get_recent_pattern_imminent_alerts_for_user(db, user_id, ticker, limit=1)
+    if not alerts:
+        return None
+    open_tr = _resolve_open_trade_for_ticker(db, user_id, ticker)
+    if not open_tr:
+        return None
+    a = alerts[0]
+    pat_name = "Scan pattern"
+    if a.scan_pattern_id:
+        pat = db.get(ScanPattern, a.scan_pattern_id)
+        if pat and pat.name:
+            pat_name = pat.name
+    return {
+        "alert_id": a.id,
+        "ticker": (ticker or "").strip().upper(),
+        "trade_id": open_tr.id,
+        "pattern_name": pat_name,
+        "already_linked": open_tr.related_alert_id == a.id,
+    }
 
 
 # ── Page ────────────────────────────────────────────────────────────────
@@ -461,6 +486,63 @@ def _strip_chart_levels_block(text: str) -> str:
     return _CHART_LEVELS_RE.sub("", text or "").strip()
 
 
+_TRADE_PLAN_LEVELS_RE = re.compile(
+    r"```json:trade_plan_levels\s*\n(\{.*?\})\s*```",
+    re.DOTALL,
+)
+
+
+def _normalize_trade_plan_levels(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Parse AI fence for apply-levels API (stop / targets)."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for k in ("stop_loss", "take_profit", "take_profit_trim"):
+        v = raw.get(k)
+        if isinstance(v, (int, float)):
+            fv = float(v)
+            if fv == fv and fv > 0:
+                out[k] = fv
+    lab = raw.get("label") or raw.get("summary")
+    if isinstance(lab, str) and lab.strip():
+        out["label"] = lab.strip()[:500]
+    if not out.get("stop_loss") and not out.get("take_profit"):
+        return None
+    return out
+
+
+def _extract_trade_plan_levels(text: str) -> dict[str, Any] | None:
+    m = _TRADE_PLAN_LEVELS_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        parsed = json.loads(m.group(1))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return _normalize_trade_plan_levels(parsed if isinstance(parsed, dict) else None)
+
+
+def _strip_trade_plan_levels_block(text: str) -> str:
+    return _TRADE_PLAN_LEVELS_RE.sub("", text or "").strip()
+
+
+def _resolve_open_trade_for_ticker(db: Session, user_id: int | None, ticker: str) -> Trade | None:
+    raw = (ticker or "").strip().upper()
+    if raw.startswith("$"):
+        raw = raw[1:]
+    if not raw:
+        return None
+    q = (
+        db.query(Trade)
+        .filter(Trade.user_id == user_id, Trade.status == "open")
+        .order_by(Trade.entry_date.desc())
+    )
+    for tr in q.all():
+        if (tr.ticker or "").upper().replace("$", "") == raw:
+            return tr
+    return None
+
+
 @router.post("/api/trading/analyze")
 def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(get_db)):
     """AI-powered analysis of a ticker using indicators + journal context."""
@@ -470,7 +552,7 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
     ai_context = ts.build_ai_context(db, ctx["user_id"], body.ticker, body.interval)
 
     proposal_reminder = _get_proposal_reminder(db, body.ticker, ctx.get("user_id"))
-    pattern_reminder = _get_pattern_imminent_reminder(db, body.ticker)
+    pattern_reminder = _get_pattern_imminent_reminder(db, body.ticker, ctx.get("user_id"))
     user_msg = body.message or f"Analyze {body.ticker} on the {body.interval} timeframe. Give me a clear verdict: should I buy, sell, or hold? Include exact entry price, stop-loss, targets, hold duration, and confidence level."
     if proposal_reminder:
         user_msg += "\n\n" + proposal_reminder
@@ -502,12 +584,26 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
     if annotations:
         reply = _strip_chart_levels_block(reply)
 
+    trade_plan_levels = _extract_trade_plan_levels(reply) if isinstance(reply, str) else None
+    if trade_plan_levels:
+        reply = _strip_trade_plan_levels_block(reply)
+        open_tr = _resolve_open_trade_for_ticker(db, ctx.get("user_id"), body.ticker)
+        if open_tr:
+            trade_plan_levels = dict(trade_plan_levels)
+            trade_plan_levels["trade_id"] = open_tr.id
+
+    pattern_imminent_attach = _build_pattern_imminent_attach_payload(
+        db, ctx.get("user_id"), body.ticker
+    )
+
     return JSONResponse(
         {
             "ok": True,
             "reply": reply,
             "ticker": body.ticker,
             "annotations": annotations,
+            "trade_plan_levels": trade_plan_levels,
+            "pattern_imminent_attach": pattern_imminent_attach,
         }
     )
 
@@ -528,7 +624,7 @@ def api_analyze_stream(
     ai_context = ts.build_ai_context(db, ctx["user_id"], ticker, interval)
 
     proposal_reminder = _get_proposal_reminder(db, ticker, ctx.get("user_id"))
-    pattern_reminder = _get_pattern_imminent_reminder(db, ticker)
+    pattern_reminder = _get_pattern_imminent_reminder(db, ticker, ctx.get("user_id"))
     user_msg = message or (
         f"Analyze {ticker} on the {interval} timeframe. "
         "Give me a clear verdict: should I buy, sell, or hold? "
@@ -578,6 +674,19 @@ def api_analyze_stream(
             ann = _extract_chart_levels(full_text)
             if ann:
                 yield f"data: {json.dumps({'annotations': ann})}\n\n"
+            tplan = _extract_trade_plan_levels(full_text)
+            if tplan:
+                open_tr = _resolve_open_trade_for_ticker(db, ctx.get("user_id"), ticker)
+                payload = dict(tplan)
+                payload["ticker"] = ticker
+                if open_tr:
+                    payload["trade_id"] = open_tr.id
+                yield f"data: {json.dumps({'trade_plan_levels': payload})}\n\n"
+            patt_attach = _build_pattern_imminent_attach_payload(
+                db, ctx.get("user_id"), ticker
+            )
+            if patt_attach:
+                yield f"data: {json.dumps({'pattern_imminent_attach': patt_attach})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             log_info(trace_id, f"[trading] stream error: {e}")

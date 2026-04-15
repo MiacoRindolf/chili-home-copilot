@@ -493,7 +493,7 @@ def _run_pattern_position_monitor_job():
     """
     from ..db import SessionLocal
     from ..models.trading import Trade
-    from sqlalchemy import distinct
+    from sqlalchemy import and_, distinct, or_
 
     def _work() -> None:
         db = SessionLocal()
@@ -504,7 +504,13 @@ def _run_pattern_position_monitor_job():
                 .filter(
                     Trade.status == "open",
                     Trade.user_id.isnot(None),
-                    Trade.related_alert_id.isnot(None),
+                    or_(
+                        Trade.related_alert_id.isnot(None),
+                        and_(
+                            Trade.related_alert_id.is_(None),
+                            or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+                        ),
+                    ),
                 )
                 .all()
             ]
@@ -529,14 +535,22 @@ def trigger_pattern_monitor_for_tickers(tickers: list[str], reason: str = "event
 
     db = SessionLocal()
     try:
+        from sqlalchemy import and_, or_
+
         from .trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
 
         trades = (
             db.query(Trade)
             .filter(
                 Trade.status == "open",
-                Trade.related_alert_id.isnot(None),
                 Trade.ticker.in_(tickers),
+                or_(
+                    Trade.related_alert_id.isnot(None),
+                    and_(
+                        Trade.related_alert_id.is_(None),
+                        or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+                    ),
+                ),
             )
             .all()
         )

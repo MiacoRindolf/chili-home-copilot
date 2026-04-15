@@ -55,6 +55,19 @@ class TradeAssignPattern(BaseModel):
     scan_pattern_id: Optional[int] = None
 
 
+class TradeApplyLevels(BaseModel):
+    """Persist stop/target on an open trade (e.g. AI damage-control plan). At least one price field required."""
+
+    stop_loss: Optional[float] = Field(None, gt=0)
+    take_profit: Optional[float] = Field(None, gt=0)
+    take_profit_trim: Optional[float] = Field(
+        None,
+        gt=0,
+        description="Optional trim level stored in trade notes (single take_profit column holds primary target).",
+    )
+    note: Optional[str] = Field(None, max_length=2000)
+
+
 class TradeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 

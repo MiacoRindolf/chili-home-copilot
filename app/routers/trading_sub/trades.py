@@ -15,7 +15,14 @@ from sqlalchemy.orm import Session
 from ...deps import get_db, get_identity_ctx
 from ...services import broker_manager, broker_service
 from ...services import trading_service as ts
-from ...schemas.trading import JournalCreate, TradeAssignPattern, TradeClose, TradeCreate, TradeSell
+from ...schemas.trading import (
+    JournalCreate,
+    TradeApplyLevels,
+    TradeAssignPattern,
+    TradeClose,
+    TradeCreate,
+    TradeSell,
+)
 from ._utils import json_safe
 
 logger = logging.getLogger(__name__)
@@ -181,6 +188,77 @@ def api_assign_trade_pattern(
             "id": trade.id,
             "scan_pattern_id": trade.scan_pattern_id,
             "related_alert_id": trade.related_alert_id,
+        }
+    )
+
+
+@router.post("/trades/{trade_id}/apply-levels")
+def api_apply_trade_levels(
+    trade_id: int,
+    body: TradeApplyLevels,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Persist stop / take-profit on an open trade (shows on Monitor; syncs linked alert if any)."""
+    ctx = get_identity_ctx(request, db)
+    trade, err = ts.apply_trade_plan_levels(
+        db,
+        trade_id,
+        ctx["user_id"],
+        stop_loss=body.stop_loss,
+        take_profit=body.take_profit,
+        take_profit_trim=body.take_profit_trim,
+        note=body.note,
+    )
+    if err == "not_found":
+        return JSONResponse({"ok": False, "error": "Trade not found"}, status_code=404)
+    if err == "not_open":
+        return JSONResponse({"ok": False, "error": "Trade is not open"}, status_code=400)
+    if err == "no_levels":
+        return JSONResponse(
+            {"ok": False, "error": "Provide stop_loss and/or take_profit"},
+            status_code=400,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": trade.id,
+            "stop_loss": trade.stop_loss,
+            "take_profit": trade.take_profit,
+        }
+    )
+
+
+@router.post("/breakout-alerts/{alert_id}/attach-to-open-trade")
+def api_attach_breakout_alert_to_open_trade(
+    alert_id: int,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Link a pattern-imminent BreakoutAlert to the user's open trade on that ticker (Monitor)."""
+    ctx = get_identity_ctx(request, db)
+    trade, err = ts.attach_breakout_alert_to_open_trade(db, alert_id, ctx["user_id"])
+    if err == "alert_not_found":
+        return JSONResponse({"ok": False, "error": "Alert not found"}, status_code=404)
+    if err == "forbidden":
+        return JSONResponse({"ok": False, "error": "Not allowed for this alert"}, status_code=403)
+    if err == "no_open_trade":
+        return JSONResponse(
+            {
+                "ok": False,
+                "error": (
+                    "No trade found for this Alert. Sync the Trade tab or sync your broker."
+                ),
+            },
+            status_code=400,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": trade.id,
+            "ticker": trade.ticker,
+            "related_alert_id": trade.related_alert_id,
+            "scan_pattern_id": trade.scan_pattern_id,
         }
     )
 

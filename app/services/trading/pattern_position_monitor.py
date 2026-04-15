@@ -1,9 +1,9 @@
 """Pattern-aware live position monitor.
 
-Queries open Trades linked to pattern-imminent alerts, evaluates the
-pattern's conditions against live indicators, and (when health changes
-significantly) calls the LLM advisor for stop/target adjustments.
-Dispatches Telegram alerts and logs decisions for learning feedback.
+Evaluates open Trades that are either (1) linked to a BreakoutAlert + ScanPattern,
+or (2) have saved stop/target from an AI/manual plan with no linked alert.
+Logs PatternMonitorDecision rows, dispatches Telegram ``pattern_monitor`` alerts on
+risk triggers, and may call the LLM advisor for full pattern-linked paths.
 """
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Any
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...models.trading import (
@@ -292,17 +293,25 @@ def run_pattern_position_monitor(
     dry_run: bool = False,
     event_driven: bool = False,
 ) -> dict[str, Any]:
-    """Main entry point — evaluate all pattern-linked positions for a user."""
-    t0 = time.monotonic()
+    """Main entry point — evaluate pattern-linked positions and plan-level (stop/target only) positions."""
 
-    query = db.query(Trade).filter(
+    q_pat = db.query(Trade).filter(
         Trade.status == "open",
         Trade.related_alert_id.isnot(None),
     )
+    q_plan = db.query(Trade).filter(
+        Trade.status == "open",
+        Trade.related_alert_id.is_(None),
+        or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+    )
     if user_id is not None:
-        query = query.filter(Trade.user_id == user_id)
+        q_pat = q_pat.filter(Trade.user_id == user_id)
+        q_plan = q_plan.filter(Trade.user_id == user_id)
 
-    trades = query.all()
+    trades_pat = q_pat.all()
+    pat_ids = {t.id for t in trades_pat}
+    trades_plan = [t for t in q_plan.all() if t.id not in pat_ids]
+    trades = trades_pat + trades_plan
     if not trades:
         return {"ok": True, "evaluated": 0, "actions": 0, "skipped": 0}
 
@@ -344,16 +353,25 @@ def _run_for_trades(
 
     for trade in trades:
         try:
-            result = _evaluate_single(
-                db, trade,
-                dry_run=dry_run,
-                cooldown_min=cooldown_min,
-                health_healthy=health_healthy,
-                health_weakening=health_weakening,
-                delta_urgent=delta_urgent,
-                llm_conf_min=llm_conf_min,
-                event_driven=event_driven,
-            )
+            if trade.related_alert_id:
+                result = _evaluate_single(
+                    db, trade,
+                    dry_run=dry_run,
+                    cooldown_min=cooldown_min,
+                    health_healthy=health_healthy,
+                    health_weakening=health_weakening,
+                    delta_urgent=delta_urgent,
+                    llm_conf_min=llm_conf_min,
+                    event_driven=event_driven,
+                )
+            else:
+                result = _evaluate_plan_levels_trade(
+                    db,
+                    trade,
+                    dry_run=dry_run,
+                    cooldown_min=cooldown_min,
+                    event_driven=event_driven,
+                )
             evaluated += 1
             if result == "action":
                 actions_taken += 1
@@ -375,6 +393,194 @@ def _run_for_trades(
     if evaluated:
         logger.info("[pattern_monitor] %s", summary)
     return summary
+
+
+def _evaluate_plan_levels_trade(
+    db: Session,
+    trade: Trade,
+    *,
+    dry_run: bool,
+    cooldown_min: float,
+    event_driven: bool = False,
+) -> str:
+    """Evaluate trades with saved stop/target but no linked BreakoutAlert (AI / manual plan).
+
+    Logs PatternMonitorDecision rows so the Monitor tab shows health and last check, and
+    dispatches Telegram ``pattern_monitor`` alerts when price breaches the plan stop zone.
+    """
+    from .monitor_rules_engine import should_evaluate
+    from .pattern_adjustment_advisor import AdjustmentRecommendation
+
+    recent_cutoff = datetime.utcnow() - timedelta(minutes=cooldown_min)
+    recent = (
+        db.query(PatternMonitorDecision)
+        .filter(
+            PatternMonitorDecision.trade_id == trade.id,
+            PatternMonitorDecision.created_at >= recent_cutoff,
+        )
+        .first()
+    )
+    if recent:
+        return "skipped"
+
+    last_any = (
+        db.query(PatternMonitorDecision)
+        .filter(PatternMonitorDecision.trade_id == trade.id)
+        .order_by(PatternMonitorDecision.created_at.desc())
+        .first()
+    )
+
+    stop = trade.stop_loss
+    target = trade.take_profit
+    if stop is None and target is None:
+        return "skipped"
+
+    try:
+        quote = fetch_quote(trade.ticker)
+        current_price = float(quote.get("price") or quote.get("last") or 0) if quote else 0
+    except Exception:
+        current_price = 0
+    if not current_price:
+        return "skipped"
+
+    if event_driven:
+        mat_ok, mat_reason = should_evaluate(
+            current_price=current_price,
+            last_price=last_any.price_at_decision if last_any else None,
+            current_indicators=None,
+            last_snapshot=last_any.conditions_snapshot if last_any else None,
+            stop_price=stop,
+            target_price=target,
+            price_change_pct=get_adaptive_weight("monitor_price_change_pct"),
+            danger_zone_pct=get_adaptive_weight("monitor_danger_zone_pct"),
+        )
+        if not mat_ok:
+            return "skipped"
+        logger.debug("[pattern_monitor] plan_levels materiality %s: %s", trade.ticker, mat_reason)
+
+    entry = float(trade.entry_price or 0)
+    direction = trade.direction or "long"
+    is_long = direction == "long"
+    pnl_pct = ((current_price - entry) / entry * 100) if entry else None
+
+    health_score = 0.5
+    health_delta = None
+    if is_long and stop is not None and entry > stop:
+        risk = entry - stop
+        cushion = current_price - stop
+        if risk > 0:
+            health_score = max(0.0, min(1.0, cushion / risk))
+    elif (not is_long) and stop is not None and stop > entry:
+        risk = stop - entry
+        cushion = stop - current_price
+        if risk > 0:
+            health_score = max(0.0, min(1.0, cushion / risk))
+
+    prev = _last_health.get(trade.id)
+    if prev is not None:
+        health_delta = round(health_score - prev, 4)
+    _last_health[trade.id] = health_score
+
+    primary = AdjustmentRecommendation(action="hold", confidence=1.0, reasoning="")
+    if is_long:
+        if stop is not None and current_price <= stop:
+            primary = AdjustmentRecommendation(
+                action="exit_now",
+                confidence=0.95,
+                reasoning=(
+                    f"Price ${current_price:.4f} is at or below your plan stop ${stop:.4f} "
+                    f"(plan-levels monitor)."
+                ),
+            )
+        elif stop is not None:
+            dist_pct = (current_price - stop) / stop * 100
+            if 0 < dist_pct <= 2.0:
+                primary = AdjustmentRecommendation(
+                    action="exit_now",
+                    confidence=0.85,
+                    reasoning=(
+                        f"Price within {dist_pct:.1f}% of plan stop ${stop:.4f} — "
+                        f"plan-levels risk trigger."
+                    ),
+                )
+    else:
+        if stop is not None and current_price >= stop:
+            primary = AdjustmentRecommendation(
+                action="exit_now",
+                confidence=0.95,
+                reasoning=(
+                    f"Price ${current_price:.4f} is at or above your plan stop ${stop:.4f} "
+                    f"(plan-levels monitor, short)."
+                ),
+            )
+        elif stop is not None:
+            dist_pct = (stop - current_price) / stop * 100 if stop else 0
+            if 0 < dist_pct <= 2.0:
+                primary = AdjustmentRecommendation(
+                    action="exit_now",
+                    confidence=0.85,
+                    reasoning=(
+                        f"Price within {dist_pct:.1f}% of plan stop ${stop:.4f} — "
+                        f"plan-levels risk trigger (short)."
+                    ),
+                )
+
+    conditions_snap = {
+        "plan_levels_only": True,
+        "health_proxy": "cushion_vs_entry_stop_risk",
+        "stop_loss": stop,
+        "take_profit": target,
+        "pnl_pct": pnl_pct,
+    }
+
+    health = ConditionHealth(
+        conditions=[],
+        health_score=health_score,
+        health_delta=health_delta,
+        human_summary=(
+            f"Plan-levels watch (no scan pattern): health≈{health_score:.0%} from price vs "
+            f"your stop/target."
+        ),
+    )
+
+    decision = PatternMonitorDecision(
+        trade_id=trade.id,
+        breakout_alert_id=None,
+        scan_pattern_id=None,
+        health_score=health_score,
+        health_delta=health_delta,
+        conditions_snapshot=conditions_snap,
+        action=primary.action,
+        old_stop=trade.stop_loss,
+        new_stop=primary.new_stop,
+        old_target=trade.take_profit,
+        new_target=primary.new_target,
+        llm_confidence=None,
+        llm_reasoning=primary.reasoning if primary.reasoning else None,
+        mechanical_action="plan_levels",
+        mechanical_stop=None,
+        mechanical_target=None,
+        decision_source="plan_levels",
+        price_at_decision=current_price,
+    )
+    db.add(decision)
+
+    try:
+        _dispatch_monitor_alert(
+            db,
+            trade=trade,
+            pattern_name="Position plan (AI / manual)",
+            rec=primary,
+            health=health,
+            plan_health=None,
+            current_price=current_price,
+            pnl_pct=pnl_pct,
+            dry_run=dry_run,
+        )
+    except Exception:
+        logger.debug("[pattern_monitor] plan_levels alert dispatch failed", exc_info=True)
+
+    return "action" if primary.action != "hold" else "hold"
 
 
 def _evaluate_single(

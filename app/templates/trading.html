@@ -6690,10 +6690,20 @@ function _streamAnalyze(msg, isSmartPick) {
         clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
         return response.json().then(function(d) {
           removeLastAiMsg(); _hideStopBtn();
-          var dispErr = _stripChartLevelsBlockDisplay(d.reply || '');
+          var dispErr = _stripAiAssistantStructuredBlocks(d.reply || '');
           appendAiMsg('assistant', dispErr || 'Analysis unavailable.');
           var lvErr = d.annotations || _parseChartLevelsFallback(d.reply || '');
           if (lvErr) drawAiAnnotations(lvErr);
+          if (d.trade_plan_levels) {
+            var row = document.getElementById('ai-msgs').lastElementChild;
+            var bod = row && row.querySelector('.msg-body');
+            if (bod) _attachTradePlanApplyButton(bod, d.trade_plan_levels, currentTicker);
+          }
+          if (d.pattern_imminent_attach) {
+            var rowP = document.getElementById('ai-msgs').lastElementChild;
+            var bodP = rowP && rowP.querySelector('.msg-body');
+            if (bodP) _attachPatternImminentButton(bodP, d.pattern_imminent_attach);
+          }
         });
       }
       removeLastAiMsg();
@@ -6705,6 +6715,8 @@ function _streamAnalyze(msg, isSmartPick) {
       var bubble = msgs.lastElementChild.querySelector('.bubble');
       var fullText = '';
       var streamAnnotations = null;
+      var streamTradePlanLevels = null;
+      var streamPatternImminentAttach = null;
       var renderTimer = null;
       var gotFirstToken = false;
 
@@ -6730,7 +6742,7 @@ function _streamAnalyze(msg, isSmartPick) {
 
       function _renderStream() {
         if (!bubble) return;
-        var displayRaw = _stripChartLevelsBlockDisplay(fullText);
+        var displayRaw = _stripAiAssistantStructuredBlocks(fullText);
         var parsed = displayRaw;
         try { parsed = marked.parse(displayRaw); } catch(e) {}
         parsed = linkifyTickers(parsed);
@@ -6744,7 +6756,7 @@ function _streamAnalyze(msg, isSmartPick) {
             clearInterval(renderTimer);
             clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
             _hideStopBtn();
-            var displayText = _stripChartLevelsBlockDisplay(fullText);
+            var displayText = _stripAiAssistantStructuredBlocks(fullText);
             var parsed2 = displayText;
             try { parsed2 = marked.parse(displayText); } catch(e) {}
             parsed2 = linkifyTickers(parsed2);
@@ -6761,6 +6773,14 @@ function _streamAnalyze(msg, isSmartPick) {
               var chipDiv = document.createElement('div');
               chipDiv.innerHTML = _renderFollowups(followups);
               if (chipDiv.firstElementChild) body.appendChild(chipDiv.firstElementChild);
+              var tlev = streamTradePlanLevels || _parseTradePlanLevelsFromText(fullText);
+              if (tlev) {
+                if (!tlev.ticker) tlev.ticker = currentTicker;
+                _attachTradePlanApplyButton(body, tlev, currentTicker);
+              }
+              if (streamPatternImminentAttach) {
+                _attachPatternImminentButton(body, streamPatternImminentAttach);
+              }
             }
             chatHistory.push({ role: 'assistant', text: displayText, time: Date.now() });
             _saveChatHistory();
@@ -6785,6 +6805,12 @@ function _streamAnalyze(msg, isSmartPick) {
                 if (ev.annotations && typeof ev.annotations === 'object') {
                   streamAnnotations = ev.annotations;
                 }
+                if (ev.trade_plan_levels && typeof ev.trade_plan_levels === 'object') {
+                  streamTradePlanLevels = ev.trade_plan_levels;
+                }
+                if (ev.pattern_imminent_attach && typeof ev.pattern_imminent_attach === 'object') {
+                  streamPatternImminentAttach = ev.pattern_imminent_attach;
+                }
                 if (ev.token) {
                   if (!gotFirstToken) {
                     gotFirstToken = true;
@@ -6805,7 +6831,7 @@ function _streamAnalyze(msg, isSmartPick) {
           clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
           _hideStopBtn();
           if (e.name !== 'AbortError') {
-            var dispInt = _stripChartLevelsBlockDisplay(fullText || '');
+            var dispInt = _stripAiAssistantStructuredBlocks(fullText || '');
             try {
               bubble.innerHTML = marked.parse(dispInt || 'Stream interrupted.');
             } catch (e2) {
@@ -6813,6 +6839,18 @@ function _streamAnalyze(msg, isSmartPick) {
             }
             var lvInt = streamAnnotations || _parseChartLevelsFallback(fullText || '');
             if (lvInt) drawAiAnnotations(lvInt);
+            var tInt = streamTradePlanLevels || _parseTradePlanLevelsFromText(fullText || '');
+            if (tInt && bubble) {
+              var bodI = bubble.closest('.msg-body');
+              if (bodI) {
+                if (!tInt.ticker) tInt.ticker = currentTicker;
+                _attachTradePlanApplyButton(bodI, tInt, currentTicker);
+              }
+            }
+            if (streamPatternImminentAttach && bubble) {
+              var bodPa = bubble.closest('.msg-body');
+              if (bodPa) _attachPatternImminentButton(bodPa, streamPatternImminentAttach);
+            }
           }
         });
       }
@@ -6829,10 +6867,20 @@ function _streamAnalyze(msg, isSmartPick) {
           body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg, history: _historyPayload() })
         }).then(function(r){return r.json();}).then(function(d) {
           removeLastAiMsg();
-          var dispFb = _stripChartLevelsBlockDisplay(d.reply || '');
+          var dispFb = _stripAiAssistantStructuredBlocks(d.reply || '');
           appendAiMsg('assistant', dispFb || 'No response.');
           var lvFb = d.annotations || _parseChartLevelsFallback(d.reply || '');
           if (lvFb) drawAiAnnotations(lvFb);
+          if (d.trade_plan_levels) {
+            var rowF = document.getElementById('ai-msgs').lastElementChild;
+            var bodF = rowF && rowF.querySelector('.msg-body');
+            if (bodF) _attachTradePlanApplyButton(bodF, d.trade_plan_levels, currentTicker);
+          }
+          if (d.pattern_imminent_attach) {
+            var rowPa = document.getElementById('ai-msgs').lastElementChild;
+            var bodPa = rowPa && rowPa.querySelector('.msg-body');
+            if (bodPa) _attachPatternImminentButton(bodPa, d.pattern_imminent_attach);
+          }
         }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
       }
     });
@@ -8862,7 +8910,7 @@ function renderMonitorCards(setups) {
   setups.forEach(function(s) {
     var ld = s.latest_decision;
     var health = _monitorHealthPct(ld);
-    var hPct = health != null ? health : 0;
+    var hPct = health != null ? health : null;
     var deltaPts = _monitorDeltaPts(ld);
     var deltaStr = deltaPts == null ? '' : (deltaPts >= 0 ? '+' + deltaPts.toFixed(1) : deltaPts.toFixed(1));
     var deltaColor = deltaPts == null ? 'var(--text-muted)' : (deltaPts >= 0 ? '#22c55e' : '#ef4444');
@@ -8871,7 +8919,8 @@ function renderMonitorCards(setups) {
     var when = ld && ld.created_at ? ld.created_at : 'never';
     var pnlStr = s.pnl_pct != null ? (Number(s.pnl_pct) >= 0 ? '+' : '') + Number(s.pnl_pct).toFixed(2) + '%' : '—';
     var pnlColor = s.pnl_pct == null ? 'var(--text)' : (Number(s.pnl_pct) >= 0 ? '#22c55e' : '#ef4444');
-    var pat = s.pattern_name ? escHtml(s.pattern_name) : 'Pattern';
+    var planTitle = s.plan_label || s.pattern_name;
+    var pat = planTitle ? escHtml(planTitle) : '—';
     var tf = s.timeframe ? '<span class="mon-tf-pill">' + escHtml(s.timeframe) + '</span>' : '';
     var snap = ld && ld.conditions_snapshot ? ld.conditions_snapshot : null;
     var snapStr = snap ? escHtml(JSON.stringify(snap, null, 2)) : '';
@@ -8889,7 +8938,7 @@ function renderMonitorCards(setups) {
     html += '</div>';
     html += '<div class="mon-health-row">';
     html += '<div class="mon-health-bar-wrap" title="Share of pattern conditions still satisfied">';
-    html += '<div class="mon-health-bar" style="width:' + hPct + '%;"></div></div>';
+    html += '<div class="mon-health-bar" style="width:' + (hPct != null ? hPct : 0) + '%;"></div></div>';
     html += '<div class="mon-health-score-wrap">';
     html += '<span class="mon-health-num" title="Pattern health score (0–100)">' + (health != null ? Math.round(health) : '—') + '</span>';
     html += '<span class="mon-health-num-sub">/ 100</span>';
@@ -11845,6 +11894,149 @@ function _stripChartLevelsBlockDisplay(text) {
     return (text.slice(0, start) + afterFence.slice(endMark + 4)).replace(/\s+$/, '').trim();
   }
   return text.slice(0, start).replace(/\s+$/, '').trim();
+}
+
+/** Strip AI ```json:trade_plan_levels ... ``` fence (saved via Apply button / API). */
+function _stripTradePlanLevelsBlockDisplay(text) {
+  if (!text) return '';
+  var fence = '```json:trade_plan_levels';
+  var start = text.indexOf(fence);
+  if (start === -1) return text;
+  var afterFence = text.slice(start + fence.length);
+  var endMark = afterFence.search(/\n```/);
+  if (endMark !== -1) {
+    return (text.slice(0, start) + afterFence.slice(endMark + 4)).replace(/\s+$/, '').trim();
+  }
+  return text.slice(0, start).replace(/\s+$/, '').trim();
+}
+
+function _stripAiAssistantStructuredBlocks(text) {
+  return _stripTradePlanLevelsBlockDisplay(_stripChartLevelsBlockDisplay(text || ''));
+}
+
+function _parseTradePlanLevelsFromText(text) {
+  var m = (text || '').match(/```json:trade_plan_levels\s*\n(\{[\s\S]*?\})\s*```/);
+  if (!m) return null;
+  try {
+    var o = JSON.parse(m[1]);
+    if (!o || typeof o !== 'object') return null;
+    if (o.stop_loss == null && o.take_profit == null) return null;
+    return o;
+  } catch (e) { return null; }
+}
+
+function _findOpenTradeIdForTicker(ticker) {
+  if (!_allTrades || !ticker) return null;
+  var u = String(ticker).toUpperCase().replace(/^\$/, '');
+  for (var i = 0; i < _allTrades.length; i++) {
+    var t = _allTrades[i];
+    if (t.status === 'open' && t.ticker && String(t.ticker).toUpperCase().replace(/^\$/, '') === u) return t.id;
+  }
+  return null;
+}
+
+function _attachPatternImminentButton(bodyEl, payload) {
+  if (!bodyEl || !payload || CHILI_TRADING_IS_GUEST) return;
+  var prevP = bodyEl.querySelector('.pattern-imminent-attach-wrap');
+  if (prevP) prevP.remove();
+  var wrap = document.createElement('div');
+  wrap.className = 'pattern-imminent-attach-wrap';
+  wrap.style.cssText = 'margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);';
+  if (payload.already_linked) {
+    wrap.innerHTML = '<span style="font-size:11px;color:var(--text-muted);">Pattern alert is already linked to your open position — Monitor can track health.</span>';
+    bodyEl.appendChild(wrap);
+    return;
+  }
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-confirm';
+  btn.style.cssText = 'font-size:11px;padding:6px 12px;margin-right:8px;';
+  btn.textContent = 'Apply pattern to trade & sync monitor';
+  btn.onclick = function() { attachPatternImminentToTrade(payload); };
+  var hint = document.createElement('span');
+  hint.style.cssText = 'font-size:10px;color:var(--text-muted);';
+  var pn = payload.pattern_name ? String(payload.pattern_name) : 'this pattern';
+  hint.textContent = 'Links CHILI imminent alert (“' + pn + '”) to your open lot for Monitor scoring.';
+  wrap.appendChild(btn);
+  wrap.appendChild(hint);
+  bodyEl.appendChild(wrap);
+}
+
+function attachPatternImminentToTrade(payload) {
+  if (CHILI_TRADING_IS_GUEST) { alert('Sign in to link pattern'); return; }
+  if (!payload || !payload.alert_id) return;
+  fetch('/api/trading/breakout-alerts/' + payload.alert_id + '/attach-to-open-trade', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: '{}'
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); }).then(function(res) {
+    if (!res.d || !res.d.ok) {
+      alert(res.d && res.d.error ? res.d.error : 'Could not link alert to trade');
+      return;
+    }
+    loadTrades();
+    _refreshMonitorIfLoaded();
+    appendAiMsg('assistant', 'Linked pattern alert to trade #' + res.d.id + '. Check the Monitor tab for pattern health.');
+  }).catch(function() { alert('Request failed'); });
+}
+
+function _attachTradePlanApplyButton(bodyEl, payload, tickerFallback) {
+  if (!bodyEl || !payload || CHILI_TRADING_IS_GUEST) return;
+  if (payload.stop_loss == null && payload.take_profit == null) return;
+  var prev = bodyEl.querySelector('.trade-plan-apply-wrap');
+  if (prev) prev.remove();
+  var wrap = document.createElement('div');
+  wrap.className = 'trade-plan-apply-wrap';
+  wrap.style.cssText = 'margin-top:10px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--bg);';
+  var btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'btn-confirm';
+  btn.style.cssText = 'font-size:11px;padding:6px 12px;margin-right:8px;';
+  btn.textContent = 'Apply stop/target to open position (Monitor)';
+  btn.onclick = function() {
+    var p = Object.assign({}, payload, { ticker: payload.ticker || tickerFallback });
+    applyAiTradePlanLevels(p);
+  };
+  var hint = document.createElement('span');
+  hint.style.cssText = 'font-size:10px;color:var(--text-muted);';
+  hint.textContent = 'Saves levels on your trade row; Monitor shows Stop/Target. Pattern health needs a linked scan pattern or monitor run.';
+  wrap.appendChild(btn);
+  wrap.appendChild(hint);
+  bodyEl.appendChild(wrap);
+}
+
+function applyAiTradePlanLevels(payload) {
+  if (CHILI_TRADING_IS_GUEST) { alert('Sign in to apply levels'); return; }
+  var tid = payload.trade_id;
+  if (!tid) tid = _findOpenTradeIdForTicker(payload.ticker || currentTicker);
+  if (!tid) {
+    alert('No open trade found for this ticker. Open the Trades tab or sync your broker.');
+    return;
+  }
+  var body = {};
+  if (payload.stop_loss != null && isFinite(Number(payload.stop_loss))) body.stop_loss = Number(payload.stop_loss);
+  if (payload.take_profit != null && isFinite(Number(payload.take_profit))) body.take_profit = Number(payload.take_profit);
+  if (payload.take_profit_trim != null && isFinite(Number(payload.take_profit_trim))) body.take_profit_trim = Number(payload.take_profit_trim);
+  if (payload.label) body.note = String(payload.label);
+  if (!body.stop_loss && !body.take_profit) {
+    alert('Nothing to apply (need stop and/or take profit).');
+    return;
+  }
+  fetch('/api/trading/trades/' + tid + '/apply-levels', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(body)
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); }).then(function(res) {
+    if (!res.d || !res.d.ok) {
+      alert(res.d && res.d.error ? res.d.error : 'Could not apply levels');
+      return;
+    }
+    loadTrades();
+    _refreshMonitorIfLoaded();
+    appendAiMsg('assistant', 'Saved stop/target on trade #' + tid + '. Check the Monitor tab for updated Stop and Target.');
+  }).catch(function() { alert('Request failed'); });
 }
 
 /** Best-effort parse of entry/stop/targets from prose when no structured block. */

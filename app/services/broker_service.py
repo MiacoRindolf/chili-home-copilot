@@ -1002,6 +1002,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     # Link open trades to recent pattern-imminent alerts (if not already linked).
     # 14-day window: positions can be held well beyond the alert timestamp.
+    # Applies to any open trade source (Robinhood, manual, other brokers) so Monitor can score health.
     try:
         from ..models.trading import BreakoutAlert
         _link_cutoff = datetime.utcnow() - timedelta(days=14)
@@ -1009,7 +1010,6 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             db.query(Trade)
             .filter(
                 Trade.user_id == user_id,
-                Trade.broker_source == "robinhood",
                 Trade.status == "open",
                 Trade.related_alert_id.is_(None),
             )

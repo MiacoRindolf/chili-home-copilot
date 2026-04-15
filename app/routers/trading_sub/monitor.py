@@ -9,7 +9,7 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from sqlalchemy import or_
+from sqlalchemy import and_, or_
 
 from ...deps import get_db, get_identity_ctx
 from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
@@ -35,6 +35,10 @@ def _monitored_open_trades_query(db: Session, user_id: int | None):
         or_(
             Trade.related_alert_id.isnot(None),
             Trade.broker_source.isnot(None),
+            and_(
+                Trade.related_alert_id.is_(None),
+                or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
+            ),
         ),
     )
     return _user_trade_filter(q, user_id)
@@ -223,12 +227,17 @@ def api_monitor_active(
         if eff_tp is None and latest is not None and latest.new_target is not None:
             eff_tp = float(latest.new_target)
 
+        plan_label = pat.name if pat else None
+        if plan_label is None and (eff_sl is not None or eff_tp is not None):
+            plan_label = "Position plan (AI / manual)"
+
         setups.append(
             {
                 "trade_id": trade.id,
                 "ticker": trade.ticker,
                 "direction": trade.direction,
                 "pattern_name": pat.name if pat else None,
+                "plan_label": plan_label,
                 "pattern_id": trade.scan_pattern_id or (latest.scan_pattern_id if latest else None),
                 "timeframe": pat.timeframe if pat else None,
                 "entry_price": json_safe(trade.entry_price),
@@ -346,7 +355,7 @@ def api_monitor_run(
     request: Request,
     db: Session = Depends(get_db),
 ):
-    """Run one pattern position monitor cycle for the current user's open alert-linked trades."""
+    """Run one monitor cycle: pattern-linked trades and plan-level (stop/target only) positions."""
     ctx = get_identity_ctx(request, db)
     user_id = ctx["user_id"]
 
