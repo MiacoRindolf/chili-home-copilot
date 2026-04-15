@@ -354,7 +354,10 @@ def evaluate_trade(
         from .scanner import _MAX_HOLD_HOURS
         _max_h = _MAX_HOLD_HOURS.get(_trade_type)
         if _max_h is not None:
-            _held_hours = (datetime.utcnow() - trade.entry_date).total_seconds() / 3600
+            _entry_dt = trade.entry_date
+            if isinstance(_entry_dt, str):
+                _entry_dt = datetime.fromisoformat(_entry_dt)
+            _held_hours = (datetime.utcnow() - _entry_dt).total_seconds() / 3600
             if _held_hours >= _max_h:
                 result.state = StopState.TRAILING
                 result.alert_event = "TIME_EXIT"
@@ -580,6 +583,8 @@ def _fetch_market_context(ticker: str, staleness_secs: int = 300) -> MarketConte
         return MarketContext(price=0, is_stale=True)
 
     quote_ts = q.get("quote_ts") or datetime.utcnow()
+    if isinstance(quote_ts, str):
+        quote_ts = datetime.fromisoformat(quote_ts)
     age_secs = (datetime.utcnow() - quote_ts).total_seconds() if quote_ts else 0
     is_stale = age_secs > staleness_secs
 
