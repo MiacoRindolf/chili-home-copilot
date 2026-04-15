@@ -116,9 +116,11 @@ def _token_param(base_url: str, max_tokens: int) -> dict:
 
 def _call_provider(api_key: str, base_url: str, model: str, messages: list[dict],
                    system_prompt: str, trace_id: str,
-                   max_tokens: int = 1024) -> dict:
+                   max_tokens: int = 1024, timeout_override: float | None = None) -> dict:
     """Make a non-streaming call with automatic retry on rate limits."""
-    timeout = 30.0 if "groq.com" in base_url else 60.0
+    timeout = timeout_override or (30.0 if "groq.com" in base_url else 60.0)
+    if timeout_override is None and max_tokens > 4000:
+        timeout = max(timeout, 120.0)
     client = OpenAI(api_key=api_key, base_url=base_url, timeout=timeout)
     api_messages = [{"role": "system", "content": system_prompt}] + messages
 

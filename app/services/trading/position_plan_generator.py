@@ -17,16 +17,11 @@ from .market_data import fetch_quotes_batch, get_market_regime
 logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "position_plan.txt"
-_SYSTEM_PROMPT: str | None = None
-
 PLAN_STALE_HOURS = 4
 
 
 def _load_system_prompt() -> str:
-    global _SYSTEM_PROMPT
-    if _SYSTEM_PROMPT is None:
-        _SYSTEM_PROMPT = _PROMPT_PATH.read_text(encoding="utf-8")
-    return _SYSTEM_PROMPT
+    return _PROMPT_PATH.read_text(encoding="utf-8")
 
 
 def _parse_llm_json(raw: str) -> dict[str, Any] | None:
@@ -318,7 +313,7 @@ def generate_position_plans(
     user_msg = json.dumps({
         "portfolio": portfolio_ctx,
         "positions": positions,
-    }, default=str, indent=2)
+    }, default=str, separators=(",", ":"))
 
     system_prompt = _load_system_prompt()
     messages = [
@@ -326,7 +321,7 @@ def generate_position_plans(
         {"role": "user", "content": user_msg},
     ]
 
-    max_tokens = min(16000, 500 * len(trades) + 800)
+    max_tokens = min(8192, 400 * len(trades) + 600)
     raw = call_llm(messages, max_tokens=max_tokens, trace_id="position-plan-generator")
 
     if not raw:
