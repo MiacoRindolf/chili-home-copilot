@@ -10,7 +10,10 @@ from __future__ import annotations
 import json
 import logging
 from dataclasses import dataclass, field
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .setup_vitals import SetupVitals
 
 logger = logging.getLogger(__name__)
 
@@ -213,9 +216,10 @@ class TradePlanHealth:
     # Nearest structural support below current price (longs), from trade plan key levels.
     nearest_support: float | None = None
     nearest_support_label: str = ""
+    vitals_summary: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "entry_validated": self.entry_validated,
             "invalidations_triggered": self.invalidations_triggered,
             "caution_signals_changed": self.caution_signals_changed,
@@ -224,6 +228,9 @@ class TradePlanHealth:
             "nearest_support": self.nearest_support,
             "nearest_support_label": self.nearest_support_label,
         }
+        if self.vitals_summary:
+            out["vitals_summary"] = self.vitals_summary
+        return out
 
     @property
     def has_critical_invalidation(self) -> bool:
@@ -234,10 +241,53 @@ class TradePlanHealth:
         return len(self.invalidations_triggered) > 0
 
 
+def evaluate_setup_vitals_impact(vitals: Any, trade_plan: dict | None) -> dict[str, Any]:
+    """Score vitals vs trade plan: extra penalties and narrative for setup health."""
+    out: dict[str, Any] = {
+        "penalty": 0.0,
+        "invalidations_extra": [],
+        "notes": [],
+    }
+    if vitals is None:
+        return out
+    penalty = 0.0
+    notes: list[str] = []
+    extra_inv: list[dict[str, Any]] = []
+    try:
+        oe = float(getattr(vitals, "overextension_risk", 0) or 0)
+        mom = float(getattr(vitals, "momentum_score", 0) or 0)
+        if oe > 0.8 and mom < -0.15:
+            penalty += 0.18
+            notes.append("Overextended + momentum fading (vitals)")
+        if oe > 0.85:
+            penalty += 0.08
+        for div in getattr(vitals, "divergences", []) or []:
+            if isinstance(div, dict) and div.get("type") == "bearish":
+                penalty += 0.1
+                notes.append(f"Bearish divergence: {div.get('pair', '')}")
+        for deg in getattr(vitals, "degradation_signals", []) or []:
+            penalty += 0.05
+            notes.append(f"Degradation: {deg}")
+        if penalty >= 0.25:
+            extra_inv.append({
+                "desc": "Vitals: setup deterioration (overextension/momentum/divergence)",
+                "indicator": "vitals_composite",
+                "severity": "warning",
+            })
+    except Exception:
+        pass
+    out["penalty"] = min(penalty, 0.6)
+    out["notes"] = notes
+    out["invalidations_extra"] = extra_inv
+    return out
+
+
 def evaluate_trade_plan(
     trade_plan: dict | None,
     indicators: dict[str, Any],
     current_price: float,
+    *,
+    vitals: "SetupVitals | None" = None,
 ) -> TradePlanHealth:
     """Evaluate a structured trade plan against live indicators.
 
@@ -246,12 +296,19 @@ def evaluate_trade_plan(
     trade_plan : the JSON plan stored on BreakoutAlert.trade_plan
     indicators : flat dict of indicator key -> current value
     current_price : live price
+    vitals : optional setup vitals (trajectories); merges direction keys for monitoring signals
     """
     if not trade_plan:
         return TradePlanHealth(entry_validated=True, human_summary="No trade plan defined.")
 
     result = TradePlanHealth()
     summary_parts: list[str] = []
+
+    ind_for_signals: dict[str, Any] = dict(indicators)
+    if vitals is not None:
+        from .setup_vitals import merge_direction_into_flat
+
+        ind_for_signals = merge_direction_into_flat(ind_for_signals, vitals)
 
     # 1. Entry validation.
     ev = trade_plan.get("entry_validation", {})
@@ -277,9 +334,17 @@ def evaluate_trade_plan(
             penalty += 0.3 if sev == "critical" else 0.15
             summary_parts.append(f"  INVALIDATION [{sev.upper()}]: {cond.get('desc', '')}")
 
+    vit_imp = evaluate_setup_vitals_impact(vitals, trade_plan)
+    penalty += float(vit_imp.get("penalty") or 0)
+    for inv in vit_imp.get("invalidations_extra") or []:
+        result.invalidations_triggered.append(inv)
+        summary_parts.append(f"  VITALS: {inv.get('desc', '')}")
+    for n in vit_imp.get("notes") or []:
+        summary_parts.append(f"  VITALS NOTE: {n}")
+
     # 3. Monitoring signals — check if baseline has changed.
     for sig in trade_plan.get("monitoring_signals", []):
-        change = _eval_signal_change(sig, indicators, current_price)
+        change = _eval_signal_change(sig, ind_for_signals, current_price)
         if change:
             result.caution_signals_changed.append(change)
             direction = change.get("direction", "changed")
@@ -288,6 +353,18 @@ def evaluate_trade_plan(
             elif direction == "resolved":
                 penalty -= 0.05
             summary_parts.append(f"  Signal {sig.get('desc', '')}: {direction}")
+
+    # 3b. Trajectory conditions (direction / slope monitors).
+    for sig in trade_plan.get("trajectory_conditions", []) or []:
+        change = _eval_signal_change(sig, ind_for_signals, current_price)
+        if change:
+            result.caution_signals_changed.append(change)
+            direction = change.get("direction", "changed")
+            if direction == "worsened":
+                penalty += 0.08
+            elif direction == "resolved":
+                penalty -= 0.04
+            summary_parts.append(f"  Trajectory {sig.get('desc', '')}: {direction}")
 
     # 4. Key levels.
     levels = trade_plan.get("key_levels", {})
@@ -326,6 +403,12 @@ def evaluate_trade_plan(
     if not summary_parts:
         summary_parts.append("Trade plan: all conditions nominal.")
     result.human_summary = "\n".join(summary_parts)
+
+    if vitals is not None:
+        try:
+            result.vitals_summary = vitals.to_dict() if hasattr(vitals, "to_dict") else {}
+        except Exception:
+            result.vitals_summary = {}
 
     return result
 
@@ -382,11 +465,23 @@ def _eval_signal_change(sig: dict, indicators: dict[str, Any], current_price: fl
         direction_val = indicators.get(prev_key, indicators.get(f"{ind_key}_direction"))
         if direction_val is None:
             return None
-        current_dir = "falling" if str(direction_val).lower() in ("falling", "down", "negative") else "rising"
+        dv = str(direction_val).lower()
+        if dv in ("falling", "down", "negative"):
+            current_dir = "falling"
+        elif dv in ("rising", "up", "positive"):
+            current_dir = "rising"
+        elif dv == "flat":
+            current_dir = "flat"
+        else:
+            current_dir = "rising"
         if baseline == "falling" and current_dir == "rising":
             return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "resolved"}
         elif baseline == "rising" and current_dir == "falling":
             return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "worsened"}
+        elif baseline == "above" and current_dir == "falling":
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "worsened"}
+        elif baseline == "below" and current_dir == "rising":
+            return {"desc": sig.get("desc", ""), "indicator": ind_key, "direction": "resolved"}
         return None
 
     if watch == "level":

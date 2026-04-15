@@ -6441,6 +6441,107 @@ def _migration_122_position_plans_table(conn) -> None:
     conn.commit()
 
 
+def _migration_123_setup_vitals_engine(conn) -> None:
+    """Ticker vitals cache, per-setup vitals history, PatternMonitorDecision.vitals_composite, mesh node."""
+    tables = _tables(conn)
+
+    if "trading_ticker_vitals" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_ticker_vitals (
+                    id SERIAL PRIMARY KEY,
+                    ticker VARCHAR(32) NOT NULL,
+                    bar_interval VARCHAR(16) NOT NULL DEFAULT '1d',
+                    momentum_score DOUBLE PRECISION,
+                    volume_score DOUBLE PRECISION,
+                    trend_score DOUBLE PRECISION,
+                    overextension_risk DOUBLE PRECISION,
+                    composite_health DOUBLE PRECISION,
+                    trajectory_json JSONB,
+                    divergences_json JSONB,
+                    computed_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE UNIQUE INDEX uix_ticker_vitals_ticker_interval "
+                "ON trading_ticker_vitals (ticker, bar_interval)"
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_ticker_vitals_computed ON trading_ticker_vitals (computed_at)"))
+
+    if "trading_setup_vitals_history" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE trading_setup_vitals_history (
+                    id SERIAL PRIMARY KEY,
+                    trade_id INTEGER REFERENCES trading_trades(id) ON DELETE CASCADE,
+                    breakout_alert_id INTEGER REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL,
+                    momentum_score DOUBLE PRECISION,
+                    volume_score DOUBLE PRECISION,
+                    trend_score DOUBLE PRECISION,
+                    overextension_risk DOUBLE PRECISION,
+                    composite_health DOUBLE PRECISION,
+                    price_at_check DOUBLE PRECISION,
+                    degradation_flags JSONB,
+                    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+                )
+                """
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_setup_vitals_hist_trade_created "
+                "ON trading_setup_vitals_history (trade_id, created_at DESC)"
+            )
+        )
+        conn.execute(
+            text(
+                "CREATE INDEX ix_setup_vitals_hist_created ON trading_setup_vitals_history (created_at)"
+            )
+        )
+
+    cols_pmd = _columns(conn, "trading_pattern_monitor_decisions")
+    if "vitals_composite" not in cols_pmd:
+        try:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_pattern_monitor_decisions "
+                    "ADD COLUMN vitals_composite DOUBLE PRECISION"
+                )
+            )
+        except Exception:
+            pass
+
+    # Neural mesh: setup health observer node (idempotent)
+    try:
+        r = conn.execute(
+            text("SELECT 1 FROM brain_graph_nodes WHERE id = 'nm_setup_health'")
+        ).fetchone()
+        if not r:
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO brain_graph_nodes
+                        (id, domain, graph_version, node_type, layer, label,
+                         fire_threshold, cooldown_seconds, enabled, version, is_observer, display_meta)
+                    VALUES
+                        ('nm_setup_health', 'trading', 1, 'observer_setup_health', 6,
+                         'Setup vitals / trajectory health', 0.55, 90, TRUE, 1, TRUE,
+                         '{"role":"setup_vitals","description":"Indicator trajectory and setup health monitoring"}'::jsonb)
+                    """
+                )
+            )
+    except Exception:
+        pass
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6565,6 +6666,7 @@ MIGRATIONS = [
     ("120_monitor_learning_engine", _migration_120_monitor_learning_engine),
     ("121_autopilot_profitability_outcomes", _migration_121_autopilot_profitability_outcomes),
     ("122_position_plans_table", _migration_122_position_plans_table),
+    ("123_setup_vitals_engine", _migration_123_setup_vitals_engine),
 ]
 
 

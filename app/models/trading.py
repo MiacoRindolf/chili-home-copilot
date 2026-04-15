@@ -122,6 +122,49 @@ class PatternMonitorDecision(Base):
     price_after_1h: Optional[float] = Column(Float, nullable=True)
     price_after_4h: Optional[float] = Column(Float, nullable=True)
     was_beneficial: Optional[bool] = Column(Boolean, nullable=True)
+    vitals_composite: Optional[float] = Column(Float, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class TickerVitals(Base):
+    """Cached setup vitals per ticker/interval (trajectory scores from snapshot history)."""
+
+    __tablename__ = "trading_ticker_vitals"
+    __table_args__ = (Index("ix_ticker_vitals_computed", "computed_at"),)
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    ticker: str = Column(String(32), nullable=False)
+    bar_interval: str = Column(String(16), nullable=False, default="1d")
+    momentum_score: Optional[float] = Column(Float, nullable=True)
+    volume_score: Optional[float] = Column(Float, nullable=True)
+    trend_score: Optional[float] = Column(Float, nullable=True)
+    overextension_risk: Optional[float] = Column(Float, nullable=True)
+    composite_health: Optional[float] = Column(Float, nullable=True)
+    trajectory_json: Optional[dict] = Column(JSONB, nullable=True)
+    divergences_json: Optional[list] = Column(JSONB, nullable=True)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class SetupVitalsHistory(Base):
+    """Per-trade vitals snapshots over time for degradation analysis and learning."""
+
+    __tablename__ = "trading_setup_vitals_history"
+    __table_args__ = (
+        Index("ix_setup_vitals_hist_trade_created", "trade_id", "created_at"),
+    )
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    trade_id: Optional[int] = Column(Integer, ForeignKey("trading_trades.id", ondelete="CASCADE"), nullable=True, index=True)
+    breakout_alert_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True
+    )
+    momentum_score: Optional[float] = Column(Float, nullable=True)
+    volume_score: Optional[float] = Column(Float, nullable=True)
+    trend_score: Optional[float] = Column(Float, nullable=True)
+    overextension_risk: Optional[float] = Column(Float, nullable=True)
+    composite_health: Optional[float] = Column(Float, nullable=True)
+    price_at_check: Optional[float] = Column(Float, nullable=True)
+    degradation_flags: Optional[dict] = Column(JSONB, nullable=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 

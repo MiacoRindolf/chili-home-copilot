@@ -43,6 +43,14 @@ The plan must be a JSON object with these sections:
       "level": <optional float for level-based signals>
     }
   ],
+  "trajectory_conditions": [
+    {
+      "desc": "<plain-English>",
+      "indicator": "<indicator key>",
+      "watch": "direction",
+      "baseline": "<'rising' or 'falling' expected for healthy long setup>"
+    }
+  ],
   "key_levels": {
     "entry": <float>,
     "stop": <float>,
@@ -163,6 +171,7 @@ def _validate_plan(
             "max_risk_pct": min(2.0, max(0.5, round(1.0 if risk_pct < 10 else 0.5, 1))),
             "sizing_note": "wide stop" if risk_pct > 15 else "normal stop width",
         }
+    plan.setdefault("trajectory_conditions", [])
 
     return plan
 
@@ -298,6 +307,43 @@ def extract_trade_plan_mechanical(
         except (TypeError, ValueError):
             pass
 
+    trajectory_conditions: list[dict[str, Any]] = []
+    seen_traj: set[str] = set()
+    for cond in pattern_conditions or []:
+        ind = cond.get("indicator", "")
+        if ind == "rsi_14" and "rsi_traj" not in seen_traj:
+            trajectory_conditions.append({
+                "desc": "RSI trajectory — falling from overbought is caution",
+                "indicator": "rsi_14",
+                "watch": "direction",
+                "baseline": "rising",
+            })
+            seen_traj.add("rsi_traj")
+        if ind in ("volume_ratio", "obv") and "obv_traj" not in seen_traj:
+            trajectory_conditions.append({
+                "desc": "OBV / flow trajectory vs price (distribution risk)",
+                "indicator": "obv",
+                "watch": "direction",
+                "baseline": "rising",
+            })
+            seen_traj.add("obv_traj")
+
+    try:
+        vwap_v = ind_alias.get("vwap")
+        if vwap_v and current_price:
+            vv = float(vwap_v)
+            cp = float(current_price)
+            if vv > 0 and abs(cp - vv) / vv < 0.025:
+                monitoring_signals.append({
+                    "desc": "Price near VWAP — watch reclaim vs lost",
+                    "indicator": "vwap",
+                    "watch": "level",
+                    "baseline": "above" if cp >= vv else "below",
+                    "level": vv,
+                })
+    except (TypeError, ValueError):
+        pass
+
     risk_pct = abs(entry_price - stop_loss) / entry_price * 100 if entry_price and stop_loss else 0.0
     reward_pct = abs(target_price - entry_price) / entry_price * 100 if entry_price and target_price else 0.0
     rr = (reward_pct / risk_pct) if risk_pct > 0.01 else 0.0
@@ -314,7 +360,8 @@ def extract_trade_plan_mechanical(
             "method": "buy_stop_above_entry",
         },
         "invalidation_conditions": invalidations,
-        "monitoring_signals": monitoring_signals[: (6 if complex_pattern else 4)],
+        "monitoring_signals": monitoring_signals[: (8 if complex_pattern else 5)],
+        "trajectory_conditions": trajectory_conditions,
         "key_levels": {
             "entry": entry_price,
             "stop": stop_loss,

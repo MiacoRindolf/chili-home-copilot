@@ -52,6 +52,8 @@ def run_retention_policy(
     results["proposals"] = _prune_old_proposals(db, settings.brain_retention_proposal_days, dry_run)
     results["paper_trades"] = _prune_old_paper_trades(db, settings.brain_retention_paper_trade_days, dry_run)
     results["stuck_jobs"] = _cleanup_stuck_batch_jobs(db, dry_run)
+    results["setup_vitals_history"] = _prune_setup_vitals_history(db, 90, dry_run)
+    results["ticker_vitals_stale"] = _prune_stale_ticker_vitals(db, 7, dry_run)
 
     if not dry_run:
         try:
@@ -132,6 +134,38 @@ def _prune_old_proposals(db: Session, retain_days: int, dry_run: bool) -> dict[s
                 "DELETE FROM trading_proposals WHERE proposed_at < :cutoff "
                 "AND status IN ('expired', 'rejected')"
             ),
+            {"cutoff": cutoff},
+        )
+    return {"eligible": count, "deleted": count if not dry_run else 0}
+
+
+def _prune_setup_vitals_history(db: Session, retain_days: int, dry_run: bool) -> dict[str, int]:
+    """Delete old setup vitals history rows (per-trade trajectory log)."""
+    cutoff = datetime.utcnow() - timedelta(days=retain_days)
+    count_q = text("SELECT COUNT(*) FROM trading_setup_vitals_history WHERE created_at < :cutoff")
+    try:
+        count = db.execute(count_q, {"cutoff": cutoff}).scalar() or 0
+    except Exception:
+        return {"eligible": 0, "deleted": 0}
+    if not dry_run and count > 0:
+        db.execute(
+            text("DELETE FROM trading_setup_vitals_history WHERE created_at < :cutoff"),
+            {"cutoff": cutoff},
+        )
+    return {"eligible": count, "deleted": count if not dry_run else 0}
+
+
+def _prune_stale_ticker_vitals(db: Session, retain_days: int, dry_run: bool) -> dict[str, int]:
+    """Remove ticker vitals cache rows older than retain_days (refreshed on demand)."""
+    cutoff = datetime.utcnow() - timedelta(days=retain_days)
+    count_q = text("SELECT COUNT(*) FROM trading_ticker_vitals WHERE computed_at < :cutoff")
+    try:
+        count = db.execute(count_q, {"cutoff": cutoff}).scalar() or 0
+    except Exception:
+        return {"eligible": 0, "deleted": 0}
+    if not dry_run and count > 0:
+        db.execute(
+            text("DELETE FROM trading_ticker_vitals WHERE computed_at < :cutoff"),
             {"cutoff": cutoff},
         )
     return {"eligible": count, "deleted": count if not dry_run else 0}

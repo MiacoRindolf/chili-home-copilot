@@ -37,6 +37,49 @@ def publish_market_snapshots_refreshed(db: Session, *, meta: Optional[dict[str, 
     publish_momentum_context_refresh(db, meta=meta)
 
 
+def publish_setup_vitals_change(
+    db: Session,
+    *,
+    trade_id: int,
+    ticker: str,
+    vitals: Any,
+    previous_composite: Optional[float] = None,
+) -> None:
+    """Enqueue mesh activation when setup vitals materially shift (threshold crossing)."""
+    if not mesh_enabled():
+        return
+    try:
+        cur = float(getattr(vitals, "composite_health", 0.5) or 0.5)
+        prev = float(previous_composite) if previous_composite is not None else None
+        if prev is None:
+            return
+        crossed_low = prev >= 0.45 and cur < 0.45
+        big_drop = (prev - cur) >= 0.15
+        if not crossed_low and not big_drop:
+            return
+        cid = str(uuid.uuid4())
+        enqueue_activation(
+            db,
+            source_node_id="nm_setup_health",
+            cause="setup_vitals_change",
+            payload={
+                "signal_type": "setup_vitals_change",
+                "trade_id": trade_id,
+                "ticker": (ticker or "").upper(),
+                "composite_health": cur,
+                "previous_composite": prev,
+                "vitals": vitals.to_dict() if hasattr(vitals, "to_dict") else {},
+            },
+            confidence_delta=0.12,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug("%s setup_vitals_change trade=%s ticker=%s cur=%s prev=%s", LOG_PREFIX, trade_id, ticker, cur, prev)
+    except Exception as e:
+        _log.warning("%s publish_setup_vitals_change failed: %s", LOG_PREFIX, e)
+
+
 def publish_momentum_context_refresh(db: Session, *, meta: Optional[dict[str, Any]] = None) -> dict[str, Any]:
     """Enqueue neural momentum context tick (neural mesh only; not learning-cycle).
 

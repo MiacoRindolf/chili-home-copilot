@@ -32,11 +32,19 @@ from .pattern_condition_monitor import (
     evaluate_trade_plan,
 )
 from .scanner import get_adaptive_weight
+from .setup_vitals import (
+    detect_multi_check_degradation,
+    get_or_compute_ticker_vitals,
+    momentum_drop_urgent,
+    record_setup_vitals_history,
+)
 
 logger = logging.getLogger(__name__)
 
 # In-memory cache of last health scores per trade_id to compute deltas.
 _last_health: dict[int, float] = {}
+# Last composite_health from vitals per trade (mesh threshold notifications).
+_last_vitals_composite: dict[int, float] = {}
 
 # Dedup Telegram pattern_monitor alerts: same ticker+pattern+action+body as last send → skip.
 # exit_now always sends. Cleared opportunistically when oversized.
@@ -691,6 +699,18 @@ def _evaluate_single(
     _ensure_trade_plan(db, alert, pattern, flat, current_price)
     trade_plan = alert.trade_plan
 
+    bar_interval = (getattr(pattern, "timeframe", None) or "1d").strip() or "1d"
+
+    # ── Setup vitals (trajectory cache / snapshot history) ──
+    vitals = get_or_compute_ticker_vitals(db, trade.ticker, bar_interval)
+    vitals_degradation = detect_multi_check_degradation(
+        db, trade.id, vitals.momentum_score, vitals.volume_score
+    )
+    mom_urgent = momentum_drop_urgent(db, trade.id, vitals.momentum_score)
+    bearish_div = any(
+        isinstance(d, dict) and d.get("type") == "bearish" for d in (vitals.divergences or [])
+    )
+
     # ── Evaluate pattern health (static conditions) ──
     previous_health = _last_health.get(trade.id)
     health = evaluate_pattern_health(
@@ -700,8 +720,8 @@ def _evaluate_single(
     )
     _last_health[trade.id] = health.health_score
 
-    # ── Evaluate trade plan (dynamic conditions) ──
-    plan_health = evaluate_trade_plan(trade_plan, flat, current_price)
+    # ── Evaluate trade plan (dynamic conditions) + vitals ──
+    plan_health = evaluate_trade_plan(trade_plan, flat, current_price, vitals=vitals)
 
     # ── Decide whether action is needed ──
     needs_action = False
@@ -722,7 +742,30 @@ def _evaluate_single(
     elif previous_health is not None and abs(health.health_score - previous_health) >= 0.2:
         needs_action = True
 
+    if vitals_degradation.get("degraded_3plus"):
+        needs_action = True
+    if mom_urgent:
+        needs_action = True
+    if vitals.overextension_risk > 0.8 and vitals.momentum_score < -0.2:
+        needs_action = True
+    if bearish_div:
+        needs_action = True
+
+    def _persist_vitals_history() -> None:
+        try:
+            record_setup_vitals_history(
+                db,
+                trade_id=trade.id,
+                breakout_alert_id=alert.id,
+                vitals=vitals,
+                price=current_price,
+                degradation_flags={**vitals_degradation, "mom_urgent": mom_urgent},
+            )
+        except Exception:
+            logger.debug("[pattern_monitor] vitals history insert failed", exc_info=True)
+
     if not needs_action:
+        _persist_vitals_history()
         return "hold"
 
     # ── Build signal snapshot for rules engine ──
@@ -734,6 +777,7 @@ def _evaluate_single(
         current_price=current_price,
         stop_price=trade.stop_loss or alert.stop_loss,
         target_price=trade.take_profit or alert.target_price,
+        vitals=vitals,
     )
     signal_sig = compute_signal_signature(sig_snap)
     simple = is_pattern_simple(pattern.rules_json if isinstance(pattern.rules_json, dict) else None)
@@ -778,6 +822,8 @@ def _evaluate_single(
             delta_urgent=delta_urgent,
             health_healthy=health_healthy,
             trade_direction=trade.direction or "long",
+            vitals=vitals,
+            vitals_degradation=vitals_degradation,
         )
         if heuristic_dec is not None:
             use_llm = False
@@ -864,6 +910,24 @@ def _evaluate_single(
     if plan_health.nearest_support is not None:
         conditions_snap["nearest_support"] = plan_health.nearest_support
         conditions_snap["nearest_support_label"] = plan_health.nearest_support_label
+    conditions_snap["vitals"] = vitals.to_dict()
+    conditions_snap["vitals_degradation"] = vitals_degradation
+
+    _persist_vitals_history()
+
+    try:
+        from .brain_neural_mesh.publisher import publish_setup_vitals_change
+
+        publish_setup_vitals_change(
+            db,
+            trade_id=trade.id,
+            ticker=trade.ticker,
+            vitals=vitals,
+            previous_composite=_last_vitals_composite.get(trade.id),
+        )
+        _last_vitals_composite[trade.id] = float(vitals.composite_health)
+    except Exception:
+        logger.debug("[pattern_monitor] vitals mesh publish skipped", exc_info=True)
 
     decision = PatternMonitorDecision(
         trade_id=trade.id,
@@ -872,6 +936,7 @@ def _evaluate_single(
         health_score=health.health_score,
         health_delta=health.health_delta,
         conditions_snapshot=conditions_snap,
+        vitals_composite=float(vitals.composite_health),
         action=primary.action,
         old_stop=trade.stop_loss,
         new_stop=primary.new_stop,

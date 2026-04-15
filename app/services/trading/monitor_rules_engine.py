@@ -63,12 +63,17 @@ class SignalSnapshot:
     pnl_pct: float | None = None
     price_vs_stop_pct: float | None = None
     price_vs_target_pct: float | None = None
+    # Vitals bands (-1..4), -1 = absent
+    momentum_band: int = -1
+    volume_band: int = -1
+    trend_band: int = -1
+    overextension_band: int = -1
 
 
 def compute_signal_signature(snap: SignalSnapshot) -> str:
     """Produce a coarse-grained string key for rule lookup.
 
-    Format: ``crit:{0|1}|inv:{0|1}|caut:{0|1}|hs:{band}|hd:{band}|pnl:{band}|ps:{band}|pt:{band}``
+    Format: ``crit:…|…|vm:…|vv:…|vt:…|vo:…`` (vitals suffix when bands present).
     """
     parts = [
         f"crit:{int(snap.has_critical_invalidation)}",
@@ -80,6 +85,14 @@ def compute_signal_signature(snap: SignalSnapshot) -> str:
         f"ps:{_band(snap.price_vs_stop_pct, [2, 5, 10, 20])}",
         f"pt:{_band(snap.price_vs_target_pct, [5, 15, 30, 50])}",
     ]
+    if snap.momentum_band >= 0:
+        parts.append(f"vm:{snap.momentum_band}")
+    if snap.volume_band >= 0:
+        parts.append(f"vv:{snap.volume_band}")
+    if snap.trend_band >= 0:
+        parts.append(f"vt:{snap.trend_band}")
+    if snap.overextension_band >= 0:
+        parts.append(f"vo:{snap.overextension_band}")
     return "|".join(parts)
 
 
@@ -91,6 +104,7 @@ def build_signal_snapshot(
     current_price: float,
     stop_price: float | None,
     target_price: float | None,
+    vitals: Any | None = None,
 ) -> SignalSnapshot:
     """Build a SignalSnapshot from the available evaluation data."""
     ps_pct = None
@@ -101,6 +115,24 @@ def build_signal_snapshot(
     if target_price and current_price and target_price > 0:
         pt_pct = ((target_price - current_price) / current_price) * 100
 
+    mb = vb = tb = ob = -1
+    if vitals is not None:
+        try:
+            mom = getattr(vitals, "momentum_score", None)
+            vol = getattr(vitals, "volume_score", None)
+            tr = getattr(vitals, "trend_score", None)
+            oe = getattr(vitals, "overextension_risk", None)
+            if mom is not None:
+                mb = _band(float(mom), [-0.5, -0.2, 0.2, 0.5])
+            if vol is not None:
+                vb = _band(float(vol), [-0.5, -0.2, 0.2, 0.5])
+            if tr is not None:
+                tb = _band(float(tr), [-0.5, -0.2, 0.2, 0.5])
+            if oe is not None:
+                ob = _band(float(oe), [0.25, 0.5, 0.75])
+        except Exception:
+            pass
+
     return SignalSnapshot(
         has_critical_invalidation=getattr(plan_health, "has_critical_invalidation", False),
         has_any_invalidation=getattr(plan_health, "has_any_invalidation", False),
@@ -110,6 +142,10 @@ def build_signal_snapshot(
         pnl_pct=pnl_pct,
         price_vs_stop_pct=ps_pct,
         price_vs_target_pct=pt_pct,
+        momentum_band=mb,
+        volume_band=vb,
+        trend_band=tb,
+        overextension_band=ob,
     )
 
 
@@ -193,6 +229,8 @@ def heuristic_adjustment(
     delta_urgent: float = -0.3,
     health_healthy: float = 0.8,
     trade_direction: str = "long",
+    vitals: Any | None = None,
+    vitals_degradation: dict[str, Any] | None = None,
 ) -> MechanicalDecision | None:
     """Deterministic position action for clear-cut cases. Returns None → caller may use LLM.
 
@@ -209,6 +247,39 @@ def heuristic_adjustment(
     caution = bool(getattr(plan_health, "caution_signals_changed", []))
     h_score = float(getattr(condition_health, "health_score", 1.0) or 1.0)
     h_delta = getattr(condition_health, "health_delta", None)
+
+    vd = vitals_degradation or {}
+    if vd.get("degraded_3plus") and is_long and current_stop and current_price > current_stop:
+        mid = (current_price + float(current_stop)) / 2.0
+        floor = float(pattern_stop) if pattern_stop is not None else float(current_stop)
+        new_stop = max(mid, floor, float(current_stop))
+        if new_stop < current_price * 0.999:
+            return MechanicalDecision(
+                action="tighten_stop",
+                new_stop=round(new_stop, 6),
+                confidence=0.78,
+                reasoning="Heuristic: vitals momentum down 3+ consecutive checks — tighten stop.",
+                graduation_status="heuristic",
+            )
+
+    if vitals is not None:
+        try:
+            oe = float(getattr(vitals, "overextension_risk", 0) or 0)
+            mom = float(getattr(vitals, "momentum_score", 0) or 0)
+            if oe > 0.8 and mom < -0.25 and is_long and current_stop:
+                mid = (current_price + float(current_stop)) / 2.0
+                floor = float(pattern_stop) if pattern_stop is not None else current_stop
+                new_stop = max(mid, floor, float(current_stop))
+                if new_stop < current_price * 0.999:
+                    return MechanicalDecision(
+                        action="tighten_stop",
+                        new_stop=round(new_stop, 6),
+                        confidence=0.8,
+                        reasoning="Heuristic: overextended + momentum fading (vitals) — tighten stop.",
+                        graduation_status="heuristic",
+                    )
+        except Exception:
+            pass
 
     # Clear risk-off: critical thesis break + meaningful loss (same pnl sign convention as monitor).
     if has_crit and pnl_pct is not None and pnl_pct < -5.0:

@@ -4471,6 +4471,7 @@ def learn_from_monitor_decisions(db: Session, user_id: int | None) -> dict[str, 
 
     # ── Trade plan signal predictiveness ──
     signal_stats = _analyze_trade_plan_signals(rows)
+    vitals_hist_summary = _vitals_history_learning_summary(db)
 
     # ── Rules engine aggregation (self-learning) ──
     rules_stats: dict[str, Any] = {}
@@ -4509,6 +4510,7 @@ def learn_from_monitor_decisions(db: Session, user_id: int | None) -> dict[str, 
         "overall_benefit_rate": round(overall_benefit, 3),
         "by_action": {k: round(sum(v) / len(v), 3) for k, v in by_action.items()},
         "plan_signal_stats": signal_stats,
+        "vitals_history_summary": vitals_hist_summary,
         "rules_engine": rules_stats,
     }
 
@@ -4544,6 +4546,24 @@ def _analyze_trade_plan_signals(rows: list) -> dict[str, Any]:
             signal_outcomes.setdefault(key, []).append(beneficial)
             total_signals += 1
 
+        vit = snap.get("vitals") or {}
+        try:
+            ch = vit.get("composite_health")
+            if ch is not None:
+                key = f"vitals_composite:{round(float(ch), 2)}"
+                signal_outcomes.setdefault(key, []).append(beneficial)
+                total_signals += 1
+        except (TypeError, ValueError):
+            pass
+
+        vd = snap.get("vitals_degradation") or {}
+        if vd.get("degraded_3plus"):
+            signal_outcomes.setdefault("vitals:degraded_3plus", []).append(beneficial)
+            total_signals += 1
+        if vd.get("mom_urgent"):
+            signal_outcomes.setdefault("vitals:mom_urgent", []).append(beneficial)
+            total_signals += 1
+
     predictive_signals = {}
     for key, outcomes in signal_outcomes.items():
         if len(outcomes) < 3:
@@ -4558,6 +4578,51 @@ def _analyze_trade_plan_signals(rows: list) -> dict[str, Any]:
     return {
         "signals_analyzed": total_signals,
         "predictive_signals": predictive_signals,
+    }
+
+
+def _vitals_history_learning_summary(db: Session, *, lookback_days: int = 90) -> dict[str, Any]:
+    """Aggregate per-trade vitals history rows for degradation vs outcomes (lightweight)."""
+    from sqlalchemy import func
+
+    from ...models.trading import SetupVitalsHistory, Trade
+
+    cutoff = datetime.utcnow() - timedelta(days=lookback_days)
+    try:
+        n_hist = (
+            db.query(func.count(SetupVitalsHistory.id))
+            .filter(SetupVitalsHistory.created_at >= cutoff)
+            .scalar()
+            or 0
+        )
+    except Exception:
+        return {"rows": 0, "note": "setup_vitals_history unavailable"}
+
+    degraded_benefit: list[bool] = []
+    try:
+        rows = (
+            db.query(SetupVitalsHistory, Trade)
+            .join(Trade, SetupVitalsHistory.trade_id == Trade.id)
+            .filter(SetupVitalsHistory.created_at >= cutoff)
+            .filter(Trade.status == "closed")
+            .limit(5000)
+            .all()
+        )
+        for hist, tr in rows:
+            flags = hist.degradation_flags or {}
+            if not isinstance(flags, dict) or not flags.get("degraded_3plus"):
+                continue
+            # last decision benefit for trade — approximate with PnL
+            won = (tr.pnl or 0) > 0
+            degraded_benefit.append(won)
+    except Exception:
+        pass
+
+    rate = sum(degraded_benefit) / len(degraded_benefit) if degraded_benefit else None
+    return {
+        "history_rows_window": int(n_hist),
+        "degraded_3plus_closed_trades_sampled": len(degraded_benefit),
+        "win_rate_when_had_degraded_3plus": round(rate, 3) if rate is not None else None,
     }
 
 
@@ -8463,6 +8528,20 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
     top_tickers, _drv = build_snapshot_ticker_universe(db, user_id)
     daily_count = take_snapshots_parallel(db, top_tickers, bar_interval="1d")
     intra_count = _take_intraday_crypto_snapshots(db, top_tickers)
+
+    vitals_refresh: dict[str, Any] = {}
+    try:
+        from .setup_vitals import monitored_tickers_for_vitals, refresh_ticker_vitals_batch
+
+        mon = set(monitored_tickers_for_vitals(db))
+        uni = {str(x).strip().upper() for x in top_tickers}
+        batch = sorted(mon & uni) if mon & uni else sorted(uni)[:40]
+        vitals_refresh["1d"] = refresh_ticker_vitals_batch(db, batch, "1d")
+        vitals_refresh["1h"] = refresh_ticker_vitals_batch(db, batch, "1h")
+    except Exception as e:
+        logger.warning("[learning] vitals refresh after snapshots failed: %s", e)
+        vitals_refresh = {"error": str(e)}
+
     return {
         "ok": True,
         "snapshots_taken_daily": daily_count,
@@ -8471,6 +8550,7 @@ def run_scheduled_market_snapshots(db: Session, user_id: int | None) -> dict[str
         "universe_size": len(top_tickers),
         "snapshot_driver": _drv.get("snapshot_driver"),
         "tickers": top_tickers,
+        "vitals_refresh": vitals_refresh,
     }
 
 
