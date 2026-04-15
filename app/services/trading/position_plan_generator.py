@@ -29,6 +29,112 @@ def _load_system_prompt() -> str:
     return _SYSTEM_PROMPT
 
 
+def _parse_llm_json(raw: str) -> dict[str, Any] | None:
+    """Parse LLM JSON with recovery for truncated responses."""
+    cleaned = raw.strip()
+    if cleaned.startswith("```"):
+        cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        cleaned = cleaned.strip()
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        pass
+
+    repaired = _repair_truncated_json(cleaned)
+    if repaired:
+        try:
+            result = json.loads(repaired)
+            logger.info("[position_plan] Recovered truncated JSON (%d → %d chars)", len(cleaned), len(repaired))
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning("[position_plan] JSON repair failed, len=%d", len(cleaned))
+    return None
+
+
+def _repair_truncated_json(s: str) -> str | None:
+    """Attempt to close a truncated JSON object so it parses.
+
+    Strategy: walk the string tracking open braces/brackets/strings,
+    then append the necessary closing tokens.  Also trims any trailing
+    incomplete key-value pair to keep the structure valid.
+    """
+    if not s or s[0] != "{":
+        return None
+
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    last_complete_idx = 0
+
+    for i, ch in enumerate(s):
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch in ("{", "["):
+            stack.append(ch)
+            last_complete_idx = i
+        elif ch == "}":
+            if stack and stack[-1] == "{":
+                stack.pop()
+                last_complete_idx = i
+        elif ch == "]":
+            if stack and stack[-1] == "[":
+                stack.pop()
+                last_complete_idx = i
+        elif ch == ",":
+            last_complete_idx = i
+
+    if not stack:
+        return None
+
+    truncated = s[:last_complete_idx + 1].rstrip().rstrip(",")
+
+    closers = ""
+    for opener in reversed(stack):
+        if opener == "{":
+            closers += "}"
+        elif opener == "[":
+            closers += "]"
+
+    candidate = truncated + closers
+    try:
+        json.loads(candidate)
+        return candidate
+    except json.JSONDecodeError:
+        pass
+
+    trim_targets = [
+        truncated.rfind(","),
+        truncated.rfind("{") + 1,
+        truncated.rfind("[") + 1,
+    ]
+    for pos in sorted(set(trim_targets), reverse=True):
+        if pos <= 0:
+            continue
+        attempt = truncated[:pos].rstrip().rstrip(",") + closers
+        try:
+            json.loads(attempt)
+            return attempt
+        except json.JSONDecodeError:
+            continue
+
+    return None
+
+
 def _build_position_context(
     db: Session,
     trades: list[Trade],
@@ -220,7 +326,7 @@ def generate_position_plans(
         {"role": "user", "content": user_msg},
     ]
 
-    max_tokens = min(4000, 300 * len(trades) + 500)
+    max_tokens = min(16000, 500 * len(trades) + 800)
     raw = call_llm(messages, max_tokens=max_tokens, trace_id="position-plan-generator")
 
     if not raw:
@@ -234,18 +340,12 @@ def generate_position_plans(
             "trade_ids": [t.id for t in trades],
         }
 
-    try:
-        cleaned = raw.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
-            if cleaned.endswith("```"):
-                cleaned = cleaned[:-3]
-        result = json.loads(cleaned)
-    except json.JSONDecodeError as e:
-        logger.error("[position_plan] Failed to parse LLM JSON: %s — raw[:500]: %s", e, raw[:500])
+    result = _parse_llm_json(raw)
+    if result is None:
+        logger.error("[position_plan] Failed to parse LLM JSON — raw[:500]: %s", raw[:500])
         return {
             "ok": False,
-            "error": f"Failed to parse LLM response: {e}",
+            "error": "Failed to parse LLM response (truncated or malformed)",
             "raw_response": raw[:2000],
             "portfolio_summary": portfolio_ctx,
             "position_plans": [],
