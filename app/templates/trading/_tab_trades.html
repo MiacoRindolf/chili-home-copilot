@@ -18,8 +18,24 @@
           <label><input type="checkbox" id="trades-filter-rh" onchange="applyTradesFilter()"> Robinhood only</label>
         </div>
         <table class="trades"><thead><tr>
-          <th>Ticker</th><th>Source</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th>Actions</th>
+          <th>Ticker</th><th>Source</th><th>Dir</th><th>Entry</th><th>Exit</th><th>Qty</th><th>P&L</th><th>Status</th><th>Pattern</th><th>Actions</th>
         </tr></thead><tbody id="trades-body"></tbody></table>
+      </div>
+
+      <!-- Assign scan pattern (Monitor tab) -->
+      <div class="sell-dialog-overlay" id="assign-pattern-overlay">
+        <div class="sell-dialog" style="width:min(420px,92vw)">
+          <h4 id="assign-pattern-title">Assign strategy</h4>
+          <p style="font-size:11px;color:var(--text-secondary);margin:0 0 8px 0" id="assign-pattern-hint">Link a scan pattern so the Monitor tab can track health and alerts for this position.</p>
+          <div class="sell-row"><label>Pattern</label>
+            <select id="assign-pattern-select" style="flex:1;padding:5px 8px;font-size:12px;border:1px solid var(--input-border);border-radius:6px;background:var(--input-bg);color:var(--text);max-width:280px"></select>
+          </div>
+          <div class="sell-buttons">
+            <button type="button" class="btn-cancel" onclick="closeAssignPatternDialog()">Cancel</button>
+            <button type="button" class="btn-cancel" onclick="confirmAssignPattern(true)" title="Remove pattern link">Clear</button>
+            <button type="button" class="btn-confirm" onclick="confirmAssignPattern(false)">Save</button>
+          </div>
+        </div>
       </div>
 
       <!-- Sell Dialog -->

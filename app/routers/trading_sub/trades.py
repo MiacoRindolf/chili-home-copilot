@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from ...deps import get_db, get_identity_ctx
 from ...services import broker_manager, broker_service
 from ...services import trading_service as ts
-from ...schemas.trading import JournalCreate, TradeClose, TradeCreate, TradeSell
+from ...schemas.trading import JournalCreate, TradeAssignPattern, TradeClose, TradeCreate, TradeSell
 from ._utils import json_safe
 
 logger = logging.getLogger(__name__)
@@ -145,6 +145,44 @@ def api_delete_trade(
     if err == "forbidden":
         return JSONResponse({"ok": False, "error": "You don't have permission to delete this trade"}, status_code=403)
     return JSONResponse({"ok": True, "id": trade_id})
+
+
+@router.post("/trades/{trade_id}/assign-pattern")
+def api_assign_trade_pattern(
+    trade_id: int,
+    body: TradeAssignPattern,
+    request: Request = None,
+    db: Session = Depends(get_db),
+):
+    """Link a scan pattern to an open trade (Monitor + pattern monitor). Clears when scan_pattern_id omitted or null."""
+    ctx = get_identity_ctx(request, db)
+    trade, err = ts.assign_scan_pattern_to_trade(
+        db, trade_id, ctx["user_id"], body.scan_pattern_id,
+    )
+    if err == "not_found":
+        return JSONResponse({"ok": False, "error": "Trade not found"}, status_code=404)
+    if err == "not_open":
+        return JSONResponse({"ok": False, "error": "Trade is not open"}, status_code=400)
+    if err == "pattern_not_found":
+        return JSONResponse({"ok": False, "error": "Pattern not found"}, status_code=404)
+    if err == "pattern_invalid":
+        return JSONResponse(
+            {"ok": False, "error": "Pattern has no evaluable conditions"},
+            status_code=400,
+        )
+    if err == "asset_mismatch":
+        return JSONResponse(
+            {"ok": False, "error": "Pattern asset class does not match this ticker"},
+            status_code=400,
+        )
+    return JSONResponse(
+        {
+            "ok": True,
+            "id": trade.id,
+            "scan_pattern_id": trade.scan_pattern_id,
+            "related_alert_id": trade.related_alert_id,
+        }
+    )
 
 
 @router.post("/trades/{trade_id}/sell")

@@ -47,6 +47,7 @@ from .portfolio import (
     create_trade,
     close_trade,
     delete_trade,
+    assign_scan_pattern_to_trade,
     get_trades,
     get_trade_stats,
     get_trade_stats_by_source,

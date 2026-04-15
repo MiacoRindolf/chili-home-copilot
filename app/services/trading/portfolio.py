@@ -10,8 +10,8 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ...models.trading import JournalEntry, Trade, TradingInsight, WatchlistItem
-from .market_data import fetch_quote, get_indicator_snapshot
+from ...models.trading import BreakoutAlert, JournalEntry, ScanPattern, Trade, TradingInsight, WatchlistItem
+from .market_data import fetch_quote, get_indicator_snapshot, is_crypto
 
 logger = logging.getLogger(__name__)
 
@@ -160,6 +160,93 @@ def delete_trade(db: Session, trade_id: int, user_id: int | None) -> str | None:
     db.delete(trade)
     db.commit()
     return None
+
+
+def assign_scan_pattern_to_trade(
+    db: Session,
+    trade_id: int,
+    user_id: int | None,
+    scan_pattern_id: int | None,
+) -> tuple[Trade | None, str | None]:
+    """Attach or clear a ScanPattern on an open trade for pattern monitor attribution.
+
+    When assigning, creates a synthetic BreakoutAlert so pattern_position_monitor
+    can resolve trade plans (engine requires related_alert_id today).
+
+    Returns (trade, None) on success, (None, error_code) on failure.
+    """
+    trade = db.query(Trade).filter(Trade.id == trade_id, Trade.user_id == user_id).first()
+    if not trade:
+        return None, "not_found"
+    if trade.status != "open":
+        return None, "not_open"
+
+    if scan_pattern_id is None:
+        trade.scan_pattern_id = None
+        trade.related_alert_id = None
+        db.commit()
+        db.refresh(trade)
+        return trade, None
+
+    pattern = db.query(ScanPattern).filter(ScanPattern.id == scan_pattern_id).first()
+    if not pattern:
+        return None, "pattern_not_found"
+
+    rules = pattern.rules_json
+    if isinstance(rules, str):
+        try:
+            rules = json.loads(rules)
+        except (json.JSONDecodeError, TypeError):
+            rules = {}
+    if not isinstance(rules, dict) or not rules.get("conditions"):
+        return None, "pattern_invalid"
+
+    ticker_crypto = is_crypto(trade.ticker)
+    ac = (pattern.asset_class or "all").lower()
+    if ac == "crypto" and not ticker_crypto:
+        return None, "asset_mismatch"
+    if ac == "stock" and ticker_crypto:
+        return None, "asset_mismatch"
+
+    if trade.scan_pattern_id == scan_pattern_id and trade.related_alert_id:
+        db.refresh(trade)
+        return trade, None
+
+    price_at = float(trade.entry_price)
+    try:
+        q = fetch_quote(trade.ticker)
+        if q:
+            p = q.get("price") or q.get("last")
+            if p:
+                price_at = float(p)
+    except Exception:
+        logger.debug("[portfolio] assign_pattern quote failed for %s", trade.ticker, exc_info=True)
+
+    asset_type = "crypto" if ticker_crypto else "stock"
+    score = float(pattern.confidence) if pattern.confidence is not None else 0.5
+
+    alert = BreakoutAlert(
+        ticker=trade.ticker.upper(),
+        asset_type=asset_type,
+        alert_tier="user_assigned",
+        score_at_alert=score,
+        price_at_alert=price_at,
+        entry_price=float(trade.entry_price),
+        stop_loss=float(trade.stop_loss) if trade.stop_loss is not None else None,
+        target_price=float(trade.take_profit) if trade.take_profit is not None else None,
+        outcome="pending",
+        user_id=user_id,
+        scan_pattern_id=pattern.id,
+        timeframe=pattern.timeframe or "1d",
+        outcome_notes="Synthetic alert: user assigned scan pattern to open position",
+    )
+    db.add(alert)
+    db.flush()
+    trade.scan_pattern_id = pattern.id
+    trade.related_alert_id = alert.id
+    db.commit()
+    db.refresh(trade)
+    return trade, None
 
 
 def _calc_pnl(trade: Trade) -> float:

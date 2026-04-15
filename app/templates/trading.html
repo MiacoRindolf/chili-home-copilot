@@ -5782,12 +5782,27 @@ function _wlInputHandler(e) {
 /* ── Trades ─────────────────────────────────────── */
 var _allTrades = [];
 var _sellTradeId = null;
+var _assignTradeId = null;
+var _assignTicker = '';
+var _patternIdToName = {};
+var _patternsListCache = null;
+
+function loadTradePatternNames(done) {
+  fetch('/api/trading/patterns').then(function(r) { return r.json(); }).then(function(d) {
+    if (d && d.ok && d.patterns) {
+      _patternsListCache = d.patterns;
+      _patternIdToName = {};
+      d.patterns.forEach(function(p) { _patternIdToName[p.id] = p.name; });
+    }
+    if (typeof done === 'function') done();
+  }).catch(function() { if (typeof done === 'function') done(); });
+}
 
 function loadTrades() {
   fetch('/api/trading/trades').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
     _allTrades = d.trades;
-    applyTradesFilter();
+    loadTradePatternNames(applyTradesFilter);
   });
 }
 
@@ -5804,7 +5819,7 @@ function applyTradesFilter() {
   });
 
   if (!filtered.length) {
-    body.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-secondary);padding:16px">No trades match the current filter.</td></tr>';
+    body.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-secondary);padding:16px">No trades match the current filter.</td></tr>';
     return;
   }
 
@@ -5831,6 +5846,16 @@ function applyTradesFilter() {
     }
     actions += '<button class="btn-delete" onclick="deleteTrade(' + t.id + ',\'' + (t.ticker || '').replace(/'/g, "\\'") + '\')" title="Remove this trade">Delete</button></div>';
 
+    var patCell = '';
+    if (t.status === 'open') {
+      var pid = t.scan_pattern_id;
+      var pLabel = pid ? (_patternIdToName[pid] || ('#' + pid)) : '—';
+      patCell = '<span style="font-size:11px;color:var(--text-secondary);max-width:120px;display:inline-block;vertical-align:middle" title="Monitor strategy">' + (pid ? escapeHtml(pLabel) : '—') + '</span> '
+        + '<button type="button" class="broker-sync-btn" style="margin-left:4px" onclick="openAssignPatternDialog(' + t.id + ',\'' + (t.ticker || '').replace(/'/g, "\\'") + '\',' + (pid ? pid : 'null') + ')">Assign</button>';
+    } else {
+      patCell = t.scan_pattern_id ? escapeHtml(_patternIdToName[t.scan_pattern_id] || ('#' + t.scan_pattern_id)) : '—';
+    }
+
     body.innerHTML += '<tr>'
       + '<td style="font-weight:600">' + t.ticker + '</td>'
       + '<td>' + srcBadge + '</td>'
@@ -5840,9 +5865,103 @@ function applyTradesFilter() {
       + '<td>' + t.quantity + '</td>'
       + '<td class="' + pnlCls + '">' + pnlStr + '</td>'
       + '<td>' + statusBadge + '</td>'
+      + '<td style="white-space:nowrap">' + patCell + '</td>'
       + '<td>' + actions + '</td>'
       + '</tr>';
   });
+}
+
+function escapeHtml(s) {
+  if (!s) return '';
+  var d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+function openAssignPatternDialog(tradeId, ticker, currentPatternId) {
+  if (CHILI_TRADING_IS_GUEST) { alert('Sign in to assign a strategy'); return; }
+  _assignTradeId = tradeId;
+  _assignTicker = ticker || '';
+  var overlay = document.getElementById('assign-pattern-overlay');
+  var title = document.getElementById('assign-pattern-title');
+  if (title) title.textContent = 'Assign strategy — ' + _assignTicker;
+  function fill() {
+    _rebuildAssignPatternSelect(_assignTicker, currentPatternId);
+    if (overlay) overlay.classList.add('active');
+  }
+  if (_patternsListCache && _patternsListCache.length) {
+    fill();
+  } else {
+    loadTradePatternNames(fill);
+  }
+}
+
+function closeAssignPatternDialog() {
+  _assignTradeId = null;
+  _assignTicker = '';
+  var overlay = document.getElementById('assign-pattern-overlay');
+  if (overlay) overlay.classList.remove('active');
+}
+
+function _rebuildAssignPatternSelect(ticker, selectedId) {
+  var sel = document.getElementById('assign-pattern-select');
+  if (!sel) return;
+  var crypto = (ticker || '').toUpperCase().indexOf('-USD') !== -1;
+  sel.innerHTML = '';
+  var opt0 = document.createElement('option');
+  opt0.value = '';
+  opt0.textContent = '(None — clear assignment)';
+  sel.appendChild(opt0);
+  var list = _patternsListCache || [];
+  list.forEach(function(p) {
+    var ac = (p.asset_class || 'all').toLowerCase();
+    if (ac === 'crypto' && !crypto) return;
+    if (ac === 'stock' && crypto) return;
+    var rj = p.rules_json;
+    var conds = (rj && typeof rj === 'object' && rj.conditions) ? rj.conditions : null;
+    if (!conds || !conds.length) return;
+    var o = document.createElement('option');
+    o.value = String(p.id);
+    o.textContent = p.name + ' (#' + p.id + ', ' + (p.asset_class || 'all') + ')';
+    sel.appendChild(o);
+  });
+  if (selectedId) {
+    sel.value = String(selectedId);
+    if (sel.value !== String(selectedId)) {
+      var o2 = document.createElement('option');
+      o2.value = String(selectedId);
+      o2.textContent = 'Current #' + selectedId;
+      sel.appendChild(o2);
+      sel.value = String(selectedId);
+    }
+  } else {
+    sel.value = '';
+  }
+}
+
+function confirmAssignPattern(isClear) {
+  if (!_assignTradeId) return;
+  var sel = document.getElementById('assign-pattern-select');
+  var raw = isClear ? '' : (sel ? sel.value : '');
+  var pid = raw === '' ? null : parseInt(raw, 10);
+  if (raw !== '' && !isFinite(pid)) { alert('Choose a pattern or clear'); return; }
+  var payload = { scan_pattern_id: pid };
+  fetch('/api/trading/trades/' + _assignTradeId + '/assign-pattern', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    credentials: 'same-origin',
+    body: JSON.stringify(payload)
+  }).then(function(r) { return r.json().then(function(d) { return { ok: r.ok, d: d }; }); }).then(function(res) {
+    if (!res.d || !res.d.ok) {
+      alert(res.d && res.d.error ? res.d.error : 'Could not update assignment');
+      return;
+    }
+    closeAssignPatternDialog();
+    loadTrades();
+    loadStats();
+    _refreshMonitorIfLoaded();
+    appendAiMsg('assistant', pid ? ('Strategy assigned for monitor (pattern #' + pid + ').') : 'Strategy assignment cleared.');
+  }).catch(function() { alert('Request failed'); });
 }
 
 function createTrade() {

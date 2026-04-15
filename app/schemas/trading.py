@@ -49,6 +49,12 @@ class TradeUpdate(BaseModel):
     notes: Optional[str] = None
 
 
+class TradeAssignPattern(BaseModel):
+    """Assign a scan pattern to an open trade for Monitor attribution (or null to clear)."""
+
+    scan_pattern_id: Optional[int] = None
+
+
 class TradeOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
