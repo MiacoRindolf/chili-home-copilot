@@ -199,10 +199,16 @@ def get_portfolio() -> dict[str, Any]:
     for acc in accounts:
         bal = acc.get("available_balance", {})
         val = _safe_float(bal.get("value") if isinstance(bal, dict) else getattr(bal, "value", 0))
-        currency = bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", "")
+        hold_bal = acc.get("hold", {})
+        hold_val = _safe_float(hold_bal.get("value") if isinstance(hold_bal, dict) else getattr(hold_bal, "value", 0))
+        currency = (
+            acc.get("currency")
+            or (bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", ""))
+            or ""
+        ).upper()
         if currency == "USD":
             available_cash += val
-        total_value += val
+        total_value += val + hold_val
     result = {
         "equity": round(total_value, 2),
         "buying_power": round(available_cash, 2),
@@ -257,12 +263,18 @@ def get_positions() -> list[dict[str, Any]]:
     for acc in accounts:
         bal = acc.get("available_balance", {})
         val = _safe_float(bal.get("value") if isinstance(bal, dict) else getattr(bal, "value", 0))
-        currency = bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", "")
-        if val <= 0 or currency == "USD":
+        currency = (
+            acc.get("currency")
+            or (bal.get("currency") if isinstance(bal, dict) else getattr(bal, "currency", ""))
+            or ""
+        ).upper()
+        if currency == "USD":
             continue
         hold_bal = acc.get("hold", {})
         hold_val = _safe_float(hold_bal.get("value") if isinstance(hold_bal, dict) else getattr(hold_bal, "value", 0))
         total_qty = val + hold_val
+        if total_qty <= 0:
+            continue
         ticker = f"{currency}-USD"
         avg_price = _get_cost_basis_from_fills(ticker)
         positions.append({
@@ -553,9 +565,39 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     return {"synced": synced, "filled": filled, "cancelled": cancelled, "errors": errors}
 
 
+def _link_latest_alert(db: Session, trade) -> None:
+    """Link a broker-synced trade to its most recent imminent/pending alert if one exists."""
+    from ..models.trading import BreakoutAlert
+
+    if trade.related_alert_id:
+        return
+    try:
+        alert = (
+            db.query(BreakoutAlert)
+            .filter(
+                BreakoutAlert.ticker == trade.ticker,
+                BreakoutAlert.outcome == "pending",
+                BreakoutAlert.scan_pattern_id.isnot(None),
+            )
+            .order_by(BreakoutAlert.alerted_at.desc())
+            .first()
+        )
+        if alert:
+            trade.related_alert_id = alert.id
+            trade.scan_pattern_id = alert.scan_pattern_id
+            if not trade.stop_loss and alert.stop_loss:
+                trade.stop_loss = float(alert.stop_loss)
+            if not trade.take_profit and alert.target_price:
+                trade.take_profit = float(alert.target_price)
+            logger.debug("[coinbase] Linked %s to alert %s (pattern %s)",
+                         trade.ticker, alert.id, alert.scan_pattern_id)
+    except Exception:
+        logger.debug("[coinbase] _link_latest_alert failed for %s", trade.ticker, exc_info=True)
+
+
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Coinbase positions into local Trade model."""
-    from ..models.trading import Trade
+    from ..models.trading import BreakoutAlert, Trade
 
     if not is_connected():
         return {"created": 0, "updated": 0, "closed": 0}
@@ -587,6 +629,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             avg_price = pos.get("average_buy_price", 0)
             if avg_price and avg_price > 0 and (not existing.entry_price or existing.entry_price == 0):
                 existing.entry_price = avg_price
+            if not existing.related_alert_id:
+                _link_latest_alert(db, existing)
             updated += 1
         else:
             avg_price = pos.get("average_buy_price", 0)
@@ -603,6 +647,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 notes=f"Auto-synced from Coinbase on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)
+            db.flush()
+            _link_latest_alert(db, trade)
             created += 1
 
     stale = (

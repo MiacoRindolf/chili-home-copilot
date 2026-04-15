@@ -7,6 +7,7 @@ Dispatches Telegram alerts and logs decisions for learning feedback.
 """
 from __future__ import annotations
 
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -35,6 +36,43 @@ logger = logging.getLogger(__name__)
 
 # In-memory cache of last health scores per trade_id to compute deltas.
 _last_health: dict[int, float] = {}
+
+# Dedup Telegram pattern_monitor alerts: same ticker+pattern+action+body as last send → skip.
+# exit_now always sends. Cleared opportunistically when oversized.
+_last_monitor_alert_sig: dict[str, str] = {}
+_MONITOR_ALERT_DEDUP_MAX_KEYS = 500
+
+
+def _monitor_alert_dedup_key(ticker: str, scan_pattern_id: int | None, action: str) -> str:
+    tid = (ticker or "").upper()
+    pid = str(scan_pattern_id) if scan_pattern_id is not None else "none"
+    return f"{tid}:{pid}:{action}"
+
+
+def _monitor_alert_content_signature(
+    *,
+    new_stop: float | None,
+    new_target: float | None,
+    health_score: float,
+    reasoning: str,
+    invalidations: list | None,
+    caution_changes: list | None,
+    structural_support: float | None,
+    structural_support_label: str,
+) -> str:
+    """Stable fingerprint for duplicate detection (ignores volatile price/PnL in message)."""
+    def _nf(x: float | None) -> str:
+        if x is None:
+            return "none"
+        return f"{float(x):.6g}"
+
+    rs = " ".join((reasoning or "").split())[:500]
+    inv = json.dumps(invalidations or [], sort_keys=True, default=str)
+    cau = json.dumps(caution_changes or [], sort_keys=True, default=str)
+    hb = f"{float(health_score):.3f}"
+    sup = _nf(structural_support)
+    slab = (structural_support_label or "").strip()[:120]
+    return "|".join((_nf(new_stop), _nf(new_target), hb, rs, inv, cau, sup, slab))
 
 
 @dataclass
@@ -743,6 +781,34 @@ def _dispatch_monitor_alert(
 
     _sup = plan_health.nearest_support if plan_health else None
     _sup_lab = plan_health.nearest_support_label if plan_health else ""
+
+    # Content-aware dedup: same ticker+pattern+action and same substantive payload → no second Telegram.
+    # exit_now always sends (critical).
+    if rec.action != "exit_now" and not dry_run:
+        dedup_key = _monitor_alert_dedup_key(
+            trade.ticker, trade.scan_pattern_id, str(rec.action)
+        )
+        sig = _monitor_alert_content_signature(
+            new_stop=rec.new_stop,
+            new_target=rec.new_target,
+            health_score=health.health_score,
+            reasoning=getattr(rec, "reasoning", "") or "",
+            invalidations=invalidations,
+            caution_changes=caution_changes,
+            structural_support=_sup,
+            structural_support_label=_sup_lab,
+        )
+        if _last_monitor_alert_sig.get(dedup_key) == sig:
+            logger.debug(
+                "[pattern_monitor] duplicate alert suppressed for %s key=%s",
+                trade.ticker,
+                dedup_key,
+            )
+            return
+        if len(_last_monitor_alert_sig) >= _MONITOR_ALERT_DEDUP_MAX_KEYS:
+            _last_monitor_alert_sig.clear()
+        _last_monitor_alert_sig[dedup_key] = sig
+
     msg = format_pattern_adjustment(
         ticker=trade.ticker,
         pattern_name=pattern_name,

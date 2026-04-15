@@ -234,6 +234,7 @@ def check_duplicate_position(ticker: str) -> list[str]:
 def sync_all(db: Session, user_id: int | None) -> dict[str, Any]:
     """Sync orders and positions from all connected brokers."""
     result: dict[str, Any] = {}
+    wl_tickers: set[str] = set()
 
     if broker_service.is_connected():
         result["robinhood_orders"] = broker_service.sync_orders_to_db(db, user_id)
@@ -242,12 +243,38 @@ def sync_all(db: Session, user_id: int | None) -> dict[str, Any]:
         result["robinhood_positions"] = pos_result
         result["robinhood_manual"] = broker_service.cleanup_manual_trades(db, user_id, live_tickers)
         result["robinhood_backfill"] = broker_service.backfill_closed_trade_pnl(db, user_id)
+        wl_tickers.update(live_tickers)
 
     if coinbase_service.is_connected():
         result["coinbase_orders"] = coinbase_service.sync_orders_to_db(db, user_id)
-        result["coinbase_positions"] = coinbase_service.sync_positions_to_db(db, user_id)
+        cb_result = coinbase_service.sync_positions_to_db(db, user_id)
+        cb_live = cb_result.pop("_live_tickers", set())
+        result["coinbase_positions"] = cb_result
+        wl_tickers.update(cb_live)
+
+    if wl_tickers and user_id:
+        added = _ensure_broker_tickers_in_watchlist(db, user_id, wl_tickers)
+        result["watchlist_added"] = added
 
     return result
+
+
+def _ensure_broker_tickers_in_watchlist(
+    db: Session, user_id: int, tickers: set[str],
+) -> int:
+    """Auto-add broker position tickers to the user's watchlist."""
+    from .trading.portfolio import add_to_watchlist, get_watchlist
+
+    existing = {item.ticker for item in get_watchlist(db, user_id)}
+    added = 0
+    for ticker in tickers:
+        if ticker.upper() not in existing:
+            try:
+                add_to_watchlist(db, user_id, ticker)
+                added += 1
+            except Exception:
+                logger.debug("[broker_manager] watchlist add failed for %s", ticker)
+    return added
 
 
 def connect_broker(broker: str, credentials: dict[str, Any] | None = None) -> dict[str, Any]:

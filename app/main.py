@@ -561,12 +561,54 @@ async def lifespan(app: FastAPI):
 
 
 def _restore_broker_sessions():
-    """Try to restore persisted Robinhood session on startup."""
+    """Try to restore persisted Robinhood + Coinbase sessions on startup."""
+    _log = logging.getLogger("chili.startup")
     try:
         from .services import broker_service
         broker_service.try_restore_session()
     except Exception:
         pass
+
+    try:
+        from .db import SessionLocal
+        from .models.core import BrokerCredential
+        from .services.credential_vault import decrypt_credentials
+        from .services import coinbase_service, broker_manager
+
+        db = SessionLocal()
+        try:
+            cb_creds = (
+                db.query(BrokerCredential)
+                .filter(BrokerCredential.broker == "coinbase")
+                .all()
+            )
+            if not cb_creds:
+                _log.debug("[startup] No Coinbase credentials in vault")
+            else:
+                connected = False
+                for cb_cred in cb_creds:
+                    creds = decrypt_credentials(cb_cred.encrypted_data)
+                    if not (creds and creds.get("api_key") and creds.get("api_secret")):
+                        continue
+                    if not connected:
+                        result = coinbase_service.connect_with_credentials(
+                            creds["api_key"], creds["api_secret"],
+                        )
+                        _log.info("[startup] Coinbase auto-reconnect: %s", result.get("status"))
+                        connected = result.get("status") == "connected"
+                    if connected:
+                        uid = cb_cred.user_id
+                        sync_result = broker_manager.sync_all(db, uid)
+                        _log.info("[startup] Broker sync user_id=%s: cb=%s, rh=%s, wl=%s",
+                            uid,
+                            sync_result.get("coinbase_positions"),
+                            sync_result.get("robinhood_positions"),
+                            sync_result.get("watchlist_added"),
+                        )
+        finally:
+            db.close()
+    except Exception:
+        _log.debug("[startup] Coinbase auto-reconnect failed", exc_info=True)
 
 
 def _start_massive_ws():
