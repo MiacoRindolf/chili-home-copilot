@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -414,6 +415,52 @@ def api_remove_watchlist(
 
 # ── AI Analysis ─────────────────────────────────────────────────────────
 
+_CHART_LEVELS_RE = re.compile(
+    r"```json:chart_levels\s*\n(\{.*?\})\s*```",
+    re.DOTALL,
+)
+
+
+def _normalize_chart_levels(raw: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Keep only expected keys with numeric values for chart price lines."""
+    if not raw or not isinstance(raw, dict):
+        return None
+    out: dict[str, Any] = {}
+    for k in ("entry", "stop", "sma_20", "sma_50", "sma_200", "vwap"):
+        v = raw.get(k)
+        if isinstance(v, (int, float)):
+            fv = float(v)
+            if fv == fv:  # not NaN
+                out[k] = fv
+    for k in ("targets", "support", "resistance"):
+        v = raw.get(k)
+        if isinstance(v, list):
+            arr = []
+            for x in v:
+                if isinstance(x, (int, float)):
+                    fx = float(x)
+                    if fx == fx:
+                        arr.append(fx)
+            if arr:
+                out[k] = arr
+    return out or None
+
+
+def _extract_chart_levels(text: str) -> dict[str, Any] | None:
+    m = _CHART_LEVELS_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        parsed = json.loads(m.group(1))
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return None
+    return _normalize_chart_levels(parsed if isinstance(parsed, dict) else None)
+
+
+def _strip_chart_levels_block(text: str) -> str:
+    return _CHART_LEVELS_RE.sub("", text or "").strip()
+
+
 @router.post("/api/trading/analyze")
 def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(get_db)):
     """AI-powered analysis of a ticker using indicators + journal context."""
@@ -451,7 +498,18 @@ def api_analyze(body: AnalyzeRequest, request: Request, db: Session = Depends(ge
         log_info(trace_id, f"[trading] AI analysis error: {e}")
         reply = f"Analysis unavailable: {e}"
 
-    return JSONResponse({"ok": True, "reply": reply, "ticker": body.ticker})
+    annotations = _extract_chart_levels(reply) if isinstance(reply, str) else None
+    if annotations:
+        reply = _strip_chart_levels_block(reply)
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "reply": reply,
+            "ticker": body.ticker,
+            "annotations": annotations,
+        }
+    )
 
 
 @router.get("/api/trading/analyze/stream")
@@ -496,6 +554,7 @@ def api_analyze_stream(
 
     def _generate():
         from .. import openai_client
+        full_text_parts: list[str] = []
         try:
             _stream_had_token = False
             for tok, model in openai_client.chat_stream(
@@ -506,13 +565,19 @@ def api_analyze_stream(
                 max_tokens=2048,
             ):
                 _stream_had_token = True
+                full_text_parts.append(tok)
                 yield f"data: {json.dumps({'token': tok})}\n\n"
             if not _stream_had_token:
                 _empty = (
                     "*No analysis text was returned.* The AI stream completed without content. "
                     "Please try again — if it keeps happening, check provider status or try a shorter question."
                 )
+                full_text_parts.append(_empty)
                 yield f"data: {json.dumps({'token': _empty})}\n\n"
+            full_text = "".join(full_text_parts)
+            ann = _extract_chart_levels(full_text)
+            if ann:
+                yield f"data: {json.dumps({'annotations': ann})}\n\n"
             yield "data: [DONE]\n\n"
         except Exception as e:
             log_info(trace_id, f"[trading] stream error: {e}")

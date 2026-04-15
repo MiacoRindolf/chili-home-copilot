@@ -5860,7 +5860,7 @@ function promptClose(id) {
   fetch('/api/trading/trades/'+id+'/close', {
     method:'POST', headers:{'Content-Type':'application/json'},
     body: JSON.stringify({ exit_price: parseFloat(price) })
-  }).then(function() { loadTrades(); loadStats(); loadInsights(); });
+  }).then(function() { loadTrades(); loadStats(); loadInsights(); _refreshMonitorIfLoaded(); });
 }
 
 function deleteTrade(id, ticker) {
@@ -5873,10 +5873,11 @@ function deleteTrade(id, ticker) {
       return { status: r.status, data: d };
     });
   }).then(function(res) {
-    if (res.data && res.data.ok) { loadTrades(); loadStats(); return; }
+    if (res.data && res.data.ok) { loadTrades(); loadStats(); _refreshMonitorIfLoaded(); return; }
     if (res.status === 403) { alert(res.data && res.data.error ? res.data.error : 'You don\'t have permission to delete this trade.'); return; }
     if (res.status === 404) {
       loadTrades();
+      _refreshMonitorIfLoaded();
       alert(res.data && res.data.error ? res.data.error : 'Trade not found. It may have been deleted already.');
       return;
     }
@@ -5924,7 +5925,7 @@ function confirmSell() {
       if (d.rh_state) msg += ' (RH: ' + d.rh_state + ')';
       if (d.remaining_qty > 0) msg += ', ' + d.remaining_qty + ' remaining';
       appendAiMsg('assistant', msg);
-      loadTrades(); loadStats(); loadBrokerPortfolio(); loadPortfolio();
+      loadTrades(); loadStats(); loadBrokerPortfolio(); loadPortfolio(); _refreshMonitorIfLoaded();
     } else {
       alert(d.error || 'Sell failed');
     }
@@ -6570,7 +6571,10 @@ function _streamAnalyze(msg, isSmartPick) {
         clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
         return response.json().then(function(d) {
           removeLastAiMsg(); _hideStopBtn();
-          appendAiMsg('assistant', d.reply || 'Analysis unavailable.');
+          var dispErr = _stripChartLevelsBlockDisplay(d.reply || '');
+          appendAiMsg('assistant', dispErr || 'Analysis unavailable.');
+          var lvErr = d.annotations || _parseChartLevelsFallback(d.reply || '');
+          if (lvErr) drawAiAnnotations(lvErr);
         });
       }
       removeLastAiMsg();
@@ -6581,6 +6585,7 @@ function _streamAnalyze(msg, isSmartPick) {
       msgs.appendChild(msgEl.firstElementChild);
       var bubble = msgs.lastElementChild.querySelector('.bubble');
       var fullText = '';
+      var streamAnnotations = null;
       var renderTimer = null;
       var gotFirstToken = false;
 
@@ -6606,8 +6611,9 @@ function _streamAnalyze(msg, isSmartPick) {
 
       function _renderStream() {
         if (!bubble) return;
-        var parsed = fullText;
-        try { parsed = marked.parse(fullText); } catch(e) {}
+        var displayRaw = _stripChartLevelsBlockDisplay(fullText);
+        var parsed = displayRaw;
+        try { parsed = marked.parse(displayRaw); } catch(e) {}
         parsed = linkifyTickers(parsed);
         bubble.innerHTML = parsed + '<span class="streaming-cursor"></span>';
         _aiScrollToBottom();
@@ -6619,11 +6625,12 @@ function _streamAnalyze(msg, isSmartPick) {
             clearInterval(renderTimer);
             clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
             _hideStopBtn();
-            var parsed2 = fullText;
-            try { parsed2 = marked.parse(fullText); } catch(e) {}
+            var displayText = _stripChartLevelsBlockDisplay(fullText);
+            var parsed2 = displayText;
+            try { parsed2 = marked.parse(displayText); } catch(e) {}
             parsed2 = linkifyTickers(parsed2);
             parsed2 = renderTickerCards(parsed2);
-            var followups = _generateFollowups(fullText, currentTicker);
+            var followups = _generateFollowups(displayText, currentTicker);
             bubble.innerHTML = parsed2;
             var body = bubble.closest('.msg-body');
             if (body) {
@@ -6636,8 +6643,10 @@ function _streamAnalyze(msg, isSmartPick) {
               chipDiv.innerHTML = _renderFollowups(followups);
               if (chipDiv.firstElementChild) body.appendChild(chipDiv.firstElementChild);
             }
-            chatHistory.push({ role: 'assistant', text: fullText, time: Date.now() });
+            chatHistory.push({ role: 'assistant', text: displayText, time: Date.now() });
             _saveChatHistory();
+            var levelsDraw = streamAnnotations || _parseChartLevelsFallback(fullText);
+            if (levelsDraw) drawAiAnnotations(levelsDraw);
             var elapsed = ((Date.now() - _streamStartTime) / 1000).toFixed(1);
             var ctxEl = document.getElementById('ai-ctx-info');
             ctxEl.textContent = elapsed + 's';
@@ -6654,6 +6663,9 @@ function _streamAnalyze(msg, isSmartPick) {
               if (payload === '[DONE]') return;
               try {
                 var ev = JSON.parse(payload);
+                if (ev.annotations && typeof ev.annotations === 'object') {
+                  streamAnnotations = ev.annotations;
+                }
                 if (ev.token) {
                   if (!gotFirstToken) {
                     gotFirstToken = true;
@@ -6674,7 +6686,14 @@ function _streamAnalyze(msg, isSmartPick) {
           clearTimeout(_slowTimer); clearTimeout(_timeoutTimer);
           _hideStopBtn();
           if (e.name !== 'AbortError') {
-            bubble.innerHTML = marked.parse(fullText || 'Stream interrupted.');
+            var dispInt = _stripChartLevelsBlockDisplay(fullText || '');
+            try {
+              bubble.innerHTML = marked.parse(dispInt || 'Stream interrupted.');
+            } catch (e2) {
+              bubble.innerHTML = dispInt || 'Stream interrupted.';
+            }
+            var lvInt = streamAnnotations || _parseChartLevelsFallback(fullText || '');
+            if (lvInt) drawAiAnnotations(lvInt);
           }
         });
       }
@@ -6691,7 +6710,10 @@ function _streamAnalyze(msg, isSmartPick) {
           body: JSON.stringify({ ticker: currentTicker, interval: currentInterval, message: msg, history: _historyPayload() })
         }).then(function(r){return r.json();}).then(function(d) {
           removeLastAiMsg();
-          appendAiMsg('assistant', d.reply || 'No response.');
+          var dispFb = _stripChartLevelsBlockDisplay(d.reply || '');
+          appendAiMsg('assistant', dispFb || 'No response.');
+          var lvFb = d.annotations || _parseChartLevelsFallback(d.reply || '');
+          if (lvFb) drawAiAnnotations(lvFb);
         }).catch(function() { removeLastAiMsg(); appendAiMsg('assistant', 'Error reaching AI.'); });
       }
     });
@@ -8794,6 +8816,13 @@ function _monitorSetSummaryHealthClass(val) {
   else el.parentElement.classList.add('health-bad');
 }
 
+/** Re-fetch monitor cards if the user has opened the Monitor tab at least once (avoids stale cards after close/sell/sync). */
+function _refreshMonitorIfLoaded() {
+  if (window.__monitorPayload != null) {
+    loadMonitorData(false);
+  }
+}
+
 function loadMonitorData(showRefreshFlash) {
   var runBtn = document.getElementById('monitor-run-btn');
   if (runBtn) {
@@ -9837,6 +9866,7 @@ function syncAllBrokers() {
         loadBrokerPortfolio();
         loadPortfolio();
         loadTrades();
+        _refreshMonitorIfLoaded();
         var parts = [];
         var rho = d.robinhood_orders;
         if (rho && (rho.synced || rho.filled || rho.cancelled)) parts.push('RH Orders: ' + (rho.filled || 0) + ' filled, ' + (rho.cancelled || 0) + ' cancelled');
@@ -11682,6 +11712,125 @@ function _initDrawingListeners() {
     chart.timeScale().subscribeVisibleTimeRangeChange(function() { _redrawAll(); });
   }
   new ResizeObserver(function() { _resizeDrawCanvas(); }).observe(document.getElementById('main-chart'));
+}
+
+/** Strip AI ```json:chart_levels ... ``` fence from chat display (safe while streaming). */
+function _stripChartLevelsBlockDisplay(text) {
+  if (!text) return '';
+  var fence = '```json:chart_levels';
+  var start = text.indexOf(fence);
+  if (start === -1) return text;
+  var afterFence = text.slice(start + fence.length);
+  var endMark = afterFence.search(/\n```/);
+  if (endMark !== -1) {
+    return (text.slice(0, start) + afterFence.slice(endMark + 4)).replace(/\s+$/, '').trim();
+  }
+  return text.slice(0, start).replace(/\s+$/, '').trim();
+}
+
+/** Best-effort parse of entry/stop/targets from prose when no structured block. */
+function _parseChartLevelsFallback(text) {
+  if (!text) return null;
+  var out = {};
+  function grab(re) {
+    var m = text.match(re);
+    if (!m || m[1] == null) return null;
+    var v = parseFloat(String(m[1]).replace(/,/g, ''));
+    return isFinite(v) ? v : null;
+  }
+  var entry = grab(/(?:Entry zone|Entry)\s*(?:\([^)]*\))?\s*:\s*\$?\s*([\d,.]+)/i);
+  if (entry == null) {
+    var ez = text.match(/Entry zone\s*:\s*\$?\s*([\d,.]+)\s*[-–]\s*\$?\s*([\d,.]+)/i);
+    if (ez) {
+      var a = parseFloat(ez[1].replace(/,/g, ''));
+      var b = parseFloat(ez[2].replace(/,/g, ''));
+      if (isFinite(a) && isFinite(b)) entry = (a + b) / 2;
+    }
+  }
+  if (entry != null) out.entry = entry;
+  var stop = grab(/(?:Stop-loss|Stop loss|Stop)\s*:\s*\$?\s*([\d,.]+)/i);
+  if (stop != null) out.stop = stop;
+  var targets = [];
+  var reT = /Target\s*(?:\d+|one|two|three|1|2|3)?\s*:\s*\$?\s*([\d,.]+)/gi;
+  var mt;
+  while ((mt = reT.exec(text)) !== null) {
+    var tv = parseFloat(mt[1].replace(/,/g, ''));
+    if (isFinite(tv)) targets.push(tv);
+  }
+  if (targets.length) out.targets = targets;
+  var sup = [];
+  var reS = /(?:Support|S\s*\d)\s*:\s*\$?\s*([\d,.]+)/gi;
+  while ((mt = reS.exec(text)) !== null) {
+    var sv = parseFloat(mt[1].replace(/,/g, ''));
+    if (isFinite(sv)) sup.push(sv);
+  }
+  var res = [];
+  var reR = /(?:Resistance|R\s*\d)\s*:\s*\$?\s*([\d,.]+)/gi;
+  while ((mt = reR.exec(text)) !== null) {
+    var rv = parseFloat(mt[1].replace(/,/g, ''));
+    if (isFinite(rv)) res.push(rv);
+  }
+  if (sup.length) out.support = sup;
+  if (res.length) out.resistance = res;
+  var sma20 = grab(/SMA\s*20\s*(?:\([^)]*\))?\s*[:\s]+\$?\s*([\d,.]+)/i);
+  if (sma20 != null) out.sma_20 = sma20;
+  var sma50 = grab(/SMA\s*50\s*(?:\([^)]*\))?\s*[:\s]+\$?\s*([\d,.]+)/i);
+  if (sma50 != null) out.sma_50 = sma50;
+  var sma200 = grab(/SMA\s*200\s*(?:\([^)]*\))?\s*[:\s]+\$?\s*([\d,.]+)/i);
+  if (sma200 != null) out.sma_200 = sma200;
+  var vwap = grab(/VWAP\s*:\s*\$?\s*([\d,.]+)/i);
+  if (vwap != null) out.vwap = vwap;
+  return Object.keys(out).length ? out : null;
+}
+
+/** Draw horizontal levels from AI Analyze structured output or fallback parse. */
+function drawAiAnnotations(levels) {
+  if (!levels || !candleSeries) return;
+  clearAnnotations();
+  var cr = (currentTicker || '').indexOf('-USD') !== -1;
+  var sp = function(v) { return smartPrice(v, cr); };
+  var legendItems = [];
+
+  if (levels.entry != null && isFinite(Number(levels.entry))) {
+    _addPriceLine(Number(levels.entry), '#3b82f6', 'AI Entry $' + sp(levels.entry), LightweightCharts.LineStyle.Solid, 2);
+    legendItems.push({ color: '#3b82f6', label: 'AI Entry $' + sp(levels.entry) });
+  }
+  if (levels.stop != null && isFinite(Number(levels.stop))) {
+    _addPriceLine(Number(levels.stop), '#ef4444', 'AI Stop $' + sp(levels.stop), LightweightCharts.LineStyle.Dotted, 2);
+    legendItems.push({ color: '#ef4444', label: 'AI Stop $' + sp(levels.stop), dashed: true });
+  }
+  (levels.targets || []).forEach(function(t, i) {
+    if (t == null || !isFinite(Number(t))) return;
+    _addPriceLine(Number(t), '#22c55e', 'AI T' + (i + 1) + ' $' + sp(t), LightweightCharts.LineStyle.Dashed, 1);
+    legendItems.push({ color: '#22c55e', label: 'AI Target ' + (i + 1) + ' $' + sp(t), dashed: true });
+  });
+  (levels.support || []).forEach(function(s, i) {
+    if (s == null || !isFinite(Number(s))) return;
+    _addPriceLine(Number(s), '#06b6d4', 'AI S' + (i + 1) + ' $' + sp(s), LightweightCharts.LineStyle.Dashed, 1);
+    legendItems.push({ color: '#06b6d4', label: 'AI Support ' + (i + 1) + ' $' + sp(s), dashed: true });
+  });
+  (levels.resistance || []).forEach(function(r, i) {
+    if (r == null || !isFinite(Number(r))) return;
+    _addPriceLine(Number(r), '#f59e0b', 'AI R' + (i + 1) + ' $' + sp(r), LightweightCharts.LineStyle.Dashed, 1);
+    legendItems.push({ color: '#f59e0b', label: 'AI Resist ' + (i + 1) + ' $' + sp(r), dashed: true });
+  });
+  if (levels.sma_20 != null && isFinite(Number(levels.sma_20))) {
+    _addPriceLine(Number(levels.sma_20), '#a855f7', 'AI SMA 20', LightweightCharts.LineStyle.Solid, 1);
+    legendItems.push({ color: '#a855f7', label: 'AI SMA 20' });
+  }
+  if (levels.sma_50 != null && isFinite(Number(levels.sma_50))) {
+    _addPriceLine(Number(levels.sma_50), '#ec4899', 'AI SMA 50', LightweightCharts.LineStyle.Solid, 1);
+    legendItems.push({ color: '#ec4899', label: 'AI SMA 50' });
+  }
+  if (levels.sma_200 != null && isFinite(Number(levels.sma_200))) {
+    _addPriceLine(Number(levels.sma_200), '#8b5cf6', 'AI SMA 200', LightweightCharts.LineStyle.Solid, 1);
+    legendItems.push({ color: '#8b5cf6', label: 'AI SMA 200' });
+  }
+  if (levels.vwap != null && isFinite(Number(levels.vwap))) {
+    _addPriceLine(Number(levels.vwap), '#e11d48', 'AI VWAP', LightweightCharts.LineStyle.LargeDashed, 2);
+    legendItems.push({ color: '#e11d48', label: 'AI VWAP', dashed: true });
+  }
+  if (legendItems.length) _showAnnotationLegend(legendItems);
 }
 
 function drawBreakoutAnnotations(r) {

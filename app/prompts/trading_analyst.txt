@@ -214,3 +214,27 @@ This user is a complete beginner with zero trading knowledge. You MUST:
 
 DISCLAIMER (include ONCE, briefly, at the very end):
 "Note: AI-assisted analysis. Manage your risk — never risk more than 2% of your portfolio on a single trade."
+
+CHART LEVELS (MACHINE-READABLE — ALWAYS INCLUDE AT THE VERY END):
+Immediately after the disclaimer sentence, output exactly one fenced code block so CHILI can draw your levels on the user's chart. Use this exact opening fence: three backticks, then json:chart_levels, then a newline, then a single JSON object, then a newline, then three closing backticks.
+
+Example shape (replace with your actual numbers; omit any key you did not discuss in the analysis above):
+
+```json:chart_levels
+{
+  "entry": 185.50,
+  "stop": 181.20,
+  "targets": [192.00, 198.50],
+  "support": [183.00, 178.50],
+  "resistance": [190.00, 195.00],
+  "sma_20": 186.30,
+  "sma_50": 182.10,
+  "sma_200": 170.50,
+  "vwap": 185.80
+}
+```
+
+Rules:
+- Prices must be JSON numbers, not strings. Do not quote numeric values.
+- Only include keys for levels you explicitly referenced in your written analysis.
+- One block only; valid JSON inside the fence; no trailing commentary after the closing backticks.
