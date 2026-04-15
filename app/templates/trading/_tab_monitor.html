@@ -26,18 +26,11 @@
   <div id="monitor-cards-wrap" class="mon-cards-wrap">
     <div id="monitor-cards" class="mon-cards-grid"></div>
     <div id="monitor-empty" class="mon-empty" style="display:none;">
-      <p class="mon-empty-title">No active pattern-monitored positions</p>
-      <p class="mon-empty-hint">Open trades linked to a breakout alert appear here. The scheduler evaluates pattern health and may suggest stop/target adjustments.</p>
+      <p class="mon-empty-title">No open positions</p>
+      <p class="mon-empty-hint">Open trades appear here for monitoring. Use "AI Evaluate All" to generate plans for every position.</p>
     </div>
   </div>
-  <div id="position-plans-section" class="mon-plans-section" style="display:none;">
-    <div class="mon-plans-header">
-      <span class="mon-plans-title">AI Position Plans</span>
-      <span class="mon-plans-meta" id="plans-meta"></span>
-    </div>
-    <div class="mon-plans-portfolio" id="plans-portfolio-summary"></div>
-    <div class="mon-plans-grid" id="plans-grid"></div>
-  </div>
+  <div id="plans-portfolio-banner" class="mon-plans-portfolio" style="display:none;"></div>
   <details class="mon-feed-details" id="monitor-feed-details">
     <summary class="mon-feed-summary">Decision feed <span class="mon-feed-hint">recent pattern monitor evaluations</span></summary>
     <div class="mon-feed-toolbar">

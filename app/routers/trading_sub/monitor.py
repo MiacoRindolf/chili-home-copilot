@@ -9,8 +9,6 @@ from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
-from sqlalchemy import and_, or_
-
 from ...deps import get_db, get_identity_ctx
 from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 from ...services import trading_service as ts
@@ -32,14 +30,6 @@ def _monitored_open_trades_query(db: Session, user_id: int | None):
     q = db.query(Trade).filter(
         Trade.status == "open",
         Trade.entry_price > 0,
-        or_(
-            Trade.related_alert_id.isnot(None),
-            Trade.broker_source.isnot(None),
-            and_(
-                Trade.related_alert_id.is_(None),
-                or_(Trade.stop_loss.isnot(None), Trade.take_profit.isnot(None)),
-            ),
-        ),
     )
     return _user_trade_filter(q, user_id)
 

@@ -350,15 +350,43 @@ def generate_position_plans(
 
     generated_at = datetime.utcnow()
 
+    ticker_to_trade = {t.ticker.upper(): t.id for t in trades}
+    plans = result.get("position_plans", [])
+    for p in plans:
+        if not p.get("trade_id"):
+            matched_id = ticker_to_trade.get((p.get("ticker") or "").upper())
+            if matched_id:
+                p["trade_id"] = matched_id
+
     _persist_plans(db, user_id, [t.id for t in trades], result, generated_at)
 
     return {
         "ok": True,
         "portfolio_summary": result.get("portfolio_summary", portfolio_ctx),
-        "position_plans": result.get("position_plans", []),
+        "position_plans": plans,
         "generated_at": generated_at.isoformat(),
         "trade_ids": [t.id for t in trades],
     }
+
+
+def _backfill_trade_ids_on_plans(db: Session, plans: list[dict], user_id: int | None) -> None:
+    """Ensure every plan dict has trade_id by matching ticker to open trades."""
+    missing = [p for p in plans if not p.get("trade_id")]
+    if not missing:
+        return
+    try:
+        q = db.query(Trade.id, Trade.ticker).filter(Trade.status == "open")
+        if user_id is not None:
+            q = q.filter(Trade.user_id == user_id)
+        else:
+            q = q.filter(Trade.user_id.is_(None))
+        ticker_map = {row.ticker.upper(): row.id for row in q.all()}
+    except Exception:
+        return
+    for p in missing:
+        tid = ticker_map.get((p.get("ticker") or "").upper())
+        if tid:
+            p["trade_id"] = tid
 
 
 def _get_cached_plans(
@@ -393,10 +421,13 @@ def _get_cached_plans(
     if set(cached_tids or []) != set(trade_ids):
         return None
 
+    plans = plan_json.get("position_plans", [])
+    _backfill_trade_ids_on_plans(db, plans, user_id)
+
     return {
         "ok": True,
         "portfolio_summary": plan_json.get("portfolio_summary", {}),
-        "position_plans": plan_json.get("position_plans", []),
+        "position_plans": plans,
         "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else str(gen_at),
         "trade_ids": cached_tids,
         "cached": True,
@@ -463,10 +494,13 @@ def get_latest_plans(db: Session, user_id: int | None) -> dict[str, Any] | None:
 
     stale = (datetime.utcnow() - gen_at).total_seconds() > PLAN_STALE_HOURS * 3600 if gen_at else True
 
+    plans = plan_json.get("position_plans", [])
+    _backfill_trade_ids_on_plans(db, plans, user_id)
+
     return {
         "ok": True,
         "portfolio_summary": plan_json.get("portfolio_summary", {}),
-        "position_plans": plan_json.get("position_plans", []),
+        "position_plans": plans,
         "generated_at": gen_at.isoformat() if hasattr(gen_at, "isoformat") else str(gen_at),
         "trade_ids": cached_tids,
         "stale": stale,

@@ -456,6 +456,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   border: 1px dashed var(--border); background: transparent; color: var(--text-muted); cursor: pointer;
 }
 .mon-expand-btn:hover { border-color: var(--accent); color: var(--accent); }
+.mon-plan-inline {
+  margin-top: 6px; padding: 6px 8px; border-radius: 6px;
+  background: rgba(245,158,11,0.06); border: 1px solid rgba(245,158,11,0.2);
+}
 .mon-card-details { display: none; font-size: 10px; color: var(--text-secondary); border-top: 1px solid var(--border); padding-top: 8px; margin-top: 4px; }
 .mon-card-details.open { display: block; }
 .mon-reason { white-space: pre-wrap; word-break: break-word; margin-bottom: 8px; line-height: 1.45; }
@@ -472,10 +476,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .mon-btn-ai.loading { animation: pulse-ai 1.2s ease-in-out infinite; }
 @keyframes pulse-ai { 0%,100% { opacity: 1; } 50% { opacity: 0.6; } }
 
-.mon-plans-section { margin-top: 14px; }
-.mon-plans-header { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
-.mon-plans-title { font-size: 13px; font-weight: 800; color: var(--text); }
-.mon-plans-meta { font-size: 9px; color: var(--text-muted); }
 .mon-plans-portfolio {
   background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px;
   padding: 10px 14px; margin-bottom: 10px; font-size: 11px; line-height: 1.5;
@@ -485,15 +485,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .plan-heat-moderate { background: rgba(234,179,8,0.15); color: #fde047; }
 .plan-heat-elevated { background: rgba(249,115,22,0.15); color: #fb923c; }
 .plan-heat-high { background: rgba(239,68,68,0.15); color: #fca5a5; }
-.mon-plans-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 10px; }
-.mon-plan-card {
-  background: var(--card-bg, #1a1a2e); border: 1px solid var(--border); border-radius: 10px;
-  padding: 10px 12px; display: flex; flex-direction: column; gap: 6px; cursor: pointer;
-  transition: border-color .15s, box-shadow .15s;
-}
-.mon-plan-card:hover { border-color: #f59e0b; box-shadow: 0 0 0 1px #f59e0b; }
-.mon-plan-head { display: flex; justify-content: space-between; align-items: center; }
-.mon-plan-ticker { font-size: 14px; font-weight: 800; }
 .mon-plan-assessment { font-size: 10px; font-weight: 700; text-transform: uppercase; padding: 2px 8px; border-radius: 999px; }
 .assess-bullish { background: rgba(34,197,94,0.2); color: #4ade80; }
 .assess-neutral { background: rgba(107,114,128,0.25); color: #d1d5db; }
@@ -505,12 +496,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .action-exit { background: rgba(239,68,68,0.2); color: #fca5a5; }
 .action-tighten_stop { background: rgba(234,179,8,0.2); color: #fde047; }
 .action-widen_target { background: rgba(59,130,246,0.2); color: #93c5fd; }
-.mon-plan-oneliner { font-size: 10px; color: var(--text-secondary); line-height: 1.4; font-style: italic; }
-.mon-plan-details { font-size: 10px; color: var(--text-secondary); line-height: 1.45; }
 .mon-plan-levels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 4px; font-size: 10px; }
 .mon-plan-levels div { color: var(--text-muted); }
 .mon-plan-levels div b { display: block; color: var(--text); font-size: 11px; margin-top: 1px; }
-.mon-plan-confidence { font-size: 9px; color: var(--text-muted); text-align: right; }
 
 .mon-feed-details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--bg-header, #0f0f18); }
 .mon-feed-summary { font-size: 12px; font-weight: 700; cursor: pointer; }
@@ -9010,6 +8998,30 @@ function renderMonitorCards(setups) {
     html += '<span class="mon-badge mon-badge-src">' + escHtml(src) + '</span>';
     html += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(when) + '</span>';
     html += '</div>';
+    var aiPlan = _getPlanByTradeId(s.trade_id) || _getPlanByTicker(s.ticker);
+    if (aiPlan) {
+      var assessClass = 'assess-' + (aiPlan.assessment || 'neutral').toLowerCase();
+      var planActClass = 'action-' + ((aiPlan.action && aiPlan.action.primary) || 'hold').toLowerCase().replace(/ /g, '_');
+      var cr = (s.ticker || '').indexOf('-USD') !== -1;
+      var planSp = function(v) { return smartPrice(v, cr); };
+      html += '<div class="mon-plan-inline">';
+      html += '<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;">';
+      html += '<span style="font-size:9px;font-weight:700;color:#f59e0b;">AI PLAN</span>';
+      html += '<span class="mon-plan-assessment ' + assessClass + '">' + escHtml(aiPlan.assessment || '?') + '</span>';
+      if (aiPlan.action && aiPlan.action.primary) html += '<span class="mon-plan-action ' + planActClass + '">' + escHtml(aiPlan.action.primary) + '</span>';
+      if (aiPlan.action && aiPlan.action.urgency) html += '<span style="font-size:8px;color:var(--text-muted);">' + escHtml(aiPlan.action.urgency) + '</span>';
+      if (aiPlan.confidence != null) html += '<span style="font-size:8px;color:var(--text-muted);">' + (aiPlan.confidence * 100).toFixed(0) + '%</span>';
+      html += '</div>';
+      if (aiPlan.one_liner) html += '<div style="font-size:9px;color:var(--text-secondary);font-style:italic;margin-top:2px;">' + escHtml(aiPlan.one_liner) + '</div>';
+      if (aiPlan.risk_management || aiPlan.key_levels) {
+        html += '<div class="mon-plan-levels" style="margin-top:4px;">';
+        if (aiPlan.risk_management && aiPlan.risk_management.recommended_stop != null) html += '<div>AI Stop<b style="color:#f87171;">$' + planSp(aiPlan.risk_management.recommended_stop) + '</b></div>';
+        if (aiPlan.risk_management && aiPlan.risk_management.risk_reward_ratio) html += '<div>R:R<b>' + escHtml(aiPlan.risk_management.risk_reward_ratio) + '</b></div>';
+        if (aiPlan.key_levels && aiPlan.key_levels.support && aiPlan.key_levels.support[0] != null) html += '<div>Support<b style="color:#06b6d4;">$' + planSp(aiPlan.key_levels.support[0]) + '</b></div>';
+        html += '</div>';
+      }
+      html += '</div>';
+    }
     html += '<div class="mon-card-expand"><button type="button" class="mon-expand-btn" id="mon-expand-' + s.trade_id + '" onclick="event.stopPropagation(); toggleMonitorCardDetails(' + s.trade_id + ')">Details &amp; history</button></div>';
     html += '<div class="mon-card-details" id="mon-details-' + s.trade_id + '">';
     if (reason) html += '<div class="mon-reason"><b>Reasoning</b><br/>' + reason + '</div>';
@@ -9104,7 +9116,6 @@ function loadMonitorData(showRefreshFlash) {
     }
     loadMonitorDecisionFeed();
     if (!window.__positionPlans) _loadCachedPositionPlans();
-    else _injectPlanBadgesIntoMonitorCards(window.__positionPlans.position_plans || []);
   }).catch(function() {
     var emptyEl2 = document.getElementById('monitor-empty');
     if (emptyEl2) emptyEl2.style.display = 'none';
@@ -9309,6 +9320,25 @@ function drawMonitorAnnotations(setup, ohlcData) {
 /* ── AI Position Plans ─────────────────────────── */
 window.__positionPlans = null;
 
+function _getPlanByTicker(ticker) {
+  if (!window.__positionPlans || !window.__positionPlans.position_plans) return null;
+  var t = (ticker || '').toUpperCase();
+  var plans = window.__positionPlans.position_plans;
+  for (var i = 0; i < plans.length; i++) {
+    if ((plans[i].ticker || '').toUpperCase() === t) return plans[i];
+  }
+  return null;
+}
+
+function _getPlanByTradeId(tradeId) {
+  if (!window.__positionPlans || !window.__positionPlans.position_plans) return null;
+  var plans = window.__positionPlans.position_plans;
+  for (var i = 0; i < plans.length; i++) {
+    if (plans[i].trade_id === tradeId) return plans[i];
+  }
+  return null;
+}
+
 function evaluateAllPositions() {
   if (CHILI_TRADING_IS_GUEST) return;
   var btn = document.getElementById('monitor-eval-btn');
@@ -9331,8 +9361,8 @@ function evaluateAllPositions() {
         setTimeout(function() { st.style.display = 'none'; }, 4000);
       }
       window.__positionPlans = d;
-      renderPositionPlans(d);
-      _injectPlanBadgesIntoMonitorCards(d.position_plans || []);
+      _showPortfolioBanner(d);
+      _reRenderMonitorWithPlans();
     }).catch(function() {
       if (btn) { btn.disabled = false; btn.classList.remove('loading'); btn.textContent = 'AI Evaluate All'; }
       if (st) { st.className = 'mon-status err'; st.textContent = 'Request failed'; }
@@ -9345,136 +9375,38 @@ function _loadCachedPositionPlans() {
     .then(function(d) {
       if (d.ok && d.position_plans && d.position_plans.length) {
         window.__positionPlans = d;
-        renderPositionPlans(d);
-        _injectPlanBadgesIntoMonitorCards(d.position_plans);
+        _showPortfolioBanner(d);
+        _reRenderMonitorWithPlans();
       }
     }).catch(function() {});
 }
 
-function renderPositionPlans(data) {
-  var section = document.getElementById('position-plans-section');
-  if (!section) return;
-  var plans = data.position_plans || [];
-  if (!plans.length) { section.style.display = 'none'; return; }
-  section.style.display = 'block';
-
-  var meta = document.getElementById('plans-meta');
-  if (meta) {
-    var genAt = data.generated_at ? new Date(data.generated_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
-    meta.textContent = plans.length + ' plan' + (plans.length !== 1 ? 's' : '') + (genAt ? ' · ' + genAt : '') + (data.cached ? ' (cached)' : '');
-  }
-
+function _showPortfolioBanner(data) {
+  var banner = document.getElementById('plans-portfolio-banner');
+  if (!banner) return;
   var pSum = data.portfolio_summary || {};
-  var pEl = document.getElementById('plans-portfolio-summary');
-  if (pEl && pSum.overall_assessment) {
-    var heatClass = 'plan-heat-' + (pSum.portfolio_heat || 'low').toLowerCase();
-    var html = '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">';
-    html += '<span class="plan-heat ' + heatClass + '">' + escHtml(pSum.portfolio_heat || 'low') + '</span>';
-    html += '<span style="font-weight:700;">Portfolio: ' + (pSum.total_positions || 0) + ' positions</span>';
-    html += '<span style="color:var(--text-muted);">Regime: ' + escHtml(pSum.regime || 'unknown') + '</span>';
-    html += '</div>';
-    html += '<div>' + escHtml(pSum.overall_assessment) + '</div>';
-    if (pSum.concentration_warnings && pSum.concentration_warnings.length) {
-      html += '<div style="margin-top:4px;color:#f59e0b;font-size:10px;">Warnings: ' + pSum.concentration_warnings.map(escHtml).join('; ') + '</div>';
-    }
-    pEl.innerHTML = html;
+  if (!pSum.overall_assessment) { banner.style.display = 'none'; return; }
+  banner.style.display = 'block';
+  var heatClass = 'plan-heat-' + (pSum.portfolio_heat || 'low').toLowerCase();
+  var genAt = data.generated_at ? new Date(data.generated_at).toLocaleString([], {month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}) : '';
+  var html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+  html += '<span class="plan-heat ' + heatClass + '">' + escHtml(pSum.portfolio_heat || 'low') + '</span>';
+  html += '<span style="font-weight:700;font-size:11px;">' + (pSum.total_positions || 0) + ' positions</span>';
+  html += '<span style="color:var(--text-muted);font-size:10px;">Regime: ' + escHtml(pSum.regime || 'unknown') + '</span>';
+  html += '<span style="flex:1;"></span>';
+  if (genAt) html += '<span style="font-size:9px;color:var(--text-muted);">' + genAt + (data.stale ? ' (stale)' : '') + '</span>';
+  html += '</div>';
+  html += '<div style="font-size:10px;margin-top:4px;color:var(--text-secondary);">' + escHtml(pSum.overall_assessment) + '</div>';
+  if (pSum.concentration_warnings && pSum.concentration_warnings.length) {
+    html += '<div style="margin-top:3px;color:#f59e0b;font-size:9px;">⚠ ' + pSum.concentration_warnings.map(escHtml).join(' · ') + '</div>';
   }
-
-  var grid = document.getElementById('plans-grid');
-  if (!grid) return;
-  var gh = '';
-  plans.forEach(function(p) {
-    var assessClass = 'assess-' + (p.assessment || 'neutral').toLowerCase();
-    var actClass = 'action-' + ((p.action && p.action.primary) || 'hold').toLowerCase().replace(/ /g, '_');
-    var cr = (p.ticker || '').indexOf('-USD') !== -1;
-    var sp = function(v) { return smartPrice(v, cr); };
-
-    gh += '<div class="mon-plan-card" onclick="_selectMonitorCardByTicker(\'' + escHtml(p.ticker) + '\')">';
-    gh += '<div class="mon-plan-head">';
-    gh += '<span class="mon-plan-ticker">' + escHtml(p.ticker) + '</span>';
-    gh += '<span class="mon-plan-assessment ' + assessClass + '">' + escHtml(p.assessment || '?') + '</span>';
-    gh += '</div>';
-
-    if (p.one_liner) gh += '<div class="mon-plan-oneliner">' + escHtml(p.one_liner) + '</div>';
-
-    gh += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">';
-    if (p.action && p.action.primary) {
-      gh += '<span class="mon-plan-action ' + actClass + '">' + escHtml(p.action.primary) + '</span>';
-    }
-    if (p.action && p.action.urgency) {
-      gh += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(p.action.urgency) + '</span>';
-    }
-    if (p.opportunity && p.opportunity.momentum) {
-      var momCol = {strong:'#22c55e',moderate:'#eab308',weak:'#f59e0b',negative:'#ef4444'}[p.opportunity.momentum] || '#888';
-      gh += '<span style="font-size:9px;color:' + momCol + ';">momentum: ' + escHtml(p.opportunity.momentum) + '</span>';
-    }
-    gh += '</div>';
-
-    if (p.risk_management) {
-      var rm = p.risk_management;
-      gh += '<div class="mon-plan-levels">';
-      gh += '<div>Stop<b style="color:#f87171;">' + (rm.recommended_stop != null ? '$' + sp(rm.recommended_stop) : '—') + '</b></div>';
-      gh += '<div>R:R<b>' + escHtml(rm.risk_reward_ratio || '—') + '</b></div>';
-      gh += '<div>Size<b>' + escHtml(rm.position_size_advice || '—') + '</b></div>';
-      gh += '</div>';
-    }
-
-    if (p.key_levels) {
-      var kl = p.key_levels;
-      gh += '<div class="mon-plan-levels">';
-      gh += '<div>Support<b style="color:#06b6d4;">' + ((kl.support && kl.support[0]) != null ? '$' + sp(kl.support[0]) : '—') + '</b></div>';
-      gh += '<div>Resist<b style="color:#f59e0b;">' + ((kl.resistance && kl.resistance[0]) != null ? '$' + sp(kl.resistance[0]) : '—') + '</b></div>';
-      gh += '<div>Target<b style="color:#22c55e;">' + (kl.take_profit != null ? '$' + sp(kl.take_profit) : '—') + '</b></div>';
-      gh += '</div>';
-    }
-
-    if (p.timeline) {
-      gh += '<div class="mon-plan-details"><b>Near-term:</b> ' + escHtml(p.timeline.near_term || '—') + '</div>';
-    }
-
-    gh += '<div class="mon-plan-confidence">confidence: ' + (p.confidence != null ? (p.confidence * 100).toFixed(0) + '%' : '—') + '</div>';
-    gh += '</div>';
-  });
-  grid.innerHTML = gh;
+  banner.innerHTML = html;
 }
 
-function _selectMonitorCardByTicker(ticker) {
+function _reRenderMonitorWithPlans() {
   if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
-  var setup = null;
-  window.__monitorPayload.setups.forEach(function(s) {
-    if (s.ticker.toUpperCase() === ticker.toUpperCase()) setup = s;
-  });
-  if (setup) {
-    _selectMonitorCard(setup.trade_id);
-  } else {
-    selectTicker(ticker);
-  }
-}
-
-function _injectPlanBadgesIntoMonitorCards(plans) {
-  if (!plans || !plans.length) return;
-  var byTicker = {};
-  plans.forEach(function(p) { if (p.ticker) byTicker[p.ticker.toUpperCase()] = p; });
-
-  if (!window.__monitorPayload || !window.__monitorPayload.setups) return;
-  window.__monitorPayload.setups.forEach(function(s) {
-    var plan = byTicker[s.ticker.toUpperCase()];
-    if (!plan) return;
-    var card = document.getElementById('mon-card-' + s.trade_id);
-    if (!card) return;
-    var existing = card.querySelector('.mon-plan-badge');
-    if (existing) existing.remove();
-    var badge = document.createElement('div');
-    badge.className = 'mon-plan-badge';
-    var actClass = 'action-' + ((plan.action && plan.action.primary) || 'hold').toLowerCase().replace(/ /g, '_');
-    badge.innerHTML = '<span class="mon-plan-action ' + actClass + '" style="font-size:8px;">' +
-      escHtml((plan.action && plan.action.primary) || '') + '</span> ' +
-      '<span style="font-size:9px;color:var(--text-secondary);font-style:italic;">' + escHtml(plan.one_liner || '') + '</span>';
-    badge.style.cssText = 'margin-top:4px;padding-top:6px;border-top:1px dashed var(--border);';
-    var expand = card.querySelector('.mon-card-expand');
-    if (expand) card.insertBefore(badge, expand);
-    else card.appendChild(badge);
-  });
+  var mode = (document.getElementById('monitor-sort') || {}).value || 'health';
+  renderMonitorCards(_monitorSortSetups(window.__monitorPayload.setups, mode));
 }
 
 function loadStopDecisions() {
