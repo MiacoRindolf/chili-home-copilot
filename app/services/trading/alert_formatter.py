@@ -623,3 +623,56 @@ def format_pattern_adjustment(
 def _health_bar(score: float) -> str:
     filled = int(score * 5)
     return "\u2588" * filled + "\u2591" * (5 - filled)
+
+
+# ── Monitoring panel (pinned Telegram message) ───────────────────────
+
+def format_monitoring_panel(entries: list[dict]) -> str:
+    """Build the HTML for the pinned monitoring panel.
+
+    *entries* is newest-first, each ``{"emoji", "ticker", "summary", "ts"}``.
+    """
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    updated = now.strftime("%H:%M UTC")
+
+    lines: list[str] = [
+        "\U0001f4ca <b>CHILI Monitoring Panel</b>",
+        f"<i>Updated {_h(updated)}</i>",
+        "",
+    ]
+
+    if not entries:
+        lines.append("<i>No recent alerts</i>")
+        return "\n".join(lines)
+
+    one_hour_ago = int(now.timestamp()) - 3600
+    recent = [e for e in entries if e.get("ts", 0) >= one_hour_ago]
+    older = [e for e in entries if e.get("ts", 0) < one_hour_ago]
+
+    def _fmt_entry(e: dict) -> str:
+        ts = e.get("ts", 0)
+        t = datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%H:%M") if ts else "?"
+        emoji = e.get("emoji", "\u2022")
+        ticker = _h(e.get("ticker", ""))
+        summary = _h(e.get("summary", ""))
+        return f"{emoji} <code>{ticker}</code> {summary}  <i>{t}</i>"
+
+    if recent:
+        lines.append(f"\U0001f534 <b>Last hour</b> ({len(recent)})")
+        for e in recent:
+            lines.append(_fmt_entry(e))
+        lines.append("")
+
+    if older:
+        lines.append(f"\u23f3 <b>Earlier</b> ({len(older)})")
+        for e in older[:10]:
+            lines.append(_fmt_entry(e))
+        if len(older) > 10:
+            lines.append(f"<i>+{len(older) - 10} more</i>")
+        lines.append("")
+
+    total = len(entries)
+    lines.append(f"<i>{total} alert{'s' if total != 1 else ''} tracked</i>")
+    return "\n".join(lines)

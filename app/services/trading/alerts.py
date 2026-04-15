@@ -121,6 +121,37 @@ ALL_ALERT_TYPES = [
 _STOP_CRITICAL_TYPES = frozenset({STOP_HIT})
 _STOP_ALL_TYPES = frozenset({STOP_HIT, STOP_APPROACHING, BREAKEVEN_REACHED, STOP_TIGHTENED, TARGET_HIT})
 
+# Alert types that always get their own Telegram message (not batched into panel)
+_INDIVIDUAL_MSG_TYPES = frozenset({
+    STOP_HIT, TARGET_HIT, STOP_APPROACHING,
+    POSITION_OPENED, POSITION_CLOSED,
+})
+
+_ALERT_TYPE_LABEL: dict[str, str] = {
+    BREAKOUT_TRIGGERED: "Breakout",
+    CRYPTO_BREAKOUT: "Crypto breakout",
+    CRYPTO_SQUEEZE_FIRING: "Squeeze firing",
+    STRATEGY_PROPOSED: "Strategy",
+    PATTERN_BREAKOUT_IMMINENT: "Imminent",
+    NEW_TOP_PICK: "Top pick",
+    WEEKLY_REVIEW: "Weekly review",
+    BREAKEVEN_REACHED: "Breakeven",
+    STOP_TIGHTENED: "Stop tightened",
+}
+
+import re as _re
+
+def _panel_summary(alert_type: str, html_message: str) -> str:
+    """Extract a short plain-text summary from the full HTML alert message."""
+    text = _re.sub(r"<[^>]+>", "", html_message)
+    text = _re.sub(r"\s+", " ", text).strip()
+    label = _ALERT_TYPE_LABEL.get(alert_type, alert_type.replace("_", " ").title())
+    first_line = text.split("\n")[0][:60] if text else ""
+    price_match = _re.search(r"\$[\d,.]+", first_line)
+    price_str = f" @ {price_match.group()}" if price_match else ""
+    return f"{label}{price_str}"
+
+
 _PATTERN_KW = [
     "macd_bullish", "macd_positive", "macd_negative",
     "ema_stack", "ema_stacking", "rsi_oversold", "rsi_overbought",
@@ -295,6 +326,7 @@ def dispatch_alert(
     scan_pattern_id: int | None = None,
     confidence: float = 0.0,
     skip_throttle: bool = False,
+    content_signature: str | None = None,
 ) -> bool:
     """Log an alert to the DB and optionally send via SMS.
 
@@ -326,27 +358,43 @@ def dispatch_alert(
 
     sent = False
     sent_via = "log_only"
+    use_panel = (
+        alert_type not in _INDIVIDUAL_MSG_TYPES
+        and not is_stop_critical
+    )
 
     try:
         if sms_is_configured() and tier in (TIER_A, TIER_B):
-            sent = send_sms(message, tier=tier)
-            # Retry for critical stop alerts (up to 2 retries with backoff)
-            if not sent and is_stop_critical:
-                import time as _time
-                for attempt, delay in enumerate([2, 8], start=2):
-                    _time.sleep(delay)
+            if use_panel:
+                from ..sms_service import push_to_telegram_panel
+                from .alert_formatter import ALERT_EMOJI
+                emoji = ALERT_EMOJI.get(alert_type, "\u2022")
+                summary = _panel_summary(alert_type, message)
+                panel_ok = push_to_telegram_panel(emoji, ticker or "", summary)
+                if panel_ok:
+                    sent = True
+                    sent_via = "telegram_panel"
+                else:
                     sent = send_sms(message, tier=tier)
-                    if sent:
-                        logger.info("[alerts] Retry #%d succeeded for %s/%s", attempt, alert_type, ticker)
-                        break
-                    logger.warning("[alerts] Retry #%d failed for %s/%s", attempt, alert_type, ticker)
-            sent_via = ("twilio" if sent else "sms_failed")
-            if sent:
-                logger.info(f"[alerts] Sent {alert_type} alert for {ticker}: {message[:80]}")
+                    sent_via = "twilio" if sent else "sms_failed"
             else:
-                logger.warning(f"[alerts] SMS delivery failed for {alert_type}/{ticker}")
+                sent = send_sms(message, tier=tier)
+                if not sent and is_stop_critical:
+                    import time as _time
+                    for attempt, delay in enumerate([2, 8], start=2):
+                        _time.sleep(delay)
+                        sent = send_sms(message, tier=tier)
+                        if sent:
+                            logger.info("[alerts] Retry #%d succeeded for %s/%s", attempt, alert_type, ticker)
+                            break
+                        logger.warning("[alerts] Retry #%d failed for %s/%s", attempt, alert_type, ticker)
+                sent_via = ("twilio" if sent else "sms_failed")
+            if sent:
+                logger.info("[alerts] Sent %s alert for %s via %s", alert_type, ticker, sent_via)
+            else:
+                logger.warning("[alerts] Delivery failed for %s/%s", alert_type, ticker)
         else:
-            logger.info(f"[alerts] Logged {alert_type} for {ticker} (SMS not configured)")
+            logger.info("[alerts] Logged %s for %s (SMS not configured)", alert_type, ticker)
 
         _record_alert_sent(alert_type, ticker)
 
@@ -359,6 +407,7 @@ def dispatch_alert(
             trade_type=trade_type,
             duration_estimate=duration_estimate,
             scan_pattern_id=scan_pattern_id,
+            content_signature=content_signature,
             sent_via=sent_via,
             success=sent,
         )

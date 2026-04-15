@@ -78,7 +78,8 @@ def is_configured() -> bool:
 
 # ── Telegram ─────────────────────────────────────────────────────────
 
-def _send_via_telegram(message: str) -> bool:
+def _send_via_telegram(message: str) -> bool | int:
+    """Send a Telegram message. Returns message_id (int) on success, False on failure."""
     token = settings.telegram_bot_token
     chat_id = settings.telegram_chat_id
     url = f"https://api.telegram.org/bot{token}/sendMessage"
@@ -96,16 +97,147 @@ def _send_via_telegram(message: str) -> bool:
         with urllib.request.urlopen(req, timeout=10) as resp:
             body = json.loads(resp.read())
             if body.get("ok"):
-                logger.info(f"[alerts] Sent via Telegram to chat {chat_id}")
-                return True
-            logger.warning(f"[alerts] Telegram API returned ok=false: {body}")
+                msg_id = body.get("result", {}).get("message_id")
+                logger.info("[alerts] Sent via Telegram to chat %s (msg %s)", chat_id, msg_id)
+                return msg_id or True
+            logger.warning("[alerts] Telegram API returned ok=false: %s", body)
             return False
     except urllib.error.HTTPError as e:
-        logger.error(f"[alerts] Telegram send failed (HTTP {e.code}): {e.read().decode()[:200]}")
+        logger.error("[alerts] Telegram send failed (HTTP %s): %s", e.code, e.read().decode()[:200])
         return False
     except Exception as e:
-        logger.error(f"[alerts] Telegram send failed: {e}")
+        logger.error("[alerts] Telegram send failed: %s", e)
         return False
+
+
+def _edit_telegram_message(message_id: int, text: str) -> bool:
+    token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+            if body.get("ok"):
+                return True
+            if "message is not modified" in str(body.get("description", "")):
+                return True
+            logger.warning("[alerts] Telegram edit failed: %s", body)
+            return False
+    except urllib.error.HTTPError as e:
+        err = e.read().decode()[:200]
+        if "message to edit not found" in err or "MESSAGE_ID_INVALID" in err:
+            logger.info("[alerts] Panel message gone — will re-create")
+            return False
+        logger.error("[alerts] Telegram edit failed (HTTP %s): %s", e.code, err)
+        return False
+    except Exception as e:
+        logger.error("[alerts] Telegram edit failed: %s", e)
+        return False
+
+
+def _pin_telegram_message(message_id: int) -> bool:
+    token = settings.telegram_bot_token
+    chat_id = settings.telegram_chat_id
+    url = f"https://api.telegram.org/bot{token}/pinChatMessage"
+    payload = json.dumps({
+        "chat_id": chat_id,
+        "message_id": message_id,
+        "disable_notification": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        url, data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            body = json.loads(resp.read())
+            return body.get("ok", False)
+    except Exception as e:
+        logger.debug("[alerts] Telegram pin failed (non-critical): %s", e)
+        return False
+
+
+# ── Telegram monitoring panel ────────────────────────────────────────
+
+import pathlib as _pathlib
+
+_PANEL_STATE_PATH = _pathlib.Path(__file__).resolve().parents[2] / "data" / "telegram_panel.json"
+_panel_state: dict | None = None
+
+
+def _load_panel_state() -> dict:
+    global _panel_state
+    if _panel_state is not None:
+        return _panel_state
+    try:
+        _panel_state = json.loads(_PANEL_STATE_PATH.read_text())
+    except Exception:
+        _panel_state = {"message_id": None, "entries": []}
+    return _panel_state
+
+
+def _save_panel_state(state: dict) -> None:
+    global _panel_state
+    _panel_state = state
+    try:
+        _PANEL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        _PANEL_STATE_PATH.write_text(json.dumps(state))
+    except Exception as e:
+        logger.debug("[alerts] Failed to persist panel state: %s", e)
+
+
+_PANEL_MAX_ENTRIES = 20
+
+
+def push_to_telegram_panel(emoji: str, ticker: str, summary: str) -> bool:
+    """Add an alert entry to the monitoring panel and edit/send the pinned message."""
+    if not _has_telegram():
+        return False
+
+    from .trading.alert_formatter import format_monitoring_panel
+
+    state = _load_panel_state()
+    entries = state.get("entries", [])
+    entries.insert(0, {
+        "emoji": emoji,
+        "ticker": ticker,
+        "summary": summary,
+        "ts": int(_time.time()),
+    })
+    entries = entries[:_PANEL_MAX_ENTRIES]
+    state["entries"] = entries
+
+    html = format_monitoring_panel(entries)
+    msg_id = state.get("message_id")
+
+    if msg_id:
+        ok = _edit_telegram_message(msg_id, html)
+        if ok:
+            _save_panel_state(state)
+            return True
+        logger.info("[alerts] Panel edit failed — sending new panel message")
+
+    result = _send_via_telegram(html)
+    if result and result is not True:
+        state["message_id"] = result
+        _save_panel_state(state)
+        _pin_telegram_message(result)
+        return True
+    elif result is True:
+        _save_panel_state(state)
+        return True
+    return False
 
 
 # ── Twilio ───────────────────────────────────────────────────────────
