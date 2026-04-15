@@ -364,7 +364,11 @@ def run_paper_runner_batch(
     """Scheduler/worker entry: tick several paper sessions."""
     out: list[dict[str, Any]] = []
     for sess in list_runnable_paper_sessions(db, limit=limit):
-        out.append(tick_paper_session(db, int(sess.id), quote_fn=quote_fn))
+        try:
+            out.append(tick_paper_session(db, int(sess.id), quote_fn=quote_fn))
+        except Exception:
+            _log.warning("[paper_runner] tick failed session=%s", sess.id, exc_info=True)
+            out.append({"ok": False, "session_id": sess.id, "error": "tick_exception"})
     return out
 
 

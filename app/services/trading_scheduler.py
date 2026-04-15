@@ -237,12 +237,19 @@ def _run_paper_trade_check_job():
 
 
 def _run_momentum_paper_runner_batch_job():
-    """Advance queued/active momentum *paper* automation sessions (simulated only; Phase 7)."""
+    """Advance queued/active momentum *paper* automation sessions (simulated only; Phase 7).
+
+    Same per-tick session isolation as the live runner to avoid holding a pooled
+    connection across 30 ticks of quote fetches.
+    """
 
     def _work() -> None:
         from ..config import settings as _settings
         from ..db import SessionLocal
-        from .trading.momentum_neural.paper_runner import run_paper_runner_batch
+        from .trading.momentum_neural.paper_runner import (
+            list_runnable_paper_sessions,
+            tick_paper_session,
+        )
 
         if not _settings.chili_momentum_paper_runner_enabled:
             return
@@ -251,23 +258,49 @@ def _run_momentum_paper_runner_batch_job():
 
         db = SessionLocal()
         try:
-            results = run_paper_runner_batch(db, limit=30)
-            db.commit()
-            if results:
-                logger.info("[scheduler] Momentum paper runner: ticked %d session(s)", len(results))
+            session_ids = [int(s.id) for s in list_runnable_paper_sessions(db, limit=30)]
+        except Exception:
+            logger.warning("[scheduler] paper runner: failed to list runnable sessions", exc_info=True)
+            return
         finally:
             db.close()
+
+        if not session_ids:
+            return
+
+        ticked = 0
+        for sid in session_ids:
+            db = SessionLocal()
+            try:
+                tick_paper_session(db, sid)
+                db.commit()
+                ticked += 1
+            except Exception:
+                db.rollback()
+                logger.warning("[scheduler] paper runner tick failed session=%s", sid, exc_info=True)
+            finally:
+                db.close()
+
+        if ticked:
+            logger.info("[scheduler] Momentum paper runner: ticked %d session(s)", ticked)
 
     run_scheduler_job_guarded("momentum_paper_runner_batch", _work)
 
 
 def _run_momentum_live_runner_batch_job():
-    """Advance queued/active momentum *live* automation sessions (real Coinbase orders — Phase 8)."""
+    """Advance queued/active momentum *live* automation sessions (real Coinbase orders — Phase 8).
+
+    Each tick gets its own DB session so Coinbase API latency doesn't hold a
+    pooled connection for the entire batch (prevents QueuePool exhaustion).
+    """
 
     def _work() -> None:
         from ..config import settings as _settings
         from ..db import SessionLocal
-        from .trading.momentum_neural.live_runner import run_live_runner_batch
+        from .trading.momentum_neural.live_runner import (
+            list_runnable_live_sessions,
+            tick_live_session,
+        )
 
         if not _settings.chili_momentum_live_runner_enabled:
             return
@@ -276,12 +309,31 @@ def _run_momentum_live_runner_batch_job():
 
         db = SessionLocal()
         try:
-            results = run_live_runner_batch(db, limit=15)
-            db.commit()
-            if results:
-                logger.info("[scheduler] Momentum live runner: ticked %d session(s)", len(results))
+            session_ids = [int(s.id) for s in list_runnable_live_sessions(db, limit=15)]
+        except Exception:
+            logger.warning("[scheduler] live runner: failed to list runnable sessions", exc_info=True)
+            return
         finally:
             db.close()
+
+        if not session_ids:
+            return
+
+        ticked = 0
+        for sid in session_ids:
+            db = SessionLocal()
+            try:
+                tick_live_session(db, sid)
+                db.commit()
+                ticked += 1
+            except Exception:
+                db.rollback()
+                logger.warning("[scheduler] live runner tick failed session=%s", sid, exc_info=True)
+            finally:
+                db.close()
+
+        if ticked:
+            logger.info("[scheduler] Momentum live runner: ticked %d session(s)", ticked)
 
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 

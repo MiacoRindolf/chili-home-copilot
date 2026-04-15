@@ -248,7 +248,11 @@ def run_live_runner_batch(
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for sess in list_runnable_live_sessions(db, limit=limit):
-        out.append(tick_live_session(db, int(sess.id), adapter_factory=adapter_factory))
+        try:
+            out.append(tick_live_session(db, int(sess.id), adapter_factory=adapter_factory))
+        except Exception:
+            _log.warning("[live_runner] tick failed session=%s", sess.id, exc_info=True)
+            out.append({"ok": False, "session_id": sess.id, "error": "tick_exception"})
     return out
 
 
