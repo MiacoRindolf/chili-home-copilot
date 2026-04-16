@@ -6542,6 +6542,226 @@ def _migration_123_setup_vitals_engine(conn) -> None:
     conn.commit()
 
 
+def _migration_124_alert_content_signature(conn) -> None:
+    """Dedup pattern_monitor Telegram: persist content hash on trading_alerts."""
+    cols = _columns(conn, "trading_alerts")
+    if "content_signature" not in cols:
+        conn.execute(
+            text(
+                "ALTER TABLE trading_alerts ADD COLUMN content_signature VARCHAR(512)"
+            )
+        )
+    conn.commit()
+
+
+def _migration_125_mesh_reactive_sensors(conn) -> None:
+    """Phase 0+1 of mesh-driven alert architecture:
+    - Postgres NOTIFY trigger on brain_activation_events for instant reactivity
+    - Sensor nodes (nm_stop_eval, nm_pattern_health) + edges to nm_action_signals
+    """
+    import json
+    tables = _tables(conn)
+
+    # ── 1. Postgres NOTIFY trigger for reactive mesh ──
+    if "brain_activation_events" in tables:
+        conn.execute(text("""
+            CREATE OR REPLACE FUNCTION mesh_activation_notify()
+            RETURNS trigger AS $$
+            BEGIN
+                PERFORM pg_notify('mesh_activation', NEW.id::text);
+                RETURN NEW;
+            END;
+            $$ LANGUAGE plpgsql
+        """))
+        conn.execute(text("""
+            DROP TRIGGER IF EXISTS trg_mesh_activation_notify
+            ON brain_activation_events
+        """))
+        conn.execute(text("""
+            CREATE TRIGGER trg_mesh_activation_notify
+            AFTER INSERT ON brain_activation_events
+            FOR EACH ROW
+            WHEN (NEW.status = 'pending')
+            EXECUTE FUNCTION mesh_activation_notify()
+        """))
+
+    # ── 2. Sensor nodes ──
+    if "brain_graph_nodes" in tables:
+        sensor_nodes = [
+            ("nm_stop_eval", 2, "sensor_stop", "Stop engine sensor", False, 0.50, 30, {
+                "role": "sensor",
+                "description": "Publishes stop engine evaluation results (stop tightened, hit, approaching).",
+                "remarks": "Layer 2 sensor. Writes structured StopDecisionResult to local_state.",
+            }),
+            ("nm_pattern_health", 2, "sensor_pattern_health", "Pattern health sensor", False, 0.50, 30, {
+                "role": "sensor",
+                "description": "Publishes pattern monitor health evaluations and adjustment recommendations.",
+                "remarks": "Layer 2 sensor. Writes health score, action, reasoning to local_state.",
+            }),
+            ("nm_imminent_eval", 2, "sensor_imminent", "Imminent breakout sensor", False, 0.55, 60, {
+                "role": "sensor",
+                "description": "Publishes imminent breakout evaluations (composite score, readiness, ETA).",
+                "remarks": "Layer 2 sensor. Writes composite score and readiness to local_state.",
+            }),
+            ("nm_trade_context", 4, "aggregator_trade", "Trade context aggregator", False, 0.50, 45, {
+                "role": "aggregator",
+                "description": "Aggregates stop, pattern health, and imminent signals into unified trade context. "
+                               "Self-graduating: GPT-5.4 teacher -> mechanical rules.",
+                "remarks": "Layer 4 aggregator. Bridges sensors to action_signals/risk_gate.",
+            }),
+        ]
+        for nid, layer, ntype, label, observer, threshold, cooldown, meta in sensor_nodes:
+            conn.execute(text("""
+                INSERT INTO brain_graph_nodes (id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer, display_meta,
+                    created_at, updated_at)
+                VALUES (:id, 'trading', 1, :ntype, :layer, :label,
+                    :threshold, :cooldown, true, 1, :observer, :meta,
+                    NOW(), NOW())
+                ON CONFLICT (id) DO NOTHING
+            """), {
+                "id": nid, "layer": layer, "ntype": ntype, "label": label,
+                "observer": observer, "threshold": threshold, "cooldown": cooldown,
+                "meta": json.dumps(meta),
+            })
+
+    # ── 3. Edges: sensors → nm_action_signals (through risk gate) ──
+    if "brain_graph_edges" in tables:
+        sensor_edges = [
+            ("nm_stop_eval", "nm_risk_gate", "stop_eval", 0.85, "excitatory", "dataflow"),
+            ("nm_stop_eval", "nm_action_signals", "stop_hit", 0.90, "excitatory", "evidence"),
+            ("nm_pattern_health", "nm_risk_gate", "pattern_health", 0.80, "excitatory", "dataflow"),
+            ("nm_pattern_health", "nm_action_signals", "exit_now", 0.90, "excitatory", "evidence"),
+            ("nm_imminent_eval", "nm_risk_gate", "imminent_eval", 0.70, "excitatory", "dataflow"),
+            ("nm_imminent_eval", "nm_action_signals", "imminent_breakout", 0.75, "excitatory", "evidence"),
+            # Sensors → nm_trade_context aggregator
+            ("nm_stop_eval", "nm_trade_context", "stop_eval", 0.85, "excitatory", "dataflow"),
+            ("nm_pattern_health", "nm_trade_context", "pattern_health", 0.80, "excitatory", "dataflow"),
+            ("nm_imminent_eval", "nm_trade_context", "imminent_eval", 0.70, "excitatory", "dataflow"),
+            # nm_trade_context → decision layer
+            ("nm_trade_context", "nm_risk_gate", "trade_context", 0.85, "excitatory", "dataflow"),
+            ("nm_trade_context", "nm_action_signals", "trade_context", 0.80, "excitatory", "evidence"),
+        ]
+        for src, tgt, sig, weight, pol, etype in sensor_edges:
+            conn.execute(text("""
+                INSERT INTO brain_graph_edges
+                    (source_node_id, target_node_id, signal_type, weight, polarity, edge_type,
+                     delay_ms, enabled, graph_version, min_confidence, min_source_confidence,
+                     created_at, updated_at)
+                SELECT :src, :tgt, :sig, :w, :pol, :etype,
+                       0, true, 1, 0.0, 0.0, NOW(), NOW()
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges
+                    WHERE source_node_id = :src AND target_node_id = :tgt AND signal_type = :sig
+                )
+            """), {"src": src, "tgt": tgt, "sig": sig, "w": weight, "pol": pol, "etype": etype})
+
+    conn.commit()
+
+
+def _migration_126_mesh_dependency_edges(conn) -> None:
+    """Rewire learning-cycle mesh from sequential cluster_chain to real data-dependency edges.
+
+    - Disables 12 cluster_chain edges (false linear pipeline)
+    - Inserts 17 data-flow dependency edges based on actual function reads
+    - Adds 2 spine-to-LC trigger edges (snapshot -> backfill, snapshot -> intraday_hv)
+    - Adds schedule metadata on self-triggering nodes (decay, journal, outcome nodes, depromote)
+    - Disables bt_insights node (no-op since legacy insight BT was removed)
+    """
+    import json
+    tables = _tables(conn)
+    if "brain_graph_edges" not in tables or "brain_graph_nodes" not in tables:
+        return
+
+    # ── 1. Disable cluster_chain edges (the false linear pipeline) ──
+    conn.execute(text("""
+        UPDATE brain_graph_edges
+        SET enabled = false, updated_at = NOW()
+        WHERE signal_type = 'cluster_chain'
+          AND graph_version = 1
+          AND enabled = true
+    """))
+
+    # ── 2. Disable bt_insights node (no-op since legacy insight BT removed) ──
+    conn.execute(text("""
+        UPDATE brain_graph_nodes
+        SET enabled = false, updated_at = NOW()
+        WHERE id = 'nm_lc_bt_insights' AND enabled = true
+    """))
+    conn.execute(text("""
+        UPDATE brain_graph_edges
+        SET enabled = false, updated_at = NOW()
+        WHERE (source_node_id = 'nm_lc_bt_insights' OR target_node_id = 'nm_lc_bt_insights')
+          AND graph_version = 1 AND enabled = true
+    """))
+
+    # ── 3. Insert real data-dependency edges ──
+    dep_edges = [
+        # Spine -> LC triggers
+        ("nm_snap_daily", "nm_lc_backfill", "snapshot_refresh", 0.6, "excitatory", "dataflow"),
+        ("nm_snap_intraday", "nm_lc_intraday_hv", "snapshot_refresh", 0.6, "excitatory", "dataflow"),
+        # Tier 1 -> Tier 2: backfill labels snapshots that mine needs
+        ("nm_lc_backfill", "nm_lc_mine", "node_completed", 0.7, "excitatory", "dataflow"),
+        # Tier 2 -> Tier 3: mining produces patterns/insights
+        ("nm_lc_mine", "nm_lc_seek", "node_completed", 0.6, "excitatory", "dataflow"),
+        ("nm_lc_mine", "nm_lc_bt_queue", "node_completed", 0.7, "excitatory", "dataflow"),
+        ("nm_lc_mine", "nm_lc_refine", "node_completed", 0.5, "excitatory", "dataflow"),
+        ("nm_lc_mine", "nm_lc_hypotheses", "node_completed", 0.6, "excitatory", "dataflow"),
+        # hypotheses can spawn patterns that need backtesting
+        ("nm_lc_hypotheses", "nm_lc_bt_queue", "node_completed", 0.5, "excitatory", "dataflow"),
+        # Tier 3 -> Tier 4: backtests produce results for evolution
+        ("nm_lc_bt_queue", "nm_lc_variants", "node_completed", 0.7, "excitatory", "dataflow"),
+        ("nm_lc_bt_queue", "nm_lc_ml", "node_completed", 0.6, "excitatory", "dataflow"),
+        ("nm_lc_bt_queue", "nm_lc_depromote", "node_completed", 0.5, "excitatory", "dataflow"),
+        # Tier 4 -> Tier 5: ML + pattern engine -> proposals
+        ("nm_lc_ml", "nm_lc_pattern_engine", "node_completed", 0.6, "excitatory", "dataflow"),
+        ("nm_lc_pattern_engine", "nm_lc_proposals", "node_completed", 0.7, "excitatory", "dataflow"),
+        ("nm_lc_pattern_engine", "nm_lc_signals", "node_completed", 0.5, "excitatory", "dataflow"),
+        # Terminal: proposals + depromote -> report -> finalize
+        ("nm_lc_proposals", "nm_lc_cycle_report", "node_completed", 0.6, "excitatory", "dataflow"),
+        ("nm_lc_depromote", "nm_lc_finalize", "node_completed", 0.5, "excitatory", "control"),
+        ("nm_lc_cycle_report", "nm_lc_finalize", "node_completed", 0.5, "excitatory", "control"),
+    ]
+
+    for src, tgt, sig, weight, pol, etype in dep_edges:
+        conn.execute(text("""
+            INSERT INTO brain_graph_edges
+                (source_node_id, target_node_id, signal_type, weight, polarity, edge_type, graph_version)
+            SELECT :src, :tgt, :sig, :w, :pol, :etype, 1
+            WHERE NOT EXISTS (
+                SELECT 1 FROM brain_graph_edges
+                WHERE source_node_id = :src AND target_node_id = :tgt
+                  AND signal_type = :sig AND graph_version = 1
+            )
+        """), {"src": src, "tgt": tgt, "sig": sig, "w": weight, "pol": pol, "etype": etype})
+
+    # ── 4. Schedule metadata on self-triggering nodes ──
+    schedule_meta = {
+        "nm_lc_decay": {"trigger": "cycle_start", "description": "Fires at start of each reconcile cycle"},
+        "nm_lc_journal": {"trigger": "schedule", "cron": "16:05 ET Mon-Fri", "description": "Daily at market close"},
+        "nm_lc_depromote": {"trigger": "schedule", "cron": "03:00 UTC daily", "description": "Daily depromotion check"},
+        "nm_lc_breakout": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_exit": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_fakeout": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_sizing": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_inter_alert": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_timeframe": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_synergy": {"trigger": "alert_resolved", "description": "Fires when BreakoutAlerts resolve"},
+        "nm_lc_monitor_review": {"trigger": "monitor_decision", "description": "Fires when PatternMonitorDecision rows appear"},
+    }
+
+    for node_id, sched in schedule_meta.items():
+        meta_json = json.dumps({"schedule": sched})
+        conn.execute(text("""
+            UPDATE brain_graph_nodes
+            SET display_meta = COALESCE(display_meta, '{}'::jsonb) || CAST(:meta AS jsonb),
+                updated_at = NOW()
+            WHERE id = :nid
+        """), {"nid": node_id, "meta": meta_json})
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6667,6 +6887,9 @@ MIGRATIONS = [
     ("121_autopilot_profitability_outcomes", _migration_121_autopilot_profitability_outcomes),
     ("122_position_plans_table", _migration_122_position_plans_table),
     ("123_setup_vitals_engine", _migration_123_setup_vitals_engine),
+    ("124_alert_content_signature", _migration_124_alert_content_signature),
+    ("125_mesh_reactive_sensors", _migration_125_mesh_reactive_sensors),
+    ("126_mesh_dependency_edges", _migration_126_mesh_dependency_edges),
 ]
 
 

@@ -350,9 +350,11 @@ def _brain_db_poll_loop(
                 if ls.get("running"):
                     phase = ls.get("phase", "")
                     step = ls.get("current_step", "")
-                    steps_done = ls.get("steps_completed", 0)
-                    total_steps = ls.get("total_steps", 24)
-                    progress = f"Step {steps_done}/{total_steps}"
+                    nodes_done = ls.get("nodes_completed", 0)
+                    total_nodes = ls.get("total_nodes", 0)
+                    clusters_done = ls.get("clusters_completed", 0)
+                    total_clusters = ls.get("total_clusters", 0)
+                    progress = f"Nodes {nodes_done}/{total_nodes}  Clusters {clusters_done}/{total_clusters}"
                     status.set_step(step or phase, progress)
             except Exception:
                 pass
@@ -863,45 +865,106 @@ def _run_lean_cycle_loop(args: argparse.Namespace, status: BrainWorkerStatus) ->
             break
 
 
-def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
-    """Neural mesh queue consumer only (requires TRADING_BRAIN_NEURAL_MESH_ENABLED)."""
-    logger.info("[brain] activation-loop mode — processing neural mesh events")
-    nap = max(1, min(30, int(args.interval) if args.interval else 2))
-    while True:
-        while check_pause_signal():
-            status.status = "paused"
-            status.set_step("Paused", "Neural mesh paused...")
-            _db_heartbeat_tick()
-            time.sleep(10)
-        if check_stop_signal() or _check_db_stop_idle():
-            break
-        status.status = "running"
-        status.set_step("NeuralActivation", "Draining activation queue...")
-        try:
-            _maybe_run_brain_work_batch()
-        except Exception as _we:
-            logger.warning("[brain] work ledger before activation batch skipped: %s", _we)
-        db = SessionLocal()
-        try:
-            from app.services.trading.brain_neural_mesh import run_activation_batch
+def _pg_listen_thread(wake_event: threading.Event, stop_flag: list[bool]) -> None:
+    """Background thread: LISTEN on Postgres 'mesh_activation' channel.
 
-            summary = run_activation_batch(db, time_budget_sec=float(min(8, nap * 2)), max_events=48)
-            db.commit()
-            if summary.get("processed"):
-                logger.info("[brain] activation-loop %s", summary)
-        except Exception as e:
-            logger.warning("[brain] activation-loop batch failed: %s", e)
+    When a NOTIFY arrives (from the trigger on brain_activation_events INSERT),
+    set the wake_event so the main loop processes immediately instead of sleeping.
+    Falls back to periodic wake if the LISTEN connection drops.
+    """
+    import select
+    try:
+        from app.config import settings
+        dsn = settings.database_url
+        if not dsn:
+            logger.warning("[brain] No DATABASE_URL for LISTEN/NOTIFY; falling back to polling")
+            return
+        # psycopg2 LISTEN requires autocommit mode on a raw connection
+        import psycopg2
+        conn = psycopg2.connect(dsn)
+        conn.set_isolation_level(0)  # autocommit
+        cur = conn.cursor()
+        cur.execute("LISTEN mesh_activation")
+        logger.info("[brain] LISTEN mesh_activation — reactive mode active")
+
+        while not stop_flag[0]:
+            if select.select([conn], [], [], 5.0) != ([], [], []):
+                conn.poll()
+                while conn.notifies:
+                    conn.notifies.pop(0)
+                    wake_event.set()
+    except ImportError:
+        logger.info("[brain] psycopg2 not available for LISTEN/NOTIFY; polling fallback")
+    except Exception as e:
+        logger.warning("[brain] LISTEN thread exiting: %s", e)
+    finally:
+        try:
+            conn.close()  # type: ignore[possibly-undefined]
+        except Exception:
+            pass
+
+
+def _run_activation_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:
+    """Neural mesh queue consumer with Postgres LISTEN/NOTIFY reactivity.
+
+    Uses a background thread that LISTENs on 'mesh_activation'. When a sensor
+    publishes an event (INSERT into brain_activation_events), the Postgres trigger
+    fires NOTIFY and the main loop wakes instantly to process. Falls back to
+    polling if LISTEN is unavailable.
+    """
+    logger.info("[brain] activation-loop mode — reactive neural mesh (LISTEN/NOTIFY)")
+    nap = max(1, min(30, int(args.interval) if args.interval else 2))
+
+    wake_event = threading.Event()
+    stop_flag = [False]
+    listener = threading.Thread(
+        target=_pg_listen_thread,
+        args=(wake_event, stop_flag),
+        daemon=True,
+        name="mesh-listen",
+    )
+    listener.start()
+
+    try:
+        while True:
+            while check_pause_signal():
+                status.status = "paused"
+                status.set_step("Paused", "Neural mesh paused...")
+                _db_heartbeat_tick()
+                time.sleep(10)
+            if check_stop_signal() or _check_db_stop_idle():
+                break
+            status.status = "running"
+            status.set_step("NeuralActivation", "Draining activation queue...")
             try:
-                db.rollback()
-            except Exception:
-                pass
-        finally:
-            db.close()
-        status.save()
-        if args.once:
-            break
-        _db_heartbeat_tick()
-        time.sleep(float(nap))
+                _maybe_run_brain_work_batch()
+            except Exception as _we:
+                logger.warning("[brain] work ledger before activation batch skipped: %s", _we)
+            db = SessionLocal()
+            try:
+                from app.services.trading.brain_neural_mesh import run_activation_batch
+
+                summary = run_activation_batch(db, time_budget_sec=float(min(8, nap * 2)), max_events=48)
+                db.commit()
+                if summary.get("processed"):
+                    logger.info("[brain] activation-loop %s", summary)
+            except Exception as e:
+                logger.warning("[brain] activation-loop batch failed: %s", e)
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+            finally:
+                db.close()
+            status.save()
+            if args.once:
+                break
+            _db_heartbeat_tick()
+            # Wait for NOTIFY wake or fall back to polling interval
+            wake_event.wait(timeout=float(nap))
+            wake_event.clear()
+    finally:
+        stop_flag[0] = True
 
 
 def _run_mining_loop(args: argparse.Namespace, status: BrainWorkerStatus) -> None:

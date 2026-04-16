@@ -828,18 +828,18 @@ def dispatch_stop_alerts(
     user_id: int | None,
     summary: dict[str, Any],
 ) -> int:
-    """
-    Turn stop engine alerts into user-facing dispatched alerts.
-    Each message includes brain context so the user sees the reasoning.
-    Returns count of alerts dispatched.
+    """Turn stop engine alerts into mesh sensor events + critical-only direct Telegram.
+
+    All events publish to the neural mesh (nm_stop_eval sensor node) so parent
+    aggregation nodes see the full picture. STOP_HIT / TARGET_HIT / STOP_APPROACHING
+    also dispatch directly via Telegram as a safety fast-path (critical events must
+    not wait for mesh propagation latency).
     """
     from .alerts import dispatch_alert
 
     STOP_HIT = "stop_hit"
     TARGET_HIT = "target_hit"
     STOP_APPROACHING = "stop_approaching"
-    BREAKEVEN_REACHED = "breakeven_reached"
-    STOP_TIGHTENED = "stop_tightened"
 
     regime = summary.get("regime", "cautious")
 
@@ -857,6 +857,26 @@ def dispatch_stop_alerts(
             strategy_tag=strategy_tag, lifecycle_tag=lifecycle_tag, regime=regime,
         )
 
+        # Publish ALL events to mesh sensor (nm_stop_eval) for aggregation
+        try:
+            from .brain_neural_mesh.publisher import publish_stop_eval
+            publish_stop_eval(
+                db,
+                trade_id=alert.get("trade_id", 0),
+                ticker=ticker,
+                alert_event=event,
+                state=alert.get("state", ""),
+                old_stop=alert.get("old_stop"),
+                new_stop=alert.get("new_stop"),
+                reason=reason,
+                price=price,
+                brain_context=brain,
+                user_id=user_id,
+            )
+        except Exception:
+            logger.debug("[stop_engine] mesh publish failed for %s", ticker, exc_info=True)
+
+        # Critical fast-path: direct Telegram for events that demand immediate action
         if event == "STOP_HIT" or event == "TIME_EXIT":
             _fmt = format_time_exit if event == "TIME_EXIT" else format_stop_hit
             msg = _fmt(ticker, price, reason, **_fmt_kw)
@@ -875,16 +895,10 @@ def dispatch_stop_alerts(
             dispatched += 1
 
         elif event == "BREAKEVEN_REACHED":
-            msg = format_breakeven(ticker, reason, **_fmt_kw)
-            dispatch_alert(db, user_id, BREAKEVEN_REACHED, ticker, msg, skip_throttle=True)
-            dispatched += 1
+            logger.info("[stop_engine] breakeven reached for %s (mesh only): %s", ticker, reason)
 
         elif event == "STOP_TIGHTENED":
-            old_s = alert.get("old_stop")
-            new_s = alert.get("new_stop")
-            msg = format_stop_tightened(ticker, old_s, new_s, reason, **_fmt_kw)
-            dispatch_alert(db, user_id, STOP_TIGHTENED, ticker, msg, skip_throttle=True)
-            dispatched += 1
+            logger.info("[stop_engine] stop tightened for %s (mesh only): %s", ticker, reason)
 
     return dispatched
 

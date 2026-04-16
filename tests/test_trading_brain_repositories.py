@@ -140,13 +140,13 @@ def test_learning_status_parity_logger_no_crash(db: Session) -> None:
 
     reader = make_learning_status_reader()
     dto = reader.get_aggregate_status(db)
-    assert isinstance(dto.steps_completed, int)
+    assert isinstance(dto.nodes_completed, int)
     log_learning_status_parity(
         legacy={
             "running": False,
             "phase": "idle",
-            "steps_completed": 0,
-            "total_steps": 14,
+            "nodes_completed": 0,
+            "total_nodes": 28,
             "current_step": "",
         },
         db_view=dto,

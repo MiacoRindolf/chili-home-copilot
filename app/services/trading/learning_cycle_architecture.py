@@ -97,8 +97,8 @@ TRADING_BRAIN_ROOT_METADATA = TradingBrainRootMetadata(
         "patterns, backtests, ML metrics, ``elapsed_s``, ``step_timings``, funnel snapshot",
         "Rows written/updated (when not snapshot-only): ``scan_patterns``, insights, "
         "backtests, ``learning_events``, journal, proposals (per sub-phase)",
-        "``_learning_status`` global — ``current_step``, ``phase``, ``steps_completed``, "
-        "``last_cycle_funnel`` for the Brain desk",
+        "``_learning_status`` global — ``current_step``, ``phase``, ``nodes_completed``, "
+        "``clusters_completed``, ``last_cycle_funnel`` for the Brain desk",
     ),
 )
 
@@ -393,30 +393,6 @@ TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS: tuple[CycleClusterDef, ...] = (
             "``report['backtests_run']``, queue pending/empty flags",
         ),
         steps=(
-            CycleStepDef(
-                sid="bt_insights",
-                label="Backtesting insights (legacy, removed)",
-                code_ref="learning.py (step retained for ordinal stability)",
-                runner_phase="backtesting",
-                description=(
-                    "Legacy TradingInsight backtests — removed. ScanPattern queue is canonical. "
-                    "Step kept as no-op for stage ordinal stability."
-                ),
-                remarks=(
-                    "What: Previously ran automated backtests for legacy insight-linked "
-                    "strategies. Removed; ScanPattern queue step is now the only backtest path.\n\n"
-                    "Where: No-op block in ``learning.py``.\n\n"
-                    "Why: Legacy path was never enabled in production."
-                ),
-                inputs=(
-                    "``db``, ``user_id``",
-                    "Eligible insights and backtest engine parameters",
-                ),
-                outputs=(
-                    "``bt_count`` insight backtests run (or 0 if skipped)",
-                    "``report['insight_backtests_skipped']`` boolean when disabled",
-                ),
-            ),
             CycleStepDef(
                 sid="bt_queue",
                 label="Backtesting patterns from queue",
@@ -1134,39 +1110,6 @@ def _build_step_index() -> dict[tuple[str, str], CycleStepDef]:
 _CYCLE_STEP_INDEX: dict[tuple[str, str], CycleStepDef] = _build_step_index()
 
 
-_NO_PROGRESS_SIDS = frozenset({"cycle_report", "depromote", "finalize"})
-_SNAP_INLINE_SIDS = frozenset({"snapshots_daily", "snapshots_intraday"})
-
-
-def cycle_progress_stage_keys(*, snap_inline: bool = False) -> tuple[str, ...]:
-    """Ordered step ``sid`` values that bump ``steps_completed`` for the learning cycle.
-
-    Same inclusion rules as the progress bar: excludes the scheduler-only cluster,
-    excludes ``cycle_report`` / ``depromote`` / ``finalize``, and excludes snapshot
-    steps unless *snap_inline* is True.
-    """
-    keys: list[str] = []
-    for cluster in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS:
-        if cluster.id == SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID:
-            continue
-        for step in cluster.steps:
-            if step.sid in _NO_PROGRESS_SIDS:
-                continue
-            if step.sid in _SNAP_INLINE_SIDS and not snap_inline:
-                continue
-            keys.append(step.sid)
-    return tuple(keys)
-
-
-def count_cycle_progress_steps(*, snap_inline: bool = False) -> int:
-    """Return the number of steps that contribute to the cycle progress bar.
-
-    Excludes scheduled-only steps (APScheduler) and post-cycle steps that don't
-    bump the counter.  Snapshot steps are only included when *snap_inline* is True.
-    """
-    return len(cycle_progress_stage_keys(snap_inline=snap_inline))
-
-
 def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:
     try:
         return _CYCLE_STEP_INDEX[(cluster_id, step_sid)]
@@ -1175,8 +1118,8 @@ def get_cycle_step(cluster_id: str, step_sid: str) -> CycleStepDef:
 
 
 def _set_cycle_graph_node_fields(status_dict: dict[str, Any], cluster_id: str, step_sid: str) -> None:
-    """Set legacy skill-tree node id (``s_{cluster}_{step}``) and cluster/step indices for status APIs."""
-    status_dict["graph_node_id"] = f"s_{cluster_id}_{step_sid}"
+    """Set mesh node id and cluster/step indices for status APIs."""
+    status_dict["graph_node_id"] = f"nm_lc_{step_sid}"
     status_dict["current_cluster_id"] = cluster_id
     status_dict["current_step_sid"] = step_sid
     status_dict["current_cluster_index"] = -1

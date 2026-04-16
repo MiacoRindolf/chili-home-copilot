@@ -4,11 +4,9 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ..stage_catalog import TOTAL_STAGES
-
 
 class LearningStatusDTO(BaseModel):
-    """Aggregate status for future DB-backed brain cycle UI (parity with `get_learning_status()` keys)."""
+    """Aggregate status for brain cycle UI — mesh-native progress."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -17,8 +15,10 @@ class LearningStatusDTO(BaseModel):
     correlation_id: str | None = None
     phase: str = "idle"
     current_step: str = ""
-    steps_completed: int = 0
-    total_steps: int = TOTAL_STAGES
+    nodes_completed: int = 0
+    total_nodes: int = 0
+    clusters_completed: int = 0
+    total_clusters: int = 0
     started_at: str | None = None
     step_timings: dict[str, float] = Field(default_factory=dict)
     data_provider: str | None = None

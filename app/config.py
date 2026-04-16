@@ -181,7 +181,8 @@ class Settings(BaseSettings):
     brain_work_retry_base_seconds: int = 30
     brain_work_retry_multiplier: int = 2
     # When True, run_learning_cycle skips in-cycle queue drain; brain-worker work-ledger batch owns it.
-    brain_work_delegate_queue_from_cycle: bool = True
+    # Requires brain_work_ledger table to exist; set False to drain queue in-cycle.
+    brain_work_delegate_queue_from_cycle: bool = False
     # Per-handler dispatch budgets (ledger round processes execution_feedback_digest before backtests).
     brain_work_exec_feedback_batch_size: int = 3
     brain_work_exec_feedback_debounce_seconds: int = 45

@@ -286,3 +286,207 @@ def publish_brain_work_outcome(
         _log.debug("%s brain_work_outcome type=%s pattern=%s", LOG_PREFIX, outcome_type, scan_pattern_id)
     except Exception as e:
         _log.warning("%s publish_brain_work_outcome failed: %s", LOG_PREFIX, e)
+
+
+# ── Sensor node publishers (Phase 2: edge nodes publish structured output) ──
+
+
+def publish_stop_eval(
+    db: Session,
+    *,
+    trade_id: int,
+    ticker: str,
+    alert_event: str | None,
+    state: str,
+    old_stop: float | None,
+    new_stop: float | None,
+    reason: str,
+    price: float,
+    brain_context: dict[str, Any] | None = None,
+    user_id: int | None = None,
+) -> None:
+    """Stop engine sensor: publish evaluation result to nm_stop_eval node."""
+    if not mesh_enabled():
+        return
+    try:
+        from .repository import get_or_create_state
+
+        node_state = get_or_create_state(db, "nm_stop_eval")
+        node_state.local_state = {
+            "trade_id": trade_id,
+            "ticker": (ticker or "").upper(),
+            "alert_event": alert_event,
+            "state": state,
+            "old_stop": old_stop,
+            "new_stop": new_stop,
+            "stop_level": new_stop or old_stop,
+            "reason": (reason or "")[:500],
+            "price": price,
+            "current_price": price,
+            "brain_context": brain_context or {},
+            "user_id": user_id,
+            "action": alert_event,
+            "urgency": "critical" if alert_event in ("STOP_HIT", "TIME_EXIT") else "info",
+            "updated_at": _now_iso(),
+        }
+
+        urgency_delta = {
+            "STOP_HIT": 0.35,
+            "TIME_EXIT": 0.35,
+            "STOP_APPROACHING": 0.20,
+            "STOP_TIGHTENED": 0.12,
+            "BREAKEVEN_REACHED": 0.10,
+        }
+        delta = urgency_delta.get(alert_event or "", 0.08)
+
+        cid = str(uuid.uuid4())
+        enqueue_activation(
+            db,
+            source_node_id="nm_stop_eval",
+            cause="stop_eval",
+            payload={
+                "signal_type": alert_event or "stop_check",
+                "trade_id": trade_id,
+                "ticker": (ticker or "").upper(),
+                "old_stop": old_stop,
+                "new_stop": new_stop,
+                "urgency": node_state.local_state["urgency"],
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+    except Exception as e:
+        _log.warning("%s publish_stop_eval failed: %s", LOG_PREFIX, e)
+
+
+def publish_pattern_health(
+    db: Session,
+    *,
+    trade_id: int,
+    ticker: str,
+    action: str,
+    health_score: float,
+    health_delta: float | None,
+    reasoning: str,
+    new_stop: float | None = None,
+    new_target: float | None = None,
+    current_price: float = 0,
+    pnl_pct: float | None = None,
+    user_id: int | None = None,
+    scan_pattern_id: int | None = None,
+) -> None:
+    """Pattern monitor sensor: publish health evaluation to nm_pattern_health node."""
+    if not mesh_enabled():
+        return
+    try:
+        from .repository import get_or_create_state
+
+        node_state = get_or_create_state(db, "nm_pattern_health")
+
+        urgency = "info"
+        if action == "exit_now":
+            urgency = "critical"
+        elif action == "tighten_stop":
+            urgency = "warning"
+
+        node_state.local_state = {
+            "trade_id": trade_id,
+            "ticker": (ticker or "").upper(),
+            "action": action,
+            "health_score": health_score,
+            "health_delta": health_delta,
+            "reasoning": (reasoning or "")[:500],
+            "new_stop": new_stop,
+            "new_target": new_target,
+            "price": current_price,
+            "current_price": current_price,
+            "pnl_pct": pnl_pct,
+            "user_id": user_id,
+            "scan_pattern_id": scan_pattern_id,
+            "urgency": urgency,
+            "updated_at": _now_iso(),
+        }
+
+        delta = {"exit_now": 0.35, "tighten_stop": 0.18, "loosen_target": 0.10}.get(action, 0.06)
+        cid = str(uuid.uuid4())
+        enqueue_activation(
+            db,
+            source_node_id="nm_pattern_health",
+            cause="pattern_health",
+            payload={
+                "signal_type": action,
+                "trade_id": trade_id,
+                "ticker": (ticker or "").upper(),
+                "health_score": health_score,
+                "urgency": urgency,
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+    except Exception as e:
+        _log.warning("%s publish_pattern_health failed: %s", LOG_PREFIX, e)
+
+
+def publish_imminent_eval(
+    db: Session,
+    *,
+    scan_pattern_id: int,
+    ticker: str,
+    composite_score: float,
+    readiness: float,
+    eta_lo: float,
+    eta_hi: float,
+    price: float | int,
+    user_id: int | None = None,
+) -> None:
+    """Imminent breakout sensor: publish evaluation to nm_imminent_eval node."""
+    if not mesh_enabled():
+        return
+    try:
+        from .repository import get_or_create_state
+
+        node_state = get_or_create_state(db, "nm_imminent_eval")
+        node_state.local_state = {
+            "scan_pattern_id": scan_pattern_id,
+            "ticker": (ticker or "").upper(),
+            "composite_score": composite_score,
+            "readiness": readiness,
+            "eta_lo": eta_lo,
+            "eta_hi": eta_hi,
+            "price": price,
+            "current_price": price,
+            "user_id": user_id,
+            "urgency": "info" if composite_score < 0.75 else "warning",
+            "action": "imminent_breakout",
+            "updated_at": _now_iso(),
+        }
+
+        delta = 0.15 if composite_score >= 0.75 else 0.08
+        cid = str(uuid.uuid4())
+        enqueue_activation(
+            db,
+            source_node_id="nm_imminent_eval",
+            cause="imminent_eval",
+            payload={
+                "signal_type": "imminent_breakout",
+                "scan_pattern_id": scan_pattern_id,
+                "ticker": (ticker or "").upper(),
+                "composite_score": composite_score,
+                "readiness": readiness,
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+    except Exception as e:
+        _log.warning("%s publish_imminent_eval failed: %s", LOG_PREFIX, e)
+
+
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()

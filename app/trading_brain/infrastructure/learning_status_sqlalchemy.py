@@ -36,8 +36,10 @@ class SqlAlchemyBrainLearningStatusReader:
             correlation_id=row.correlation_id,
             phase=str(mir.get("phase", "idle")),
             current_step=str(mir.get("current_step", "")),
-            steps_completed=int(mir.get("steps_completed", 0)),
-            total_steps=int(mir.get("total_steps", TOTAL_STAGES)),
+            nodes_completed=int(mir.get("nodes_completed", 0)),
+            total_nodes=int(mir.get("total_nodes", TOTAL_STAGES)),
+            clusters_completed=int(mir.get("clusters_completed", 0)),
+            total_clusters=int(mir.get("total_clusters", 0)),
             started_at=started_at,
             step_timings={
                 k: float(v)
@@ -60,17 +62,17 @@ def log_learning_status_parity(
     logger,
 ) -> None:
     """Log WARNING on field mismatches; never mutates legacy."""
-    fields = ("running", "phase", "current_step", "steps_completed")
+    fields = ("running", "phase", "current_step", "nodes_completed")
     mismatches: list[str] = []
     for f in fields:
         lv = legacy.get(f)
         dv = getattr(db_view, f)
         if lv != dv:
             mismatches.append(f"{f} legacy={lv!r} db_mirror={dv!r}")
-    lt = legacy.get("total_steps")
-    if lt != db_view.total_steps:
+    lt = legacy.get("total_nodes")
+    if lt != db_view.total_nodes:
         mismatches.append(
-            f"total_steps legacy={lt!r} db_mirror={db_view.total_steps!r} "
+            f"total_nodes legacy={lt!r} db_mirror={db_view.total_nodes!r} "
             f"(catalog={TOTAL_STAGES})"
         )
     if not mismatches:

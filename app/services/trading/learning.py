@@ -48,7 +48,8 @@ from .snapshot_bar_ops import (
 from .learning_cycle_architecture import (
     apply_learning_cycle_step_status,
     apply_learning_cycle_step_status_progress,
-    count_cycle_progress_steps,
+    TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS,
+    SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
 )
 from .learning_cycle_steps import load_prescreen_scan_and_universe, run_secondary_miners_phase
 
@@ -6159,8 +6160,17 @@ _learning_status: dict[str, Any] = {
     "current_step_sid": "",
     "current_cluster_index": -1,
     "current_step_index": -1,
-    "steps_completed": 0,
-    "total_steps": count_cycle_progress_steps(snap_inline=False),
+    "nodes_completed": 0,
+    "total_nodes": sum(
+        len(c.steps)
+        for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+        if c.id != SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+    ),
+    "clusters_completed": 0,
+    "total_clusters": sum(
+        1 for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+        if c.id != SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+    ),
     "patterns_found": 0,
     "tickers_processed": 0,
     "step_timings": {},
@@ -6187,8 +6197,10 @@ _BRAIN_WORKER_STATUS_LEARNING_KEYS: tuple[str, ...] = (
     "current_step_sid",
     "current_cluster_index",
     "current_step_index",
-    "steps_completed",
-    "total_steps",
+    "nodes_completed",
+    "total_nodes",
+    "clusters_completed",
+    "total_clusters",
     "started_at",
     "elapsed_s",
 )
@@ -8626,9 +8638,8 @@ def run_learning_cycle(
     _learning_status["phase"] = "starting"
     _learning_status["correlation_id"] = str(uuid.uuid4())
     _learning_status["secondary_miners_skipped"] = False
-    _learning_status["steps_completed"] = 0
-    # Matches ``stage_catalog.TOTAL_STAGES`` / ``cycle_progress_stage_keys(snap_inline=False)``.
-    _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
+    _learning_status["nodes_completed"] = 0
+    _learning_status["clusters_completed"] = 0
     _learning_status["patterns_found"] = 0
     _learning_status["tickers_processed"] = 0
     _learning_status["started_at"] = datetime.utcnow().isoformat()
@@ -8716,13 +8727,39 @@ def run_learning_cycle(
     try:
         from ...config import settings
 
-        _cycle_step = 0
-        _learning_status["total_steps"] = count_cycle_progress_steps(snap_inline=False)
+        _node_step = 0
+        _cluster_done: set[str] = set()
 
-        def _bump_cycle_step() -> None:
-            nonlocal _cycle_step
-            _cycle_step += 1
-            _learning_status["steps_completed"] = _cycle_step
+        _total_nodes = sum(
+            len(c.steps)
+            for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+            if c.id != SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+        )
+        _total_clusters = sum(
+            1 for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+            if c.id != SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+        )
+        _learning_status["total_nodes"] = _total_nodes
+        _learning_status["total_clusters"] = _total_clusters
+
+        def _bump_node(cluster_id: str | None = None) -> None:
+            nonlocal _node_step
+            _node_step += 1
+            _learning_status["nodes_completed"] = _node_step
+            if cluster_id and cluster_id not in _cluster_done:
+                cluster_def = next(
+                    (c for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS if c.id == cluster_id),
+                    None,
+                )
+                if cluster_def:
+                    cluster_sids = {s.sid for s in cluster_def.steps}
+                    done_in_cluster = sum(
+                        1 for k in _learning_status.get("step_timings", {})
+                        if k in cluster_sids
+                    )
+                    if done_in_cluster >= len(cluster_sids):
+                        _cluster_done.add(cluster_id)
+                        _learning_status["clusters_completed"] = len(_cluster_done)
 
         def _finish_secondary_step(cluster_id: str, step_sid: str, step_started: float, extra: str = "") -> None:
             _finish_lc_step(cluster_id, step_sid, step_started, extra)
@@ -8744,7 +8781,7 @@ def run_learning_cycle(
         scores_filled = backfill_predicted_scores(db, limit=1000)
         report["returns_backfilled"] = filled
         report["scores_backfilled"] = scores_filled
-        _bump_cycle_step()
+        _bump_node("c_state")
         _step_time("backfill", step_start,
                     f"{filled} returns + {scores_filled} scores via {_provider}")
         _finish_lc_step(
@@ -8763,7 +8800,7 @@ def run_learning_cycle(
         decay_result = decay_stale_insights(db, user_id)
         report["insights_decayed"] = decay_result.get("decayed", 0)
         report["insights_pruned"] = decay_result.get("pruned", 0)
-        _bump_cycle_step()
+        _bump_node("c_state")
         _step_time("confidence_decay", step_start,
                     f"{decay_result.get('decayed', 0)} decayed, {decay_result.get('pruned', 0)} pruned")
         _finish_lc_step(
@@ -8790,7 +8827,7 @@ def run_learning_cycle(
         discoveries = mine_patterns(db, user_id, ticker_universe=top_tickers)
         report["patterns_discovered"] = len(discoveries)
         _learning_status["patterns_found"] = len(discoveries)
-        _bump_cycle_step()
+        _bump_node("c_discovery")
         _step_time("mine", step_start,
                     f"{len(discoveries)} patterns from OHLCV via {_provider}")
         _finish_lc_step(
@@ -8808,7 +8845,7 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_discovery", "seek")
         seek_result = seek_pattern_data(db, user_id)
         report["patterns_boosted"] = seek_result.get("sought", 0)
-        _bump_cycle_step()
+        _bump_node("c_discovery")
         _step_time("active_seek", step_start,
                     f"{seek_result.get('sought', 0)} boosted")
         _finish_lc_step(
@@ -8822,20 +8859,9 @@ def run_learning_cycle(
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
-        # graph-node: c_validation/bt_insights
-        apply_learning_cycle_step_status(_learning_status, "c_validation", "bt_insights")
-        # Legacy TradingInsight backtests removed — ScanPattern queue is canonical.
-        report["insight_backtests_skipped"] = True
-        _step_time("backtest_insights", step_start, "skipped (legacy insight backtests removed)")
-        _bump_cycle_step()
-        _finish_lc_step(
-            "c_validation",
-            "bt_insights",
-            step_start,
-            "skipped (legacy insight backtests removed)",
-        )
+        # bt_insights removed — ScanPattern queue is the canonical backtest path.
 
-        # Step 8: Backtest ScanPatterns from priority queue
+        # Backtest ScanPatterns from priority queue
         if _shutting_down.is_set():
             raise InterruptedError("shutdown")
         step_start = time.time()
@@ -8868,7 +8894,7 @@ def run_learning_cycle(
         report["backtests_run"] = int(report.get("backtests_run", 0)) + int(
             queue_result.get("backtests_run", 0)
         )
-        _bump_cycle_step()
+        _bump_node("c_validation")
         _step_time("backtest_queue", step_start,
                    f"{queue_result.get('patterns_processed', 0)} patterns, "
                    f"{queue_result.get('pending', 0)} still pending")
@@ -8892,7 +8918,7 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning("[learning] evolve_pattern_strategies failed: %s", e)
             report["evolution"] = {}
-        _bump_cycle_step()
+        _bump_node("c_evolution")
         _step_time(
             "pattern_variant_evolution",
             step_start,
@@ -8919,7 +8945,7 @@ def run_learning_cycle(
         report["hypothesis_patterns_spawned"] = sum(
             1 for d in evolve_result.get("details", []) if d.get("spawned_pattern_id")
         )
-        _bump_cycle_step()
+        _bump_node("c_evolution")
         _step_time("evolve", step_start,
                     f"{evolve_result.get('hypotheses_tested', 0)} hypotheses, "
                     f"{evolve_result.get('weights_evolved', 0)} weights evolved")
@@ -8956,7 +8982,7 @@ def run_learning_cycle(
             logger.warning("[learning] Monitor decision learning failed: %s", _md_err)
             report["monitor_decisions_reviewed"] = 0
 
-        _bump_cycle_step()
+        _bump_node("c_evolution")
         _step_time("breakout_outcomes", step_start_bo,
                     f"{bo_result.get('patterns_learned', 0)} patterns from "
                     f"{bo_result.get('total_resolved', 0)} resolved alerts, "
@@ -8970,11 +8996,11 @@ def run_learning_cycle(
             f"{report.get('trade_feedback_patterns', 0)} trade-feedback updates",
         )
 
-        # Steps 11–18: Secondary miners (optional — disable for faster cycles)
+        # Secondary miners (optional — disable for faster cycles)
         def _mark_secondary_skipped() -> None:
-            nonlocal _cycle_step
-            _cycle_step += 8
-            _learning_status["steps_completed"] = _cycle_step
+            nonlocal _node_step
+            _node_step += 8
+            _learning_status["nodes_completed"] = _node_step
             _learning_status["secondary_miners_skipped"] = True
 
         run_secondary_miners_phase(
@@ -8984,7 +9010,7 @@ def run_learning_cycle(
             cycle_budget=cycle_budget,
             report=report,
             learning_status=_learning_status,
-            bump_cycle_step=_bump_cycle_step,
+            bump_node=_bump_node,
             step_time=_step_time,
             finish_lc_step=_finish_secondary_step,
             shutting_down_is_set=_shutting_down.is_set,
@@ -9001,7 +9027,7 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_journal", "journal")
         journal = daily_market_journal(db, user_id)
         report["journal_written"] = journal is not None
-        _bump_cycle_step()
+        _bump_node("c_journal")
         _step_time("journal", step_start)
         _finish_lc_step("c_journal", "journal", step_start, "")
 
@@ -9013,7 +9039,7 @@ def run_learning_cycle(
         apply_learning_cycle_step_status(_learning_status, "c_journal", "signals")
         events = check_signal_events(db, user_id)
         report["signal_events"] = len(events)
-        _bump_cycle_step()
+        _bump_node("c_journal")
         _step_time("signals", step_start, f"{len(events)} events")
         _finish_lc_step("c_journal", "signals", step_start, f"{len(events)} events")
 
@@ -9038,7 +9064,7 @@ def run_learning_cycle(
                 f"{ml_result.get('active_patterns',0)} patterns, "
                 f"{_fb.get('boosted',0)} boosted, {_fb.get('penalised',0)} penalised",
             )
-        _bump_cycle_step()
+        _bump_node("c_meta_learning")
         _step_time("ml_train", step_start,
                     f"acc={ml_result.get('cv_accuracy', 0):.3f}"
                     if ml_result.get("ok") else "skipped")
@@ -9062,7 +9088,7 @@ def run_learning_cycle(
             report["patterns_evolved"] = pe_result.get("patterns_evolved", 0)
         except Exception as e:
             logger.warning(f"[trading] Pattern engine cycle failed: {e}")
-        _bump_cycle_step()
+        _bump_node("c_decisioning")
         _step_time("pattern_engine", step_start, "done")
         _finish_lc_step("c_decisioning", "pattern_engine", step_start, "done")
 
@@ -9079,7 +9105,7 @@ def run_learning_cycle(
         except Exception as e:
             logger.warning(f"[trading] Strategy proposal generation failed: {e}")
             report["proposals_generated"] = 0
-        _bump_cycle_step()
+        _bump_node("c_decisioning")
         _step_time("proposals", step_start,
                     f"{report.get('proposals_generated', 0)} generated")
         _finish_lc_step(
@@ -9103,7 +9129,7 @@ def run_learning_cycle(
                 report["cycle_ai_report_id"] = rid
             except Exception as e:
                 logger.warning("[trading] Cycle AI report failed: %s", e)
-            _learning_status["steps_completed"] = _cycle_step
+            _bump_node("c_control")
             _step_time(
                 "cycle_ai_report",
                 step_start,
@@ -9115,8 +9141,6 @@ def run_learning_cycle(
                 step_start,
                 f"id={report.get('cycle_ai_report_id')}" if report.get("cycle_ai_report_id") else "failed",
             )
-        else:
-            _learning_status["steps_completed"] = _cycle_step
 
         # Live vs research depromotion (optional)
         if not _shutting_down.is_set():
@@ -9179,7 +9203,7 @@ def run_learning_cycle(
             f"ML={'trained' if report.get('ml_trained') else 'skipped'}, "
             f"{report.get('proposals_generated', 0)} proposals — {elapsed:.0f}s",
         )
-        _learning_status["steps_completed"] = _cycle_step
+        _bump_node("c_control")
         _finish_lc_step(
             "c_control",
             "finalize",

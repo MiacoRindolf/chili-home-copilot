@@ -3008,10 +3008,12 @@ function pollLearningStatus() {
       var stepEl = document.getElementById('brain-learning-step');
       var progEl = document.getElementById('brain-learning-progress');
       var barEl = document.getElementById('brain-progress-bar');
-      var roleHint = (learning.status_role === 'reconcile_compatibility') ? ' (reconcile compatibility)' : '';
-      if (stepEl) stepEl.textContent = (learning.current_step || '') + roleHint;
-      var pct = learning.total_steps ? Math.round(learning.steps_completed / learning.total_steps * 100) : 0;
-      if (progEl) progEl.textContent = 'Step ' + learning.steps_completed + '/' + learning.total_steps + (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
+      if (stepEl) stepEl.textContent = learning.current_step || '';
+      var pct = learning.total_nodes ? Math.round(learning.nodes_completed / learning.total_nodes * 100) : 0;
+      var clusterText = 'Clusters ' + (learning.clusters_completed || 0) + '/' + (learning.total_clusters || 0);
+      var nodeText = 'Nodes ' + (learning.nodes_completed || 0) + '/' + (learning.total_nodes || 0);
+      var extra = (learning.tickers_processed > 0 ? ' (' + learning.tickers_processed + ' scored)' : '') + (learning.elapsed_s ? ' ' + Math.round(learning.elapsed_s) + 's' : '');
+      if (progEl) progEl.textContent = clusterText + '  ' + nodeText + extra;
       if (barEl) barEl.style.width = Math.min(100, pct) + '%';
     } else {
       // Secondary UX: keep <details> visible but collapsed when idle (not display:none).

@@ -713,6 +713,23 @@ def run_pattern_imminent_scan(
             signals=sigs,
         )
 
+        # Publish to mesh sensor (nm_imminent_eval) for aggregation
+        try:
+            from .brain_neural_mesh.publisher import publish_imminent_eval
+            publish_imminent_eval(
+                db,
+                scan_pattern_id=pat.id,
+                ticker=ticker,
+                composite_score=float(c["composite"]),
+                readiness=float(c["readiness"]),
+                eta_lo=float(c["eta_lo"]),
+                eta_hi=float(c["eta_hi"]),
+                price=sc.get("price", 0),
+                user_id=user_id,
+            )
+        except Exception:
+            logger.debug("[pattern_imminent] mesh publish failed for %s", ticker, exc_info=True)
+
         delivered = do_dry
         if not do_dry:
             delivered = dispatch_alert(

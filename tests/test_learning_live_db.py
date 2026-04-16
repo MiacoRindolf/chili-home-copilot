@@ -16,13 +16,15 @@ def test_get_learning_status_merges_learning_live_from_db(db) -> None:
             "running": True,
             "phase": "mining",
             "current_step": "Mining patterns",
-            "graph_node_id": "s_c_discovery_mine",
+            "graph_node_id": "nm_lc_mine",
             "current_cluster_id": "c_discovery",
             "current_step_sid": "mine",
             "current_cluster_index": 2,
             "current_step_index": 0,
-            "steps_completed": 5,
-            "total_steps": 24,
+            "nodes_completed": 5,
+            "total_nodes": 28,
+            "clusters_completed": 1,
+            "total_clusters": 11,
             "started_at": "2020-01-01T00:00:00",
             "elapsed_s": 1.0,
         }
@@ -36,7 +38,7 @@ def test_get_learning_status_merges_learning_live_from_db(db) -> None:
         learning_mod._learning_status["current_step_index"] = -1
 
         st = learning_mod.get_learning_status()
-        assert st["graph_node_id"] == "s_c_discovery_mine"
+        assert st["graph_node_id"] == "nm_lc_mine"
         assert st["running"] is True
         assert st["current_cluster_id"] == "c_discovery"
     finally:

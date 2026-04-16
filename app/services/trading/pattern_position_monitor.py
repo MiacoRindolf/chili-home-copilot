@@ -1132,7 +1132,28 @@ def _dispatch_monitor_alert(
     pnl_pct: float | None,
     dry_run: bool,
 ) -> None:
-    """Send Telegram alert for critical pattern monitor actions only (exit_now)."""
+    """Publish pattern health to mesh sensor; direct Telegram only for exit_now."""
+    # Publish ALL actions to mesh sensor (nm_pattern_health) for aggregation
+    try:
+        from .brain_neural_mesh.publisher import publish_pattern_health
+        publish_pattern_health(
+            db,
+            trade_id=trade.id,
+            ticker=trade.ticker,
+            action=rec.action,
+            health_score=health.health_score,
+            health_delta=health.health_delta,
+            reasoning=getattr(rec, "reasoning", "") or "",
+            new_stop=rec.new_stop,
+            new_target=getattr(rec, "new_target", None),
+            current_price=current_price,
+            pnl_pct=pnl_pct,
+            user_id=trade.user_id,
+            scan_pattern_id=trade.scan_pattern_id,
+        )
+    except Exception:
+        logger.debug("[pattern_monitor] mesh publish failed for %s", trade.ticker, exc_info=True)
+
     if rec.action != "exit_now":
         return
 

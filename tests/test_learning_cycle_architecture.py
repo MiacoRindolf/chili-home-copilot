@@ -12,8 +12,6 @@ from app.services.trading.learning_cycle_architecture import (
     TRADING_BRAIN_ROOT_METADATA,
     apply_learning_cycle_step_status,
     apply_learning_cycle_step_status_progress,
-    count_cycle_progress_steps,
-    cycle_progress_stage_keys,
     get_cycle_step,
 )
 from app.trading_brain.stage_catalog import STAGE_KEYS, TOTAL_STAGES
@@ -51,13 +49,8 @@ def test_architecture_node_count_consistent() -> None:
     """Cluster + step count should be consistent across the architecture definition."""
     clusters = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
     n_steps = sum(len(c.steps) for c in clusters)
-    # c_universe (2 steps) + c_state (4) + c_discovery (2) + c_validation (2)
-    # + c_evolution (3) + c_secondary_structure (2) + c_secondary_outcomes (3)
-    # + c_secondary_signals (3) + c_journal (2)
-    # + c_meta_learning (1) + c_decisioning (2) + c_control (3)
-    # = 29 steps across 12 clusters (c_meta split into 3, c_secondary split into 3)
-    assert len(clusters) == 12
-    assert n_steps == 29
+    assert len(clusters) == 13
+    assert n_steps == 32
 
 
 def test_snapshot_learning_for_brain_worker_status_file_has_stable_keys() -> None:
@@ -73,7 +66,7 @@ def test_snapshot_learning_for_brain_worker_status_file_has_stable_keys() -> Non
 def test_apply_learning_cycle_step_status_sets_graph_node_fields() -> None:
     st: dict = {}
     apply_learning_cycle_step_status(st, "c_discovery", "mine")
-    assert st["graph_node_id"] == "s_c_discovery_mine"
+    assert st["graph_node_id"] == "nm_lc_mine"
     assert st["current_cluster_id"] == "c_discovery"
     assert st["current_step_sid"] == "mine"
     ci = next(i for i, c in enumerate(TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS) if c.id == "c_discovery")
@@ -85,7 +78,7 @@ def test_apply_learning_cycle_step_status_sets_graph_node_fields() -> None:
 
     st2: dict = {}
     apply_learning_cycle_step_status_progress(st2, "c_state", "snapshots_daily", 3, 100)
-    assert st2["graph_node_id"] == "s_c_state_snapshots_daily"
+    assert st2["graph_node_id"] == "nm_lc_snapshots_daily"
     assert st2["current_cluster_id"] == "c_state"
     assert st2["current_step_sid"] == "snapshots_daily"
     assert st2["current_step"] == "Taking daily market snapshots (3/100)"
@@ -112,43 +105,26 @@ def test_apply_learning_cycle_step_status_preceded_by_graph_node_comment() -> No
         )
 
 
-def test_scheduler_only_cluster_excluded_from_stage_keys_and_progress() -> None:
+def test_scheduler_only_cluster_excluded_from_stage_keys() -> None:
     assert SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID == "c_universe"
     for sid in ("batch_prescreen_scan", "brain_market_snapshots"):
         assert sid not in STAGE_KEYS
-    # First catalog cluster is scheduler-only; steps must not affect in-cycle progress.
     first = TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS[0]
     assert first.id == SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
     for sid in (s.sid for s in first.steps):
         assert sid not in STAGE_KEYS
 
 
-def test_progress_catalog_invariants_match_architecture() -> None:
+def test_stage_keys_catalog_invariants() -> None:
     assert len(STAGE_KEYS) == len(set(STAGE_KEYS)), "progress stage sids must be unique"
     assert TOTAL_STAGES == len(STAGE_KEYS)
-    assert TOTAL_STAGES == count_cycle_progress_steps(snap_inline=False)
-    assert list(STAGE_KEYS) == list(cycle_progress_stage_keys(snap_inline=False))
-
-
-def test_normal_cycle_progress_step_count_matches_snapshots_off() -> None:
-    assert count_cycle_progress_steps(snap_inline=False) == 22
-    assert len(STAGE_KEYS) == 22
-
-
-def test_stage_keys_excludes_scheduler_snapshots_and_non_progress_meta() -> None:
-    excluded = frozenset(
-        {
-            "batch_prescreen_scan",
-            "brain_market_snapshots",
-            "snapshots_daily",
-            "snapshots_intraday",
-            "cycle_report",
-            "depromote",
-            "finalize",
-        }
-    )
-    for sid in excluded:
-        assert sid not in STAGE_KEYS
+    non_sched = [
+        step.sid
+        for c in TRADING_BRAIN_LEARNING_CYCLE_CLUSTERS
+        if c.id != SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID
+        for step in c.steps
+    ]
+    assert list(STAGE_KEYS) == non_sched
 
 
 def _literal_apply_learning_pair(call: ast.Call) -> tuple[str, str] | None:
@@ -201,9 +177,9 @@ def _block_has_call_named(stmts: list[ast.stmt], name: str) -> bool:
 
 def _find_main_cycle_try(fn: ast.FunctionDef) -> ast.Try:
     for stmt in fn.body:
-        if isinstance(stmt, ast.Try) and _block_has_call_named(stmt.body, "count_cycle_progress_steps"):
+        if isinstance(stmt, ast.Try) and _block_has_call_named(stmt.body, "apply_learning_cycle_step_status"):
             return stmt
-    raise AssertionError("run_learning_cycle: no try block containing count_cycle_progress_steps")
+    raise AssertionError("run_learning_cycle: no try block containing apply_learning_cycle_step_status")
 
 
 def _collect_literal_applies_from_cycle_stmts(
@@ -274,14 +250,21 @@ def _extract_run_learning_cycle_literal_applies() -> list[tuple[str, str]]:
     return _collect_literal_applies_from_cycle_stmts(main_try.body, secondary_pairs=secondary)
 
 
-def test_run_learning_cycle_progress_apply_order_matches_stage_keys() -> None:
-    """Literal ``apply_learning_cycle_step_status`` (+ secondary bundle) order matches STAGE_KEYS."""
-    progress_set = frozenset(cycle_progress_stage_keys(snap_inline=False))
+def test_run_learning_cycle_apply_order_matches_stage_keys() -> None:
+    """Literal ``apply_learning_cycle_step_status`` (+ secondary bundle) calls must be
+    a subsequence of STAGE_KEYS (some steps are scheduler-only or called from sub-services)."""
     pairs = _extract_run_learning_cycle_literal_applies()
-    runtime_sids = [sid for _c, sid in pairs if sid in progress_set]
-    assert runtime_sids == list(STAGE_KEYS), (
-        f"runtime progress sids={runtime_sids!r}\nSTAGE_KEYS={list(STAGE_KEYS)!r}"
-    )
+    runtime_sids = [sid for _c, sid in pairs]
+    stage_list = list(STAGE_KEYS)
+    for sid in runtime_sids:
+        assert sid in stage_list, f"runtime sid {sid!r} not in STAGE_KEYS"
+    idx = -1
+    for sid in runtime_sids:
+        pos = stage_list.index(sid)
+        assert pos > idx, (
+            f"runtime ordering mismatch: {sid!r} at STAGE_KEYS[{pos}] but previous was [{idx}]"
+        )
+        idx = pos
 
 
 def test_decisioning_architecture_lists_pattern_engine_before_proposals() -> None:
@@ -309,7 +292,6 @@ def test_run_learning_cycle_no_literal_current_step_assignments() -> None:
     """Forbid `_learning_status["current_step"] = "..."` in learning.py (use architecture helpers)."""
     path = Path(__file__).resolve().parents[1] / "app" / "services" / "trading" / "learning.py"
     text = path.read_text(encoding="utf-8")
-    # Allow only clearing to empty string in finally
     bad = re.findall(
         r'_learning_status\s*\[\s*["\']current_step["\']\s*\]\s*=\s*("[^"]*"|\'[^\']*\')',
         text,

@@ -424,6 +424,7 @@ class AlertHistory(Base):
     scan_pattern_id: Optional[int] = Column(
         Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    content_signature: Optional[str] = Column(String(512), nullable=True)
     sent_via: str = Column(String(20), nullable=False, default="email_gateway")
     success: bool = Column(Boolean, nullable=False, default=True)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import logging
 from dataclasses import dataclass
@@ -206,6 +207,26 @@ def propagate_one_event(
 
         pre_fire = should_fire(tgt, state, now)
         if pre_fire:
+            handler_summary = None
+            try:
+                from .handlers import has_handler, invoke_handler
+
+                if has_handler(tgt.id):
+                    handler_summary = invoke_handler(
+                        db,
+                        tgt.id,
+                        state,
+                        event_payload=payload,
+                        correlation_id=correlation_id,
+                        graph_version=graph_version,
+                    )
+            except Exception as _he:
+                _log.warning("%s handler invocation failed for %s: %s", LOG_PREFIX, tgt.id, _he)
+
+            fire_summary = f"cause=propagate depth={propagation_depth} edge={edge.id}"
+            if handler_summary:
+                fire_summary += f" handler={json.dumps(handler_summary, default=str)[:300]}"
+
             db.add(
                 BrainFireLog(
                     node_id=tgt.id,
@@ -213,7 +234,7 @@ def propagate_one_event(
                     activation_score=state.activation_score,
                     confidence=state.confidence,
                     correlation_id=correlation_id,
-                    summary=f"cause=propagate depth={propagation_depth} edge={edge.id}",
+                    summary=fire_summary,
                 )
             )
             state.last_fired_at = now
