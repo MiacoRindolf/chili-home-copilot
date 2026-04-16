@@ -7,6 +7,7 @@ risk triggers, and may call the LLM advisor for full pattern-linked paths.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import time
@@ -18,6 +19,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...models.trading import (
+    AlertHistory,
     BreakoutAlert,
     PatternMonitorDecision,
     ScanPattern,
@@ -82,6 +84,37 @@ def _monitor_alert_content_signature(
     sup = _nf(structural_support)
     slab = (structural_support_label or "").strip()[:120]
     return "|".join((_nf(new_stop), _nf(new_target), hb, rs, inv, cau, sup, slab))
+
+
+def _pattern_monitor_content_digest(action: str, sig: str) -> str:
+    """Stable short hash for AlertHistory.content_signature (includes action)."""
+    payload = f"{action}|{sig}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:64]
+
+
+def _pattern_monitor_duplicate_in_db(
+    db: Session,
+    *,
+    trade: Trade,
+    content_digest: str,
+) -> bool:
+    """True if a successful pattern_monitor with this digest was already logged for this context."""
+    q = (
+        db.query(AlertHistory.id)
+        .filter(
+            AlertHistory.alert_type == "pattern_monitor",
+            AlertHistory.ticker == trade.ticker,
+            AlertHistory.content_signature == content_digest,
+            AlertHistory.success.is_(True),
+        )
+    )
+    if trade.scan_pattern_id is None:
+        q = q.filter(AlertHistory.scan_pattern_id.is_(None))
+    else:
+        q = q.filter(AlertHistory.scan_pattern_id == int(trade.scan_pattern_id))
+    if trade.user_id is not None:
+        q = q.filter(AlertHistory.user_id == trade.user_id)
+    return q.limit(1).first() is not None
 
 
 @dataclass
@@ -1099,8 +1132,8 @@ def _dispatch_monitor_alert(
     pnl_pct: float | None,
     dry_run: bool,
 ) -> None:
-    """Send Telegram alert for a pattern monitor action."""
-    if rec.action == "hold":
+    """Send Telegram alert for critical pattern monitor actions only (exit_now)."""
+    if rec.action != "exit_now":
         return
 
     from .alert_formatter import format_pattern_adjustment
@@ -1113,7 +1146,8 @@ def _dispatch_monitor_alert(
     _sup_lab = plan_health.nearest_support_label if plan_health else ""
 
     # Content-aware dedup: same ticker+pattern+action and same substantive payload → no second Telegram.
-    # exit_now always sends (critical).
+    # exit_now always sends (critical). In-memory + DB (survives restarts / multi-worker).
+    monitor_digest: str | None = None
     if rec.action != "exit_now" and not dry_run:
         dedup_key = _monitor_alert_dedup_key(
             trade.ticker, trade.scan_pattern_id, str(rec.action)
@@ -1134,6 +1168,17 @@ def _dispatch_monitor_alert(
                 trade.ticker,
                 dedup_key,
             )
+            return
+        monitor_digest = _pattern_monitor_content_digest(str(rec.action), sig)
+        if _pattern_monitor_duplicate_in_db(db, trade=trade, content_digest=monitor_digest):
+            logger.debug(
+                "[pattern_monitor] duplicate alert suppressed (db) for %s key=%s",
+                trade.ticker,
+                dedup_key,
+            )
+            if len(_last_monitor_alert_sig) >= _MONITOR_ALERT_DEDUP_MAX_KEYS:
+                _last_monitor_alert_sig.clear()
+            _last_monitor_alert_sig[dedup_key] = sig
             return
         if len(_last_monitor_alert_sig) >= _MONITOR_ALERT_DEDUP_MAX_KEYS:
             _last_monitor_alert_sig.clear()
@@ -1167,6 +1212,7 @@ def _dispatch_monitor_alert(
         message=msg,
         user_id=trade.user_id,
         scan_pattern_id=trade.scan_pattern_id,
+        content_signature=monitor_digest,
     )
 
 
