@@ -7,6 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
+from sqlalchemy import and_, exists
 from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
@@ -364,3 +365,71 @@ def api_monitor_run(
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
     return JSONResponse({"ok": True, **summary})
+
+
+@router.get("/monitor/imminent-alerts")
+def api_monitor_imminent_alerts(
+    request: Request,
+    db: Session = Depends(get_db),
+    hours: int = Query(72, ge=1, le=168, description="Look-back window in hours"),
+):
+    """Imminent breakout alerts that are still viable (pending outcome) and not yet acted on."""
+    ctx = get_identity_ctx(request, db)
+    user_id = ctx["user_id"]
+
+    cutoff = datetime.utcnow() - timedelta(hours=hours)
+
+    user_filter = Trade.user_id == user_id if user_id is not None else Trade.user_id.is_(None)
+    actioned_subq = exists().where(
+        and_(
+            Trade.related_alert_id == BreakoutAlert.id,
+            Trade.status.in_(["open", "closed"]),
+            user_filter,
+        )
+    )
+
+    q = (
+        db.query(BreakoutAlert)
+        .filter(
+            BreakoutAlert.alert_tier == "pattern_imminent",
+            BreakoutAlert.outcome == "pending",
+            BreakoutAlert.alerted_at >= cutoff,
+        )
+        .filter(~actioned_subq)
+    )
+    if user_id is not None:
+        q = q.filter(BreakoutAlert.user_id == user_id)
+    else:
+        q = q.filter(BreakoutAlert.user_id.is_(None))
+
+    alerts = q.order_by(BreakoutAlert.alerted_at.desc()).limit(30).all()
+
+    pat_ids = {a.scan_pattern_id for a in alerts if a.scan_pattern_id}
+    patterns: dict[int, ScanPattern] = {}
+    if pat_ids:
+        for p in db.query(ScanPattern).filter(ScanPattern.id.in_(pat_ids)).all():
+            patterns[p.id] = p
+
+    items: list[dict[str, Any]] = []
+    for a in alerts:
+        pat = patterns.get(a.scan_pattern_id) if a.scan_pattern_id else None
+        items.append(
+            {
+                "id": a.id,
+                "ticker": a.ticker,
+                "asset_type": a.asset_type,
+                "score": json_safe(a.score_at_alert),
+                "price_at_alert": json_safe(a.price_at_alert),
+                "entry_price": json_safe(a.entry_price),
+                "stop_loss": json_safe(a.stop_loss),
+                "target_price": json_safe(a.target_price),
+                "alerted_at": a.alerted_at.isoformat() if a.alerted_at else None,
+                "timeframe": a.timeframe,
+                "regime": a.regime_at_alert,
+                "pattern_id": a.scan_pattern_id,
+                "pattern_name": pat.name if pat else None,
+                "trade_plan": a.trade_plan,
+            }
+        )
+
+    return JSONResponse({"ok": True, "alerts": json_safe(items), "total": len(items)})

@@ -502,6 +502,30 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .mon-plan-levels div { color: var(--text-muted); }
 .mon-plan-levels div b { display: block; color: var(--text); font-size: 11px; margin-top: 1px; }
 
+.mon-imminent-details { margin-top: 14px; border: 1px solid rgba(245,158,11,0.35); border-radius: 10px; padding: 8px 10px; background: var(--bg-header, #0f0f18); }
+.mon-imminent-summary { font-size: 12px; font-weight: 700; cursor: pointer; }
+.mon-imminent-count { font-size: 10px; font-weight: 700; background: rgba(245,158,11,0.2); color: #fbbf24; padding: 1px 7px; border-radius: 99px; margin-left: 4px; }
+.mon-imminent-count:empty { display: none; }
+.mon-imminent-list { display: flex; flex-direction: column; gap: 6px; margin-top: 10px; max-height: 340px; overflow-y: auto; }
+.mon-imm-card {
+  display: grid; grid-template-columns: 1fr auto; gap: 8px; align-items: start;
+  padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--card-bg, #1a1a2e);
+  font-size: 11px; cursor: pointer; transition: border-color 0.15s, box-shadow 0.15s;
+}
+.mon-imm-card:hover { border-color: #f59e0b; box-shadow: 0 0 0 1px rgba(245,158,11,0.4); }
+.mon-imm-ticker { font-size: 14px; font-weight: 800; letter-spacing: 0.02em; }
+.mon-imm-meta { display: flex; flex-wrap: wrap; gap: 8px; font-size: 10px; color: var(--text-muted); margin-top: 4px; }
+.mon-imm-meta b { color: var(--text); display: inline; margin-left: 2px; }
+.mon-imm-score { font-weight: 700; font-size: 11px; padding: 2px 8px; border-radius: 99px; white-space: nowrap; }
+.mon-imm-score-high { background: rgba(34,197,94,0.2); color: #86efac; }
+.mon-imm-score-med { background: rgba(245,158,11,0.2); color: #fde047; }
+.mon-imm-score-low { background: rgba(107,114,128,0.25); color: #d1d5db; }
+.mon-imm-time { font-size: 9px; color: var(--text-muted); }
+.mon-imm-actions { display: flex; gap: 6px; margin-top: 6px; }
+.mon-imm-act-btn { padding: 4px 10px; font-size: 10px; font-weight: 600; border-radius: 6px; border: none; cursor: pointer; }
+.mon-imm-act-view { background: var(--input-bg); color: var(--text); border: 1px solid var(--border); }
+.mon-imm-act-view:hover { border-color: var(--accent); }
+.mon-imm-empty { font-size: 11px; color: var(--text-muted); padding: 12px 8px; text-align: center; }
 .mon-feed-details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--bg-header, #0f0f18); }
 .mon-feed-summary { font-size: 12px; font-weight: 700; cursor: pointer; }
 .mon-feed-hint { font-weight: 400; color: var(--text-muted); font-size: 10px; margin-left: 8px; }
@@ -7953,6 +7977,9 @@ function switchTab(el) {
   }
   if (tabName === 'monitor') {
     loadMonitorData(false);
+    _startMonitorAutoRefresh();
+  } else {
+    _stopMonitorAutoRefresh();
   }
 }
 
@@ -9141,6 +9168,7 @@ function loadMonitorData(showRefreshFlash) {
       }
     }
     loadMonitorDecisionFeed();
+    loadImminentAlerts();
     if (!window.__positionPlans) _loadCachedPositionPlans();
   }).catch(function() {
     var emptyEl2 = document.getElementById('monitor-empty');
@@ -9225,6 +9253,106 @@ function loadMonitorDecisionFeed() {
   }).catch(function() {
     list.innerHTML = '<div style="font-size:10px;color:#ef4444;padding:8px;">Error loading feed</div>';
   });
+}
+
+function loadImminentAlerts() {
+  var list = document.getElementById('monitor-imminent-list');
+  var countEl = document.getElementById('mon-imminent-count');
+  if (!list) return;
+  fetch('/api/trading/monitor/imminent-alerts?hours=72').then(function(r) {
+    if (!r.ok) return { ok: false };
+    return r.json();
+  }).then(function(d) {
+    if (!d || !d.ok) {
+      list.innerHTML = '<div class="mon-imm-empty">Could not load imminent alerts</div>';
+      if (countEl) countEl.textContent = '';
+      return;
+    }
+    var alerts = d.alerts || [];
+    if (countEl) countEl.textContent = alerts.length ? String(alerts.length) : '';
+    if (!alerts.length) {
+      list.innerHTML = '<div class="mon-imm-empty">No imminent alerts pending action right now.</div>';
+      return;
+    }
+    var html = '';
+    alerts.forEach(function(a) {
+      var scoreClass = 'mon-imm-score-low';
+      if (a.score != null && a.score >= 75) scoreClass = 'mon-imm-score-high';
+      else if (a.score != null && a.score >= 50) scoreClass = 'mon-imm-score-med';
+      var cr = (a.ticker || '').indexOf('-USD') !== -1;
+      var sp = function(v) { return smartPrice(v, cr); };
+      var ago = '';
+      if (a.alerted_at) {
+        var ms = Date.now() - new Date(a.alerted_at).getTime();
+        var hrs = Math.floor(ms / 3600000);
+        if (hrs < 1) ago = Math.floor(ms / 60000) + 'm ago';
+        else if (hrs < 24) ago = hrs + 'h ago';
+        else ago = Math.floor(hrs / 24) + 'd ago';
+      }
+      html += '<div class="mon-imm-card" onclick="_chartImminentAlert(\'' + escHtml(a.ticker) + '\', \'' + escHtml(a.timeframe || '1d') + '\')">';
+      html += '<div>';
+      html += '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">';
+      html += '<span class="mon-imm-ticker">' + escHtml(a.ticker) + '</span>';
+      if (a.timeframe) html += '<span class="mon-tf-pill">' + escHtml(a.timeframe) + '</span>';
+      if (a.pattern_name) html += '<span style="font-size:10px;color:var(--text-secondary);">' + escHtml(a.pattern_name) + '</span>';
+      html += '</div>';
+      html += '<div class="mon-imm-meta">';
+      html += '<div>Price<b>$' + (a.price_at_alert != null ? sp(a.price_at_alert) : '—') + '</b></div>';
+      if (a.entry_price != null) html += '<div>Entry<b>$' + sp(a.entry_price) + '</b></div>';
+      if (a.stop_loss != null) html += '<div>Stop<b style="color:#f87171;">$' + sp(a.stop_loss) + '</b></div>';
+      if (a.target_price != null) html += '<div>Target<b style="color:#86efac;">$' + sp(a.target_price) + '</b></div>';
+      html += '</div>';
+      if (a.regime) html += '<div style="font-size:9px;color:var(--text-muted);margin-top:2px;">Regime: ' + escHtml(a.regime) + '</div>';
+      html += '</div>';
+      html += '<div style="text-align:right;">';
+      html += '<div class="mon-imm-score ' + scoreClass + '">' + (a.score != null ? Number(a.score).toFixed(0) : '—') + '</div>';
+      html += '<div class="mon-imm-time">' + ago + '</div>';
+      html += '</div>';
+      html += '</div>';
+    });
+    list.innerHTML = html;
+  }).catch(function() {
+    list.innerHTML = '<div class="mon-imm-empty">Error loading imminent alerts</div>';
+    if (countEl) countEl.textContent = '';
+  });
+}
+
+function _chartImminentAlert(ticker, timeframe) {
+  var isCrypto = ticker.indexOf('-USD') !== -1;
+  var targetInterval = timeframe || (isCrypto ? '15m' : '1d');
+  currentTicker = ticker.toUpperCase();
+  _activeBreakoutRow = null;
+  clearAnnotations();
+  _loadDrawings();
+  document.querySelectorAll('.wl-item').forEach(function(el) { el.classList.toggle('active', el.dataset.ticker === currentTicker); });
+  document.getElementById('ticker-label').textContent = currentTicker;
+  if (_selectDebounce) clearTimeout(_selectDebounce);
+  changeInterval(targetInterval);
+  var chartArea = document.getElementById('chart-area');
+  if (chartArea) {
+    chartArea.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    chartArea.classList.remove('glow'); void chartArea.offsetWidth; chartArea.classList.add('glow');
+  }
+}
+
+/* ── Monitor auto-refresh ─────────────────────── */
+var _monitorRefreshTimer = null;
+var _MONITOR_REFRESH_MS = 30000;
+
+function _startMonitorAutoRefresh() {
+  _stopMonitorAutoRefresh();
+  _monitorRefreshTimer = setInterval(function() {
+    if (window.__monitorPayload != null) {
+      loadMonitorData(false);
+    }
+  }, _MONITOR_REFRESH_MS);
+}
+
+function _stopMonitorAutoRefresh() {
+  if (_monitorRefreshTimer) {
+    clearInterval(_monitorRefreshTimer);
+    _monitorRefreshTimer = null;
+  }
 }
 
 /* ── Monitor card → chart interaction ─────────── */
