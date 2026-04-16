@@ -6726,8 +6726,11 @@ def _migration_126_mesh_dependency_edges(conn) -> None:
     for src, tgt, sig, weight, pol, etype in dep_edges:
         conn.execute(text("""
             INSERT INTO brain_graph_edges
-                (source_node_id, target_node_id, signal_type, weight, polarity, edge_type, graph_version)
-            SELECT :src, :tgt, :sig, :w, :pol, :etype, 1
+                (source_node_id, target_node_id, signal_type, weight, polarity, edge_type,
+                 delay_ms, enabled, graph_version, min_confidence, min_source_confidence,
+                 created_at, updated_at)
+            SELECT :src, :tgt, :sig, :w, :pol, :etype,
+                   0, true, 1, 0.0, 0.0, NOW(), NOW()
             WHERE NOT EXISTS (
                 SELECT 1 FROM brain_graph_edges
                 WHERE source_node_id = :src AND target_node_id = :tgt
