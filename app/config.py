@@ -238,7 +238,7 @@ class Settings(BaseSettings):
     # Snapshots + mining: canonical bar key (ticker, interval, bar_start_utc). Intraday is crypto-focused.
     brain_snapshot_top_tickers: int = 1000
     brain_intraday_snapshots_enabled: bool = True
-    brain_intraday_intervals: str = "15m"
+    brain_intraday_intervals: str = "1m,5m,15m"
     brain_intraday_max_tickers: int = 1000
     brain_snapshot_backfill_years: int = 10
 
