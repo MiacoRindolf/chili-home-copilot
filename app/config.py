@@ -1032,6 +1032,92 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_AUTO_EXECUTE_STOPS"),
     )
 
+    # AutoTrader v1 — pattern-imminent → rules + LLM gate → RH equities (see app/services/trading/auto_trader.py)
+    chili_autotrader_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_ENABLED"),
+    )
+    chili_autotrader_live_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LIVE_ENABLED"),
+    )
+    chili_autotrader_user_id: int | None = Field(
+        default=None,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_USER_ID"),
+    )
+    chili_autotrader_per_trade_notional_usd: float = Field(
+        default=300.0,
+        ge=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_PER_TRADE_NOTIONAL_USD"),
+    )
+    chili_autotrader_synergy_scale_notional_usd: float = Field(
+        default=150.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_SCALE_NOTIONAL_USD"),
+    )
+    chili_autotrader_synergy_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_SYNERGY_ENABLED"),
+    )
+    chili_autotrader_daily_loss_cap_usd: float = Field(
+        default=150.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_DAILY_LOSS_CAP_USD"),
+    )
+    chili_autotrader_max_concurrent: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_CONCURRENT"),
+    )
+    chili_autotrader_confidence_floor: float = Field(
+        default=0.7,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_CONFIDENCE_FLOOR"),
+    )
+    chili_autotrader_min_projected_profit_pct: float = Field(
+        default=12.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MIN_PROJECTED_PROFIT_PCT"),
+    )
+    chili_autotrader_max_symbol_price_usd: float = Field(
+        default=50.0,
+        ge=0.01,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_SYMBOL_PRICE_USD"),
+    )
+    chili_autotrader_max_entry_slippage_pct: float = Field(
+        default=1.0,
+        ge=0.0,
+        le=50.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MAX_ENTRY_SLIPPAGE_PCT"),
+    )
+    chili_autotrader_monitor_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=600,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_MONITOR_INTERVAL_SECONDS"),
+    )
+    chili_autotrader_rth_only: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),
+    )
+    chili_autotrader_llm_revalidation_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),
+    )
+    chili_autotrader_assumed_capital_usd: float = Field(
+        default=25_000.0,
+        ge=100.0,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_ASSUMED_CAPITAL_USD"),
+    )
+    chili_autotrader_tick_interval_seconds: int = Field(
+        default=10,
+        ge=5,
+        le=120,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_TICK_INTERVAL_SECONDS"),
+    )
+
     brain_market_snapshot_scheduler_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("BRAIN_MARKET_SNAPSHOT_SCHEDULER_ENABLED"),

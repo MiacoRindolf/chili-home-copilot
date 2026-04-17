@@ -1525,6 +1525,40 @@ def _run_pattern_imminent_job():
     run_scheduler_job_guarded("pattern_imminent_scanner", _work)
 
 
+def _run_auto_trader_tick_job():
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.auto_trader import run_auto_trader_tick
+
+    if not getattr(_settings, "chili_autotrader_enabled", False):
+        return
+
+    db = SessionLocal()
+    try:
+        run_auto_trader_tick(db)
+    except Exception:
+        logger.exception("[scheduler] auto_trader tick failed")
+    finally:
+        db.close()
+
+
+def _run_auto_trader_monitor_job():
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    if not getattr(_settings, "chili_autotrader_enabled", False):
+        return
+
+    db = SessionLocal()
+    try:
+        tick_auto_trader_monitor(db)
+    except Exception:
+        logger.exception("[scheduler] auto_trader monitor failed")
+    finally:
+        db.close()
+
+
 _crypto_alert_cooldown: dict[str, float] = {}
 _stock_alert_cooldown: dict[str, float] = {}
 
@@ -2707,6 +2741,28 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=20),
+            )
+
+        if include_heavy or include_web_light:
+            _at_tick_s = max(5, int(getattr(settings, "chili_autotrader_tick_interval_seconds", 10)))
+            _at_mon_s = max(5, int(getattr(settings, "chili_autotrader_monitor_interval_seconds", 30)))
+            _scheduler.add_job(
+                _run_auto_trader_tick_job,
+                trigger=IntervalTrigger(seconds=_at_tick_s),
+                id="auto_trader_tick",
+                name=f"AutoTrader v1 tick (every {_at_tick_s}s; no-op when CHILI_AUTOTRADER_ENABLED=false)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=25),
+            )
+            _scheduler.add_job(
+                _run_auto_trader_monitor_job,
+                trigger=IntervalTrigger(seconds=_at_mon_s),
+                id="auto_trader_monitor",
+                name=f"AutoTrader v1 monitor (every {_at_mon_s}s; no-op when CHILI_AUTOTRADER_ENABLED=false)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=30),
             )
 
         if include_web_light:

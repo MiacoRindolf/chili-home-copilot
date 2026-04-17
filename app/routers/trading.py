@@ -104,7 +104,7 @@ def _analyze_stream_chunk_text(text: str, chunk_size: int = 32):
     for i in range(0, len(text), chunk_size):
         yield text[i : i + chunk_size]
 
-from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -1177,6 +1177,242 @@ def api_run_pattern_imminent_scan(
 
     result = run_pattern_imminent_scan(db, ctx["user_id"], dry_run=dry_run)
     return JSONResponse(result)
+
+
+def _require_trading_user_id(request: Request, db: Session) -> int:
+    ctx = get_identity_ctx(request, db)
+    if ctx.get("is_guest") or not ctx.get("user_id"):
+        raise HTTPException(status_code=403, detail="Paired account required.")
+    return int(ctx["user_id"])
+
+
+@router.get("/api/trading/autotrader/desk")
+def api_autotrader_desk(request: Request, db: Session = Depends(get_db)):
+    """Autopilot desk: AutoTrader runtime flags + open positions linked to CHILI patterns."""
+    uid = _require_trading_user_id(request, db)
+    from ..config import settings as _s
+    from ..services.trading.autotrader_desk import (
+        effective_autotrader_runtime,
+        list_pattern_linked_open_positions,
+    )
+    from ..services.trading.governance import is_kill_switch_active
+
+    rt = effective_autotrader_runtime(db)
+    pos = list_pattern_linked_open_positions(db, uid)
+    return JSONResponse(
+        {
+            "ok": True,
+            "autotrader": {
+                "env_enabled": bool(getattr(_s, "chili_autotrader_enabled", False)),
+                "env_live": bool(getattr(_s, "chili_autotrader_live_enabled", False)),
+                "kill_switch_active": bool(is_kill_switch_active()),
+                **rt,
+            },
+            **pos,
+        }
+    )
+
+
+@router.patch("/api/trading/autotrader/desk")
+async def api_autotrader_desk_patch(request: Request, db: Session = Depends(get_db)):
+    """Update desk pause state and/or live-order override (persists in ``trading_brain_runtime_modes``)."""
+    _require_trading_user_id(request, db)
+    from ..services.trading.autotrader_desk import set_desk_live_orders, set_desk_paused
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+
+    updated = []
+    if "paused" in body:
+        set_desk_paused(db, bool(body["paused"]), updated_by="autopilot_ui")
+        updated.append("paused")
+    if "live_orders" in body:
+        v = body["live_orders"]
+        if v is None:
+            set_desk_live_orders(db, None, updated_by="autopilot_ui")
+        else:
+            set_desk_live_orders(db, bool(v), updated_by="autopilot_ui")
+        updated.append("live_orders")
+
+    if not updated:
+        raise HTTPException(status_code=400, detail="No supported fields (paused, live_orders)")
+
+    from ..services.trading.autotrader_desk import effective_autotrader_runtime
+
+    return JSONResponse({"ok": True, "updated": updated, "runtime": effective_autotrader_runtime(db)})
+
+
+@router.patch("/api/trading/autotrader/positions/{trade_id}")
+async def api_autotrader_position_override(
+    trade_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Set per-position AutoTrader v1 overrides: ``monitor_paused`` / ``synergy_excluded``.
+
+    Body: ``{"kind": "trade"|"paper", "monitor_paused"?: bool, "synergy_excluded"?: bool}``.
+    """
+    _require_trading_user_id(request, db)
+    from ..services.trading.auto_trader_position_overrides import (
+        get_position_overrides,
+        set_position_override,
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+
+    kind = str(body.get("kind") or "").strip().lower()
+    if kind not in ("trade", "paper"):
+        raise HTTPException(status_code=400, detail="kind must be 'trade' or 'paper'")
+
+    updated_fields: list[str] = []
+    for field in ("monitor_paused", "synergy_excluded"):
+        if field in body:
+            try:
+                set_position_override(db, kind, trade_id, field, bool(body[field]))
+                updated_fields.append(field)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc))
+
+    if not updated_fields:
+        raise HTTPException(
+            status_code=400,
+            detail="No supported fields (monitor_paused, synergy_excluded)",
+        )
+
+    return JSONResponse(
+        {
+            "ok": True,
+            "kind": kind,
+            "trade_id": trade_id,
+            "overrides": get_position_overrides(db, kind, trade_id),
+            "updated": updated_fields,
+        }
+    )
+
+
+@router.post("/api/trading/autotrader/positions/{trade_id}/close")
+async def api_autotrader_position_close(
+    trade_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Market-sell (live) or best-effort close (paper) a pattern-linked open position now.
+
+    Body: ``{"kind": "trade"|"paper", "confirm": true}``. Confirmation is required.
+    Works for any pattern-linked open row (v1-adopted or linked-only) — same
+    market-sell / paper-close path either way.
+    """
+    _require_trading_user_id(request, db)
+    from ..services.trading.auto_trader_position_overrides import close_position_now
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+    kind = str(body.get("kind") or "").strip().lower()
+    if kind not in ("trade", "paper"):
+        raise HTTPException(status_code=400, detail="kind must be 'trade' or 'paper'")
+    if not bool(body.get("confirm")):
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+
+    result = close_position_now(db, kind=kind, trade_id=trade_id)
+    status = 200 if result.get("ok") else 409
+    return JSONResponse({"kind": kind, "trade_id": trade_id, **result}, status_code=status)
+
+
+@router.post("/api/trading/autotrader/positions/{trade_id}/adopt")
+async def api_autotrader_position_adopt(
+    trade_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Adopt a pattern-linked open position into AutoTrader v1.
+
+    After adoption, CHILI's monitor takes over stop/target exits, synergy can
+    scale in, and per-position Pause / Exclude / Close controls are active.
+
+    Body: ``{"kind": "trade"|"paper", "stop"?: float, "target"?: float}``. When
+    the row has no stop/target and none are supplied, seed from the linked
+    ``ScanPattern`` exit hints when available; otherwise the monitor runs with
+    whatever values remain on the row.
+    """
+    _require_trading_user_id(request, db)
+    from ..services.trading.auto_trader_position_overrides import (
+        adopt_position_into_v1,
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+    kind = str(body.get("kind") or "").strip().lower()
+    if kind not in ("trade", "paper"):
+        raise HTTPException(status_code=400, detail="kind must be 'trade' or 'paper'")
+
+    def _opt_float(v):
+        if v in (None, ""):
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="stop/target must be numeric")
+
+    stop = _opt_float(body.get("stop"))
+    target = _opt_float(body.get("target"))
+
+    result = adopt_position_into_v1(
+        db, kind=kind, trade_id=trade_id, stop=stop, target=target
+    )
+    status = 200 if result.get("ok") else 409
+    return JSONResponse({"kind": kind, "trade_id": trade_id, **result}, status_code=status)
+
+
+@router.post("/api/trading/autotrader/positions/{trade_id}/unadopt")
+async def api_autotrader_position_unadopt(
+    trade_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Release a position from AutoTrader v1 management.
+
+    Broker position stays open; CHILI's monitor simply stops touching it. Per
+    -position overrides are cleared.
+
+    Body: ``{"kind": "trade"|"paper", "confirm": true}``.
+    """
+    _require_trading_user_id(request, db)
+    from ..services.trading.auto_trader_position_overrides import (
+        unadopt_position_from_v1,
+    )
+
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        raise HTTPException(status_code=400, detail="JSON body required")
+    kind = str(body.get("kind") or "").strip().lower()
+    if kind not in ("trade", "paper"):
+        raise HTTPException(status_code=400, detail="kind must be 'trade' or 'paper'")
+    if not bool(body.get("confirm")):
+        raise HTTPException(status_code=400, detail="confirm=true is required")
+
+    result = unadopt_position_from_v1(db, kind=kind, trade_id=trade_id)
+    status = 200 if result.get("ok") else 409
+    return JSONResponse({"kind": kind, "trade_id": trade_id, **result}, status_code=status)
 
 
 # ── Stop Engine ──────────────────────────────────────────────────────

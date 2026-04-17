@@ -93,6 +93,38 @@ class Trade(Base):
     related_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
     )
+    scale_in_count: int = Column(Integer, nullable=False, default=0)
+    auto_trader_version: Optional[str] = Column(String(32), nullable=True, index=True)
+
+
+class AutoTraderRun(Base):
+    """Audit row for AutoTrader v1 decisions (pattern-imminent → gates → placement)."""
+
+    __tablename__ = "trading_autotrader_runs"
+    __table_args__ = (
+        Index("ix_autotrader_runs_user_created", "user_id", "created_at"),
+        Index("ix_autotrader_runs_breakout_alert", "breakout_alert_id"),
+    )
+
+    id: int = Column(Integer, primary_key=True, autoincrement=True)
+    user_id: Optional[int] = Column(
+        Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    breakout_alert_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    scan_pattern_id: Optional[int] = Column(
+        Integer, ForeignKey("scan_patterns.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    ticker: str = Column(String(32), nullable=False, default="")
+    decision: str = Column(String(24), nullable=False)  # placed | scaled_in | skipped | blocked | error
+    reason: Optional[str] = Column(Text, nullable=True)
+    rule_snapshot: Optional[dict] = Column(JSONB, nullable=True)
+    llm_snapshot: Optional[dict] = Column(JSONB, nullable=True)
+    trade_id: Optional[int] = Column(
+        Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
 
 
 class PatternMonitorDecision(Base):

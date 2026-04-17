@@ -1143,3 +1143,65 @@
     white-space: nowrap;
   }
 }
+
+/* ── Pattern desk (CHILI-linked open positions) ── */
+.ap-pattern-desk-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ap-pattern-desk-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+.ap-pattern-desk-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-left: 4px;
+}
+/* Pattern position cards reuse .ap-session-card; just differentiate the
+   left edge so operators can tell "CHILI-linked open position" from
+   "autopilot session" at a glance. */
+.ap-pattern-card {
+  border-left: 3px solid rgba(250, 204, 21, 0.55);
+}
+.ap-pattern-card[data-position-id^="paper"] {
+  border-left-color: rgba(148, 163, 184, 0.45);
+}
+.ap-pattern-card-linked-note {
+  font-size: 12px;
+  padding: 6px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+}
+.ap-pattern-desk-table {
+  overflow-x: auto;
+}
+.ap-data-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.ap-data-table th,
+.ap-data-table td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.ap-data-table th {
+  color: var(--text-secondary);
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.ap-data-table tbody tr:hover {
+  background: rgba(148, 163, 184, 0.06);
+}

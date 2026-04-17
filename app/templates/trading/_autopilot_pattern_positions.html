@@ -1,0 +1,24 @@
+<section class="ap-section" id="ap-pattern-desk-section">
+  <div class="ap-section-head">
+    <div>
+      <h2>CHILI pattern setups</h2>
+      <p>
+        Open positions that CHILI linked to a scan pattern or breakout alert (including AutoTrader v1).
+        Per-row controls let you pause the exit monitor on a position, exclude it from future synergy scale-ins, or close it now.
+        Desk <em>Pause entries</em> blocks <strong>new</strong> automated entries; it does not touch monitors.
+        Server must have <code>CHILI_AUTOTRADER_ENABLED=true</code> for the scheduler tick to run.
+      </p>
+    </div>
+    <div class="ap-section-actions">
+      <button type="button" class="ap-btn" id="ap-pattern-desk-refresh" aria-label="Refresh pattern desk">Refresh</button>
+    </div>
+  </div>
+  <div class="ap-banner" id="ap-pattern-desk-banner" style="display:none"></div>
+  <div class="ap-pattern-desk-controls" id="ap-pattern-desk-controls"></div>
+  <div class="ap-section-body">
+    <div id="ap-pattern-desk-table" class="ap-pattern-desk-table" aria-live="polite"></div>
+    <div id="ap-pattern-desk-empty" class="ap-empty" style="display:none">
+      No open positions linked to a CHILI pattern yet.
+    </div>
+  </div>
+</section>

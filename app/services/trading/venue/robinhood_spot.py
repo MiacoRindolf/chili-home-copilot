@@ -250,6 +250,63 @@ class RobinhoodSpotAdapter:
     def get_ticker(self, product_id: str) -> tuple[Optional[NormalizedTicker], FreshnessMeta]:
         return self.get_best_bid_ask(product_id)
 
+    def get_quote_price(self, product_id: str) -> Optional[float]:
+        """Return a scalar price for ``product_id`` from Robinhood's own feed.
+
+        Priority: mid (if both bid/ask present), else last_trade_price. Used by
+        the AutoTrader v1 live monitor + close-now so exits compare against the
+        same venue that would fill the order — no Massive/Polygon mismatch.
+        """
+        tkr, _ = self.get_best_bid_ask(product_id)
+        if tkr is None:
+            return None
+        if tkr.mid and tkr.mid > 0:
+            return float(tkr.mid)
+        if tkr.last_price and tkr.last_price > 0:
+            return float(tkr.last_price)
+        return None
+
+    def get_quote_prices_batch(self, product_ids: list[str]) -> dict[str, float]:
+        """Batched RH quote lookup. One ``rh.stocks.get_quotes`` round-trip per call.
+
+        Returns ``{TICKER_UPPER: price}`` only for tickers that produced a real
+        price; missing / halted symbols are omitted. Falls back to per-symbol
+        ``get_quote_price`` on any library exception.
+        """
+        tickers = sorted({(_to_ticker(p) or "").upper() for p in product_ids if p})
+        tickers = [t for t in tickers if t]
+        if not tickers:
+            return {}
+        out: dict[str, float] = {}
+        try:
+            import robin_stocks.robinhood as rh
+
+            quotes = rh.stocks.get_quotes(tickers) or []
+            for tkr, q in zip(tickers, quotes):
+                if not q or not isinstance(q, dict):
+                    continue
+                bid = _sf(q.get("bid_price"))
+                ask = _sf(q.get("ask_price"))
+                last = _sf(q.get("last_trade_price"))
+                ext = _sf(q.get("last_extended_hours_trade_price"))
+                if bid and ask and bid > 0 and ask > 0:
+                    px = (bid + ask) / 2.0
+                elif last and last > 0:
+                    px = float(last)
+                elif ext and ext > 0:
+                    px = float(ext)
+                else:
+                    continue
+                out[tkr] = float(px)
+            return out
+        except Exception as e:
+            logger.warning("[rh_adapter] get_quote_prices_batch failed, falling back: %s", e)
+            for tkr in tickers:
+                px = self.get_quote_price(tkr)
+                if px is not None:
+                    out[tkr] = float(px)
+            return out
+
     def get_recent_trades(self, product_id: str, *, limit: int = 50) -> tuple[list[dict[str, Any]], FreshnessMeta]:
         # robin_stocks has no public trade tape endpoint
         return [], _now_freshness()

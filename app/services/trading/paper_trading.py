@@ -207,12 +207,20 @@ def open_paper_trade(
     return pt
 
 
-def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]:
+def check_paper_exits(
+    db: Session,
+    user_id: int | None = None,
+    *,
+    skip_trade_ids: set[int] | None = None,
+) -> dict[str, Any]:
     """Check all open paper trades for stop/target/trailing-stop/expiry exits.
 
     Supports ATR trailing stops: once price moves >= 1R in profit, trail the
     stop at trailing_atr_mult * ATR behind the best price seen. The trailing
     stop only tightens, never loosens.
+
+    ``skip_trade_ids`` lets the caller hold specific rows past their stop/target
+    (used by AutoTrader v1 per-position monitor pause from the Autopilot desk).
     """
     from .market_data import fetch_quote
 
@@ -222,6 +230,9 @@ def check_paper_exits(db: Session, user_id: int | None = None) -> dict[str, Any]
     if user_id is not None:
         open_trades = open_trades.filter(PaperTrade.user_id == user_id)
     open_trades = open_trades.all()
+
+    if skip_trade_ids:
+        open_trades = [pt for pt in open_trades if pt.id not in skip_trade_ids]
 
     if not open_trades:
         return {"checked": 0, "closed": 0, "trailing_updated": 0}

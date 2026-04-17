@@ -8346,6 +8346,55 @@ def _migration_146_m2_autopilot(conn) -> None:
     conn.commit()
 
 
+def _migration_147_autotrader_audit(conn) -> None:
+    """AutoTrader v1: audit table + Trade columns for scale-in and filtering."""
+    tables = _tables(conn)
+
+    if "trading_autotrader_runs" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_autotrader_runs (
+                id SERIAL PRIMARY KEY,
+                user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+                breakout_alert_id INTEGER REFERENCES trading_breakout_alerts(id) ON DELETE SET NULL,
+                scan_pattern_id INTEGER REFERENCES scan_patterns(id) ON DELETE SET NULL,
+                ticker VARCHAR(32) NOT NULL DEFAULT '',
+                decision VARCHAR(24) NOT NULL,
+                reason TEXT,
+                rule_snapshot JSONB,
+                llm_snapshot JSONB,
+                trade_id INTEGER REFERENCES trading_trades(id) ON DELETE SET NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_autotrader_runs_user_created ON trading_autotrader_runs (user_id, created_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_autotrader_runs_breakout_alert ON trading_autotrader_runs (breakout_alert_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_autotrader_runs_trade ON trading_autotrader_runs (trade_id)"
+        ))
+
+    if "trading_trades" in _tables(conn):
+        cols = _columns(conn, "trading_trades")
+        if "scale_in_count" not in cols:
+            conn.execute(text(
+                "ALTER TABLE trading_trades ADD COLUMN scale_in_count INTEGER NOT NULL DEFAULT 0"
+            ))
+        if "auto_trader_version" not in cols:
+            conn.execute(text(
+                "ALTER TABLE trading_trades ADD COLUMN auto_trader_version VARCHAR(32)"
+            ))
+            conn.execute(text(
+                "CREATE INDEX ix_trading_trades_auto_trader_version "
+                "ON trading_trades (auto_trader_version) "
+                "WHERE auto_trader_version IS NOT NULL"
+            ))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -8494,6 +8543,7 @@ MIGRATIONS = [
     ("144_pattern_regime_performance_ledger", _migration_144_pattern_regime_performance_ledger),
     ("145_pattern_regime_m2_consumers", _migration_145_pattern_regime_m2_consumers),
     ("146_m2_autopilot", _migration_146_m2_autopilot),
+    ("147_autotrader_audit", _migration_147_autotrader_audit),
 ]
 
 

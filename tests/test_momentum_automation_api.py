@@ -246,6 +246,7 @@ def test_trading_autopilot_page_loads(client) -> None:
     r = client.get("/trading/autopilot")
     assert r.status_code == 200
     assert b"Trading Autopilot" in r.content
+    assert b"CHILI pattern setups" in r.content
 
 
 def test_automation_routes_paired_shape(paired_client, db: Session) -> None:
