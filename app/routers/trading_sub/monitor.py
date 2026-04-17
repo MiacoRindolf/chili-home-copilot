@@ -7,7 +7,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse
-from sqlalchemy import and_, exists
+from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 
 from ...deps import get_db, get_identity_ctx
@@ -398,7 +398,9 @@ def api_monitor_imminent_alerts(
         .filter(~actioned_subq)
     )
     if user_id is not None:
-        q = q.filter(BreakoutAlert.user_id == user_id)
+        # Imminent scan rows often have user_id NULL when brain_default_user_id is unset
+        # (Telegram still dispatches). Surface those global brain alerts in Monitor too.
+        q = q.filter(or_(BreakoutAlert.user_id == user_id, BreakoutAlert.user_id.is_(None)))
     else:
         q = q.filter(BreakoutAlert.user_id.is_(None))
 

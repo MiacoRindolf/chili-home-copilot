@@ -7,7 +7,7 @@ import math
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from ...models.trading import (
@@ -321,7 +321,7 @@ def get_recent_pattern_imminent_alerts_for_user(
         .filter(
             BreakoutAlert.ticker == tu,
             BreakoutAlert.alert_tier == "pattern_imminent",
-            BreakoutAlert.user_id == user_id,
+            or_(BreakoutAlert.user_id == user_id, BreakoutAlert.user_id.is_(None)),
         )
         .order_by(BreakoutAlert.alerted_at.desc())
         .limit(limit)
