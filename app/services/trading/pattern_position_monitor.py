@@ -886,6 +886,7 @@ def _evaluate_single(
             pattern_target=alert.target_price,
             pnl_pct=pnl_pct,
             trade_plan_health=plan_health,
+            trade_id=getattr(trade, "id", None),
         )
 
     # ── Select primary recommendation ──

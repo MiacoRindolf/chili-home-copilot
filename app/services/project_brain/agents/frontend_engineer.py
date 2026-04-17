@@ -129,7 +129,7 @@ class FrontendEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"issues\": [{\"file\": \"...\", \"issue\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="fe-patterns")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="fe-patterns", cacheable=True)
         if not reply:
             return {"issues_found": 0}
         try:
@@ -172,7 +172,7 @@ class FrontendEngineerAgent(AgentBase):
             "{\"findings\": [{\"category\": \"...\", \"title\": \"...\", "
             "\"description\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=600, trace_id="fe-findings")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=600, trace_id="fe-findings", cacheable=True)
         if not reply:
             return 0
         try:

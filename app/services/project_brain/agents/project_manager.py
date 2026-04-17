@@ -269,6 +269,7 @@ class ProjectManagerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=800,
             trace_id="pm-breakdown",
+            cacheable=True,
         )
         if not reply:
             return 0
@@ -364,6 +365,7 @@ class ProjectManagerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500,
             trace_id="pm-findings",
+            cacheable=True,
         )
         if not reply:
             return 0

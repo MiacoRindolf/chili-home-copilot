@@ -130,7 +130,7 @@ class QAEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"tests\": [{\"name\": \"...\", \"steps\": [\"...\"], \"expected\": \"...\", \"priority\": \"...\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=700, trace_id="qa-testgen")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=700, trace_id="qa-testgen", cacheable=True)
         if not reply:
             return 0
 
@@ -255,7 +255,7 @@ class QAEngineerAgent(AgentBase):
             "{\"bugs\": [{\"file\": \"...\", \"title\": \"...\", \"description\": \"...\", "
             "\"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="qa-codebugs")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="qa-codebugs", cacheable=True)
         if not reply:
             return 0
         try:

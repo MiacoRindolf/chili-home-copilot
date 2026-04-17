@@ -295,6 +295,7 @@ class ArchitectAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
             trace_id="arch-findings",
+            cacheable=True,
         )
         if not reply:
             return 0

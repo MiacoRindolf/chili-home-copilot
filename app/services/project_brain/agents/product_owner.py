@@ -235,6 +235,7 @@ class ProductOwnerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=400,
             trace_id="po-gaps",
+            cacheable=True,
         )
         if not reply:
             return ["Project vision", "Target users", "Key features"]
@@ -290,6 +291,7 @@ class ProductOwnerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1000,
             trace_id="po-upgrade-options",
+            cacheable=True,
         )
         if not reply:
             return 0
@@ -361,6 +363,7 @@ class ProductOwnerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=1200,
             trace_id="po-questions",
+            cacheable=True,
         )
         if not reply:
             return 0
@@ -464,6 +467,7 @@ class ProductOwnerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=600,
             trace_id="po-synthesize",
+            cacheable=True,
         )
         if not reply:
             return 0
@@ -554,6 +558,7 @@ class ProductOwnerAgent(AgentBase):
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500,
             trace_id="po-recommendations",
+            cacheable=True,
         )
         if not reply:
             return 0

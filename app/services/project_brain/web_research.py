@@ -38,6 +38,7 @@ def _summarize_raw(topic: str, raw: str, trace_id: str) -> dict | None:
         ],
         max_tokens=500,
         trace_id=trace_id,
+        cacheable=True,
     )
     if not reply:
         return None

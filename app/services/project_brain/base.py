@@ -17,8 +17,22 @@ from ...models.project_brain import (
     AgentEvolution, AgentFinding, AgentGoal, AgentMessage,
     AgentResearch, ProjectAgentState,
 )
+from ...prompts import load_prompt
 
 logger = logging.getLogger(__name__)
+
+
+# Shared preamble (Phase C, c4) loaded once at import to dedupe the
+# severity legend + JSON-discipline rules repeated across agents.
+# Agents may prepend this to their task-specific prompts without
+# changing per-agent schemas.
+try:
+    AGENT_SHARED_PROMPT = load_prompt("agent_shared")
+except Exception as _exc:  # pragma: no cover — prompt file always exists
+    logger.warning("[agent_base] failed to load agent_shared prompt: %s", _exc)
+    AGENT_SHARED_PROMPT = (
+        "Respond with ONLY valid JSON. Use severity enum: info|warn|critical."
+    )
 
 
 class AgentBase:

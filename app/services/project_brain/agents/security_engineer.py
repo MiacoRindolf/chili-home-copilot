@@ -110,7 +110,7 @@ class SecurityEngineerAgent(AgentBase):
                 "{\"vulnerabilities\": [{\"package\": \"...\", \"issue\": \"...\", "
                 "\"severity\": \"low|medium|high|critical\"}]}\n"
             )
-            reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="sec-deps")
+            reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="sec-deps", cacheable=True)
             if not reply:
                 return {"vulnerabilities": 0}
             data = json.loads(reply[reply.find("{"):reply.rfind("}") + 1])
@@ -149,7 +149,7 @@ class SecurityEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"issues\": [{\"file\": \"...\", \"issue\": \"...\", \"severity\": \"low|medium|high|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="sec-code")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="sec-code", cacheable=True)
         if not reply:
             return {"issues": 0}
         try:
@@ -179,7 +179,7 @@ class SecurityEngineerAgent(AgentBase):
                 "Return ONLY valid JSON:\n"
                 "{\"issues\": [{\"file\": \"...\", \"issue\": \"...\", \"severity\": \"low|medium|high|critical\"}]}\n"
             )
-            reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="sec-api")
+            reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="sec-api", cacheable=True)
             if not reply:
                 return {"issues": 0}
             data = json.loads(reply[reply.find("{"):reply.rfind("}") + 1])

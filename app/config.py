@@ -71,6 +71,23 @@ class Settings(BaseSettings):
     premium_model: str = "gemini-2.0-flash"
     premium_base_url: str = "https://generativelanguage.googleapis.com/v1beta/openai/"
 
+    # Cascade order toggle (Phase B, b1). When True AND both OPENAI_API_KEY and
+    # LLM_API_KEY are set, reorder to Groq primary → Groq secondary →
+    # OpenAI official → Gemini, saving paid OpenAI calls whenever the
+    # free tier can answer adequately. Weak-response escalation still fires
+    # up to OpenAI so quality is preserved (Phase B, b2).
+    llm_free_tier_first: bool = True
+
+    # In-process LLM reply cache (Phase B, b3). Shared by llm_caller.call_llm
+    # call-sites that opt in via cacheable=True. 0 disables the cache.
+    llm_cache_max_entries: int = 256
+    llm_cache_ttl_seconds: int = 600
+
+    # Per-provider daily token budgets (Phase C, c2). 0 means unlimited.
+    # Groq bucket keeps its historical 85K preemptive threshold.
+    openai_daily_token_limit: int = 0
+    premium_daily_token_limit: int = 0
+
     # Vision fallback (often same as premium)
     openai_vision_model: str = "gpt-4o-mini"
 

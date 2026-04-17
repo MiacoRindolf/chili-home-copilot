@@ -1,14 +1,108 @@
 """Trading module routes: page + REST APIs for market data, indicators, watchlist, journal, AI."""
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
+import threading
+import time
+from collections import OrderedDict
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 import asyncio
+
+# ── /api/trading/analyze/stream SSE cache (Phase C, c1) ─────────────────
+# Short-TTL per-ticker replay cache. Key hashes the *stable* inputs (user,
+# ticker, interval, ai_context). Hit replays previously streamed text as
+# SSE tokens so the UX stays identical. Non-deterministic pieces such as
+# `_get_proposal_reminder` are not part of the key — callers that want a
+# strictly fresh read can bypass with a query-string variation (future).
+_ANALYZE_STREAM_CACHE_MAX = 128
+_ANALYZE_STREAM_TTL_BY_INTERVAL = {
+    "1m": 10,
+    "5m": 10,
+    "15m": 30,
+    "30m": 30,
+    "1h": 45,
+    "1d": 90,
+}
+_ANALYZE_STREAM_TTL_DEFAULT = 45
+
+_analyze_stream_lock = threading.Lock()
+_analyze_stream_cache: "OrderedDict[str, tuple[float, str, str]]" = OrderedDict()
+_analyze_stream_stats = {"hits": 0, "misses": 0}
+
+
+def _analyze_stream_ttl(interval: str) -> int:
+    return _ANALYZE_STREAM_TTL_BY_INTERVAL.get((interval or "").lower(), _ANALYZE_STREAM_TTL_DEFAULT)
+
+
+def _analyze_stream_key(user_id: Any, ticker: str, interval: str, ai_context: str, user_msg: str) -> str:
+    h = hashlib.sha256()
+    h.update(str(user_id or "").encode())
+    h.update(b"|")
+    h.update((ticker or "").upper().encode())
+    h.update(b"|")
+    h.update((interval or "").lower().encode())
+    h.update(b"|")
+    h.update((ai_context or "").encode("utf-8", errors="ignore"))
+    h.update(b"|")
+    h.update((user_msg or "").encode("utf-8", errors="ignore"))
+    return h.hexdigest()
+
+
+def _analyze_stream_cache_get(key: str) -> tuple[str, str] | None:
+    now = time.monotonic()
+    with _analyze_stream_lock:
+        entry = _analyze_stream_cache.get(key)
+        if entry is None:
+            _analyze_stream_stats["misses"] += 1
+            return None
+        expiry, text, model = entry
+        if expiry < now:
+            _analyze_stream_cache.pop(key, None)
+            _analyze_stream_stats["misses"] += 1
+            return None
+        _analyze_stream_cache.move_to_end(key)
+        _analyze_stream_stats["hits"] += 1
+        return text, model
+
+
+def _analyze_stream_cache_put(key: str, text: str, model: str, interval: str) -> None:
+    if not text:
+        return
+    ttl = _analyze_stream_ttl(interval)
+    expiry = time.monotonic() + ttl
+    with _analyze_stream_lock:
+        _analyze_stream_cache[key] = (expiry, text, model)
+        _analyze_stream_cache.move_to_end(key)
+        while len(_analyze_stream_cache) > _ANALYZE_STREAM_CACHE_MAX:
+            _analyze_stream_cache.popitem(last=False)
+
+
+def _analyze_stream_cache_stats() -> dict[str, Any]:
+    with _analyze_stream_lock:
+        hits = _analyze_stream_stats["hits"]
+        misses = _analyze_stream_stats["misses"]
+        size = len(_analyze_stream_cache)
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "size": size,
+        "hit_rate": round((hits / total) if total else 0.0, 4),
+        "max_entries": _ANALYZE_STREAM_CACHE_MAX,
+        "ttl_by_interval": _ANALYZE_STREAM_TTL_BY_INTERVAL,
+    }
+
+
+def _analyze_stream_chunk_text(text: str, chunk_size: int = 32):
+    """Yield cached text as small SSE chunks so the UX mirrors a live stream."""
+    for i in range(0, len(text), chunk_size):
+        yield text[i : i + chunk_size]
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
@@ -654,11 +748,46 @@ def api_analyze_stream(
 
     system_prompt = f"{_get_trading_prompt()}\n\n---\n\n{ai_context}"
 
+    cache_key = _analyze_stream_key(ctx.get("user_id"), ticker, interval, ai_context, user_msg)
+
     def _generate():
         from .. import openai_client
         full_text_parts: list[str] = []
+        cached_model: str | None = None
+
+        cached = _analyze_stream_cache_get(cache_key)
+        if cached is not None:
+            cached_text, cached_model = cached
+            log_info(trace_id, f"[analyze_stream] cache_hit ticker={ticker} interval={interval}")
+            full_text_parts.append(cached_text)
+            try:
+                for chunk in _analyze_stream_chunk_text(cached_text):
+                    yield f"data: {json.dumps({'token': chunk})}\n\n"
+                full_text = cached_text
+                ann = _extract_chart_levels(full_text)
+                if ann:
+                    yield f"data: {json.dumps({'annotations': ann})}\n\n"
+                tplan = _extract_trade_plan_levels(full_text)
+                if tplan:
+                    open_tr = _resolve_open_trade_for_ticker(db, ctx.get("user_id"), ticker)
+                    payload = dict(tplan)
+                    payload["ticker"] = ticker
+                    if open_tr:
+                        payload["trade_id"] = open_tr.id
+                    yield f"data: {json.dumps({'trade_plan_levels': payload})}\n\n"
+                patt_attach = _build_pattern_imminent_attach_payload(
+                    db, ctx.get("user_id"), ticker
+                )
+                if patt_attach:
+                    yield f"data: {json.dumps({'pattern_imminent_attach': patt_attach})}\n\n"
+                yield "data: [DONE]\n\n"
+                return
+            except Exception as e:
+                log_info(trace_id, f"[analyze_stream] cache replay error: {e}")
+
         try:
             _stream_had_token = False
+            live_model: str | None = None
             for tok, model in openai_client.chat_stream(
                 messages=messages,
                 system_prompt=system_prompt,
@@ -667,6 +796,7 @@ def api_analyze_stream(
                 max_tokens=2048,
             ):
                 _stream_had_token = True
+                live_model = model
                 full_text_parts.append(tok)
                 yield f"data: {json.dumps({'token': tok})}\n\n"
             if not _stream_had_token:
@@ -677,6 +807,11 @@ def api_analyze_stream(
                 full_text_parts.append(_empty)
                 yield f"data: {json.dumps({'token': _empty})}\n\n"
             full_text = "".join(full_text_parts)
+            if _stream_had_token and full_text and live_model:
+                try:
+                    _analyze_stream_cache_put(cache_key, full_text, live_model, interval)
+                except Exception as e:
+                    log_info(trace_id, f"[analyze_stream] cache store error: {e}")
             ann = _extract_chart_levels(full_text)
             if ann:
                 yield f"data: {json.dumps({'annotations': ann})}\n\n"

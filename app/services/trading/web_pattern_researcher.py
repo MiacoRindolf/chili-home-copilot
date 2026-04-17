@@ -294,6 +294,7 @@ def _extract_patterns_from_content(
             ],
             max_tokens=1500,
             trace_id="web_pattern_extract",
+            cacheable=True,
         )
 
         if not response:

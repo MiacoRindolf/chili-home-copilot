@@ -1080,6 +1080,17 @@ def api_brain_stats(request: Request, db: Session = Depends(get_db)):
     return JSONResponse({"ok": True, **stats})
 
 
+@router.get("/api/trading/brain/llm-cache-stats")
+def api_brain_llm_cache_stats():
+    """In-process LRU+TTL cache metrics for deterministic LLM calls (Phase B, b5).
+
+    Returns hits / misses / size / evictions / hit_rate. Counters reset on
+    process start (cache is not persisted).
+    """
+    from ...services.llm_caller import get_cache_stats
+    return JSONResponse({"ok": True, **get_cache_stats()})
+
+
 @router.get("/api/trading/brain/performance")
 def api_brain_performance(request: Request, db: Session = Depends(get_db)):
     """Comprehensive P&L performance dashboard data."""

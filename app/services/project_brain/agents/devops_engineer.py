@@ -115,7 +115,7 @@ class DevOpsEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"issues\": [{\"file\": \"...\", \"issue\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="devops-patterns")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="devops-patterns", cacheable=True)
         if not reply:
             return {"issues_found": 0}
         try:
@@ -160,7 +160,7 @@ class DevOpsEngineerAgent(AgentBase):
             "{\"findings\": [{\"category\": \"...\", \"title\": \"...\", "
             "\"description\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="devops-findings")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="devops-findings", cacheable=True)
         if not reply:
             return 0
         try:

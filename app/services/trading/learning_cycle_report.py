@@ -318,6 +318,7 @@ def generate_and_store_cycle_report(db: Session, user_id: int | None, report: di
             ],
             max_tokens=1800,
             trace_id="learning-cycle-report",
+            cacheable=True,
         )
         polished = (reply or "").strip()
         if polished:

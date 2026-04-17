@@ -119,7 +119,7 @@ class AIEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"issues\": [{\"file\": \"...\", \"issue\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ai-prompts")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ai-prompts", cacheable=True)
         if not reply:
             return {"issues": 0}
         try:
@@ -147,7 +147,7 @@ class AIEngineerAgent(AgentBase):
             "Return ONLY valid JSON:\n"
             "{\"benchmarks\": [{\"name\": \"...\", \"description\": \"...\", \"priority\": \"high|medium|low\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="ai-bench")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=400, trace_id="ai-bench", cacheable=True)
         if not reply:
             return 0
         try:
@@ -192,7 +192,7 @@ class AIEngineerAgent(AgentBase):
             "{\"findings\": [{\"category\": \"...\", \"title\": \"...\", "
             "\"description\": \"...\", \"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ai-findings")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ai-findings", cacheable=True)
         if not reply:
             return 0
         try:

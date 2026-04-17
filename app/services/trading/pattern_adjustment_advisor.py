@@ -8,10 +8,142 @@ from __future__ import annotations
 
 import json
 import logging
+import math
+import threading
+import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from typing import Any
 
 logger = logging.getLogger(__name__)
+
+# Input-change gate (Phase C, c3). Per-monitor-tick ``get_adjustment`` would
+# otherwise call the LLM every time even when inputs barely moved. We round
+# numeric inputs into coarse buckets (price ±0.25%, health ±0.05,
+# pnl ±0.5pp) so a stable position reuses the previous recommendation for
+# ``_INPUT_GATE_TTL`` seconds. Safety rails still run on every return.
+_INPUT_GATE_MAX = 512
+_INPUT_GATE_TTL = 300
+
+_input_gate_lock = threading.Lock()
+_input_gate_cache: "OrderedDict[str, tuple[float, 'AdjustmentRecommendation']]" = OrderedDict()
+_input_gate_stats = {"hits": 0, "misses": 0}
+
+
+def _round_bucket(value: float | None, step: float) -> float | None:
+    if value is None:
+        return None
+    try:
+        return round(float(value) / step) * step
+    except Exception:
+        return None
+
+
+def _price_step(reference_price: float) -> float:
+    """Magnitude-based ±0.25 % step anchored to ``reference_price``'s decade,
+    so tiny wiggles in the actual value don't land in different buckets."""
+    try:
+        p = abs(float(reference_price))
+    except Exception:
+        return 0.001
+    if p <= 0:
+        return 0.001
+    magnitude = 10 ** math.floor(math.log10(max(p, 1e-6)))
+    return max(magnitude * 0.0025, 1e-6)
+
+
+def _gate_key(
+    *,
+    trade_id: Any,
+    ticker: str,
+    pattern_name: str,
+    current_price: float,
+    health_score: float,
+    pnl_pct: float | None,
+    current_stop: float | None,
+    current_target: float | None,
+    trade_plan_health: Any,
+) -> str:
+    step = _price_step(current_price)
+    price_b = _round_bucket(current_price, step)
+    health_b = _round_bucket(health_score, 0.05)
+    pnl_b = _round_bucket(pnl_pct, 0.5) if pnl_pct is not None else None
+    stop_b = _round_bucket(current_stop, step) if current_stop else None
+    target_b = _round_bucket(current_target, step) if current_target else None
+
+    plan_sig = None
+    if trade_plan_health is not None:
+        try:
+            plan_sig = (
+                bool(getattr(trade_plan_health, "entry_validated", False)),
+                _round_bucket(getattr(trade_plan_health, "plan_health_score", 0.0), 0.05),
+                len(getattr(trade_plan_health, "invalidations_triggered", []) or []),
+                len(getattr(trade_plan_health, "caution_signals_changed", []) or []),
+                len(getattr(trade_plan_health, "levels_breached", []) or []),
+            )
+        except Exception:
+            plan_sig = None
+
+    return repr((
+        str(trade_id or ""),
+        (ticker or "").upper(),
+        pattern_name or "",
+        price_b,
+        health_b,
+        pnl_b,
+        stop_b,
+        target_b,
+        plan_sig,
+    ))
+
+
+def _gate_get(key: str) -> "AdjustmentRecommendation | None":
+    now = time.monotonic()
+    with _input_gate_lock:
+        entry = _input_gate_cache.get(key)
+        if entry is None:
+            _input_gate_stats["misses"] += 1
+            return None
+        expiry, rec = entry
+        if expiry < now:
+            _input_gate_cache.pop(key, None)
+            _input_gate_stats["misses"] += 1
+            return None
+        _input_gate_cache.move_to_end(key)
+        _input_gate_stats["hits"] += 1
+        return rec
+
+
+def _gate_put(key: str, rec: "AdjustmentRecommendation") -> None:
+    expiry = time.monotonic() + _INPUT_GATE_TTL
+    with _input_gate_lock:
+        _input_gate_cache[key] = (expiry, rec)
+        _input_gate_cache.move_to_end(key)
+        while len(_input_gate_cache) > _INPUT_GATE_MAX:
+            _input_gate_cache.popitem(last=False)
+
+
+def get_input_gate_stats() -> dict[str, Any]:
+    with _input_gate_lock:
+        hits = _input_gate_stats["hits"]
+        misses = _input_gate_stats["misses"]
+        size = len(_input_gate_cache)
+    total = hits + misses
+    return {
+        "hits": hits,
+        "misses": misses,
+        "size": size,
+        "hit_rate": round((hits / total) if total else 0.0, 4),
+        "ttl_seconds": _INPUT_GATE_TTL,
+        "max_entries": _INPUT_GATE_MAX,
+    }
+
+
+def reset_input_gate_cache() -> None:
+    with _input_gate_lock:
+        _input_gate_cache.clear()
+        _input_gate_stats["hits"] = 0
+        _input_gate_stats["misses"] = 0
 
 _SYSTEM_PROMPT = """\
 You are CHILI's pattern-position management engine.  You monitor open
@@ -152,9 +284,38 @@ def get_adjustment(
     pattern_target: float | None,
     pnl_pct: float | None,
     trade_plan_health: Any = None,
+    trade_id: Any = None,
 ) -> AdjustmentRecommendation:
     """Call LLM and return a validated adjustment recommendation."""
     from ..llm_caller import call_llm
+
+    gate_key = _gate_key(
+        trade_id=trade_id,
+        ticker=ticker,
+        pattern_name=pattern_name,
+        current_price=current_price,
+        health_score=health_score,
+        pnl_pct=pnl_pct,
+        current_stop=current_stop,
+        current_target=current_target,
+        trade_plan_health=trade_plan_health,
+    )
+    cached = _gate_get(gate_key)
+    if cached is not None:
+        logger.debug("[pattern_adjust] input_gate hit for %s", ticker)
+        return _apply_safety_rails(
+            AdjustmentRecommendation(
+                action=cached.action,
+                new_stop=cached.new_stop,
+                new_target=cached.new_target,
+                confidence=cached.confidence,
+                reasoning=cached.reasoning,
+            ),
+            current_price=current_price,
+            current_stop=current_stop,
+            current_target=current_target,
+            pattern_stop=pattern_stop,
+        )
 
     user_msg = _build_user_prompt(
         ticker=ticker,
@@ -183,6 +344,7 @@ def get_adjustment(
             messages=messages,
             max_tokens=300,
             trace_id=f"pattern-adjust-{ticker}",
+            cacheable=True,
         )
         raw = (raw or "").strip()
         if raw.startswith("```"):
@@ -208,6 +370,7 @@ def get_adjustment(
         current_target=current_target,
         pattern_stop=pattern_stop,
     )
+    _gate_put(gate_key, rec)
     return rec
 
 

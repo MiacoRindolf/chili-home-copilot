@@ -139,7 +139,7 @@ class UXDesignerAgent(AgentBase):
             "{\"violations\": [{\"heuristic\": 1, \"name\": \"...\", \"issue\": \"...\", "
             "\"severity\": \"info|warn|critical\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=600, trace_id="ux-heuristics")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=600, trace_id="ux-heuristics", cacheable=True)
         if not reply:
             return {"violations": 0, "results": []}
         try:
@@ -165,7 +165,7 @@ class UXDesignerAgent(AgentBase):
             "{\"issues\": [{\"wcag\": \"...\", \"issue\": \"...\", \"severity\": \"info|warn|critical\", "
             "\"fix\": \"...\"}]}\n"
         )
-        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ux-a11y")
+        reply = call_llm(messages=[{"role": "user", "content": prompt}], max_tokens=500, trace_id="ux-a11y", cacheable=True)
         if not reply:
             return {"issues": 0, "results": []}
         try:

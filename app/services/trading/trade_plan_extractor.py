@@ -129,7 +129,7 @@ produce the structured monitoring plan JSON.
     ]
 
     try:
-        raw = call_llm(messages=messages, max_tokens=600, trace_id=f"trade-plan-{ticker}")
+        raw = call_llm(messages=messages, max_tokens=600, trace_id=f"trade-plan-{ticker}", cacheable=True)
         raw = (raw or "").strip()
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
