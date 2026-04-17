@@ -1284,18 +1284,173 @@ class DynamicPatternStrategy(Strategy):
             trailing_stop = self._highest_since_entry - self._exit_atr_mult * atr_val
 
             bos_triggered = False
+            swing_low_val = None
             if (self._bars_in_trade >= self._bos_grace
                     and i < len(self._swing_low_array)):
                 swing_low = self._swing_low_array[i]
                 if swing_low is not None and swing_low > 0:
+                    swing_low_val = float(swing_low)
                     bos_threshold = swing_low * (1 - self._bos_buffer_pct)
                     if price < bos_threshold:
                         bos_triggered = True
 
-            if (price < trailing_stop
-                    or self._bars_in_trade >= self._exit_max_bars
-                    or bos_triggered):
+            legacy_would_close = (
+                price < trailing_stop
+                or self._bars_in_trade >= self._exit_max_bars
+                or bos_triggered
+            )
+            if legacy_would_close:
+                if price < trailing_stop:
+                    legacy_action_str = "exit_trail"
+                elif bos_triggered:
+                    legacy_action_str = "exit_bos"
+                else:
+                    legacy_action_str = "exit_time_decay"
+            else:
+                legacy_action_str = "hold"
+
+            _phase_b_bt_shadow_parity(
+                strategy=self,
+                i=i,
+                price=price,
+                atr_val=atr_val,
+                swing_low_val=swing_low_val,
+                bars_in_trade=self._bars_in_trade,
+                trailing_stop_prev=getattr(self, "_canonical_trailing_stop", None),
+                legacy_action=legacy_action_str,
+                legacy_exit_price=(price if legacy_would_close else None),
+            )
+
+            if legacy_would_close:
                 self.position.close()
+
+
+def _phase_b_bt_shadow_parity(
+    *,
+    strategy: "DynamicPatternStrategy",
+    i: int,
+    price: float,
+    atr_val: float,
+    swing_low_val: float | None,
+    bars_in_trade: int,
+    trailing_stop_prev: float | None,
+    legacy_action: str,
+    legacy_exit_price: float | None,
+) -> None:
+    """Phase B shadow hook for the backtest exit branch.
+
+    Runs the canonical ``ExitEvaluator`` against the same bar the legacy
+    logic just evaluated and, when a ticker + sink are attached to the
+    strategy instance, appends a parity record. Side-effect only: the
+    backtest MUST continue to act on the legacy decision in shadow mode.
+
+    Failures are swallowed; a broken parity hook cannot break a backtest.
+    """
+    try:
+        from ..config import settings
+        mode = str(getattr(settings, "brain_exit_engine_mode", "off") or "off").lower()
+        if mode == "off":
+            return
+        if mode == "authoritative":
+            mode = "shadow"
+
+        from .trading import exit_evaluator as ev
+
+        cfg = ev.build_config_backtest(
+            exit_atr_mult=float(strategy._exit_atr_mult),
+            exit_max_bars=int(strategy._exit_max_bars),
+            use_bos=True,
+            bos_buffer_frac=float(strategy._bos_buffer_pct),
+            bos_grace_bars=int(strategy._bos_grace),
+        )
+
+        entry_price = float(strategy.trades[-1].entry_price) if getattr(strategy, "trades", None) else price
+        highest = float(strategy._highest_since_entry)
+        state = ev.PositionState(
+            direction="long",
+            entry_price=entry_price,
+            stop_price=None,
+            target_price=None,
+            bars_held=max(0, bars_in_trade - 1),  # evaluate_bar increments
+            highest_since_entry=highest,
+            lowest_since_entry=entry_price,
+            trailing_stop=trailing_stop_prev,
+            partial_taken=False,
+        )
+        bar = ev.BarContext(
+            open=price,
+            high=price,
+            low=price,
+            close=price,
+            atr=atr_val if atr_val > 0 else None,
+            swing_low=swing_low_val,
+            swing_high=None,
+            bar_idx=i,
+            bar_ts=None,
+        )
+        decision = ev.evaluate_bar(cfg, state, bar)
+
+        # Carry trailing stop forward for the next bar.
+        strategy._canonical_trailing_stop = decision.trailing_stop
+
+        canonical_action = decision.action
+        agree = (legacy_action == canonical_action) or (
+            # Any exit from legacy + any exit from canonical still counts as
+            # "agree on close/no-close"; label mismatch is tracked separately.
+            legacy_action != "hold" and canonical_action != "hold"
+        )
+        config_hash = cfg.config_hash()
+
+        sink = getattr(strategy, "_parity_sink", None)
+        if sink is not None:
+            sink.append({
+                "source": "backtest",
+                "position_id": None,
+                "scan_pattern_id": getattr(strategy, "_scan_pattern_id", None),
+                "ticker": getattr(strategy, "_ticker", "") or "",
+                "legacy_action": legacy_action,
+                "legacy_exit_price": legacy_exit_price,
+                "canonical_action": canonical_action,
+                "canonical_exit_price": decision.exit_price,
+                "agree_bool": bool(agree),
+                "mode": mode,
+                "config_hash": config_hash,
+                "reason_code": decision.reason_code,
+                "bar_idx": i,
+            })
+
+        if bool(getattr(settings, "brain_exit_engine_ops_log_enabled", True)):
+            from ..trading_brain.infrastructure.exit_engine_ops_log import (
+                format_exit_engine_ops_line,
+            )
+            sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
+            line = format_exit_engine_ops_line(
+                mode=mode,
+                source="backtest",
+                position_id=None,
+                ticker=getattr(strategy, "_ticker", "") or "none",
+                legacy_action=legacy_action,
+                canonical_action=canonical_action,
+                agree=agree,
+                config_hash=config_hash,
+                sample_pct=sample_pct,
+            )
+            # Parity data is always persisted via the strategy parity sink above;
+            # only INFO-log interesting bars (disagreements or actual exits).
+            # Backtest refresh fires one hook per bar per path, so hold+hold+agree
+            # dominates the log — route those to DEBUG to keep the contract shape
+            # without the per-bar spam.
+            boring = (
+                bool(agree)
+                and legacy_action == "hold"
+                and canonical_action == "hold"
+            )
+            if boring:
+                logger.debug(line)
+            else:
+                logger.info(line)
+    except Exception as exc:
+        logger.debug("[exit_engine_bt] shadow parity failed: %s", exc)
 
 
 def _extract_pattern_indicators(

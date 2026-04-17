@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
@@ -10,6 +11,8 @@ from sqlalchemy.orm import Session
 from ...config import settings
 from ..broker_manager import get_all_broker_statuses
 from .pattern_validation_projection import read_pattern_validation_projection, write_validation_contract
+
+logger = logging.getLogger(__name__)
 
 ALLOCATION_STATE_VERSION = 1
 _LIVE_TERMINAL_SESSION_STATES = frozenset(
@@ -621,6 +624,44 @@ def allocate_momentum_session_entry(
         capacity_soft_penalty=_safe_float(cap_eval.get("soft_penalty"), 0.0),
         correlation_penalty=corr_pen,
     )
+
+    # SHADOW HOOK: NetEdgeRanker (Phase E). Logs a parallel score next to the
+    # heuristic ``exp``. The authoritative abstain/floor logic below MUST
+    # continue to use ``exp`` until brain_net_edge_ranker_mode == authoritative.
+    try:
+        from . import net_edge_ranker as _net_edge
+
+        if _net_edge.mode_is_active():
+            _asset = "crypto" if str(symbol).endswith("-USD") else "stock"
+            _entry = _safe_float(quote_mid, 0.0) or 0.0
+            _stop = _safe_float(
+                (ex or {}).get("stop_price") or (ex or {}).get("stop"), 0.0
+            ) or (_entry * 0.97 if _entry > 0 else 0.0)
+            _target = _safe_float(
+                (ex or {}).get("target_price") or (ex or {}).get("target"), 0.0
+            ) or None
+            if _entry > 0 and _stop > 0:
+                _net_edge.score(
+                    db,
+                    _net_edge.NetEdgeSignalContext(
+                        ticker=symbol or "unknown",
+                        asset_class=_asset,
+                        scan_pattern_id=scan_pattern_id,
+                        raw_prob=_safe_float(
+                            getattr(viability, "viability_score", None), 0.0
+                        ),
+                        entry_price=float(_entry),
+                        stop_price=float(_stop),
+                        target_price=_target,
+                        regime=str((regime_snapshot or {}).get("regime") or "").strip() or None,
+                        timeframe=str(
+                            getattr(variant, "timeframe", None) or ""
+                        ).strip() or None,
+                        heuristic_score=_safe_float(exp.get("expected_edge_net"), None),
+                    ),
+                )
+    except Exception as _net_edge_exc:
+        logger.debug("[allocator] net_edge shadow score failed: %s", _net_edge_exc)
 
     floor = _safe_float(getattr(settings, "brain_minimum_net_expectancy_to_trade", 0.0), 0.0)
     shadow = bool(getattr(settings, "brain_expectancy_allocator_shadow_mode", False))

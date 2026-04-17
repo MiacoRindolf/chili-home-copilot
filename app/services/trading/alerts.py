@@ -282,6 +282,71 @@ def _compute_position_size(
     return quantity, final_pct
 
 
+def _emit_phase_h_shadow_from_pick(
+    db: Session,
+    user_id: int | None,
+    pick: dict[str, Any] | None,
+    ticker: str,
+    entry: float,
+    stop: float,
+    target: float | None,
+    quantity: int | None,
+    buying_power: float,
+    source: str,
+) -> None:
+    """Phase H shadow-sizer emit. Defensive; never breaks legacy sizing.
+
+    Called after :func:`_compute_position_size` so the canonical
+    sizer sees the same ``(entry, stop, target, buying_power)`` the
+    legacy sizer saw and its proposal can be compared via
+    ``divergence_bps`` in the log.
+    """
+    try:
+        from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
+        from .position_sizer_writer import LegacySizing, mode_is_active
+
+        if not mode_is_active():
+            return
+        if not entry or not stop:
+            return
+        pick = pick or {}
+        legacy_notional = (
+            float(quantity) * float(entry)
+            if quantity is not None and quantity > 0
+            else None
+        )
+        confidence = (
+            pick.get("brain_confidence")
+            or pick.get("confidence")
+            or pick.get("combined_score")
+        )
+        is_crypto = bool(pick.get("is_crypto")) or (ticker or "").upper().endswith("-USD")
+        emit_shadow_proposal(
+            db,
+            signal=EmitterSignal(
+                source=source,
+                ticker=ticker,
+                direction="long",
+                entry_price=float(entry),
+                stop_price=float(stop),
+                capital=float(buying_power or 10000.0),
+                target_price=float(target) if target else None,
+                asset_class="crypto" if is_crypto else "equity",
+                user_id=user_id,
+                pattern_id=pick.get("scan_pattern_id"),
+                regime=pick.get("regime"),
+                confidence=float(confidence) if confidence is not None else None,
+            ),
+            legacy=LegacySizing(
+                notional=legacy_notional,
+                quantity=float(quantity) if quantity else None,
+                source=source,
+            ),
+        )
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("[alerts] phase H shadow emit failed", exc_info=True)
+
+
 def _expire_proposals_on_stop(
     db: Session,
     user_id: int | None,
@@ -621,6 +686,14 @@ def generate_strategy_proposals(
         if position_size_pct is None:
             position_size_pct = round(min(_get_brain_weight("pos_pct_hard_cap"), (quantity * price) / max(buying_power, 10000.0) * 100), 2)
 
+        _emit_phase_h_shadow_from_pick(
+            db, user_id, pick, ticker,
+            entry=price, stop=stop, target=target,
+            quantity=quantity,
+            buying_power=buying_power or 10000.0,
+            source="alerts.generate_strategy_proposals",
+        )
+
         confidence = pick.get("brain_confidence") or (combined * 10)
 
         signals = pick.get("signals", [])
@@ -831,6 +904,14 @@ def create_proposal_from_pick(
         quantity = max(1, int((buying_power or 10000.0) * (_MAX_RISK_PCT / 100) / risk_per_share))
     if position_size_pct is None:
         position_size_pct = round(min(_POS_PCT_HARD_CAP, (quantity * price) / max(buying_power or 10000.0, 1) * 100), 2)
+
+    _emit_phase_h_shadow_from_pick(
+        db, user_id, pick, ticker,
+        entry=price, stop=stop, target=target,
+        quantity=quantity,
+        buying_power=buying_power or 10000.0,
+        source="alerts.create_proposal_from_pick",
+    )
     confidence = pick.get("brain_confidence") or (combined * 10)
     signals = pick.get("signals", [])
     indicators = pick.get("indicators", {})
@@ -1443,6 +1524,16 @@ def _execute_proposal(
         else:
             quantity = 1
             proposal.quantity = 1
+
+        _emit_phase_h_shadow_from_pick(
+            db, user_id, pick, ticker,
+            entry=float(proposal.entry_price),
+            stop=float(stop) if stop else float(proposal.entry_price),
+            target=float(proposal.take_profit) if getattr(proposal, "take_profit", None) else None,
+            quantity=quantity,
+            buying_power=bp,
+            source="alerts.execute_proposal",
+        )
 
     target_broker = broker or get_best_broker_for(ticker)
     now = datetime.utcnow()

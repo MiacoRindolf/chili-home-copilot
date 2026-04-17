@@ -540,6 +540,63 @@ def _record_stop_decision(db: Session, trade_id: int, result: StopDecisionResult
     db.add(record)
 
 
+def _maybe_emit_bracket_intent(db: Session, trade, brain) -> None:
+    """Phase G - single canonical bracket-intent emitter.
+
+    Shadow mode only: persists the bracket (stop/target) the engine would have
+    enforced for live (broker-backed) trades. Idempotent upsert, safe to call
+    every evaluation tick.
+    """
+    try:
+        from ...config import settings as _cfg
+
+        mode = getattr(_cfg, "brain_live_brackets_mode", "off") or "off"
+        if mode == "off":
+            return
+        broker_src = getattr(trade, "broker_source", None)
+        if not broker_src:
+            return
+        stop_price = getattr(trade, "stop_loss", None)
+        if stop_price is None or float(stop_price) <= 0:
+            return
+
+        from .bracket_intent import BracketIntentInput
+        from .bracket_intent_writer import upsert_bracket_intent
+
+        atr_val = None
+        try:
+            snapshot = getattr(trade, "indicator_snapshot", None)
+            if isinstance(snapshot, str) and snapshot:
+                snap = json.loads(snapshot)
+                if isinstance(snap, dict):
+                    atr_val = snap.get("atr") or snap.get("ATR")
+        except Exception:
+            atr_val = None
+
+        bracket_input = BracketIntentInput(
+            ticker=trade.ticker,
+            direction=(trade.direction or "long").lower(),
+            entry_price=float(trade.entry_price or 0.0),
+            quantity=float(trade.quantity or 0.0),
+            atr=float(atr_val) if atr_val else None,
+            stop_model=getattr(trade, "stop_model", None),
+            pattern_id=getattr(trade, "scan_pattern_id", None),
+            lifecycle_stage=getattr(brain, "lifecycle_stage", None) if brain else None,
+            regime=getattr(brain, "regime", "cautious") if brain else "cautious",
+            pattern_win_rate=getattr(brain, "win_rate", None) if brain else None,
+            pattern_name=getattr(brain, "pattern_name", None) if brain else None,
+        )
+        upsert_bracket_intent(
+            db,
+            trade_id=trade.id,
+            user_id=getattr(trade, "user_id", None),
+            bracket_input=bracket_input,
+            broker_source=broker_src,
+        )
+    except Exception:
+        logger.debug("[stop_engine] bracket intent emit failed", exc_info=True)
+
+
 def _apply_stop_to_trade(db: Session, trade, result: StopDecisionResult) -> None:
     """Update the Trade row with any stop/watermark changes.
 
@@ -712,6 +769,7 @@ def evaluate_all(
             if result.alert_event and result.alert_event != "DATA_STALE":
                 _record_stop_decision(db, trade.id, result)
                 _apply_stop_to_trade(db, trade, result)
+                _maybe_emit_bracket_intent(db, trade, brain)
 
             if result.alert_event:
                 if _should_suppress_alert(trade.id, result.alert_event, recent_decisions, adaptive_cooldowns):

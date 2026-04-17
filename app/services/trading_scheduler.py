@@ -338,6 +338,841 @@ def _run_momentum_live_runner_batch_job():
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
 
+def _run_bracket_reconciliation_job():
+    """Phase G - periodic shadow-mode bracket reconciliation sweep."""
+
+    def _work() -> None:
+        from ..config import settings as _cfg
+        mode = (getattr(_cfg, "brain_live_brackets_mode", "off") or "off").lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] bracket_reconciliation skipped: mode=authoritative "
+                    "(Phase G is shadow-only; Phase G.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.bracket_reconciliation_service import (
+            broker_manager_view_fn,
+            run_reconciliation_sweep,
+        )
+
+        db = SessionLocal()
+        try:
+            summary = run_reconciliation_sweep(db, broker_view_fn=broker_manager_view_fn)
+            logger.info(
+                "[scheduler] bracket_reconciliation sweep done: "
+                "trades=%d brackets=%d agree=%d drift=%d took_ms=%.1f",
+                summary.trades_scanned,
+                summary.brackets_checked,
+                summary.agree,
+                (
+                    summary.orphan_stop + summary.missing_stop + summary.qty_drift
+                    + summary.state_drift + summary.price_drift + summary.broker_down
+                    + summary.unreconciled
+                ),
+                summary.took_ms,
+            )
+        except Exception:
+            logger.exception("[scheduler] bracket_reconciliation sweep failed")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("bracket_reconciliation", _work)
+
+
+def _run_capital_reweight_weekly_job():
+    """Phase I - weekly capital re-weight sweep (shadow mode only).
+
+    Gated by ``brain_capital_reweight_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase I.2 will open that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (getattr(settings, "brain_capital_reweight_mode", "off") or "off").lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] capital_reweight_weekly skipped: mode=authoritative "
+                    "(Phase I is shadow-only; Phase I.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal
+        from .trading.capital_reweight_model import BucketContext
+        from .trading.capital_reweight_service import run_sweep
+        from .trading.risk_dial_service import get_latest_dial
+
+        db = SessionLocal()
+        try:
+            # Shadow sweep: one global row per week using active-user
+            # snapshot. Per-user fan-out is Phase I.2. We still use the
+            # risk-dial read path so the sweep is tilted by the current
+            # dial when it is active.
+            from sqlalchemy import text as _text
+
+            rows = db.execute(_text("""
+                SELECT
+                    CASE
+                        WHEN UPPER(ticker) LIKE '%-USD'
+                          OR UPPER(ticker) LIKE '%USD'
+                          OR UPPER(ticker) LIKE '%USDT'
+                          OR UPPER(ticker) LIKE '%USDC'
+                        THEN 'crypto:majors'
+                        ELSE 'equity:default'
+                    END AS bucket,
+                    COALESCE(SUM(entry_price * quantity), 0) AS notional
+                FROM trading_paper_trades
+                WHERE status = 'open'
+                GROUP BY 1
+            """)).fetchall()
+            buckets = tuple(
+                BucketContext(
+                    name=str(r[0]),
+                    current_notional=float(r[1] or 0.0),
+                    volatility=1.0 if str(r[0]).startswith("equity") else 2.0,
+                )
+                for r in rows
+            )
+            if not buckets:
+                logger.info("[scheduler] capital_reweight_weekly: no open buckets")
+                return
+            total_capital = float(
+                getattr(settings, "brain_capital_reweight_total_capital_default", 100_000.0)
+            )
+            dial = get_latest_dial(db, user_id=None, default=1.0)
+            res = run_sweep(
+                db,
+                user_id=None,
+                as_of_date=_date.today(),
+                total_capital=total_capital,
+                regime=None,
+                dial_value=float(dial),
+                buckets=buckets,
+            )
+            if res is None:
+                logger.info("[scheduler] capital_reweight_weekly: mode=off, skipped")
+                return
+            logger.info(
+                "[scheduler] capital_reweight_weekly sweep done: "
+                "reweight_id=%s mode=%s mean_drift_bps=%.1f p90_drift_bps=%.1f",
+                res.reweight_id,
+                res.mode,
+                res.mean_drift_bps,
+                res.p90_drift_bps,
+            )
+        except Exception:
+            logger.exception("[scheduler] capital_reweight_weekly sweep failed")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("capital_reweight_weekly", _work)
+
+
+def _run_drift_monitor_daily_job():
+    """Phase J - daily drift-monitor sweep (shadow mode only).
+
+    Iterates active ``scan_patterns`` (lifecycle in ``promoted`` /
+    ``live``) and, for each, reads the baseline win-probability from
+    ``oos_win_rate`` (fallback ``win_rate``) and the recent closed
+    paper-trade sample (bucketed by ``pnl > 0`` → 1 else 0). Writes
+    one row per pattern to ``trading_pattern_drift_log`` and, when
+    the row is ``red`` severity and the re-cert queue is active,
+    one row to ``trading_pattern_recert_log``.
+
+    Gated by ``brain_drift_monitor_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase J.2 will open that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (getattr(settings, "brain_drift_monitor_mode", "off") or "off").lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] drift_monitor_daily skipped: mode=authoritative "
+                    "(Phase J is shadow-only; Phase J.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal
+        from .trading.drift_monitor_service import (
+            DriftInputBundle,
+            run_sweep as _drift_run_sweep,
+        )
+        from .trading.recert_queue_service import (
+            mode_is_active as _recert_mode_is_active,
+            queue_from_drift,
+        )
+        from .trading.drift_monitor_model import (
+            DriftMonitorInput,
+            compute_drift,
+        )
+
+        db = SessionLocal()
+        try:
+            from sqlalchemy import text as _text
+            lookback_days = int(
+                getattr(settings, "brain_drift_monitor_sample_lookback_days", 30)
+            )
+            patterns = db.execute(_text("""
+                SELECT id, name,
+                       COALESCE(oos_win_rate, win_rate) AS baseline
+                FROM scan_patterns
+                WHERE active = TRUE
+                  AND lifecycle_stage IN ('promoted', 'live')
+                  AND COALESCE(oos_win_rate, win_rate) IS NOT NULL
+            """)).fetchall()
+            if not patterns:
+                logger.info("[scheduler] drift_monitor_daily: no eligible patterns")
+                return
+
+            bundles: list[DriftInputBundle] = []
+            for pid, pname, baseline in patterns:
+                sample_rows = db.execute(_text("""
+                    SELECT CASE WHEN COALESCE(pnl, 0) > 0 THEN 1 ELSE 0 END
+                    FROM trading_paper_trades
+                    WHERE scan_pattern_id = :pid
+                      AND status = 'closed'
+                      AND exit_date IS NOT NULL
+                      AND exit_date >= NOW() - (:ld || ' days')::INTERVAL
+                    ORDER BY exit_date ASC
+                """), {"pid": int(pid), "ld": int(lookback_days)}).fetchall()
+                outcomes = [int(r[0] or 0) for r in sample_rows]
+                bundles.append(DriftInputBundle(
+                    scan_pattern_id=int(pid),
+                    pattern_name=pname,
+                    baseline_win_prob=float(baseline) if baseline is not None else None,
+                    outcomes=outcomes,
+                ))
+
+            today = _date.today()
+            rows = _drift_run_sweep(
+                db, bundles=bundles, as_of_date=today,
+            )
+            red_count = sum(1 for r in rows if r.severity == "red")
+            logger.info(
+                "[scheduler] drift_monitor_daily sweep done: "
+                "patterns=%d rows_written=%d red=%d mode=%s",
+                len(bundles), len(rows), red_count, mode,
+            )
+
+            # Fan out red rows to the re-cert queue when it is active.
+            if _recert_mode_is_active():
+                for r in rows:
+                    if r.severity != "red":
+                        continue
+                    # Re-derive the pure output for the proposal path so
+                    # we can pass it to queue_from_drift without re-reading
+                    # the row.
+                    bundle = next(
+                        (b for b in bundles if b.scan_pattern_id == r.scan_pattern_id),
+                        None,
+                    )
+                    if bundle is None:
+                        continue
+                    drift_out = compute_drift(DriftMonitorInput(
+                        scan_pattern_id=bundle.scan_pattern_id,
+                        pattern_name=bundle.pattern_name,
+                        baseline_win_prob=bundle.baseline_win_prob,
+                        outcomes=tuple(bundle.outcomes),
+                        as_of_key=today.isoformat(),
+                    ))
+                    try:
+                        queue_from_drift(
+                            db, drift_out,
+                            as_of_date=today,
+                            drift_log_id=r.log_id,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[scheduler] drift_monitor_daily queue_from_drift failed",
+                        )
+        except Exception:
+            logger.exception("[scheduler] drift_monitor_daily sweep failed")
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("drift_monitor_daily", _work)
+
+
+def _run_divergence_sweep_daily_job():
+    """Phase K - daily divergence-panel sweep (shadow mode only).
+
+    Discovers patterns with at least one signal in the last
+    ``brain_divergence_scorer_lookback_days`` across the five substrate
+    log tables (Phase A ledger parity, Phase B exit parity, Phase F
+    venue truth, Phase G bracket reconciliation, Phase H position
+    sizer), gathers per-layer signals for each, and writes one row to
+    ``trading_pattern_divergence_log`` per pattern.
+
+    Gated by ``brain_divergence_scorer_mode != off`` and hard-refused
+    when the mode is ``authoritative`` (Phase K.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_divergence_scorer_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] divergence_sweep_daily skipped: "
+                    "mode=authoritative (Phase K is shadow-only; "
+                    "Phase K.2 required to enable)",
+                )
+            return
+        from datetime import date as _date
+        from ..db import SessionLocal
+        from .trading.divergence_service import (
+            DivergenceInputBundle,
+            discover_active_patterns,
+            gather_signals_for_pattern,
+            run_sweep as _div_run_sweep,
+        )
+
+        db = SessionLocal()
+        try:
+            lookback_days = int(
+                getattr(
+                    settings, "brain_divergence_scorer_lookback_days", 7,
+                )
+            )
+            patterns = discover_active_patterns(
+                db, lookback_days=lookback_days,
+            )
+            if not patterns:
+                logger.info(
+                    "[scheduler] divergence_sweep_daily: no eligible patterns",
+                )
+                return
+
+            bundles: list[DivergenceInputBundle] = []
+            for pid, pname in patterns:
+                signals = gather_signals_for_pattern(
+                    db,
+                    scan_pattern_id=int(pid),
+                    lookback_days=lookback_days,
+                )
+                bundles.append(DivergenceInputBundle(
+                    scan_pattern_id=int(pid),
+                    pattern_name=pname,
+                    signals=signals,
+                ))
+
+            today = _date.today()
+            rows = _div_run_sweep(db, bundles=bundles, as_of_date=today)
+            red_count = sum(1 for r in rows if r.severity == "red")
+            yellow_count = sum(1 for r in rows if r.severity == "yellow")
+            logger.info(
+                "[scheduler] divergence_sweep_daily sweep done: "
+                "patterns=%d rows_written=%d red=%d yellow=%d mode=%s",
+                len(bundles), len(rows), red_count, yellow_count, mode,
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] divergence_sweep_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("divergence_sweep_daily", _work)
+
+
+def _run_macro_regime_daily_job():
+    """Phase L.17 - daily macro-regime snapshot sweep (shadow mode only).
+
+    Fetches OHLCV trends for the rates/credit/USD ETF basket
+    (IEF/SHY/TLT/HYG/LQD/UUP), combines with the existing equity regime
+    composite, and writes one row to ``trading_macro_regime_snapshots``.
+
+    Gated by ``brain_macro_regime_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.17.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_macro_regime_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] macro_regime_daily skipped: "
+                    "mode=authoritative (Phase L.17 is shadow-only; "
+                    "Phase L.17.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.macro_regime_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] macro_regime_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+            else:
+                logger.info(
+                    "[scheduler] macro_regime_daily done: "
+                    "regime_id=%s label=%s coverage=%.2f mode=%s",
+                    row.regime_id, row.macro_label,
+                    float(row.coverage_score), mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] macro_regime_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("macro_regime_daily", _work)
+
+
+def _run_breadth_relstr_daily_job():
+    """Phase L.18 - daily breadth + RS snapshot sweep (shadow mode only).
+
+    Fetches OHLCV trends for the fixed reference basket (11 sector SPDRs
+    plus SPY / QQQ / IWM), computes the ETF-basket advance/decline proxy
+    + per-sector relative strength vs SPY + size/style tilts, and writes
+    one row to ``trading_breadth_relstr_snapshots``.
+
+    Gated by ``brain_breadth_relstr_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.18.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_breadth_relstr_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] breadth_relstr_daily skipped: "
+                    "mode=authoritative (Phase L.18 is shadow-only; "
+                    "Phase L.18.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.breadth_relstr_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] breadth_relstr_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+            else:
+                logger.info(
+                    "[scheduler] breadth_relstr_daily done: "
+                    "snapshot_id=%s label=%s advance_ratio=%.2f "
+                    "coverage=%.2f mode=%s",
+                    row.snapshot_id, row.breadth_label,
+                    float(row.advance_ratio),
+                    float(row.coverage_score), mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] breadth_relstr_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("breadth_relstr_daily", _work)
+
+
+def _run_cross_asset_daily_job():
+    """Phase L.19 - daily cross-asset signals sweep (shadow mode only).
+
+    Fetches OHLCV for the fixed lead/lag basket (SPY, TLT, HYG, LQD,
+    UUP, BTC-USD, ETH-USD), reads Phase L.17 macro_label and Phase L.18
+    advance_ratio/breadth_label for context, pulls VIX from
+    ``get_market_regime()``, computes the bond-equity / credit-equity /
+    USD-crypto leads + VIX-breadth divergence + BTC-SPY beta, and
+    writes one row to ``trading_cross_asset_snapshots``.
+
+    Gated by ``brain_cross_asset_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.19.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_cross_asset_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] cross_asset_daily skipped: "
+                    "mode=authoritative (Phase L.19 is shadow-only; "
+                    "Phase L.19.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.cross_asset_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] cross_asset_daily: skipped "
+                    "(off / coverage_below_min)",
+                )
+            else:
+                logger.info(
+                    "[scheduler] cross_asset_daily done: "
+                    "snapshot_id=%s label=%s coverage=%.2f mode=%s",
+                    row.snapshot_id, row.cross_asset_label,
+                    float(row.coverage_score), mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] cross_asset_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("cross_asset_daily", _work)
+
+
+def _run_ticker_regime_daily_job():
+    """Phase L.20 - daily per-ticker mean-reversion vs trend sweep (shadow).
+
+    Iterates over the snapshot-universe (scan + watchlist, bounded by
+    ``brain_ticker_regime_max_tickers``), fetches daily OHLCV per
+    ticker, and writes one row per eligible ticker to
+    ``trading_ticker_regime_snapshots``. Gated by
+    ``brain_ticker_regime_mode != off`` and hard-refused when the mode
+    is ``authoritative`` (Phase L.20.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_ticker_regime_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] ticker_regime_daily skipped: "
+                    "mode=authoritative (Phase L.20 is shadow-only; "
+                    "Phase L.20.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.ticker_regime_service import compute_and_persist_sweep
+
+        db = SessionLocal()
+        try:
+            result = compute_and_persist_sweep(db)
+            logger.info(
+                "[scheduler] ticker_regime_daily done: "
+                "attempted=%d persisted=%d skipped=%d mode=%s",
+                int(result.tickers_attempted),
+                int(result.tickers_persisted),
+                int(result.tickers_skipped),
+                mode,
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] ticker_regime_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("ticker_regime_daily", _work)
+
+
+def _run_vol_dispersion_daily_job():
+    """Phase L.21 - daily volatility term structure + cross-sectional
+    dispersion snapshot (shadow).
+
+    Fetches VIXY/VIXM/VXZ/SPY + 11 sector SPDRs + a capped slice of
+    the snapshot universe, computes the pure model, and writes one row
+    to ``trading_vol_dispersion_snapshots``. Gated by
+    ``brain_vol_dispersion_mode != off`` and hard-refused when the
+    mode is ``authoritative`` (Phase L.21.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_vol_dispersion_mode", "off") or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] vol_dispersion_daily skipped: "
+                    "mode=authoritative (Phase L.21 is shadow-only; "
+                    "Phase L.21.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.vol_dispersion_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] vol_dispersion_daily done: "
+                    "no_row_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] vol_dispersion_daily done: "
+                    "snapshot_id=%s vol=%s disp=%s corr=%s cov=%.4f mode=%s",
+                    row.snapshot_id,
+                    row.vol_regime_label,
+                    row.dispersion_label,
+                    row.correlation_label,
+                    float(row.coverage_score),
+                    mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] vol_dispersion_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("vol_dispersion_daily", _work)
+
+
+def _run_intraday_session_daily_job():
+    """Phase L.22 - daily intraday session regime snapshot (shadow).
+
+    Fetches SPY 5-minute bars for the current trading day (in
+    US/Eastern), computes the pure model (opening range, midday
+    compression, power hour, gap dynamics, composite label), and
+    writes one row to ``trading_intraday_session_snapshots``. Gated
+    by ``brain_intraday_session_mode != off`` and hard-refused when
+    the mode is ``authoritative`` (Phase L.22.2 opens that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_intraday_session_mode", "off")
+            or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] intraday_session_daily skipped: "
+                    "mode=authoritative (Phase L.22 is shadow-only; "
+                    "Phase L.22.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.intraday_session_service import compute_and_persist
+
+        db = SessionLocal()
+        try:
+            row = compute_and_persist(db)
+            if row is None:
+                logger.info(
+                    "[scheduler] intraday_session_daily done: "
+                    "no_row_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] intraday_session_daily done: "
+                    "snapshot_id=%s label=%s numeric=%d cov=%.4f mode=%s",
+                    row.snapshot_id,
+                    row.session_label,
+                    int(row.session_numeric),
+                    float(row.coverage_score),
+                    mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] intraday_session_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("intraday_session_daily", _work)
+
+
+def _run_pattern_regime_perf_daily_job():
+    """Phase M.1 - daily pattern x regime performance ledger (shadow).
+
+    First consumer of the L.17-L.22 regime snapshot stack. Joins
+    closed paper trades in the rolling window against the latest
+    regime label per dimension at each trade's entry_date, then
+    writes one aggregate row per (pattern_id, regime_dimension,
+    regime_label) to ``trading_pattern_regime_performance_daily``.
+    Gated by ``brain_pattern_regime_perf_mode != off`` and hard-
+    refused when the mode is ``authoritative`` (Phase M.2 opens
+    that path).
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_pattern_regime_perf_mode", "off")
+            or "off"
+        ).lower()
+        if mode in ("off", "authoritative"):
+            if mode == "authoritative":
+                logger.warning(
+                    "[scheduler] pattern_regime_perf_daily skipped: "
+                    "mode=authoritative (Phase M.1 is shadow-only; "
+                    "Phase M.2 required to enable)",
+                )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_performance_service import (
+            compute_and_persist,
+        )
+
+        db = SessionLocal()
+        try:
+            run_ref = compute_and_persist(db)
+            if run_ref is None:
+                logger.info(
+                    "[scheduler] pattern_regime_perf_daily done: "
+                    "no_cells_persisted mode=%s", mode,
+                )
+            else:
+                logger.info(
+                    "[scheduler] pattern_regime_perf_daily done: "
+                    "ledger_run_id=%s cells=%d window_days=%d mode=%s",
+                    run_ref.ledger_run_id,
+                    run_ref.cells_persisted,
+                    run_ref.window_days,
+                    run_ref.mode,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_perf_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_perf_daily", _work)
+
+
+def _run_pattern_regime_killswitch_daily_job():
+    """Phase M.2.c — daily pattern x regime kill-switch / auto-quarantine sweep.
+
+    Iterates promoted / live patterns and evaluates them against the
+    M.1 ledger. Shadow / compare / authoritative gated by
+    ``brain_pattern_regime_killswitch_mode``. Authoritative mode
+    requires a live approval row in ``trading_governance_approvals``
+    (``action_type='pattern_regime_killswitch'``); without one, the
+    service emits ``killswitch_refused_authoritative`` ops lines.
+    """
+
+    def _work() -> None:
+        from ..config import settings
+        mode = (
+            getattr(settings, "brain_pattern_regime_killswitch_mode", "off")
+            or "off"
+        ).lower()
+        if mode == "off":
+            return
+        if bool(getattr(settings, "brain_pattern_regime_killswitch_kill", False)):
+            logger.warning(
+                "[scheduler] pattern_regime_killswitch_daily skipped: kill flag set",
+            )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_killswitch_service import run_daily_sweep
+
+        db = SessionLocal()
+        try:
+            out = run_daily_sweep(db)
+            logger.info(
+                "[scheduler] pattern_regime_killswitch_daily done: "
+                "mode=%s evaluated=%s quarantined=%s refused=%s",
+                out.get("mode"),
+                out.get("patterns_evaluated"),
+                out.get("patterns_quarantined"),
+                out.get("refused_authoritative"),
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_killswitch_daily sweep failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_killswitch_daily", _work)
+
+
+def _run_pattern_regime_autopilot_tick_job():
+    """Phase M.2-autopilot — daily advance/hold/revert tick.
+
+    Gated by ``brain_pattern_regime_autopilot_enabled``. Writes runtime
+    mode overrides into ``trading_brain_runtime_modes`` and audit rows
+    into ``trading_pattern_regime_autopilot_log``. Never raises.
+    """
+
+    def _work() -> None:
+        from ..config import settings as _s
+
+        if not bool(getattr(_s, "brain_pattern_regime_autopilot_enabled", False)):
+            return
+        if bool(getattr(_s, "brain_pattern_regime_autopilot_kill", False)):
+            logger.warning(
+                "[scheduler] pattern_regime_autopilot_tick skipped: kill flag set",
+            )
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_autopilot_service import run_autopilot_tick
+
+        db = SessionLocal()
+        try:
+            out = run_autopilot_tick(db)
+            logger.info(
+                "[scheduler] pattern_regime_autopilot_tick done: enabled=%s slices=%s",
+                out.get("enabled"),
+                list((out.get("slices") or {}).keys()),
+            )
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_autopilot_tick failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_autopilot_tick", _work)
+
+
+def _run_pattern_regime_autopilot_weekly_job():
+    """Phase M.2-autopilot — Monday 09:00 weekly summary."""
+
+    def _work() -> None:
+        from ..config import settings as _s
+
+        if not bool(getattr(_s, "brain_pattern_regime_autopilot_enabled", False)):
+            return
+        from ..db import SessionLocal
+        from .trading.pattern_regime_autopilot_service import run_weekly_summary
+
+        db = SessionLocal()
+        try:
+            run_weekly_summary(db)
+        except Exception:
+            logger.exception(
+                "[scheduler] pattern_regime_autopilot_weekly failed",
+            )
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("pattern_regime_autopilot_weekly", _work)
+
+
 def _run_data_retention_job():
     """Daily sweep: archive old snapshots, prune stale batch job payloads."""
 
@@ -2016,6 +2851,395 @@ def start_scheduler():
                 name="Data retention sweep (daily 3:30AM PT)",
                 replace_existing=True,
                 max_instances=1,
+            )
+
+        # Phase G: bracket reconciliation sweep (shadow mode only).
+        # Gated by brain_live_brackets_mode != off; authoritative is blocked
+        # inside the job itself (Phase G is observability-only).
+        try:
+            _brk_mode = (getattr(settings, "brain_live_brackets_mode", "off") or "off").lower()
+            _brk_interval_s = int(getattr(settings, "brain_live_brackets_reconciliation_interval_s", 60) or 60)
+            if include_web_light and _brk_mode not in ("off", "authoritative"):
+                _scheduler.add_job(
+                    _run_bracket_reconciliation_job,
+                    trigger=IntervalTrigger(seconds=_brk_interval_s),
+                    id="bracket_reconciliation",
+                    name=f"Bracket reconciliation sweep (every {_brk_interval_s}s; mode={_brk_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=30),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register bracket_reconciliation job")
+
+        # Phase I: weekly capital re-weight sweep (shadow mode only).
+        try:
+            _cr_mode = (getattr(settings, "brain_capital_reweight_mode", "off") or "off").lower()
+            if include_web_light and _cr_mode not in ("off", "authoritative"):
+                _cr_dow = str(getattr(settings, "brain_capital_reweight_cron_day_of_week", "sun") or "sun")
+                _cr_hour = int(getattr(settings, "brain_capital_reweight_cron_hour", 18) or 18)
+                _scheduler.add_job(
+                    _run_capital_reweight_weekly_job,
+                    trigger=CronTrigger(day_of_week=_cr_dow, hour=_cr_hour, minute=30),
+                    id="capital_reweight_weekly",
+                    name=f"Capital re-weight weekly ({_cr_dow} {_cr_hour:02d}:30; mode={_cr_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register capital_reweight_weekly job")
+
+        # Phase J: daily drift-monitor sweep (shadow mode only).
+        try:
+            _dm_mode = (getattr(settings, "brain_drift_monitor_mode", "off") or "off").lower()
+            if include_web_light and _dm_mode not in ("off", "authoritative"):
+                _dm_hour = int(getattr(settings, "brain_drift_monitor_cron_hour", 5) or 5)
+                _dm_minute = int(getattr(settings, "brain_drift_monitor_cron_minute", 30) or 30)
+                _scheduler.add_job(
+                    _run_drift_monitor_daily_job,
+                    trigger=CronTrigger(hour=_dm_hour, minute=_dm_minute),
+                    id="drift_monitor_daily",
+                    name=f"Drift monitor daily ({_dm_hour:02d}:{_dm_minute:02d}; mode={_dm_mode})",
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register drift_monitor_daily job")
+
+        # Phase K: daily divergence panel sweep (shadow mode only).
+        try:
+            _dv_mode = (
+                getattr(settings, "brain_divergence_scorer_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _dv_mode not in ("off", "authoritative"):
+                _dv_hour = int(
+                    getattr(settings, "brain_divergence_scorer_cron_hour", 6) or 6
+                )
+                _dv_minute = int(
+                    getattr(settings, "brain_divergence_scorer_cron_minute", 15) or 15
+                )
+                _scheduler.add_job(
+                    _run_divergence_sweep_daily_job,
+                    trigger=CronTrigger(hour=_dv_hour, minute=_dv_minute),
+                    id="divergence_sweep_daily",
+                    name=(
+                        f"Divergence panel daily ({_dv_hour:02d}:{_dv_minute:02d}; "
+                        f"mode={_dv_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register divergence_sweep_daily job"
+            )
+
+        # Phase L.17: daily macro-regime snapshot sweep (shadow mode only).
+        try:
+            _mr_mode = (
+                getattr(settings, "brain_macro_regime_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _mr_mode not in ("off", "authoritative"):
+                _mr_hour = int(
+                    getattr(settings, "brain_macro_regime_cron_hour", 6) or 6
+                )
+                _mr_minute = int(
+                    getattr(settings, "brain_macro_regime_cron_minute", 30) or 30
+                )
+                _scheduler.add_job(
+                    _run_macro_regime_daily_job,
+                    trigger=CronTrigger(hour=_mr_hour, minute=_mr_minute),
+                    id="macro_regime_daily",
+                    name=(
+                        f"Macro regime daily ({_mr_hour:02d}:{_mr_minute:02d}; "
+                        f"mode={_mr_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register macro_regime_daily job"
+            )
+
+        # Phase L.18: daily breadth + RS snapshot sweep (shadow mode only).
+        try:
+            _br_mode = (
+                getattr(settings, "brain_breadth_relstr_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _br_mode not in ("off", "authoritative"):
+                _br_hour = int(
+                    getattr(settings, "brain_breadth_relstr_cron_hour", 6) or 6
+                )
+                _br_minute = int(
+                    getattr(settings, "brain_breadth_relstr_cron_minute", 45)
+                    or 45
+                )
+                _scheduler.add_job(
+                    _run_breadth_relstr_daily_job,
+                    trigger=CronTrigger(hour=_br_hour, minute=_br_minute),
+                    id="breadth_relstr_daily",
+                    name=(
+                        f"Breadth + RS daily ({_br_hour:02d}:"
+                        f"{_br_minute:02d}; mode={_br_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register breadth_relstr_daily job"
+            )
+
+        # Phase L.19: daily cross-asset signals sweep (shadow mode only).
+        try:
+            _ca_mode = (
+                getattr(settings, "brain_cross_asset_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _ca_mode not in ("off", "authoritative"):
+                _ca_hour = int(
+                    getattr(settings, "brain_cross_asset_cron_hour", 7) or 7
+                )
+                _ca_minute = int(
+                    getattr(settings, "brain_cross_asset_cron_minute", 0)
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_cross_asset_daily_job,
+                    trigger=CronTrigger(hour=_ca_hour, minute=_ca_minute),
+                    id="cross_asset_daily",
+                    name=(
+                        f"Cross-asset daily ({_ca_hour:02d}:"
+                        f"{_ca_minute:02d}; mode={_ca_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register cross_asset_daily job"
+            )
+
+        # Phase L.20: daily per-ticker regime sweep (shadow mode only).
+        try:
+            _tr_mode = (
+                getattr(settings, "brain_ticker_regime_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _tr_mode not in ("off", "authoritative"):
+                _tr_hour = int(
+                    getattr(settings, "brain_ticker_regime_cron_hour", 7) or 7
+                )
+                _tr_minute = int(
+                    getattr(settings, "brain_ticker_regime_cron_minute", 15)
+                    or 15
+                )
+                _scheduler.add_job(
+                    _run_ticker_regime_daily_job,
+                    trigger=CronTrigger(hour=_tr_hour, minute=_tr_minute),
+                    id="ticker_regime_daily",
+                    name=(
+                        f"Ticker regime daily ({_tr_hour:02d}:"
+                        f"{_tr_minute:02d}; mode={_tr_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register ticker_regime_daily job"
+            )
+
+        # Phase L.21: daily vol term-structure + dispersion snapshot
+        # (shadow mode only).
+        try:
+            _vd_mode = (
+                getattr(settings, "brain_vol_dispersion_mode", "off") or "off"
+            ).lower()
+            if include_web_light and _vd_mode not in ("off", "authoritative"):
+                _vd_hour = int(
+                    getattr(settings, "brain_vol_dispersion_cron_hour", 7) or 7
+                )
+                _vd_minute = int(
+                    getattr(settings, "brain_vol_dispersion_cron_minute", 30)
+                    or 30
+                )
+                _scheduler.add_job(
+                    _run_vol_dispersion_daily_job,
+                    trigger=CronTrigger(hour=_vd_hour, minute=_vd_minute),
+                    id="vol_dispersion_daily",
+                    name=(
+                        f"Vol dispersion daily ({_vd_hour:02d}:"
+                        f"{_vd_minute:02d}; mode={_vd_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register vol_dispersion_daily job"
+            )
+
+        # Phase L.22: daily intraday session regime snapshot
+        # (shadow mode only). Runs post-close at 22:00 local.
+        try:
+            _is_mode = (
+                getattr(settings, "brain_intraday_session_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _is_mode not in ("off", "authoritative"):
+                _is_hour = int(
+                    getattr(
+                        settings, "brain_intraday_session_cron_hour", 22,
+                    )
+                    or 22
+                )
+                _is_minute = int(
+                    getattr(
+                        settings, "brain_intraday_session_cron_minute", 0,
+                    )
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_intraday_session_daily_job,
+                    trigger=CronTrigger(hour=_is_hour, minute=_is_minute),
+                    id="intraday_session_daily",
+                    name=(
+                        f"Intraday session daily ({_is_hour:02d}:"
+                        f"{_is_minute:02d}; mode={_is_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register intraday_session_daily job"
+            )
+
+        # Phase M.1: pattern x regime performance ledger (shadow-only).
+        # First consumer of L.17-L.22 snapshots. Runs daily at 23:00 local,
+        # after L.22 intraday session (22:00) has landed.
+        try:
+            _prp_mode = (
+                getattr(settings, "brain_pattern_regime_perf_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _prp_mode not in ("off", "authoritative"):
+                _prp_hour = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_perf_cron_hour",
+                        23,
+                    )
+                    or 23
+                )
+                _prp_minute = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_perf_cron_minute",
+                        0,
+                    )
+                    or 0
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_perf_daily_job,
+                    trigger=CronTrigger(hour=_prp_hour, minute=_prp_minute),
+                    id="pattern_regime_perf_daily",
+                    name=(
+                        f"Pattern x regime perf daily "
+                        f"({_prp_hour:02d}:{_prp_minute:02d}; "
+                        f"mode={_prp_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_perf_daily job"
+            )
+
+        # Phase M.2.c: pattern x regime kill-switch daily sweep (shadow-gated).
+        try:
+            _ks_mode = (
+                getattr(settings, "brain_pattern_regime_killswitch_mode", "off")
+                or "off"
+            ).lower()
+            if include_web_light and _ks_mode != "off":
+                _ks_hour = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_killswitch_cron_hour",
+                        23,
+                    )
+                    or 23
+                )
+                _ks_minute = int(
+                    getattr(
+                        settings,
+                        "brain_pattern_regime_killswitch_cron_minute",
+                        5,
+                    )
+                    or 5
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_killswitch_daily_job,
+                    trigger=CronTrigger(hour=_ks_hour, minute=_ks_minute),
+                    id="pattern_regime_killswitch_daily",
+                    name=(
+                        f"Pattern x regime killswitch daily "
+                        f"({_ks_hour:02d}:{_ks_minute:02d}; "
+                        f"mode={_ks_mode})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_killswitch_daily job"
+            )
+
+        try:
+            _ap_enabled = bool(
+                getattr(settings, "brain_pattern_regime_autopilot_enabled", False)
+            )
+            if include_web_light and _ap_enabled:
+                _ap_hour = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_cron_hour", 6) or 6
+                )
+                _ap_minute = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_cron_minute", 15) or 15
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_autopilot_tick_job,
+                    trigger=CronTrigger(hour=_ap_hour, minute=_ap_minute),
+                    id="pattern_regime_autopilot_tick",
+                    name=(
+                        f"Pattern x regime autopilot tick "
+                        f"({_ap_hour:02d}:{_ap_minute:02d})"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+
+                _ap_w_hour = int(
+                    getattr(settings, "brain_pattern_regime_autopilot_weekly_cron_hour", 9) or 9
+                )
+                _ap_w_dow = str(
+                    getattr(settings, "brain_pattern_regime_autopilot_weekly_cron_dow", "mon") or "mon"
+                )
+                _scheduler.add_job(
+                    _run_pattern_regime_autopilot_weekly_job,
+                    trigger=CronTrigger(day_of_week=_ap_w_dow, hour=_ap_w_hour, minute=0),
+                    id="pattern_regime_autopilot_weekly",
+                    name=(
+                        f"Pattern x regime autopilot weekly "
+                        f"({_ap_w_dow} {_ap_w_hour:02d}:00)"
+                    ),
+                    replace_existing=True,
+                    max_instances=1,
+                )
+        except Exception:
+            logger.exception(
+                "[scheduler] failed to register pattern_regime_autopilot jobs"
             )
 
         _scheduler.start()

@@ -7,14 +7,17 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
     Index,
     Integer,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import relationship
@@ -1383,3 +1386,1475 @@ class TradingGovernanceApproval(Base):
     decision: Optional[str] = Column(String(24), nullable=True)
     decided_at: Optional[datetime] = Column(DateTime, nullable=True)
     notes: str = Column(Text, nullable=False, default="")
+
+
+class NetEdgeScoreLog(Base):
+    """Phase E: per-decision log of NetEdgeRanker score vs heuristic (shadow-safe).
+
+    Rows are written on every entry/proposal decision when
+    ``brain_net_edge_ranker_mode`` is not ``off``. Downstream consumers must
+    not gate any trading action on these rows while ``mode != "authoritative"``.
+    """
+
+    __tablename__ = "trading_net_edge_scores"
+    __table_args__ = (
+        Index("ix_net_edge_scores_ticker_created", "ticker", "created_at"),
+        Index("ix_net_edge_scores_pattern_created", "scan_pattern_id", "created_at"),
+        Index("ix_net_edge_scores_regime_created", "regime", "created_at"),
+        Index("ix_net_edge_scores_mode_created", "mode", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    decision_id: str = Column(Text, nullable=False)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    asset_class: Optional[str] = Column(String(16), nullable=True)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    ctx_hash: Optional[str] = Column(String(64), nullable=True)
+    calibrated_prob: Optional[float] = Column(Float, nullable=True)
+    expected_payoff: Optional[float] = Column(Float, nullable=True)
+    spread_cost: Optional[float] = Column(Float, nullable=True)
+    slippage_cost: Optional[float] = Column(Float, nullable=True)
+    fees_cost: Optional[float] = Column(Float, nullable=True)
+    miss_prob_cost: Optional[float] = Column(Float, nullable=True)
+    partial_fill_cost: Optional[float] = Column(Float, nullable=True)
+    expected_net_pnl: Optional[float] = Column(Float, nullable=True)
+    heuristic_score: Optional[float] = Column(Float, nullable=True)
+    disagree_flag: bool = Column(Boolean, nullable=False, default=False)
+    mode: str = Column(String(16), nullable=False)
+    provenance_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class NetEdgeCalibrationSnapshot(Base):
+    """Phase E: periodic fit of the per-regime NetEdgeRanker calibrator.
+
+    A snapshot row represents the state of one calibration head (per asset
+    class and regime bucket). Only one row per (asset_class, regime) should
+    have ``is_active=True``; promotion flips the active flag.
+    """
+
+    __tablename__ = "trading_net_edge_calibration_snapshots"
+    __table_args__ = (
+        Index("ix_net_edge_cal_regime_fitted", "regime", "fitted_at"),
+        Index("ix_net_edge_cal_active", "is_active", "fitted_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    version_id: str = Column(String(64), nullable=False)
+    asset_class: Optional[str] = Column(String(16), nullable=True)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    method: str = Column(String(32), nullable=False)
+    sample_count: int = Column(Integer, nullable=False, default=0)
+    reliability_json: Optional[dict] = Column(JSONB, nullable=True)
+    brier_score: Optional[float] = Column(Float, nullable=True)
+    log_loss: Optional[float] = Column(Float, nullable=True)
+    disagreement_rate: Optional[float] = Column(Float, nullable=True)
+    params_json: Optional[dict] = Column(JSONB, nullable=True)
+    fitted_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    is_active: bool = Column(Boolean, nullable=False, default=False)
+
+
+class ExitParityLog(Base):
+    """Phase B: per-bar parity record between legacy exit paths and the canonical ExitEvaluator.
+
+    Rows are written whenever a legacy exit path runs while
+    ``brain_exit_engine_mode`` is not ``off``. The canonical evaluator does
+    not decide the trade in any non-``authoritative`` mode; its output is
+    logged here to measure drift before cutover.
+
+    ``source`` is one of ``"backtest"`` or ``"live"``. ``position_id`` is the
+    ``PaperTrade.id`` / ``Trade.id`` for live; for backtest it is the synthetic
+    row id emitted by the backtest adapter (or NULL if not tracked).
+    ``config_hash`` is a stable hash of the ``ExitConfig`` used by the canonical
+    evaluator so disagreements can be grouped by config flavor.
+    """
+
+    __tablename__ = "trading_exit_parity_log"
+    __table_args__ = (
+        Index("ix_exit_parity_source_created", "source", "created_at"),
+        Index("ix_exit_parity_ticker_created", "ticker", "created_at"),
+        Index("ix_exit_parity_mode_created", "mode", "created_at"),
+        Index("ix_exit_parity_agree_created", "agree_bool", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    source: str = Column(String(16), nullable=False)
+    position_id: Optional[int] = Column(BigInteger, nullable=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    bar_ts: Optional[datetime] = Column(DateTime, nullable=True)
+    legacy_action: str = Column(String(32), nullable=False)
+    legacy_exit_price: Optional[float] = Column(Float, nullable=True)
+    canonical_action: str = Column(String(32), nullable=False)
+    canonical_exit_price: Optional[float] = Column(Float, nullable=True)
+    pnl_diff_pct: Optional[float] = Column(Float, nullable=True)
+    agree_bool: bool = Column(Boolean, nullable=False, default=False)
+    mode: str = Column(String(16), nullable=False)
+    config_hash: Optional[str] = Column(String(64), nullable=True)
+    provenance_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class EconomicLedgerEvent(Base):
+    """Phase A: append-only economic event in the canonical economic-truth ledger.
+
+    One row per fill / fee / adjustment with explicit ``cash_delta`` (signed;
+    positive = cash in) and ``realized_pnl_delta`` (zero for entries, signed
+    PnL contribution for exits, net of fees when attributable).
+
+    ``event_type`` is one of ``entry_fill``, ``exit_fill``, ``partial_fill``,
+    ``fee``, ``adjustment``. ``source`` is ``paper``, ``live``, or
+    ``broker_sync``. Exactly one of ``trade_id`` / ``paper_trade_id`` is set.
+
+    Idempotency: partial unique indexes enforce at most one entry_fill + one
+    exit_fill per ``(paper_trade_id)`` and per ``(trade_id)``. Duplicate
+    writes are a no-op.
+
+    Legacy ``Trade.pnl`` / ``PaperTrade.pnl`` remain authoritative until the
+    Phase A cutover phase; the ledger is shadow-only when
+    ``brain_economic_ledger_mode != 'authoritative'``.
+    """
+
+    __tablename__ = "trading_economic_ledger"
+    __table_args__ = (
+        Index("ix_economic_ledger_source_created", "source", "created_at"),
+        Index("ix_economic_ledger_ticker_created", "ticker", "created_at"),
+        Index("ix_economic_ledger_event_type_created", "event_type", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    source: str = Column(String(16), nullable=False)
+    trade_id: Optional[int] = Column(BigInteger, nullable=True)
+    paper_trade_id: Optional[int] = Column(BigInteger, nullable=True)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    event_type: str = Column(String(32), nullable=False)
+    direction: Optional[str] = Column(String(8), nullable=True)
+    quantity: Optional[float] = Column(Float, nullable=True)
+    price: Optional[float] = Column(Float, nullable=True)
+    fee: float = Column(Float, nullable=False, default=0.0)
+    cash_delta: float = Column(Float, nullable=False)
+    realized_pnl_delta: float = Column(Float, nullable=False, default=0.0)
+    position_qty_after: Optional[float] = Column(Float, nullable=True)
+    position_cost_basis_after: Optional[float] = Column(Float, nullable=True)
+    venue: Optional[str] = Column(String(32), nullable=True)
+    broker_source: Optional[str] = Column(String(32), nullable=True)
+    event_ts: Optional[datetime] = Column(DateTime, nullable=True)
+    mode: str = Column(String(16), nullable=False)
+    provenance_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class LedgerParityLog(Base):
+    """Phase A: per-closed-trade reconciliation between ledger-PnL and legacy PnL.
+
+    Rows are written whenever a paper or live trade closes while
+    ``brain_economic_ledger_mode`` is not ``off``. ``legacy_pnl`` is
+    ``PaperTrade.pnl`` or ``Trade.pnl``; ``ledger_pnl`` is the sum of
+    ``realized_pnl_delta`` across matching ``EconomicLedgerEvent`` rows for
+    the trade. ``agree_bool`` is true when
+    ``|delta_pnl| <= tolerance_usd``.
+    """
+
+    __tablename__ = "trading_ledger_parity_log"
+    __table_args__ = (
+        Index("ix_ledger_parity_source_created", "source", "created_at"),
+        Index("ix_ledger_parity_agree_created", "agree_bool", "created_at"),
+        Index("ix_ledger_parity_ticker_created", "ticker", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    source: str = Column(String(16), nullable=False)
+    trade_id: Optional[int] = Column(BigInteger, nullable=True)
+    paper_trade_id: Optional[int] = Column(BigInteger, nullable=True)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    scan_pattern_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    legacy_pnl: Optional[float] = Column(Float, nullable=True)
+    ledger_pnl: Optional[float] = Column(Float, nullable=True)
+    delta_pnl: Optional[float] = Column(Float, nullable=True)
+    delta_abs: Optional[float] = Column(Float, nullable=True)
+    agree_bool: bool = Column(Boolean, nullable=False, default=False)
+    tolerance_usd: Optional[float] = Column(Float, nullable=True)
+    mode: str = Column(String(16), nullable=False)
+    provenance_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PitAuditLog(Base):
+    """Phase C: per-audit record of a ScanPattern's condition fields classified
+    as PIT / non_pit / unknown against the canonical ``pit_contract`` lists.
+
+    Rows are written when ``brain_pit_audit_mode`` is not ``off`` and the
+    learning-cycle shadow hook runs ``pit_audit.audit_active_patterns``.
+    History is preserved; multiple passes per pattern are allowed.
+    ``agree_bool`` is true when ``non_pit_count + unknown_count == 0``.
+    """
+
+    __tablename__ = "trading_pit_audit_log"
+    __table_args__ = (
+        Index("ix_pit_audit_pattern_created", "pattern_id", "created_at"),
+        Index("ix_pit_audit_agree_created", "agree_bool", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    pattern_id: int = Column(Integer, nullable=False)
+    name: Optional[str] = Column(String(200), nullable=True)
+    origin: Optional[str] = Column(String(32), nullable=True)
+    lifecycle_stage: Optional[str] = Column(String(32), nullable=True)
+    pit_count: int = Column(Integer, nullable=False)
+    non_pit_count: int = Column(Integer, nullable=False)
+    unknown_count: int = Column(Integer, nullable=False)
+    pit_fields: list = Column(JSONB, nullable=False, default=lambda: [])
+    non_pit_fields: list = Column(JSONB, nullable=False, default=lambda: [])
+    unknown_fields: list = Column(JSONB, nullable=False, default=lambda: [])
+    agree_bool: bool = Column(Boolean, nullable=False, default=False)
+    mode: str = Column(String(16), nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class UniverseSnapshot(Base):
+    """Phase C: per-day, per-ticker historical universe record.
+
+    Lets PIT audits and backtests answer "was ticker T in our tradable universe
+    on date D?" without re-fetching from live sources. Writer helper
+    ``universe_snapshot.record_snapshot`` is idempotent on
+    ``(as_of_date, ticker)``. No automatic backfill this phase.
+    """
+
+    __tablename__ = "trading_universe_snapshots"
+    __table_args__ = (
+        UniqueConstraint("as_of_date", "ticker", name="uq_universe_snapshot_date_ticker"),
+        Index("ix_universe_snapshot_date", "as_of_date"),
+        Index("ix_universe_snapshot_ticker_date", "ticker", "as_of_date"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    as_of_date = Column(Date, nullable=False)
+    ticker: str = Column(String(32), nullable=False)
+    asset_class: str = Column(String(16), nullable=False)
+    status: str = Column(String(16), nullable=False)
+    primary_exchange: Optional[str] = Column(String(32), nullable=True)
+    source: Optional[str] = Column(String(32), nullable=True)
+    provenance_json: Optional[dict] = Column(JSONB, nullable=True)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class TripleBarrierLabelRow(Base):
+    """Phase D: triple-barrier label for a (ticker, label_date, side, barrier)
+    tuple.
+
+    One row per unique configuration so the labeler is idempotent via the
+    ``uq_triple_barrier_labels`` UNIQUE index. History is preserved by
+    varying barrier configs (e.g. tp=1.5/sl=1.0 vs tp=2.0/sl=1.0).
+
+    label:
+        +1 = take-profit barrier hit (winner)
+        -1 = stop-loss barrier hit (loser)
+         0 = timeout / missing data
+
+    Shadow-safe: ``mode`` records whether the write happened under
+    ``off`` / ``shadow`` / ``authoritative``. Only ``shadow`` rows are
+    emitted until explicit cutover.
+    """
+
+    __tablename__ = "trading_triple_barrier_labels"
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker", "label_date", "side", "tp_pct", "sl_pct", "max_bars",
+            name="uq_triple_barrier_labels",
+        ),
+        Index("ix_triple_barrier_label_date", "label_date"),
+        Index("ix_triple_barrier_ticker_date", "ticker", "label_date"),
+        Index("ix_triple_barrier_snapshot", "snapshot_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    label_date = Column(Date, nullable=False)
+    side: str = Column(String(8), nullable=False)
+    tp_pct: float = Column(Float, nullable=False)
+    sl_pct: float = Column(Float, nullable=False)
+    max_bars: int = Column(Integer, nullable=False)
+    entry_close: float = Column(Float, nullable=False)
+    tp_price: float = Column(Float, nullable=False)
+    sl_price: float = Column(Float, nullable=False)
+    label: int = Column(SmallInteger, nullable=False)
+    barrier_hit: str = Column(String(16), nullable=False)
+    exit_bar_idx: int = Column(Integer, nullable=False)
+    realized_return_pct: float = Column(Float, nullable=False)
+    mode: str = Column(String(16), nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class ExecutionCostEstimate(Base):
+    """Phase F: per-(ticker, side, window_days) rolling execution-cost estimate.
+
+    Computed from closed ``Trade`` rows and their TCA slippage columns;
+    materialised so NetEdgeRanker / backtests can look it up cheaply
+    without recomputing from scratch every call. Idempotent writes via
+    ``uq_execution_cost_estimates``.
+
+    All cost columns are in basis points (bps) of notional.
+    """
+
+    __tablename__ = "trading_execution_cost_estimates"
+    __table_args__ = (
+        UniqueConstraint(
+            "ticker", "side", "window_days",
+            name="uq_execution_cost_estimates",
+        ),
+        Index("ix_execution_cost_estimates_updated", "last_updated_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    ticker: str = Column(String(32), nullable=False)
+    side: str = Column(String(8), nullable=False)
+    window_days: int = Column(Integer, nullable=False)
+    median_spread_bps: float = Column(Float, nullable=False)
+    p90_spread_bps: float = Column(Float, nullable=False)
+    median_slippage_bps: float = Column(Float, nullable=False)
+    p90_slippage_bps: float = Column(Float, nullable=False)
+    avg_daily_volume_usd: float = Column(Float, nullable=False)
+    sample_trades: int = Column(Integer, nullable=False)
+    last_updated_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class VenueTruthLog(Base):
+    """Phase F: per-fill observation comparing expected vs realized costs.
+
+    One row is written at trade-close time (paper or live) by the
+    venue-truth hook. All bps values are signed: positive slippage means
+    we paid worse than expected. Used by the diagnostics endpoint and the
+    release-blocker script to detect structural mis-calibration between
+    our cost model and the venue.
+    """
+
+    __tablename__ = "trading_venue_truth_log"
+    __table_args__ = (
+        Index("ix_venue_truth_log_created", "created_at"),
+        Index("ix_venue_truth_log_ticker_created", "ticker", "created_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    side: str = Column(String(8), nullable=False)
+    notional_usd: float = Column(Float, nullable=False)
+    expected_spread_bps: Optional[float] = Column(Float, nullable=True)
+    realized_spread_bps: Optional[float] = Column(Float, nullable=True)
+    expected_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    realized_slippage_bps: Optional[float] = Column(Float, nullable=True)
+    expected_cost_fraction: Optional[float] = Column(Float, nullable=True)
+    realized_cost_fraction: Optional[float] = Column(Float, nullable=True)
+    paper_bool: bool = Column(Boolean, nullable=False, default=True)
+    mode: str = Column(String(16), nullable=False)
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BracketIntent(Base):
+    """Phase G: persisted bracket (stop + target) intent for a live Trade.
+
+    One row per Trade (``uq_bracket_intents_trade_id``). In shadow mode
+    the broker child order ids stay NULL; only the intended prices and
+    the ``intent_state`` move. When Phase G.2 flips to authoritative,
+    ``broker_stop_order_id`` / ``broker_target_order_id`` are filled in
+    and ``intent_state`` transitions to ``authoritative_submitted``.
+    """
+
+    __tablename__ = "trading_bracket_intents"
+    __table_args__ = (
+        UniqueConstraint("trade_id", name="uq_bracket_intents_trade_id"),
+        Index("ix_bracket_intents_ticker_state", "ticker", "intent_state"),
+        Index("ix_bracket_intents_updated_at", "updated_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    trade_id: int = Column(
+        Integer,
+        ForeignKey("trading_trades.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    ticker: str = Column(String(32), nullable=False)
+    direction: str = Column(String(8), nullable=False)
+    quantity: float = Column(Float, nullable=False)
+    entry_price: float = Column(Float, nullable=False)
+    stop_price: Optional[float] = Column(Float, nullable=True)
+    target_price: Optional[float] = Column(Float, nullable=True)
+    stop_model: Optional[str] = Column(String(32), nullable=True)
+    pattern_id: Optional[int] = Column(Integer, nullable=True)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    intent_state: str = Column(String(32), nullable=False, default="intent")
+    shadow_mode: bool = Column(Boolean, nullable=False, default=True)
+    broker_source: Optional[str] = Column(String(32), nullable=True)
+    broker_stop_order_id: Optional[str] = Column(String(128), nullable=True)
+    broker_target_order_id: Optional[str] = Column(String(128), nullable=True)
+    last_observed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_diff_reason: Optional[str] = Column(String(128), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    updated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False,
+    )
+
+
+class BracketReconciliationLog(Base):
+    """Phase G: append-only sweep log comparing local bracket state vs broker.
+
+    A sweep writes at least one row per scanned ``Trade`` / bracket intent.
+    ``kind='agree'`` means local and broker match within tolerances;
+    other kinds capture specific drift modes. In shadow mode this table
+    is the only place reconciliation output lands - no broker writes
+    happen, no user-visible alerts fire from this signal yet.
+    """
+
+    __tablename__ = "trading_bracket_reconciliation_log"
+    __table_args__ = (
+        Index("ix_bracket_reconciliation_sweep", "sweep_id"),
+        Index("ix_bracket_reconciliation_trade", "trade_id"),
+        Index("ix_bracket_reconciliation_kind_ts", "kind", "observed_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    sweep_id: str = Column(String(64), nullable=False)
+    trade_id: Optional[int] = Column(
+        Integer,
+        ForeignKey("trading_trades.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    bracket_intent_id: Optional[int] = Column(
+        BigInteger,
+        ForeignKey("trading_bracket_intents.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    ticker: Optional[str] = Column(String(32), nullable=True)
+    broker_source: Optional[str] = Column(String(32), nullable=True)
+    kind: str = Column(String(32), nullable=False)
+    severity: str = Column(String(16), nullable=False)
+    local_payload: dict = Column(JSONB, nullable=False, default=lambda: {})
+    broker_payload: dict = Column(JSONB, nullable=False, default=lambda: {})
+    delta_payload: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PositionSizerLog(Base):
+    """Phase H: append-only shadow log for the canonical position sizer.
+
+    For each actionable pick (alert, paper/live runner, manual proposal,
+    backtest), the canonical :mod:`app.services.trading.position_sizer_model`
+    writes exactly one row here *in parallel* with the legacy sizer that
+    actually chose the notional. The row captures:
+
+      * the :class:`NetEdgeScore` inputs the canonical sizer consumed
+        (calibrated_prob / payoff_fraction / cost_fraction /
+        expected_net_pnl),
+      * the sizer outputs (Kelly fractions, proposed notional /
+        quantity / risk_pct),
+      * which caps fired (correlation bucket, single-notional),
+      * the legacy notional / quantity for divergence tracking, and
+      * the ``mode`` under which the proposal was emitted
+        (``off`` / ``shadow`` / ``compare`` / ``authoritative``).
+
+    Shadow-safe: Phase H never changes legacy sizer return values.
+    Authoritative cutover is Phase H.2.
+    """
+
+    __tablename__ = "trading_position_sizer_log"
+    __table_args__ = (
+        Index("ix_position_sizer_log_proposal", "proposal_id"),
+        Index("ix_position_sizer_log_source_ts", "source", "observed_at"),
+        Index("ix_position_sizer_log_ticker_ts", "ticker", "observed_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    proposal_id: str = Column(String(64), nullable=False)
+    source: str = Column(String(32), nullable=False)
+    ticker: str = Column(String(32), nullable=False)
+    direction: str = Column(String(8), nullable=False)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    pattern_id: Optional[int] = Column(Integer, nullable=True)
+    asset_class: Optional[str] = Column(String(16), nullable=True)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    entry_price: float = Column(Float, nullable=False)
+    stop_price: Optional[float] = Column(Float, nullable=True)
+    target_price: Optional[float] = Column(Float, nullable=True)
+    capital: Optional[float] = Column(Float, nullable=True)
+    calibrated_prob: Optional[float] = Column(Float, nullable=True)
+    payoff_fraction: Optional[float] = Column(Float, nullable=True)
+    cost_fraction: Optional[float] = Column(Float, nullable=True)
+    expected_net_pnl: Optional[float] = Column(Float, nullable=True)
+    kelly_fraction: Optional[float] = Column(Float, nullable=True)
+    kelly_scaled_fraction: Optional[float] = Column(Float, nullable=True)
+    proposed_notional: Optional[float] = Column(Float, nullable=True)
+    proposed_quantity: Optional[float] = Column(Float, nullable=True)
+    proposed_risk_pct: Optional[float] = Column(Float, nullable=True)
+    correlation_cap_triggered: bool = Column(
+        Boolean, nullable=False, default=False,
+    )
+    correlation_bucket: Optional[str] = Column(String(64), nullable=True)
+    max_bucket_notional: Optional[float] = Column(Float, nullable=True)
+    notional_cap_triggered: bool = Column(
+        Boolean, nullable=False, default=False,
+    )
+    legacy_notional: Optional[float] = Column(Float, nullable=True)
+    legacy_quantity: Optional[float] = Column(Float, nullable=True)
+    legacy_source: Optional[str] = Column(String(48), nullable=True)
+    divergence_bps: Optional[float] = Column(Float, nullable=True)
+    mode: str = Column(String(16), nullable=False)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    risk_dial_multiplier: Optional[float] = Column(Float, nullable=True)
+    pattern_regime_tilt_multiplier: Optional[float] = Column(Float, nullable=True)
+    pattern_regime_tilt_reason: Optional[str] = Column(String(48), nullable=True)
+
+
+class RiskDialState(Base):
+    """Phase I: append-only log of risk-dial values.
+
+    The risk dial is a scalar in ``[0.0, brain_risk_dial_ceiling]`` that
+    modulates sizing aggressiveness. A new row is inserted each time
+    the dial is *resolved* for a user (via
+    :mod:`app.services.trading.risk_dial_service`). The **current**
+    dial is the latest row per ``user_id`` ordered by
+    ``observed_at DESC``; a ``NULL`` ``user_id`` means the global
+    default.
+
+    Phase I writes these rows under ``mode='shadow'`` only; the dial
+    value is not yet consumed by
+    :func:`position_sizer_model.compute_proposal`. Phase I.2 will
+    promote it to authoritative and apply it inside ``compute_proposal``.
+    """
+
+    __tablename__ = "trading_risk_dial_state"
+    __table_args__ = (
+        Index("ix_risk_dial_user_ts", "user_id", "observed_at"),
+        Index("ix_risk_dial_regime_ts", "regime", "observed_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    dial_value: float = Column(Float, nullable=False)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    source: str = Column(String(32), nullable=False)
+    reason: Optional[str] = Column(String(256), nullable=True)
+    mode: str = Column(String(16), nullable=False)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CapitalReweightLog(Base):
+    """Phase I: append-only log of weekly capital re-weight sweeps.
+
+    The weekly APScheduler job computes a proposed per-bucket
+    allocation for each user and writes one row per
+    ``(user_id, as_of_date)``. The row captures:
+
+      * the proposed allocation list (``proposed_allocations_json``) -
+        one entry per bucket with the target notional / weight + a
+        short rationale string.
+      * the current allocation list (``current_allocations_json``) -
+        the same shape, based on the user's open trades.
+      * ``drift_bucket_json`` mapping each bucket to ``drift_bps``
+        (abs(target-current)/max(target,1) in bps).
+      * ``cap_triggers_json`` flags which single-bucket caps fired.
+      * ``mode`` under which the sweep was written.
+
+    Shadow-safe: Phase I never resizes or closes an open position.
+    Authoritative rebalance orders from this log are Phase I.2.
+    """
+
+    __tablename__ = "trading_capital_reweight_log"
+    __table_args__ = (
+        Index("ix_capital_reweight_user_date", "user_id", "as_of_date"),
+        Index("ix_capital_reweight_id", "reweight_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    reweight_id: str = Column(String(64), nullable=False)
+    user_id: Optional[int] = Column(Integer, nullable=True)
+    as_of_date: datetime = Column(Date, nullable=False)
+    regime: Optional[str] = Column(String(32), nullable=True)
+    total_capital: float = Column(Float, nullable=False)
+    proposed_allocations_json: list = Column(
+        JSONB, nullable=False, default=lambda: [],
+    )
+    current_allocations_json: list = Column(
+        JSONB, nullable=False, default=lambda: [],
+    )
+    drift_bucket_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {},
+    )
+    mean_drift_bps: Optional[float] = Column(Float, nullable=True)
+    p90_drift_bps: Optional[float] = Column(Float, nullable=True)
+    cap_triggers_json: dict = Column(
+        JSONB, nullable=False, default=lambda: {},
+    )
+    mode: str = Column(String(16), nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternDriftLog(Base):
+    """Phase J: append-only drift score log, one row per daily sweep.
+
+    The drift monitor computes, per scan_pattern, a Brier-style
+    calibration delta (``observed_win_prob - baseline_win_prob``) and
+    a CUSUM-style cumulative sum statistic over the recent closed
+    sample. The severity bucket (``green`` / ``yellow`` / ``red``)
+    is a deterministic function of both statistics plus sample size.
+
+    Shadow-safe: Phase J never calls ``lifecycle.transition`` or
+    modifies ``scan_patterns``; this table is write-only in J.1.
+    Authoritative gating on severity is Phase J.2.
+    """
+
+    __tablename__ = "trading_pattern_drift_log"
+    __table_args__ = (
+        Index("ix_pattern_drift_pattern_ts", "scan_pattern_id", "sweep_at"),
+        Index("ix_pattern_drift_severity_ts", "severity", "sweep_at"),
+        Index("ix_pattern_drift_id", "drift_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    drift_id: str = Column(String(64), nullable=False)
+    scan_pattern_id: int = Column(Integer, nullable=False)
+    pattern_name: Optional[str] = Column(String(256), nullable=True)
+    baseline_win_prob: Optional[float] = Column(Float, nullable=True)
+    observed_win_prob: Optional[float] = Column(Float, nullable=True)
+    brier_delta: Optional[float] = Column(Float, nullable=True)
+    cusum_statistic: Optional[float] = Column(Float, nullable=True)
+    cusum_threshold: Optional[float] = Column(Float, nullable=True)
+    sample_size: int = Column(Integer, nullable=False, default=0)
+    severity: str = Column(String(16), nullable=False)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    sweep_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternRecertLog(Base):
+    """Phase J: append-only re-certification proposal queue.
+
+    When the drift monitor emits a ``red`` severity row, or a user
+    manually queues a re-cert via the diagnostics surface, the
+    re-cert queue service writes one row per
+    ``(scan_pattern_id, as_of_date)``. ``status`` starts as
+    ``proposed`` and is updated by Phase J.2 consumers (none in J.1).
+    Shadow-safe: J.1 never triggers backtests or lifecycle
+    transitions from these rows.
+    """
+
+    __tablename__ = "trading_pattern_recert_log"
+    __table_args__ = (
+        Index("ix_pattern_recert_pattern_ts", "scan_pattern_id", "observed_at"),
+        Index("ix_pattern_recert_status_ts", "status", "observed_at"),
+        Index("ix_pattern_recert_id", "recert_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    recert_id: str = Column(String(64), nullable=False)
+    scan_pattern_id: int = Column(Integer, nullable=False)
+    pattern_name: Optional[str] = Column(String(256), nullable=True)
+    as_of_date: datetime = Column(Date, nullable=False)
+    source: str = Column(String(32), nullable=False)
+    severity: Optional[str] = Column(String(16), nullable=True)
+    status: str = Column(String(32), nullable=False, default="proposed")
+    reason: Optional[str] = Column(String(256), nullable=True)
+    drift_log_id: Optional[int] = Column(BigInteger, nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternDivergenceLog(Base):
+    """Phase K: append-only per-pattern divergence panel.
+
+    One row per pattern per daily sweep. Aggregates divergence signals
+    already persisted by Phase A/B/F/G/H tables into a per-layer
+    severity + hysteresis overall severity so operators can spot
+    patterns that drift across multiple substrate layers
+    simultaneously. Shadow-only: K.1 never mutates lifecycle state or
+    writes to ``scan_patterns``.
+    """
+
+    __tablename__ = "trading_pattern_divergence_log"
+    __table_args__ = (
+        Index("ix_pattern_divergence_pattern_ts", "scan_pattern_id", "sweep_at"),
+        Index("ix_pattern_divergence_severity_ts", "severity", "sweep_at"),
+        Index("ix_pattern_divergence_id", "divergence_id"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    divergence_id: str = Column(String(64), nullable=False)
+    scan_pattern_id: int = Column(Integer, nullable=False)
+    pattern_name: Optional[str] = Column(String(256), nullable=True)
+    as_of_date: datetime = Column(Date, nullable=False)
+    ledger_severity: Optional[str] = Column(String(16), nullable=True)
+    exit_severity: Optional[str] = Column(String(16), nullable=True)
+    venue_severity: Optional[str] = Column(String(16), nullable=True)
+    bracket_severity: Optional[str] = Column(String(16), nullable=True)
+    sizer_severity: Optional[str] = Column(String(16), nullable=True)
+    severity: str = Column(String(16), nullable=False)
+    score: float = Column(Float, nullable=False, default=0.0)
+    layers_sampled: int = Column(Integer, nullable=False, default=0)
+    layers_agreed: int = Column(Integer, nullable=False, default=0)
+    layers_total: int = Column(Integer, nullable=False, default=5)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    sweep_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class MacroRegimeSnapshot(Base):
+    """Phase L.17: append-only macro regime snapshot.
+
+    One row per daily sweep of the extended macro regime surface
+    (rates/credit/USD on top of existing SPY/VIX composite). Shadow-only
+    in L.17.1: no existing regime consumer reads from this table and
+    ``market_data.get_market_regime()`` is not modified. Downstream
+    authoritative consumption is deferred to L.17.2.
+    """
+
+    __tablename__ = "trading_macro_regime_snapshots"
+    __table_args__ = (
+        Index("ix_macro_regime_as_of", "as_of_date"),
+        Index("ix_macro_regime_id", "regime_id"),
+        Index("ix_macro_regime_label_computed", "macro_label", "computed_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    regime_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+
+    # equity block - mirrors the existing get_market_regime() output
+    spy_direction: Optional[str] = Column(String(16), nullable=True)
+    spy_momentum_5d: Optional[float] = Column(Float, nullable=True)
+    vix: Optional[float] = Column(Float, nullable=True)
+    vix_regime: Optional[str] = Column(String(16), nullable=True)
+    volatility_percentile: Optional[float] = Column(Float, nullable=True)
+    composite: Optional[str] = Column(String(16), nullable=True)
+    regime_numeric: Optional[int] = Column(Integer, nullable=True)
+
+    # rates block
+    ief_trend: Optional[str] = Column(String(16), nullable=True)
+    shy_trend: Optional[str] = Column(String(16), nullable=True)
+    tlt_trend: Optional[str] = Column(String(16), nullable=True)
+    yield_curve_slope_proxy: Optional[float] = Column(Float, nullable=True)
+    rates_regime: Optional[str] = Column(String(16), nullable=True)
+
+    # credit block
+    hyg_trend: Optional[str] = Column(String(16), nullable=True)
+    lqd_trend: Optional[str] = Column(String(16), nullable=True)
+    credit_spread_proxy: Optional[float] = Column(Float, nullable=True)
+    credit_regime: Optional[str] = Column(String(16), nullable=True)
+
+    # usd block
+    uup_trend: Optional[str] = Column(String(16), nullable=True)
+    uup_momentum_20d: Optional[float] = Column(Float, nullable=True)
+    usd_regime: Optional[str] = Column(String(16), nullable=True)
+
+    # composite macro
+    macro_numeric: int = Column(Integer, nullable=False, default=0)
+    macro_label: str = Column(String(32), nullable=False)
+
+    # coverage
+    symbols_sampled: int = Column(Integer, nullable=False, default=0)
+    symbols_missing: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw per-symbol readings + config echoes
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BreadthRelstrSnapshot(Base):
+    """Phase L.18: append-only breadth + cross-sectional relative-strength
+    snapshot.
+
+    One row per daily sweep. Captures:
+      * ETF-basket advance/decline proxy across 11 US sector SPDRs plus
+        SPY/QQQ/IWM benchmarks;
+      * per-sector trend + momentum + relative strength vs SPY
+        (serialized as JSONB in ``sector_json`` to avoid 30+ flat
+        columns);
+      * benchmark trends (SPY/QQQ/IWM) and size/style tilts
+        (IWM-vs-SPY, QQQ-vs-SPY 20d RS);
+      * composite breadth label in
+        {broad_risk_on, mixed, broad_risk_off} + leader / laggard
+        sector.
+
+    Shadow-only in L.18.1: no existing consumer reads from this table,
+    ``market_data.get_market_regime()`` is unchanged, and Phase L.17's
+    ``trading_macro_regime_snapshots`` is untouched. Downstream
+    authoritative consumption is deferred to L.18.2.
+    """
+
+    __tablename__ = "trading_breadth_relstr_snapshots"
+    __table_args__ = (
+        Index("ix_breadth_relstr_as_of", "as_of_date"),
+        Index("ix_breadth_relstr_id", "snapshot_id"),
+        Index("ix_breadth_relstr_label_computed", "breadth_label", "computed_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+
+    # breadth block
+    members_sampled: int = Column(Integer, nullable=False, default=0)
+    members_advancing: int = Column(Integer, nullable=False, default=0)
+    members_declining: int = Column(Integer, nullable=False, default=0)
+    members_flat: int = Column(Integer, nullable=False, default=0)
+    advance_ratio: float = Column(Float, nullable=False, default=0.0)
+    new_highs_count: int = Column(Integer, nullable=False, default=0)
+    new_lows_count: int = Column(Integer, nullable=False, default=0)
+
+    # sector block (JSONB: {sector: {trend, momentum_20d, rs_vs_spy_20d}})
+    sector_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+
+    # benchmark block
+    spy_trend: Optional[str] = Column(String(16), nullable=True)
+    spy_momentum_20d: Optional[float] = Column(Float, nullable=True)
+    qqq_trend: Optional[str] = Column(String(16), nullable=True)
+    qqq_momentum_20d: Optional[float] = Column(Float, nullable=True)
+    iwm_trend: Optional[str] = Column(String(16), nullable=True)
+    iwm_momentum_20d: Optional[float] = Column(Float, nullable=True)
+
+    # tilt block
+    size_tilt: Optional[float] = Column(Float, nullable=True)
+    style_tilt: Optional[float] = Column(Float, nullable=True)
+
+    # composite block
+    breadth_numeric: int = Column(Integer, nullable=False, default=0)
+    breadth_label: str = Column(String(32), nullable=False)
+    leader_sector: Optional[str] = Column(String(32), nullable=True)
+    laggard_sector: Optional[str] = Column(String(32), nullable=True)
+
+    # coverage block
+    symbols_sampled: int = Column(Integer, nullable=False, default=0)
+    symbols_missing: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw per-symbol readings + config echoes
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class CrossAssetSnapshot(Base):
+    """Phase L.19: append-only cross-asset lead/lag snapshot.
+
+    One row per daily sweep. Captures cross-asset lead/lag features:
+      * bond-vs-equity lead (TLT 5d/20d vs SPY 5d/20d);
+      * credit-vs-equity lead (HYG-LQD spread change vs SPY);
+      * USD-vs-crypto lead (UUP 5d/20d vs BTC-USD 5d/20d);
+      * VIX shock vs breadth divergence (VIX percentile vs advance
+        ratio from L.18);
+      * rolling BTC-SPY beta + correlation (window configurable).
+
+    Shadow-only in L.19.1: no existing consumer reads from this table;
+    Phase L.17's ``trading_macro_regime_snapshots`` and Phase L.18's
+    ``trading_breadth_relstr_snapshots`` are not mutated;
+    ``market_data.get_market_regime()`` is unchanged. Downstream
+    authoritative consumption is deferred to L.19.2.
+    """
+
+    __tablename__ = "trading_cross_asset_snapshots"
+    __table_args__ = (
+        Index("ix_cross_asset_as_of", "as_of_date"),
+        Index("ix_cross_asset_id", "snapshot_id"),
+        Index(
+            "ix_cross_asset_label_computed",
+            "cross_asset_label",
+            "computed_at",
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+
+    # bond vs equity lead (TLT vs SPY)
+    bond_equity_lead_5d: Optional[float] = Column(Float, nullable=True)
+    bond_equity_lead_20d: Optional[float] = Column(Float, nullable=True)
+    bond_equity_label: Optional[str] = Column(String(32), nullable=True)
+
+    # credit vs equity lead (HYG-LQD spread change vs SPY)
+    credit_equity_lead_5d: Optional[float] = Column(Float, nullable=True)
+    credit_equity_lead_20d: Optional[float] = Column(Float, nullable=True)
+    credit_equity_label: Optional[str] = Column(String(32), nullable=True)
+
+    # USD vs crypto lead (UUP vs BTC-USD)
+    usd_crypto_lead_5d: Optional[float] = Column(Float, nullable=True)
+    usd_crypto_lead_20d: Optional[float] = Column(Float, nullable=True)
+    usd_crypto_label: Optional[str] = Column(String(32), nullable=True)
+
+    # VIX shock vs breadth divergence
+    vix_level: Optional[float] = Column(Float, nullable=True)
+    vix_percentile: Optional[float] = Column(Float, nullable=True)
+    breadth_advance_ratio: Optional[float] = Column(Float, nullable=True)
+    vix_breadth_divergence_score: Optional[float] = Column(
+        Float, nullable=True
+    )
+    vix_breadth_label: Optional[str] = Column(String(32), nullable=True)
+
+    # BTC-SPY rolling beta + correlation
+    crypto_equity_beta: Optional[float] = Column(Float, nullable=True)
+    crypto_equity_beta_window_days: Optional[int] = Column(
+        Integer, nullable=True
+    )
+    crypto_equity_correlation: Optional[float] = Column(Float, nullable=True)
+
+    # composite block
+    cross_asset_numeric: int = Column(Integer, nullable=False, default=0)
+    cross_asset_label: str = Column(String(32), nullable=False)
+
+    # coverage block
+    symbols_sampled: int = Column(Integer, nullable=False, default=0)
+    symbols_missing: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw per-symbol readings + macro/breadth context echo + config
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class TickerRegimeSnapshot(Base):
+    """Phase L.20: append-only per-ticker mean-reversion vs trend snapshot.
+
+    One row per ``(ticker, as_of_date)`` sweep. Captures pure
+    time-series regime features computed from daily OHLCV:
+      * lag-1 return autocorrelation ``ac1``;
+      * variance-ratio ``vr_5`` / ``vr_20`` (Lo-MacKinlay style proxy);
+      * Hurst exponent ``hurst`` via rescaled-range (R/S);
+      * ADX-style trend-strength proxy ``adx_proxy``;
+      * realised volatility ``sigma_20d``.
+
+    Plus a composite label in
+    ``{trend_up, trend_down, mean_revert, choppy, neutral}``.
+
+    Shadow-only in L.20.1: no existing consumer reads from this table;
+    L.17/L.18/L.19 snapshots and ``market_data.get_market_regime()``
+    are not mutated; ``hurst_proxy_from_closes`` in the
+    momentum-neural pipeline is untouched. Downstream authoritative
+    consumption (regime-aware pattern promotion bias, regime-aware
+    stop policy, regime-aware sizing) is deferred to L.20.2.
+    """
+
+    __tablename__ = "trading_ticker_regime_snapshots"
+    __table_args__ = (
+        Index("ix_ticker_regime_as_of", "as_of_date"),
+        Index("ix_ticker_regime_id", "snapshot_id"),
+        Index("ix_ticker_regime_ticker_as_of", "ticker", "as_of_date"),
+        Index(
+            "ix_ticker_regime_label_computed",
+            "ticker_regime_label",
+            "computed_at",
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    ticker: str = Column(String(32), nullable=False)
+    asset_class: Optional[str] = Column(String(16), nullable=True)
+
+    # raw features
+    last_close: Optional[float] = Column(Float, nullable=True)
+    sigma_20d: Optional[float] = Column(Float, nullable=True)
+    ac1: Optional[float] = Column(Float, nullable=True)
+    vr_5: Optional[float] = Column(Float, nullable=True)
+    vr_20: Optional[float] = Column(Float, nullable=True)
+    hurst: Optional[float] = Column(Float, nullable=True)
+    adx_proxy: Optional[float] = Column(Float, nullable=True)
+
+    # composite scores + label
+    trend_score: Optional[float] = Column(Float, nullable=True)
+    mean_revert_score: Optional[float] = Column(Float, nullable=True)
+    ticker_regime_numeric: int = Column(Integer, nullable=False, default=0)
+    ticker_regime_label: str = Column(String(32), nullable=False)
+
+    # coverage block
+    bars_used: int = Column(Integer, nullable=False, default=0)
+    bars_missing: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw readings + config echo
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class VolatilityDispersionSnapshot(Base):
+    """Phase L.21: append-only daily market-wide volatility term
+    structure + cross-sectional dispersion snapshot.
+
+    One row per ``as_of_date`` sweep. Captures:
+      * VIX term structure — ``vixy_close`` (1M), ``vixm_close`` (4M),
+        ``vxz_close`` (4-7M) + slopes (``vix_slope_4m_1m``,
+        ``vix_slope_7m_1m``).
+      * SPY realised vol (annualised) over 5d / 20d / 60d windows
+        and the implied-realised gap (``vix_realized_gap``).
+      * Cross-sectional dispersion — standard deviation of ticker-level
+        daily returns averaged over 5d / 20d windows
+        (``cross_section_return_std_5d`` / ``_20d``).
+      * Mean absolute pairwise correlation over 20d
+        (``mean_abs_corr_20d``) with ``corr_sample_size`` samples.
+      * Sector-leadership churn — Spearman ``1 - rho^2`` between
+        20d-return ranks today and 20d ago for 11 sector SPDRs
+        (``sector_leadership_churn_20d``).
+
+    Composite labels (shadow-only):
+      * ``vol_regime_label`` ∈ ``{vol_compressed, vol_normal,
+        vol_expanded, vol_spike}``;
+      * ``dispersion_label`` ∈ ``{dispersion_low, dispersion_normal,
+        dispersion_high}``;
+      * ``correlation_label`` ∈ ``{correlation_low,
+        correlation_normal, correlation_spike}``.
+
+    Shadow-only in L.21.1: no existing consumer reads from this table;
+    L.17/L.18/L.19/L.20 snapshots and
+    ``market_data.get_market_regime()`` are not mutated. Authoritative
+    consumption (dispersion-aware pattern promotion bias,
+    vol-regime-aware sizing / stop policy) deferred to L.21.2.
+    """
+
+    __tablename__ = "trading_vol_dispersion_snapshots"
+    __table_args__ = (
+        Index("ix_vol_dispersion_as_of", "as_of_date"),
+        Index("ix_vol_dispersion_id", "snapshot_id"),
+        Index(
+            "ix_vol_dispersion_vol_label",
+            "vol_regime_label",
+            "computed_at",
+        ),
+        Index(
+            "ix_vol_dispersion_disp_label",
+            "dispersion_label",
+            "computed_at",
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+
+    # VIX term structure
+    vixy_close: Optional[float] = Column(Float, nullable=True)
+    vixm_close: Optional[float] = Column(Float, nullable=True)
+    vxz_close: Optional[float] = Column(Float, nullable=True)
+    vix_slope_4m_1m: Optional[float] = Column(Float, nullable=True)
+    vix_slope_7m_1m: Optional[float] = Column(Float, nullable=True)
+
+    # SPY realised vol (annualised) + implied-realised gap
+    spy_realized_vol_5d: Optional[float] = Column(Float, nullable=True)
+    spy_realized_vol_20d: Optional[float] = Column(Float, nullable=True)
+    spy_realized_vol_60d: Optional[float] = Column(Float, nullable=True)
+    vix_realized_gap: Optional[float] = Column(Float, nullable=True)
+
+    # cross-sectional dispersion + correlation
+    cross_section_return_std_5d: Optional[float] = Column(Float, nullable=True)
+    cross_section_return_std_20d: Optional[float] = Column(Float, nullable=True)
+    mean_abs_corr_20d: Optional[float] = Column(Float, nullable=True)
+    corr_sample_size: int = Column(Integer, nullable=False, default=0)
+
+    # sector leadership churn (Spearman 1 - rho^2)
+    sector_leadership_churn_20d: Optional[float] = Column(Float, nullable=True)
+
+    # composite labels
+    vol_regime_numeric: int = Column(Integer, nullable=False, default=0)
+    vol_regime_label: str = Column(String(32), nullable=False)
+    dispersion_numeric: int = Column(Integer, nullable=False, default=0)
+    dispersion_label: str = Column(String(32), nullable=False)
+    correlation_numeric: int = Column(Integer, nullable=False, default=0)
+    correlation_label: str = Column(String(32), nullable=False)
+
+    # coverage block
+    universe_size: int = Column(Integer, nullable=False, default=0)
+    tickers_missing: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw readings + config echo
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class IntradaySessionSnapshot(Base):
+    """Phase L.22: append-only daily intraday session regime snapshot.
+
+    One row per ``as_of_date`` derived from SPY 5-minute bars. Captures
+    how the US equity session unfolded intraday — opening-range (OR),
+    midday compression, power-hour dynamics, gap-open magnitude, and a
+    composite ``session_label`` classifying the day.
+
+    Composite labels (shadow-only):
+      * ``session_trending_up`` / ``session_trending_down`` — strong
+        directional close
+      * ``session_range_bound`` — OR dominates the day
+      * ``session_reversal`` — midday compression + late-day push
+        away from OR midpoint
+      * ``session_gap_and_go`` — large gap, close in gap direction
+      * ``session_gap_fade`` — large gap, close against gap direction
+      * ``session_compressed`` — tight OR and tight session range
+      * ``session_neutral`` — insufficient bars / degenerate data
+
+    Shadow-only in L.22.1: no existing consumer reads from this table;
+    L.17–L.21 snapshots and ``get_market_regime()`` are not mutated.
+    Authoritative consumption (session-aware entry timing, size tilt,
+    post-gap filters) deferred to L.22.2.
+    """
+
+    __tablename__ = "trading_intraday_session_snapshots"
+    __table_args__ = (
+        Index("ix_intraday_session_as_of", "as_of_date"),
+        Index("ix_intraday_session_id", "snapshot_id"),
+        Index(
+            "ix_intraday_session_label",
+            "session_label",
+            "computed_at",
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    snapshot_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    source_symbol: str = Column(String(16), nullable=False, default="SPY")
+
+    # session anchors
+    open_price: Optional[float] = Column(Float, nullable=True)
+    close_price: Optional[float] = Column(Float, nullable=True)
+    session_high: Optional[float] = Column(Float, nullable=True)
+    session_low: Optional[float] = Column(Float, nullable=True)
+    session_range_pct: Optional[float] = Column(Float, nullable=True)
+
+    # gap features
+    prev_close: Optional[float] = Column(Float, nullable=True)
+    gap_open: Optional[float] = Column(Float, nullable=True)
+    gap_open_pct: Optional[float] = Column(Float, nullable=True)
+
+    # opening range
+    or_high: Optional[float] = Column(Float, nullable=True)
+    or_low: Optional[float] = Column(Float, nullable=True)
+    or_range_pct: Optional[float] = Column(Float, nullable=True)
+    or_volume_ratio: Optional[float] = Column(Float, nullable=True)
+
+    # midday window
+    midday_range_pct: Optional[float] = Column(Float, nullable=True)
+    midday_compression_ratio: Optional[float] = Column(Float, nullable=True)
+
+    # power hour
+    ph_range_pct: Optional[float] = Column(Float, nullable=True)
+    ph_volume_ratio: Optional[float] = Column(Float, nullable=True)
+    close_vs_or_mid_pct: Optional[float] = Column(Float, nullable=True)
+
+    # intraday realised vol (annualised)
+    intraday_rv: Optional[float] = Column(Float, nullable=True)
+
+    # composite label
+    session_numeric: int = Column(Integer, nullable=False, default=0)
+    session_label: str = Column(String(32), nullable=False)
+
+    # coverage block
+    bars_observed: int = Column(Integer, nullable=False, default=0)
+    coverage_score: float = Column(Float, nullable=False, default=0.0)
+
+    # raw readings + config echo
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+    observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternRegimePerformanceDaily(Base):
+    """Phase M.1: per-pattern per-regime performance aggregate ledger.
+
+    Append-only daily aggregate joining closed paper-trade outcomes
+    (`trading_paper_trades` where `status='closed'`) against the most
+    recent L.17 - L.22 regime snapshot at each trade's entry date.
+
+    Each row represents one 1-D slice:
+      ``(pattern_id, regime_dimension, regime_label)``
+
+    Regime dimensions (8 total, 1-D slicing only in M.1):
+      * ``macro_regime``      ← ``trading_macro_regime_snapshots.regime_label``
+      * ``breadth_label``     ← ``trading_breadth_relstr_snapshots.breadth_composite_label``
+      * ``cross_asset_label`` ← ``trading_cross_asset_snapshots.composite_label``
+      * ``ticker_regime``     ← ``trading_ticker_regime_snapshots.regime_label`` (keyed by trade's ticker)
+      * ``vol_regime``        ← ``trading_vol_dispersion_snapshots.vol_regime_label``
+      * ``dispersion_label``  ← ``trading_vol_dispersion_snapshots.dispersion_label``
+      * ``correlation_label`` ← ``trading_vol_dispersion_snapshots.correlation_label``
+      * ``session_label``     ← ``trading_intraday_session_snapshots.session_label``
+
+    Trades with no snapshot at or before the entry date contribute
+    to the pseudo-label ``regime_unavailable`` under that dimension
+    — explicit, not a drop.
+
+    Shadow-only in M.1: no downstream consumer (scanner, promotion,
+    sizing, alerts, NetEdgeRanker) reads this table. Authoritative
+    consumption deferred to M.2 behind governance + parity window.
+    """
+
+    __tablename__ = "trading_pattern_regime_performance_daily"
+    __table_args__ = (
+        Index(
+            "ix_pattern_regime_perf_as_of",
+            "as_of_date",
+        ),
+        Index(
+            "ix_pattern_regime_perf_lookup",
+            "pattern_id",
+            "regime_dimension",
+            "regime_label",
+            "as_of_date",
+        ),
+        Index(
+            "ix_pattern_regime_perf_run",
+            "ledger_run_id",
+        ),
+        Index(
+            "ix_pattern_regime_perf_confident",
+            "pattern_id",
+            "regime_dimension",
+            postgresql_where=text("has_confidence"),
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    ledger_run_id: str = Column(String(64), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    window_days: int = Column(Integer, nullable=False, default=90)
+    pattern_id: int = Column(Integer, nullable=False)
+    regime_dimension: str = Column(String(32), nullable=False)
+    regime_label: str = Column(String(48), nullable=False)
+
+    # aggregate outcomes
+    n_trades: int = Column(Integer, nullable=False, default=0)
+    n_wins: int = Column(Integer, nullable=False, default=0)
+    hit_rate: Optional[float] = Column(Float, nullable=True)
+    mean_pnl_pct: Optional[float] = Column(Float, nullable=True)
+    median_pnl_pct: Optional[float] = Column(Float, nullable=True)
+    sum_pnl: Optional[float] = Column(Float, nullable=True)
+    expectancy: Optional[float] = Column(Float, nullable=True)
+    mean_win_pct: Optional[float] = Column(Float, nullable=True)
+    mean_loss_pct: Optional[float] = Column(Float, nullable=True)
+    profit_factor: Optional[float] = Column(Float, nullable=True)
+    sharpe_proxy: Optional[float] = Column(Float, nullable=True)
+    avg_hold_days: Optional[float] = Column(Float, nullable=True)
+
+    # confidence gate (True iff n_trades >= min_trades_per_cell)
+    has_confidence: bool = Column(Boolean, nullable=False, default=False)
+
+    # raw config echo + forensic metadata
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    mode: str = Column(String(16), nullable=False)
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternRegimeTiltLog(Base):
+    """Phase M.2.a: append-only decision log for per-call pattern x
+    regime sizing tilt proposals.
+
+    One row per ``emit_shadow_proposal`` call where the tilt slice is
+    at least ``shadow``. Rows record both the baseline (non-tilted)
+    and proposed notionals so ``compare`` dashboards can track drift
+    without committing to a size change.
+    """
+
+    __tablename__ = "trading_pattern_regime_tilt_log"
+    __table_args__ = (
+        Index("ix_pr_tilt_as_of", "as_of_date"),
+        Index("ix_pr_tilt_pattern", "pattern_id", "as_of_date"),
+        Index(
+            "ix_pr_tilt_auth",
+            "pattern_id",
+            "as_of_date",
+            postgresql_where=text("mode = 'authoritative'"),
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    evaluation_id: str = Column(String(32), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    pattern_id: int = Column(Integer, nullable=False)
+    ticker: Optional[str] = Column(String(32), nullable=True)
+    source: Optional[str] = Column(String(48), nullable=True)
+    mode: str = Column(String(16), nullable=False)
+    applied: bool = Column(Boolean, nullable=False, default=False)
+    baseline_size_dollars: Optional[float] = Column(Float, nullable=True)
+    consumer_size_dollars: Optional[float] = Column(Float, nullable=True)
+    multiplier: float = Column(Float, nullable=False)
+    reason_code: str = Column(String(48), nullable=False)
+    diff_category: Optional[str] = Column(String(16), nullable=True)
+    contributing_dimensions: dict = Column(JSONB, nullable=False, default=lambda: {})
+    n_confident_dimensions: int = Column(Integer, nullable=False, default=0)
+    fallback_used: bool = Column(Boolean, nullable=False, default=False)
+    context_hash: Optional[str] = Column(String(16), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternRegimePromotionLog(Base):
+    """Phase M.2.b: append-only decision log for pattern x regime
+    promotion-gate evaluations.
+
+    One row per ``governance.request_pattern_to_live`` (and supporting
+    hook) call where the promotion slice is at least ``shadow``. The
+    row captures whether the baseline would have allowed promotion,
+    whether the regime-aware gate would allow it, and which dimensions
+    (if any) block it.
+    """
+
+    __tablename__ = "trading_pattern_regime_promotion_log"
+    __table_args__ = (
+        Index("ix_pr_prom_as_of", "as_of_date"),
+        Index("ix_pr_prom_pattern", "pattern_id", "as_of_date"),
+        Index(
+            "ix_pr_prom_auth",
+            "pattern_id",
+            "as_of_date",
+            postgresql_where=text("mode = 'authoritative'"),
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    evaluation_id: str = Column(String(32), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    pattern_id: int = Column(Integer, nullable=False)
+    mode: str = Column(String(16), nullable=False)
+    applied: bool = Column(Boolean, nullable=False, default=False)
+    baseline_allow: Optional[bool] = Column(Boolean, nullable=True)
+    consumer_allow: bool = Column(Boolean, nullable=False)
+    reason_code: str = Column(String(48), nullable=False)
+    diff_category: Optional[str] = Column(String(16), nullable=True)
+    blocking_dimensions: dict = Column(JSONB, nullable=False, default=lambda: {})
+    n_confident_dimensions: int = Column(Integer, nullable=False, default=0)
+    fallback_used: bool = Column(Boolean, nullable=False, default=False)
+    source: Optional[str] = Column(String(48), nullable=True)
+    context_hash: Optional[str] = Column(String(16), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class PatternRegimeKillSwitchLog(Base):
+    """Phase M.2.c: append-only decision log for daily pattern x regime
+    kill-switch evaluations.
+
+    One row per (pattern, evaluation-day) tuple where the kill-switch
+    slice is at least ``shadow``. Consecutive-day negative-expectancy
+    tracking is implicit in ``consecutive_days_negative``; quarantine
+    fires when that counter reaches the configured threshold.
+    """
+
+    __tablename__ = "trading_pattern_regime_killswitch_log"
+    __table_args__ = (
+        Index("ix_pr_kill_as_of", "as_of_date"),
+        Index("ix_pr_kill_pattern", "pattern_id", "as_of_date"),
+        Index(
+            "ix_pr_kill_auth",
+            "pattern_id",
+            "as_of_date",
+            postgresql_where=text("mode = 'authoritative'"),
+        ),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    evaluation_id: str = Column(String(32), nullable=False)
+    as_of_date: datetime = Column(Date, nullable=False)
+    pattern_id: int = Column(Integer, nullable=False)
+    mode: str = Column(String(16), nullable=False)
+    applied: bool = Column(Boolean, nullable=False, default=False)
+    baseline_status: Optional[str] = Column(String(24), nullable=True)
+    consumer_quarantine: bool = Column(Boolean, nullable=False)
+    reason_code: str = Column(String(48), nullable=False)
+    diff_category: Optional[str] = Column(String(16), nullable=True)
+    consecutive_days_negative: int = Column(Integer, nullable=False, default=0)
+    worst_dimension: Optional[str] = Column(String(32), nullable=True)
+    worst_expectancy: Optional[float] = Column(Float, nullable=True)
+    n_confident_dimensions: int = Column(Integer, nullable=False, default=0)
+    fallback_used: bool = Column(Boolean, nullable=False, default=False)
+    context_hash: Optional[str] = Column(String(16), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    computed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
+class BrainRuntimeMode(Base):
+    """Phase M.2-autopilot: per-slice runtime mode override.
+
+    Single row per ``slice_name`` (e.g. ``pattern_regime_tilt``).
+    Consulted by each slice's ``_raw_mode()`` helper BEFORE falling
+    back to the ``settings.brain_pattern_regime_*_mode`` env values.
+
+    Absence of a row for a slice means "use env default". Autopilot
+    writes rows here to advance / revert modes without touching
+    ``.env`` or recreating services.
+    """
+
+    __tablename__ = "trading_brain_runtime_modes"
+    __table_args__ = (
+        Index("ix_brain_runtime_modes_updated", "updated_at"),
+    )
+
+    slice_name: str = Column(String(64), primary_key=True)
+    mode: str = Column(String(16), nullable=False)
+    updated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    updated_by: str = Column(
+        String(64), nullable=False, default="unknown"
+    )
+    reason: Optional[str] = Column(String(200), nullable=True)
+    payload_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+
+
+class PatternRegimeAutopilotLog(Base):
+    """Phase M.2-autopilot: append-only audit trail of autopilot
+    decisions.
+
+    One row per (slice, evaluation_tick) where an event occurred:
+    ``autopilot_advance``, ``autopilot_hold``, ``autopilot_revert``,
+    ``autopilot_weekly_summary``, ``autopilot_gate_fail``,
+    ``autopilot_killswitch_disabled``.
+
+    ``gates_json`` and ``evidence_json`` capture the full gate
+    evaluation payload for forensic analysis.
+    """
+
+    __tablename__ = "trading_pattern_regime_autopilot_log"
+    __table_args__ = (
+        Index("ix_pr_autopilot_as_of", "as_of_date"),
+        Index(
+            "ix_pr_autopilot_slice_event",
+            "slice_name",
+            "event",
+            "as_of_date",
+        ),
+        Index("ix_pr_autopilot_evaluated", "evaluated_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    as_of_date: datetime = Column(Date, nullable=False)
+    evaluated_at: datetime = Column(
+        DateTime, default=datetime.utcnow, nullable=False
+    )
+    slice_name: str = Column(String(64), nullable=False)
+    event: str = Column(String(32), nullable=False)
+    from_mode: Optional[str] = Column(String(16), nullable=True)
+    to_mode: Optional[str] = Column(String(16), nullable=True)
+    reason_code: str = Column(String(64), nullable=False)
+    gates_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    evidence_json: dict = Column(JSONB, nullable=False, default=lambda: {})
+    approval_id: Optional[int] = Column(Integer, nullable=True)
+    days_in_stage: Optional[int] = Column(Integer, nullable=True)
+    ops_log_excerpt: Optional[str] = Column(Text, nullable=True)

@@ -6,6 +6,11 @@ Supports:
 - Partial profit-taking at R-multiples
 - Break-of-structure (BOS) exits via swing-low breach
 - Pattern-specific exit_config from ScanPattern.exit_config
+
+Phase B (shadow): every call also runs the canonical ExitEvaluator
+(``app.services.trading.exit_evaluator``) in parallel and logs parity
+against the legacy decision into ``trading_exit_parity_log``. In any mode
+other than ``authoritative`` the legacy dict is what callers act on.
 """
 from __future__ import annotations
 
@@ -91,20 +96,31 @@ def compute_live_exit_levels(
             result["exit_price"] = current_price
             result["days_held"] = days_held
 
+    swing_low_val: float | None = None
     if atr and exit_cfg.get("use_bos", True):
         try:
             df_recent = fetch_ohlcv_df(trade.ticker, period="1mo", interval="1d")
             if df_recent is not None and len(df_recent) >= 5:
                 lows = df_recent["Low"].values[-5:]
-                swing_low = float(min(lows))
+                swing_low_val = float(min(lows))
                 bos_buffer = exit_cfg.get("bos_buffer_pct", 0.5) / 100
-                bos_level = swing_low * (1 - bos_buffer) if is_long else swing_low * (1 + bos_buffer)
+                bos_level = swing_low_val * (1 - bos_buffer) if is_long else swing_low_val * (1 + bos_buffer)
                 result["bos_level"] = round(bos_level, 4)
                 if is_long and current_price < bos_level:
                     result["action"] = "exit_bos"
                     result["exit_price"] = current_price
         except Exception:
             pass
+
+    _phase_b_shadow_parity(
+        db=db,
+        trade=trade,
+        exit_cfg=exit_cfg,
+        current_price=current_price,
+        atr=atr,
+        swing_low_val=swing_low_val,
+        legacy_result=result,
+    )
 
     return result
 
@@ -166,3 +182,136 @@ def run_exit_engine(db: Session, user_id: int | None = None) -> dict[str, Any]:
         "actions": actions,
         "all": results,
     }
+
+
+def _phase_b_shadow_parity(
+    *,
+    db: Session,
+    trade: PaperTrade | Trade,
+    exit_cfg: dict,
+    current_price: float,
+    atr: float | None,
+    swing_low_val: float | None,
+    legacy_result: dict[str, Any],
+) -> None:
+    """Phase B shadow hook: run the canonical ExitEvaluator and log parity.
+
+    Side-effect only. The canonical decision MUST NOT influence ``legacy_result``
+    while ``brain_exit_engine_mode`` is not ``authoritative``. Failures are
+    swallowed so the legacy path is never broken by a parity log issue.
+    """
+    try:
+        from ...config import settings
+        mode = str(getattr(settings, "brain_exit_engine_mode", "off") or "off").lower()
+        if mode == "off":
+            return
+        if mode == "authoritative":
+            logger.warning(
+                "[exit_engine_ops] authoritative mode reached in live adapter but "
+                "cutover is not part of Phase B; treating as shadow."
+            )
+            mode = "shadow"
+
+        sample_pct = float(getattr(settings, "brain_exit_engine_parity_sample_pct", 1.0) or 1.0)
+        ops_log_enabled = bool(getattr(settings, "brain_exit_engine_ops_log_enabled", True))
+
+        from . import exit_evaluator as ev
+        from ...models.trading import ExitParityLog
+        from ...trading_brain.infrastructure.exit_engine_ops_log import (
+            format_exit_engine_ops_line,
+        )
+
+        cfg = ev.build_config_live(exit_cfg)
+
+        is_long = getattr(trade, "direction", "long") == "long"
+        entry = float(trade.entry_price)
+        stop = float(trade.stop_price) if trade.stop_price else entry * (0.97 if is_long else 1.03)
+        target = getattr(trade, "target_price", None)
+        target_f = float(target) if target else None
+        bars_held = 0
+        if trade.entry_date:
+            try:
+                bars_held = max(0, (datetime.utcnow() - trade.entry_date).days)
+            except Exception:
+                bars_held = 0
+
+        state = ev.PositionState(
+            direction="long" if is_long else "short",
+            entry_price=entry,
+            stop_price=stop,
+            target_price=target_f,
+            bars_held=max(0, bars_held - 1),  # evaluate_bar increments
+            highest_since_entry=max(entry, current_price) if is_long else entry,
+            lowest_since_entry=min(entry, current_price) if is_long else entry,
+            trailing_stop=None,
+            partial_taken=False,
+        )
+        bar = ev.BarContext(
+            open=current_price,
+            high=current_price,
+            low=current_price,
+            close=current_price,
+            atr=atr,
+            swing_low=swing_low_val,
+            swing_high=None,
+            bar_idx=bars_held,
+            bar_ts=None,
+        )
+
+        decision = ev.evaluate_bar(cfg, state, bar)
+        legacy_action = str(legacy_result.get("action") or "hold")
+        canonical_action = decision.action
+        agree = (legacy_action == canonical_action)
+        config_hash = cfg.config_hash()
+
+        row = ExitParityLog(
+            source="live",
+            position_id=int(getattr(trade, "id", 0) or 0) or None,
+            scan_pattern_id=getattr(trade, "scan_pattern_id", None),
+            ticker=str(trade.ticker),
+            bar_ts=None,
+            legacy_action=legacy_action,
+            legacy_exit_price=legacy_result.get("exit_price"),
+            canonical_action=canonical_action,
+            canonical_exit_price=decision.exit_price,
+            pnl_diff_pct=None,
+            agree_bool=bool(agree),
+            mode=mode,
+            config_hash=config_hash,
+            provenance_json={
+                "current_price": float(current_price),
+                "atr": atr,
+                "swing_low": swing_low_val,
+                "bars_held_estimate": bars_held,
+                "reason_code": decision.reason_code,
+            },
+        )
+        db.add(row)
+        db.flush()
+
+        if ops_log_enabled:
+            line = format_exit_engine_ops_line(
+                mode=mode,
+                source="live",
+                position_id=row.position_id,
+                ticker=str(trade.ticker),
+                legacy_action=legacy_action,
+                canonical_action=canonical_action,
+                agree=agree,
+                config_hash=config_hash,
+                sample_pct=sample_pct,
+            )
+            # Parity row is always persisted to ExitParityLog above; only escalate
+            # the INFO line for interesting cases (disagreements or actual exits).
+            # Per-bar hold+hold+agree is ~90% of all lines and pure noise.
+            boring = (
+                bool(agree)
+                and legacy_action == "hold"
+                and canonical_action == "hold"
+            )
+            if boring:
+                logger.debug(line)
+            else:
+                logger.info(line)
+    except Exception as exc:  # pragma: no cover - defensive; legacy path must not break
+        logger.debug("[exit_engine] shadow parity failed: %s", exc)

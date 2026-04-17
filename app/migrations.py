@@ -6765,6 +6765,1587 @@ def _migration_126_mesh_dependency_edges(conn) -> None:
     conn.commit()
 
 
+def _migration_127_net_edge_ranker(conn) -> None:
+    """Phase E: NetEdgeRanker shadow rollout.
+
+    Tables:
+      * trading_net_edge_scores - per-decision log of NetEdgeRanker score vs heuristic
+      * trading_net_edge_calibration_snapshots - daily per-regime calibrator state
+
+    Idempotent. Shadow-safe: tables can exist and be empty with zero runtime impact
+    while brain_net_edge_ranker_mode = 'off'.
+    """
+    tables = _tables(conn)
+
+    if "trading_net_edge_scores" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_net_edge_scores (
+                id BIGSERIAL PRIMARY KEY,
+                decision_id TEXT NOT NULL,
+                scan_pattern_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                asset_class VARCHAR(16) NULL,
+                regime VARCHAR(32) NULL,
+                ctx_hash VARCHAR(64) NULL,
+                calibrated_prob DOUBLE PRECISION NULL,
+                expected_payoff DOUBLE PRECISION NULL,
+                spread_cost DOUBLE PRECISION NULL,
+                slippage_cost DOUBLE PRECISION NULL,
+                fees_cost DOUBLE PRECISION NULL,
+                miss_prob_cost DOUBLE PRECISION NULL,
+                partial_fill_cost DOUBLE PRECISION NULL,
+                expected_net_pnl DOUBLE PRECISION NULL,
+                heuristic_score DOUBLE PRECISION NULL,
+                disagree_flag BOOLEAN NOT NULL DEFAULT FALSE,
+                mode VARCHAR(16) NOT NULL,
+                provenance_json JSONB NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_scores_ticker_created "
+            "ON trading_net_edge_scores (ticker, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_scores_pattern_created "
+            "ON trading_net_edge_scores (scan_pattern_id, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_scores_regime_created "
+            "ON trading_net_edge_scores (regime, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_scores_mode_created "
+            "ON trading_net_edge_scores (mode, created_at DESC)"
+        ))
+        conn.commit()
+
+    if "trading_net_edge_calibration_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_net_edge_calibration_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                version_id VARCHAR(64) NOT NULL,
+                asset_class VARCHAR(16) NULL,
+                regime VARCHAR(32) NULL,
+                method VARCHAR(32) NOT NULL,
+                sample_count INTEGER NOT NULL DEFAULT 0,
+                reliability_json JSONB NULL,
+                brier_score DOUBLE PRECISION NULL,
+                log_loss DOUBLE PRECISION NULL,
+                disagreement_rate DOUBLE PRECISION NULL,
+                params_json JSONB NULL,
+                fitted_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                is_active BOOLEAN NOT NULL DEFAULT FALSE
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_cal_regime_fitted "
+            "ON trading_net_edge_calibration_snapshots (regime, fitted_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_net_edge_cal_active "
+            "ON trading_net_edge_calibration_snapshots (is_active, fitted_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_128_exit_evaluator_parity(conn) -> None:
+    """Phase B: Exit-engine unification shadow rollout.
+
+    Table:
+      * trading_exit_parity_log - per-bar, per-position disagreement record
+        between the legacy exit paths (backtest DynamicPatternStrategy +
+        live_exit_engine.compute_live_exit_levels) and the new canonical
+        ExitEvaluator. Shadow-only until a later cutover phase.
+
+    Idempotent. Shadow-safe: table can exist and be empty with zero runtime
+    impact while brain_exit_engine_mode = 'off'.
+    """
+    tables = _tables(conn)
+
+    if "trading_exit_parity_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_exit_parity_log (
+                id BIGSERIAL PRIMARY KEY,
+                source VARCHAR(16) NOT NULL,
+                position_id BIGINT NULL,
+                scan_pattern_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                bar_ts TIMESTAMP NULL,
+                legacy_action VARCHAR(32) NOT NULL,
+                legacy_exit_price DOUBLE PRECISION NULL,
+                canonical_action VARCHAR(32) NOT NULL,
+                canonical_exit_price DOUBLE PRECISION NULL,
+                pnl_diff_pct DOUBLE PRECISION NULL,
+                agree_bool BOOLEAN NOT NULL DEFAULT FALSE,
+                mode VARCHAR(16) NOT NULL,
+                config_hash VARCHAR(64) NULL,
+                provenance_json JSONB NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_exit_parity_source_created "
+            "ON trading_exit_parity_log (source, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_exit_parity_ticker_created "
+            "ON trading_exit_parity_log (ticker, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_exit_parity_mode_created "
+            "ON trading_exit_parity_log (mode, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_exit_parity_agree_created "
+            "ON trading_exit_parity_log (agree_bool, created_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_129_economic_ledger(conn) -> None:
+    """Phase A: Economic-truth ledger shadow rollout.
+
+    Tables:
+      * trading_economic_ledger - append-only economic events
+        (entry_fill / exit_fill / partial_fill / fee / adjustment) with
+        explicit cash_delta and realized_pnl_delta. Parallel to Trade /
+        PaperTrade rows; legacy pnl columns remain authoritative until a
+        later cutover phase.
+      * trading_ledger_parity_log - per-closed-trade reconciliation record
+        between ledger-derived PnL and legacy Trade/PaperTrade PnL.
+
+    Idempotent. Shadow-safe: tables can exist and be empty with zero runtime
+    impact while brain_economic_ledger_mode = 'off'.
+    """
+    tables = _tables(conn)
+
+    if "trading_economic_ledger" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_economic_ledger (
+                id BIGSERIAL PRIMARY KEY,
+                source VARCHAR(16) NOT NULL,
+                trade_id BIGINT NULL,
+                paper_trade_id BIGINT NULL,
+                user_id INTEGER NULL,
+                scan_pattern_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                event_type VARCHAR(32) NOT NULL,
+                direction VARCHAR(8) NULL,
+                quantity DOUBLE PRECISION NULL,
+                price DOUBLE PRECISION NULL,
+                fee DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                cash_delta DOUBLE PRECISION NOT NULL,
+                realized_pnl_delta DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                position_qty_after DOUBLE PRECISION NULL,
+                position_cost_basis_after DOUBLE PRECISION NULL,
+                venue VARCHAR(32) NULL,
+                broker_source VARCHAR(32) NULL,
+                event_ts TIMESTAMP NULL,
+                mode VARCHAR(16) NOT NULL,
+                provenance_json JSONB NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_economic_ledger_source_created "
+            "ON trading_economic_ledger (source, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_economic_ledger_trade_created "
+            "ON trading_economic_ledger (trade_id, created_at) "
+            "WHERE trade_id IS NOT NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_economic_ledger_paper_trade_created "
+            "ON trading_economic_ledger (paper_trade_id, created_at) "
+            "WHERE paper_trade_id IS NOT NULL"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_economic_ledger_ticker_created "
+            "ON trading_economic_ledger (ticker, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_economic_ledger_event_type_created "
+            "ON trading_economic_ledger (event_type, created_at DESC)"
+        ))
+        # Idempotency: at most one entry_fill / exit_fill per trade ref.
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_economic_ledger_paper_entry "
+            "ON trading_economic_ledger (paper_trade_id, event_type) "
+            "WHERE paper_trade_id IS NOT NULL AND event_type IN ('entry_fill','exit_fill')"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_economic_ledger_trade_entry "
+            "ON trading_economic_ledger (trade_id, event_type) "
+            "WHERE trade_id IS NOT NULL AND event_type IN ('entry_fill','exit_fill')"
+        ))
+        conn.commit()
+
+    if "trading_ledger_parity_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_ledger_parity_log (
+                id BIGSERIAL PRIMARY KEY,
+                source VARCHAR(16) NOT NULL,
+                trade_id BIGINT NULL,
+                paper_trade_id BIGINT NULL,
+                user_id INTEGER NULL,
+                scan_pattern_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                legacy_pnl DOUBLE PRECISION NULL,
+                ledger_pnl DOUBLE PRECISION NULL,
+                delta_pnl DOUBLE PRECISION NULL,
+                delta_abs DOUBLE PRECISION NULL,
+                agree_bool BOOLEAN NOT NULL DEFAULT FALSE,
+                tolerance_usd DOUBLE PRECISION NULL,
+                mode VARCHAR(16) NOT NULL,
+                provenance_json JSONB NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_ledger_parity_source_created "
+            "ON trading_ledger_parity_log (source, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ledger_parity_agree_created "
+            "ON trading_ledger_parity_log (agree_bool, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ledger_parity_ticker_created "
+            "ON trading_ledger_parity_log (ticker, created_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_130_pit_hygiene(conn) -> None:
+    """Phase C: PIT hygiene + historical universe snapshot.
+
+    Tables:
+      * trading_pit_audit_log - per-audit record of a ScanPattern's condition
+        fields classified as PIT / non_pit / unknown. History is preserved;
+        multiple passes per pattern are allowed.
+      * trading_universe_snapshots - per-day, per-ticker active/halted/delisted
+        snapshot with UNIQUE (as_of_date, ticker) for idempotent upsert.
+
+    Idempotent. Shadow-safe: both tables can exist empty with zero runtime
+    impact while brain_pit_audit_mode = 'off'.
+    """
+    tables = _tables(conn)
+
+    if "trading_pit_audit_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pit_audit_log (
+                id BIGSERIAL PRIMARY KEY,
+                pattern_id INTEGER NOT NULL,
+                name VARCHAR(200) NULL,
+                origin VARCHAR(32) NULL,
+                lifecycle_stage VARCHAR(32) NULL,
+                pit_count INTEGER NOT NULL,
+                non_pit_count INTEGER NOT NULL,
+                unknown_count INTEGER NOT NULL,
+                pit_fields JSONB NOT NULL DEFAULT '[]',
+                non_pit_fields JSONB NOT NULL DEFAULT '[]',
+                unknown_fields JSONB NOT NULL DEFAULT '[]',
+                agree_bool BOOLEAN NOT NULL,
+                mode VARCHAR(16) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pit_audit_pattern_created "
+            "ON trading_pit_audit_log (pattern_id, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pit_audit_agree_created "
+            "ON trading_pit_audit_log (agree_bool, created_at DESC)"
+        ))
+        conn.commit()
+
+    if "trading_universe_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_universe_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                as_of_date DATE NOT NULL,
+                ticker VARCHAR(32) NOT NULL,
+                asset_class VARCHAR(16) NOT NULL,
+                status VARCHAR(16) NOT NULL,
+                primary_exchange VARCHAR(32) NULL,
+                source VARCHAR(32) NULL,
+                provenance_json JSONB NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_universe_snapshot_date_ticker "
+            "ON trading_universe_snapshots (as_of_date, ticker)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_universe_snapshot_date "
+            "ON trading_universe_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_universe_snapshot_ticker_date "
+            "ON trading_universe_snapshots (ticker, as_of_date DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_131_triple_barrier(conn) -> None:
+    """Phase D: Triple-barrier label store + economic promotion metric (shadow rollout).
+
+    Table:
+      * trading_triple_barrier_labels - one row per (ticker, label_date, side,
+        tp_pct, sl_pct, max_bars) tuple, labelling the outcome of a trade
+        entered at that bar's close against configured barriers. Idempotent
+        on the configured UNIQUE key so re-running the labeler is safe.
+
+    Shadow-safe: the table can be empty with zero runtime impact until
+    brain_triple_barrier_mode != 'off'. Promotion behaviour is unchanged
+    until brain_promotion_metric_mode == 'economic'.
+    """
+    tables = _tables(conn)
+
+    if "trading_triple_barrier_labels" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_triple_barrier_labels (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                label_date DATE NOT NULL,
+                side VARCHAR(8) NOT NULL,
+                tp_pct DOUBLE PRECISION NOT NULL,
+                sl_pct DOUBLE PRECISION NOT NULL,
+                max_bars INTEGER NOT NULL,
+                entry_close DOUBLE PRECISION NOT NULL,
+                tp_price DOUBLE PRECISION NOT NULL,
+                sl_price DOUBLE PRECISION NOT NULL,
+                label SMALLINT NOT NULL,
+                barrier_hit VARCHAR(16) NOT NULL,
+                exit_bar_idx INTEGER NOT NULL,
+                realized_return_pct DOUBLE PRECISION NOT NULL,
+                mode VARCHAR(16) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_triple_barrier_labels "
+            "ON trading_triple_barrier_labels "
+            "(ticker, label_date, side, tp_pct, sl_pct, max_bars)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_triple_barrier_label_date "
+            "ON trading_triple_barrier_labels (label_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_triple_barrier_ticker_date "
+            "ON trading_triple_barrier_labels (ticker, label_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_triple_barrier_snapshot "
+            "ON trading_triple_barrier_labels (snapshot_id)"
+        ))
+        conn.commit()
+
+
+def _migration_132_execution_cost_model(conn) -> None:
+    """Phase F: Execution-cost model + venue-truth telemetry (shadow rollout).
+
+    Tables:
+      * trading_execution_cost_estimates - per-(ticker, side, window_days)
+        rolling cost profile: median/p90 spread in bps, median/p90 slippage
+        in bps, avg daily volume in USD, sample counts, last refresh
+        timestamp. Idempotent on UNIQUE (ticker, side, window_days) so the
+        estimator can be re-run safely.
+
+      * trading_venue_truth_log - one row per fill observation comparing
+        expected vs realized execution costs. Powers the /brain/venue-truth/
+        diagnostics endpoint and the release-blocker script.
+
+    Shadow-safe: both tables stay empty until brain_execution_cost_mode /
+    brain_venue_truth_mode flip from 'off'. No existing code path reads
+    these tables in this phase.
+    """
+    tables = _tables(conn)
+
+    if "trading_execution_cost_estimates" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_execution_cost_estimates (
+                id BIGSERIAL PRIMARY KEY,
+                ticker VARCHAR(32) NOT NULL,
+                side VARCHAR(8) NOT NULL,
+                window_days INTEGER NOT NULL,
+                median_spread_bps DOUBLE PRECISION NOT NULL,
+                p90_spread_bps DOUBLE PRECISION NOT NULL,
+                median_slippage_bps DOUBLE PRECISION NOT NULL,
+                p90_slippage_bps DOUBLE PRECISION NOT NULL,
+                avg_daily_volume_usd DOUBLE PRECISION NOT NULL,
+                sample_trades INTEGER NOT NULL,
+                last_updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_execution_cost_estimates "
+            "ON trading_execution_cost_estimates "
+            "(ticker, side, window_days)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_execution_cost_estimates_updated "
+            "ON trading_execution_cost_estimates (last_updated_at DESC)"
+        ))
+        conn.commit()
+
+    if "trading_venue_truth_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_venue_truth_log (
+                id BIGSERIAL PRIMARY KEY,
+                trade_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                side VARCHAR(8) NOT NULL,
+                notional_usd DOUBLE PRECISION NOT NULL,
+                expected_spread_bps DOUBLE PRECISION NULL,
+                realized_spread_bps DOUBLE PRECISION NULL,
+                expected_slippage_bps DOUBLE PRECISION NULL,
+                realized_slippage_bps DOUBLE PRECISION NULL,
+                expected_cost_fraction DOUBLE PRECISION NULL,
+                realized_cost_fraction DOUBLE PRECISION NULL,
+                paper_bool BOOLEAN NOT NULL DEFAULT TRUE,
+                mode VARCHAR(16) NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_venue_truth_log_created "
+            "ON trading_venue_truth_log (created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_venue_truth_log_ticker_created "
+            "ON trading_venue_truth_log (ticker, created_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_133_live_brackets_reconciliation(conn) -> None:
+    """Phase G: Live brackets + stop reconciliation (shadow rollout).
+
+    Tables:
+      * trading_bracket_intents - one row per live Trade recording the
+        stop/target bracket we would have placed at the broker. Keyed
+        uniquely on trade_id so repeated shadow emits are idempotent.
+        Broker order ids stay NULL in shadow mode.
+
+      * trading_bracket_reconciliation_log - append-only sweep log
+        comparing local trade state + bracket intent vs broker-reported
+        open orders and positions. Every sweep writes at minimum one
+        row per scanned trade (kind='agree' is valid).
+
+    Shadow-safe: both tables stay empty until
+    brain_live_brackets_mode flips from 'off'. No existing code path
+    reads these tables in this phase; the Phase G reconciliation
+    service + diagnostics endpoints are the first consumers.
+    """
+    tables = _tables(conn)
+
+    if "trading_bracket_intents" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_bracket_intents (
+                id BIGSERIAL PRIMARY KEY,
+                trade_id INTEGER NOT NULL REFERENCES trading_trades(id) ON DELETE CASCADE,
+                user_id INTEGER NULL,
+                ticker VARCHAR(32) NOT NULL,
+                direction VARCHAR(8) NOT NULL,
+                quantity DOUBLE PRECISION NOT NULL,
+                entry_price DOUBLE PRECISION NOT NULL,
+                stop_price DOUBLE PRECISION NULL,
+                target_price DOUBLE PRECISION NULL,
+                stop_model VARCHAR(32) NULL,
+                pattern_id INTEGER NULL,
+                regime VARCHAR(32) NULL,
+                intent_state VARCHAR(32) NOT NULL DEFAULT 'intent',
+                shadow_mode BOOLEAN NOT NULL DEFAULT TRUE,
+                broker_source VARCHAR(32) NULL,
+                broker_stop_order_id VARCHAR(128) NULL,
+                broker_target_order_id VARCHAR(128) NULL,
+                last_observed_at TIMESTAMP NULL,
+                last_diff_reason VARCHAR(128) NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX uq_bracket_intents_trade_id "
+            "ON trading_bracket_intents (trade_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_bracket_intents_ticker_state "
+            "ON trading_bracket_intents (ticker, intent_state)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_bracket_intents_updated_at "
+            "ON trading_bracket_intents (updated_at DESC)"
+        ))
+        conn.commit()
+
+    if "trading_bracket_reconciliation_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_bracket_reconciliation_log (
+                id BIGSERIAL PRIMARY KEY,
+                sweep_id VARCHAR(64) NOT NULL,
+                trade_id INTEGER NULL REFERENCES trading_trades(id) ON DELETE SET NULL,
+                bracket_intent_id BIGINT NULL REFERENCES trading_bracket_intents(id) ON DELETE SET NULL,
+                ticker VARCHAR(32) NULL,
+                broker_source VARCHAR(32) NULL,
+                kind VARCHAR(32) NOT NULL,
+                severity VARCHAR(16) NOT NULL,
+                local_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                broker_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                delta_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_bracket_reconciliation_sweep "
+            "ON trading_bracket_reconciliation_log (sweep_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_bracket_reconciliation_trade "
+            "ON trading_bracket_reconciliation_log (trade_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_bracket_reconciliation_kind_ts "
+            "ON trading_bracket_reconciliation_log (kind, observed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_134_position_sizer_log(conn) -> None:
+    """Phase H: Canonical PositionSizer + portfolio optimizer (shadow rollout).
+
+    Table:
+      * trading_position_sizer_log - append-only shadow log. For every
+        actionable pick (alerts, paper/live runner, manual, backtest)
+        the canonical sizer emits exactly one proposal row containing
+        the NetEdgeRanker score it consumed, the proposed notional /
+        quantity / risk, which caps triggered, and the legacy sizer's
+        notional for divergence tracking.
+
+    Shadow-safe: Phase H never changes the value returned by legacy
+    sizers. This table is write-only from the canonical sizer and
+    read-only from the diagnostics endpoint + release-blocker script.
+    Authoritative cutover is Phase H.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_position_sizer_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_position_sizer_log (
+                id BIGSERIAL PRIMARY KEY,
+                proposal_id VARCHAR(64) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                ticker VARCHAR(32) NOT NULL,
+                direction VARCHAR(8) NOT NULL,
+                user_id INTEGER NULL,
+                pattern_id INTEGER NULL,
+                asset_class VARCHAR(16) NULL,
+                regime VARCHAR(32) NULL,
+                entry_price DOUBLE PRECISION NOT NULL,
+                stop_price DOUBLE PRECISION NULL,
+                target_price DOUBLE PRECISION NULL,
+                capital DOUBLE PRECISION NULL,
+                calibrated_prob DOUBLE PRECISION NULL,
+                payoff_fraction DOUBLE PRECISION NULL,
+                cost_fraction DOUBLE PRECISION NULL,
+                expected_net_pnl DOUBLE PRECISION NULL,
+                kelly_fraction DOUBLE PRECISION NULL,
+                kelly_scaled_fraction DOUBLE PRECISION NULL,
+                proposed_notional DOUBLE PRECISION NULL,
+                proposed_quantity DOUBLE PRECISION NULL,
+                proposed_risk_pct DOUBLE PRECISION NULL,
+                correlation_cap_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+                correlation_bucket VARCHAR(64) NULL,
+                max_bucket_notional DOUBLE PRECISION NULL,
+                notional_cap_triggered BOOLEAN NOT NULL DEFAULT FALSE,
+                legacy_notional DOUBLE PRECISION NULL,
+                legacy_quantity DOUBLE PRECISION NULL,
+                legacy_source VARCHAR(48) NULL,
+                divergence_bps DOUBLE PRECISION NULL,
+                mode VARCHAR(16) NOT NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_position_sizer_log_proposal "
+            "ON trading_position_sizer_log (proposal_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_position_sizer_log_source_ts "
+            "ON trading_position_sizer_log (source, observed_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_position_sizer_log_ticker_ts "
+            "ON trading_position_sizer_log (ticker, observed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_135_risk_dial_capital_reweight(conn) -> None:
+    """Phase I: Risk dial + weekly capital re-weighting (shadow rollout).
+
+    Tables:
+      * trading_risk_dial_state - append-only log of risk-dial values.
+        A row represents a resolved dial for (user_id, regime) with
+        the source attribution ('config' | 'regime_default' |
+        'manual' | 'drift_override'). The current dial is the
+        latest row per (user_id) order by observed_at DESC.
+      * trading_capital_reweight_log - append-only weekly sweep log.
+        One row per (user_id, as_of_date) captures the proposed
+        bucket weights vs. the current book weights; read by the
+        diagnostics endpoint.
+
+    Column:
+      * trading_position_sizer_log.risk_dial_multiplier - nullable
+        record of which dial value was in effect when the Phase H
+        proposal was generated. Never read by the sizer in Phase I;
+        Phase I.2 will consume it authoritatively.
+
+    Shadow-safe: no existing behaviour changes, no Phase H math
+    changes, no live trade is resized by these tables. Authoritative
+    cutover (dial applied inside compute_proposal + rebalance
+    orders from the weekly sweep) is Phase I.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_risk_dial_state" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_risk_dial_state (
+                id BIGSERIAL PRIMARY KEY,
+                user_id INTEGER NULL,
+                dial_value DOUBLE PRECISION NOT NULL,
+                regime VARCHAR(32) NULL,
+                source VARCHAR(32) NOT NULL,
+                reason VARCHAR(256) NULL,
+                mode VARCHAR(16) NOT NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_risk_dial_user_ts "
+            "ON trading_risk_dial_state (user_id, observed_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_risk_dial_regime_ts "
+            "ON trading_risk_dial_state (regime, observed_at DESC)"
+        ))
+        conn.commit()
+
+    if "trading_capital_reweight_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_capital_reweight_log (
+                id BIGSERIAL PRIMARY KEY,
+                reweight_id VARCHAR(64) NOT NULL,
+                user_id INTEGER NULL,
+                as_of_date DATE NOT NULL,
+                regime VARCHAR(32) NULL,
+                total_capital DOUBLE PRECISION NOT NULL,
+                proposed_allocations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                current_allocations_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+                drift_bucket_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mean_drift_bps DOUBLE PRECISION NULL,
+                p90_drift_bps DOUBLE PRECISION NULL,
+                cap_triggers_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_capital_reweight_user_date "
+            "ON trading_capital_reweight_log (user_id, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_capital_reweight_id "
+            "ON trading_capital_reweight_log (reweight_id)"
+        ))
+        conn.commit()
+
+    cols = _columns(conn, "trading_position_sizer_log")
+    if "risk_dial_multiplier" not in cols:
+        conn.execute(text(
+            "ALTER TABLE trading_position_sizer_log "
+            "ADD COLUMN risk_dial_multiplier DOUBLE PRECISION NULL"
+        ))
+        conn.commit()
+
+
+def _migration_136_drift_monitor_recert(conn) -> None:
+    """Phase J: Drift monitor + re-certification queue (shadow rollout).
+
+    Tables:
+      * trading_pattern_drift_log - append-only drift score log. One
+        row per (scan_pattern_id, sweep_at). Records Brier-delta and
+        CUSUM statistics against the pattern's backtest baseline,
+        plus a bucketed severity ('green' | 'yellow' | 'red').
+      * trading_pattern_recert_log - append-only re-cert proposal log.
+        One row per (scan_pattern_id, as_of_date) when the drift
+        monitor crosses red severity or a user manually queues a
+        re-cert. Status starts as 'proposed'; Phase J.2 will consume
+        these rows and trigger the backtest + promotion gate.
+
+    Shadow-safe: no existing lifecycle transitions, no backtest
+    triggers, no scanner/alerts/playbook consumer changes. Both
+    tables are write-only in J.1.
+    """
+    tables = _tables(conn)
+
+    if "trading_pattern_drift_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_drift_log (
+                id BIGSERIAL PRIMARY KEY,
+                drift_id VARCHAR(64) NOT NULL,
+                scan_pattern_id INTEGER NOT NULL,
+                pattern_name VARCHAR(256) NULL,
+                baseline_win_prob DOUBLE PRECISION NULL,
+                observed_win_prob DOUBLE PRECISION NULL,
+                brier_delta DOUBLE PRECISION NULL,
+                cusum_statistic DOUBLE PRECISION NULL,
+                cusum_threshold DOUBLE PRECISION NULL,
+                sample_size INTEGER NOT NULL DEFAULT 0,
+                severity VARCHAR(16) NOT NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                sweep_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_drift_pattern_ts "
+            "ON trading_pattern_drift_log (scan_pattern_id, sweep_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_drift_severity_ts "
+            "ON trading_pattern_drift_log (severity, sweep_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_drift_id "
+            "ON trading_pattern_drift_log (drift_id)"
+        ))
+        conn.commit()
+
+    if "trading_pattern_recert_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_recert_log (
+                id BIGSERIAL PRIMARY KEY,
+                recert_id VARCHAR(64) NOT NULL,
+                scan_pattern_id INTEGER NOT NULL,
+                pattern_name VARCHAR(256) NULL,
+                as_of_date DATE NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                severity VARCHAR(16) NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'proposed',
+                reason VARCHAR(256) NULL,
+                drift_log_id BIGINT NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_recert_pattern_ts "
+            "ON trading_pattern_recert_log (scan_pattern_id, observed_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_recert_status_ts "
+            "ON trading_pattern_recert_log (status, observed_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_recert_id "
+            "ON trading_pattern_recert_log (recert_id)"
+        ))
+        conn.commit()
+
+
+def _migration_137_divergence_panel(conn) -> None:
+    """Phase K: canonical divergence panel log (shadow rollout).
+
+    Creates ``trading_pattern_divergence_log``, an append-only aggregation
+    of per-pattern divergence signals sourced from existing Phase A/B/F/G/H
+    divergence-bearing tables:
+
+    * ``trading_ledger_parity_log`` (Phase A)
+    * ``trading_exit_parity_log`` (Phase B)
+    * ``trading_venue_truth_log`` (Phase F)
+    * ``trading_bracket_reconciliation_log`` (Phase G)
+    * ``trading_position_sizer_log`` (Phase H)
+
+    One row per pattern per daily sweep. Per-layer severities + a hysteresis
+    overall severity are stored so operators can triage cross-layer
+    drift quickly. Shadow-only: K.1 never mutates lifecycle state or
+    writes to ``scan_patterns``.
+    """
+    tables = _tables(conn)
+
+    if "trading_pattern_divergence_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_divergence_log (
+                id BIGSERIAL PRIMARY KEY,
+                divergence_id VARCHAR(64) NOT NULL,
+                scan_pattern_id INTEGER NOT NULL,
+                pattern_name VARCHAR(256) NULL,
+                as_of_date DATE NOT NULL,
+                ledger_severity VARCHAR(16) NULL,
+                exit_severity VARCHAR(16) NULL,
+                venue_severity VARCHAR(16) NULL,
+                bracket_severity VARCHAR(16) NULL,
+                sizer_severity VARCHAR(16) NULL,
+                severity VARCHAR(16) NOT NULL,
+                score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                layers_sampled INTEGER NOT NULL DEFAULT 0,
+                layers_agreed INTEGER NOT NULL DEFAULT 0,
+                layers_total INTEGER NOT NULL DEFAULT 5,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                sweep_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_divergence_pattern_ts "
+            "ON trading_pattern_divergence_log (scan_pattern_id, sweep_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_divergence_severity_ts "
+            "ON trading_pattern_divergence_log (severity, sweep_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_divergence_id "
+            "ON trading_pattern_divergence_log (divergence_id)"
+        ))
+        conn.commit()
+
+
+def _migration_138_macro_regime_snapshot(conn) -> None:
+    """Phase L.17: macro regime expansion snapshot (shadow rollout).
+
+    Creates ``trading_macro_regime_snapshots``, an append-only daily
+    record of the extended macro regime surface: existing SPY/VIX
+    composite plus rates (IEF/SHY/TLT), credit (HYG/LQD), and USD (UUP)
+    features. Shadow-only: L.17.1 does not mutate any existing regime
+    consumer. The ``get_market_regime()`` return shape in
+    ``market_data.py`` is bit-for-bit unchanged.
+    """
+    tables = _tables(conn)
+
+    if "trading_macro_regime_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_macro_regime_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                regime_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                -- equity block (mirrors get_market_regime())
+                spy_direction VARCHAR(16) NULL,
+                spy_momentum_5d DOUBLE PRECISION NULL,
+                vix DOUBLE PRECISION NULL,
+                vix_regime VARCHAR(16) NULL,
+                volatility_percentile DOUBLE PRECISION NULL,
+                composite VARCHAR(16) NULL,
+                regime_numeric INTEGER NULL,
+                -- rates block
+                ief_trend VARCHAR(16) NULL,
+                shy_trend VARCHAR(16) NULL,
+                tlt_trend VARCHAR(16) NULL,
+                yield_curve_slope_proxy DOUBLE PRECISION NULL,
+                rates_regime VARCHAR(16) NULL,
+                -- credit block
+                hyg_trend VARCHAR(16) NULL,
+                lqd_trend VARCHAR(16) NULL,
+                credit_spread_proxy DOUBLE PRECISION NULL,
+                credit_regime VARCHAR(16) NULL,
+                -- usd block
+                uup_trend VARCHAR(16) NULL,
+                uup_momentum_20d DOUBLE PRECISION NULL,
+                usd_regime VARCHAR(16) NULL,
+                -- composite-macro block
+                macro_numeric INTEGER NOT NULL DEFAULT 0,
+                macro_label VARCHAR(32) NOT NULL,
+                -- coverage block
+                symbols_sampled INTEGER NOT NULL DEFAULT 0,
+                symbols_missing INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw per-symbol readings + config echoes
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_macro_regime_as_of "
+            "ON trading_macro_regime_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_macro_regime_id "
+            "ON trading_macro_regime_snapshots (regime_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_macro_regime_label_computed "
+            "ON trading_macro_regime_snapshots (macro_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_139_breadth_relstr_snapshot(conn) -> None:
+    """Phase L.18: breadth + cross-sectional relative-strength snapshot
+    (shadow rollout).
+
+    Creates ``trading_breadth_relstr_snapshots``, an append-only daily
+    record of:
+      * breadth block: how many members of a fixed reference basket
+        (11 US sector SPDRs plus SPY/QQQ/IWM benchmarks) are
+        advancing vs declining (ETF-basket proxy for A/D);
+      * per-sector trend + relative strength vs SPY (stored as JSONB
+        to avoid 33+ flat columns);
+      * benchmark trends + momenta (SPY/QQQ/IWM);
+      * composite breadth label (broad_risk_on / mixed / broad_risk_off)
+        and leader / laggard sector by 20d RS.
+
+    Shadow-only: L.18.1 does not mutate any existing consumer.
+    ``market_data.get_market_regime()`` and Phase L.17's
+    ``trading_macro_regime_snapshots`` are bit-for-bit unchanged.
+    Authoritative consumption is deferred to L.18.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_breadth_relstr_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_breadth_relstr_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                -- breadth block (ETF-basket A/D proxy)
+                members_sampled INTEGER NOT NULL DEFAULT 0,
+                members_advancing INTEGER NOT NULL DEFAULT 0,
+                members_declining INTEGER NOT NULL DEFAULT 0,
+                members_flat INTEGER NOT NULL DEFAULT 0,
+                advance_ratio DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                new_highs_count INTEGER NOT NULL DEFAULT 0,
+                new_lows_count INTEGER NOT NULL DEFAULT 0,
+                -- sector block (JSONB: {sector: {trend, momentum_20d, rs_vs_spy_20d}})
+                sector_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                -- benchmark block
+                spy_trend VARCHAR(16) NULL,
+                spy_momentum_20d DOUBLE PRECISION NULL,
+                qqq_trend VARCHAR(16) NULL,
+                qqq_momentum_20d DOUBLE PRECISION NULL,
+                iwm_trend VARCHAR(16) NULL,
+                iwm_momentum_20d DOUBLE PRECISION NULL,
+                -- tilt block
+                size_tilt DOUBLE PRECISION NULL,
+                style_tilt DOUBLE PRECISION NULL,
+                -- composite block
+                breadth_numeric INTEGER NOT NULL DEFAULT 0,
+                breadth_label VARCHAR(32) NOT NULL,
+                leader_sector VARCHAR(32) NULL,
+                laggard_sector VARCHAR(32) NULL,
+                -- coverage block
+                symbols_sampled INTEGER NOT NULL DEFAULT 0,
+                symbols_missing INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw per-symbol readings + config echo
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_breadth_relstr_as_of "
+            "ON trading_breadth_relstr_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_breadth_relstr_id "
+            "ON trading_breadth_relstr_snapshots (snapshot_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_breadth_relstr_label_computed "
+            "ON trading_breadth_relstr_snapshots (breadth_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_140_cross_asset_snapshot(conn) -> None:
+    """Phase L.19: cross-asset signals snapshot (shadow rollout).
+
+    Append-only daily snapshot of cross-asset lead/lag features:
+    bond vs equity, credit vs equity, USD vs crypto, VIX shock vs
+    breadth, BTC-SPY rolling beta. No downstream consumer reads this
+    in L.19.1; authoritative consumption deferred to L.19.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_cross_asset_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_cross_asset_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                -- bond vs equity lead (TLT vs SPY)
+                bond_equity_lead_5d DOUBLE PRECISION NULL,
+                bond_equity_lead_20d DOUBLE PRECISION NULL,
+                bond_equity_label VARCHAR(32) NULL,
+                -- credit vs equity lead (Δ(HYG-LQD) vs SPY)
+                credit_equity_lead_5d DOUBLE PRECISION NULL,
+                credit_equity_lead_20d DOUBLE PRECISION NULL,
+                credit_equity_label VARCHAR(32) NULL,
+                -- USD vs crypto lead (UUP vs BTC)
+                usd_crypto_lead_5d DOUBLE PRECISION NULL,
+                usd_crypto_lead_20d DOUBLE PRECISION NULL,
+                usd_crypto_label VARCHAR(32) NULL,
+                -- VIX shock vs breadth divergence
+                vix_level DOUBLE PRECISION NULL,
+                vix_percentile DOUBLE PRECISION NULL,
+                breadth_advance_ratio DOUBLE PRECISION NULL,
+                vix_breadth_divergence_score DOUBLE PRECISION NULL,
+                vix_breadth_label VARCHAR(32) NULL,
+                -- BTC-SPY rolling beta (window configurable)
+                crypto_equity_beta DOUBLE PRECISION NULL,
+                crypto_equity_beta_window_days INTEGER NULL,
+                crypto_equity_correlation DOUBLE PRECISION NULL,
+                -- composite block
+                cross_asset_numeric INTEGER NOT NULL DEFAULT 0,
+                cross_asset_label VARCHAR(32) NOT NULL,
+                -- coverage block
+                symbols_sampled INTEGER NOT NULL DEFAULT 0,
+                symbols_missing INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw per-symbol readings + macro/breadth context echo + config
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_cross_asset_as_of "
+            "ON trading_cross_asset_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_cross_asset_id "
+            "ON trading_cross_asset_snapshots (snapshot_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_cross_asset_label_computed "
+            "ON trading_cross_asset_snapshots (cross_asset_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_141_ticker_regime_snapshot(conn) -> None:
+    """Phase L.20: per-ticker mean-reversion vs trend regime (shadow rollout).
+
+    Append-only daily per-ticker snapshot of pure time-series regime
+    features (AC(1), variance-ratio, Hurst R/S, ADX proxy) and a
+    composite label in {trend_up, trend_down, mean_revert, choppy,
+    neutral}. No downstream consumer reads this in L.20.1;
+    authoritative consumption deferred to L.20.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_ticker_regime_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_ticker_regime_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                ticker VARCHAR(32) NOT NULL,
+                asset_class VARCHAR(16) NULL,
+                -- raw features
+                last_close DOUBLE PRECISION NULL,
+                sigma_20d DOUBLE PRECISION NULL,
+                ac1 DOUBLE PRECISION NULL,
+                vr_5 DOUBLE PRECISION NULL,
+                vr_20 DOUBLE PRECISION NULL,
+                hurst DOUBLE PRECISION NULL,
+                adx_proxy DOUBLE PRECISION NULL,
+                -- composite scores + label
+                trend_score DOUBLE PRECISION NULL,
+                mean_revert_score DOUBLE PRECISION NULL,
+                ticker_regime_numeric INTEGER NOT NULL DEFAULT 0,
+                ticker_regime_label VARCHAR(32) NOT NULL,
+                -- coverage block
+                bars_used INTEGER NOT NULL DEFAULT 0,
+                bars_missing INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw readings + config echo
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_ticker_regime_as_of "
+            "ON trading_ticker_regime_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ticker_regime_id "
+            "ON trading_ticker_regime_snapshots (snapshot_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ticker_regime_ticker_as_of "
+            "ON trading_ticker_regime_snapshots (ticker, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_ticker_regime_label_computed "
+            "ON trading_ticker_regime_snapshots (ticker_regime_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_142_vol_dispersion_snapshot(conn) -> None:
+    """Phase L.21: volatility term structure + cross-sectional dispersion
+    snapshot (shadow rollout).
+
+    Append-only daily market-wide snapshot capturing VIX term structure
+    (VIXY/VIXM/VXZ), SPY realised-vol windows, cross-sectional return
+    dispersion, mean pairwise correlation, and sector-leadership churn.
+    Composite labels for vol-regime, dispersion, and correlation are
+    shadow-only; no consumer reads this table in L.21.1 —
+    authoritative consumption deferred to L.21.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_vol_dispersion_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_vol_dispersion_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                -- VIX term structure
+                vixy_close DOUBLE PRECISION NULL,
+                vixm_close DOUBLE PRECISION NULL,
+                vxz_close DOUBLE PRECISION NULL,
+                vix_slope_4m_1m DOUBLE PRECISION NULL,
+                vix_slope_7m_1m DOUBLE PRECISION NULL,
+                -- SPY realised vol (annualised)
+                spy_realized_vol_5d DOUBLE PRECISION NULL,
+                spy_realized_vol_20d DOUBLE PRECISION NULL,
+                spy_realized_vol_60d DOUBLE PRECISION NULL,
+                vix_realized_gap DOUBLE PRECISION NULL,
+                -- cross-sectional dispersion + correlation
+                cross_section_return_std_5d DOUBLE PRECISION NULL,
+                cross_section_return_std_20d DOUBLE PRECISION NULL,
+                mean_abs_corr_20d DOUBLE PRECISION NULL,
+                corr_sample_size INTEGER NOT NULL DEFAULT 0,
+                -- sector leadership churn (Spearman 1-rho^2)
+                sector_leadership_churn_20d DOUBLE PRECISION NULL,
+                -- composite labels
+                vol_regime_numeric INTEGER NOT NULL DEFAULT 0,
+                vol_regime_label VARCHAR(32) NOT NULL,
+                dispersion_numeric INTEGER NOT NULL DEFAULT 0,
+                dispersion_label VARCHAR(32) NOT NULL,
+                correlation_numeric INTEGER NOT NULL DEFAULT 0,
+                correlation_label VARCHAR(32) NOT NULL,
+                -- coverage block
+                universe_size INTEGER NOT NULL DEFAULT 0,
+                tickers_missing INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw readings + config echo
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_vol_dispersion_as_of "
+            "ON trading_vol_dispersion_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_vol_dispersion_id "
+            "ON trading_vol_dispersion_snapshots (snapshot_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_vol_dispersion_vol_label "
+            "ON trading_vol_dispersion_snapshots (vol_regime_label, computed_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_vol_dispersion_disp_label "
+            "ON trading_vol_dispersion_snapshots (dispersion_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_143_intraday_session_snapshot(conn) -> None:
+    """Phase L.22: intraday session regime snapshot (shadow rollout).
+
+    Append-only daily market-wide snapshot derived from SPY 5-minute
+    bars that captures opening-range, midday compression, power-hour,
+    gap-open magnitude and the resulting session composite label
+    (trending / range / reversal / gap-and-go / gap-fade / compressed /
+    neutral). Shadow-only in L.22.1: no consumer reads this table;
+    authoritative consumption deferred to L.22.2.
+    """
+    tables = _tables(conn)
+
+    if "trading_intraday_session_snapshots" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_intraday_session_snapshots (
+                id BIGSERIAL PRIMARY KEY,
+                snapshot_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                source_symbol VARCHAR(16) NOT NULL DEFAULT 'SPY',
+                -- session anchors
+                open_price DOUBLE PRECISION NULL,
+                close_price DOUBLE PRECISION NULL,
+                session_high DOUBLE PRECISION NULL,
+                session_low DOUBLE PRECISION NULL,
+                session_range_pct DOUBLE PRECISION NULL,
+                -- gap features
+                prev_close DOUBLE PRECISION NULL,
+                gap_open DOUBLE PRECISION NULL,
+                gap_open_pct DOUBLE PRECISION NULL,
+                -- opening range (first 30 min by default)
+                or_high DOUBLE PRECISION NULL,
+                or_low DOUBLE PRECISION NULL,
+                or_range_pct DOUBLE PRECISION NULL,
+                or_volume_ratio DOUBLE PRECISION NULL,
+                -- midday window (12:00-14:00 ET)
+                midday_range_pct DOUBLE PRECISION NULL,
+                midday_compression_ratio DOUBLE PRECISION NULL,
+                -- power hour (last 30 min)
+                ph_range_pct DOUBLE PRECISION NULL,
+                ph_volume_ratio DOUBLE PRECISION NULL,
+                close_vs_or_mid_pct DOUBLE PRECISION NULL,
+                -- intraday realised vol (annualised)
+                intraday_rv DOUBLE PRECISION NULL,
+                -- composite label
+                session_numeric INTEGER NOT NULL DEFAULT 0,
+                session_label VARCHAR(32) NOT NULL,
+                -- coverage block
+                bars_observed INTEGER NOT NULL DEFAULT 0,
+                coverage_score DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                -- raw readings + config echo
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                observed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_intraday_session_as_of "
+            "ON trading_intraday_session_snapshots (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_intraday_session_id "
+            "ON trading_intraday_session_snapshots (snapshot_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_intraday_session_label "
+            "ON trading_intraday_session_snapshots (session_label, computed_at DESC)"
+        ))
+        conn.commit()
+
+
+def _migration_144_pattern_regime_performance_ledger(conn) -> None:
+    """Phase M.1: pattern x regime performance ledger (shadow rollout).
+
+    Append-only daily aggregate of closed paper-trade performance
+    stratified by pattern_id and regime dimension/label. First
+    consumer of L.17 - L.22 snapshots: reads them read-only to
+    resolve the regime label at each trade's entry_date. Writes
+    one row per (as_of_date, pattern_id, regime_dimension,
+    regime_label, window_days) tuple per run.
+
+    Shadow-only in M.1: no downstream consumer (scanner,
+    promotion, sizing, alerts) reads this table. Authoritative
+    consumption (e.g. NetEdgeRanker reading per-regime expectancy
+    to tilt sizing) is deferred to M.2 behind governance.
+    """
+    tables = _tables(conn)
+
+    if "trading_pattern_regime_performance_daily" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_regime_performance_daily (
+                id BIGSERIAL PRIMARY KEY,
+                ledger_run_id VARCHAR(64) NOT NULL,
+                as_of_date DATE NOT NULL,
+                window_days INTEGER NOT NULL DEFAULT 90,
+                pattern_id INTEGER NOT NULL,
+                regime_dimension VARCHAR(32) NOT NULL,
+                regime_label VARCHAR(48) NOT NULL,
+                n_trades INTEGER NOT NULL DEFAULT 0,
+                n_wins INTEGER NOT NULL DEFAULT 0,
+                hit_rate DOUBLE PRECISION NULL,
+                mean_pnl_pct DOUBLE PRECISION NULL,
+                median_pnl_pct DOUBLE PRECISION NULL,
+                sum_pnl DOUBLE PRECISION NULL,
+                expectancy DOUBLE PRECISION NULL,
+                mean_win_pct DOUBLE PRECISION NULL,
+                mean_loss_pct DOUBLE PRECISION NULL,
+                profit_factor DOUBLE PRECISION NULL,
+                sharpe_proxy DOUBLE PRECISION NULL,
+                avg_hold_days DOUBLE PRECISION NULL,
+                has_confidence BOOLEAN NOT NULL DEFAULT FALSE,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                mode VARCHAR(16) NOT NULL,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_regime_perf_as_of "
+            "ON trading_pattern_regime_performance_daily (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_regime_perf_lookup "
+            "ON trading_pattern_regime_performance_daily "
+            "(pattern_id, regime_dimension, regime_label, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_regime_perf_run "
+            "ON trading_pattern_regime_performance_daily (ledger_run_id)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pattern_regime_perf_confident "
+            "ON trading_pattern_regime_performance_daily "
+            "(pattern_id, regime_dimension) "
+            "WHERE has_confidence"
+        ))
+        conn.commit()
+
+
+def _migration_145_pattern_regime_m2_consumers(conn) -> None:
+    """Phase M.2: pattern x regime authoritative consumers.
+
+    Adds three append-only decision-log tables (tilt, promotion,
+    kill-switch) and two additive columns to
+    ``trading_position_sizer_log`` for M.2.a's sizing tilt
+    multiplier. Also extends ``trading_governance_approvals`` with
+    a nullable ``expires_at`` column so M.2 can gate ``authoritative``
+    mode behind time-bounded approvals.
+
+    Shadow/compare-first rollout: the new tables accept rows in any
+    mode, but ``authoritative`` refusal (with a ``refused`` event)
+    triggers when the matching approval row is missing or expired.
+    """
+    tables = _tables(conn)
+
+    # --- Extend trading_governance_approvals (additive) -------------
+    if "trading_governance_approvals" in tables:
+        cols = _columns(conn, "trading_governance_approvals")
+        if "expires_at" not in cols:
+            conn.execute(text(
+                "ALTER TABLE trading_governance_approvals "
+                "ADD COLUMN expires_at TIMESTAMP NULL"
+            ))
+
+    # --- Extend trading_position_sizer_log (additive) ---------------
+    if "trading_position_sizer_log" in tables:
+        cols = _columns(conn, "trading_position_sizer_log")
+        if "pattern_regime_tilt_multiplier" not in cols:
+            conn.execute(text(
+                "ALTER TABLE trading_position_sizer_log "
+                "ADD COLUMN pattern_regime_tilt_multiplier "
+                "DOUBLE PRECISION NULL"
+            ))
+        if "pattern_regime_tilt_reason" not in cols:
+            conn.execute(text(
+                "ALTER TABLE trading_position_sizer_log "
+                "ADD COLUMN pattern_regime_tilt_reason VARCHAR(48) NULL"
+            ))
+
+    # --- Tilt log ---------------------------------------------------
+    if "trading_pattern_regime_tilt_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_regime_tilt_log (
+                id BIGSERIAL PRIMARY KEY,
+                evaluation_id VARCHAR(32) NOT NULL,
+                as_of_date DATE NOT NULL,
+                pattern_id INTEGER NOT NULL,
+                ticker VARCHAR(32) NULL,
+                source VARCHAR(48) NULL,
+                mode VARCHAR(16) NOT NULL,
+                applied BOOLEAN NOT NULL DEFAULT FALSE,
+                baseline_size_dollars DOUBLE PRECISION NULL,
+                consumer_size_dollars DOUBLE PRECISION NULL,
+                multiplier DOUBLE PRECISION NOT NULL,
+                reason_code VARCHAR(48) NOT NULL,
+                diff_category VARCHAR(16) NULL,
+                contributing_dimensions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                n_confident_dimensions INTEGER NOT NULL DEFAULT 0,
+                fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+                context_hash VARCHAR(16) NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_tilt_as_of "
+            "ON trading_pattern_regime_tilt_log (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_tilt_pattern "
+            "ON trading_pattern_regime_tilt_log "
+            "(pattern_id, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_tilt_auth "
+            "ON trading_pattern_regime_tilt_log (pattern_id, as_of_date DESC) "
+            "WHERE mode = 'authoritative'"
+        ))
+
+    # --- Promotion log ----------------------------------------------
+    if "trading_pattern_regime_promotion_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_regime_promotion_log (
+                id BIGSERIAL PRIMARY KEY,
+                evaluation_id VARCHAR(32) NOT NULL,
+                as_of_date DATE NOT NULL,
+                pattern_id INTEGER NOT NULL,
+                mode VARCHAR(16) NOT NULL,
+                applied BOOLEAN NOT NULL DEFAULT FALSE,
+                baseline_allow BOOLEAN NULL,
+                consumer_allow BOOLEAN NOT NULL,
+                reason_code VARCHAR(48) NOT NULL,
+                diff_category VARCHAR(16) NULL,
+                blocking_dimensions JSONB NOT NULL DEFAULT '{}'::jsonb,
+                n_confident_dimensions INTEGER NOT NULL DEFAULT 0,
+                fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+                source VARCHAR(48) NULL,
+                context_hash VARCHAR(16) NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_prom_as_of "
+            "ON trading_pattern_regime_promotion_log (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_prom_pattern "
+            "ON trading_pattern_regime_promotion_log "
+            "(pattern_id, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_prom_auth "
+            "ON trading_pattern_regime_promotion_log (pattern_id, as_of_date DESC) "
+            "WHERE mode = 'authoritative'"
+        ))
+
+    # --- Kill-switch log --------------------------------------------
+    if "trading_pattern_regime_killswitch_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_regime_killswitch_log (
+                id BIGSERIAL PRIMARY KEY,
+                evaluation_id VARCHAR(32) NOT NULL,
+                as_of_date DATE NOT NULL,
+                pattern_id INTEGER NOT NULL,
+                mode VARCHAR(16) NOT NULL,
+                applied BOOLEAN NOT NULL DEFAULT FALSE,
+                baseline_status VARCHAR(24) NULL,
+                consumer_quarantine BOOLEAN NOT NULL,
+                reason_code VARCHAR(48) NOT NULL,
+                diff_category VARCHAR(16) NULL,
+                consecutive_days_negative INTEGER NOT NULL DEFAULT 0,
+                worst_dimension VARCHAR(32) NULL,
+                worst_expectancy DOUBLE PRECISION NULL,
+                n_confident_dimensions INTEGER NOT NULL DEFAULT 0,
+                fallback_used BOOLEAN NOT NULL DEFAULT FALSE,
+                context_hash VARCHAR(16) NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                computed_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_kill_as_of "
+            "ON trading_pattern_regime_killswitch_log (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_kill_pattern "
+            "ON trading_pattern_regime_killswitch_log "
+            "(pattern_id, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_kill_auth "
+            "ON trading_pattern_regime_killswitch_log (pattern_id, as_of_date DESC) "
+            "WHERE mode = 'authoritative'"
+        ))
+
+    conn.commit()
+
+
+def _migration_146_m2_autopilot(conn) -> None:
+    """Phase M.2-autopilot: auto-advance engine for M.2 slices.
+
+    Adds two tables:
+
+    * ``trading_brain_runtime_modes`` — single-row-per-slice override
+      table. Each M.2 slice (``tilt`` / ``promotion`` / ``killswitch``)
+      consults this before falling back to ``settings.brain_pattern_regime_*_mode``.
+      Allows the autopilot to advance / revert modes without mutating
+      ``.env`` or restarting services.
+    * ``trading_pattern_regime_autopilot_log`` — append-only audit
+      trail of every advance / hold / revert / weekly-summary decision,
+      with gate evaluation payload for forensic analysis.
+
+    Both tables are additive. Absence of a row in runtime_modes is a
+    valid state (slice uses env fallback). No existing rows are touched.
+    """
+    tables = _tables(conn)
+
+    if "trading_brain_runtime_modes" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_brain_runtime_modes (
+                slice_name VARCHAR(64) PRIMARY KEY,
+                mode VARCHAR(16) NOT NULL,
+                updated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                updated_by VARCHAR(64) NOT NULL DEFAULT 'unknown',
+                reason VARCHAR(200) NULL,
+                payload_json JSONB NOT NULL DEFAULT '{}'::jsonb
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_brain_runtime_modes_updated "
+            "ON trading_brain_runtime_modes (updated_at DESC)"
+        ))
+
+    if "trading_pattern_regime_autopilot_log" not in tables:
+        conn.execute(text("""
+            CREATE TABLE trading_pattern_regime_autopilot_log (
+                id BIGSERIAL PRIMARY KEY,
+                as_of_date DATE NOT NULL,
+                evaluated_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                slice_name VARCHAR(64) NOT NULL,
+                event VARCHAR(32) NOT NULL,
+                from_mode VARCHAR(16) NULL,
+                to_mode VARCHAR(16) NULL,
+                reason_code VARCHAR(64) NOT NULL,
+                gates_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                evidence_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+                approval_id INTEGER NULL,
+                days_in_stage INTEGER NULL,
+                ops_log_excerpt TEXT NULL
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_autopilot_as_of "
+            "ON trading_pattern_regime_autopilot_log (as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_autopilot_slice_event "
+            "ON trading_pattern_regime_autopilot_log "
+            "(slice_name, event, as_of_date DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_pr_autopilot_evaluated "
+            "ON trading_pattern_regime_autopilot_log (evaluated_at DESC)"
+        ))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -6893,6 +8474,26 @@ MIGRATIONS = [
     ("124_alert_content_signature", _migration_124_alert_content_signature),
     ("125_mesh_reactive_sensors", _migration_125_mesh_reactive_sensors),
     ("126_mesh_dependency_edges", _migration_126_mesh_dependency_edges),
+    ("127_net_edge_ranker", _migration_127_net_edge_ranker),
+    ("128_exit_evaluator_parity", _migration_128_exit_evaluator_parity),
+    ("129_economic_ledger", _migration_129_economic_ledger),
+    ("130_pit_hygiene", _migration_130_pit_hygiene),
+    ("131_triple_barrier", _migration_131_triple_barrier),
+    ("132_execution_cost_model", _migration_132_execution_cost_model),
+    ("133_live_brackets_reconciliation", _migration_133_live_brackets_reconciliation),
+    ("134_position_sizer_log", _migration_134_position_sizer_log),
+    ("135_risk_dial_capital_reweight", _migration_135_risk_dial_capital_reweight),
+    ("136_drift_monitor_recert", _migration_136_drift_monitor_recert),
+    ("137_divergence_panel", _migration_137_divergence_panel),
+    ("138_macro_regime_snapshot", _migration_138_macro_regime_snapshot),
+    ("139_breadth_relstr_snapshot", _migration_139_breadth_relstr_snapshot),
+    ("140_cross_asset_snapshot", _migration_140_cross_asset_snapshot),
+    ("141_ticker_regime_snapshot", _migration_141_ticker_regime_snapshot),
+    ("142_vol_dispersion_snapshot", _migration_142_vol_dispersion_snapshot),
+    ("143_intraday_session_snapshot", _migration_143_intraday_session_snapshot),
+    ("144_pattern_regime_performance_ledger", _migration_144_pattern_regime_performance_ledger),
+    ("145_pattern_regime_m2_consumers", _migration_145_pattern_regime_m2_consumers),
+    ("146_m2_autopilot", _migration_146_m2_autopilot),
 ]
 
 

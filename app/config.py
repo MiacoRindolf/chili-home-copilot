@@ -199,6 +199,447 @@ class Settings(BaseSettings):
     brain_prediction_io_workers: int | None = None
     brain_market_snapshot_defer_while_learning_running: bool = True
 
+    # NetEdgeRanker (Phase E) — calibrated expected-net-PnL scoring, shadow by default.
+    # Rollout ladder mirrors the prediction-mirror: off -> shadow -> compare -> authoritative.
+    # In any mode != "authoritative" the ranker MUST NOT gate entries, exits, sizing, or promotion.
+    # See docs/TRADING_BRAIN_NET_EDGE_RANKER_ROLLOUT.md.
+    brain_net_edge_ranker_mode: str = "off"
+    brain_net_edge_ops_log_enabled: bool = True
+    brain_net_edge_min_samples: int = 50
+    brain_net_edge_cache_ttl_s: int = 300
+    brain_net_edge_shadow_sample_pct: float = 1.0
+
+    # ExitEngine unification (Phase B) — canonical ExitEvaluator shadow rollout.
+    # Rollout ladder mirrors the prediction-mirror + NetEdgeRanker contract:
+    # off -> shadow -> compare -> authoritative. In any mode != "authoritative"
+    # the canonical evaluator MUST NOT decide exits; it only logs parity against
+    # the legacy backtest/live paths. See docs/TRADING_BRAIN_EXIT_ENGINE_ROLLOUT.md.
+    brain_exit_engine_mode: str = "off"
+    brain_exit_engine_ops_log_enabled: bool = True
+    brain_exit_engine_parity_sample_pct: float = 1.0
+
+    # Economic-truth ledger (Phase A) — canonical append-only ledger of
+    # entry/exit fills + fees + cash-delta + realized-PnL-delta. Shadow-only
+    # until a later cutover phase. Rollout ladder mirrors Phase B/E:
+    # off -> shadow -> compare -> authoritative. Legacy Trade.pnl and
+    # PaperTrade.pnl remain authoritative until the cutover phase.
+    # See docs/TRADING_BRAIN_ECONOMIC_LEDGER_ROLLOUT.md.
+    brain_economic_ledger_mode: str = "off"
+    brain_economic_ledger_ops_log_enabled: bool = True
+    brain_economic_ledger_parity_tolerance_usd: float = 0.01
+
+    # PIT hygiene audit (Phase C) — classifies `ScanPattern.rules_json`
+    # condition indicators against an explicit allow/deny list and writes
+    # results to `trading_pit_audit_log`. Shadow-only until cutover. See
+    # docs/TRADING_BRAIN_PIT_HYGIENE_ROLLOUT.md.
+    brain_pit_audit_mode: str = "off"
+    brain_pit_audit_ops_log_enabled: bool = True
+
+    # Triple-barrier labels (Phase D) — replaces fixed-horizon binary labels
+    # with (TP, SL, timeout) outcomes for training and economic promotion.
+    # Shadow-only until cutover. See docs/TRADING_BRAIN_TRIPLE_BARRIER_ROLLOUT.md.
+    brain_triple_barrier_mode: str = "off"
+    brain_triple_barrier_tp_pct: float = 0.015
+    brain_triple_barrier_sl_pct: float = 0.010
+    brain_triple_barrier_max_bars: int = 5
+    brain_triple_barrier_ops_log_enabled: bool = True
+    # Promotion metric (Phase D) — controls how ModelRegistry picks winners.
+    # accuracy  = legacy behavior (single-metric check_shadow_vs_active).
+    # shadow    = compute economic metric alongside accuracy; log delta only.
+    # economic  = expected-PnL + Brier composite is authoritative (future cutover).
+    brain_promotion_metric_mode: str = "accuracy"
+
+    # Execution-cost model (Phase F) — per-ticker rolling spread/slippage
+    # + capacity cap. Read-only in shadow; flipping to authoritative lets
+    # NetEdgeRanker / sizing consume the per-ticker estimates. See
+    # docs/TRADING_BRAIN_EXECUTION_REALISM_ROLLOUT.md.
+    brain_execution_cost_mode: str = "off"
+    brain_execution_cost_default_fee_bps: float = 1.0
+    brain_execution_cost_impact_cap_bps: float = 50.0
+    brain_execution_capacity_max_adv_frac: float = 0.05
+
+    # Venue-truth telemetry (Phase F) — compares expected vs realized
+    # costs per fill. Shadow writes to `trading_venue_truth_log` only.
+    brain_venue_truth_mode: str = "off"
+    brain_venue_truth_ops_log_enabled: bool = True
+
+    # Live brackets + reconciliation (Phase G) — persists bracket intent
+    # per live Trade and runs a read-only sweep comparing local bracket
+    # state to broker-reported open orders. In shadow mode no broker
+    # writes happen; only `trading_bracket_intents` + `trading_bracket_
+    # reconciliation_log` are populated. Flipping to authoritative is
+    # Phase G.2 and requires extending the venue adapter protocol first.
+    # See docs/TRADING_BRAIN_LIVE_BRACKETS_ROLLOUT.md.
+    brain_live_brackets_mode: str = "off"
+    brain_live_brackets_ops_log_enabled: bool = True
+    brain_live_brackets_reconciliation_interval_s: int = 60
+    brain_live_brackets_price_drift_bps: float = 25.0
+    brain_live_brackets_qty_drift_abs: float = 1e-6
+
+    # Canonical position sizer (Phase H) — Kelly-from-NetEdgeRanker with
+    # hard correlation bucket caps + single-ticker notional cap. Shadow
+    # mode: emits `trading_position_sizer_log` rows in parallel with the
+    # legacy sizer call-sites and NEVER changes the notional those sites
+    # return. Authoritative cutover (replacing legacy sizers) is Phase
+    # H.2. See docs/TRADING_BRAIN_POSITION_SIZER_ROLLOUT.md.
+    brain_position_sizer_mode: str = "off"
+    brain_position_sizer_ops_log_enabled: bool = True
+    brain_position_sizer_equity_bucket_cap_pct: float = 15.0
+    brain_position_sizer_crypto_bucket_cap_pct: float = 10.0
+    brain_position_sizer_single_ticker_cap_pct: float = 7.5
+    brain_position_sizer_kelly_scale: float = 0.25
+    brain_position_sizer_max_risk_pct: float = 2.0
+
+    # Phase I - Risk dial + weekly capital re-weighting (shadow rollout).
+    # The risk dial modulates sizing aggressiveness; in Phase I it is
+    # only persisted alongside PositionSizerLog rows and never applied
+    # inside compute_proposal. Authoritative cutover is Phase I.2. See
+    # docs/TRADING_BRAIN_RISK_DIAL_ROLLOUT.md.
+    brain_risk_dial_mode: str = "off"
+    brain_risk_dial_ops_log_enabled: bool = True
+    brain_risk_dial_default_risk_on: float = 1.0
+    brain_risk_dial_default_cautious: float = 0.7
+    brain_risk_dial_default_risk_off: float = 0.3
+    brain_risk_dial_drawdown_floor: float = 0.5
+    brain_risk_dial_drawdown_trigger_pct: float = 10.0
+    brain_risk_dial_ceiling: float = 1.5
+
+    brain_capital_reweight_mode: str = "off"
+    brain_capital_reweight_ops_log_enabled: bool = True
+    brain_capital_reweight_cron_day_of_week: str = "sun"
+    brain_capital_reweight_cron_hour: int = 18
+    brain_capital_reweight_lookback_days: int = 14
+    brain_capital_reweight_max_single_bucket_pct: float = 35.0
+
+    # Phase J - Drift monitor + re-cert queue (shadow rollout).
+    brain_drift_monitor_mode: str = "off"
+    brain_drift_monitor_ops_log_enabled: bool = True
+    brain_drift_monitor_min_red_sample: int = 20
+    brain_drift_monitor_min_yellow_sample: int = 10
+    brain_drift_monitor_yellow_brier_abs: float = 0.10
+    brain_drift_monitor_red_brier_abs: float = 0.20
+    brain_drift_monitor_cusum_k: float = 0.05
+    brain_drift_monitor_cusum_threshold_mult: float = 0.6
+    brain_drift_monitor_sample_lookback_days: int = 30
+    brain_drift_monitor_cron_hour: int = 5
+    brain_drift_monitor_cron_minute: int = 30
+
+    brain_recert_queue_mode: str = "off"
+    brain_recert_queue_ops_log_enabled: bool = True
+    brain_recert_queue_include_yellow: bool = False
+
+    # Phase K - Divergence panel + ops health endpoint (shadow rollout).
+    brain_divergence_scorer_mode: str = "off"
+    brain_divergence_scorer_ops_log_enabled: bool = True
+    brain_divergence_scorer_min_layers_sampled: int = 1
+    brain_divergence_scorer_yellow_threshold: float = 0.9
+    brain_divergence_scorer_red_threshold: float = 1.8
+    brain_divergence_scorer_lookback_days: int = 7
+    brain_divergence_scorer_cron_hour: int = 6
+    brain_divergence_scorer_cron_minute: int = 15
+    brain_divergence_scorer_layer_weight_ledger: float = 1.0
+    brain_divergence_scorer_layer_weight_exit: float = 1.0
+    brain_divergence_scorer_layer_weight_venue: float = 0.8
+    brain_divergence_scorer_layer_weight_bracket: float = 1.0
+    brain_divergence_scorer_layer_weight_sizer: float = 1.0
+
+    brain_ops_health_enabled: bool = True
+    brain_ops_health_lookback_days: int = 14
+
+    # Phase L.17 - Macro regime expansion (shadow rollout).
+    # One row per trading day is appended to trading_macro_regime_snapshots
+    # by a daily scheduled sweep when mode != "off". L.17.1 never flips to
+    # "authoritative"; the service layer hard-refuses that mode until the
+    # L.17.2 plan is opened explicitly.
+    brain_macro_regime_mode: str = "off"
+    brain_macro_regime_ops_log_enabled: bool = True
+    brain_macro_regime_cron_hour: int = 6
+    brain_macro_regime_cron_minute: int = 30
+    brain_macro_regime_min_coverage_score: float = 0.5
+    brain_macro_regime_trend_up_threshold: float = 0.01
+    brain_macro_regime_strong_trend_threshold: float = 0.03
+    brain_macro_regime_promote_threshold: float = 0.35
+    brain_macro_regime_weight_rates: float = 0.45
+    brain_macro_regime_weight_credit: float = 0.35
+    brain_macro_regime_weight_usd: float = 0.20
+    # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
+    brain_macro_regime_lookback_days: int = 14
+
+    # Phase L.18 - Breadth + cross-sectional relative-strength (shadow).
+    # One row per trading day is appended to
+    # trading_breadth_relstr_snapshots by a daily scheduled sweep when
+    # mode != "off". L.18.1 never flips to "authoritative"; the service
+    # layer hard-refuses that mode until the L.18.2 plan is opened
+    # explicitly.
+    brain_breadth_relstr_mode: str = "off"
+    brain_breadth_relstr_ops_log_enabled: bool = True
+    brain_breadth_relstr_cron_hour: int = 6
+    brain_breadth_relstr_cron_minute: int = 45
+    brain_breadth_relstr_min_coverage_score: float = 0.5
+    brain_breadth_relstr_trend_up_threshold: float = 0.01
+    brain_breadth_relstr_strong_trend_threshold: float = 0.03
+    brain_breadth_relstr_tilt_threshold: float = 0.02
+    brain_breadth_relstr_risk_on_ratio: float = 0.65
+    brain_breadth_relstr_risk_off_ratio: float = 0.35
+    # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
+    brain_breadth_relstr_lookback_days: int = 14
+
+    # Phase L.19 - Cross-asset signals v1 (shadow).
+    # One row per trading day is appended to
+    # trading_cross_asset_snapshots by a daily scheduled sweep when mode
+    # != "off". L.19.1 never flips to "authoritative"; the service layer
+    # hard-refuses that mode until the L.19.2 plan is opened explicitly.
+    brain_cross_asset_mode: str = "off"
+    brain_cross_asset_ops_log_enabled: bool = True
+    brain_cross_asset_cron_hour: int = 7
+    brain_cross_asset_cron_minute: int = 0
+    brain_cross_asset_min_coverage_score: float = 0.5
+    brain_cross_asset_fast_lead_threshold: float = 0.01
+    brain_cross_asset_slow_lead_threshold: float = 0.03
+    brain_cross_asset_vix_percentile_shock: float = 0.80
+    brain_cross_asset_beta_window_days: int = 60
+    brain_cross_asset_composite_min_agreement: int = 2
+    # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
+    brain_cross_asset_lookback_days: int = 14
+
+    # Phase L.20 - Per-ticker mean-reversion vs trend regime (shadow).
+    # One row per (ticker, trading day) is appended to
+    # trading_ticker_regime_snapshots by a daily scheduled sweep when mode
+    # != "off". L.20.1 never flips to "authoritative"; the service layer
+    # hard-refuses that mode until the L.20.2 plan is opened explicitly.
+    # Additive-only: no existing consumer reads this table; L.17/L.18/L.19
+    # snapshots are unchanged, and the existing ``hurst_proxy_from_closes``
+    # in the momentum-neural pipeline is not touched.
+    brain_ticker_regime_mode: str = "off"
+    brain_ticker_regime_ops_log_enabled: bool = True
+    brain_ticker_regime_cron_hour: int = 7
+    brain_ticker_regime_cron_minute: int = 15
+    # Minimum number of daily close bars required per ticker before the
+    # pure model runs (matches ``TickerRegimeConfig.min_bars``).
+    brain_ticker_regime_min_bars: int = 40
+    # Minimum coverage-score (fraction of scalars that are not None) for
+    # a per-ticker row to be considered a complete observation. Rows
+    # below this threshold are still persisted (so ops can see the
+    # coverage signal) but are excluded from the sweep-level ``summary``
+    # breakdown returned to the diagnostics endpoint.
+    brain_ticker_regime_min_coverage_score: float = 0.5
+    # Composite-label thresholds (echoed in the snapshot payload).
+    brain_ticker_regime_ac1_trend: float = 0.05
+    brain_ticker_regime_ac1_mean_revert: float = -0.05
+    brain_ticker_regime_hurst_trend: float = 0.55
+    brain_ticker_regime_hurst_mean_revert: float = 0.45
+    brain_ticker_regime_vr_trend: float = 1.05
+    brain_ticker_regime_vr_mean_revert: float = 0.95
+    brain_ticker_regime_adx_trend: float = 20.0
+    brain_ticker_regime_atr_period: int = 14
+    # Universe cap - upper bound on the number of tickers processed per
+    # sweep. Paired with the snapshot-universe builder to avoid
+    # unbounded OHLCV fetches for a very large promoted / snapshot-held
+    # set during shadow rollout.
+    brain_ticker_regime_max_tickers: int = 250
+    # Diagnostics endpoint default lookback (clamped [1, 30] at the route).
+    brain_ticker_regime_lookback_days: int = 7
+
+    # ---------------------------------------------------------------
+    # Phase L.21 - Volatility term structure + cross-sectional
+    # dispersion snapshot (shadow rollout).
+    # One row per as_of_date is appended to
+    # trading_vol_dispersion_snapshots by a daily scheduled sweep when
+    # mode != "off". L.21.1 never flips to "authoritative"; the
+    # service layer hard-refuses that mode until the L.21.2 plan is
+    # opened explicitly. Additive-only: no existing consumer reads
+    # this table; L.17/L.18/L.19/L.20 snapshots and
+    # ``market_data.get_market_regime()`` are unchanged.
+    brain_vol_dispersion_mode: str = "off"
+    brain_vol_dispersion_ops_log_enabled: bool = True
+    brain_vol_dispersion_cron_hour: int = 7
+    brain_vol_dispersion_cron_minute: int = 30
+    # Minimum number of close bars required per leg before the pure
+    # model runs. Matches VolatilityDispersionConfig.min_bars.
+    brain_vol_dispersion_min_bars: int = 60
+    # Minimum coverage-score below which composite labels are forced
+    # to neutral (``vol_normal``, ``dispersion_normal``,
+    # ``correlation_normal``). Rows below threshold are still
+    # persisted so the soak / ops surface can see the coverage signal.
+    brain_vol_dispersion_min_coverage_score: float = 0.5
+    # Universe caps for dispersion and pairwise correlation. Keeps
+    # the daily sweep tractable regardless of snapshot universe size.
+    brain_vol_dispersion_universe_cap: int = 60
+    brain_vol_dispersion_corr_sample_size: int = 30
+    # Vol regime thresholds (VIXY spot, in VIX points).
+    brain_vol_dispersion_vixy_low: float = 14.0
+    brain_vol_dispersion_vixy_high: float = 22.0
+    brain_vol_dispersion_vixy_spike: float = 30.0
+    # SPY realised-vol bands (annualised, decimal fraction).
+    brain_vol_dispersion_realized_vol_low: float = 0.12
+    brain_vol_dispersion_realized_vol_high: float = 0.30
+    # Cross-sectional return std bands (daily log-return scale).
+    brain_vol_dispersion_cs_std_low: float = 0.012
+    brain_vol_dispersion_cs_std_high: float = 0.025
+    # Mean absolute pairwise correlation bands.
+    brain_vol_dispersion_corr_low: float = 0.35
+    brain_vol_dispersion_corr_high: float = 0.65
+    # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
+    brain_vol_dispersion_lookback_days: int = 14
+
+    # ------------------------------------------------------------------
+    # Phase L.22 - intraday session regime snapshot (shadow rollout).
+    # Daily post-close snapshot derived from SPY 5-minute bars. Captures
+    # opening range, midday compression, power-hour, gap magnitude, and
+    # a composite ``session_label`` classifying the day (trending /
+    # range / reversal / gap-and-go / gap-fade / compressed / neutral).
+    # ``mode`` supports ``off`` (default), ``shadow``, ``compare``; the
+    # service layer hard-refuses ``authoritative`` until the L.22.2
+    # plan is opened explicitly. Additive-only: no existing consumer
+    # reads this table; L.17-L.21 snapshots and ``get_market_regime()``
+    # are unchanged.
+    brain_intraday_session_mode: str = "off"
+    brain_intraday_session_ops_log_enabled: bool = True
+    # 22:00 local scheduler slot (post US cash close and after L.17-L.21
+    # jobs at 06:30-07:30).
+    brain_intraday_session_cron_hour: int = 22
+    brain_intraday_session_cron_minute: int = 0
+    # Source symbol + OHLCV fetch parameters.
+    brain_intraday_session_source_symbol: str = "SPY"
+    brain_intraday_session_interval: str = "5m"
+    brain_intraday_session_period: str = "5d"
+    # Minimum number of 5-min RTH bars required before the composite
+    # label becomes non-neutral. A full session = 78 bars.
+    brain_intraday_session_min_bars: int = 40
+    # Minimum coverage-score below which callers see ``None`` back.
+    brain_intraday_session_min_coverage_score: float = 0.5
+    # Opening-range and power-hour durations (minutes).
+    brain_intraday_session_or_minutes: int = 30
+    brain_intraday_session_power_minutes: int = 30
+    # Session thresholds (fractions of open price).
+    brain_intraday_session_or_range_low: float = 0.003
+    brain_intraday_session_or_range_high: float = 0.012
+    brain_intraday_session_midday_compression_cut: float = 0.5
+    brain_intraday_session_gap_go: float = 0.005
+    brain_intraday_session_gap_fade: float = 0.005
+    brain_intraday_session_trending_close: float = 0.006
+    brain_intraday_session_reversal_close: float = 0.003
+    # Diagnostics endpoint default lookback (clamped [1, 180] at the route).
+    brain_intraday_session_lookback_days: int = 14
+
+    # ---- Phase M.1: pattern x regime performance ledger (shadow) ----
+    # First consumer of L.17-L.22 snapshots: joins closed paper trades
+    # to the most recent regime label per dimension at entry_date, then
+    # writes one aggregate row per (pattern_id, regime_dimension,
+    # regime_label) tuple to ``trading_pattern_regime_performance_daily``.
+    # Shadow-only: no sizing/promotion/stop behaviour reads this table
+    # in M.1. ``mode`` supports ``off`` (default), ``shadow``, ``compare``;
+    # service hard-refuses ``authoritative`` until M.2 is opened.
+    brain_pattern_regime_perf_mode: str = "off"
+    brain_pattern_regime_perf_ops_log_enabled: bool = True
+    # 23:00 local scheduler slot (after L.22 at 22:00 has landed).
+    brain_pattern_regime_perf_cron_hour: int = 23
+    brain_pattern_regime_perf_cron_minute: int = 0
+    # Rolling window of closed paper trades (exit_date within N days).
+    brain_pattern_regime_perf_window_days: int = 90
+    # Minimum trades per (pattern, dimension, label) cell before
+    # ``has_confidence`` is True. Sub-threshold cells are still persisted
+    # for visibility but excluded from the default diagnostics view.
+    brain_pattern_regime_perf_min_trades_per_cell: int = 3
+    # Safety cap: if more than N patterns have closed trades in the
+    # window, the top-N by trade-count are kept and the rest are logged
+    # as ``event=pattern_regime_perf_skipped reason=pattern_cap``.
+    brain_pattern_regime_perf_max_patterns: int = 500
+    # Diagnostics endpoint default lookback (clamped [1, 180] at route).
+    brain_pattern_regime_perf_lookback_days: int = 14
+
+    # ---- Phase M.2: pattern x regime authoritative consumers ----
+    # Three independently-gated slices read the M.1 ledger and make
+    # (or shadow) decisions. Each slice has its own mode flag; all
+    # default to ``off``. Authoritative mode requires a live, un-
+    # expired row in ``trading_governance_approvals`` for the slice's
+    # ``action_type``. Missing/expired approval => service refuses
+    # authoritative and emits a ``refused`` event.
+
+    # M.2.a: NetEdgeRanker sizing tilt multiplier inside
+    # ``position_sizer_emitter.emit_shadow_proposal``.
+    brain_pattern_regime_tilt_mode: str = "off"
+    brain_pattern_regime_tilt_ops_log_enabled: bool = True
+    brain_pattern_regime_tilt_kill: bool = False
+    # Multiplier bounds (hard clamp at model boundary).
+    brain_pattern_regime_tilt_min_multiplier: float = 0.25
+    brain_pattern_regime_tilt_max_multiplier: float = 2.00
+    # At least this many confident ledger cells (``has_confidence=TRUE``)
+    # must be available across 8 dimensions to tilt; otherwise
+    # ``multiplier = 1.0`` with ``reason_code = insufficient_coverage``.
+    brain_pattern_regime_tilt_min_confident_dimensions: int = 3
+    # Ledger staleness tolerance: cell's as_of_date must be within
+    # N days of today. Older cells are treated as unavailable.
+    brain_pattern_regime_tilt_max_staleness_days: int = 5
+
+    # M.2.b: promotion gate inside ``governance.request_pattern_to_live``.
+    brain_pattern_regime_promotion_mode: str = "off"
+    brain_pattern_regime_promotion_ops_log_enabled: bool = True
+    brain_pattern_regime_promotion_kill: bool = False
+    # Required confident-dimension coverage for a promotion decision.
+    brain_pattern_regime_promotion_min_confident_dimensions: int = 3
+    # Block promotion if this many dimensions show negative expectancy
+    # (cell.expectancy < 0) with has_confidence=TRUE.
+    brain_pattern_regime_promotion_block_on_negative_dimensions: int = 2
+    # Minimum overall expectancy across confident dimensions to allow.
+    brain_pattern_regime_promotion_min_mean_expectancy: float = 0.0
+
+    # M.2.c: kill-switch / auto-quarantine (daily sweep at 23:05).
+    brain_pattern_regime_killswitch_mode: str = "off"
+    brain_pattern_regime_killswitch_ops_log_enabled: bool = True
+    brain_pattern_regime_killswitch_kill: bool = False
+    brain_pattern_regime_killswitch_cron_hour: int = 23
+    brain_pattern_regime_killswitch_cron_minute: int = 5
+    # Consecutive-day threshold: quarantine fires only when a pattern's
+    # aggregate expectancy has been < threshold for N sequential
+    # evaluation days. Prevents single-bad-day flakes from quarantining.
+    brain_pattern_regime_killswitch_consecutive_days: int = 3
+    brain_pattern_regime_killswitch_neg_expectancy_threshold: float = -0.005
+    # Per-pattern circuit breaker: max quarantines per pattern per
+    # rolling 30-day window. Prevents thrash.
+    brain_pattern_regime_killswitch_max_per_pattern_30d: int = 1
+    brain_pattern_regime_killswitch_lookback_days: int = 14
+
+    # ------------------------------------------------------------------
+    # Phase M.2-autopilot: auto-advance engine for M.2 slices.
+    # When enabled, evaluates shadow->compare->authoritative transitions
+    # daily for each slice and writes mode overrides to
+    # ``trading_brain_runtime_modes``. Never skips stages, rate-limits
+    # to at most one advance per slice per UTC day, and auto-reverts
+    # on anomaly. See docs/TRADING_BRAIN_PATTERN_REGIME_M2_AUTOPILOT_ROLLOUT.md.
+    # ------------------------------------------------------------------
+    brain_pattern_regime_autopilot_enabled: bool = False
+    brain_pattern_regime_autopilot_kill: bool = False
+    brain_pattern_regime_autopilot_ops_log_enabled: bool = True
+    # Daily evaluation cron. Default 06:15 local (before the macro /
+    # breadth / cross-asset snapshot jobs so advances take effect for
+    # the trading day).
+    brain_pattern_regime_autopilot_cron_hour: int = 6
+    brain_pattern_regime_autopilot_cron_minute: int = 15
+    # Weekly summary cron (single ops line with per-slice stage).
+    brain_pattern_regime_autopilot_weekly_cron_hour: int = 9
+    brain_pattern_regime_autopilot_weekly_cron_dow: str = "mon"
+    # Days-in-stage thresholds. Shadow -> compare after N_shadow BD;
+    # compare -> authoritative after N_compare BD.
+    brain_pattern_regime_autopilot_shadow_days: int = 5
+    brain_pattern_regime_autopilot_compare_days: int = 10
+    # Minimum decision-log rows required across the window to consider
+    # evidence "flowing" (proves the slice is actually emitting
+    # decisions, not silently no-op-ping).
+    brain_pattern_regime_autopilot_min_decisions: int = 100
+    # M.2.a tilt safety envelope: mean would-apply multiplier must lie
+    # inside [min, max] over the compare window to unlock authoritative.
+    brain_pattern_regime_autopilot_tilt_mult_min: float = 0.85
+    brain_pattern_regime_autopilot_tilt_mult_max: float = 1.25
+    # M.2.b promotion safety envelope: ratio of consumer_block over
+    # baseline_allow must be <= ratio to unlock authoritative.
+    brain_pattern_regime_autopilot_promo_block_max_ratio: float = 0.10
+    # M.2.c kill-switch safety envelope: mean daily would-quarantine
+    # count must be <= N/day to unlock authoritative.
+    brain_pattern_regime_autopilot_ks_max_fires_per_day: float = 1.0
+    # Auto-inserted governance approval expiry window (days).
+    brain_pattern_regime_autopilot_approval_days: int = 30
+
     @field_validator("brain_queue_backtest_executor", mode="before")
     @classmethod
     def _normalize_queue_backtest_executor(cls, v: object) -> str:

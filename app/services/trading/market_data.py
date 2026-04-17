@@ -251,7 +251,11 @@ def fetch_ohlcv(
                 ticker, interval, provider="massive", reason="error", row_count=0,
             )
 
-    if _massive_dead:
+    if _massive_dead and _massive.is_crypto(ticker):
+        # Phase F fix: only crypto tickers legitimately exhaust all Massive
+        # variants (X:BASEUSD / X:BASEUSDT / X:BASEUSDC). For equities the
+        # single candidate is the ticker itself and Polygon/yfinance are
+        # entirely separate pipes — do not short-circuit them.
         _log_ohlcv_outcome(
             ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
         )
@@ -416,7 +420,8 @@ def fetch_ohlcv_df(
                 ticker, interval, provider="massive", reason="error", row_count=0,
             )
 
-    if _massive_dead:
+    if _massive_dead and _massive.is_crypto(ticker):
+        # Phase F fix: see fetch_ohlcv. Equities fall through to Polygon/yfinance.
         _log_ohlcv_outcome(
             ticker, interval, provider="massive", reason="all_variants_dead", row_count=0,
         )
@@ -505,7 +510,10 @@ def fetch_ohlcv_batch(
         missing = [
             t for t in tickers
             if t not in results
-            and not _massive.massive_aggregate_variants_all_dead(t)
+            and (
+                not _massive.is_crypto(t)
+                or not _massive.massive_aggregate_variants_all_dead(t)
+            )
         ]
         if not missing:
             return results
@@ -606,7 +614,8 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
         except Exception as e:
             logger.warning(f"[market_data] Massive quote failed for {ticker}: {e}")
 
-    if _massive_dead:
+    if _massive_dead and _massive.is_crypto(ticker):
+        # Phase F fix: see fetch_ohlcv. Equities fall through to Polygon/yfinance.
         return None
 
     if not fb:

@@ -563,6 +563,31 @@ class PatternMetaLearner:
 
         self.save()
 
+        # Phase D: compute expected-PnL-per-trade on OOS holdout so the
+        # registry can later rank candidates using an economic composite
+        # (expected_pnl - brier_penalty * brier). Falls back to 0.0 if we
+        # can't compute. We use realized `future_return_5d` as the payoff
+        # signal; if triple-barrier labels are present in the DB we'll
+        # switch to those in a follow-up (see Phase D plan).
+        expected_pnl_oos_pct = None
+        try:
+            if y_prob_oos is not None and len(X_oos) > 0:
+                # Recover per-snapshot realized returns aligned with the OOS slice.
+                oos_slice = snaps[split_idx:split_idx + len(X_oos)]  # type: ignore[name-defined]
+                oos_returns = [
+                    float((s.future_return_5d or 0.0)) / 100.0  # pct → fraction
+                    for s in oos_slice
+                ]
+                if len(oos_returns) == len(y_prob_oos):
+                    import numpy as _np
+                    arr_ret = _np.asarray(oos_returns, dtype=float)
+                    arr_prob = _np.asarray(y_prob_oos, dtype=float)
+                    # Expected PnL per trade = E[p * r] under the model's prob
+                    # (the simplest calibration-aware, cost-free proxy).
+                    expected_pnl_oos_pct = float((arr_prob * arr_ret).mean())
+        except Exception:
+            logger.debug("[pattern_ml] expected_pnl_oos_pct computation failed", exc_info=True)
+
         try:
             from .model_registry import get_registry
             reg = get_registry()
@@ -576,6 +601,10 @@ class PatternMetaLearner:
                     "samples": len(X),
                     "train_samples": len(X_train),
                     "oos_samples": len(X_oos),
+                    # Phase D: economic promotion metrics (Brier + expected PnL).
+                    "oos_brier_score": oos_brier,
+                    "oos_log_loss": oos_logloss,
+                    "expected_pnl_oos_pct": expected_pnl_oos_pct,
                 },
                 file_path=str(self._save_path) if hasattr(self, "_save_path") else None,
                 notes=f"auto-train {len(patterns)} patterns, {len(X)} samples",

@@ -178,6 +178,30 @@ def open_paper_trade(
     )
     db.add(pt)
     db.flush()
+
+    # Phase A shadow hook: record entry fill in the canonical economic-truth
+    # ledger. Legacy PaperTrade.pnl remains authoritative. Any failure is
+    # swallowed so the paper path never breaks due to ledger bugs.
+    try:
+        from . import economic_ledger as _ledger
+        if _ledger.mode_is_active():
+            _ledger.record_entry_fill(
+                db,
+                source="paper",
+                paper_trade_id=int(pt.id),
+                user_id=user_id,
+                scan_pattern_id=scan_pattern_id,
+                ticker=pt.ticker,
+                direction=direction,
+                quantity=float(quantity),
+                fill_price=float(fill_price),
+                fee=0.0,
+                event_ts=pt.entry_date,
+                provenance={"legacy_path": "open_paper_trade", "atr_value": atr_val},
+            )
+    except Exception:
+        logger.debug("[paper] economic_ledger entry hook failed", exc_info=True)
+
     logger.info("[paper] Opened paper trade: %s %s @ %.4f (fill=%.4f, stop=%.4f, target=%.4f, atr=%.4f)",
                 direction, ticker, entry_price, fill_price, stop_price, target_price, atr_val or 0)
     return pt
@@ -339,6 +363,48 @@ def _close_paper_trade(pt: PaperTrade, exit_price: float, reason: str) -> None:
     logger.info("[paper] Closed %s %s @ %.2f (%s) P&L: $%.2f (%.2f%%)",
                 pt.direction, pt.ticker, exit_price, reason, pt.pnl, pt.pnl_pct)
 
+    # Phase A shadow hook: record exit fill + reconcile legacy pnl against
+    # the canonical ledger's realized_pnl_delta sum. Shadow-only; legacy
+    # pt.pnl remains authoritative. Any failure is swallowed.
+    try:
+        from sqlalchemy import inspect as _sa_inspect
+        from . import economic_ledger as _ledger
+
+        if _ledger.mode_is_active():
+            sess = _sa_inspect(pt).session
+            if sess is not None:
+                # Entry-leg + exit-leg fees are both folded into commission_cost
+                # at legacy close time; ledger rows express them on the exit leg
+                # only so the sum of realized_pnl_delta matches pt.pnl exactly.
+                fee_total = float(commission_cost)
+                _ledger.record_exit_fill(
+                    sess,
+                    source="paper",
+                    paper_trade_id=int(pt.id),
+                    user_id=pt.user_id,
+                    scan_pattern_id=pt.scan_pattern_id,
+                    ticker=pt.ticker or "",
+                    direction=pt.direction or "long",
+                    quantity=float(pt.quantity),
+                    fill_price=float(exit_price),
+                    entry_price=float(pt.entry_price),
+                    fee=fee_total,
+                    event_ts=pt.exit_date,
+                    provenance={"legacy_path": "_close_paper_trade", "reason": reason},
+                )
+                _ledger.reconcile_trade(
+                    sess,
+                    source="paper",
+                    paper_trade_id=int(pt.id),
+                    user_id=pt.user_id,
+                    scan_pattern_id=pt.scan_pattern_id,
+                    ticker=pt.ticker or "",
+                    legacy_pnl=float(pt.pnl) if pt.pnl is not None else None,
+                    provenance={"legacy_path": "_close_paper_trade", "reason": reason},
+                )
+    except Exception:
+        logger.debug("[paper] economic_ledger exit/reconcile hook failed", exc_info=True)
+
 
 def get_paper_dashboard(db: Session, user_id: int | None = None) -> dict[str, Any]:
     """Get paper trading performance summary."""
@@ -424,6 +490,15 @@ def auto_enter_from_signals(
     """
     from .portfolio_risk import size_position, check_new_trade_allowed
 
+    # NetEdgeRanker (Phase E, shadow-only). Imported lazily so the paper path
+    # never breaks if the ranker module has an issue; the heuristic sizing
+    # below is the single source of truth until Phase E becomes authoritative.
+    try:
+        from . import net_edge_ranker as _net_edge
+    except Exception as _exc:  # pragma: no cover - defensive
+        _net_edge = None  # type: ignore[assignment]
+        logger.debug("[paper] net_edge_ranker unavailable: %s", _exc)
+
     entered = 0
     blocked = 0
     for sig in signals:
@@ -450,6 +525,66 @@ def auto_enter_from_signals(
         qty = size_position(capital, entry, stop, risk_pct=0.5)
         if qty <= 0:
             qty = 10
+
+        # SHADOW HOOK: Compute NetEdgeRanker score for measurement only. The
+        # qty above is and remains the authoritative sizing decision. The
+        # ranker is not allowed to skip or resize entries until
+        # ``brain_net_edge_ranker_mode == "authoritative"`` (future phase).
+        _net_edge_score = None
+        if _net_edge is not None and _net_edge.mode_is_active():
+            try:
+                _ctx = _net_edge.NetEdgeSignalContext(
+                    ticker=ticker,
+                    asset_class="crypto" if str(ticker).upper().endswith("-USD") else "stock",
+                    scan_pattern_id=sig.get("scan_pattern_id"),
+                    raw_prob=float(conf),
+                    entry_price=float(entry),
+                    stop_price=float(stop),
+                    target_price=float(target) if target else None,
+                    regime=sig.get("regime"),
+                    timeframe=sig.get("timeframe"),
+                    heuristic_score=sig.get("heuristic_score"),
+                )
+                _net_edge_score = _net_edge.score(db, _ctx)  # logged + persisted
+            except Exception as _exc:  # pragma: no cover - defensive
+                logger.debug("[paper] net_edge shadow score failed: %s", _exc)
+
+        # Phase H shadow hook: log a canonical sizing proposal so the
+        # paper path's ``qty`` can be compared against the Kelly +
+        # portfolio-capped size. Shadow-only; qty above is unchanged.
+        try:
+            from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
+            from .position_sizer_writer import LegacySizing, mode_is_active
+
+            if mode_is_active():
+                _legacy_notional = float(qty) * float(entry) if qty > 0 and entry > 0 else None
+                emit_shadow_proposal(
+                    db,
+                    signal=EmitterSignal(
+                        source="paper_trading.auto_open",
+                        ticker=ticker,
+                        direction="long",
+                        entry_price=float(entry),
+                        stop_price=float(stop),
+                        capital=float(capital or 0.0),
+                        target_price=float(target) if target else None,
+                        asset_class=(
+                            "crypto" if str(ticker).upper().endswith("-USD") else "equity"
+                        ),
+                        user_id=user_id,
+                        pattern_id=sig.get("scan_pattern_id"),
+                        regime=sig.get("regime"),
+                        confidence=float(conf) if conf is not None else None,
+                    ),
+                    legacy=LegacySizing(
+                        notional=_legacy_notional,
+                        quantity=float(qty) if qty else None,
+                        source="paper_trading.size_position",
+                    ),
+                    net_edge_score=_net_edge_score,
+                )
+        except Exception as _exc:  # pragma: no cover - defensive
+            logger.debug("[paper] phase H shadow emit failed: %s", _exc)
 
         pt = open_paper_trade(
             db, user_id,

@@ -265,6 +265,15 @@ def size_position_kelly(
     *,
     max_kelly_pct: float = 5.0,
     limits: RiskLimits | None = None,
+    # Phase H shadow-emit context (all optional). Passing ``db`` + ``ticker``
+    # enables a Phase H canonical sizer log row for divergence analysis.
+    db: "Session | None" = None,
+    user_id: int | None = None,
+    ticker: str | None = None,
+    pattern_id: int | None = None,
+    target_price: float | None = None,
+    regime: str | None = None,
+    asset_class: str | None = None,
 ) -> dict[str, Any]:
     """Kelly-optimized position sizing with drawdown scaling.
 
@@ -277,6 +286,44 @@ def size_position_kelly(
     risk_pct = min(kf * 100, max_kelly_pct, limits.max_risk_per_trade_pct)
 
     shares = size_position(capital, entry_price, stop_price, risk_pct=risk_pct, limits=limits)
+
+    # Phase H shadow hook. Defensive: never breaks Kelly sizing.
+    if db is not None and ticker:
+        try:
+            from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
+            from .position_sizer_writer import LegacySizing, mode_is_active
+
+            if mode_is_active():
+                _legacy_notional = (
+                    float(shares) * float(entry_price)
+                    if shares > 0 and entry_price > 0
+                    else None
+                )
+                # Infer a rough calibrated-prob from the legacy win_rate.
+                emit_shadow_proposal(
+                    db,
+                    signal=EmitterSignal(
+                        source="portfolio_risk.size_position_kelly",
+                        ticker=ticker,
+                        direction="long",
+                        entry_price=float(entry_price),
+                        stop_price=float(stop_price),
+                        capital=float(capital),
+                        target_price=float(target_price) if target_price else None,
+                        asset_class=asset_class,
+                        user_id=user_id,
+                        pattern_id=pattern_id,
+                        regime=regime,
+                        confidence=float(win_rate) if win_rate is not None else None,
+                    ),
+                    legacy=LegacySizing(
+                        notional=_legacy_notional,
+                        quantity=float(shares) if shares else None,
+                        source="portfolio_risk.size_position_kelly",
+                    ),
+                )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug("[portfolio_risk.kelly] phase H shadow emit failed", exc_info=True)
 
     return {
         "shares": shares,
@@ -298,6 +345,12 @@ def size_with_drawdown_scaling(
     avg_win_pct: float = 2.0,
     avg_loss_pct: float = 1.0,
     limits: RiskLimits | None = None,
+    # Phase H shadow-emit context (optional). Supply ``ticker`` to turn on.
+    ticker: str | None = None,
+    pattern_id: int | None = None,
+    target_price: float | None = None,
+    regime: str | None = None,
+    asset_class: str | None = None,
 ) -> dict[str, Any]:
     """Kelly sizing scaled down by current drawdown severity.
 
@@ -308,6 +361,9 @@ def size_with_drawdown_scaling(
     if limits is None:
         limits = get_risk_limits()
 
+    # Note: we deliberately DO NOT pass the Phase H shadow-emit kwargs into
+    # ``size_position_kelly`` here; the DD-scaled variant owns the final
+    # ``scaled_shares``, so we emit once after scaling rather than twice.
     base = size_position_kelly(
         capital, entry_price, stop_price,
         win_rate, avg_win_pct, avg_loss_pct,
@@ -341,6 +397,45 @@ def size_with_drawdown_scaling(
     base["shares"] = scaled_shares
     base["notional"] = round(scaled_shares * entry_price, 2)
     base["method"] = "kelly_quarter_dd_scaled"
+
+    # Phase H shadow hook.
+    if ticker:
+        try:
+            from .position_sizer_emitter import EmitterSignal, emit_shadow_proposal
+            from .position_sizer_writer import LegacySizing, mode_is_active
+
+            if mode_is_active():
+                _legacy_notional = (
+                    float(scaled_shares) * float(entry_price)
+                    if scaled_shares > 0 and entry_price > 0
+                    else None
+                )
+                emit_shadow_proposal(
+                    db,
+                    signal=EmitterSignal(
+                        source="portfolio_risk.size_with_drawdown_scaling",
+                        ticker=ticker,
+                        direction="long",
+                        entry_price=float(entry_price),
+                        stop_price=float(stop_price),
+                        capital=float(capital),
+                        target_price=float(target_price) if target_price else None,
+                        asset_class=asset_class,
+                        user_id=user_id,
+                        pattern_id=pattern_id,
+                        regime=regime,
+                        confidence=float(win_rate) if win_rate is not None else None,
+                    ),
+                    legacy=LegacySizing(
+                        notional=_legacy_notional,
+                        quantity=float(scaled_shares) if scaled_shares else None,
+                        source="portfolio_risk.size_with_drawdown_scaling",
+                    ),
+                )
+        except Exception:  # pragma: no cover - defensive
+            logger.debug(
+                "[portfolio_risk.dd] phase H shadow emit failed", exc_info=True
+            )
 
     return base
 

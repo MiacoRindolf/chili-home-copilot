@@ -420,6 +420,8 @@ def request_pattern_to_live(
         db.commit()
         return {"approved": False, "reason": allocation.get("blocked_reason") or "allocator_blocked", "allocation": allocation}
 
+    baseline_allow: bool | None = None
+    auto_reason: str | None = None
     if auto_approve_paper_profitable:
         paper_trades = db.query(PaperTrade).filter(
             PaperTrade.scan_pattern_id == pattern_id,
@@ -430,18 +432,61 @@ def request_pattern_to_live(
             wr = wins / len(paper_trades) * 100
             total_pnl = sum(t.pnl or 0 for t in paper_trades)
             if wr >= 50 and total_pnl > 0:
-                from .lifecycle import transition_to_live
-                try:
-                    transition_to_live(db, pattern)
-                    db.commit()
-                    return {
-                        "approved": True,
-                        "auto": True,
-                        "reason": f"Paper profitable: {wr:.0f}% WR, ${total_pnl:.2f} P&L ({len(paper_trades)} trades)",
-                        "allocation": allocation,
-                    }
-                except Exception as e:
-                    return {"approved": False, "reason": f"lifecycle transition failed: {e}"}
+                baseline_allow = True
+                auto_reason = f"Paper profitable: {wr:.0f}% WR, ${total_pnl:.2f} P&L ({len(paper_trades)} trades)"
+
+    # Phase M.2.b — promotion gate consumer. Shadow mode always
+    # defers to baseline; authoritative (with approval) can convert
+    # a baseline allow into a block. Never upgrades a baseline
+    # block. Never raises.
+    consumer_result = None
+    try:
+        from . import pattern_regime_promotion_service as _promo
+        if _promo.mode_is_active():
+            consumer_result = _promo.evaluate_promotion_for_pattern(
+                db,
+                pattern_id=int(pattern_id),
+                baseline_allow=baseline_allow,
+                source="request_pattern_to_live",
+            )
+    except Exception:
+        consumer_result = None
+
+    consumer_blocked_allow = bool(
+        consumer_result is not None
+        and consumer_result.applied
+        and baseline_allow is True
+        and consumer_result.consumer_allow is False
+    )
+
+    if baseline_allow is True and not consumer_blocked_allow:
+        from .lifecycle import transition_to_live
+        try:
+            transition_to_live(db, pattern)
+            db.commit()
+            return {
+                "approved": True,
+                "auto": True,
+                "reason": auto_reason,
+                "allocation": allocation,
+            }
+        except Exception as e:
+            return {"approved": False, "reason": f"lifecycle transition failed: {e}"}
+
+    if consumer_blocked_allow:
+        return {
+            "approved": False,
+            "reason": (
+                "pattern_regime_promotion gate blocked auto-approve "
+                f"(reason={consumer_result.reason_code})"
+            ),
+            "allocation": allocation,
+            "pattern_regime_promotion": {
+                "applied": True,
+                "reason_code": consumer_result.reason_code,
+                "evaluation_id": consumer_result.evaluation_id,
+            },
+        }
 
     out = submit_for_approval("pattern_to_live", {
         "pattern_id": pattern_id,
@@ -451,6 +496,13 @@ def request_pattern_to_live(
         "oos_win_rate": pattern.oos_win_rate,
     })
     out["allocation"] = allocation
+    if consumer_result is not None:
+        out["pattern_regime_promotion"] = {
+            "applied": bool(consumer_result.applied),
+            "consumer_allow": bool(consumer_result.consumer_allow),
+            "reason_code": consumer_result.reason_code,
+            "evaluation_id": consumer_result.evaluation_id,
+        }
     return out
 
 

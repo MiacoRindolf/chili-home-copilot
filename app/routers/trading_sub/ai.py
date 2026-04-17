@@ -263,6 +263,740 @@ def api_trading_brain_graph_metrics(request: Request, db: Session = Depends(get_
     )
 
 
+@router.get("/api/trading/brain/net-edge/diagnostics")
+def api_trading_brain_net_edge_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=168),
+    db: Session = Depends(get_db),
+):
+    """Phase E: read-only diagnostics for the NetEdgeRanker shadow rollout.
+
+    Returns reliability, Brier, disagreement-vs-heuristic, and last calibrator
+    snapshot. This endpoint must not mutate any state and must remain safe to
+    hit repeatedly. Shape is frozen for the rollout doc.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.net_edge_ranker import diagnostics as _ne_diag
+
+    payload = _ne_diag(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": bool(payload.get("ok", True)), "net_edge_ranker": payload})
+
+
+@router.get("/api/trading/brain/exit-engine/diagnostics")
+def api_trading_brain_exit_engine_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=168),
+    db: Session = Depends(get_db),
+):
+    """Phase B: read-only diagnostics for the ExitEvaluator shadow rollout.
+
+    Aggregates ``trading_exit_parity_log`` over the last ``lookback_hours``
+    and returns:
+      * total / agree / disagree counts
+      * disagreement rate
+      * per-source breakdown (backtest vs live)
+      * top mismatched (legacy_action, canonical_action) pairs
+      * distinct config_hash buckets currently in use
+    Must remain read-only and safe to hit repeatedly. Shape is frozen for
+    the rollout doc.
+    """
+    get_identity_ctx(request, db)
+    from datetime import datetime, timedelta
+    from sqlalchemy import Integer as _sa_Integer, func
+    from ...config import settings as _settings
+    from ...models.trading import ExitParityLog
+
+    since = datetime.utcnow() - timedelta(hours=int(lookback_hours))
+    base_q = db.query(ExitParityLog).filter(ExitParityLog.created_at >= since)
+    total = base_q.count()
+
+    agree_count = base_q.filter(ExitParityLog.agree_bool.is_(True)).count()
+    disagree_count = total - agree_count
+
+    per_source: dict[str, dict[str, int | float]] = {}
+    # Postgres sums boolean columns as integer counts of True.
+    src_rows = (
+        db.query(
+            ExitParityLog.source,
+            func.count(ExitParityLog.id),
+            func.sum(func.cast(ExitParityLog.agree_bool, _sa_Integer())),
+        )
+        .filter(ExitParityLog.created_at >= since)
+        .group_by(ExitParityLog.source)
+        .all()
+    )
+    for src, n, ag in src_rows:
+        n_i = int(n or 0)
+        # ``ag`` may be bool-summed by Postgres; normalize to int count.
+        try:
+            ag_i = int(ag or 0)
+        except Exception:
+            ag_i = 0
+        per_source[str(src)] = {
+            "total": n_i,
+            "agree": ag_i,
+            "disagree": max(0, n_i - ag_i),
+            "disagreement_rate": (0.0 if n_i == 0 else (n_i - ag_i) / n_i),
+        }
+
+    pair_rows = (
+        db.query(
+            ExitParityLog.legacy_action,
+            ExitParityLog.canonical_action,
+            func.count(ExitParityLog.id),
+        )
+        .filter(ExitParityLog.created_at >= since)
+        .filter(ExitParityLog.agree_bool.is_(False))
+        .group_by(ExitParityLog.legacy_action, ExitParityLog.canonical_action)
+        .order_by(func.count(ExitParityLog.id).desc())
+        .limit(10)
+        .all()
+    )
+    top_mismatches = [
+        {"legacy_action": la, "canonical_action": ca, "count": int(n or 0)}
+        for la, ca, n in pair_rows
+    ]
+
+    config_rows = (
+        db.query(ExitParityLog.config_hash, func.count(ExitParityLog.id))
+        .filter(ExitParityLog.created_at >= since)
+        .group_by(ExitParityLog.config_hash)
+        .order_by(func.count(ExitParityLog.id).desc())
+        .limit(10)
+        .all()
+    )
+    configs = [{"config_hash": ch, "count": int(n or 0)} for ch, n in config_rows]
+
+    payload = {
+        "ok": True,
+        "mode": str(getattr(_settings, "brain_exit_engine_mode", "off") or "off"),
+        "lookback_hours": int(lookback_hours),
+        "total": total,
+        "agree": agree_count,
+        "disagree": disagree_count,
+        "disagreement_rate": (0.0 if total == 0 else disagree_count / total),
+        "per_source": per_source,
+        "top_mismatches": top_mismatches,
+        "configs": configs,
+    }
+    return JSONResponse({"ok": True, "exit_engine": payload})
+
+
+@router.get("/api/trading/brain/ledger/diagnostics")
+def api_trading_brain_ledger_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=168),
+    source: str | None = Query(None, description="Filter to 'paper' | 'live' | 'broker_sync'"),
+    db: Session = Depends(get_db),
+):
+    """Phase A: read-only diagnostics for the economic-truth ledger shadow rollout.
+
+    Aggregates ``trading_economic_ledger`` + ``trading_ledger_parity_log``
+    over the last ``lookback_hours`` and returns:
+      * mode + tolerance_usd
+      * event totals by event_type and source
+      * parity totals (agree / disagree / rate)
+      * mean / max absolute delta in USD
+      * top 10 disagreement rows (trade_ref + delta)
+
+    Shape is frozen for the rollout doc. Must remain read-only.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading import economic_ledger as _ledger
+
+    src = (source or "").strip().lower() or None
+    if src not in (None, "paper", "live", "broker_sync"):
+        src = None
+    payload = _ledger.ledger_summary(db, lookback_hours=int(lookback_hours), source_filter=src)
+    payload["ok"] = True
+    return JSONResponse({"ok": True, "ledger": payload})
+
+
+@router.get("/api/trading/brain/pit/diagnostics")
+def api_trading_brain_pit_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase C: read-only diagnostics for the PIT hygiene audit shadow rollout.
+
+    Aggregates the most-recent ``trading_pit_audit_log`` row per pattern in
+    the lookback window and returns:
+      * mode
+      * audits_total (every row in the window)
+      * patterns_audited (distinct pattern_id)
+      * patterns_clean / patterns_violating
+      * top_violators (up to 20) with their non_pit_fields + unknown_fields
+      * forbidden_hits_by_field / unknown_hits_by_field (tallies)
+
+    Shape is frozen for the Phase C rollout doc. Must remain read-only.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading import pit_audit as _pit_audit
+
+    payload = _pit_audit.audit_summary(db, lookback_hours=int(lookback_hours))
+    payload["ok"] = True
+    return JSONResponse({"ok": True, "pit": payload})
+
+
+@router.get("/api/trading/brain/triple-barrier/diagnostics")
+def api_trading_brain_triple_barrier_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase D: read-only diagnostics for the triple-barrier labeler.
+
+    Aggregates ``trading_triple_barrier_labels`` rows in the lookback
+    window and returns:
+      * mode and barrier configuration
+      * labels_total, tickers_distinct, last_label_at
+      * by_barrier: {tp, sl, timeout, missing_data}
+      * label_distribution: {+1, -1, 0}
+
+    Shape is frozen for the Phase D rollout doc. Must remain read-only.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading import triple_barrier_labeler as _tb_labeler
+
+    payload = _tb_labeler.label_summary(db, lookback_hours=int(lookback_hours))
+    payload["ok"] = True
+    return JSONResponse({"ok": True, "triple_barrier": payload})
+
+
+@router.get("/api/trading/brain/execution-cost/diagnostics")
+def api_trading_brain_execution_cost_diagnostics(
+    request: Request,
+    stale_threshold_hours: int = Query(48, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase F: read-only diagnostics for the execution-cost model.
+
+    Aggregates ``trading_execution_cost_estimates`` and reports:
+      * mode, estimates_total, tickers, by_side
+      * stale_estimates (older than stale_threshold_hours)
+      * last_refresh_at
+    Shape is frozen for the Phase F rollout doc.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading import execution_cost_builder as _ec
+
+    payload = _ec.estimates_summary(
+        db, stale_threshold_hours=int(stale_threshold_hours)
+    )
+    payload["ok"] = True
+    return JSONResponse({"ok": True, "execution_cost": payload})
+
+
+@router.get("/api/trading/brain/venue-truth/diagnostics")
+def api_trading_brain_venue_truth_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    top_n: int = Query(10, ge=1, le=100),
+    db: Session = Depends(get_db),
+):
+    """Phase F: read-only diagnostics for venue-truth telemetry.
+
+    Aggregates ``trading_venue_truth_log`` rows in the lookback window:
+      * mode, lookback_hours, observations_total
+      * mean_expected_cost_fraction, mean_realized_cost_fraction
+      * mean_gap_bps, p90_gap_bps
+      * worst_tickers: up to ``top_n`` tickers with largest mean gap
+    Shape is frozen for the Phase F rollout doc.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading import venue_truth as _vt
+
+    payload = _vt.venue_truth_summary(
+        db, lookback_hours=int(lookback_hours), top_n=int(top_n)
+    )
+    payload["ok"] = True
+    return JSONResponse({"ok": True, "venue_truth": payload})
+
+
+@router.get("/api/trading/brain/bracket-intent/diagnostics")
+def api_trading_brain_bracket_intent_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase G: read-only diagnostics for bracket intents (shadow).
+
+    Returns the frozen summary shape:
+      * mode, lookback_hours, intents_total
+      * by_state, by_broker_source
+      * latest_intent
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.bracket_intent_writer import bracket_intent_summary
+
+    payload = bracket_intent_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "bracket_intent": payload})
+
+
+@router.get("/api/trading/brain/bracket-reconciliation/diagnostics")
+def api_trading_brain_bracket_reconciliation_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    recent_sweeps: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Phase G: read-only diagnostics for bracket reconciliation sweeps.
+
+    Returns the frozen summary shape:
+      * mode, lookback_hours, recent_sweeps_requested
+      * rows_total, by_kind, by_severity
+      * last_sweep_id, last_observed_at
+      * sweeps_recent: list of {sweep_id, observed_at, counts}
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.bracket_reconciliation_service import (
+        bracket_reconciliation_summary,
+    )
+
+    payload = bracket_reconciliation_summary(
+        db,
+        lookback_hours=int(lookback_hours),
+        recent_sweeps=int(recent_sweeps),
+    )
+    return JSONResponse({"ok": True, "bracket_reconciliation": payload})
+
+
+@router.get("/api/trading/brain/position-sizer/diagnostics")
+def api_trading_brain_position_sizer_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase H: read-only diagnostics for canonical position-sizer proposals.
+
+    Returns the frozen summary shape:
+      * mode, lookback_hours, proposals_total
+      * by_source, by_divergence_bucket
+      * mean_divergence_bps, p90_divergence_bps
+      * cap_trigger_counts (correlation_cap, notional_cap)
+      * latest_proposal
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.position_sizer_writer import proposals_summary
+
+    payload = proposals_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "position_sizer": payload})
+
+
+@router.get("/api/trading/brain/risk-dial/diagnostics")
+def api_trading_brain_risk_dial_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase I: read-only diagnostics for the canonical risk dial.
+
+    Returns the frozen summary shape (see
+    ``risk_dial_service.dial_state_summary``):
+      * mode, lookback_hours, dial_events_total
+      * by_regime, by_source, by_dial_bucket
+      * mean_dial_value, override_rejected_count, capped_at_ceiling_count
+      * latest_dial
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.risk_dial_service import dial_state_summary
+
+    payload = dial_state_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "risk_dial": payload})
+
+
+@router.get("/api/trading/brain/capital-reweight/diagnostics")
+def api_trading_brain_capital_reweight_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase I: read-only diagnostics for weekly capital re-weights.
+
+    Returns the frozen summary shape (see
+    ``capital_reweight_service.sweep_summary``):
+      * mode, lookback_days, sweeps_total
+      * mean_mean_drift_bps, p90_p90_drift_bps
+      * single_bucket_cap_trigger_count, concentration_cap_trigger_count
+      * latest_sweep
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.capital_reweight_service import sweep_summary
+
+    payload = sweep_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "capital_reweight": payload})
+
+
+@router.get("/api/trading/brain/drift-monitor/diagnostics")
+def api_trading_brain_drift_monitor_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase J: read-only diagnostics for the drift monitor.
+
+    Returns the frozen summary shape (see
+    ``drift_monitor_service.drift_summary``):
+      * mode, lookback_days, drift_events_total
+      * by_severity, patterns_red, patterns_yellow
+      * mean_brier_delta, mean_cusum_statistic
+      * latest_drift
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.drift_monitor_service import drift_summary
+
+    payload = drift_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "drift_monitor": payload})
+
+
+@router.get("/api/trading/brain/recert-queue/diagnostics")
+def api_trading_brain_recert_queue_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase J: read-only diagnostics for the re-cert proposal queue.
+
+    Returns the frozen summary shape (see
+    ``recert_queue_service.recert_summary``):
+      * mode, lookback_days, recert_events_total
+      * by_source, by_severity, by_status
+      * patterns_queued_distinct, latest_recert
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.recert_queue_service import recert_summary
+
+    payload = recert_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "recert_queue": payload})
+
+
+@router.get("/api/trading/brain/divergence/diagnostics")
+def api_trading_brain_divergence_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase K: read-only diagnostics for the divergence panel.
+
+    Returns the frozen summary shape (see
+    ``divergence_service.divergence_summary``):
+      * mode, lookback_days, divergence_events_total
+      * by_severity, patterns_red, patterns_yellow
+      * mean_score, layers_tracked, latest_divergence
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.divergence_service import divergence_summary
+
+    payload = divergence_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "divergence": payload})
+
+
+@router.get("/api/trading/brain/ops/health")
+def api_trading_brain_ops_health(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase K: canonical read-only ops-health aggregation endpoint.
+
+    Returns a frozen-shape snapshot combining every Phase A-K
+    substrate's own diagnostics summary plus scheduler and governance
+    state. Never fails closed - unavailable phases are reported as
+    ``present=False`` so operators always see the full substrate in
+    one view.
+
+    Top-level keys (stable):
+      * ok, ops_health
+    ``ops_health`` keys (stable):
+      * overall_severity {green, yellow, red}
+      * lookback_days, enabled
+      * scheduler {running, job_count}
+      * governance {kill_switch_engaged, pending_approvals}
+      * phases [{key, present, mode, red_count, yellow_count, notes}]
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.ops_health_service import build_health_snapshot
+
+    payload = build_health_snapshot(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "ops_health": payload})
+
+
+@router.get("/api/trading/brain/macro-regime/diagnostics")
+def api_trading_brain_macro_regime_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase L.17: read-only diagnostics for the macro regime panel.
+
+    Returns the frozen summary shape (see
+    ``macro_regime_service.macro_regime_summary``):
+      * mode, lookback_days, snapshots_total
+      * by_label {risk_on, cautious, risk_off}
+      * by_rates_regime, by_credit_regime, by_usd_regime
+      * mean_coverage_score, latest_snapshot
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.macro_regime_service import macro_regime_summary
+
+    payload = macro_regime_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "macro_regime": payload})
+
+
+@router.get("/api/trading/brain/breadth-relstr/diagnostics")
+def api_trading_brain_breadth_relstr_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase L.18: read-only diagnostics for the breadth + RS panel.
+
+    Returns the frozen summary shape (see
+    ``breadth_relstr_service.breadth_relstr_summary``):
+      * mode, lookback_days, snapshots_total
+      * by_breadth_label {broad_risk_on, mixed, broad_risk_off}
+      * by_leader_sector, by_laggard_sector
+      * mean_advance_ratio, mean_coverage_score, latest_snapshot
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.breadth_relstr_service import (
+        breadth_relstr_summary,
+    )
+
+    payload = breadth_relstr_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "breadth_relstr": payload})
+
+
+@router.get("/api/trading/brain/cross-asset/diagnostics")
+def api_trading_brain_cross_asset_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase L.19: read-only diagnostics for the cross-asset panel.
+
+    Returns the frozen summary shape (see
+    ``cross_asset_service.cross_asset_summary``):
+      * mode, lookback_days, snapshots_total
+      * by_cross_asset_label {risk_on_crosscheck, risk_off_crosscheck,
+        divergence, neutral}
+      * by_bond_equity_label, by_credit_equity_label,
+        by_usd_crypto_label, by_vix_breadth_label
+      * mean_coverage_score, latest_snapshot
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.cross_asset_service import (
+        cross_asset_summary,
+    )
+
+    payload = cross_asset_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "cross_asset": payload})
+
+
+@router.get("/api/trading/brain/ticker-regime/diagnostics")
+def api_trading_brain_ticker_regime_diagnostics(
+    request: Request,
+    lookback_days: int = Query(7, ge=1, le=30),
+    latest_tickers_limit: int = Query(20, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    """Phase L.20: read-only diagnostics for the per-ticker regime panel.
+
+    Returns the frozen summary shape (see
+    ``ticker_regime_service.ticker_regime_summary``):
+      * mode, lookback_days, snapshots_total, distinct_tickers
+      * by_ticker_regime_label {trend_up, trend_down, mean_revert,
+        choppy, neutral}
+      * by_asset_class
+      * mean_coverage_score, mean_trend_score, mean_mean_revert_score
+      * latest_tickers (most-recent snapshot per distinct ticker,
+        capped)
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.ticker_regime_service import (
+        ticker_regime_summary,
+    )
+
+    payload = ticker_regime_summary(
+        db,
+        lookback_days=int(lookback_days),
+        latest_tickers_limit=int(latest_tickers_limit),
+    )
+    return JSONResponse({"ok": True, "ticker_regime": payload})
+
+
+@router.get("/api/trading/brain/vol-dispersion/diagnostics")
+def api_trading_brain_vol_dispersion_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase L.21: read-only diagnostics for the vol term structure +
+    cross-sectional dispersion panel.
+
+    Returns the frozen summary shape (see
+    ``vol_dispersion_service.vol_dispersion_summary``):
+      * mode, lookback_days, snapshots_total
+      * by_vol_regime_label {vol_compressed, vol_normal,
+        vol_expanded, vol_spike}
+      * by_dispersion_label {dispersion_low, dispersion_normal,
+        dispersion_high}
+      * by_correlation_label {correlation_low, correlation_normal,
+        correlation_spike}
+      * mean_vixy_close, mean_vix_slope_4m_1m,
+        mean_cross_section_return_std_20d, mean_abs_corr_20d,
+        mean_sector_leadership_churn_20d, mean_coverage_score
+      * latest_snapshot (full latest row as dict, or null)
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.vol_dispersion_service import (
+        vol_dispersion_summary,
+    )
+
+    payload = vol_dispersion_summary(db, lookback_days=int(lookback_days))
+    return JSONResponse({"ok": True, "vol_dispersion": payload})
+
+
+@router.get("/api/trading/brain/intraday-session/diagnostics")
+def api_trading_brain_intraday_session_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase L.22: read-only diagnostics for the intraday session
+    regime panel.
+
+    Returns the frozen summary shape (see
+    ``intraday_session_service.intraday_session_summary``):
+      * mode, lookback_days, snapshots_total
+      * by_session_label {session_trending_up, session_trending_down,
+        session_range_bound, session_reversal, session_gap_and_go,
+        session_gap_fade, session_compressed, session_neutral}
+      * mean_or_range_pct, mean_midday_compression_ratio,
+        mean_ph_range_pct, mean_intraday_rv,
+        mean_session_range_pct, mean_gap_open_pct_abs,
+        mean_coverage_score
+      * latest_snapshot (full latest row as dict, or null)
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.intraday_session_service import (
+        intraday_session_summary,
+    )
+
+    payload = intraday_session_summary(
+        db, lookback_days=int(lookback_days)
+    )
+    return JSONResponse({"ok": True, "intraday_session": payload})
+
+
+@router.get("/api/trading/brain/pattern-regime-performance/diagnostics")
+def api_trading_brain_pattern_regime_performance_diagnostics(
+    request: Request,
+    lookback_days: int = Query(14, ge=1, le=180),
+    db: Session = Depends(get_db),
+):
+    """Phase M.1: read-only diagnostics for the pattern x regime
+    performance ledger.
+
+    Returns the frozen summary shape (see
+    ``pattern_regime_performance_service.pattern_regime_perf_summary``):
+      * mode, lookback_days, window_days, min_trades_per_cell
+      * latest_as_of_date (ISO-8601 or null)
+      * latest_ledger_run_id (str or null)
+      * ledger_rows_total, confident_cells_total
+      * by_dimension (8 entries: macro_regime, breadth_label,
+        cross_asset_label, ticker_regime, vol_regime, dispersion_label,
+        correlation_label, session_label — each with total_cells,
+        confident_cells, by_label)
+      * top_pattern_label_expectancy (top 25 confident cells by
+        expectancy DESC)
+      * bottom_pattern_label_expectancy (bottom 25 confident cells
+        by expectancy ASC)
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.pattern_regime_performance_service import (
+        pattern_regime_perf_summary,
+    )
+
+    payload = pattern_regime_perf_summary(
+        db, lookback_days=int(lookback_days)
+    )
+    return JSONResponse(
+        {"ok": True, "pattern_regime_performance": payload}
+    )
+
+
+@router.get("/api/trading/brain/pattern-regime-tilt/diagnostics")
+def api_trading_brain_pattern_regime_tilt_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(24, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase M.2.a diagnostics for the sizing tilt consumer."""
+    get_identity_ctx(request, db)
+    from ...services.trading.pattern_regime_tilt_service import (
+        diagnostics_summary,
+    )
+
+    payload = diagnostics_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "pattern_regime_tilt": payload})
+
+
+@router.get("/api/trading/brain/pattern-regime-promotion/diagnostics")
+def api_trading_brain_pattern_regime_promotion_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(168, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase M.2.b diagnostics for the promotion gate consumer."""
+    get_identity_ctx(request, db)
+    from ...services.trading.pattern_regime_promotion_service import (
+        diagnostics_summary,
+    )
+
+    payload = diagnostics_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "pattern_regime_promotion": payload})
+
+
+@router.get("/api/trading/brain/pattern-regime-killswitch/diagnostics")
+def api_trading_brain_pattern_regime_killswitch_diagnostics(
+    request: Request,
+    lookback_hours: int = Query(168, ge=1, le=720),
+    db: Session = Depends(get_db),
+):
+    """Phase M.2.c diagnostics for the kill-switch consumer."""
+    get_identity_ctx(request, db)
+    from ...services.trading.pattern_regime_killswitch_service import (
+        diagnostics_summary,
+    )
+
+    payload = diagnostics_summary(db, lookback_hours=int(lookback_hours))
+    return JSONResponse({"ok": True, "pattern_regime_killswitch": payload})
+
+
+@router.get("/api/trading/brain/m2-autopilot/status")
+def api_trading_brain_m2_autopilot_status(
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    """Phase M.2-autopilot diagnostics.
+
+    Frozen shape: ``{ ok, m2_autopilot: { enabled, kill, cron_hour,
+    cron_minute, slices: { tilt, promotion, killswitch } } }``.
+    Each slice dict has ``stage``, ``days_in_stage``,
+    ``last_advance_date``, ``approval_live``, ``env_mode``,
+    ``override_present``.
+    """
+    get_identity_ctx(request, db)
+    from ...services.trading.pattern_regime_autopilot_service import (
+        diagnostics_summary as _autopilot_diag,
+    )
+
+    payload = _autopilot_diag(db)
+    return JSONResponse({"ok": True, "m2_autopilot": payload})
+
+
 @router.post("/api/trading/brain/graph/publish")
 def api_trading_brain_graph_publish(
     request: Request,

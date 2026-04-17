@@ -9418,6 +9418,25 @@ def run_learning_cycle(
             logger.warning("[learning] Promoted prediction cache at cycle end failed: %s", _pfe)
             report["promoted_fast_eval"] = {"ok": False, "error": str(_pfe)}
 
+    # Phase C shadow hook: PIT audit of active scan patterns. Purely advisory
+    # — no pattern is mutated. Any failure is swallowed. When
+    # brain_pit_audit_mode == "off" the helper returns [] without DB work.
+    try:
+        from .pit_audit import audit_and_record_active as _pit_audit_and_record
+        _pit_results = _pit_audit_and_record(db)
+        if _pit_results:
+            try:
+                db.commit()
+            except Exception:
+                logger.debug("[pit_audit] commit failed", exc_info=True)
+            report["pit_audit"] = {
+                "patterns_audited": len(_pit_results),
+                "patterns_clean": sum(1 for r in _pit_results if r.agree_bool),
+                "patterns_violating": sum(1 for r in _pit_results if not r.agree_bool),
+            }
+    except Exception:
+        logger.debug("[pit_audit] shadow hook failed", exc_info=True)
+
     try:
         from ..brain_worker_signals import persist_last_cycle_digest_json
 
