@@ -22,6 +22,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from .trading.broker_position_sync import (
+    acquire_broker_position_sync_lock,
+    collapse_open_broker_position_duplicates,
+    dedupe_positions_by_ticker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -946,9 +951,14 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     if not is_connected():
         return {"created": 0, "updated": 0, "closed": 0}
 
+    acquire_broker_position_sync_lock(db, broker_source="robinhood", user_id=user_id)
+    cleanup = collapse_open_broker_position_duplicates(
+        db, broker_source="robinhood", user_id=user_id,
+    )
+
     positions = get_positions()
     crypto = get_crypto_positions()
-    all_positions = positions + crypto
+    all_positions = dedupe_positions_by_ticker(positions + crypto)
 
     created = updated = closed = 0
 
@@ -998,6 +1008,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 notes=f"Auto-synced from Robinhood on {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
             )
             db.add(trade)
+            db.flush()
             created += 1
 
     # Link open trades to recent pattern-imminent alerts (if not already linked).
@@ -1088,8 +1099,20 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         closed += 1
 
     db.commit()
-    logger.info(f"[broker] Position sync: {created} created, {updated} updated, {closed} closed")
-    return {"created": created, "updated": updated, "closed": closed, "_live_tickers": rh_tickers}
+    logger.info(
+        "[broker] Position sync: %d created, %d updated, %d closed, %d duplicates cancelled",
+        created,
+        updated,
+        closed,
+        cleanup["cancelled"],
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "closed": closed,
+        "deduped": cleanup["cancelled"],
+        "_live_tickers": rh_tickers,
+    }
 
 
 def cleanup_manual_trades(

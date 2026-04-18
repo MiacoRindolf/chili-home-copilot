@@ -14,6 +14,11 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ..config import settings
+from .trading.broker_position_sync import (
+    acquire_broker_position_sync_lock,
+    collapse_open_broker_position_duplicates,
+    dedupe_positions_by_ticker,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -602,7 +607,12 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     if not is_connected():
         return {"created": 0, "updated": 0, "closed": 0}
 
-    all_positions = get_positions()
+    acquire_broker_position_sync_lock(db, broker_source="coinbase", user_id=user_id)
+    cleanup = collapse_open_broker_position_duplicates(
+        db, broker_source="coinbase", user_id=user_id,
+    )
+
+    all_positions = dedupe_positions_by_ticker(get_positions())
     created = updated = closed = 0
     cb_tickers: set[str] = set()
 
@@ -678,8 +688,20 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         closed += 1
 
     db.commit()
-    logger.info(f"[coinbase] Position sync: {created} created, {updated} updated, {closed} closed")
-    return {"created": created, "updated": updated, "closed": closed, "_live_tickers": cb_tickers}
+    logger.info(
+        "[coinbase] Position sync: %d created, %d updated, %d closed, %d duplicates cancelled",
+        created,
+        updated,
+        closed,
+        cleanup["cancelled"],
+    )
+    return {
+        "created": created,
+        "updated": updated,
+        "closed": closed,
+        "deduped": cleanup["cancelled"],
+        "_live_tickers": cb_tickers,
+    }
 
 
 def _update_proposal_on_fill(db: Session, trade) -> None:
