@@ -44,13 +44,15 @@ def _hydrate_test_database_url_from_dotenv() -> None:
 
 
 def _ensure_postgres_test_url() -> str:
+    # Safety: NEVER fall back to DATABASE_URL. A missing TEST_DATABASE_URL must be a hard error
+    # so pytest can never truncate the live `chili` database (this wiped app data on 2026-04-18).
     _hydrate_test_database_url_from_dotenv()
-    raw = (os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL") or "").strip()
+    raw = (os.environ.get("TEST_DATABASE_URL") or "").strip()
     if not raw:
         raise RuntimeError(
-            "Tests require PostgreSQL. Set TEST_DATABASE_URL (preferred) or DATABASE_URL to a "
-            "dedicated test database, e.g. postgresql://chili:chili@localhost:5433/chili_test — "
-            "add TEST_DATABASE_URL to your .env or your shell; see docs/DATABASE_POSTGRES.md"
+            "Tests require TEST_DATABASE_URL pointing at a dedicated test database (e.g. "
+            "postgresql://chili:chili@localhost:5433/chili_test). Set it in your shell or .env. "
+            "DATABASE_URL is intentionally not a fallback — see docs/DATABASE_POSTGRES.md."
         )
     lowered = raw.lower()
     if not (
@@ -58,8 +60,17 @@ def _ensure_postgres_test_url() -> str:
         or lowered.startswith("postgresql+psycopg2://")
         or lowered.startswith("postgresql+psycopg://")
     ):
+        raise RuntimeError("TEST_DATABASE_URL must be a PostgreSQL URL for pytest.")
+    # Extract database name (last path segment, before any ?query).
+    try:
+        db_name = raw.rsplit("/", 1)[-1].split("?", 1)[0].strip().lower()
+    except Exception:
+        db_name = ""
+    if not db_name.endswith("_test"):
         raise RuntimeError(
-            "TEST_DATABASE_URL / DATABASE_URL must be a PostgreSQL URL for pytest."
+            f"Refusing to run pytest against database {db_name!r}: the TEST_DATABASE_URL database "
+            "name must end with '_test' (e.g. chili_test). This guard prevents accidental TRUNCATE "
+            "of the live chili database."
         )
     os.environ["DATABASE_URL"] = raw
     return raw
