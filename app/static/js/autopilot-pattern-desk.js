@@ -125,6 +125,8 @@
     out.push(badge(r.asset_type === 'crypto' ? 'CRYPTO' : 'STOCK', r.asset_type === 'crypto' ? 'crypto' : 'stock'));
     if (r.auto_trader_v1) {
       out.push(badge('AUTO V1', 'compatible'));
+    } else if (r.monitor_scope === 'plan_levels') {
+      out.push(badge('PLAN', 'event'));
     } else {
       out.push(badge('LINKED', 'event'));
     }
@@ -138,7 +140,7 @@
   }
 
   function rowControls(r) {
-    // No-adopt model: every pattern-linked open position is managed by the
+    // No-adopt model: every CHILI-managed open position is managed by the
     // CHILI monitor by default. Pause is the per-position opt-out.
     var kind = r.kind;
     var id = r.id;
@@ -183,6 +185,12 @@
     return '<div class="ap-callout"><strong>Watchouts</strong>' + esc(parts.join(' · ')) + '</div>';
   }
 
+  function monitorScopeLabel(r) {
+    if (r.monitor_scope === 'plan_levels') return 'AI/manual position plan';
+    if (r.auto_trader_v1) return 'AutoTrader v1';
+    return 'Pattern-linked';
+  }
+
   function patternCard(r) {
     var posId = r.kind + '-' + r.id;
     var pnlVal = Number(r.unrealized_pnl_usd);
@@ -191,7 +199,15 @@
     var tgt = r.take_profit != null ? r.take_profit : r.target_price;
     var thesis = r.pattern_name
       ? ('CHILI-linked setup: ' + esc(r.pattern_name))
-      : ('CHILI-linked position (pattern #' + (r.scan_pattern_id || '?') + ')');
+      : (r.monitor_scope === 'plan_levels'
+        ? 'CHILI-managed AI/manual position plan'
+        : (r.auto_trader_v1
+          ? 'CHILI-managed AutoTrader v1 position'
+          : ('CHILI-linked position (pattern #' + (r.scan_pattern_id || '?') + ')')));
+    var linkageSummary = r.monitor_scope === 'plan_levels'
+      ? 'Scope: AI/manual plan-level monitoring'
+      : ('Pattern: ' + esc(r.pattern_name || ('#' + (r.scan_pattern_id || '?')))
+        + '        &middot; Alert id: ' + esc(r.related_alert_id != null ? String(r.related_alert_id) : 'n/a'));
     return ''
       + '<article class="ap-session-card ap-pattern-card" data-position-id="' + esc(posId) + '" data-ticker="' + esc((r.ticker || '').toUpperCase()) + '">'
       + '  <div class="ap-session-card__header">'
@@ -236,13 +252,13 @@
       + '  <div class="ap-tab-panel" data-panel="details" data-pos="' + esc(posId) + '" role="tabpanel">'
       + '    <div class="ap-detail-stack">'
       + '      <div class="ap-callout"><strong>Linkage</strong>'
-      + '        Pattern: ' + esc(r.pattern_name || ('#' + (r.scan_pattern_id || '?')))
-      + '        &middot; Alert id: ' + esc(r.related_alert_id != null ? String(r.related_alert_id) : 'n/a')
+      + '        ' + linkageSummary
       + '        &middot; Scale-ins: ' + esc(String(r.scale_in_count || 0))
       + '      </div>'
       + '      <div class="ap-callout"><strong>Broker / source</strong>'
       + '        Broker: ' + esc(r.broker_source || (r.kind === 'paper' ? 'paper' : 'n/a'))
       + '        &middot; Quote source: ' + esc(quoteSourceLabel(r.quote_source))
+      + '        &middot; Monitor scope: ' + esc(monitorScopeLabel(r))
       + '        &middot; Auto v1: ' + (r.auto_trader_v1 ? 'yes' : 'no')
       + '      </div>'
       + '      <pre class="ap-pre">' + esc(JSON.stringify({
@@ -363,13 +379,16 @@
 
   function renderCards(data) {
     var host = el('ap-pattern-desk-cards');
+    var empty = el('ap-pattern-desk-empty');
     if (!host) return;
     var rows = (data.trades || []).concat(data.paper_trades || []);
     _destroyPosCharts();
     if (!rows.length) {
       host.innerHTML = '';
+      if (empty) empty.style.display = 'block';
       return;
     }
+    if (empty) empty.style.display = 'none';
     host.innerHTML = rows.map(patternCard).join('');
     bindPatternTabs();
     _observePosCards();

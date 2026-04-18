@@ -13,11 +13,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Optional
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import BrainRuntimeMode, PaperTrade, ScanPattern, Trade
+from .autopilot_scope import (
+    classify_live_autopilot_trade_scope,
+    live_autopilot_trade_filter,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -157,7 +160,7 @@ def _compute_unrealized(
 
 
 def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, Any]:
-    """Open trades and paper rows CHILI tied to a pattern (scan or alert).
+    """Open trades and paper rows surfaced on the Autopilot desk.
 
     Each row is enriched with:
 
@@ -180,10 +183,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
         .filter(
             Trade.user_id == user_id,
             Trade.status == "open",
-            or_(
-                Trade.scan_pattern_id.isnot(None),
-                Trade.related_alert_id.isnot(None),
-            ),
+            live_autopilot_trade_filter(),
         )
         .order_by(Trade.id.desc())
         .all()
@@ -213,6 +213,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
 
     out_trades: list[dict[str, Any]] = []
     for t in trades:
+        monitor_scope = classify_live_autopilot_trade_scope(t)
         pat_name = None
         if t.scan_pattern_id:
             p = db.get(ScanPattern, int(t.scan_pattern_id))
@@ -246,6 +247,7 @@ def list_pattern_linked_open_positions(db: Session, user_id: int) -> dict[str, A
                 "take_profit": float(t.take_profit) if t.take_profit is not None else None,
                 "scan_pattern_id": t.scan_pattern_id,
                 "pattern_name": pat_name,
+                "monitor_scope": monitor_scope,
                 "related_alert_id": t.related_alert_id,
                 "broker_source": t.broker_source,
                 "asset_type": "stock",

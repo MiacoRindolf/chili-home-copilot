@@ -1300,6 +1300,26 @@ def _retry_api_call(
 # ── Order Placement ───────────────────────────────────────────────────
 
 
+def _rh_order_session_kwargs() -> dict[str, Any]:
+    """Return Robinhood session flags for stock order placement."""
+    allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
+    if not allow_ext:
+        return {"extendedHours": False, "market_hours": "regular_hours"}
+    try:
+        from .trading.pattern_imminent_alerts import (
+            us_stock_extended_session_open,
+            us_stock_session_open,
+        )
+
+        if us_stock_session_open():
+            return {"extendedHours": False, "market_hours": "regular_hours"}
+        if us_stock_extended_session_open():
+            return {"extendedHours": True, "market_hours": "all_day_hours"}
+    except Exception:
+        logger.debug("[broker] extended-hours session probe failed", exc_info=True)
+    return {"extendedHours": False, "market_hours": "regular_hours"}
+
+
 def place_buy_order(
     ticker: str,
     quantity: float,
@@ -1319,6 +1339,7 @@ def place_buy_order(
 
     try:
         import robin_stocks.robinhood as rh
+        session_kwargs = _rh_order_session_kwargs()
 
         def _do_buy():
             return rh.orders.order(
@@ -1327,7 +1348,8 @@ def place_buy_order(
                 side="buy",
                 limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
                 timeInForce="gtc",
-                extendedHours=False,
+                extendedHours=session_kwargs["extendedHours"],
+                market_hours=session_kwargs["market_hours"],
                 jsonify=True,
             )
 
@@ -1376,6 +1398,7 @@ def place_sell_order(
 
     try:
         import robin_stocks.robinhood as rh
+        session_kwargs = _rh_order_session_kwargs()
 
         def _do_sell():
             return rh.orders.order(
@@ -1384,7 +1407,8 @@ def place_sell_order(
                 side="sell",
                 limitPrice=round(limit_price, 2) if order_type == "limit" and limit_price else None,
                 timeInForce="gtc",
-                extendedHours=False,
+                extendedHours=session_kwargs["extendedHours"],
+                market_hours=session_kwargs["market_hours"],
                 jsonify=True,
             )
 

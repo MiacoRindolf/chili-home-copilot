@@ -15,13 +15,22 @@ import logging
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
+from ...models.trading import (
+    AutoTraderRun,
+    BreakoutAlert,
+    PatternMonitorDecision,
+    ScanPattern,
+    Trade,
+)
 from ...config import settings
+from .autopilot_scope import live_autopilot_trade_filter
 
 logger = logging.getLogger(__name__)
+# Carry fresh EXIT_NOW recommendations across a normal weekend / long-holiday
+# gap so Friday evening decisions can still execute on the next regular session.
+_MONITOR_EXIT_NOW_MAX_AGE_HOURS = 96.0
 
 
 def _quote_price(ticker: str) -> float | None:
@@ -138,6 +147,51 @@ def _coerce_pct(v: Any) -> float | None:
         return None
 
 
+def _latest_monitor_decisions_by_trade(
+    db: Session,
+    trade_ids: list[int],
+) -> dict[int, PatternMonitorDecision]:
+    """Latest PatternMonitorDecision per trade.
+
+    Execution should follow the newest advisory state only. If a prior
+    ``exit_now`` has since been superseded by ``hold``, the live monitor must
+    not keep selling from the stale recommendation.
+    """
+    if not trade_ids:
+        return {}
+    rows = (
+        db.query(PatternMonitorDecision)
+        .filter(PatternMonitorDecision.trade_id.in_(trade_ids))
+        .order_by(PatternMonitorDecision.created_at.desc())
+        .all()
+    )
+    latest: dict[int, PatternMonitorDecision] = {}
+    for row in rows:
+        latest.setdefault(int(row.trade_id), row)
+    return latest
+
+
+def _fresh_monitor_exit_meta(
+    decision: PatternMonitorDecision | None,
+) -> dict[str, Any] | None:
+    """Audit metadata when the latest monitor decision still means exit."""
+    if decision is None or (decision.action or "").lower() != "exit_now":
+        return None
+    age_h = (datetime.utcnow() - decision.created_at).total_seconds() / 3600.0
+    if age_h > _MONITOR_EXIT_NOW_MAX_AGE_HOURS:
+        return None
+    return {
+        "decision_id": int(decision.id),
+        "decision_source": decision.decision_source,
+        "decision_age_hours": round(age_h, 3),
+        "decision_price": (
+            float(decision.price_at_decision)
+            if decision.price_at_decision is not None
+            else None
+        ),
+    }
+
+
 def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
     """Poll open autotrader v1 trades; market-sell on stop/target when live enabled."""
     if not getattr(settings, "chili_autotrader_enabled", False):
@@ -219,8 +273,9 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         logger.debug("[autotrader_monitor] RH adapter not enabled/connected — skip live monitor")
         return {**summary, "skipped": "rh_adapter_off"}
 
-    # D1: manage any open pattern-linked Trade, not just v1-originated rows.
-    # Users opt specific positions out via the desk's per-row "Pause monitor".
+    # Manage any Autopilot-surfaced live Trade: AutoTrader v1, pattern-linked,
+    # or AI/manual plan-level rows with a saved stop/target. Users opt
+    # specific positions out via the desk's per-row "Pause monitor".
     #
     # SAFETY: scope to the configured autotrader user (``chili_autotrader_user_id``
     # or ``brain_default_user_id``). Without this scope the monitor would sweep
@@ -242,11 +297,7 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         .filter(
             Trade.user_id == int(uid),
             Trade.status == "open",
-            or_(
-                Trade.auto_trader_version == "v1",
-                Trade.scan_pattern_id.isnot(None),
-                Trade.related_alert_id.isnot(None),
-            ),
+            live_autopilot_trade_filter(),
         )
         .all()
     )
@@ -266,12 +317,27 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         tid for (kind, tid), ov in overrides.items()
         if kind == "trade" and ov.get("monitor_paused")
     }
+    latest_monitor_decisions = _latest_monitor_decisions_by_trade(
+        db,
+        [int(t.id) for t in open_rows],
+    )
     if paused_ids:
         summary["live_monitor_paused_ids"] = sorted(paused_ids)
 
     for t in open_rows:
         summary["checked"] += 1
         if t.id in paused_ids:
+            continue
+        broker_source = (t.broker_source or "").strip().lower()
+        if broker_source and broker_source != "robinhood":
+            summary.setdefault("skipped_broker_source", []).append(
+                {"trade_id": int(t.id), "ticker": t.ticker, "broker_source": broker_source}
+            )
+            continue
+        if broker_source == "robinhood" and (t.ticker or "").upper().endswith("-USD"):
+            summary.setdefault("skipped_unsupported_ticker", []).append(
+                {"trade_id": int(t.id), "ticker": t.ticker, "broker_source": broker_source}
+            )
             continue
 
         # Prefer Robinhood's own feed for live stock exits (same venue as fills).
@@ -301,7 +367,10 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             continue
         hit_stop = stop > 0 and px <= stop
         hit_target = tgt > 0 and px >= tgt
-        if not hit_stop and not hit_target:
+        monitor_exit_meta = _fresh_monitor_exit_meta(
+            latest_monitor_decisions.get(int(t.id))
+        )
+        if not hit_stop and not hit_target and monitor_exit_meta is None:
             continue
 
         qty = float(t.quantity or 0)
@@ -309,7 +378,12 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             summary["errors"].append(f"bad_qty:{t.id}")
             continue
 
-        reason = "stop" if hit_stop else "target"
+        if hit_stop:
+            reason = "stop"
+        elif hit_target:
+            reason = "target"
+        else:
+            reason = "pattern_exit_now"
         client_oid = f"atv1-{t.id}-exit-{reason}"
         try:
             res = adapter.place_market_order(
@@ -378,6 +452,11 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
                     "pnl": round(pnl, 4),
                     "opened_today_et": opened_today,
                     "would_be_day_trade": would_be_day_trade,
+                    **(
+                        {"monitor_decision": monitor_exit_meta}
+                        if monitor_exit_meta is not None
+                        else {}
+                    ),
                 },
             )
             db.add(audit)

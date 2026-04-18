@@ -89,3 +89,32 @@ def test_autotrader_desk_lists_pattern_trade(paired_client, db: Session) -> None
     # No-adopt model: every linked row is managed; no explicit adopt toggle.
     assert row["controls_supported"] is True
     assert "can_adopt" not in row
+
+
+def test_autotrader_desk_lists_plan_level_trade(paired_client, db: Session) -> None:
+    c, user = paired_client
+    t = Trade(
+        user_id=user.id,
+        ticker="PLAN1",
+        direction="long",
+        entry_price=10.0,
+        quantity=2.0,
+        status="open",
+        stop_loss=9.25,
+        take_profit=11.5,
+        broker_source="robinhood",
+        tags="robinhood-sync",
+    )
+    db.add(t)
+    db.commit()
+
+    r = c.get("/api/trading/autotrader/desk")
+    assert r.status_code == 200
+    payload = r.json()
+    tickers = [x["ticker"] for x in payload.get("trades", [])]
+    assert "PLAN1" in tickers
+
+    row = next(x for x in payload["trades"] if x["ticker"] == "PLAN1")
+    assert row["monitor_scope"] == "plan_levels"
+    assert row["scan_pattern_id"] is None
+    assert row["related_alert_id"] is None
