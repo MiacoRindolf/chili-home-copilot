@@ -54,10 +54,19 @@ def passes_rule_gate(
     }
 
     if getattr(settings, "chili_autotrader_rth_only", True):
-        from .pattern_imminent_alerts import us_stock_session_open
+        from .pattern_imminent_alerts import (
+            us_stock_extended_session_open,
+            us_stock_session_open,
+        )
 
-        if not us_stock_session_open():
-            return False, "outside_rth", snap
+        allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
+        session_open = (
+            us_stock_extended_session_open() if allow_ext else us_stock_session_open()
+        )
+        if not session_open:
+            return False, (
+                "outside_extended_hours" if allow_ext else "outside_rth"
+            ), snap
 
     if (alert.asset_type or "").lower() != "stock":
         return False, "not_stock", snap

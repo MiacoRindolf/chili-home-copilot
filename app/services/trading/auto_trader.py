@@ -5,6 +5,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session, aliased
 
 from ...config import settings
@@ -116,13 +117,18 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
         logger.debug("[autotrader] No user id (chili_autotrader_user_id / brain_default_user_id)")
         return {"ok": False, "error": "no_user_id"}
 
+    # Match alerts scoped to this autotrader user AND system-generated
+    # (``user_id IS NULL``) pattern-imminent alerts. The imminent generator
+    # writes alerts without a specific owner; treating them as processable by
+    # the configured autotrader user is the intended behavior (single-tenant
+    # deployment). Use ``OR`` so explicit-user alerts are still honored.
     ar = aliased(AutoTraderRun)
     candidates = (
         db.query(BreakoutAlert)
         .outerjoin(ar, ar.breakout_alert_id == BreakoutAlert.id)
         .filter(
             BreakoutAlert.alert_tier == "pattern_imminent",
-            BreakoutAlert.user_id == uid,
+            or_(BreakoutAlert.user_id == uid, BreakoutAlert.user_id.is_(None)),
             ar.id.is_(None),
         )
         .order_by(BreakoutAlert.id.asc())

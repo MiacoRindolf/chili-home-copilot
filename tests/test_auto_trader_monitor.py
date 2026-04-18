@@ -5,7 +5,7 @@ from datetime import datetime
 from unittest.mock import MagicMock, patch
 
 from app import models
-from app.models.trading import ScanPattern, Trade
+from app.models.trading import BreakoutAlert, ScanPattern, Trade
 
 
 @patch("app.services.trading.governance.activate_kill_switch")
@@ -58,6 +58,8 @@ def test_tick_closes_on_stop(db):
         s.chili_autotrader_rth_only = False
         s.chili_autotrader_live_enabled = True
         s.chili_autotrader_daily_loss_cap_usd = 500.0
+        s.chili_autotrader_user_id = u.id
+        s.brain_default_user_id = u.id
         with patch(
             "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
             return_value=ad,
@@ -76,13 +78,24 @@ def test_tick_closes_on_stop(db):
     assert out.get("quote_sources", {}).get("ZZZ") == "robinhood"
 
 
-def _patch_monitor_settings():
-    """Settings patcher shared by D1 widened-scope tests."""
+def _patch_monitor_settings(**overrides):
+    """Settings patcher shared by D1 widened-scope tests.
+
+    Accepts keyword overrides so tests can exercise the user-scope guard
+    (``chili_autotrader_user_id`` / ``brain_default_user_id``) without
+    repeating the full patcher each time.
+    """
     s = patch("app.services.trading.auto_trader_monitor.settings").start()
     s.chili_autotrader_enabled = True
     s.chili_autotrader_rth_only = False
     s.chili_autotrader_live_enabled = True
     s.chili_autotrader_daily_loss_cap_usd = 500.0
+    # Default: resolve user from the first User created in each test fixture
+    # (tests that care about scope explicitly override these).
+    s.chili_autotrader_user_id = overrides.get("chili_autotrader_user_id", 1)
+    s.brain_default_user_id = overrides.get("brain_default_user_id", 1)
+    for k, v in overrides.items():
+        setattr(s, k, v)
     return s
 
 
@@ -133,7 +146,7 @@ def test_monitor_manages_non_v1_pattern_linked_trade(db):
         "raw": {"average_price": 8.0, "cumulative_quantity": 5},
     }
 
-    _patch_monitor_settings()
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
         out = _run_tick_with_adapter(db, ad)
     finally:
@@ -178,7 +191,7 @@ def test_monitor_seeds_missing_levels_from_pattern(db):
     ad.get_quote_price.return_value = 102.0  # between seeded stop (95) and target (110)
     ad.place_market_order.return_value = {"ok": True}
 
-    _patch_monitor_settings()
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
         _run_tick_with_adapter(db, ad)
     finally:
@@ -226,7 +239,7 @@ def test_monitor_skips_linked_trade_without_levels_or_pattern_hints(db):
     ad.get_quote_price.return_value = 40.0
     ad.place_market_order.return_value = {"ok": True}
 
-    _patch_monitor_settings()
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
         out = _run_tick_with_adapter(db, ad)
     finally:
@@ -236,3 +249,196 @@ def test_monitor_skips_linked_trade_without_levels_or_pattern_hints(db):
     ad.place_market_order.assert_not_called()
     db.refresh(t)
     assert t.status == "open"
+
+
+def test_monitor_seeds_missing_levels_from_breakout_alert(db):
+    """Regression: the 20 live Trades in production have alert-stamped stop/target
+    but no pattern.rules_json.exits. Seeder must prefer BreakoutAlert as the
+    authoritative source and heal them without needing pattern exits."""
+    u = models.User(name="d1_alert_seed_u")
+    db.add(u)
+    db.flush()
+    pat = ScanPattern(
+        name="no-exits pattern",
+        rules_json={},  # deliberately empty — mirrors prod state
+        origin="user",
+        asset_class="stock",
+    )
+    db.add(pat)
+    db.flush()
+    alert = BreakoutAlert(
+        user_id=u.id,
+        ticker="PFSI",
+        asset_type="stock",
+        alert_tier="pattern_imminent",
+        score_at_alert=0.55,
+        price_at_alert=90.0,
+        entry_price=90.38,
+        stop_loss=82.37,
+        target_price=99.99,
+        scan_pattern_id=pat.id,
+    )
+    db.add(alert)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="PFSI",
+        direction="long",
+        entry_price=89.64,
+        quantity=4.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        scan_pattern_id=pat.id,
+        related_alert_id=alert.id,
+        # Only stop populated — target missing (mirrors prod exact state).
+        stop_loss=93.9,
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 95.0  # between stop and seeded target
+    ad.place_market_order.return_value = {"ok": True}
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    db.refresh(t)
+    assert t.take_profit is not None and abs(float(t.take_profit) - 99.99) < 1e-6, \
+        "take_profit should have been seeded from alert.target_price"
+    # Pre-existing stop (93.9) should not be overwritten by alert.stop_loss (82.37).
+    assert abs(float(t.stop_loss) - 93.9) < 1e-6, "existing stop must not be overwritten"
+    ad.place_market_order.assert_not_called()
+    assert t.status == "open"
+
+
+def test_monitor_scopes_live_sweep_to_autotrader_user(db):
+    """Safety: live monitor must filter open Trade rows by the configured
+    autotrader user_id. Without this, trades owned by other users (linked RH
+    accounts) would be eligible for market-sell on stop hits. Reproduces the
+    cross-user sweep observed in production after D1."""
+    from app.services.trading import auto_trader_monitor as mod
+
+    owner = models.User(name="owner_autotrader")
+    other = models.User(name="other_user_rh_linked")
+    db.add_all([owner, other])
+    db.flush()
+    pat = ScanPattern(name="scope t", rules_json={}, origin="user", asset_class="stock")
+    db.add(pat)
+    db.flush()
+    # Other user's pattern-linked open position.
+    t_other = Trade(
+        user_id=other.id,
+        ticker="OTHR",
+        direction="long",
+        entry_price=10.0,
+        quantity=10.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=11.0,
+        scan_pattern_id=pat.id,
+    )
+    # Owner's own position.
+    t_own = Trade(
+        user_id=owner.id,
+        ticker="MINE",
+        direction="long",
+        entry_price=10.0,
+        quantity=10.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=11.0,
+        scan_pattern_id=pat.id,
+    )
+    db.add_all([t_other, t_own])
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    # Price far below stop — if the scope leaked, OTHR would be sold.
+    ad.get_quote_price.return_value = 5.0
+    ad.place_market_order.return_value = {"ok": True}
+
+    _patch_monitor_settings(
+        chili_autotrader_user_id=owner.id,
+        brain_default_user_id=owner.id,
+    )
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    # Exactly one position checked — the owner's. Other user's OTHR is invisible.
+    assert out.get("checked") == 1
+    sold_tickers = [c.kwargs.get("product_id") for c in ad.place_market_order.call_args_list]
+    assert "OTHR" not in sold_tickers, "monitor must not market-sell other-user trades"
+    db.refresh(t_other)
+    assert t_other.status == "open", "other user's trade must stay open"
+
+
+def test_monitor_aborts_when_no_autotrader_user_configured(db):
+    """Defense-in-depth: if neither chili_autotrader_user_id nor
+    brain_default_user_id is set, the live monitor must refuse to sweep."""
+    from app.services.trading import auto_trader_monitor as mod
+
+    u = models.User(name="orphan_monitor_u")
+    db.add(u)
+    db.flush()
+    pat = ScanPattern(name="orphan", rules_json={}, origin="user", asset_class="stock")
+    db.add(pat)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="NOU",
+        direction="long",
+        entry_price=10.0,
+        quantity=1.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=11.0,
+        scan_pattern_id=pat.id,
+    )
+    db.add(t)
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 5.0
+
+    _patch_monitor_settings(
+        chili_autotrader_user_id=None,
+        brain_default_user_id=None,
+    )
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("skipped") == "no_user_scope"
+    ad.place_market_order.assert_not_called()
+
+
+def test_monitor_extended_hours_gate_blocks_pure_overnight(db, monkeypatch):
+    """chili_autotrader_allow_extended_hours uses 04:00-20:00 ET; outside that
+    the monitor short-circuits with skipped=outside_extended_hours."""
+    from app.services.trading import auto_trader_monitor as mod
+
+    monkeypatch.setattr(mod.settings, "chili_autotrader_enabled", True, raising=False)
+    monkeypatch.setattr(mod.settings, "chili_autotrader_rth_only", True, raising=False)
+    monkeypatch.setattr(
+        mod.settings, "chili_autotrader_allow_extended_hours", True, raising=False
+    )
+    with patch(
+        "app.services.trading.pattern_imminent_alerts.us_stock_extended_session_open",
+        return_value=False,
+    ):
+        out = mod.tick_auto_trader_monitor(db)
+    assert out.get("skipped") == "outside_extended_hours"

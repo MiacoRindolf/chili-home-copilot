@@ -1102,6 +1102,16 @@ class Settings(BaseSettings):
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_RTH_ONLY"),
     )
+    chili_autotrader_allow_extended_hours: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOTRADER_ALLOW_EXTENDED_HOURS"),
+        description=(
+            "When true and chili_autotrader_rth_only is also true, the monitor "
+            "runs during Mon-Fri US/Eastern 04:00-20:00 (pre + RTH + post) "
+            "instead of RTH only. Set rth_only=false to disable the session "
+            "gate entirely (weekends and overnight included)."
+        ),
+    )
     chili_autotrader_llm_revalidation_enabled: bool = Field(
         default=True,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_LLM_REVALIDATION_ENABLED"),

@@ -18,7 +18,7 @@ from typing import Any
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
-from ...models.trading import AutoTraderRun, ScanPattern, Trade
+from ...models.trading import AutoTraderRun, BreakoutAlert, ScanPattern, Trade
 from ...config import settings
 
 logger = logging.getLogger(__name__)
@@ -40,73 +40,102 @@ def _quote_price(ticker: str) -> float | None:
 
 
 def _seed_missing_levels(db: Session, rows: list[Trade]) -> None:
-    """Populate ``stop_loss`` / ``take_profit`` in-place from the linked
-    ``ScanPattern`` exit hints when the row has none.
+    """Populate missing ``stop_loss`` / ``take_profit`` in-place from the most
+    authoritative source available for each CHILI-tagged row.
 
-    Pattern hints live in ``ScanPattern.rules_json.exits`` as percents
-    (``stop_pct`` / ``target_pct``) and are applied relative to ``entry_price``
-    (long-aware: stop below entry, target above). Rows that still have no stop
-    AND no target after seeding are skipped by the caller, never traded blindly.
+    Lookup order (first populated value wins per field, per row):
+      1. Linked ``BreakoutAlert`` — concrete numeric ``stop_loss`` /
+         ``target_price`` stamped when the alert fired. This is the source of
+         truth for pattern-imminent entries in production (data-first).
+      2. Linked ``ScanPattern.rules_json.exits`` percents (``stop_pct`` /
+         ``target_pct``), applied long/short-aware to ``entry_price``. Fallback
+         for rows linked to a pattern but no alert, e.g. ad-hoc mirrors.
+
+    Rows that still have **no** stop AND **no** target after both lookups are
+    skipped by the caller (``skipped_no_levels`` on the summary) so the monitor
+    never trades blind.
     """
-    dirty = False
+    dirty_rows: list[Trade] = []
     for t in rows:
         if (t.stop_loss or 0) > 0 and (t.take_profit or 0) > 0:
             continue
-        if not t.scan_pattern_id:
-            continue
-        try:
-            p = db.get(ScanPattern, int(t.scan_pattern_id))
-        except Exception:
-            continue
-        if p is None:
-            continue
-        rj = dict(p.rules_json or {})
-        exits = rj.get("exits") if isinstance(rj, dict) else None
-        if not isinstance(exits, dict):
-            continue
         entry = float(t.entry_price or 0.0)
-        if entry <= 0:
-            continue
         side = (t.direction or "long").lower()
+        seeded_from: list[str] = []
 
-        if not (t.stop_loss or 0) > 0:
-            stop_pct = exits.get("stop_pct") or exits.get("stop_loss_pct")
+        # 1) Breakout alert — canonical numeric levels for pattern-imminent entries.
+        if t.related_alert_id:
             try:
-                sp = float(stop_pct) if stop_pct is not None else None
-            except (TypeError, ValueError):
-                sp = None
-            if sp is not None and sp > 0:
-                t.stop_loss = round(
-                    entry * (1.0 - sp / 100.0) if side != "short" else entry * (1.0 + sp / 100.0),
-                    4,
-                )
-                dirty = True
+                a = db.get(BreakoutAlert, int(t.related_alert_id))
+            except Exception:
+                a = None
+            if a is not None:
+                alert_stop = float(a.stop_loss) if a.stop_loss is not None else 0.0
+                alert_tgt = float(a.target_price) if a.target_price is not None else 0.0
+                if not (t.stop_loss or 0) > 0 and alert_stop > 0:
+                    t.stop_loss = round(alert_stop, 4)
+                    seeded_from.append("alert.stop_loss")
+                if not (t.take_profit or 0) > 0 and alert_tgt > 0:
+                    t.take_profit = round(alert_tgt, 4)
+                    seeded_from.append("alert.target_price")
 
-        if not (t.take_profit or 0) > 0:
-            target_pct = exits.get("target_pct") or exits.get("take_profit_pct")
+        # 2) Pattern rules_json.exits percents — fallback for any side still empty.
+        if t.scan_pattern_id and (
+            not (t.stop_loss or 0) > 0 or not (t.take_profit or 0) > 0
+        ) and entry > 0:
             try:
-                tp = float(target_pct) if target_pct is not None else None
-            except (TypeError, ValueError):
-                tp = None
-            if tp is not None and tp > 0:
-                t.take_profit = round(
-                    entry * (1.0 + tp / 100.0) if side != "short" else entry * (1.0 - tp / 100.0),
-                    4,
-                )
-                dirty = True
+                p = db.get(ScanPattern, int(t.scan_pattern_id))
+            except Exception:
+                p = None
+            if p is not None:
+                rj = dict(p.rules_json or {})
+                exits = rj.get("exits") if isinstance(rj, dict) else None
+                if isinstance(exits, dict):
+                    if not (t.stop_loss or 0) > 0:
+                        sp = _coerce_pct(
+                            exits.get("stop_pct") or exits.get("stop_loss_pct")
+                        )
+                        if sp is not None and sp > 0:
+                            t.stop_loss = round(
+                                entry * (1.0 - sp / 100.0)
+                                if side != "short"
+                                else entry * (1.0 + sp / 100.0),
+                                4,
+                            )
+                            seeded_from.append("pattern.stop_pct")
+                    if not (t.take_profit or 0) > 0:
+                        tp = _coerce_pct(
+                            exits.get("target_pct") or exits.get("take_profit_pct")
+                        )
+                        if tp is not None and tp > 0:
+                            t.take_profit = round(
+                                entry * (1.0 + tp / 100.0)
+                                if side != "short"
+                                else entry * (1.0 - tp / 100.0),
+                                4,
+                            )
+                            seeded_from.append("pattern.target_pct")
 
-        if dirty:
+        if seeded_from:
             db.add(t)
+            dirty_rows.append(t)
             logger.info(
-                "[autotrader_monitor] seeded levels trade=%s ticker=%s stop=%s target=%s from pattern=%s",
+                "[autotrader_monitor] seeded levels trade=%s ticker=%s stop=%s target=%s sources=%s",
                 t.id,
                 t.ticker,
                 t.stop_loss,
                 t.take_profit,
-                t.scan_pattern_id,
+                ",".join(seeded_from),
             )
-    if dirty:
+    if dirty_rows:
         db.commit()
+
+
+def _coerce_pct(v: Any) -> float | None:
+    try:
+        return float(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
 
 
 def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
@@ -120,10 +149,20 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         return {"ok": True, "skipped": "kill_switch"}
 
     if getattr(settings, "chili_autotrader_rth_only", True):
-        from .pattern_imminent_alerts import us_stock_session_open
+        from .pattern_imminent_alerts import (
+            us_stock_extended_session_open,
+            us_stock_session_open,
+        )
 
-        if not us_stock_session_open():
-            return {"ok": True, "skipped": "outside_rth"}
+        allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
+        session_open = (
+            us_stock_extended_session_open() if allow_ext else us_stock_session_open()
+        )
+        if not session_open:
+            return {
+                "ok": True,
+                "skipped": "outside_extended_hours" if allow_ext else "outside_rth",
+            }
 
     summary: dict[str, Any] = {"checked": 0, "closed": 0, "errors": []}
 
@@ -182,9 +221,26 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
 
     # D1: manage any open pattern-linked Trade, not just v1-originated rows.
     # Users opt specific positions out via the desk's per-row "Pause monitor".
+    #
+    # SAFETY: scope to the configured autotrader user (``chili_autotrader_user_id``
+    # or ``brain_default_user_id``). Without this scope the monitor would sweep
+    # pattern-linked trades for every user in the DB and market-sell positions
+    # held in other brokerage accounts. Enforce a resolved uid before any live
+    # exits can fire.
+    uid = getattr(settings, "chili_autotrader_user_id", None) or getattr(
+        settings, "brain_default_user_id", None
+    )
+    if uid is None:
+        logger.warning(
+            "[autotrader_monitor] live monitor aborted: no chili_autotrader_user_id/"
+            "brain_default_user_id configured — cannot scope to owner"
+        )
+        return {**summary, "skipped": "no_user_scope"}
+
     open_rows = (
         db.query(Trade)
         .filter(
+            Trade.user_id == int(uid),
             Trade.status == "open",
             or_(
                 Trade.auto_trader_version == "v1",

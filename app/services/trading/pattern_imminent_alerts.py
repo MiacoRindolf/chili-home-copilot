@@ -65,6 +65,28 @@ def us_stock_session_open(now_utc: datetime | None = None) -> bool:
     return open_t <= t < close_t
 
 
+def us_stock_extended_session_open(now_utc: datetime | None = None) -> bool:
+    """True during Mon–Fri US/Eastern 04:00–20:00 — pre + RTH + post.
+
+    Robinhood's 24/5 window covers ~04:00–20:00 ET for most tickers (plus
+    narrower overnight sessions for a subset). This helper is intentionally
+    conservative: it keeps the AutoTrader away from weekends entirely and
+    gates on standard extended hours so entries/exits can attempt fills
+    outside RTH when ``chili_autotrader_allow_extended_hours`` is set. The
+    adapter itself decides whether market-order vs limit-order is appropriate
+    and surfaces rejection as a ``sell_fail`` / ``error`` without corrupting
+    position state.
+    """
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    et = now.astimezone(ZoneInfo("US/Eastern"))
+    if et.weekday() >= 5:
+        return False
+    t = et.time()
+    return time(4, 0) <= t < time(20, 0)
+
+
 def describe_us_session_context(now_utc: datetime | None = None) -> dict[str, Any]:
     """US equity session label for UI (premarket / regular / after_hours / closed)."""
     now = now_utc or datetime.now(timezone.utc)
@@ -805,4 +827,5 @@ __all__ = [
     "run_pattern_imminent_scan",
     "timeframe_to_hours_per_step",
     "us_stock_session_open",
+    "us_stock_extended_session_open",
 ]
