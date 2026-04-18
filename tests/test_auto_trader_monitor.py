@@ -1,11 +1,11 @@
 """Tests for AutoTrader v1 monitor (stop/target, daily loss trip)."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 from app import models
-from app.models.trading import BreakoutAlert, ScanPattern, Trade
+from app.models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 
 
 @patch("app.services.trading.governance.activate_kill_switch")
@@ -156,6 +156,262 @@ def test_monitor_manages_non_v1_pattern_linked_trade(db):
     db.refresh(t)
     assert t.status == "closed"
     ad.place_market_order.assert_called_once()
+
+
+def test_monitor_manages_plan_level_trade_without_pattern_link(db):
+    """Plan-level live trades should execute exits on stop/target just like the
+    advisory pattern-position monitor already evaluates them."""
+    u = models.User(name="d1_plan_levels_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="PLANX",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=12.0,
+        broker_source="robinhood",
+        tags="robinhood-sync",
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 8.0
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "oid-plan",
+        "raw": {"average_price": 8.0, "cumulative_quantity": 5},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.status == "closed"
+    ad.place_market_order.assert_called_once()
+
+
+def test_monitor_closes_on_latest_pattern_exit_now_decision(db):
+    """A fresh advisory EXIT_NOW should now bridge into the live sell path even
+    when the hard stop/target has not been crossed yet."""
+    u = models.User(name="d1_monitor_exit_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="EXIT1",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=14.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.flush()
+    db.add(
+        PatternMonitorDecision(
+            trade_id=t.id,
+            health_score=0.15,
+            action="exit_now",
+            decision_source="plan_levels",
+            price_at_decision=10.35,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 10.4  # above stop and below target
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "oid-exit-now",
+        "raw": {"average_price": 10.4, "cumulative_quantity": 5},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 1
+    db.refresh(t)
+    assert t.status == "closed"
+    assert t.exit_reason == "pattern_exit_now"
+    ad.place_market_order.assert_called_once()
+
+
+def test_monitor_uses_latest_pattern_decision_not_stale_exit_now(db):
+    """A newer HOLD decision must suppress an older EXIT_NOW recommendation."""
+    u = models.User(name="d1_monitor_hold_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="EXIT2",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=14.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.flush()
+    db.add_all(
+        [
+            PatternMonitorDecision(
+                trade_id=t.id,
+                health_score=0.12,
+                action="exit_now",
+                decision_source="plan_levels",
+                price_at_decision=10.2,
+                created_at=datetime.utcnow() - timedelta(hours=2),
+            ),
+            PatternMonitorDecision(
+                trade_id=t.id,
+                health_score=0.68,
+                action="hold",
+                decision_source="plan_levels",
+                price_at_decision=10.45,
+                created_at=datetime.utcnow() - timedelta(minutes=5),
+            ),
+        ]
+    )
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 10.5  # above stop and below target
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "oid-hold-wins",
+        "raw": {"average_price": 10.5, "cumulative_quantity": 5},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 0
+    db.refresh(t)
+    assert t.status == "open"
+    ad.place_market_order.assert_not_called()
+
+
+def test_monitor_skips_non_robinhood_trade_even_if_exit_would_fire(db):
+    """Safety: this monitor places orders through the Robinhood adapter, so
+    explicit non-Robinhood rows must be skipped."""
+    u = models.User(name="d1_monitor_coinbase_skip_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="BTC-USD",
+        direction="long",
+        entry_price=50000.0,
+        quantity=0.1,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=49000.0,
+        take_profit=52000.0,
+        broker_source="coinbase",
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = None
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "oid-should-not-fire",
+        "raw": {"average_price": 48000.0},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 0
+    assert any(
+        x.get("trade_id") == int(t.id) and x.get("broker_source") == "coinbase"
+        for x in (out.get("skipped_broker_source") or [])
+    )
+    db.refresh(t)
+    assert t.status == "open"
+    ad.place_market_order.assert_not_called()
+
+
+def test_monitor_skips_robinhood_crypto_ticker_on_equity_adapter(db):
+    """Robinhood crypto rows are synced into Trade, but this monitor's adapter is
+    still the equities path and must not try to liquidate ``-USD`` tickers."""
+    u = models.User(name="d1_monitor_rh_crypto_skip_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="ETH-USD",
+        direction="long",
+        entry_price=3000.0,
+        quantity=0.5,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=2900.0,
+        take_profit=3300.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 2800.0
+    ad.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "oid-rh-crypto-should-not-fire",
+        "raw": {"average_price": 2800.0},
+    }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("closed") == 0
+    assert any(
+        x.get("trade_id") == int(t.id) and x.get("ticker") == "ETH-USD"
+        for x in (out.get("skipped_unsupported_ticker") or [])
+    )
+    db.refresh(t)
+    assert t.status == "open"
+    ad.place_market_order.assert_not_called()
 
 
 def test_monitor_seeds_missing_levels_from_pattern(db):

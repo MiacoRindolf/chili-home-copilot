@@ -10,6 +10,7 @@ import pytest
 from app.services.broker_service import (
     map_rh_status,
     is_rh_terminal,
+    _rh_order_session_kwargs,
     _RH_TO_CHILI_STATUS,
 )
 
@@ -56,6 +57,33 @@ class TestStatusMapping:
     def test_case_insensitive(self):
         assert map_rh_status("FILLED") == "open"
         assert map_rh_status("Queued") == "working"
+
+
+class TestRobinhoodSessionFlags:
+    def test_regular_hours_when_extended_disabled(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chili_autotrader_allow_extended_hours", False, raising=False)
+        assert _rh_order_session_kwargs() == {
+            "extendedHours": False,
+            "market_hours": "regular_hours",
+        }
+
+    def test_all_day_hours_when_extended_session_open(self, monkeypatch):
+        from app.config import settings
+
+        monkeypatch.setattr(settings, "chili_autotrader_allow_extended_hours", True, raising=False)
+        with patch(
+            "app.services.trading.pattern_imminent_alerts.us_stock_session_open",
+            return_value=False,
+        ), patch(
+            "app.services.trading.pattern_imminent_alerts.us_stock_extended_session_open",
+            return_value=True,
+        ):
+            assert _rh_order_session_kwargs() == {
+                "extendedHours": True,
+                "market_hours": "all_day_hours",
+            }
 
 
 class TestIsRhTerminal:

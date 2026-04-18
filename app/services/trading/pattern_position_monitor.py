@@ -54,6 +54,33 @@ _last_monitor_alert_sig: dict[str, str] = {}
 _MONITOR_ALERT_DEDUP_MAX_KEYS = 500
 
 
+def _trade_quote_price(trade: Trade) -> tuple[float | None, str]:
+    """Venue-consistent quote lookup for live trades.
+
+    Robinhood-backed positions should prefer Robinhood's own quote feed so the
+    advisory monitor and the execution monitor reason about the same price.
+    Fall back to generic market data if the broker feed is unavailable.
+    """
+    if (trade.broker_source or "").lower() == "robinhood":
+        try:
+            from .venue.robinhood_spot import RobinhoodSpotAdapter
+
+            adapter = RobinhoodSpotAdapter()
+            if adapter.is_enabled():
+                px = adapter.get_quote_price(trade.ticker)
+                if px is not None:
+                    return (float(px), "robinhood")
+        except Exception:
+            logger.debug("[pattern_monitor] RH quote failed for %s", trade.ticker, exc_info=True)
+
+    try:
+        q = fetch_quote(trade.ticker)
+        px = float(q.get("price") or q.get("last") or 0) if q else 0.0
+    except Exception:
+        px = 0.0
+    return ((px or None), "market_data" if px else "unavailable")
+
+
 def _monitor_alert_dedup_key(ticker: str, scan_pattern_id: int | None, action: str) -> str:
     tid = (ticker or "").upper()
     pid = str(scan_pattern_id) if scan_pattern_id is not None else "none"
@@ -141,11 +168,8 @@ def resolve_position_verdict(
         return None
 
     if current_price is None or current_price <= 0:
-        try:
-            q = fetch_quote(trade.ticker)
-            current_price = float(q.get("price") or q.get("last") or 0) if q else 0.0
-        except Exception:
-            current_price = 0.0
+        current_price, _quote_source = _trade_quote_price(trade)
+        current_price = float(current_price or 0.0)
 
     tiny_float = current_price > 0 and current_price < 5.0
 
@@ -476,11 +500,8 @@ def _evaluate_plan_levels_trade(
     if stop is None and target is None:
         return "skipped"
 
-    try:
-        quote = fetch_quote(trade.ticker)
-        current_price = float(quote.get("price") or quote.get("last") or 0) if quote else 0
-    except Exception:
-        current_price = 0
+    current_price, quote_source = _trade_quote_price(trade)
+    current_price = float(current_price or 0)
     if not current_price:
         return "skipped"
 
@@ -572,6 +593,7 @@ def _evaluate_plan_levels_trade(
         "stop_loss": stop,
         "take_profit": target,
         "pnl_pct": pnl_pct,
+        "quote_source": quote_source,
     }
 
     health = ConditionHealth(
@@ -700,11 +722,8 @@ def _evaluate_single(
     flat = _flatten_indicators(indicators)
 
     # Get quote for current price.
-    try:
-        quote = fetch_quote(trade.ticker)
-        current_price = float(quote.get("price") or quote.get("last") or 0) if quote else 0
-    except Exception:
-        current_price = 0
+    current_price, quote_source = _trade_quote_price(trade)
+    current_price = float(current_price or 0)
     if not current_price:
         return "skipped"
 
@@ -996,6 +1015,11 @@ def _evaluate_single(
         decision_source=decision_source,
         price_at_decision=current_price,
     )
+    if isinstance(decision.conditions_snapshot, dict):
+        decision.conditions_snapshot = {
+            **decision.conditions_snapshot,
+            "quote_source": quote_source,
+        }
     db.add(decision)
 
     # ── Apply adjustment ──

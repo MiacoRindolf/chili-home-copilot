@@ -2750,7 +2750,7 @@ def start_scheduler():
                 _run_auto_trader_tick_job,
                 trigger=IntervalTrigger(seconds=_at_tick_s),
                 id="auto_trader_tick",
-                name=f"AutoTrader v1 tick (every {_at_tick_s}s; no-op when CHILI_AUTOTRADER_ENABLED=false)",
+                name=f"AutoTrader v1 tick (every {_at_tick_s}s)",
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=25),
@@ -2759,7 +2759,7 @@ def start_scheduler():
                 _run_auto_trader_monitor_job,
                 trigger=IntervalTrigger(seconds=_at_mon_s),
                 id="auto_trader_monitor",
-                name=f"AutoTrader v1 monitor (every {_at_mon_s}s; no-op when CHILI_AUTOTRADER_ENABLED=false)",
+                name=f"AutoTrader v1 monitor (every {_at_mon_s}s)",
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=30),
@@ -3362,5 +3362,4 @@ def get_scheduler_info() -> dict:
         "running": _scheduler.running,
         "jobs": jobs,
     }
-
 

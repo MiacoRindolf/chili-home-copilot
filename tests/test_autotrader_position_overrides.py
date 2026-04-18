@@ -304,6 +304,47 @@ def test_close_position_now_live(paired_client, db: Session) -> None:
     fake_adapter.place_market_order.assert_called_once()
 
 
+def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None:
+    _c, user = paired_client
+    t = Trade(
+        user_id=user.id,
+        ticker="CLP2",
+        direction="long",
+        entry_price=10.0,
+        quantity=4.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.25,
+        take_profit=11.5,
+        broker_source="robinhood",
+        tags="robinhood-sync",
+    )
+    db.add(t)
+    db.commit()
+    db.refresh(t)
+
+    fake_adapter = MagicMock()
+    fake_adapter.is_enabled.return_value = True
+    fake_adapter.place_market_order.return_value = {
+        "ok": True,
+        "order_id": "rh-plan-42",
+        "raw": {"average_price": "9.10"},
+    }
+
+    with patch(
+        "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+        return_value=fake_adapter,
+    ):
+        res = close_position_now(db, kind="trade", trade_id=int(t.id))
+
+    assert res["ok"] is True
+    db.refresh(t)
+    assert t.status == "closed"
+    assert t.exit_reason == "desk_close_now"
+    assert abs(float(t.exit_price) - 9.10) < 1e-6
+    fake_adapter.place_market_order.assert_called_once()
+
+
 def test_close_position_now_live_rh_off(paired_client, db: Session) -> None:
     _c, user = paired_client
     t = _mk_autotrader_trade(db, user.id, "CLT2")

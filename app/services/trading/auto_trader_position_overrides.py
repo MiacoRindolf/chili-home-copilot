@@ -25,6 +25,7 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import AutoTraderRun, BrainRuntimeMode, PaperTrade, Trade
+from .autopilot_scope import is_live_autopilot_trade
 
 logger = logging.getLogger(__name__)
 
@@ -189,12 +190,9 @@ def _close_trade_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
         return {"ok": False, "error": "trade_not_found"}
     if t.status != "open":
         return {"ok": False, "error": f"not_open:{t.status}"}
-    # Close-now is available on v1-adopted rows AND on any pattern-linked open
-    # row. The desk only surfaces positions meeting one of these, so this still
-    # excludes unrelated broker holdings.
-    is_v1 = (t.auto_trader_version or "") == "v1"
-    is_linked = bool(t.scan_pattern_id or t.related_alert_id)
-    if not (is_v1 or is_linked):
+    # Close-now is available for any live row surfaced on the Autopilot desk:
+    # AutoTrader v1, pattern-linked, or AI/manual plan-level rows.
+    if not is_live_autopilot_trade(t):
         return {"ok": False, "error": "not_pattern_linked"}
 
     from .venue.robinhood_spot import RobinhoodSpotAdapter

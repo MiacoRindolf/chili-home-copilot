@@ -1188,7 +1188,7 @@ def _require_trading_user_id(request: Request, db: Session) -> int:
 
 @router.get("/api/trading/autotrader/desk")
 def api_autotrader_desk(request: Request, db: Session = Depends(get_db)):
-    """Autopilot desk: AutoTrader runtime flags + open positions linked to CHILI patterns."""
+    """Autopilot desk: AutoTrader runtime flags + CHILI-managed open positions."""
     uid = _require_trading_user_id(request, db)
     from ..config import settings as _s
     from ..services.trading.autotrader_desk import (
