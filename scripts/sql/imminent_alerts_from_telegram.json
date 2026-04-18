@@ -1,0 +1,1178 @@
+[
+  {
+    "ticker": "MGRT",
+    "pattern_id": 168,
+    "pattern_name": "Volume-confirmed resistance breakout [tf-15m]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:31+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 177,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [guided-cross-dist_to_resistance_pct]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:32+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 161,
+    "pattern_name": "Volume-confirmed resistance breakout [No-BOS-breakout]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:33+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 162,
+    "pattern_name": "Volume-confirmed resistance breakout [BOS-tight]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:34+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 163,
+    "pattern_name": "Volume-confirmed resistance breakout [BOS-moderate]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:35+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 164,
+    "pattern_name": "Volume-confirmed resistance breakout [BOS-wide]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:36+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 165,
+    "pattern_name": "Volume-confirmed resistance breakout [entry-cross-vcp_count]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:36+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 166,
+    "pattern_name": "Volume-confirmed resistance breakout [entry-tweak-dist_to_resistance_pct-0.25-]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:37+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 160,
+    "pattern_name": "Volume-confirmed resistance breakout",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T14:34:38+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 176,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [mut-g2-atr3.1]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T15:49:31+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 12,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T15:49:32+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T15:49:32+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 60,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim [cross-vcp_count]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T15:49:33+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 177,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [guided-cross-dist_to_resistance_pct]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T17:45:31+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T18:57:18+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 60,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim [cross-vcp_count]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T18:57:21+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 177,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [guided-cross-dist_to_resistance_pct]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-02T20:47:06+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 177,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [guided-cross-dist_to_resistance_pct]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T17:43:01+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T17:43:01+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 60,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim [cross-vcp_count]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T17:43:02+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 177,
+    "pattern_name": "VWAP Reclaim + Volume [cross-price] [guided-cross-dist_to_resistance_pct]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T20:58:01+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T20:58:02+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 60,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim [cross-vcp_count]",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-03T20:58:03+00:00"
+  },
+  {
+    "ticker": "PFSI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-07T14:44:48+00:00"
+  },
+  {
+    "ticker": "MGRT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-07T14:44:50+00:00"
+  },
+  {
+    "ticker": "ACHC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-07T15:52:45+00:00"
+  },
+  {
+    "ticker": "ACHC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-07T20:01:56+00:00"
+  },
+  {
+    "ticker": "AFRM",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T15:13:29+00:00"
+  },
+  {
+    "ticker": "ALG",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T15:46:04+00:00"
+  },
+  {
+    "ticker": "PVH",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T15:46:06+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T15:58:45+00:00"
+  },
+  {
+    "ticker": "SPGI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T17:14:16+00:00"
+  },
+  {
+    "ticker": "SXTC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T17:27:36+00:00"
+  },
+  {
+    "ticker": "AGPU",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T17:27:38+00:00"
+  },
+  {
+    "ticker": "AEHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T17:27:40+00:00"
+  },
+  {
+    "ticker": "AGL",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T18:28:00+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T19:12:27+00:00"
+  },
+  {
+    "ticker": "AGPU",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T20:42:52+00:00"
+  },
+  {
+    "ticker": "AEHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-08T20:42:55+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T14:38:23+00:00"
+  },
+  {
+    "ticker": "AGL",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T14:38:26+00:00"
+  },
+  {
+    "ticker": "ACLS",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T14:38:28+00:00"
+  },
+  {
+    "ticker": "AEIS",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T15:07:42+00:00"
+  },
+  {
+    "ticker": "AEHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T16:43:03+00:00"
+  },
+  {
+    "ticker": "AFJK",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T16:43:06+00:00"
+  },
+  {
+    "ticker": "AGPU",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T16:43:08+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T17:43:19+00:00"
+  },
+  {
+    "ticker": "ALG",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T17:43:22+00:00"
+  },
+  {
+    "ticker": "AGL",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-09T17:43:25+00:00"
+  },
+  {
+    "ticker": "AMAT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T15:05:12+00:00"
+  },
+  {
+    "ticker": "AMD",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T15:05:15+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T15:25:01+00:00"
+  },
+  {
+    "ticker": "AEHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T15:25:01+00:00"
+  },
+  {
+    "ticker": "AFJK",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T15:25:02+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T18:34:53+00:00"
+  },
+  {
+    "ticker": "AFJK",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T18:34:54+00:00"
+  },
+  {
+    "ticker": "AEHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-10T18:34:54+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T14:36:28+00:00"
+  },
+  {
+    "ticker": "CRDO",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T15:37:22+00:00"
+  },
+  {
+    "ticker": "ALLO",
+    "pattern_id": 285,
+    "pattern_name": "ADX_Expansion_Breakout_25",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T15:37:23+00:00"
+  },
+  {
+    "ticker": "ALLO",
+    "pattern_id": 296,
+    "pattern_name": "BullFlag_PullbackBreakout",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T15:51:12+00:00"
+  },
+  {
+    "ticker": "AMKR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T16:36:27+00:00"
+  },
+  {
+    "ticker": "ALLO",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T17:06:10+00:00"
+  },
+  {
+    "ticker": "AAOI",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T17:36:54+00:00"
+  },
+  {
+    "ticker": "AIXI",
+    "pattern_id": 285,
+    "pattern_name": "ADX_Expansion_Breakout_25",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T17:52:58+00:00"
+  },
+  {
+    "ticker": "AGL",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-13T17:53:00+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "legacy",
+    "sent_at_utc": "2026-04-14T00:38:38+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T07:46:11+00:00"
+  },
+  {
+    "ticker": "ZEC-USD",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T12:59:42+00:00"
+  },
+  {
+    "ticker": "SNDK",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:35:34+00:00"
+  },
+  {
+    "ticker": "YSS",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:35:34+00:00"
+  },
+  {
+    "ticker": "MSFT",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:35:35+00:00"
+  },
+  {
+    "ticker": "ABTC",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:35:36+00:00"
+  },
+  {
+    "ticker": "INTC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:35:37+00:00"
+  },
+  {
+    "ticker": "CMC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:52:10+00:00"
+  },
+  {
+    "ticker": "UPS",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:52:11+00:00"
+  },
+  {
+    "ticker": "MS",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T15:52:12+00:00"
+  },
+  {
+    "ticker": "FCX",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:01:26+00:00"
+  },
+  {
+    "ticker": "RGTU",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:01:27+00:00"
+  },
+  {
+    "ticker": "AMZN",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:01:28+00:00"
+  },
+  {
+    "ticker": "AMD",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:01:28+00:00"
+  },
+  {
+    "ticker": "GOOGL",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:52+00:00"
+  },
+  {
+    "ticker": "SGML",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:52+00:00"
+  },
+  {
+    "ticker": "SRLN",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:53+00:00"
+  },
+  {
+    "ticker": "RGTX",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:54+00:00"
+  },
+  {
+    "ticker": "CIFG",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:55+00:00"
+  },
+  {
+    "ticker": "NBIS",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:55+00:00"
+  },
+  {
+    "ticker": "UI",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T17:46:56+00:00"
+  },
+  {
+    "ticker": "TQQQ",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:10:48+00:00"
+  },
+  {
+    "ticker": "HOOD",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:42+00:00"
+  },
+  {
+    "ticker": "ICHR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:43+00:00"
+  },
+  {
+    "ticker": "CAR",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:43+00:00"
+  },
+  {
+    "ticker": "REBN",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:44+00:00"
+  },
+  {
+    "ticker": "LNZA",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:45+00:00"
+  },
+  {
+    "ticker": "ORKA",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:46+00:00"
+  },
+  {
+    "ticker": "NCEW",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:35:46+00:00"
+  },
+  {
+    "ticker": "SYRE",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:53:58+00:00"
+  },
+  {
+    "ticker": "MRVL",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:53:59+00:00"
+  },
+  {
+    "ticker": "CAR",
+    "pattern_id": 285,
+    "pattern_name": "ADX_Expansion_Breakout_25",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:54:00+00:00"
+  },
+  {
+    "ticker": "LNZA",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:54:00+00:00"
+  },
+  {
+    "ticker": "ANET",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:57:00+00:00"
+  },
+  {
+    "ticker": "CAR",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:57:00+00:00"
+  },
+  {
+    "ticker": "SYRE",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:57:01+00:00"
+  },
+  {
+    "ticker": "MRVL",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:57:02+00:00"
+  },
+  {
+    "ticker": "LNZA",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T18:57:03+00:00"
+  },
+  {
+    "ticker": "EWT",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:08:20+00:00"
+  },
+  {
+    "ticker": "CLS",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:08:21+00:00"
+  },
+  {
+    "ticker": "SYK",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:22:49+00:00"
+  },
+  {
+    "ticker": "BTGO",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:22:50+00:00"
+  },
+  {
+    "ticker": "DLR",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:22:51+00:00"
+  },
+  {
+    "ticker": "AVGO",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:22:51+00:00"
+  },
+  {
+    "ticker": "STM",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:22:52+00:00"
+  },
+  {
+    "ticker": "MSFT",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:41:17+00:00"
+  },
+  {
+    "ticker": "HOOD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:41:17+00:00"
+  },
+  {
+    "ticker": "C",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:41:18+00:00"
+  },
+  {
+    "ticker": "BE",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:41:19+00:00"
+  },
+  {
+    "ticker": "LGND",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:56:49+00:00"
+  },
+  {
+    "ticker": "BE",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T19:56:50+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 599,
+    "pattern_name": "Range_breakout_multi_retest_confirmation",
+    "format": "rich",
+    "sent_at_utc": "2026-04-14T22:11:44+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 599,
+    "pattern_name": "Range_breakout_multi_retest_confirmation",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T01:17:49+00:00"
+  },
+  {
+    "ticker": "ZEC-USD",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T13:22:22+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T13:45:58+00:00"
+  },
+  {
+    "ticker": "SOLV",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:40+00:00"
+  },
+  {
+    "ticker": "GOOGL",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:41+00:00"
+  },
+  {
+    "ticker": "TILE",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:42+00:00"
+  },
+  {
+    "ticker": "SOFI",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:44+00:00"
+  },
+  {
+    "ticker": "AMD",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:45+00:00"
+  },
+  {
+    "ticker": "INTC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T14:38:46+00:00"
+  },
+  {
+    "ticker": "SNDK",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T15:05:11+00:00"
+  },
+  {
+    "ticker": "NVDA",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T15:49:00+00:00"
+  },
+  {
+    "ticker": "QPUX",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:08:59+00:00"
+  },
+  {
+    "ticker": "ABM",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:08:59+00:00"
+  },
+  {
+    "ticker": "ACHR",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:09:00+00:00"
+  },
+  {
+    "ticker": "TOYO",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:09:01+00:00"
+  },
+  {
+    "ticker": "TLS",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:40:07+00:00"
+  },
+  {
+    "ticker": "ARTV",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T17:40:08+00:00"
+  },
+  {
+    "ticker": "QBTX",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:15+00:00"
+  },
+  {
+    "ticker": "BULX",
+    "pattern_id": 285,
+    "pattern_name": "ADX_Expansion_Breakout_25",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:16+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:16+00:00"
+  },
+  {
+    "ticker": "BULG",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:17+00:00"
+  },
+  {
+    "ticker": "TSLA",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:18+00:00"
+  },
+  {
+    "ticker": "TNGX",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T18:37:19+00:00"
+  },
+  {
+    "ticker": "ROOT",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:41+00:00"
+  },
+  {
+    "ticker": "GOOGL",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:41+00:00"
+  },
+  {
+    "ticker": "SMR",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:42+00:00"
+  },
+  {
+    "ticker": "ACCO",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:43+00:00"
+  },
+  {
+    "ticker": "PDSB",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:43+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 599,
+    "pattern_name": "Range_breakout_multi_retest_confirmation",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:23:44+00:00"
+  },
+  {
+    "ticker": "TQQQ",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:48:27+00:00"
+  },
+  {
+    "ticker": "XLK",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:48:28+00:00"
+  },
+  {
+    "ticker": "KKR",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:48:29+00:00"
+  },
+  {
+    "ticker": "INTC",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:48:30+00:00"
+  },
+  {
+    "ticker": "PDSB",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T19:48:30+00:00"
+  },
+  {
+    "ticker": "SOFX",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:07:08+00:00"
+  },
+  {
+    "ticker": "TSLR",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:07:09+00:00"
+  },
+  {
+    "ticker": "NNBR",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:07:10+00:00"
+  },
+  {
+    "ticker": "IONQ.WS",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:21:08+00:00"
+  },
+  {
+    "ticker": "SNAG",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:21:09+00:00"
+  },
+  {
+    "ticker": "ABM",
+    "pattern_id": 52,
+    "pattern_name": "Falling Wedge Breakout + Trend Reclaim",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:21:10+00:00"
+  },
+  {
+    "ticker": "KMRK",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:21:11+00:00"
+  },
+  {
+    "ticker": "ACHR",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:21:11+00:00"
+  },
+  {
+    "ticker": "PDSB",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T20:40:41+00:00"
+  },
+  {
+    "ticker": "BULLW",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T21:03:30+00:00"
+  },
+  {
+    "ticker": "SNAG",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T21:03:32+00:00"
+  },
+  {
+    "ticker": "NEXA",
+    "pattern_id": 589,
+    "pattern_name": "breakout_pullback_retest_hold_ema20",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T21:03:33+00:00"
+  },
+  {
+    "ticker": "SHIM",
+    "pattern_id": 323,
+    "pattern_name": "bullish_bear_trap_reclaim_support",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T21:03:35+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 361,
+    "pattern_name": "demand_zone_reversal_long",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T21:57:53+00:00"
+  },
+  {
+    "ticker": "AAVE-USD",
+    "pattern_id": 599,
+    "pattern_name": "Range_breakout_multi_retest_confirmation",
+    "format": "rich",
+    "sent_at_utc": "2026-04-15T23:19:08+00:00"
+  }
+]

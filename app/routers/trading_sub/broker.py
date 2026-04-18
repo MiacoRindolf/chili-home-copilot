@@ -197,14 +197,35 @@ async def api_broker_connect(
             return resp
 
     result = broker_manager.connect_broker(broker, credentials=credentials)
+
+    # On a successful connect, immediately mirror broker positions/orders into
+    # the local DB so Monitor + Watchlist populate without waiting for the
+    # Mon–Fri scheduled broker_sync job or a manual "Sync All" click.
+    sync_result: dict | None = None
+    if result.get("status") == "connected" and user_id:
+        try:
+            sync_result = broker_manager.sync_all(db, user_id)
+            logger.info(
+                "[broker] Post-connect sync (user=%d, broker=%s): %s",
+                user_id, broker, sync_result,
+            )
+        except Exception:
+            logger.warning(
+                "[broker] Post-connect sync failed (user=%d, broker=%s)",
+                user_id, broker, exc_info=True,
+            )
+
     statuses = broker_manager.get_all_broker_statuses()
     statuses["robinhood"]["has_credentials"] = has_broker_credentials(db, user_id, "robinhood")
     statuses["coinbase"]["has_credentials"] = has_broker_credentials(db, user_id, "coinbase")
-    resp = JSONResponse({
+    payload: dict = {
         "ok": result.get("status") == "connected",
         **result,
         "brokers": statuses,
-    })
+    }
+    if sync_result is not None:
+        payload["sync"] = sync_result
+    resp = JSONResponse(payload)
     if new_token:
         resp.set_cookie(
             DEVICE_COOKIE_NAME,
@@ -218,29 +239,67 @@ async def api_broker_connect(
 
 
 @router.post("/api/trading/broker/verify")
-async def api_broker_verify(request: Request):
+async def api_broker_verify(
+    request: Request,
+    db: Session = Depends(get_db),
+    identity: dict = Depends(get_identity_ctx),
+):
     """Submit SMS/TOTP verification code (Robinhood only)."""
     body = await request.json()
     code = body.get("code", "")
     result = broker_service.login_step2_verify(code)
     statuses = broker_manager.get_all_broker_statuses()
-    return JSONResponse({
+    payload: dict = {
         "ok": result["status"] == "connected",
         **result,
         "brokers": statuses,
-    })
+    }
+    if result.get("status") == "connected":
+        uid = identity.get("user_id")
+        if not uid:
+            cookie = request.cookies.get(DEVICE_COOKIE_NAME)
+            if cookie:
+                dev = db.query(Device).filter(Device.token == cookie).first()
+                if dev:
+                    uid = dev.user_id
+        if uid:
+            try:
+                payload["sync"] = broker_manager.sync_all(db, uid)
+                logger.info("[broker] Post-verify sync (user=%d): %s", uid, payload["sync"])
+            except Exception:
+                logger.warning("[broker] Post-verify sync failed (user=%d)", uid, exc_info=True)
+    return JSONResponse(payload)
 
 
 @router.get("/api/trading/broker/poll")
-async def api_broker_poll():
+async def api_broker_poll(
+    request: Request,
+    db: Session = Depends(get_db),
+    identity: dict = Depends(get_identity_ctx),
+):
     """Poll Robinhood app approval."""
     result = broker_service.poll_app_approval()
     statuses = broker_manager.get_all_broker_statuses()
-    return JSONResponse({
+    payload: dict = {
         "ok": result["status"] == "approved",
         **result,
         "brokers": statuses,
-    })
+    }
+    if result.get("status") == "approved":
+        uid = identity.get("user_id")
+        if not uid:
+            cookie = request.cookies.get(DEVICE_COOKIE_NAME)
+            if cookie:
+                dev = db.query(Device).filter(Device.token == cookie).first()
+                if dev:
+                    uid = dev.user_id
+        if uid:
+            try:
+                payload["sync"] = broker_manager.sync_all(db, uid)
+                logger.info("[broker] Post-approval sync (user=%d): %s", uid, payload["sync"])
+            except Exception:
+                logger.warning("[broker] Post-approval sync failed (user=%d)", uid, exc_info=True)
+    return JSONResponse(payload)
 
 
 @router.get("/api/trading/broker/positions")
