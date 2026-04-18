@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import logging
 import uuid
-from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
 
 from ....config import settings
 from ... import coinbase_service as cb
+from . import idempotency_store, rate_limiter
 from .protocol import (
     FreshnessMeta,
     NormalizedFill,
@@ -21,44 +21,16 @@ from .protocol import (
 
 _log = logging.getLogger(__name__)
 
-# Recent client_order_id -> monotonic time of submission (duplicate guard)
-_recent_client_orders: OrderedDict[str, float] = OrderedDict()
-_GUARD_TTL_SEC = 300.0
-_GUARD_MAX = 512
+_VENUE = "coinbase"
 
 
 def reset_duplicate_client_order_guard_for_tests() -> None:
-    """Clear in-process duplicate client_order_id guard (pytest only)."""
-    _recent_client_orders.clear()
+    """Clear in-process duplicate client_order_id cache (pytest only).
 
-
-def _monotonic_now() -> float:
-    import time
-
-    return time.monotonic()
-
-
-def _guard_remember(client_order_id: str) -> None:
-    now_m = _monotonic_now()
-    while len(_recent_client_orders) >= _GUARD_MAX:
-        _recent_client_orders.popitem(last=False)
-    _recent_client_orders[client_order_id] = now_m
-    # prune stale
-    cutoff = now_m - _GUARD_TTL_SEC
-    for k in list(_recent_client_orders.keys()):
-        if _recent_client_orders[k] < cutoff:
-            del _recent_client_orders[k]
-        else:
-            break
-
-
-def _guard_is_duplicate(client_order_id: str) -> bool:
-    now_m = _monotonic_now()
-    cutoff = now_m - _GUARD_TTL_SEC
-    ts = _recent_client_orders.get(client_order_id)
-    if ts is None:
-        return False
-    return ts >= cutoff
+    Does NOT truncate the DB table — tests that need a clean DB row set
+    should use their own fixtures.
+    """
+    idempotency_store.reset_for_tests()
 
 
 def _as_dict(resp: Any) -> dict[str, Any]:
@@ -472,8 +444,11 @@ class CoinbaseSpotAdapter:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
         cid = client_order_id or str(uuid.uuid4())
-        if _guard_is_duplicate(cid):
+        if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
         pid = _to_product_id(product_id)
         try:
             c = self._require_client()
@@ -489,7 +464,15 @@ class CoinbaseSpotAdapter:
             sr = _as_dict(rd.get("success_response"))
             oid = sr.get("order_id") or cid
             if ok or oid:
-                _guard_remember(cid)
+                idempotency_store.remember(
+                    cid,
+                    venue=_VENUE,
+                    symbol=pid,
+                    side=side_l,
+                    qty=float(base_size or 0.0),
+                    broker_order_id=oid if oid != cid else None,
+                    status="submitted",
+                )
                 cb.clear_cache()
                 return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
             er = _as_dict(rd.get("error_response"))
@@ -512,8 +495,11 @@ class CoinbaseSpotAdapter:
         if not getattr(settings, "chili_coinbase_spot_adapter_enabled", True):
             return {"ok": False, "error": "adapter disabled"}
         cid = client_order_id or str(uuid.uuid4())
-        if _guard_is_duplicate(cid):
+        if idempotency_store.is_duplicate(cid, venue=_VENUE):
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
         pid = _to_product_id(product_id)
         try:
             c = self._require_client()
@@ -539,7 +525,15 @@ class CoinbaseSpotAdapter:
             sr = _as_dict(rd.get("success_response"))
             oid = sr.get("order_id") or cid
             if ok or oid:
-                _guard_remember(cid)
+                idempotency_store.remember(
+                    cid,
+                    venue=_VENUE,
+                    symbol=pid,
+                    side=side_l,
+                    qty=float(base_size or 0.0),
+                    broker_order_id=oid if oid != cid else None,
+                    status="submitted",
+                )
                 cb.clear_cache()
                 return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
             er = _as_dict(rd.get("error_response"))
@@ -553,6 +547,9 @@ class CoinbaseSpotAdapter:
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         if not self.is_enabled():
             return {"ok": False, "error": "adapter disabled"}
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(_VENUE, retry_after)
         try:
             c = self._require_client()
             resp = c.cancel_orders(order_ids=[order_id])

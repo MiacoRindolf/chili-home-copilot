@@ -84,6 +84,15 @@ def try_emit_momentum_session_feedback(
     except Exception as ex:
         _log.warning("[momentum_feedback] evolution ingest failed session_id=%s: %s", sess.id, ex)
 
+    # P0.2 — after a momentum session terminates with realized PnL, re-check
+    # the global daily-loss cap so a mixed-path drawdown (autotrader + momentum)
+    # can trip the kill switch. No-ops if already active or no limits configured.
+    try:
+        from ..governance import check_daily_loss_breach
+        check_daily_loss_breach(db, user_id=sess.user_id)
+    except Exception as ex:
+        _log.debug("[momentum_feedback] global daily-loss check skipped: %s", ex)
+
     return {"ok": True, "emitted": True, "session_id": int(sess.id), "outcome_class": row.outcome_class}
 
 

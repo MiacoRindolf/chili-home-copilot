@@ -144,7 +144,7 @@ class TestSyncOrdersToDb:
 
         db = MagicMock()
         filter_mock = db.query.return_value.filter.return_value
-        filter_mock.all.side_effect = [[trade], []]
+        filter_mock.all.side_effect = [[trade], [], []]
 
         result = sync_orders_to_db(db, user_id=None)
 
@@ -165,9 +165,10 @@ class TestSyncOrdersToDb:
         mock_get_order.return_value = {"state": "cancelled"}
 
         db = MagicMock()
-        # First .all() call = working trades, second = open-with-order-id reconciliation
+        # First .all() call = working trades, second = open-with-order-id reconciliation,
+        # third = open trades carrying a pending exit order.
         filter_mock = db.query.return_value.filter.return_value
-        filter_mock.all.side_effect = [[trade], []]
+        filter_mock.all.side_effect = [[trade], [], []]
 
         result = sync_orders_to_db(db, user_id=None)
 
@@ -185,7 +186,7 @@ class TestSyncOrdersToDb:
 
         db = MagicMock()
         filter_mock = db.query.return_value.filter.return_value
-        filter_mock.all.side_effect = [[trade], []]
+        filter_mock.all.side_effect = [[trade], [], []]
 
         result = sync_orders_to_db(db, user_id=None)
 
@@ -210,10 +211,51 @@ class TestSyncOrdersToDb:
         trade = self._make_trade()
         db = MagicMock()
         filter_mock = db.query.return_value.filter.return_value
-        filter_mock.all.side_effect = [[trade], []]
+        filter_mock.all.side_effect = [[trade], [], []]
 
         result = sync_orders_to_db(db, user_id=None)
         assert result["errors"] == 1
+
+    @patch("app.services.broker_service.is_connected", return_value=True)
+    @patch("app.services.broker_service.get_order_by_id")
+    def test_pending_exit_fill_closes_trade(self, mock_get_order, mock_connected):
+        from app.services.broker_service import sync_orders_to_db
+
+        trade = self._make_trade(
+            id=77,
+            status="open",
+            broker_order_id=None,
+            pending_exit_order_id="exit-123",
+            pending_exit_status="working",
+            pending_exit_requested_at=datetime.utcnow(),
+            pending_exit_reason="pattern_exit_now",
+            pending_exit_limit_price=150.5,
+            exit_price=None,
+            exit_date=None,
+            pnl=None,
+            exit_reason=None,
+            related_alert_id=None,
+            scan_pattern_id=None,
+        )
+        mock_get_order.return_value = {
+            "id": "exit-123",
+            "state": "filled",
+            "average_price": "151.50",
+            "last_transaction_at": datetime.utcnow().isoformat() + "Z",
+        }
+
+        db = MagicMock()
+        filter_mock = db.query.return_value.filter.return_value
+        filter_mock.all.side_effect = [[], [], [trade]]
+
+        result = sync_orders_to_db(db, user_id=None)
+
+        assert result["filled"] == 1
+        assert trade.status == "closed"
+        assert trade.exit_reason == "pattern_exit_now"
+        assert trade.exit_price == 151.5
+        assert trade.pending_exit_order_id is None
+        assert trade.pending_exit_status is None
 
 
 # ── Execute proposal status ──────────────────────────────────────────

@@ -452,6 +452,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .mon-badge-action-loosen_target { background: rgba(59,130,246,0.2); color: #93c5fd; }
 .mon-badge-action-exit_now { background: rgba(239,68,68,0.25); color: #fca5a5; }
 .mon-badge-src { background: rgba(168,85,247,0.2); color: #d8b4fe; font-size: 8px; }
+.mon-badge-exec-working { background: rgba(59,130,246,0.22); color: #bfdbfe; }
+.mon-badge-exec-deferred { background: rgba(245,158,11,0.22); color: #fde68a; }
+.mon-badge-exec-closed { background: rgba(239,68,68,0.22); color: #fecaca; }
+.mon-exec-reason { margin-top: 4px; font-size: 9px; color: var(--text-muted); line-height: 1.35; }
 .mon-card-expand { margin-top: 4px; }
 .mon-expand-btn {
   width: 100%; text-align: center; font-size: 10px; padding: 5px; border-radius: 6px;
@@ -8913,6 +8917,14 @@ function _monitorActionClass(act) {
   return 'mon-badge-action-hold';
 }
 
+function _monitorExecutionClass(state) {
+  var s = String(state || '').toLowerCase();
+  if (s === 'exit_order_working') return 'mon-badge-exec-working';
+  if (s === 'deferred') return 'mon-badge-exec-deferred';
+  if (s === 'closed_weekend') return 'mon-badge-exec-closed';
+  return 'mon-badge-exec-deferred';
+}
+
 function _monitorHealthPct(ld) {
   if (!ld) return null;
   if (ld.health_score_pct != null && ld.health_score_pct !== '') {
@@ -9049,8 +9061,18 @@ function renderMonitorCards(setups) {
     html += '<div class="mon-badges">';
     html += '<span class="mon-badge ' + _monitorActionClass(act) + '">' + escHtml(act) + '</span>';
     html += '<span class="mon-badge mon-badge-src">' + escHtml(src) + '</span>';
+    if (s.execution_label) {
+      html += '<span class="mon-badge ' + _monitorExecutionClass(s.execution_state) + '">' + escHtml(s.execution_label) + '</span>';
+    }
     html += '<span style="font-size:9px;color:var(--text-muted);">' + escHtml(when) + '</span>';
     html += '</div>';
+    if (s.execution_reason || s.next_eligible_session_at) {
+      var execReason = s.execution_reason || '';
+      if (s.next_eligible_session_at) {
+        execReason += (execReason ? ' · ' : '') + 'next: ' + s.next_eligible_session_at;
+      }
+      html += '<div class="mon-exec-reason">' + escHtml(execReason) + '</div>';
+    }
     var aiPlan = _getPlanByTradeId(s.trade_id) || _getPlanByTicker(s.ticker);
     if (aiPlan) {
       var assessClass = 'assess-' + (aiPlan.assessment || 'neutral').toLowerCase();

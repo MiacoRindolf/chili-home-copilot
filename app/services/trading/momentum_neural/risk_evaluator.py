@@ -478,7 +478,7 @@ def evaluate_proposed_momentum_automation(
             )
         )
 
-    # ── Daily loss cap ────────────────────────────────────────────────────
+    # ── Daily loss cap (momentum-local) ───────────────────────────────────
     daily_pnl = _daily_realized_pnl(db, user_id)
     ok_dloss = daily_pnl > -policy.max_daily_loss_usd
     checks.append(
@@ -490,6 +490,40 @@ def evaluate_proposed_momentum_automation(
             detail={"daily_pnl_usd": daily_pnl, "max_daily_loss_usd": policy.max_daily_loss_usd},
         )
     )
+
+    # ── Global daily loss cap (P0.2 — spans autotrader + momentum) ────────
+    # Read-only here: we block new entries if already breached, but do NOT
+    # activate the kill switch from a pre-entry "what if" evaluation. The
+    # post-close hooks (feedback_emit / auto_trader_monitor) do the actual
+    # activation when a realized-loss event lands.
+    try:
+        from ..governance import check_daily_loss_breach
+        gdl = check_daily_loss_breach(db, user_id=user_id, activate=False)
+        ok_gdl = not bool(gdl.get("breached"))
+        if gdl.get("source") != "none":
+            checks.append(
+                _check(
+                    "global_daily_loss_cap",
+                    ok_gdl,
+                    severity="block" if not ok_gdl and m == "live" else ("warn" if not ok_gdl else "ok"),
+                    message=(
+                        f"Global realized PnL ${float(gdl.get('realized_usd', 0.0)):+.2f} "
+                        f"vs cap -${float(gdl.get('limit_usd', 0.0)):.2f} "
+                        f"(src={gdl.get('source')})."
+                    ),
+                    detail={
+                        "realized_usd": gdl.get("realized_usd"),
+                        "limit_usd": gdl.get("limit_usd"),
+                        "source": gdl.get("source"),
+                        "breakdown": gdl.get("breakdown"),
+                    },
+                )
+            )
+    except Exception:
+        # Non-fatal: the post-close hook is the real enforcement; this check
+        # is additive / informational at pre-entry.
+        pass
+
     checks.append(
         _check(
             "notional_cap",

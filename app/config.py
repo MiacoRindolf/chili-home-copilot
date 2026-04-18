@@ -986,6 +986,96 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_RISK_AUTO_EXPIRE_PENDING_LIVE_ARM_SECONDS"),
     )
 
+    # Durable venue idempotency (P0.1) — DB-backed client_order_id guard.
+    # TTLs are deliberately asymmetric: crypto markets 24/7 so a shorter
+    # window suffices; equities can go through a weekend before a retry
+    # becomes obviously stale.
+    chili_venue_idempotency_ttl_hours_crypto: float = Field(
+        default=48.0,
+        ge=1.0,
+        le=720.0,
+        validation_alias=AliasChoices("CHILI_VENUE_IDEMPOTENCY_TTL_HOURS_CRYPTO"),
+    )
+    chili_venue_idempotency_ttl_hours_equities: float = Field(
+        default=168.0,
+        ge=1.0,
+        le=720.0,
+        validation_alias=AliasChoices("CHILI_VENUE_IDEMPOTENCY_TTL_HOURS_EQUITIES"),
+    )
+
+    # Global daily-loss halt (P0.2) — single source of truth spanning both
+    # AutoTrader v1 and momentum_neural paths. The more conservative of the
+    # two limits (usd vs pct-of-equity) wins. Set pct to 0 to disable that leg.
+    chili_global_max_daily_loss_usd: float = Field(
+        default=300.0,
+        ge=0.0,
+        le=1_000_000.0,
+        validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_USD"),
+    )
+    chili_global_max_daily_loss_pct_of_equity: float = Field(
+        default=0.02,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_GLOBAL_MAX_DAILY_LOSS_PCT_OF_EQUITY"),
+    )
+
+    # Venue order rate limiter (P0.3) — token-bucket per venue wrapping
+    # place_* / cancel_order. Defaults are deliberately well below each
+    # venue's published cap so a reconciler retry storm can't 429-lock
+    # the account. Override via env in prod if needed.
+    # Robinhood's equities REST is ~60 req/min in practice; stay conservative.
+    chili_venue_rate_limit_rh_orders_per_min: float = Field(
+        default=20.0,
+        ge=1.0,
+        le=300.0,
+        validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_RH_ORDERS_PER_MIN"),
+    )
+    chili_venue_rate_limit_rh_burst: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_RH_BURST"),
+    )
+    # Coinbase Advanced Trade private endpoints are ~30 req/s per account;
+    # orders specifically are lower. Stay comfortably under.
+    chili_venue_rate_limit_cb_orders_per_sec: float = Field(
+        default=3.0,
+        ge=0.1,
+        le=30.0,
+        validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_CB_ORDERS_PER_SEC"),
+    )
+    chili_venue_rate_limit_cb_burst: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_CB_BURST"),
+    )
+    chili_venue_rate_limit_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_ENABLED"),
+    )
+
+    # Autopilot mutual exclusion (P0.4) — only one autopilot path may "own"
+    # entries for a given symbol at a time. The primary is authoritative;
+    # the non-primary is read-only/analysis until promoted. Both paths
+    # check this gate before placing entry orders; exits are always allowed
+    # regardless (once open, a position must be closeable). Values:
+    #   "momentum_neural" | "auto_trader_v1"
+    # An unknown / empty value disables primary preference (but the per-symbol
+    # lease still fires, so concurrent entries on the same symbol are blocked).
+    chili_autopilot_primary: str = Field(
+        default="momentum_neural",
+        validation_alias=AliasChoices("CHILI_AUTOPILOT_PRIMARY"),
+    )
+    # When True, entry attempts from the non-primary autopilot are blocked
+    # even when the symbol has no active lease holder (strict primary mode).
+    # When False, the non-primary may enter a symbol that has no owner, but
+    # is still blocked from overlapping an existing lease holder.
+    chili_autopilot_strict_primary: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_AUTOPILOT_STRICT_PRIMARY"),
+    )
+
     # Phase 7 — simulated paper automation runner (no live orders).
     chili_momentum_paper_runner_enabled: bool = Field(
         default=False,

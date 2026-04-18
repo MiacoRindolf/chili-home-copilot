@@ -335,6 +335,157 @@ def check_trade_gate(
     return {"allowed": True, "reason": "within_auto_gates", "needs_approval": False}
 
 
+# ── Global Daily-Loss Halt (P0.2) ─────────────────────────────────────
+#
+# Single source of truth that spans BOTH AutoTrader v1 (Trade table) and
+# momentum_neural (MomentumAutomationOutcome table). Intentionally additive
+# to the path-local caps:
+#   • auto_trader_monitor uses its own $150 v1-only cap
+#   • momentum_neural uses policy.max_daily_loss_usd ($250)
+# Either a local cap or this global cap can fire the kill switch; defense
+# in depth. Use the MORE CONSERVATIVE of (usd, pct_of_equity) when both
+# are configured.
+
+
+def global_realized_pnl_today_et(
+    db: Session, user_id: int | None = None
+) -> dict[str, Any]:
+    """Sum realized PnL across ALL trading paths for today's US/Eastern calendar day.
+
+    Unlike `auto_trader_rules.autotrader_realized_pnl_today_et` (which filters
+    `auto_trader_version == "v1"`), this aggregates across:
+      - `Trade` rows (ALL auto_trader_versions, closed with exit_date in today's ET session)
+      - `MomentumAutomationOutcome` rows (sessions with terminal_at in today's ET session)
+
+    Returns {"total_usd", "autotrader_usd", "momentum_usd"} — signed
+    (negative == loss). `user_id=None` → sum across all users.
+    """
+    from datetime import datetime as _dt, timedelta as _td
+    from zoneinfo import ZoneInfo
+    from sqlalchemy import func as sa_func
+    from ...models.trading import Trade, MomentumAutomationOutcome
+
+    et = ZoneInfo("America/New_York")
+    now_et = _dt.now(et)
+    start_et = now_et.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_et = start_et + _td(days=1)
+    start_utc = start_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+    end_utc = end_et.astimezone(ZoneInfo("UTC")).replace(tzinfo=None)
+
+    # Trade rows (all versions; v1 and any future variants)
+    tq = db.query(Trade).filter(
+        Trade.status == "closed",
+        Trade.exit_date.isnot(None),
+        Trade.exit_date >= start_utc,
+        Trade.exit_date < end_utc,
+    )
+    if user_id is not None:
+        tq = tq.filter(Trade.user_id == user_id)
+    trade_total = 0.0
+    for t in tq.all():
+        if t.pnl is not None:
+            trade_total += float(t.pnl)
+
+    # Momentum automation outcomes
+    mq = db.query(
+        sa_func.coalesce(sa_func.sum(MomentumAutomationOutcome.realized_pnl_usd), 0.0)
+    ).filter(
+        MomentumAutomationOutcome.terminal_at >= start_utc,
+        MomentumAutomationOutcome.terminal_at < end_utc,
+    )
+    if user_id is not None:
+        mq = mq.filter(MomentumAutomationOutcome.user_id == user_id)
+    momentum_total = float(mq.scalar() or 0.0)
+
+    return {
+        "total_usd": trade_total + momentum_total,
+        "autotrader_usd": trade_total,
+        "momentum_usd": momentum_total,
+    }
+
+
+def check_daily_loss_breach(
+    db: Session,
+    *,
+    user_id: int | None = None,
+    equity_usd: float | None = None,
+    activate: bool = True,
+) -> dict[str, Any]:
+    """Check if today's realized loss breaches the global daily-loss cap.
+
+    Limits (in priority: the more conservative wins):
+      - `chili_global_max_daily_loss_usd` (absolute dollar cap; disabled if 0)
+      - `chili_global_max_daily_loss_pct_of_equity * equity_usd`
+        (pct cap; requires `equity_usd`; disabled if pct=0 or equity missing)
+
+    If breached and `activate=True`, fires the global kill switch.
+
+    Returns:
+      {
+        "breached": bool,
+        "reason": str,
+        "realized_usd": float,        # signed; negative means losing
+        "limit_usd": float,           # positive dollar amount of the chosen cap
+        "source": "usd"|"pct_equity"|"none",
+        "breakdown": {"autotrader_usd": float, "momentum_usd": float},
+      }
+    """
+    usd_cap = float(getattr(settings, "chili_global_max_daily_loss_usd", 0.0) or 0.0)
+    pct_cap = float(getattr(settings, "chili_global_max_daily_loss_pct_of_equity", 0.0) or 0.0)
+
+    pnl = global_realized_pnl_today_et(db, user_id)
+    realized = float(pnl["total_usd"])
+
+    candidates: list[tuple[float, str]] = []
+    if usd_cap > 0:
+        candidates.append((usd_cap, "usd"))
+    if pct_cap > 0 and equity_usd is not None and float(equity_usd) > 0:
+        candidates.append((pct_cap * float(equity_usd), "pct_equity"))
+
+    if not candidates:
+        return {
+            "breached": False,
+            "reason": "no_daily_loss_limit_configured",
+            "realized_usd": realized,
+            "limit_usd": 0.0,
+            "source": "none",
+            "breakdown": {
+                "autotrader_usd": pnl["autotrader_usd"],
+                "momentum_usd": pnl["momentum_usd"],
+            },
+        }
+
+    # More conservative = smaller positive dollar amount
+    limit_usd, source = min(candidates, key=lambda kv: kv[0])
+    breached = realized <= -limit_usd
+    reason = (
+        f"global_daily_loss_breach_{source}_${limit_usd:.0f}"
+        if breached
+        else f"within_global_daily_loss_cap_${limit_usd:.0f}"
+    )
+
+    if breached and activate and not is_kill_switch_active():
+        activate_kill_switch(reason)
+        logger.critical(
+            "[governance] Global daily-loss breach (realized=%.2f limit=-%.2f source=%s) — kill switch",
+            realized,
+            limit_usd,
+            source,
+        )
+
+    return {
+        "breached": bool(breached),
+        "reason": reason,
+        "realized_usd": realized,
+        "limit_usd": limit_usd,
+        "source": source,
+        "breakdown": {
+            "autotrader_usd": pnl["autotrader_usd"],
+            "momentum_usd": pnl["momentum_usd"],
+        },
+    }
+
+
 # ── Trade Velocity Limits ─────────────────────────────────────────────
 
 _trade_timestamps: list[float] = []

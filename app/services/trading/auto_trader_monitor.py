@@ -18,7 +18,6 @@ from typing import Any
 from sqlalchemy.orm import Session
 
 from ...models.trading import (
-    AutoTraderRun,
     BreakoutAlert,
     PatternMonitorDecision,
     ScanPattern,
@@ -202,23 +201,14 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
     if is_kill_switch_active():
         return {"ok": True, "skipped": "kill_switch"}
 
-    if getattr(settings, "chili_autotrader_rth_only", True):
-        from .pattern_imminent_alerts import (
-            us_stock_extended_session_open,
-            us_stock_session_open,
-        )
-
-        allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
-        session_open = (
-            us_stock_extended_session_open() if allow_ext else us_stock_session_open()
-        )
-        if not session_open:
-            return {
-                "ok": True,
-                "skipped": "outside_extended_hours" if allow_ext else "outside_rth",
-            }
-
-    summary: dict[str, Any] = {"checked": 0, "closed": 0, "errors": []}
+    summary: dict[str, Any] = {
+        "checked": 0,
+        "closed": 0,
+        "working": 0,
+        "deferred": 0,
+        "cancelled": 0,
+        "errors": [],
+    }
 
     from .autotrader_desk import effective_autotrader_runtime
 
@@ -302,9 +292,12 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         .all()
     )
 
-    from .auto_trader_position_overrides import (
-        clear_position_overrides,
-        list_position_overrides,
+    from .auto_trader_position_overrides import list_position_overrides
+    from .robinhood_exit_execution import (
+        cancel_pending_exit_order,
+        describe_robinhood_equity_execution_window,
+        has_active_pending_exit,
+        submit_robinhood_trade_exit,
     )
 
     # Seed missing stop/target from the linked ScanPattern's exit hints so the
@@ -370,7 +363,31 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
         monitor_exit_meta = _fresh_monitor_exit_meta(
             latest_monitor_decisions.get(int(t.id))
         )
+        pending_reason = (t.pending_exit_reason or "").strip().lower()
+        pending_status = (t.pending_exit_status or "").strip().lower()
+        if pending_reason == "pattern_exit_now" and monitor_exit_meta is None and (
+            has_active_pending_exit(t) or pending_status == "deferred"
+        ):
+            cancelled = cancel_pending_exit_order(
+                db,
+                t,
+                reason="superseded_monitor_hold",
+                audit_decision_prefix="monitor_exit",
+                adapter=adapter,
+            )
+            if not cancelled.get("ok"):
+                summary["errors"].append(
+                    f"cancel_pending_exit:{t.id}:{cancelled.get('error')}"
+                )
+                continue
+            summary["cancelled"] += 1
+            pending_reason = ""
+            pending_status = ""
         if not hit_stop and not hit_target and monitor_exit_meta is None:
+            if has_active_pending_exit(t):
+                summary["working"] += 1
+            elif pending_status == "deferred":
+                summary["deferred"] += 1
             continue
 
         qty = float(t.quantity or 0)
@@ -384,110 +401,76 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
             reason = "target"
         else:
             reason = "pattern_exit_now"
-        client_oid = f"atv1-{t.id}-exit-{reason}"
-        try:
-            res = adapter.place_market_order(
-                product_id=t.ticker,
-                side="sell",
-                base_size=str(qty),
-                client_order_id=client_oid,
-            )
-        except Exception as e:
-            logger.warning("[autotrader_monitor] sell failed trade=%s: %s", t.id, e)
-            summary["errors"].append(f"sell_exc:{t.id}")
+        if has_active_pending_exit(t) and pending_reason == reason:
+            summary["working"] += 1
             continue
+        if pending_status == "deferred" and pending_reason == reason:
+            window = describe_robinhood_equity_execution_window(
+                t.ticker,
+                adapter=adapter,
+            )
+            if not window.get("can_submit_now"):
+                summary["deferred"] += 1
+                continue
+
+        client_oid = f"atv1-{t.id}-exit-{reason}"
+        res = submit_robinhood_trade_exit(
+            db,
+            t,
+            exit_reason=reason,
+            audit_decision_prefix="monitor_exit",
+            client_order_id=client_oid,
+            adapter=adapter,
+            monitor_exit_meta=monitor_exit_meta,
+        )
 
         if not res.get("ok"):
             summary["errors"].append(f"sell_fail:{t.id}:{res.get('error')}")
             continue
 
-        raw = res.get("raw") or {}
-        exit_px = None
-        try:
-            exit_px = float(raw.get("average_price") or raw.get("price") or px)
-        except (TypeError, ValueError):
-            exit_px = px
-
-        entry = float(t.entry_price)
-        pnl = (exit_px - entry) * qty
-        t.status = "closed"
-        t.exit_price = exit_px
-        t.exit_date = datetime.utcnow()
-        t.pnl = round(pnl, 4)
-        t.exit_reason = reason
-        t.broker_order_id = str(res.get("order_id") or "") or t.broker_order_id
-        db.add(t)
-        db.commit()
-        summary["closed"] += 1
-        logger.info(
-            "[autotrader_monitor] Closed trade id=%s ticker=%s reason=%s pnl=%.2f",
-            t.id,
-            t.ticker,
-            reason,
-            pnl,
-        )
-
-        # PDT soft-warn: stamp audit row when the exit would be a same-day
-        # round trip (long only, stocks only). We don't block — Robinhood
-        # itself rejects if the account is PDT flagged.
-        try:
-            from .auto_trader_position_overrides import _opened_today_et
-
-            opened_today = bool(t.entry_date) and _opened_today_et(t.entry_date)
-            would_be_day_trade = (
-                opened_today
-                and (t.direction or "long") == "long"
-                and (t.broker_source or "") != "crypto"
+        state = str(res.get("state") or "").lower()
+        if state == "filled":
+            db.refresh(t)
+            summary["closed"] += 1
+            logger.info(
+                "[autotrader_monitor] Closed trade id=%s ticker=%s reason=%s pnl=%s",
+                t.id,
+                t.ticker,
+                reason,
+                t.pnl,
             )
-            audit = AutoTraderRun(
-                user_id=t.user_id,
-                breakout_alert_id=t.related_alert_id,
-                scan_pattern_id=t.scan_pattern_id,
-                ticker=(t.ticker or "").upper(),
-                decision="monitor_exit",
-                reason=reason,
-                trade_id=int(t.id),
-                rule_snapshot={
-                    "exit_reason": reason,
-                    "pnl": round(pnl, 4),
-                    "opened_today_et": opened_today,
-                    "would_be_day_trade": would_be_day_trade,
-                    **(
-                        {"monitor_decision": monitor_exit_meta}
-                        if monitor_exit_meta is not None
-                        else {}
-                    ),
-                },
-            )
-            db.add(audit)
-            db.commit()
-            if would_be_day_trade:
-                summary.setdefault("would_be_day_trade_exits", []).append(int(t.id))
-        except Exception:
-            logger.debug("[autotrader_monitor] PDT audit stamp failed", exc_info=True)
-
-        try:
-            clear_position_overrides(db, "trade", int(t.id))
-        except Exception:
-            logger.debug("[autotrader_monitor] clear_position_overrides failed", exc_info=True)
-
-        _maybe_trip_daily_loss_kill_switch(db, t.user_id)
+            _maybe_trip_daily_loss_kill_switch(db, t.user_id)
+        elif state == "working":
+            summary["working"] += 1
+        elif state == "deferred":
+            summary["deferred"] += 1
 
     return summary
 
 
 def _maybe_trip_daily_loss_kill_switch(db: Session, user_id: int | None) -> None:
     from .auto_trader_rules import autotrader_realized_pnl_today_et
-    from .governance import activate_kill_switch
+    from .governance import activate_kill_switch, check_daily_loss_breach
 
+    # Path-local v1 cap (legacy, autotrader-only, stays as a tighter tripwire).
     cap = float(getattr(settings, "chili_autotrader_daily_loss_cap_usd", 150.0))
-    if cap <= 0:
-        return
-    total = autotrader_realized_pnl_today_et(db, user_id)
-    if total <= -cap:
-        activate_kill_switch("autotrader_daily_loss_cap")
-        logger.critical(
-            "[autotrader_monitor] Daily loss cap hit (pnl_today=%.2f cap=%.2f) — kill switch",
-            total,
-            cap,
+    if cap > 0:
+        total = autotrader_realized_pnl_today_et(db, user_id)
+        if total <= -cap:
+            activate_kill_switch("autotrader_daily_loss_cap")
+            logger.critical(
+                "[autotrader_monitor] Daily loss cap hit (pnl_today=%.2f cap=%.2f) — kill switch",
+                total,
+                cap,
+            )
+
+    # Global cap (P0.2) — spans autotrader + momentum_neural so a mixed-path
+    # drawdown can't sneak past either path-local cap. `check_daily_loss_breach`
+    # handles the kill-switch activation and no-op's if already active.
+    try:
+        check_daily_loss_breach(db, user_id=user_id)
+    except Exception:
+        logger.debug(
+            "[autotrader_monitor] Global daily-loss check failed (non-fatal)",
+            exc_info=True,
         )

@@ -95,6 +95,11 @@ class Trade(Base):
     )
     scale_in_count: int = Column(Integer, nullable=False, default=0)
     auto_trader_version: Optional[str] = Column(String(32), nullable=True, index=True)
+    pending_exit_order_id: Optional[str] = Column(String(100), nullable=True)
+    pending_exit_status: Optional[str] = Column(String(30), nullable=True)
+    pending_exit_requested_at: Optional[datetime] = Column(DateTime, nullable=True)
+    pending_exit_reason: Optional[str] = Column(String(50), nullable=True)
+    pending_exit_limit_price: Optional[float] = Column(Float, nullable=True)
 
 
 class AutoTraderRun(Base):

@@ -173,7 +173,7 @@ def close_position_now(
     trade_id: int,
     updated_by: str = "autopilot_ui",
 ) -> dict[str, Any]:
-    """Market-sell (live) or best-effort close (paper) immediately.
+    """Submit a live exit or best-effort close a paper trade immediately.
 
     Returns ``{"ok": bool, "error"?: str, "exit_price"?: float, "pnl"?: float}``.
     """
@@ -196,6 +196,7 @@ def _close_trade_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
         return {"ok": False, "error": "not_pattern_linked"}
 
     from .venue.robinhood_spot import RobinhoodSpotAdapter
+    from .robinhood_exit_execution import submit_robinhood_trade_exit
 
     adapter = RobinhoodSpotAdapter()
     if not adapter.is_enabled():
@@ -206,67 +207,46 @@ def _close_trade_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
         return {"ok": False, "error": "bad_qty"}
 
     client_oid = f"atv1-{t.id}-desk-close"
-    try:
-        res = adapter.place_market_order(
-            product_id=t.ticker,
-            side="sell",
-            base_size=str(qty),
-            client_order_id=client_oid,
-        )
-    except Exception as e:
-        logger.exception("[autotrader_pos_override] close live trade=%s failed", t.id)
-        return {"ok": False, "error": f"adapter_exc:{e}"}
-
+    res = submit_robinhood_trade_exit(
+        db,
+        t,
+        exit_reason="desk_close_now",
+        audit_decision_prefix="desk_close",
+        client_order_id=client_oid,
+        adapter=adapter,
+    )
     if not res.get("ok"):
         return {"ok": False, "error": f"broker:{res.get('error')}"}
-
-    raw = res.get("raw") or {}
-    try:
-        exit_px = (
-            float(raw.get("average_price") or raw.get("price") or 0)
-            or _current_quote_price(t.ticker, prefer_rh=True)
-            or float(t.entry_price)
+    state = str(res.get("state") or "").lower()
+    db.refresh(t)
+    if state == "filled":
+        logger.info(
+            "[autotrader_pos_override] live close trade=%s ticker=%s exit=%.4f pnl=%.2f",
+            t.id,
+            t.ticker,
+            float(t.exit_price or 0.0),
+            float(t.pnl or 0.0),
         )
-    except (TypeError, ValueError):
-        exit_px = _current_quote_price(t.ticker, prefer_rh=True) or float(t.entry_price)
-
-    entry = float(t.entry_price)
-    pnl = (exit_px - entry) * qty
-    t.status = "closed"
-    t.exit_price = exit_px
-    t.exit_date = datetime.utcnow()
-    t.pnl = round(pnl, 4)
-    t.exit_reason = "desk_close_now"
-    t.broker_order_id = str(res.get("order_id") or "") or t.broker_order_id
-    db.add(t)
-    db.commit()
-
-    opened_today = _opened_today_et(t.entry_date) if t.entry_date else False
-    audit = AutoTraderRun(
-        user_id=t.user_id,
-        breakout_alert_id=t.related_alert_id,
-        scan_pattern_id=t.scan_pattern_id,
-        ticker=(t.ticker or "").upper(),
-        decision="desk_close_now",
-        reason=f"close_by={updated_by}",
-        trade_id=t.id,
-        rule_snapshot={
-            "opened_today_et": opened_today,
-            "would_be_day_trade": opened_today and (t.direction or "long") == "long",
-        },
-    )
-    db.add(audit)
-    db.commit()
-
-    clear_position_overrides(db, "trade", t.id)
-    logger.info(
-        "[autotrader_pos_override] live close trade=%s ticker=%s exit=%.4f pnl=%.2f",
-        t.id,
-        t.ticker,
-        exit_px,
-        pnl,
-    )
-    return {"ok": True, "exit_price": exit_px, "pnl": round(pnl, 4)}
+        return {
+            "ok": True,
+            "state": "filled",
+            "exit_price": float(t.exit_price or 0.0),
+            "pnl": float(t.pnl or 0.0),
+        }
+    if state == "working":
+        return {
+            "ok": True,
+            "state": "working",
+            "order_id": t.pending_exit_order_id,
+            "pending_exit_status": t.pending_exit_status,
+        }
+    if state == "deferred":
+        return {
+            "ok": True,
+            "state": "deferred",
+            "reason": res.get("execution_reason"),
+        }
+    return {"ok": True, "state": state or "submitted"}
 
 
 def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str, Any]:

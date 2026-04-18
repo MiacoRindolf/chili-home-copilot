@@ -53,21 +53,39 @@ def test_tick_closes_on_stop(db):
         "raw": {"average_price": 8.0, "cumulative_quantity": 10},
     }
 
-    with patch("app.services.trading.auto_trader_monitor.settings") as s:
-        s.chili_autotrader_enabled = True
-        s.chili_autotrader_rth_only = False
-        s.chili_autotrader_live_enabled = True
-        s.chili_autotrader_daily_loss_cap_usd = 500.0
-        s.chili_autotrader_user_id = u.id
-        s.brain_default_user_id = u.id
+    def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
+        res = ad.place_market_order(
+            product_id=trade.ticker,
+            side="sell",
+            base_size=str(trade.quantity or 0),
+            client_order_id=client_order_id,
+        )
+        raw = dict(res.get("raw") or {})
+        exit_px = float(raw.get("average_price") or ad.get_quote_price(trade.ticker) or trade.entry_price)
+        qty = float(trade.quantity or 0)
+        trade.status = "closed"
+        trade.exit_price = exit_px
+        trade.exit_date = datetime.utcnow()
+        trade.exit_reason = exit_reason
+        trade.pnl = round((exit_px - float(trade.entry_price)) * qty, 4)
+        db_sess.add(trade)
+        db_sess.commit()
+        return {"ok": True, "state": "filled", "order_id": res.get("order_id")}
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
         with patch(
             "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
             return_value=ad,
+        ), patch(
+            "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.submit_robinhood_trade_exit",
+            side_effect=_fake_submit,
         ):
-            with patch(
-                "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
-            ):
-                out = tick_auto_trader_monitor(db)
+            out = tick_auto_trader_monitor(db)
+    finally:
+        patch.stopall()
 
     assert out.get("closed") == 1
     db.refresh(t)
@@ -99,8 +117,107 @@ def _patch_monitor_settings(**overrides):
     return s
 
 
-def _run_tick_with_adapter(db, adapter):
+def _mock_execution_window(**overrides):
+    base = {
+        "ticker": "ZZZ",
+        "session": "regular_hours",
+        "session_label": "Regular session",
+        "market_hours": "regular_hours",
+        "next_eligible_session_at": datetime.utcnow(),
+        "overnight_eligible": False,
+        "can_submit_now": True,
+        "execution_reason": "Regular session",
+    }
+    base.update(overrides)
+    return base
+
+
+def _run_tick_with_adapter(db, adapter, *, execution_window=None):
     from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    active_window = execution_window or _mock_execution_window()
+
+    def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
+        if hasattr(adapter, "_submit_side_effect") and adapter._submit_side_effect is not None:
+            return adapter._submit_side_effect(
+                db_sess,
+                trade,
+                exit_reason=exit_reason,
+                client_order_id=client_order_id,
+                **_kwargs,
+            )
+        if not active_window.get("can_submit_now"):
+            trade.pending_exit_order_id = None
+            trade.pending_exit_status = "deferred"
+            trade.pending_exit_requested_at = datetime.utcnow()
+            trade.pending_exit_reason = exit_reason
+            trade.pending_exit_limit_price = None
+            db_sess.add(trade)
+            db_sess.commit()
+            return {
+                "ok": True,
+                "state": "deferred",
+                "execution_reason": active_window.get("execution_reason"),
+                "next_eligible_session_at": active_window.get("next_eligible_session_at"),
+            }
+        if active_window.get("session") != "regular_hours":
+            res = adapter.place_limit_order_gtc(
+                product_id=trade.ticker,
+                side="sell",
+                base_size=str(int(round(float(trade.quantity or 0)))),
+                limit_price=str(active_window.get("mock_limit_price") or trade.entry_price),
+                client_order_id=client_order_id,
+            )
+        else:
+            res = adapter.place_market_order(
+                product_id=trade.ticker,
+                side="sell",
+                base_size=str(trade.quantity or 0),
+                client_order_id=client_order_id,
+            )
+        if not res.get("ok"):
+            return res
+        raw = dict(res.get("raw") or {})
+        state = str(res.get("state") or raw.get("state") or "filled").lower()
+        if state == "filled":
+            exit_px = float(raw.get("average_price") or raw.get("price") or adapter.get_quote_price(trade.ticker) or trade.entry_price)
+            qty = float(trade.quantity or 0)
+            trade.status = "closed"
+            trade.exit_price = exit_px
+            trade.exit_date = datetime.utcnow()
+            trade.exit_reason = exit_reason
+            trade.pnl = round((exit_px - float(trade.entry_price)) * qty, 4)
+            trade.pending_exit_order_id = None
+            trade.pending_exit_status = None
+            trade.pending_exit_requested_at = None
+            trade.pending_exit_reason = None
+            trade.pending_exit_limit_price = None
+            db_sess.add(trade)
+            db_sess.commit()
+            return {"ok": True, "state": "filled", "order_id": res.get("order_id")}
+        if state == "working":
+            trade.pending_exit_order_id = str(res.get("order_id") or raw.get("id") or "pending-order")
+            trade.pending_exit_status = "working"
+            trade.pending_exit_requested_at = datetime.utcnow()
+            trade.pending_exit_reason = exit_reason
+            trade.pending_exit_limit_price = float(raw.get("price") or 0) or None
+            db_sess.add(trade)
+            db_sess.commit()
+            return {"ok": True, "state": "working", "order_id": trade.pending_exit_order_id}
+        if state == "deferred":
+            trade.pending_exit_order_id = None
+            trade.pending_exit_status = "deferred"
+            trade.pending_exit_requested_at = datetime.utcnow()
+            trade.pending_exit_reason = exit_reason
+            trade.pending_exit_limit_price = None
+            db_sess.add(trade)
+            db_sess.commit()
+            return {
+                "ok": True,
+                "state": "deferred",
+                "execution_reason": res.get("execution_reason") or raw.get("execution_reason"),
+            }
+        return {"ok": True, "state": state, "order_id": res.get("order_id")}
 
     with patch(
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
@@ -109,7 +226,15 @@ def _run_tick_with_adapter(db, adapter):
         with patch(
             "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
         ):
-            return tick_auto_trader_monitor(db)
+            with patch(
+                "app.services.trading.robinhood_exit_execution.describe_robinhood_equity_execution_window",
+                return_value=active_window,
+            ):
+                with patch(
+                    "app.services.trading.robinhood_exit_execution.submit_robinhood_trade_exit",
+                    side_effect=_fake_submit,
+                ):
+                    return tick_auto_trader_monitor(db)
 
 
 def test_monitor_manages_non_v1_pattern_linked_trade(db):
@@ -205,6 +330,8 @@ def test_monitor_manages_plan_level_trade_without_pattern_link(db):
 def test_monitor_closes_on_latest_pattern_exit_now_decision(db):
     """A fresh advisory EXIT_NOW should now bridge into the live sell path even
     when the hard stop/target has not been crossed yet."""
+    from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
+
     u = models.User(name="d1_monitor_exit_u")
     db.add(u)
     db.flush()
@@ -244,9 +371,37 @@ def test_monitor_closes_on_latest_pattern_exit_now_decision(db):
         "raw": {"average_price": 10.4, "cumulative_quantity": 5},
     }
 
+    def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
+        res = ad.place_market_order(
+            product_id=trade.ticker,
+            side="sell",
+            base_size=str(trade.quantity or 0),
+            client_order_id=client_order_id,
+        )
+        raw = dict(res.get("raw") or {})
+        exit_px = float(raw.get("average_price") or ad.get_quote_price(trade.ticker) or trade.entry_price)
+        qty = float(trade.quantity or 0)
+        trade.status = "closed"
+        trade.exit_price = exit_px
+        trade.exit_date = datetime.utcnow()
+        trade.exit_reason = exit_reason
+        trade.pnl = round((exit_px - float(trade.entry_price)) * qty, 4)
+        db_sess.add(trade)
+        db_sess.commit()
+        return {"ok": True, "state": "filled", "order_id": res.get("order_id")}
+
     _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
-        out = _run_tick_with_adapter(db, ad)
+        with patch(
+            "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+            return_value=ad,
+        ), patch(
+            "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.submit_robinhood_trade_exit",
+            side_effect=_fake_submit,
+        ):
+            out = tick_auto_trader_monitor(db)
     finally:
         patch.stopall()
 
@@ -682,19 +837,248 @@ def test_monitor_aborts_when_no_autotrader_user_configured(db):
     ad.place_market_order.assert_not_called()
 
 
-def test_monitor_extended_hours_gate_blocks_pure_overnight(db, monkeypatch):
-    """chili_autotrader_allow_extended_hours uses 04:00-20:00 ET; outside that
-    the monitor short-circuits with skipped=outside_extended_hours."""
-    from app.services.trading import auto_trader_monitor as mod
+def test_monitor_defers_weekend_exit_now_without_queueing(db):
+    from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
 
-    monkeypatch.setattr(mod.settings, "chili_autotrader_enabled", True, raising=False)
-    monkeypatch.setattr(mod.settings, "chili_autotrader_rth_only", True, raising=False)
-    monkeypatch.setattr(
-        mod.settings, "chili_autotrader_allow_extended_hours", True, raising=False
+    u = models.User(name="weekend_exit_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="WKND",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=14.0,
+        broker_source="robinhood",
     )
-    with patch(
-        "app.services.trading.pattern_imminent_alerts.us_stock_extended_session_open",
-        return_value=False,
-    ):
-        out = mod.tick_auto_trader_monitor(db)
-    assert out.get("skipped") == "outside_extended_hours"
+    db.add(t)
+    db.flush()
+    db.add(
+        PatternMonitorDecision(
+            trade_id=t.id,
+            health_score=0.1,
+            action="exit_now",
+            decision_source="plan_levels",
+            price_at_decision=10.25,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 10.3
+    ad.place_market_order.return_value = {"ok": True}
+    ad.place_limit_order_gtc.return_value = {"ok": True}
+
+    def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
+        trade.pending_exit_order_id = None
+        trade.pending_exit_status = "deferred"
+        trade.pending_exit_requested_at = datetime.utcnow()
+        trade.pending_exit_reason = exit_reason
+        trade.pending_exit_limit_price = None
+        db_sess.add(trade)
+        db_sess.commit()
+        return {
+            "ok": True,
+            "state": "deferred",
+            "execution_reason": "Weekend closed",
+            "next_eligible_session_at": datetime.utcnow() + timedelta(days=1),
+        }
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        with patch(
+            "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+            return_value=ad,
+        ), patch(
+            "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.describe_robinhood_equity_execution_window",
+            return_value=_mock_execution_window(
+                ticker="WKND",
+                session="closed_weekend",
+                session_label="Weekend closed",
+                market_hours=None,
+                can_submit_now=False,
+                execution_reason="Weekend closed",
+                next_eligible_session_at=datetime.utcnow() + timedelta(days=1),
+            ),
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.submit_robinhood_trade_exit",
+            side_effect=_fake_submit,
+        ):
+            out = tick_auto_trader_monitor(db)
+    finally:
+        patch.stopall()
+
+    assert out.get("deferred") == 1
+    db.refresh(t)
+    assert t.status == "open"
+    assert t.pending_exit_status == "deferred"
+    assert t.pending_exit_reason == "pattern_exit_now"
+    ad.place_market_order.assert_not_called()
+    ad.place_limit_order_gtc.assert_not_called()
+
+
+def test_monitor_marks_offhours_exit_order_working(db):
+    from app.services.trading.auto_trader_monitor import tick_auto_trader_monitor
+
+    u = models.User(name="ext_hours_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="EXT1",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=14.0,
+        broker_source="robinhood",
+    )
+    db.add(t)
+    db.flush()
+    db.add(
+        PatternMonitorDecision(
+            trade_id=t.id,
+            health_score=0.12,
+            action="exit_now",
+            decision_source="plan_levels",
+            price_at_decision=10.15,
+            created_at=datetime.utcnow(),
+        )
+    )
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 10.2
+    ad.place_limit_order_gtc.return_value = {
+        "ok": True,
+        "state": "working",
+        "order_id": "exit-ext-1",
+        "raw": {"state": "working", "price": 10.15},
+    }
+
+    def _fake_submit(db_sess, trade, *, exit_reason, client_order_id, **_kwargs):
+        res = ad.place_limit_order_gtc(
+            product_id=trade.ticker,
+            side="sell",
+            base_size=str(int(round(float(trade.quantity or 0)))),
+            limit_price="10.15",
+            client_order_id=client_order_id,
+        )
+        raw = dict(res.get("raw") or {})
+        trade.pending_exit_order_id = str(res.get("order_id") or raw.get("id") or "exit-ext-1")
+        trade.pending_exit_status = str(res.get("state") or raw.get("state") or "working")
+        trade.pending_exit_requested_at = datetime.utcnow()
+        trade.pending_exit_reason = exit_reason
+        trade.pending_exit_limit_price = float(raw.get("price") or 10.15)
+        db_sess.add(trade)
+        db_sess.commit()
+        return {"ok": True, "state": "working", "order_id": trade.pending_exit_order_id}
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        with patch(
+            "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
+            return_value=ad,
+        ), patch(
+            "app.services.trading.auto_trader_monitor._maybe_trip_daily_loss_kill_switch",
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.describe_robinhood_equity_execution_window",
+            return_value=_mock_execution_window(
+                ticker="EXT1",
+                session="extended_hours",
+                session_label="Extended hours",
+                market_hours="extended_hours",
+                can_submit_now=True,
+                execution_reason="Extended hours",
+                mock_limit_price=10.15,
+            ),
+        ), patch(
+            "app.services.trading.robinhood_exit_execution.submit_robinhood_trade_exit",
+            side_effect=_fake_submit,
+        ):
+            out = tick_auto_trader_monitor(db)
+    finally:
+        patch.stopall()
+
+    assert out.get("working") == 1
+    db.refresh(t)
+    assert t.status == "open"
+    assert t.pending_exit_status == "working"
+    assert t.pending_exit_order_id == "exit-ext-1"
+    ad.place_limit_order_gtc.assert_called_once()
+
+
+def test_monitor_cancels_pending_pattern_exit_when_hold_supersedes(db):
+    u = models.User(name="cancel_pending_u")
+    db.add(u)
+    db.flush()
+    t = Trade(
+        user_id=u.id,
+        ticker="CNCL",
+        direction="long",
+        entry_price=10.0,
+        quantity=5.0,
+        entry_date=datetime.utcnow(),
+        status="open",
+        stop_loss=9.0,
+        take_profit=14.0,
+        broker_source="robinhood",
+        pending_exit_order_id="pending-1",
+        pending_exit_status="working",
+        pending_exit_requested_at=datetime.utcnow(),
+        pending_exit_reason="pattern_exit_now",
+        pending_exit_limit_price=10.1,
+    )
+    db.add(t)
+    db.flush()
+    db.add_all(
+        [
+            PatternMonitorDecision(
+                trade_id=t.id,
+                health_score=0.08,
+                action="exit_now",
+                decision_source="plan_levels",
+                price_at_decision=10.1,
+                created_at=datetime.utcnow() - timedelta(hours=1),
+            ),
+            PatternMonitorDecision(
+                trade_id=t.id,
+                health_score=0.7,
+                action="hold",
+                decision_source="plan_levels",
+                price_at_decision=10.35,
+                created_at=datetime.utcnow(),
+            ),
+        ]
+    )
+    db.commit()
+
+    ad = MagicMock()
+    ad.is_enabled.return_value = True
+    ad.get_quote_price.return_value = 10.4
+    ad.cancel_order.return_value = {"ok": True}
+    ad.place_market_order.return_value = {"ok": True}
+
+    _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
+    try:
+        out = _run_tick_with_adapter(db, ad)
+    finally:
+        patch.stopall()
+
+    assert out.get("cancelled") == 1
+    db.refresh(t)
+    assert t.pending_exit_order_id is None
+    assert t.pending_exit_status is None
+    ad.cancel_order.assert_called_once_with("pending-1")
+    ad.place_market_order.assert_not_called()

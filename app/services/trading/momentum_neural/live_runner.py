@@ -26,6 +26,10 @@ from ..execution_family_registry import (
     momentum_runner_supports_execution_family,
     resolve_live_spot_adapter_factory,
 )
+from ..autopilot_scope import (
+    AUTOPILOT_MOMENTUM_NEURAL,
+    check_autopilot_entry_gate,
+)
 from ..governance import is_kill_switch_active
 from ..venue.protocol import NormalizedOrder, NormalizedProduct, is_fresh_enough
 from .persistence import append_trading_automation_event
@@ -613,6 +617,37 @@ def tick_live_session(
         if le.get("entry_submitted"):
             db.flush()
             return {"ok": True, "session_id": sess.id, "state": sess.state}
+
+        # P0.4 — autopilot mutual exclusion. Our own active session counts as
+        # the lease holder (owner_self → allowed), so this only blocks when
+        # an AutoTrader v1 live Trade is already open on the same symbol/user.
+        gate = check_autopilot_entry_gate(
+            db,
+            candidate=AUTOPILOT_MOMENTUM_NEURAL,
+            symbol=sess.symbol,
+            user_id=sess.user_id,
+        )
+        if not gate.get("allowed"):
+            _emit(
+                db,
+                sess,
+                "live_entry_blocked_by_autopilot_mutex",
+                {
+                    "reason": gate.get("reason"),
+                    "owner": gate.get("owner"),
+                    "primary": gate.get("primary"),
+                    "strict": gate.get("strict"),
+                },
+            )
+            _safe_transition(db, sess, STATE_WATCHING_LIVE)
+            db.flush()
+            return {
+                "ok": True,
+                "session_id": sess.id,
+                "state": sess.state,
+                "blocked": True,
+                "reason": "autopilot_mutex",
+            }
 
         regime_live = via.regime_snapshot_json if isinstance(via.regime_snapshot_json, dict) else {}
         ex_live = via.execution_readiness_json if isinstance(via.execution_readiness_json, dict) else {}

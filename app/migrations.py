@@ -8395,6 +8395,101 @@ def _migration_147_autotrader_audit(conn) -> None:
     conn.commit()
 
 
+def _migration_148_trade_pending_exit_columns(conn) -> None:
+    """Pending live-exit state for Robinhood off-hours equity liquidation."""
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+    cols = _columns(conn, "trading_trades")
+    for col, typ in [
+        ("pending_exit_order_id", "VARCHAR(100)"),
+        ("pending_exit_status", "VARCHAR(30)"),
+        ("pending_exit_requested_at", "TIMESTAMP"),
+        ("pending_exit_reason", "VARCHAR(50)"),
+        ("pending_exit_limit_price", "DOUBLE PRECISION"),
+    ]:
+        if col not in cols:
+            conn.execute(text(f"ALTER TABLE trading_trades ADD COLUMN {col} {typ}"))
+    conn.commit()
+
+
+def _migration_150_venue_order_idempotency(conn) -> None:
+    """Durable DB-backed client_order_id guard for venue adapters.
+
+    Previously the per-venue duplicate guards lived only in RAM
+    (``_recent_client_orders`` OrderedDict in robinhood_spot.py /
+    coinbase_spot.py). That resets on restart, leaving a window where a
+    crash + redeploy during an in-flight order could re-submit.
+
+    This table is the durable backing for
+    ``app/services/trading/venue/idempotency_store.py``. The in-memory
+    guard remains as a hot path; the DB is the source of truth across
+    restarts.
+
+    TTL-based eviction: rows stay until ``ttl_expires_at`` passes, then
+    ``idempotency_store.gc_expired`` (optional scheduler) can reap them.
+    Lookups filter on TTL directly, so an untended table is still
+    correct — just larger.
+    """
+    if "venue_order_idempotency" not in _tables(conn):
+        conn.execute(text("""
+            CREATE TABLE venue_order_idempotency (
+                client_order_id VARCHAR(128) PRIMARY KEY,
+                venue VARCHAR(32) NOT NULL,
+                symbol VARCHAR(32) NOT NULL,
+                side VARCHAR(8) NOT NULL,
+                qty DOUBLE PRECISION NOT NULL,
+                broker_order_id VARCHAR(128) NULL,
+                status VARCHAR(32) NOT NULL DEFAULT 'submitted',
+                created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+                ttl_expires_at TIMESTAMP NOT NULL
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_voi_venue_created_at "
+            "ON venue_order_idempotency (venue, created_at DESC)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_voi_ttl "
+            "ON venue_order_idempotency (ttl_expires_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_voi_broker_order_id "
+            "ON venue_order_idempotency (broker_order_id) "
+            "WHERE broker_order_id IS NOT NULL"
+        ))
+    conn.commit()
+
+
+def _migration_149_schema_drift_repairs(conn) -> None:
+    """Repair additive trading columns when schema_version drift skipped old migrations."""
+    tables = _tables(conn)
+
+    if "trading_pattern_monitor_decisions" in tables:
+        cols = _columns(conn, "trading_pattern_monitor_decisions")
+        if "vitals_composite" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_pattern_monitor_decisions "
+                    "ADD COLUMN vitals_composite DOUBLE PRECISION"
+                )
+            )
+
+    if "trading_trades" in tables:
+        cols = _columns(conn, "trading_trades")
+        for col, typ in [
+            ("pending_exit_order_id", "VARCHAR(100)"),
+            ("pending_exit_status", "VARCHAR(30)"),
+            ("pending_exit_requested_at", "TIMESTAMP"),
+            ("pending_exit_reason", "VARCHAR(50)"),
+            ("pending_exit_limit_price", "DOUBLE PRECISION"),
+        ]:
+            if col not in cols:
+                conn.execute(text(f"ALTER TABLE trading_trades ADD COLUMN {col} {typ}"))
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -8544,6 +8639,9 @@ MIGRATIONS = [
     ("145_pattern_regime_m2_consumers", _migration_145_pattern_regime_m2_consumers),
     ("146_m2_autopilot", _migration_146_m2_autopilot),
     ("147_autotrader_audit", _migration_147_autotrader_audit),
+    ("148_trade_pending_exit_columns", _migration_148_trade_pending_exit_columns),
+    ("149_schema_drift_repairs", _migration_149_schema_drift_repairs),
+    ("150_venue_order_idempotency", _migration_150_venue_order_idempotency),
 ]
 
 

@@ -7,10 +7,10 @@ Symbol convention: plain tickers (``AAPL``), not crypto-style product IDs (``BTC
 from __future__ import annotations
 
 import logging
-from collections import OrderedDict
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from . import idempotency_store, rate_limiter
 from .protocol import (
     FreshnessMeta,
     NormalizedFill,
@@ -22,29 +22,7 @@ from .protocol import (
 
 logger = logging.getLogger(__name__)
 
-# ── Duplicate-order guard (mirrors coinbase_spot pattern) ──────────────
-_recent_client_orders: OrderedDict[str, float] = OrderedDict()
-_GUARD_TTL_SEC = 300.0
-_GUARD_MAX = 512
-
-
-def _guard_remember(key: str) -> None:
-    import time
-
-    _recent_client_orders[key] = time.monotonic()
-    while len(_recent_client_orders) > _GUARD_MAX:
-        _recent_client_orders.popitem(last=False)
-
-
-def _guard_is_duplicate(key: str | None) -> bool:
-    if not key:
-        return False
-    import time
-
-    ts = _recent_client_orders.get(key)
-    if ts is None:
-        return False
-    return (time.monotonic() - ts) < _GUARD_TTL_SEC
+_VENUE = "robinhood"
 
 
 # ── Helpers ────────────────────────────────────────────────────────────
@@ -376,24 +354,53 @@ class RobinhoodSpotAdapter:
         side: str,
         base_size: str,
         client_order_id: Optional[str] = None,
+        market_hours_override: Optional[str] = None,
+        extended_hours_override: Optional[bool] = None,
     ) -> dict[str, Any]:
         ticker = _to_ticker(product_id)
         qty = float(base_size)
 
-        if _guard_is_duplicate(client_order_id):
+        if idempotency_store.is_duplicate(client_order_id, venue=_VENUE):
             return {"ok": False, "error": "duplicate_client_order_id", "client_order_id": client_order_id}
+
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(
+                _VENUE, retry_after, client_order_id=client_order_id
+            )
 
         from ...broker_service import place_buy_order, place_sell_order
 
-        if side.lower() == "buy":
-            result = place_buy_order(ticker, qty, order_type="market")
-        elif side.lower() == "sell":
-            result = place_sell_order(ticker, qty, order_type="market")
+        side_l = side.lower()
+        if side_l == "buy":
+            result = place_buy_order(
+                ticker,
+                qty,
+                order_type="market",
+                market_hours_override=market_hours_override,
+                extended_hours_override=extended_hours_override,
+            )
+        elif side_l == "sell":
+            result = place_sell_order(
+                ticker,
+                qty,
+                order_type="market",
+                market_hours_override=market_hours_override,
+                extended_hours_override=extended_hours_override,
+            )
         else:
             return {"ok": False, "error": f"unknown side: {side}"}
 
         if result.get("ok") and client_order_id:
-            _guard_remember(client_order_id)
+            idempotency_store.remember(
+                client_order_id,
+                venue=_VENUE,
+                symbol=ticker,
+                side=side_l,
+                qty=qty,
+                broker_order_id=result.get("order_id") or None,
+                status="submitted",
+            )
 
         if result.get("ok"):
             return {
@@ -412,25 +419,56 @@ class RobinhoodSpotAdapter:
         base_size: str,
         limit_price: str,
         client_order_id: Optional[str] = None,
+        market_hours_override: Optional[str] = None,
+        extended_hours_override: Optional[bool] = None,
     ) -> dict[str, Any]:
         ticker = _to_ticker(product_id)
         qty = float(base_size)
         price = float(limit_price)
 
-        if _guard_is_duplicate(client_order_id):
+        if idempotency_store.is_duplicate(client_order_id, venue=_VENUE):
             return {"ok": False, "error": "duplicate_client_order_id", "client_order_id": client_order_id}
+
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(
+                _VENUE, retry_after, client_order_id=client_order_id
+            )
 
         from ...broker_service import place_buy_order, place_sell_order
 
-        if side.lower() == "buy":
-            result = place_buy_order(ticker, qty, order_type="limit", limit_price=price)
-        elif side.lower() == "sell":
-            result = place_sell_order(ticker, qty, order_type="limit", limit_price=price)
+        side_l = side.lower()
+        if side_l == "buy":
+            result = place_buy_order(
+                ticker,
+                qty,
+                order_type="limit",
+                limit_price=price,
+                market_hours_override=market_hours_override,
+                extended_hours_override=extended_hours_override,
+            )
+        elif side_l == "sell":
+            result = place_sell_order(
+                ticker,
+                qty,
+                order_type="limit",
+                limit_price=price,
+                market_hours_override=market_hours_override,
+                extended_hours_override=extended_hours_override,
+            )
         else:
             return {"ok": False, "error": f"unknown side: {side}"}
 
         if result.get("ok") and client_order_id:
-            _guard_remember(client_order_id)
+            idempotency_store.remember(
+                client_order_id,
+                venue=_VENUE,
+                symbol=ticker,
+                side=side_l,
+                qty=qty,
+                broker_order_id=result.get("order_id") or None,
+                status="submitted",
+            )
 
         if result.get("ok"):
             return {
@@ -442,6 +480,9 @@ class RobinhoodSpotAdapter:
         return result
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
+        allowed, retry_after = rate_limiter.try_acquire(_VENUE)
+        if not allowed:
+            return rate_limiter.rate_limited_response(_VENUE, retry_after)
         try:
             import robin_stocks.robinhood as rh
 

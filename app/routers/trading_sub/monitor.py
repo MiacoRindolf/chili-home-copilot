@@ -14,6 +14,7 @@ from ...deps import get_db, get_identity_ctx
 from ...models.trading import BreakoutAlert, PatternMonitorDecision, ScanPattern, Trade
 from ...services import trading_service as ts
 from ...services.trading.pattern_position_monitor import run_pattern_position_monitor_for_trades
+from ...services.trading.robinhood_exit_execution import describe_trade_execution_state
 from ._utils import json_safe
 
 logger = logging.getLogger(__name__)
@@ -222,6 +223,11 @@ def api_monitor_active(
         if plan_label is None and (eff_sl is not None or eff_tp is not None):
             plan_label = "Position plan (AI / manual)"
 
+        exec_meta = describe_trade_execution_state(
+            trade,
+            latest_monitor_action=(latest.action if latest is not None else None),
+        )
+
         setups.append(
             {
                 "trade_id": trade.id,
@@ -240,6 +246,13 @@ def api_monitor_active(
                 "latest_decision": _serialize_decision(latest) if latest else None,
                 "decision_count": len(decs),
                 "recent_decisions": recent,
+                "execution_state": exec_meta.get("execution_state"),
+                "execution_label": exec_meta.get("execution_label"),
+                "execution_reason": exec_meta.get("execution_reason"),
+                "pending_exit_status": exec_meta.get("pending_exit_status"),
+                "pending_exit_order_id": exec_meta.get("pending_exit_order_id"),
+                "pending_exit_limit_price": json_safe(exec_meta.get("pending_exit_limit_price")),
+                "next_eligible_session_at": exec_meta.get("next_eligible_session_at"),
             }
         )
 

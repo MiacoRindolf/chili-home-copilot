@@ -20,6 +20,10 @@ from .auto_trader_rules import (
     passes_rule_gate,
 )
 from .autotrader_desk import effective_autotrader_runtime
+from .autopilot_scope import (
+    AUTOPILOT_AUTO_TRADER_V1,
+    check_autopilot_entry_gate,
+)
 from .auto_trader_synergy import (
     find_open_autotrader_paper,
     find_open_autotrader_trade,
@@ -228,6 +232,31 @@ def _process_one_alert(
         return
 
     for_new = scale_plan is None
+
+    # P0.4 — autopilot mutual exclusion. Only gate LIVE orders: the lease
+    # signal for momentum_neural is a mode="live" TradingAutomationSession,
+    # so paper v1 can't contend on the schema level. For live v1:
+    #   * scale-in (scale_plan != None) → our own existing Trade is the lease,
+    #     gate returns owner_self → allowed.
+    #   * new entry → gate blocks if momentum_neural already owns the symbol.
+    if live:
+        gate = check_autopilot_entry_gate(
+            db,
+            candidate=AUTOPILOT_AUTO_TRADER_V1,
+            symbol=alert.ticker,
+            user_id=uid,
+        )
+        if not gate.get("allowed"):
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=f"autopilot_mutex:{gate.get('reason')}:owner={gate.get('owner') or 'none'}",
+            )
+            out["skipped"] += 1
+            return
+
     ok, reason, snap = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=for_new)
     if not ok:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)

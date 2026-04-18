@@ -1323,8 +1323,21 @@ def _retry_api_call(
 # ── Order Placement ───────────────────────────────────────────────────
 
 
-def _rh_order_session_kwargs() -> dict[str, Any]:
+def _rh_order_session_kwargs(
+    *,
+    market_hours_override: str | None = None,
+    extended_hours_override: bool | None = None,
+) -> dict[str, Any]:
     """Return Robinhood session flags for stock order placement."""
+    if market_hours_override is not None:
+        return {
+            "extendedHours": bool(
+                extended_hours_override
+                if extended_hours_override is not None
+                else market_hours_override != "regular_hours"
+            ),
+            "market_hours": str(market_hours_override or "regular_hours"),
+        }
     allow_ext = bool(getattr(settings, "chili_autotrader_allow_extended_hours", False))
     if not allow_ext:
         return {"extendedHours": False, "market_hours": "regular_hours"}
@@ -1348,6 +1361,9 @@ def place_buy_order(
     quantity: float,
     order_type: str = "market",
     limit_price: float | None = None,
+    *,
+    market_hours_override: str | None = None,
+    extended_hours_override: bool | None = None,
 ) -> dict[str, Any]:
     """Place a buy order via Robinhood.
 
@@ -1362,7 +1378,10 @@ def place_buy_order(
 
     try:
         import robin_stocks.robinhood as rh
-        session_kwargs = _rh_order_session_kwargs()
+        session_kwargs = _rh_order_session_kwargs(
+            market_hours_override=market_hours_override,
+            extended_hours_override=extended_hours_override,
+        )
 
         def _do_buy():
             return rh.orders.order(
@@ -1407,6 +1426,9 @@ def place_sell_order(
     quantity: float,
     order_type: str = "market",
     limit_price: float | None = None,
+    *,
+    market_hours_override: str | None = None,
+    extended_hours_override: bool | None = None,
 ) -> dict[str, Any]:
     """Place a sell order via Robinhood.
 
@@ -1421,7 +1443,10 @@ def place_sell_order(
 
     try:
         import robin_stocks.robinhood as rh
-        session_kwargs = _rh_order_session_kwargs()
+        session_kwargs = _rh_order_session_kwargs(
+            market_hours_override=market_hours_override,
+            extended_hours_override=extended_hours_override,
+        )
 
         def _do_sell():
             return rh.orders.order(
@@ -1571,6 +1596,7 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """
     from ..models.trading import Trade, StrategyProposal
     from .trading.execution_audit import normalize_robinhood_order_event, record_execution_event
+    from .trading.robinhood_exit_execution import sync_pending_exit_order
 
     if not is_connected():
         return {"synced": 0, "filled": 0, "cancelled": 0, "errors": 0}
@@ -1593,6 +1619,16 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
         .filter(
             Trade.user_id == user_id,
             Trade.broker_order_id.isnot(None),
+            Trade.status == "open",
+        )
+        .all()
+    )
+    open_with_pending_exit = (
+        db.query(Trade)
+        .filter(
+            Trade.user_id == user_id,
+            Trade.broker_source == "robinhood",
+            Trade.pending_exit_order_id.isnot(None),
             Trade.status == "open",
         )
         .all()
@@ -1655,6 +1691,29 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
         except Exception as e:
             logger.warning(f"[broker] Order sync failed for {trade.ticker}: {e}")
+            errors += 1
+
+    for trade in open_with_pending_exit:
+        try:
+            rh_order = get_order_by_id(trade.pending_exit_order_id)
+            if not rh_order:
+                errors += 1
+                continue
+            prefix = "desk_close" if (trade.pending_exit_reason or "").lower() == "desk_close_now" else "monitor_exit"
+            sync_out = sync_pending_exit_order(
+                db,
+                trade,
+                order={**rh_order, "id": trade.pending_exit_order_id},
+                audit_decision_prefix=prefix,
+            )
+            st = str(sync_out.get("state") or "").lower()
+            if st == "filled":
+                filled += 1
+            elif st in ("cancelled", "canceled", "rejected", "failed", "expired"):
+                cancelled += 1
+            synced += 1
+        except Exception as e:
+            logger.warning(f"[broker] Pending exit sync failed for {trade.ticker}: {e}")
             errors += 1
 
     # Reconcile "open" trades that have broker_order_id: if RH says cancelled, fix local
