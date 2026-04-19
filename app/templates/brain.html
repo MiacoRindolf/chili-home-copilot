@@ -7,7 +7,9 @@
 <link rel="stylesheet" href="/static/css/brain-tokens.css">
 <link rel="stylesheet" href="/static/css/brain-trading.css">
 <link rel="stylesheet" href="/static/css/brain-components.css">
+{% if project_domain_enabled|default(true) %}
 <link rel="stylesheet" href="/static/components/brain-project-domain.css">
+{% endif %}
 {% endblock %}
 
 {% block content %}
@@ -91,7 +93,9 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
       </div><!-- .trading-brain-body-row -->
     </div>
 
+    {% if project_domain_enabled|default(true) %}
     {% include "brain_project_domain.html" %}
+    {% endif %}
 
     <!-- Reasoning Domain -->
     <div id="domain-reasoning" style="display:{% if _bd == 'reasoning' %}block{% else %}none{% endif %}; overflow-y:auto;">
@@ -171,9 +175,12 @@ window.__CHILI_BRAIN_INITIAL_DOMAIN__ = {{ _bd|tojson }};
 window.__CHILI_BRAIN_PLANNER_TASK_HINT__ = {{ planner_task_id|default(none)|tojson }};
 window.__CHILI_BRAIN_PLANNER_PROJECT_HINT__ = {{ planner_project_id|default(none)|tojson }};
 </script>
+{% if project_domain_enabled|default(true) %}
+<script src="/static/components/brain-project-client.js"></script>
 <script src="/static/components/brain-project-domain.js"></script>
 <script src="/static/components/brain-project-agents.js"></script>
 <script src="/static/components/brain-project-handoff.js"></script>
+{% endif %}
 <script>
 document.addEventListener('DOMContentLoaded', function() {
   renderBrainHubCards();

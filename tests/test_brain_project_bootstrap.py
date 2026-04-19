@@ -65,3 +65,136 @@ def test_project_bootstrap_with_bound_workspace(paired_client, db):
     assert data["capabilities"]["suggest"]["enabled"] is True
     assert data["capabilities"]["apply"]["enabled"] is True
     assert data["capabilities"]["validate"]["enabled"] is True
+
+
+def _seed_task_with_profile(
+    db,
+    user,
+    *,
+    repo: CodeRepo | None = None,
+    repo_index: int = 0,
+    sub_path: str = "",
+) -> PlanTask:
+    project = PlanProject(user_id=user.id, name="Proj", key="PRJ")
+    db.add(project)
+    db.flush()
+    db.add(ProjectMember(project_id=project.id, user_id=user.id, role="owner"))
+    task = PlanTask(project_id=project.id, title="T", reporter_id=user.id)
+    db.add(task)
+    db.flush()
+    db.add(
+        PlanTaskCodingProfile(
+            task_id=task.id,
+            code_repo_id=repo.id if repo is not None else None,
+            repo_index=repo_index,
+            sub_path=sub_path,
+        )
+    )
+    db.commit()
+    return task
+
+
+def test_project_bootstrap_fails_closed_when_code_repo_deleted(paired_client, db):
+    """FK uses SET NULL, but the bootstrap must still report workspace_bound=False
+    and disable suggest/apply/validate when the referenced CodeRepo is gone.
+    """
+    client, user = paired_client
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        name="to-be-deleted",
+        file_count=5,
+        total_lines=50,
+        last_indexed=datetime.utcnow(),
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    task = _seed_task_with_profile(db, user, repo=repo, repo_index=0)
+
+    # Simulate a code repo deletion (FK SET NULL would null out code_repo_id;
+    # here we delete and also null the profile to mirror the observed state).
+    from app.models.coding_task import PlanTaskCodingProfile as _Profile
+
+    db.query(_Profile).filter(_Profile.task_id == task.id).update(
+        {_Profile.code_repo_id: None}
+    )
+    db.query(CodeRepo).filter(CodeRepo.id == repo.id).delete()
+    db.commit()
+
+    r = client.get(f"/api/brain/project/bootstrap?planner_task_id={task.id}")
+    assert r.status_code == 200
+    data = r.json()
+    profile = data["planner_handoff"]["summary"]["profile"]
+    assert profile["workspace_bound"] is False
+    assert data["capabilities"]["suggest"]["enabled"] is False
+    assert data["capabilities"]["apply"]["enabled"] is False
+    assert data["capabilities"]["validate"]["enabled"] is False
+    # Reason must be surfaced so the UI can show the operator what to do.
+    ops_hints = data["planner_handoff"]["summary"]["ops_hints"]
+    assert ops_hints["workspace_bound"] is False
+    assert ops_hints["workspace_reason"]
+
+
+def test_project_bootstrap_fails_closed_when_code_repo_inactive(paired_client, db):
+    """Marking a repo ``active=False`` must flip the task to unbound; we do not
+    silently fall back to some previously-matched repo.
+    """
+    client, user = paired_client
+    repo = CodeRepo(
+        user_id=user.id,
+        path=str(Path(__file__).resolve().parents[1]),
+        name="inactive",
+        file_count=5,
+        total_lines=50,
+        last_indexed=datetime.utcnow(),
+        active=True,
+    )
+    db.add(repo)
+    db.flush()
+    task = _seed_task_with_profile(db, user, repo=repo, repo_index=0)
+
+    repo.active = False
+    db.commit()
+
+    r = client.get(f"/api/brain/project/bootstrap?planner_task_id={task.id}")
+    assert r.status_code == 200
+    data = r.json()
+    profile = data["planner_handoff"]["summary"]["profile"]
+    assert profile["workspace_bound"] is False
+    assert data["capabilities"]["suggest"]["enabled"] is False
+    assert data["capabilities"]["apply"]["enabled"] is False
+    assert data["capabilities"]["validate"]["enabled"] is False
+
+
+def test_project_bootstrap_legacy_repo_index_without_code_repo(paired_client, db):
+    """Profile with only legacy repo_index (no code_repo_id) is treated as unbound
+    at the capability layer — legacy fallback is for path resolution, not write enablement.
+    """
+    client, user = paired_client
+    task = _seed_task_with_profile(db, user, repo=None, repo_index=0)
+
+    r = client.get(f"/api/brain/project/bootstrap?planner_task_id={task.id}")
+    assert r.status_code == 200
+    data = r.json()
+    profile = data["planner_handoff"]["summary"]["profile"]
+    assert profile["workspace_bound"] is False
+    assert data["capabilities"]["suggest"]["enabled"] is False
+    assert data["capabilities"]["apply"]["enabled"] is False
+    assert data["capabilities"]["validate"]["enabled"] is False
+
+
+def test_project_bootstrap_disabled_by_feature_flag(client, db, monkeypatch):
+    """Kill switch: when ``settings.project_domain_enabled`` is False the
+    bootstrap endpoint must return 503 so the front end fails closed without a redeploy.
+    """
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "project_domain_enabled", False)
+    r = client.get("/api/brain/project/bootstrap")
+    assert r.status_code == 503
+    payload = r.json()
+    detail = payload.get("detail") if isinstance(payload, dict) else None
+    assert isinstance(detail, dict)
+    assert detail.get("disabled") is True
+    assert detail.get("domain") == "project"
