@@ -98,6 +98,416 @@ _BUILTIN_PATTERNS: list[dict[str, Any]] = [
     },
 ]
 
+# ── Builtin intraday patterns (1m / 5m / 15m) ──────────────────────────
+# Curated core for intraday timeframes so tf_variant/exit_variant spawning
+# has parents to inherit from. Each entry sets ``timeframe`` and
+# ``hypothesis_family`` explicitly — no inference, no NULL family.
+# Indicators referenced should already exist in the indicator pipeline; any
+# pattern that needs a not-yet-implemented detector references it via
+# ``meta.detector`` (same convention as ``rsi_fib_fvg_pullback`` above) and
+# evaluates to ``False`` until the detector is wired up.
+_BUILTIN_INTRADAY_PATTERNS: list[dict[str, Any]] = [
+    # ── 1m: scalping / micro-momentum ─────────────────────────────────
+    {
+        "name": "1m Opening Range Break + Volume",
+        "description": (
+            "Price breaks the high of the first N opening-range bars on the 1m "
+            "with relative volume >= 2.0. Classic intraday breakout entry."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "1m",
+        "hypothesis_family": "opening_range",
+        "score_boost": 1.5,
+        "min_base_score": 3.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "opening_range_break", "op": "==", "value": True},
+                {"indicator": "rel_vol", "op": ">=", "value": 2.0},
+            ],
+            "meta": {
+                "type": "opening_range_break",
+                "side": "bullish",
+                "or_window_minutes": 15,
+                "detector": "opening_range_break_1m",
+                "requires_intraday_session": True,
+            },
+        }),
+    },
+    {
+        "name": "1m VWAP Reclaim",
+        "description": (
+            "Price closes back above session VWAP after trading below it, "
+            "with rel_vol >= 1.5 — fast mean-reversion reclaim."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "1m",
+        "hypothesis_family": "mean_reversion",
+        "score_boost": 1.0,
+        "min_base_score": 3.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "vwap_reclaim", "op": "==", "value": True},
+                {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+            ],
+            "meta": {"type": "vwap_reclaim", "side": "bullish"},
+        }),
+    },
+    {
+        "name": "1m Tape-Speed Burst",
+        "description": (
+            "Volume burst (rel_vol >= 3) with RSI rising and MACD histogram "
+            "expanding — momentum ignition on the tape."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "1m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "rel_vol", "op": ">=", "value": 3.0},
+                {"indicator": "rsi_14", "op": ">", "value": 55},
+                {"indicator": "macd_hist", "op": ">", "value": 0},
+            ],
+            "meta": {"type": "tape_speed_burst", "side": "bullish"},
+        }),
+    },
+    {
+        "name": "1m Liquidity Sweep + Reverse",
+        "description": (
+            "Wick pierces prior swing low/high then closes back inside the range "
+            "— stop-run reversal pattern."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "1m",
+        "hypothesis_family": "liquidity_sweep",
+        "score_boost": 1.5,
+        "min_base_score": 3.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "liquidity_sweep_reverse", "op": "==", "value": True},
+            ],
+            "meta": {
+                "type": "liquidity_sweep",
+                "side": "bullish",
+                "swing_lookback": 20,
+                "detector": "liquidity_sweep_reverse_1m",
+            },
+        }),
+    },
+    {
+        "name": "1m Stoch Bull Cross + RSI > 50",
+        "description": (
+            "Stochastic %K crosses above %D from oversold while RSI > 50 — "
+            "fast trend-with-pullback re-entry."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "1m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.0,
+        "min_base_score": 2.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "stoch_bull_cross", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 50},
+            ],
+            "meta": {"type": "stoch_pullback_entry", "side": "bullish"},
+        }),
+    },
+
+    # ── 5m: intraday momentum / structure ─────────────────────────────
+    {
+        "name": "5m Opening Drive",
+        "description": (
+            "First three 5m bars trend in one direction (HH/HL or LH/LL) with "
+            "ADX >= 20 — opening-drive momentum continuation."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "opening_range",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "opening_drive", "op": "==", "value": True},
+                {"indicator": "adx", "op": ">=", "value": 20},
+            ],
+            "meta": {
+                "type": "opening_drive",
+                "side": "bullish",
+                "drive_bars": 3,
+                "detector": "opening_drive_5m",
+                "requires_intraday_session": True,
+            },
+        }),
+    },
+    {
+        "name": "5m First Pullback to VWAP",
+        "description": (
+            "After an opening drive, first pullback that holds VWAP with "
+            "RSI > 45 — high-probability continuation entry."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 2.0,
+        "min_base_score": 4.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "vwap_pullback_hold", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 45},
+                {"indicator": "price", "op": ">", "ref": "vwap"},
+            ],
+            "meta": {
+                "type": "vwap_pullback_continuation",
+                "side": "bullish",
+                "detector": "vwap_pullback_hold_5m",
+            },
+        }),
+    },
+    {
+        "name": "5m EMA9/EMA21 Bull Cross + Volume",
+        "description": (
+            "Fast EMA9 crosses above EMA21 with volume expansion (rel_vol >= 1.5) "
+            "and price > VWAP — intraday trend-flip entry."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "ema_9", "op": ">", "ref": "ema_21"},
+                {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+                {"indicator": "price", "op": ">", "ref": "vwap"},
+            ],
+            "meta": {"type": "ema_cross_intraday", "side": "bullish"},
+        }),
+    },
+    {
+        "name": "5m NR4 Coil Breakout",
+        "description": (
+            "Narrow Range 4 (smallest range of last 4 bars) followed by a "
+            "breakout bar with volume — coil release."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "compression_expansion",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "narrow_range", "op": "any_of", "value": ["NR4", "NR7"]},
+                {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+            ],
+            "meta": {"type": "nr_coil_break", "side": "bullish"},
+        }),
+    },
+    {
+        "name": "5m HOD Reclaim with Volume",
+        "description": (
+            "Price reclaims the session high-of-day after a pullback, with "
+            "rel_vol >= 1.5 — momentum continuation through prior resistance."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "hod_reclaim", "op": "==", "value": True},
+                {"indicator": "rel_vol", "op": ">=", "value": 1.5},
+            ],
+            "meta": {
+                "type": "hod_reclaim",
+                "side": "bullish",
+                "detector": "hod_reclaim_5m",
+                "requires_intraday_session": True,
+            },
+        }),
+    },
+    {
+        "name": "5m Failed Breakdown Reversal",
+        "description": (
+            "Session low broken intraday but price closes back above the prior "
+            "low within 2 bars — failed-breakdown reversal."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "5m",
+        "hypothesis_family": "mean_reversion",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "failed_breakdown", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 35},
+            ],
+            "meta": {
+                "type": "failed_breakdown_reversal",
+                "side": "bullish",
+                "detector": "failed_breakdown_5m",
+            },
+        }),
+    },
+
+    # ── 15m: intraday swing ───────────────────────────────────────────
+    {
+        "name": "15m Inside Bar Breakout",
+        "description": (
+            "Inside bar (range fully within prior bar) followed by a breakout "
+            "of the mother bar's high — classic compression release."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "compression_expansion",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "inside_bar_break", "op": "==", "value": True},
+                {"indicator": "rel_vol", "op": ">=", "value": 1.2},
+            ],
+            "meta": {
+                "type": "inside_bar_break",
+                "side": "bullish",
+                "detector": "inside_bar_break_15m",
+            },
+        }),
+    },
+    {
+        "name": "15m BB Squeeze + ADX < 20",
+        "description": (
+            "Intraday Bollinger Band squeeze with ADX < 20 (low trend strength) "
+            "and RSI in the 40-65 neutral zone — pre-expansion coil."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "compression_expansion",
+        "score_boost": 2.0,
+        "min_base_score": 4.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "bb_squeeze", "op": "==", "value": True},
+                {"indicator": "adx", "op": "<", "value": 20},
+                {"indicator": "rsi_14", "op": "between", "value": [40, 65]},
+            ],
+            "meta": {"type": "bb_squeeze_intraday", "side": "neutral"},
+        }),
+    },
+    {
+        "name": "15m MACD Histogram Flip + RSI > 50",
+        "description": (
+            "MACD histogram flips from negative to positive while RSI > 50 — "
+            "momentum-shift entry on the 15m."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "macd_hist_flip_positive", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 50},
+            ],
+            "meta": {
+                "type": "macd_flip_continuation",
+                "side": "bullish",
+                "detector": "macd_hist_flip_positive",
+            },
+        }),
+    },
+    {
+        "name": "15m EMA Stack Reclaim",
+        "description": (
+            "Price reclaims the bullish EMA stack (above 9/21/50) after a "
+            "pullback, with RSI > 50 — trend-continuation entry."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 2.0,
+        "min_base_score": 4.0,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "price", "op": ">", "ref": "ema_9"},
+                {"indicator": "price", "op": ">", "ref": "ema_21"},
+                {"indicator": "price", "op": ">", "ref": "ema_50"},
+                {"indicator": "ema_9", "op": ">", "ref": "ema_21"},
+                {"indicator": "rsi_14", "op": ">", "value": 50},
+            ],
+            "meta": {"type": "ema_stack_reclaim", "side": "bullish"},
+        }),
+    },
+    {
+        "name": "15m Higher-Low Trend Continuation",
+        "description": (
+            "Confirmed higher-low structure with RSI > 55 and price above EMA21 "
+            "— intraday trend-continuation buy."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "momentum_continuation",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "higher_low_confirmed", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 55},
+                {"indicator": "price", "op": ">", "ref": "ema_21"},
+            ],
+            "meta": {
+                "type": "higher_low_continuation",
+                "side": "bullish",
+                "detector": "higher_low_confirmed_15m",
+            },
+        }),
+    },
+    {
+        "name": "15m Failed Breakdown Reversal",
+        "description": (
+            "Prior swing low broken on the 15m but price closes back above it "
+            "within 2 bars and RSI > 35 — failed-breakdown reversal."
+        ),
+        "origin": "builtin",
+        "asset_class": "all",
+        "timeframe": "15m",
+        "hypothesis_family": "mean_reversion",
+        "score_boost": 1.5,
+        "min_base_score": 3.5,
+        "rules_json": json.dumps({
+            "conditions": [
+                {"indicator": "failed_breakdown", "op": "==", "value": True},
+                {"indicator": "rsi_14", "op": ">", "value": 35},
+            ],
+            "meta": {
+                "type": "failed_breakdown_reversal",
+                "side": "bullish",
+                "detector": "failed_breakdown_15m",
+            },
+        }),
+    },
+]
+
+
 # Community / link-attributed seeds (insert once by name; not ``origin=builtin``).
 _COMMUNITY_SEED_PATTERNS: list[dict[str, Any]] = [
     {
@@ -159,13 +569,18 @@ _COMMUNITY_SEED_PATTERNS: list[dict[str, Any]] = [
 
 
 def seed_builtin_patterns(db: Session) -> int:
-    """Insert builtin patterns if they don't already exist. Returns count added."""
+    """Insert builtin patterns if they don't already exist. Returns count added.
+
+    Covers daily/multi-tf patterns from ``_BUILTIN_PATTERNS`` plus intraday
+    (1m/5m/15m) patterns from ``_BUILTIN_INTRADAY_PATTERNS``. Both pass through
+    ``hypothesis_family`` so the family taxonomy is populated from day one.
+    """
     existing = {p.name for p in db.query(ScanPattern).filter_by(origin="builtin").all()}
     added = 0
     from ...services.backtest_service import infer_pattern_timeframe
     import json as _json2
 
-    for bp in _BUILTIN_PATTERNS:
+    for bp in (*_BUILTIN_PATTERNS, *_BUILTIN_INTRADAY_PATTERNS):
         if bp["name"] in existing:
             continue
         conds = []
@@ -183,6 +598,7 @@ def seed_builtin_patterns(db: Session) -> int:
             origin=bp["origin"],
             asset_class=bp.get("asset_class", "all"),
             timeframe=tf,
+            hypothesis_family=bp.get("hypothesis_family"),
             score_boost=bp.get("score_boost", 0.0),
             min_base_score=bp.get("min_base_score", 0.0),
             confidence=0.5,
@@ -223,6 +639,7 @@ def seed_community_patterns(db: Session) -> int:
             origin=bp.get("origin", "user_seeded"),
             asset_class=bp.get("asset_class", "all"),
             timeframe=tf,
+            hypothesis_family=bp.get("hypothesis_family"),
             score_boost=bp.get("score_boost", 0.0),
             min_base_score=bp.get("min_base_score", 0.0),
             confidence=0.5,
@@ -634,6 +1051,7 @@ def _pattern_to_dict(p: ScanPattern) -> dict[str, Any]:
         "rules_json": p.rules_json,
         "origin": p.origin,
         "asset_class": p.asset_class,
+        "timeframe": p.timeframe,
         "confidence": p.confidence,
         "evidence_count": p.evidence_count,
         "win_rate": p.win_rate,
@@ -642,6 +1060,10 @@ def _pattern_to_dict(p: ScanPattern) -> dict[str, Any]:
         "score_boost": p.score_boost,
         "min_base_score": p.min_base_score,
         "active": p.active,
+        "parent_id": getattr(p, "parent_id", None),
+        "generation": getattr(p, "generation", 0),
+        "ticker_scope": getattr(p, "ticker_scope", "universal"),
+        "lifecycle_stage": getattr(p, "lifecycle_stage", None) or "candidate",
         "promotion_status": getattr(p, "promotion_status", None) or "legacy",
         "oos_win_rate": getattr(p, "oos_win_rate", None),
         "oos_avg_return_pct": getattr(p, "oos_avg_return_pct", None),
