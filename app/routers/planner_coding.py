@@ -8,12 +8,18 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from ..deps import get_db
+from ..deps import get_db, require_project_domain_enabled
 from ..pairing import DEVICE_COOKIE_NAME, get_identity_record
 from ..models import PlanTask
 from ..services import planner_service
 from ..services.coding_task import po_v2
+from ..services.coding_task.workspaces import WorkspaceUnbound
+from ..services.coding_task.workflow_state import (
+    WorkflowTransitionBlocked,
+    assert_transition_allowed,
+)
 from ..services.coding_task.agent_suggest import run_agent_suggest_for_task
+from ..services.coding_task.telemetry import log_event as _log_coding_event, timed_step as _coding_timed
 from ..services.coding_task.agent_suggestion_store import (
     bound_payload_for_save,
     coerce_list_limit,
@@ -34,7 +40,11 @@ from ..services.coding_task.service import (
     update_coding_profile,
 )
 
-router = APIRouter(prefix="/api/planner", tags=["planner-coding"])
+router = APIRouter(
+    prefix="/api/planner",
+    tags=["planner-coding"],
+    dependencies=[Depends(require_project_domain_enabled)],
+)
 
 
 def _preflight_error_payload(db: Session, task: PlanTask, message: str) -> dict:
@@ -44,6 +54,23 @@ def _preflight_error_payload(db: Session, task: PlanTask, message: str) -> dict:
         payload["open_clarification_count"] = oc
         payload["open_clarification_ids"] = po_v2.open_clarification_ids(db, task.id)
     return payload
+
+
+# Named HTTP status constants (A7) — avoid magic numbers scattered at call sites.
+HTTP_BAD_REQUEST = 400
+HTTP_FORBIDDEN = 403
+HTTP_NOT_FOUND = 404
+HTTP_CONFLICT = 409
+
+
+def _workflow_blocked_payload(exc: WorkflowTransitionBlocked) -> dict:
+    return {
+        "error": str(exc),
+        "workflow_blocked": True,
+        "action": exc.action,
+        "current_state": exc.current,
+        "required_state": exc.required,
+    }
 
 
 def _require_user(request: Request, db: Session) -> dict | None:
@@ -69,6 +96,45 @@ def _get_task_readable(db: Session, task_id: int, user_id: int) -> PlanTask | No
     if not planner_service._user_can_access(db, t.project_id, user_id):
         return None
     return t
+
+
+def require_editable_task(
+    request: Request,
+    db: Session,
+    task_id: int,
+) -> tuple[dict, PlanTask] | JSONResponse:
+    """A7: single auth + lookup helper for mutation endpoints.
+
+    Returns ``(identity, task)`` on success or a ``JSONResponse`` with the
+    appropriate HTTP status (403 / 404) on failure. Endpoints use::
+
+        res = require_editable_task(request, db, task_id)
+        if isinstance(res, JSONResponse):
+            return res
+        identity, t = res
+    """
+    identity = _require_user(request, db)
+    if not identity:
+        return JSONResponse({"error": "Not paired"}, status_code=HTTP_FORBIDDEN)
+    t = _get_task_editable(db, task_id, identity["user_id"])
+    if not t:
+        return JSONResponse({"error": "Not found"}, status_code=HTTP_NOT_FOUND)
+    return identity, t
+
+
+def require_readable_task(
+    request: Request,
+    db: Session,
+    task_id: int,
+) -> tuple[dict, PlanTask] | JSONResponse:
+    """A7: single auth + lookup helper for read endpoints."""
+    identity = _require_user(request, db)
+    if not identity:
+        return JSONResponse({"error": "Not paired"}, status_code=HTTP_FORBIDDEN)
+    t = _get_task_readable(db, task_id, identity["user_id"])
+    if not t:
+        return JSONResponse({"error": "Not found"}, status_code=HTTP_NOT_FOUND)
+    return identity, t
 
 
 def _clar_row_dict(c) -> dict:
@@ -339,13 +405,25 @@ def api_run_validation(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     try:
-        result = run_validation_for_task(
-            db,
-            t,
-            user_id=identity["user_id"],
-            trigger_source=body.trigger_source,
-        )
+        assert_transition_allowed(db, t, "validate", user_id=identity["user_id"])
+        with _coding_timed("validate", task_id=task_id, user_id=identity["user_id"]):
+            result = run_validation_for_task(
+                db,
+                t,
+                user_id=identity["user_id"],
+                trigger_source=body.trigger_source,
+            )
+    except WorkflowTransitionBlocked as e:
+        _log_coding_event("validate", "blocked", task_id=task_id, user_id=identity["user_id"], current_state=e.current, required_state=e.required)
+        return JSONResponse(_workflow_blocked_payload(e), status_code=409)
+    except WorkspaceUnbound as e:
+        _log_coding_event("validate", "blocked", task_id=task_id, user_id=identity["user_id"], reason="workspace_unbound")
+        payload = _preflight_error_payload(db, t, str(e))
+        payload["workspace_unbound"] = True
+        payload["workspace_reason"] = e.reason
+        return JSONResponse(payload, status_code=409)
     except ValueError as e:
+        _log_coding_event("validate", "failed", task_id=task_id, user_id=identity["user_id"], reason=str(e)[:200])
         return JSONResponse(_preflight_error_payload(db, t, str(e)), status_code=400)
     return {"ok": True, **result}
 
@@ -390,9 +468,25 @@ async def api_agent_suggest(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     extra = body.extra_instructions if body else None
+    try:
+        assert_transition_allowed(db, t, "suggest", user_id=identity["user_id"])
+    except WorkflowTransitionBlocked as e:
+        _log_coding_event("suggest", "blocked", task_id=task_id, user_id=identity["user_id"], current_state=e.current, required_state=e.required)
+        return JSONResponse(_workflow_blocked_payload(e), status_code=409)
+    import time as _t
+    _start = _t.monotonic()
     result = await run_agent_suggest_for_task(db, t, identity["user_id"], extra_instructions=extra)
+    _duration_ms = int((_t.monotonic() - _start) * 1000)
     if result.get("error"):
-        return JSONResponse({"ok": False, "message": result["error"]}, status_code=400)
+        outcome = "blocked" if result.get("workspace_unbound") else "failed"
+        _log_coding_event("suggest", outcome, task_id=task_id, user_id=identity["user_id"], duration_ms=_duration_ms, reason=result.get("workspace_reason") or result["error"][:200])
+        status = 409 if result.get("workspace_unbound") else 400
+        body_out = {"ok": False, "message": result["error"]}
+        if result.get("workspace_unbound"):
+            body_out["workspace_unbound"] = True
+            body_out["workspace_reason"] = result.get("workspace_reason") or result["error"]
+        return JSONResponse(body_out, status_code=status)
+    _log_coding_event("suggest", "ok", task_id=task_id, user_id=identity["user_id"], duration_ms=_duration_ms)
     return JSONResponse({"ok": True, **result})
 
 
@@ -477,8 +571,34 @@ def api_apply_agent_suggestion(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     dry = body.dry_run if body else False
+    step_name = "dry_run" if dry else "apply"
+    try:
+        # Dry-run is always allowed once a snapshot exists; real apply requires
+        # a green dry-run first, so the workflow state machine enforces that gate.
+        assert_transition_allowed(db, t, step_name, user_id=identity["user_id"])
+    except WorkflowTransitionBlocked as e:
+        _log_coding_event(step_name, "blocked", task_id=task_id, user_id=identity["user_id"], suggestion_id=suggestion_id, current_state=e.current, required_state=e.required)
+        return JSONResponse(_workflow_blocked_payload(e), status_code=409)
+    import time as _t
+    _start = _t.monotonic()
     payload, status = apply_stored_snapshot_diffs(
         db, t, identity["user_id"], suggestion_id, dry_run=dry
+    )
+    _duration_ms = int((_t.monotonic() - _start) * 1000)
+    if status == 200:
+        outcome = "ok"
+    elif payload.get("workspace_unbound"):
+        outcome = "blocked"
+    else:
+        outcome = "failed"
+    _log_coding_event(
+        step_name,
+        outcome,
+        task_id=task_id,
+        user_id=identity["user_id"],
+        suggestion_id=suggestion_id,
+        duration_ms=_duration_ms,
+        http_status=status,
     )
     return JSONResponse(payload, status_code=status)
 

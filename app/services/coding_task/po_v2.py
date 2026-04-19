@@ -66,15 +66,28 @@ def open_clarification_ids(db: Session, task_id: int) -> list[int]:
     return [r[0] for r in rows]
 
 
-def preview_readiness(db: Session, task: PlanTask) -> str:
-    """
-    Read-only readiness for API summaries. Does not mutate PlanTask or other rows.
-    Terminal stored states (blocked, ready_for_future_impl, validation_pending) echo DB.
+def _compute_readiness_state(db: Session, task: PlanTask) -> str:
+    """Single source of truth for the derived ``coding_readiness_state``.
+
+    Pure: does not mutate any row. ``preview_readiness`` and ``sync_readiness``
+    both delegate here so the summary payload, handoff payload, and the
+    persisted value can never diverge (A4).
     """
     stored = task.coding_readiness_state or "not_started"
+    # Terminal stored states are authoritative — they reflect a validation
+    # run outcome that the derived signals cannot overturn on their own.
     if stored == "validation_pending":
         return "validation_pending"
     if stored in ("blocked", "ready_for_future_impl"):
+        # For blocked/ready we still upgrade to needs_clarification if the
+        # user has added a new open question, so the UI nags them correctly;
+        # sync_readiness has that same precedence below.
+        oc = open_clarification_count(db, task.id)
+        if oc > 0 and stored == "ready_for_future_impl":
+            # A completed task with a new open clarification goes back to
+            # needs_clarification — this matches sync_readiness's ordering
+            # where clarifications win over brief state.
+            return "needs_clarification"
         return stored
 
     oc = open_clarification_count(db, task.id)
@@ -93,31 +106,29 @@ def preview_readiness(db: Session, task: PlanTask) -> str:
     return "brief_ready"
 
 
+def preview_readiness(db: Session, task: PlanTask) -> str:
+    """Read-only readiness for API summaries. Delegates to
+    ``_compute_readiness_state``; does not mutate.
+    """
+    return _compute_readiness_state(db, task)
+
+
 def sync_readiness(db: Session, task: PlanTask) -> None:
-    """Derive coding_readiness_state from clarifications and brief (not during an active run)."""
+    """Derive ``coding_readiness_state`` and persist the result onto ``task``.
+    Delegates state computation to ``_compute_readiness_state`` — the only
+    writer of readiness-derived state in the system (A4).
+    """
     if task.coding_readiness_state == "validation_pending":
         return
-
-    oc = open_clarification_count(db, task.id)
-    if oc > 0:
-        task.coding_readiness_state = "needs_clarification"
-        return
-
     if task.coding_readiness_state in ("blocked", "ready_for_future_impl"):
+        # Preserve terminal stored states unless a new clarification warrants
+        # reopening — mirrors _compute_readiness_state's precedence.
+        if task.coding_readiness_state == "ready_for_future_impl":
+            oc = open_clarification_count(db, task.id)
+            if oc > 0:
+                task.coding_readiness_state = "needs_clarification"
         return
-
-    br = latest_brief(db, task.id)
-    body = (br.body or "").strip() if br else ""
-    if not body:
-        task.coding_readiness_state = "needs_clarification"
-        return
-
-    prof = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
-    if prof is None or prof.brief_approved_at is None:
-        task.coding_readiness_state = "brief_ready"
-        return
-
-    task.coding_readiness_state = "brief_ready"
+    task.coding_readiness_state = _compute_readiness_state(db, task)
 
 
 def add_clarification(db: Session, task: PlanTask, question: str, user_id: int | None) -> TaskClarification:

@@ -14,7 +14,11 @@ from ...models.coding_task import (
     PlanTaskCodingProfile,
 )
 from .envelope import subprocess_safe_env, truncate_text
-from .workspaces import lookup_workspace_repo_for_profile
+from .workspaces import (
+    WorkspaceUnbound,
+    lookup_workspace_repo_for_profile,
+    workspace_binding_reason,
+)
 
 _AUDIT_MESSAGE_MAX = 4000
 _APPLY_TIMEOUT_SEC = 120
@@ -151,6 +155,10 @@ def apply_stored_snapshot_diffs(
 
     root = _repo_root_for_task(db, task, user_id)
     if root is None or not root.is_dir():
+        prof = db.query(PlanTaskCodingProfile).filter(PlanTaskCodingProfile.task_id == task.id).first()
+        reason = workspace_binding_reason(db, prof, user_id=user_id) or (
+            "Could not resolve active CodeRepo root for this task (fail-closed)."
+        )
         aid = _insert_audit(
             db,
             suggestion_id=suggestion_id,
@@ -158,12 +166,16 @@ def apply_stored_snapshot_diffs(
             user_id=user_id,
             dry_run=dry_run,
             status="failed",
-            message=_bound_audit_message(
-                "Could not resolve active CodeRepo root for this task (fail-closed)."
-            ),
+            message=_bound_audit_message(reason),
         )
         db.commit()
-        return {"ok": False, "message": "Repository root could not be resolved", "audit_id": aid}, 400
+        return {
+            "ok": False,
+            "message": reason,
+            "workspace_unbound": True,
+            "workspace_reason": reason,
+            "audit_id": aid,
+        }, 409
 
     patch = _combine_diffs(diffs)
     code, msg = _run_git_apply(root, patch, check_only=True)

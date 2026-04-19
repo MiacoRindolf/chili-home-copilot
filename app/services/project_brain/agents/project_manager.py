@@ -123,15 +123,18 @@ class ProjectManagerAgent(AgentBase):
         return count
 
     def _review_planner_state(self, db: Session, user_id: int) -> Dict[str, Any]:
-        """Step 2: Pull current project state from the Planner module."""
-        try:
-            from ...planner_service import list_projects, get_user_project_summary
-            projects = list_projects(db, user_id)
-            summary_text = get_user_project_summary(db, user_id)
-        except Exception as e:
-            logger.warning("[pm] Could not read planner: %s", e)
-            projects = []
-            summary_text = ""
+        """Step 2: Pull current project state from the Planner module via the
+        typed ``planner_facade`` (A8). Field names and null handling live in
+        the facade so this method stays short and schema-change-proof.
+        """
+        from ..planner_facade import (
+            get_user_project_summary_text,
+            list_project_tasks,
+            list_user_projects,
+        )
+
+        projects = list_user_projects(db, user_id)
+        summary_text = get_user_project_summary_text(db, user_id)
 
         total_tasks = 0
         done_tasks = 0
@@ -141,26 +144,22 @@ class ProjectManagerAgent(AgentBase):
         today = date.today()
 
         for p in projects:
-            for t in self._get_project_tasks(db, user_id, p.get("id")):
+            for t in list_project_tasks(db, user_id, p.id):
                 total_tasks += 1
-                status = t.get("status", "todo")
-                if status == "done":
+                if t.status == "done":
                     done_tasks += 1
-                elif status == "in_progress":
+                elif t.status == "in_progress":
                     in_progress += 1
-                elif status == "blocked":
+                elif t.status == "blocked":
                     blocked += 1
-                end = t.get("end_date")
-                if end and status != "done":
-                    try:
-                        if date.fromisoformat(end) < today:
-                            overdue += 1
-                    except Exception:
-                        pass
+                if t.end_date and t.status != "done" and t.end_date < today:
+                    overdue += 1
 
         return {
             "project_count": len(projects),
-            "projects": projects,
+            # Preserve the historical dict-shaped contract for downstream
+            # consumers (LLM prompts, findings, cycle reports).
+            "projects": [p.raw for p in projects],
             "total_tasks": total_tasks,
             "done_tasks": done_tasks,
             "in_progress": in_progress,
@@ -170,13 +169,11 @@ class ProjectManagerAgent(AgentBase):
         }
 
     def _get_project_tasks(self, db: Session, user_id: int, project_id: int | None) -> list:
-        if not project_id:
-            return []
-        try:
-            from ...planner_service import list_tasks
-            return list_tasks(db, project_id, user_id)
-        except Exception:
-            return []
+        """Backward-compat shim — downstream helpers still expect dicts.
+        New PM code should use ``planner_facade.list_project_tasks`` directly.
+        """
+        from ..planner_facade import list_project_tasks
+        return [t.raw for t in list_project_tasks(db, user_id, project_id)]
 
     def _analyze_velocity(self, db: Session, user_id: int, planner_state: dict) -> Dict[str, Any]:
         """Step 3: Calculate velocity metrics from planner data."""

@@ -111,6 +111,13 @@ class Settings(BaseSettings):
     # Empty means: enable all known modules.
     chili_modules: str = "planner,intercom,voice,projects"
 
+    # Kill switch for the /brain?domain=project developer cockpit (register repo,
+    # planner handoff, code agents, suggest/apply/validate). When False, the
+    # project-domain bootstrap and /api/brain/project/* + /api/brain/code/*
+    # endpoints return HTTP 503 so the front end fails closed, and the brain
+    # shell hides the project domain tab and skips rendering the pane.
+    project_domain_enabled: bool = True
+
     # Desktop command refinement: LLM corrects ASR and normalizes app names (mobile/desktop API).
     desktop_refinement_enabled: bool = True
 
@@ -1074,6 +1081,216 @@ class Settings(BaseSettings):
     chili_autopilot_strict_primary: bool = Field(
         default=False,
         validation_alias=AliasChoices("CHILI_AUTOPILOT_STRICT_PRIMARY"),
+    )
+
+    # P0.5 — Bracket reconciler watchdog: alert when an open live trade's most
+    # recent reconciliation kind is missing_stop / orphan_stop and the observation
+    # is older than this threshold. Since RH has no native brackets, a live
+    # unprotected position is a critical operator signal.
+    chili_bracket_watchdog_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_ENABLED"),
+    )
+    chili_bracket_watchdog_stale_after_sec: int = Field(
+        default=300,
+        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC"),
+    )
+
+    # P1.1 — formal order state machine. When enabled, venue adapters and the
+    # execution-audit event stream project broker-native statuses onto the
+    # canonical DRAFT/SUBMITTING/ACK/PARTIAL/FILLED/CANCELLED/REJECTED/EXPIRED
+    # states and write one row per transition to ``trading_order_state_log``.
+    # Off by default during the P1.1 rollout — flip on per-environment once
+    # shadow traffic has been observed for a week. Disabled mode is a hard
+    # no-op: no rows are written, callers receive ``reason='disabled'``.
+    chili_order_state_machine_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_ORDER_STATE_MACHINE_ENABLED"),
+    )
+
+    # P1.2 — venue health + circuit breaker. When enabled, ``venue_health``
+    # rolls up per-venue ack-to-fill latency + error/rate-limit rates over
+    # 1m/5m/1h windows and can flip a venue to "degraded" when thresholds
+    # are breached. The gate blocks new entries (AutoTrader v1 + momentum
+    # neural live_runner) without killing open positions. Off by default;
+    # flip on once P1.1 has accumulated a week of canonical transitions.
+    chili_venue_health_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ENABLED"),
+    )
+    # Primary rolling window (seconds) used by ``is_venue_degraded``.
+    # 300 = 5 minutes — long enough to denoise a transient spike, short
+    # enough that one-off incidents don't linger past recovery.
+    chili_venue_health_window_sec: int = Field(
+        default=300,
+        ge=60,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_WINDOW_SEC"),
+    )
+    # Minimum sample count required before the breaker can fire. Below this
+    # the venue is reported ``healthy`` regardless of thresholds so we don't
+    # trip on a single unlucky ack.
+    chili_venue_health_min_samples: int = Field(
+        default=5,
+        ge=1,
+        le=500,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_MIN_SAMPLES"),
+    )
+    # P95 ack-to-fill latency threshold (ms) — above this the venue is
+    # considered degraded. Defaults: coinbase crypto fills should clear in
+    # well under 5s; robinhood equities comparable on regular market hours.
+    chili_venue_health_ack_to_fill_p95_ms: int = Field(
+        default=5000,
+        ge=100,
+        le=120000,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ACK_TO_FILL_P95_MS"),
+    )
+    # P95 submit-to-ack latency threshold (ms) — catches slow broker REST.
+    chili_venue_health_submit_to_ack_p95_ms: int = Field(
+        default=3000,
+        ge=50,
+        le=60000,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_SUBMIT_TO_ACK_P95_MS"),
+    )
+    # Error-rate threshold as a fraction (0.0–1.0). Reject + rate_limit
+    # events divided by all lifecycle events in the window. 10% = clearly
+    # unhealthy; below 5% is normal noise (cancel-after-ack etc).
+    chili_venue_health_error_rate_pct: float = Field(
+        default=0.10,
+        ge=0.01,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ERROR_RATE_PCT"),
+    )
+    # When degraded, should momentum_neural live sessions auto-switch to
+    # paper mode? False = block entry and stay in WATCHING_LIVE (retry on
+    # next pulse). True = flip session.mode to paper so the session stays
+    # productive instead of stalling. Conservative default: block only.
+    chili_venue_health_auto_switch_to_paper: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_AUTO_SWITCH_TO_PAPER"),
+    )
+
+    # P1.3 — date-based walk-forward backtest. Unlike a single %-holdout
+    # OOS split, walk-forward slices the dataset into rolling (train,
+    # test) windows so a pattern must stay profitable across multiple
+    # independently-held-out periods. With an embargo day gap between
+    # train-end and test-start, triple-barrier labels can't leak a
+    # single-bar future return across the boundary.
+    chili_walk_forward_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_ENABLED"),
+    )
+    # Length of each fold's train window (bars treated as days for 1d
+    # data). 180d = 6 months of training → stable parameter estimates.
+    chili_walk_forward_train_days: int = Field(
+        default=180,
+        ge=30,
+        le=1825,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_TRAIN_DAYS"),
+    )
+    # Length of each fold's test window. 30d = 1 month of held-out
+    # evaluation → 10-20 trades on a typical daily pattern.
+    chili_walk_forward_test_days: int = Field(
+        default=30,
+        ge=5,
+        le=365,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_TEST_DAYS"),
+    )
+    # Step between fold start dates. 30d = non-overlapping test
+    # windows; <test_days means overlapping tests (bootstrap-like).
+    chili_walk_forward_step_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_STEP_DAYS"),
+    )
+    # Embargo between train-end and test-start. Required for daily
+    # patterns because triple-barrier labels reach ``max_bars`` forward
+    # — a 2-day embargo eliminates single-bar leakage. Set to 5+ for
+    # patterns with longer look-ahead (e.g. weekly exits).
+    chili_walk_forward_embargo_days: int = Field(
+        default=2,
+        ge=0,
+        le=30,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_EMBARGO_DAYS"),
+    )
+    # Minimum number of completed folds required before the gate can
+    # fire. Fewer folds = too noisy to trust. 3 folds = minimum for any
+    # real statistical claim about pattern robustness.
+    chili_walk_forward_min_folds: int = Field(
+        default=3,
+        ge=2,
+        le=24,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_FOLDS"),
+    )
+    # Per-fold pass threshold: a fold passes iff its test win-rate
+    # meets this floor. 0.45 = baseline "not worse than coin-flip after
+    # friction" for a 1:1 RR pattern.
+    chili_walk_forward_min_fold_win_rate: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_FOLD_WIN_RATE"),
+    )
+    # Fraction of folds that must pass the per-fold threshold for the
+    # overall pattern to pass walk-forward. 0.6 = 3-of-5 / 6-of-10
+    # folds must pass — tight enough to reject regime-dependent edges.
+    chili_walk_forward_min_pass_fraction: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_PASS_FRACTION"),
+    )
+
+    # ── P1.4 — runtime feature-parity assertion at entry ────────────────────
+    # Verifies at entry time that the feature vector used by the decision
+    # matches what indicator_core.compute_all_from_df produces on the same
+    # OHLCV frame. Catches regressions where the live path diverges from the
+    # canonical backtest compute surface (missing features, rounding drift,
+    # stale caches). Soft by default — logs + alerts + records to the
+    # TradingExecutionEvent stream with event_type='feature_parity_drift'
+    # without blocking entry. Flip to 'hard' to block critical drift.
+    chili_feature_parity_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_ENABLED"),
+    )
+    # 'disabled' | 'soft' | 'hard'. Soft records + alerts but never blocks.
+    # Hard blocks entry when severity == 'critical'. 2-week shakedown in soft
+    # mode is the intended path before flipping to hard.
+    chili_feature_parity_mode: str = Field(
+        default="soft",
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_MODE"),
+    )
+    # Absolute tolerance for numeric feature comparison. Smaller-than-this
+    # deltas are considered exact.
+    chili_feature_parity_epsilon_abs: float = Field(
+        default=1e-6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_EPSILON_ABS"),
+    )
+    # Relative tolerance for numeric feature comparison. 0.005 = 0.5%.
+    # Applies only when the reference value is non-zero.
+    chili_feature_parity_epsilon_rel: float = Field(
+        default=0.005,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_EPSILON_REL"),
+    )
+    # Number of feature mismatches at/above which the overall severity is
+    # critical (in addition to any boolean mismatch, which is always critical).
+    chili_feature_parity_critical_mismatch_count: int = Field(
+        default=3,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_CRITICAL_MISMATCH_COUNT"),
+    )
+    # Whether to emit alerts.dispatch_alert on warn+ severity. Off for tests;
+    # operators can toggle off if alert noise exceeds tolerance during
+    # shakedown.
+    chili_feature_parity_alert_on_warn: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_ALERT_ON_WARN"),
     )
 
     # Phase 7 — simulated paper automation runner (no live orders).

@@ -11,6 +11,17 @@ from ...models.coding_task import PlanTaskCodingProfile
 from . import envelope
 
 
+class WorkspaceUnbound(ValueError):
+    """Raised when a mutation is attempted on a task whose workspace is unbound
+    or points to an inactive/deleted code repo. Router layer maps this to
+    HTTP 409 so UI surfaces can show the operator the actionable reason.
+    """
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
 def _workspace_query(db: Session, user_id: int | None = None) -> Query:
     q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
     if user_id is None:
@@ -169,15 +180,21 @@ def bind_profile_workspace(
     repo_index: int | None = None,
     user_id: int | None = None,
 ) -> CodeRepo | None:
+    """Bind a profile to a registered workspace. Canonical path writes only
+    ``code_repo_id``. Legacy ``repo_index`` writes are deprecated (A2/D3) —
+    when binding via ``code_repo_id``/``repo_name`` we no longer backfill
+    ``repo_index``. Direct ``repo_index`` binding still works but logs a
+    deprecation warning so operators can spot stragglers.
+    """
+    import logging
+
+    _log = logging.getLogger("chili.coding_task.workspaces")
     repo: CodeRepo | None = None
     if code_repo_id is not None:
         repo = get_active_workspace_repo(db, code_repo_id, user_id=user_id)
         if repo is None:
             raise ValueError("code_repo_id does not point to an active registered workspace.")
         profile.code_repo_id = int(repo.id)
-        idx = legacy_workspace_index_for_path(repo.path)
-        if idx is not None:
-            profile.repo_index = idx
         return repo
 
     if repo_name is not None:
@@ -185,18 +202,38 @@ def bind_profile_workspace(
         if repo is None:
             raise ValueError("repo_name does not match an active registered workspace.")
         profile.code_repo_id = int(repo.id)
-        idx = legacy_workspace_index_for_path(repo.path)
-        if idx is not None:
-            profile.repo_index = idx
         return repo
 
     if repo_index is not None:
+        _log.warning(
+            "bind_profile_workspace called with legacy repo_index=%s (deprecated); "
+            "migrate caller to code_repo_id",
+            repo_index,
+        )
         profile.repo_index = int(repo_index)
         repo = resolve_workspace_repo_from_legacy_index(db, repo_index, user_id=user_id)
         profile.code_repo_id = int(repo.id) if repo is not None else None
         return repo
 
     return lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+
+
+def require_bound_repo(
+    db: Session,
+    profile: PlanTaskCodingProfile | None,
+    *,
+    user_id: int | None = None,
+) -> CodeRepo:
+    """Return the active CodeRepo for ``profile`` or raise WorkspaceUnbound
+    with an actionable reason. Use from mutation endpoints to fail closed.
+    """
+    repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
+    if repo is None:
+        reason = workspace_binding_reason(db, profile, user_id=user_id) or (
+            "Task workspace is not bound to an active registered repo."
+        )
+        raise WorkspaceUnbound(reason)
+    return repo
 
 
 def resolve_profile_cwd(
@@ -207,9 +244,10 @@ def resolve_profile_cwd(
 ) -> Path:
     repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is None:
-        raise ValueError(
+        reason = workspace_binding_reason(db, profile, user_id=user_id) or (
             "Task workspace is not bound to an active registered repo. Rebind the task to a Project workspace first."
         )
+        raise WorkspaceUnbound(reason)
     try:
         root = Path(repo.path).resolve()
     except OSError as exc:
