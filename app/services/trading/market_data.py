@@ -568,6 +568,19 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
         from .price_bus import get_live_quote
         bus_q = get_live_quote(ticker)
         if bus_q and bus_q.get("price"):
+            try:
+                from .runtime_surface_state import persist_runtime_surface_now
+
+                persist_runtime_surface_now(
+                    surface="market_data",
+                    state="ok",
+                    source=str(bus_q.get("source") or "price_bus"),
+                    as_of=datetime.utcnow(),
+                    details={"provider": str(bus_q.get("source") or "price_bus")},
+                    updated_by="market_data",
+                )
+            except Exception:
+                pass
             from ..massive_client import is_crypto
             _cr = is_crypto(ticker)
             return {
@@ -594,6 +607,7 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
                     "bid_size": ws_snap.bid_size,
                     "ask_size": ws_snap.ask_size,
                     "quote_ts": _dt.utcfromtimestamp(ws_snap.timestamp) if ws_snap.timestamp else None,
+                    "provider": "massive_ws",
                 }
                 return _build_quote_result(ticker, fi)
         except Exception:
@@ -605,6 +619,7 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
         try:
             fi = _massive.get_last_quote(ticker)
             if fi and fi.get("last_price") is not None:
+                fi = {**fi, "provider": "massive"}
                 return _build_quote_result(ticker, fi)
             if _massive.massive_aggregate_variants_all_dead(ticker):
                 _massive_dead = True
@@ -626,6 +641,7 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
         try:
             fi = _poly.get_last_quote(ticker)
             if fi and fi.get("last_price") is not None:
+                fi = {**fi, "provider": "polygon"}
                 return _build_quote_result(ticker, fi)
             logger.debug(f"[market_data] Polygon quote empty for {ticker}, falling back")
             fi = None
@@ -636,6 +652,7 @@ def fetch_quote(ticker: str, *, allow_provider_fallback: bool | None = None) -> 
     fi = _yf_fast_info(ticker)
     if fi is None or fi.get("last_price") is None:
         return None
+    fi = {**fi, "provider": "yfinance"}
     return _build_quote_result(ticker, fi)
 
 
@@ -647,6 +664,23 @@ def _serialize_ts(val: Any) -> str | None:
     if isinstance(val, (_dt, _d)):
         return val.isoformat()
     return str(val)
+
+
+def _parse_runtime_dt(val: Any) -> datetime | None:
+    if val is None:
+        return None
+    if isinstance(val, datetime):
+        return val
+    raw = str(val).strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    return dt.replace(tzinfo=None) if dt.tzinfo else dt
 
 
 def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | None:
@@ -667,6 +701,7 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         "market_cap": int(fi["market_cap"]) if fi.get("market_cap") else None,
         "currency": "USD",
         "quote_ts": _serialize_ts(fi.get("quote_ts") or _dt.utcnow()),
+        "source": fi.get("provider") or fi.get("source") or "market_data",
     }
     if fi.get("day_high"):
         result["day_high"] = smart_round(fi["day_high"], crypto=_cr)
@@ -692,6 +727,19 @@ def _build_quote_result(ticker: str, fi: dict[str, Any]) -> dict[str, Any] | Non
         from .emergency_liquidation import record_price_heartbeat
 
         record_price_heartbeat()
+    except Exception:
+        pass
+    try:
+        from .runtime_surface_state import persist_runtime_surface_now
+
+        persist_runtime_surface_now(
+            surface="market_data",
+            state="ok",
+            source=str(result.get("source") or "market_data"),
+            as_of=_parse_runtime_dt(result.get("quote_ts")) or _dt.utcnow(),
+            details={"provider": result.get("source"), "ticker": ticker.upper()},
+            updated_by="market_data",
+        )
     except Exception:
         pass
     return result
@@ -1506,6 +1554,23 @@ def get_market_regime() -> dict[str, Any]:
     }
     _market_regime_cache["data"] = result
     _market_regime_cache["ts"] = now
+    try:
+        from .runtime_surface_state import persist_runtime_surface_now
+
+        persist_runtime_surface_now(
+            surface="regime",
+            state="ok",
+            source="get_market_regime",
+            as_of=datetime.utcnow(),
+            details={
+                "regime": result.get("regime"),
+                "vix_regime": result.get("vix_regime"),
+                "spy_direction": result.get("spy_direction"),
+            },
+            updated_by="market_data",
+        )
+    except Exception:
+        pass
     return result
 
 

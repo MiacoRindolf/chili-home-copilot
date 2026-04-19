@@ -18,6 +18,7 @@ from .trading.research_integrity import (
     enrich_generic_backtest_result as _enrich_generic_bt_result,
     enrich_pattern_backtest_result as _enrich_pattern_bt_result,
 )
+from .trading.backtest_provenance import normalize_backtest_storage_metadata
 
 from ..config import settings
 from ..models.trading import BacktestResult, ScanPattern
@@ -688,6 +689,12 @@ def save_backtest(
         for _k in ("ohlc_bars", "chart_time_from", "chart_time_to", "period", "interval"):
             if params_obj.get(_k) is None and _dp.get(_k) is not None:
                 params_obj[_k] = _dp[_k]
+    strategy, params_obj, _prov_status, _prov_issues, _sp = normalize_backtest_storage_metadata(
+        db,
+        resolved_scan_pattern_id=int(resolved_sp_id) if resolved_sp_id is not None else None,
+        strategy_name=strategy,
+        params_obj=params_obj,
+    )
     params_json = json.dumps(params_obj)
     from .trading.backtest_param_sets import get_or_create_backtest_param_set
 
@@ -742,6 +749,7 @@ def save_backtest(
                 if len(sp_match) == 1:
                     existing = sp_match[0]
         if existing:
+            existing.strategy_name = strategy
             existing.return_pct = ret_pct
             existing.win_rate = wr
             existing.sharpe = sharpe

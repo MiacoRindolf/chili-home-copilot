@@ -32,7 +32,7 @@ from .scanner import (
 )
 
 # ── Runtime / operator ──────────────────────────────────────────────────────
-from .runtime_status import get_freshness_summary, get_runtime_overview
+from . import runtime_status as _runtime_status
 
 # ── Risk / portfolio ────────────────────────────────────────────────────────
 from .portfolio_risk import (
@@ -109,3 +109,11 @@ __all__ = [
     "apply_tca_on_trade_close",
     "resolve_exit_reference_price",
 ]
+
+
+def get_runtime_overview(db):
+    return _runtime_status.get_runtime_overview(db)
+
+
+def get_freshness_summary(db):
+    return _runtime_status.get_freshness_summary(db)

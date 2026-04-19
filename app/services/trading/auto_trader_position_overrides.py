@@ -25,6 +25,10 @@ from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.trading import AutoTraderRun, BrainRuntimeMode, PaperTrade, Trade
+from .management_scope import (
+    MANAGEMENT_SCOPE_ADOPTED_POSITION,
+    infer_trade_management_scope_from_fields,
+)
 from .autopilot_scope import is_live_autopilot_trade
 
 logger = logging.getLogger(__name__)
@@ -287,6 +291,7 @@ def _close_paper_now(db: Session, *, trade_id: int, updated_by: str) -> dict[str
         ticker=(pt.ticker or "").upper(),
         decision="desk_close_now",
         reason=f"paper_close_by={updated_by}",
+        management_scope=MANAGEMENT_SCOPE_ADOPTED_POSITION if sj.get("auto_trader_v1") else None,
         rule_snapshot={
             "opened_today_et": opened_today,
             "would_be_day_trade": opened_today and (pt.direction or "long") == "long",
@@ -441,6 +446,7 @@ def _adopt_trade(
 
     previous_version = t.auto_trader_version
     t.auto_trader_version = "v1"
+    t.management_scope = MANAGEMENT_SCOPE_ADOPTED_POSITION
     if t.stop_loss is None and seeded_stop is not None:
         t.stop_loss = float(seeded_stop)
     if t.take_profit is None and seeded_target is not None:
@@ -457,6 +463,7 @@ def _adopt_trade(
         decision="adopt_manual",
         reason=f"adopt_by={updated_by}",
         trade_id=t.id,
+        management_scope=MANAGEMENT_SCOPE_ADOPTED_POSITION,
         rule_snapshot={
             "previous_version": previous_version,
             "stop_loss": float(t.stop_loss) if t.stop_loss is not None else None,
@@ -539,6 +546,7 @@ def _adopt_paper(
         ticker=(pt.ticker or "").upper(),
         decision="adopt_manual",
         reason=f"paper_adopt_by={updated_by}",
+        management_scope=MANAGEMENT_SCOPE_ADOPTED_POSITION,
         rule_snapshot={
             "stop_price": float(pt.stop_price) if pt.stop_price is not None else None,
             "target_price": float(pt.target_price) if pt.target_price is not None else None,
@@ -575,6 +583,12 @@ def _unadopt_trade(db: Session, *, trade_id: int, updated_by: str) -> dict[str, 
         return {"ok": False, "error": "not_v1"}
 
     t.auto_trader_version = None
+    t.management_scope = infer_trade_management_scope_from_fields(
+        management_scope=None,
+        auto_trader_version=None,
+        broker_source=t.broker_source,
+        tags=t.tags,
+    )
     db.add(t)
     db.commit()
     clear_position_overrides(db, "trade", t.id)
@@ -587,6 +601,7 @@ def _unadopt_trade(db: Session, *, trade_id: int, updated_by: str) -> dict[str, 
         decision="unadopt_manual",
         reason=f"unadopt_by={updated_by}",
         trade_id=t.id,
+        management_scope=MANAGEMENT_SCOPE_ADOPTED_POSITION,
         rule_snapshot={"released_to_user": True},
     )
     db.add(audit)
@@ -619,6 +634,7 @@ def _unadopt_paper(db: Session, *, trade_id: int, updated_by: str) -> dict[str, 
         ticker=(pt.ticker or "").upper(),
         decision="unadopt_manual",
         reason=f"paper_unadopt_by={updated_by}",
+        management_scope=MANAGEMENT_SCOPE_ADOPTED_POSITION,
         rule_snapshot={"released_to_user": True, "paper": True},
     )
     db.add(audit)

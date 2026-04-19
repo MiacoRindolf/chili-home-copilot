@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...deps import get_db, get_identity_ctx
 from ...models.core import User, Device
 from ...pairing import DEVICE_COOKIE_NAME, register_device
@@ -20,6 +21,11 @@ from ...services.credential_vault import (
     get_broker_credentials,
     has_broker_credentials,
     save_broker_credentials,
+)
+from ...services.trading.broker_account_repair import (
+    repair_broker_account_truth,
+    repoint_device_token_to_user,
+    resolve_canonical_broker_user,
 )
 
 logger = logging.getLogger(__name__)
@@ -100,8 +106,33 @@ async def api_broker_save_credentials(
         creds = {"username": username, "password": password}
         if totp_secret:
             creds["totp_secret"] = totp_secret
+        resolved = resolve_canonical_broker_user(
+            db,
+            broker="robinhood",
+            creds=creds,
+            preferred_user_id=int(getattr(settings, "chili_autotrader_user_id", user_id) or user_id),
+        )
+        canonical_user_id = int(resolved.get("canonical_user_id") or user_id)
+        if canonical_user_id != int(user_id):
+            repoint_device_token_to_user(
+                db,
+                device_token=new_token or request.cookies.get(DEVICE_COOKIE_NAME),
+                canonical_user_id=canonical_user_id,
+            )
+            user_id = canonical_user_id
         save_broker_credentials(db, user_id, "robinhood", creds)
         result = broker_manager.connect_broker("robinhood", credentials=creds)
+        if result.get("status") == "connected":
+            try:
+                repair_broker_account_truth(
+                    db,
+                    broker="robinhood",
+                    creds=creds,
+                    canonical_user_id=user_id,
+                    preview_only=False,
+                )
+            except Exception:
+                logger.warning("[broker] Robinhood account truth repair failed after credential save", exc_info=True)
 
     elif broker == "coinbase":
         api_key = body.get("api_key", "").strip()
@@ -170,6 +201,22 @@ async def api_broker_connect(
 
     user_id, new_token = _ensure_user_id(db, identity, request)
     credentials = get_broker_credentials(db, user_id, broker) if user_id else None
+    if broker == "robinhood" and credentials:
+        resolved = resolve_canonical_broker_user(
+            db,
+            broker="robinhood",
+            creds=credentials,
+            preferred_user_id=int(getattr(settings, "chili_autotrader_user_id", user_id) or user_id),
+        )
+        canonical_user_id = int(resolved.get("canonical_user_id") or user_id)
+        if canonical_user_id != int(user_id):
+            repoint_device_token_to_user(
+                db,
+                device_token=new_token or request.cookies.get(DEVICE_COOKIE_NAME),
+                canonical_user_id=canonical_user_id,
+            )
+            user_id = canonical_user_id
+            credentials = get_broker_credentials(db, user_id, broker) or credentials
 
     if not credentials:
         env_has = False
@@ -204,6 +251,14 @@ async def api_broker_connect(
     sync_result: dict | None = None
     if result.get("status") == "connected" and user_id:
         try:
+            if broker == "robinhood":
+                repair_broker_account_truth(
+                    db,
+                    broker="robinhood",
+                    creds=credentials,
+                    canonical_user_id=user_id,
+                    preview_only=False,
+                )
             sync_result = broker_manager.sync_all(db, user_id)
             logger.info(
                 "[broker] Post-connect sync (user=%d, broker=%s): %s",
@@ -264,6 +319,12 @@ async def api_broker_verify(
                     uid = dev.user_id
         if uid:
             try:
+                repair_broker_account_truth(
+                    db,
+                    broker="robinhood",
+                    canonical_user_id=uid,
+                    preview_only=False,
+                )
                 payload["sync"] = broker_manager.sync_all(db, uid)
                 logger.info("[broker] Post-verify sync (user=%d): %s", uid, payload["sync"])
             except Exception:

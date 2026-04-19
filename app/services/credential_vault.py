@@ -111,6 +111,59 @@ def delete_broker_credentials(db: Session, user_id: int, broker: str) -> bool:
     return False
 
 
+def broker_identity_from_credentials(
+    broker: str,
+    creds: dict[str, Any] | None,
+) -> str | None:
+    """Best-effort stable identity for duplicate-account prevention."""
+    if not isinstance(creds, dict):
+        return None
+    broker_key = (broker or "").strip().lower()
+    if broker_key == "robinhood":
+        username = str(creds.get("username") or "").strip().lower()
+        return username or None
+    if broker_key == "coinbase":
+        api_key = str(creds.get("api_key") or "").strip()
+        return api_key or None
+    return None
+
+
+def iter_broker_credentials_with_identity(
+    db: Session,
+    broker: str,
+) -> list[tuple[BrokerCredential, dict[str, Any] | None, str | None]]:
+    """Decrypt all credentials for one broker with a resolved identity key."""
+    rows = (
+        db.query(BrokerCredential)
+        .filter(BrokerCredential.broker == broker)
+        .order_by(BrokerCredential.updated_at.desc(), BrokerCredential.id.desc())
+        .all()
+    )
+    out: list[tuple[BrokerCredential, dict[str, Any] | None, str | None]] = []
+    for row in rows:
+        data = decrypt_credentials(row.encrypted_data)
+        out.append((row, data, broker_identity_from_credentials(broker, data)))
+    return out
+
+
+def find_users_with_broker_identity(
+    db: Session,
+    broker: str,
+    identity: str | None,
+) -> list[int]:
+    key = str(identity or "").strip().lower()
+    if not key:
+        return []
+    seen: set[int] = set()
+    user_ids: list[int] = []
+    for row, _data, row_identity in iter_broker_credentials_with_identity(db, broker):
+        if row_identity != key or int(row.user_id) in seen:
+            continue
+        seen.add(int(row.user_id))
+        user_ids.append(int(row.user_id))
+    return user_ids
+
+
 # ── Key Rotation ──────────────────────────────────────────────────────
 
 
