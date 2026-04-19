@@ -1312,6 +1312,7 @@ class Settings(BaseSettings):
     brain_bench_require_stress_pass: bool = False
 
     # OOS gates beyond win rate (None = off). Enabling thins promotions; set in .env only on purpose.
+    brain_min_trades_for_promotion: int = 30
     brain_oos_min_expectancy_pct: Optional[float] = None
     brain_oos_min_profit_factor: Optional[float] = None
     # Extra holdout fractions on the same OHLCV window (comma-separated); empty = primary holdout only.

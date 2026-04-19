@@ -4252,13 +4252,21 @@ def get_top_picks_freshness(stale_threshold_seconds: float = 600) -> dict[str, A
     """
     global _top_picks_cache
     ts = _top_picks_cache.get("ts") or 0.0
+    if not ts:
+        return {
+            "as_of": None,
+            "age_seconds": None,
+            "is_stale": True,
+            "state": "no_data",
+        }
     now = time.time()
     age = now - ts
-    as_of_dt = datetime.utcfromtimestamp(ts) if ts else datetime.utcnow()
+    as_of_dt = datetime.utcfromtimestamp(ts)
     return {
         "as_of": as_of_dt.isoformat() + "Z",
         "age_seconds": round(age),
         "is_stale": age > stale_threshold_seconds,
+        "state": "stale" if age > stale_threshold_seconds else "ok",
     }
 
 

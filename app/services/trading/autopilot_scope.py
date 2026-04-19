@@ -93,7 +93,16 @@ def get_primary_autopilot() -> str:
     except Exception:
         return ""
     normalized = raw.strip().lower()
-    return normalized if normalized in KNOWN_AUTOPILOTS else ""
+    if normalized == AUTOPILOT_MOMENTUM_NEURAL:
+        momentum_live_enabled = bool(getattr(settings, "chili_momentum_live_runner_enabled", False))
+        autotrader_live_enabled = bool(getattr(settings, "chili_autotrader_live_enabled", False))
+        if not momentum_live_enabled and autotrader_live_enabled:
+            return AUTOPILOT_AUTO_TRADER_V1
+    if normalized in KNOWN_AUTOPILOTS:
+        return normalized
+    if bool(getattr(settings, "chili_autotrader_live_enabled", False)):
+        return AUTOPILOT_AUTO_TRADER_V1
+    return ""
 
 
 def get_strict_primary_mode() -> bool:

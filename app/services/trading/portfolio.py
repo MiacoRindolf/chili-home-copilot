@@ -14,6 +14,7 @@ from ...models.trading import (
     BreakoutAlert, JournalEntry, PatternMonitorDecision, ScanPattern,
     Trade, TradingInsight, WatchlistItem,
 )
+from .management_scope import MANAGEMENT_SCOPE_MANUAL
 from .market_data import fetch_quote, get_indicator_snapshot, is_crypto
 
 logger = logging.getLogger(__name__)
@@ -114,6 +115,7 @@ def create_trade(db: Session, user_id: int | None, **kwargs) -> Trade:
     except Exception as e:
         logger.warning("[portfolio] risk check error (allowing trade): %s", e)
 
+    kwargs.setdefault("management_scope", MANAGEMENT_SCOPE_MANUAL)
     trade = Trade(user_id=user_id, **kwargs)
     if trade.entry_date is None:
         trade.entry_date = datetime.utcnow()

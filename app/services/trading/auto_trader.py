@@ -29,6 +29,7 @@ from .auto_trader_synergy import (
     find_open_autotrader_trade,
     maybe_scale_in,
 )
+from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,7 @@ def _audit(
         reason=reason[:2000] if reason else None,
         rule_snapshot=rule_snapshot,
         llm_snapshot=llm_snapshot,
+        management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
         trade_id=trade_id,
     )
     db.add(row)
@@ -439,6 +441,7 @@ def _execute_new_entry(
             scan_pattern_id=alert.scan_pattern_id,
             related_alert_id=alert.id,
             broker_source="robinhood",
+            management_scope=MANAGEMENT_SCOPE_AUTO_TRADER_V1,
             broker_order_id=str(res.get("order_id") or ""),
             indicator_snapshot={
                 "breakout_alert": alert.indicator_snapshot,

@@ -100,6 +100,22 @@ def get_prediction_swr_cache_meta() -> dict[str, Any]:
     }
 
 
+def _persist_prediction_runtime_surface(results: list[dict] | None) -> None:
+    try:
+        from .runtime_surface_state import persist_runtime_surface_now
+
+        persist_runtime_surface_now(
+            surface="predictions",
+            state="ok",
+            source="get_current_predictions",
+            as_of=datetime.utcnow(),
+            details={"cached_result_count": len(results or [])},
+            updated_by="learning",
+        )
+    except Exception:
+        logger.debug("[learning] prediction runtime surface persist failed", exc_info=True)
+
+
 def get_current_predictions(db: Session, tickers: list[str] | None = None) -> list[dict]:
     """Generate live predictions for a set of tickers.
 
@@ -142,6 +158,7 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
                         try:
                             fresh = _get_current_predictions_impl(s, None, explicit_api_tickers=False)
                             _pred_cache = {"results": fresh, "ts": time.time()}
+                            _persist_prediction_runtime_surface(fresh)
                         finally:
                             s.close()
                     except Exception:
@@ -154,6 +171,7 @@ def get_current_predictions(db: Session, tickers: list[str] | None = None) -> li
 
     results = _get_current_predictions_impl(db, None, explicit_api_tickers=False)
     _pred_cache = {"results": results, "ts": time.time()}
+    _persist_prediction_runtime_surface(results)
     return results
 
 
@@ -196,6 +214,7 @@ def refresh_promoted_prediction_cache(db: Session) -> dict[str, Any]:
     with _pred_refresh_lock:
         _pred_cache = {"results": results, "ts": time.time()}
         _pred_refreshing = False
+    _persist_prediction_runtime_surface(results)
 
     logger.info(
         "[learning] Promoted prediction cache: tickers=%s patterns=%s predictions=%s",
@@ -568,6 +587,32 @@ def get_attribution_coverage_stats(db: Session, user_id: int | None) -> dict[str
     }
 
 
+def _repaired_oos_gate_failures(pattern: Any) -> list[str]:
+    from ...config import settings
+
+    reasons: list[str] = []
+    min_trades = int(getattr(settings, "brain_min_trades_for_promotion", 30) or 30)
+    oos_trade_count = int(getattr(pattern, "oos_trade_count", 0) or 0)
+    if oos_trade_count < min_trades:
+        reasons.append(f"oos_trade_count<{min_trades}")
+
+    oos_avg_return_pct = getattr(pattern, "oos_avg_return_pct", None)
+    if oos_avg_return_pct is None or float(oos_avg_return_pct) <= 0:
+        reasons.append("oos_avg_return_pct<=0")
+
+    freshness_ref = getattr(pattern, "oos_evaluated_at", None) or getattr(pattern, "last_backtest_at", None)
+    stale_cutoff = datetime.utcnow() - timedelta(days=7)
+    if freshness_ref is None or freshness_ref < stale_cutoff:
+        reasons.append("backtest_stale>7d")
+
+    ov = dict(getattr(pattern, "oos_validation_json", {}) or {})
+    provenance_status = str(ov.get("provenance_status") or "").strip().lower()
+    if provenance_status in {"incomplete", "quarantined"}:
+        reasons.append(f"provenance_{provenance_status}")
+
+    return reasons
+
+
 def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     """Maintenance / reconcile: demote patterns when live win rate lags research OOS.
 
@@ -595,6 +640,50 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
     min_n = int(getattr(settings, "brain_live_depromotion_min_closed_trades", 8))
     max_gap = float(getattr(settings, "brain_live_depromotion_max_gap_pct", 25.0))
     demoted = 0
+    demoted_pattern_ids: set[int] = set()
+    promoted_patterns = (
+        db.query(ScanPattern)
+        .filter(
+            ScanPattern.promotion_status == "promoted",
+            ScanPattern.active.is_(True),
+        )
+        .all()
+    )
+    for p in promoted_patterns:
+        failures = _repaired_oos_gate_failures(p)
+        if not failures:
+            continue
+        _op = (p.promotion_status or "").strip()
+        _ol = (p.lifecycle_stage or "").strip()
+        from .lifecycle import transition_on_decay
+
+        reason = "repaired_oos_gate_failed: " + ", ".join(failures[:4])
+        try:
+            transition_on_decay(db, p, reason=reason)
+        except Exception:
+            p.active = False
+            p.promotion_status = "degraded_live"
+            p.lifecycle_stage = "decayed"
+            p.lifecycle_changed_at = datetime.utcnow()
+            try:
+                from .brain_work.promotion_surface import emit_promotion_surface_change
+
+                emit_promotion_surface_change(
+                    db,
+                    scan_pattern_id=int(p.id),
+                    old_promotion_status=_op,
+                    old_lifecycle_stage=_ol,
+                    new_promotion_status=(p.promotion_status or "").strip(),
+                    new_lifecycle_stage=(p.lifecycle_stage or "").strip(),
+                    source="run_live_pattern_depromotion_repaired_oos_fallback",
+                )
+            except Exception:
+                logger.debug(
+                    "[learning] repaired_oos depromotion emit failed",
+                    exc_info=True,
+                )
+        demoted_pattern_ids.add(int(p.id))
+        demoted += 1
     for row in patterns:
         n_live = int(row.get("live_closed_trades") or 0)
         if n_live < min_n:
@@ -603,6 +692,8 @@ def run_live_pattern_depromotion(db: Session) -> dict[str, Any]:
         live_wr = row.get("live_win_rate_pct")
         pid = row.get("scan_pattern_id")
         if oos_wr is None or live_wr is None or pid is None:
+            continue
+        if int(pid) in demoted_pattern_ids:
             continue
         if float(live_wr) < float(oos_wr) - max_gap:
             p = db.query(ScanPattern).filter(ScanPattern.id == int(pid)).first()
