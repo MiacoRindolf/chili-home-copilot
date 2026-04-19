@@ -839,6 +839,43 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_MOMENTUM_FAMILY_REGIME_PREFILTER_ENABLED"),
     )
 
+    # ── Phase 2C: Hebbian plasticity on neural mesh edges ───────────────────
+    # Outcome-driven edge-weight updates. Defaults conservative: feature flag OFF,
+    # dry_run ON, so even when enabled the first rollout writes audit rows
+    # without mutating edge weights. Only flip dry_run=false after shadow-mode
+    # validation on 20+ closed trades.
+    chili_mesh_plasticity_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_ENABLED"),
+    )
+    chili_mesh_plasticity_dry_run: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_DRY_RUN"),
+    )
+    # Circuit breaker: if an edge has drifted more than this from its pre-live
+    # snapshot, refuse further mutations on it and log with reason='drift_cap'.
+    # 0.0 disables the check.
+    chili_mesh_plasticity_drift_cap: float = Field(
+        default=1.0,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_DRIFT_CAP"),
+    )
+    chili_mesh_plasticity_learning_rate: float = Field(
+        default=0.05,
+        ge=0.0, le=0.5,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_LEARNING_RATE"),
+    )
+    chili_mesh_plasticity_daily_budget: float = Field(
+        default=0.5,
+        ge=0.0,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_DAILY_BUDGET"),
+    )
+    chili_mesh_plasticity_per_edge_cooldown_trades: int = Field(
+        default=5,
+        ge=0,
+        validation_alias=AliasChoices("CHILI_MESH_PLASTICITY_PER_EDGE_COOLDOWN_TRADES"),
+    )
+
     # Robinhood spot venue adapter (execution layer; equities via robin_stocks).
     chili_robinhood_spot_adapter_enabled: bool = Field(
         default=False,

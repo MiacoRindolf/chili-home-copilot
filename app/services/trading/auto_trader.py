@@ -454,6 +454,26 @@ def _execute_new_entry(
         db.add(tr)
         db.commit()
         db.refresh(tr)
+        # Phase 2C: emit trade_lifecycle entry event and save correlation_id
+        # on the Trade. On close, plasticity uses this to look up the path log
+        # and reinforce/attenuate the edges that carried the signal.
+        try:
+            from .brain_neural_mesh.publisher import publish_trade_lifecycle
+
+            entry_corr = publish_trade_lifecycle(
+                db,
+                trade_id=int(tr.id),
+                ticker=tr.ticker,
+                transition="entry",
+                broker_source="robinhood",
+                quantity=float(tr.quantity),
+                price=float(fill),
+            )
+            if entry_corr:
+                tr.mesh_entry_correlation_id = entry_corr
+                db.commit()
+        except Exception:
+            pass
         _audit(
             db,
             user_id=uid,

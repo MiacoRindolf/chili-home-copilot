@@ -9,9 +9,17 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from ....models.trading import BrainFireLog, BrainGraphEdge, BrainGraphNode, BrainNodeState
+from ....config import settings
+from ....models.trading import (
+    BrainActivationPathLog,
+    BrainFireLog,
+    BrainGraphEdge,
+    BrainGraphNode,
+    BrainNodeState,
+)
 from .repository import get_node, get_or_create_state, outbound_edges
 from .schema import LOG_PREFIX
 
@@ -204,6 +212,36 @@ def propagate_one_event(
             res.suppressions += 1
 
         res.targets_touched += 1
+
+        # Phase 2C: path logging for plasticity. Only active when plasticity is
+        # enabled so we don't amplify writes for every propagation event.
+        if correlation_id and getattr(settings, "chili_mesh_plasticity_enabled", False):
+            try:
+                # hop_idx packs (depth, edge_id) to be unique within a correlation.
+                hop_idx = int(propagation_depth) * 100000 + int(edge.id or 0)
+                db.execute(
+                    text(
+                        """
+                        INSERT INTO brain_activation_path_log (
+                            correlation_id, hop_idx, source_node_id, target_node_id,
+                            edge_id, activation_before, activation_after,
+                            confidence_at_hop, recorded_at
+                        ) VALUES (
+                            :cid, :hop, :src, :tgt, :eid, :a_before, :a_after, :conf, :now
+                        )
+                        ON CONFLICT (correlation_id, hop_idx) DO NOTHING
+                        """
+                    ),
+                    {
+                        "cid": correlation_id, "hop": hop_idx,
+                        "src": source_node_id, "tgt": tgt.id, "eid": edge.id,
+                        "a_before": before_act, "a_after": state.activation_score,
+                        "conf": float(state.confidence),
+                        "now": now,
+                    },
+                )
+            except Exception as _pe:
+                _log.warning("%s path_log insert failed: %s", LOG_PREFIX, _pe)
 
         pre_fire = should_fire(tgt, state, now)
         if pre_fire:
