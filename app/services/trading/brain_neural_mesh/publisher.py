@@ -490,3 +490,167 @@ def publish_imminent_eval(
 def _now_iso() -> str:
     from datetime import datetime, timezone
     return datetime.now(timezone.utc).isoformat()
+
+
+# ── Phase 2B: Portfolio & exit execution publishers ─────────────────────────
+# Emit to nm_trade_lifecycle_hub / nm_exposure_heat / nm_exit_trigger. Safe
+# no-ops when mesh is disabled.
+
+def publish_trade_lifecycle(
+    db: Session,
+    *,
+    trade_id: int,
+    ticker: str,
+    transition: str,
+    broker_source: Optional[str] = None,
+    quantity: Optional[float] = None,
+    price: Optional[float] = None,
+    pnl: Optional[float] = None,
+    correlation_id: Optional[str] = None,
+) -> Optional[str]:
+    """Enqueue mesh activation when a Trade transitions (entry, scale_in, scale_out, close).
+
+    Fires ``nm_trade_lifecycle_hub`` which cascades to ``nm_portfolio_state`` and
+    ``nm_exit_policy``. ``transition`` is one of: ``"entry"``, ``"scale_in"``,
+    ``"scale_out"``, ``"close"``, ``"cancel"``.
+
+    Returns the correlation_id used (useful for callers that want to persist
+    the id on a Trade row for later plasticity lookup). Returns None if mesh
+    is disabled or on error.
+    """
+    if not mesh_enabled():
+        return None
+    try:
+        cid = correlation_id or str(uuid.uuid4())
+        # Close with realized pnl carries stronger signal than routine entry.
+        delta = 0.30 if transition == "close" else 0.18
+        enqueue_activation(
+            db,
+            source_node_id="nm_trade_lifecycle_hub",
+            cause="trade_lifecycle",
+            payload={
+                "signal_type": "trade_lifecycle",
+                "trade_id": int(trade_id),
+                "ticker": (ticker or "").upper(),
+                "transition": transition,
+                "broker_source": broker_source,
+                "quantity": quantity,
+                "price": price,
+                "pnl": pnl,
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug(
+            "%s published trade_lifecycle trade=%s transition=%s corr=%s",
+            LOG_PREFIX, trade_id, transition, cid,
+        )
+        return cid
+    except Exception as e:
+        _log.warning("%s publish_trade_lifecycle failed: %s", LOG_PREFIX, e)
+        return None
+
+
+def publish_exposure_update(
+    db: Session,
+    *,
+    heat_score: float,
+    sector_breakdown: Optional[dict[str, Any]] = None,
+    venue_breakdown: Optional[dict[str, Any]] = None,
+    over_limit: bool = False,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Enqueue activation when portfolio heat changes materially.
+
+    ``heat_score`` is a normalized [0,1] measure of portfolio risk consumption.
+    When ``over_limit=True`` the event pushes ``nm_exposure_heat`` hard enough
+    to fire the inhibitory veto edge into ``nm_risk_gate``.
+    """
+    if not mesh_enabled():
+        return
+    try:
+        cid = correlation_id or str(uuid.uuid4())
+        signal = "exposure_exceeded" if over_limit else "portfolio_update"
+        # Over-limit events are the strong signal; normal updates are gentle.
+        delta = 0.40 if over_limit else 0.12
+        enqueue_activation(
+            db,
+            source_node_id="nm_exposure_heat" if over_limit else "nm_portfolio_state",
+            cause="exposure_update",
+            payload={
+                "signal_type": signal,
+                "heat_score": float(heat_score),
+                "sector_breakdown": sector_breakdown or {},
+                "venue_breakdown": venue_breakdown or {},
+                "over_limit": bool(over_limit),
+            },
+            confidence_delta=delta,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug(
+            "%s published exposure_update heat=%.3f over_limit=%s corr=%s",
+            LOG_PREFIX, float(heat_score), over_limit, cid,
+        )
+    except Exception as e:
+        _log.warning("%s publish_exposure_update failed: %s", LOG_PREFIX, e)
+
+
+def publish_exit_decision(
+    db: Session,
+    *,
+    trade_id: int,
+    ticker: str,
+    reason: str,
+    source: str = "exit_trigger",
+    new_stop: Optional[float] = None,
+    target_price: Optional[float] = None,
+    correlation_id: Optional[str] = None,
+) -> None:
+    """Enqueue activation for an exit-side decision (trail move, target hit, or terminal trigger).
+
+    ``source`` is one of: ``"trail_engine"``, ``"target_engine"``, ``"exit_trigger"``.
+    Maps to the corresponding mesh node.
+    """
+    if not mesh_enabled():
+        return
+    source_node_map = {
+        "trail_engine": "nm_trail_engine",
+        "target_engine": "nm_target_engine",
+        "exit_trigger": "nm_exit_trigger",
+    }
+    source_node = source_node_map.get(source, "nm_exit_trigger")
+    signal_map = {
+        "trail_engine": "trail_move",
+        "target_engine": "target_hit",
+        "exit_trigger": "exit_intent",
+    }
+    try:
+        cid = correlation_id or str(uuid.uuid4())
+        enqueue_activation(
+            db,
+            source_node_id=source_node,
+            cause="exit_decision",
+            payload={
+                "signal_type": signal_map.get(source, "exit_intent"),
+                "trade_id": int(trade_id),
+                "ticker": (ticker or "").upper(),
+                "reason": reason,
+                "new_stop": new_stop,
+                "target_price": target_price,
+            },
+            # Terminal trigger is the strongest signal.
+            confidence_delta=0.35 if source == "exit_trigger" else 0.20,
+            propagation_depth=0,
+            correlation_id=cid,
+        )
+        get_counters().note_publish(1)
+        _log.debug(
+            "%s published exit_decision trade=%s source=%s reason=%s corr=%s",
+            LOG_PREFIX, trade_id, source, reason, cid,
+        )
+    except Exception as e:
+        _log.warning("%s publish_exit_decision failed: %s", LOG_PREFIX, e)

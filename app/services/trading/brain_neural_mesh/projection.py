@@ -24,6 +24,7 @@ from .layout_neural_graph import (
 )
 from .repository import nodes_for_domain
 from .schema import DEFAULT_DOMAIN, DEFAULT_GRAPH_VERSION
+from .seed_graph import OPERATIONAL_CLUSTERS
 from .waves import derive_overlay_hot_pulse_from_waves, group_activation_events_into_waves
 from ..learning_cycle_architecture import (
     SCHEDULER_ONLY_LEARNING_CYCLE_CLUSTER_ID,
@@ -36,8 +37,9 @@ from ..momentum_neural.brain_desk_summary import (
 
 NEURAL_LAYOUT_VERSION = 2
 # Bumped when neural graph node payload shape changes materially (Phase 10 momentum desk previews;
-# v4 adds lc_cluster_index / lc_step_index for learning-cycle status overlay).
-NEURAL_PROJECTION_SCHEMA_VERSION = 4
+# v4 adds lc_cluster_index / lc_step_index for learning-cycle status overlay;
+# v5 adds operational_cluster_id on nodes + operational_clusters registry in meta).
+NEURAL_PROJECTION_SCHEMA_VERSION = 5
 
 # Layer indices: 1 = outer ring (sensory), 7 = inner (meta-learning).
 NEURAL_LAYER_LABELS: dict[int, str] = {
@@ -48,9 +50,17 @@ NEURAL_LAYER_LABELS: dict[int, str] = {
     5: "Evidence / Verification",
     6: "Action / Expression",
     7: "Meta-Learning / Reweighting",
-    8: "Learning Cycle / Cluster",
+    8: "Cluster (Learning / Operational)",
     9: "Learning Cycle / Step",
 }
+
+
+def operational_clusters_registry() -> list[dict[str, Any]]:
+    """Projection payload for the operational cluster registry (UI grouping)."""
+    return [
+        {"cluster_id": cid, "label": label, "member_node_ids": list(members)}
+        for cid, label, members in OPERATIONAL_CLUSTERS
+    ]
 
 
 def neural_layer_labels_meta() -> dict[str, str]:
@@ -176,6 +186,8 @@ def build_neural_graph_projection(
             "description": dmeta.get("description"),
             "remarks": dmeta.get("remarks"),
             "cluster_id": dmeta.get("cluster_id"),
+            "operational_cluster_id": dmeta.get("operational_cluster_id"),
+            "cluster_kind": dmeta.get("cluster_kind"),
         }
         ls = st.local_state if st and isinstance(st.local_state, dict) else None
         if ls and ls.get("momentum_neural_version"):
@@ -244,6 +256,7 @@ def build_neural_graph_projection(
             "paper_vs_live_30d": panel.get("paper_vs_live_30d"),
             "links": panel.get("links"),
         },
+        "operational_clusters": operational_clusters_registry(),
     }
     return {"ok": True, "meta": meta, "nodes": out_nodes, "edges": out_edges}
 
