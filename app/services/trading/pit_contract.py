@@ -145,6 +145,21 @@ ALLOWED_INDICATORS: frozenset[str] = frozenset(
         "doji",
         "hammer",
         "engulfing",
+        # Intraday session anchors (computed from session-to-bar prefix only)
+        "vwap",
+        "ema_21",
+        # Intraday detectors used by _BUILTIN_INTRADAY_PATTERNS — each is a
+        # boolean derived from bars at or before the current bar close.
+        "opening_range_break",
+        "opening_drive",
+        "vwap_pullback_hold",
+        "hod_reclaim",
+        "failed_breakdown",
+        "liquidity_sweep_reverse",
+        "inside_bar_break",
+        "stoch_bull_cross",
+        "macd_hist_flip_positive",
+        "higher_low_confirmed",
     }
 )
 
