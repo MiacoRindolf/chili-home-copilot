@@ -1,67 +1,120 @@
-"""Operator runtime status: aggregate health and freshness across all key trading surfaces.
-
-Provides a single read point for:
-- Scanner / top-picks cache freshness
-- Prediction mirror cache freshness
-- Broker connectivity and session age
-- Learning cycle last-run timestamp
-- Market data provider health
-- Circuit breaker state
-- Regime freshness
-
-All functions are read-only and safe to call on any request; heavy computation
-is NOT done here — this module reads from in-process state and lightweight DB
-queries only.
-"""
+"""Operator runtime status backed by durable DB state."""
 from __future__ import annotations
 
-import logging
-import time
-from datetime import datetime, timezone
+import json
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from sqlalchemy import or_
+from sqlalchemy.orm import Session
 
-# ── Freshness thresholds (seconds) ─────────────────────────────────────────
-_STALE_SCANNER = 600        # top-picks stale after 10m
-_STALE_PREDICTIONS = 1800   # predictions stale after 30m
-_STALE_BROKER_SYNC = 300    # broker sync stale after 5m
-_STALE_LEARNING = 3600      # learning cycle stale after 1h
-_STALE_MARKET_DATA = 120    # quote cache stale after 2m
-_STALE_REGIME = 900         # regime reading stale after 15m
+from ...models.core import BrainWorkerControl, BrokerSession
+from ...models.trading import BrainBatchJob
+from .batch_job_constants import (
+    JOB_CRYPTO_BREAKOUT_SCANNER,
+    JOB_MOMENTUM_SCANNER,
+    JOB_PATTERN_IMMINENT_SCANNER,
+    JOB_STOCK_BREAKOUT_SCANNER,
+)
+from .runtime_surface_state import read_runtime_surface_state
+
+# Freshness thresholds (seconds)
+_STALE_SCANNER = 600
+_STALE_PREDICTIONS = 1800
+_STALE_BROKER_SYNC = 300
+_STALE_LEARNING = 3600
+_STALE_MARKET_DATA = 120
+_STALE_REGIME = 900
+
+_SCANNER_JOB_TYPES = (
+    JOB_PATTERN_IMMINENT_SCANNER,
+    JOB_MOMENTUM_SCANNER,
+    JOB_STOCK_BREAKOUT_SCANNER,
+    JOB_CRYPTO_BREAKOUT_SCANNER,
+)
 
 
-def _age_seconds(ts: float | None) -> float | None:
-    if not ts:
+def _parse_dt(value: Any) -> datetime | None:
+    if value is None:
         return None
-    return round(time.time() - ts, 1)
+    if isinstance(value, datetime):
+        dt = value
+    else:
+        raw = str(value).strip()
+        if not raw:
+            return None
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            dt = datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=UTC)
+    return dt.astimezone(UTC)
 
 
-def _as_of(ts: float | None) -> str | None:
-    if not ts:
+def _iso(dt: datetime | None) -> str | None:
+    if dt is None:
         return None
-    return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    return dt.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _age_seconds(dt: datetime | None) -> float | None:
+    if dt is None:
+        return None
+    return round((datetime.now(UTC) - dt.astimezone(UTC)).total_seconds(), 1)
+
+
+def _freshness_state(
+    *,
+    dt: datetime | None,
+    stale_threshold: float,
+    explicit_state: str | None = None,
+) -> tuple[str, bool]:
+    state = (explicit_state or "").strip().lower()
+    if dt is None:
+        return "no_data", True
+    if state == "error":
+        return "error", True
+    age = _age_seconds(dt)
+    if age is None:
+        return "no_data", True
+    if age > stale_threshold:
+        return "stale", True
+    if state in {"ok", "stale", "no_data"}:
+        return state if state == "ok" else "ok", False
+    return "ok", False
 
 
 def _surface(
-    name: str,
-    ts: float | None,
-    stale_threshold: float,
+    surface: str,
     *,
+    stale_threshold: float | None = None,
+    as_of: datetime | None = None,
+    state: str | None = None,
     extra: dict[str, Any] | None = None,
-    ok: bool = True,
     note: str | None = None,
 ) -> dict[str, Any]:
-    age = _age_seconds(ts)
-    is_stale = (age is None) or (age > stale_threshold)
+    if stale_threshold is not None:
+        final_state, is_stale = _freshness_state(
+            dt=as_of,
+            stale_threshold=stale_threshold,
+            explicit_state=state,
+        )
+    else:
+        final_state = (state or "ok").strip().lower() or "ok"
+        is_stale = final_state == "stale"
     out: dict[str, Any] = {
-        "surface": name,
-        "ok": ok and not is_stale,
-        "as_of": _as_of(ts),
-        "age_seconds": age,
-        "is_stale": is_stale,
-        "stale_threshold_seconds": stale_threshold,
+        "surface": surface,
+        "state": final_state,
+        "ok": final_state == "ok",
+        "as_of": _iso(as_of),
     }
+    if stale_threshold is not None:
+        out["age_seconds"] = _age_seconds(as_of)
+        out["is_stale"] = is_stale
+        out["stale_threshold_seconds"] = stale_threshold
     if note:
         out["note"] = note
     if extra:
@@ -69,196 +122,219 @@ def _surface(
     return out
 
 
-# ── Individual surface checks ───────────────────────────────────────────────
-
-def scanner_status() -> dict[str, Any]:
-    """Top-picks / scanner cache freshness."""
-    try:
-        from .scanner import get_top_picks_freshness, _top_picks_cache  # type: ignore[attr-defined]
-        fresh = get_top_picks_freshness(stale_threshold_seconds=_STALE_SCANNER)
-        return {
-            "surface": "scanner",
-            "ok": not fresh.get("is_stale", True),
-            "as_of": fresh.get("as_of"),
-            "age_seconds": fresh.get("age_seconds"),
-            "is_stale": fresh.get("is_stale", True),
-            "stale_threshold_seconds": _STALE_SCANNER,
-            "cached_picks": len(_top_picks_cache.get("picks") or []),
-        }
-    except Exception as e:
-        logger.debug("[runtime_status] scanner_status error: %s", e)
-        return _surface("scanner", None, _STALE_SCANNER, ok=False, note=str(e))
-
-
-def predictions_status() -> dict[str, Any]:
-    """Prediction mirror (SWR) cache freshness."""
-    try:
-        from .learning import _prediction_cache_ts  # type: ignore[attr-defined]
-        ts = _prediction_cache_ts if isinstance(_prediction_cache_ts, float) else None
-        return _surface("predictions", ts, _STALE_PREDICTIONS)
-    except Exception:
-        # Cache ts not exposed or not yet populated — not an error
-        return _surface("predictions", None, _STALE_PREDICTIONS, note="cache ts unavailable")
+def _surface_from_runtime_row(
+    db: Session,
+    *,
+    surface: str,
+    stale_threshold: float,
+) -> dict[str, Any]:
+    row = read_runtime_surface_state(db, surface=surface)
+    if row is None:
+        return _surface(surface, stale_threshold=stale_threshold, state="no_data")
+    as_of = _parse_dt(row.get("as_of") or row.get("updated_at"))
+    extra = {k: v for k, v in row.items() if k not in {"state", "as_of", "updated_at", "surface"}}
+    return _surface(
+        surface,
+        stale_threshold=stale_threshold,
+        as_of=as_of,
+        state=row.get("state"),
+        extra=extra,
+    )
 
 
-def broker_status() -> dict[str, Any]:
-    """Broker connectivity, session age, and last-sync timestamp."""
-    try:
-        from .. import broker_service
-        connected = broker_service.is_connected()
-        session_ts = getattr(broker_service, "_session_connected_at", None)
-        sync_ts = getattr(broker_service, "_last_sync_ts", None)
-        age = _age_seconds(sync_ts)
-        is_stale = (age is None) or (age > _STALE_BROKER_SYNC)
-        return {
-            "surface": "broker",
-            "ok": connected and not is_stale,
-            "connected": connected,
-            "session_as_of": _as_of(session_ts),
-            "last_sync_as_of": _as_of(sync_ts),
-            "last_sync_age_seconds": age,
-            "is_stale": is_stale,
-            "stale_threshold_seconds": _STALE_BROKER_SYNC,
-        }
-    except Exception as e:
-        logger.debug("[runtime_status] broker_status error: %s", e)
-        return {
-            "surface": "broker",
-            "ok": False,
-            "connected": False,
-            "note": str(e),
-            "is_stale": True,
-            "stale_threshold_seconds": _STALE_BROKER_SYNC,
-        }
-
-
-def learning_status() -> dict[str, Any]:
-    """Last learning cycle completion timestamp."""
-    try:
-        from .learning import _last_cycle_ts  # type: ignore[attr-defined]
-        ts = _last_cycle_ts if isinstance(_last_cycle_ts, float) else None
-        return _surface("learning", ts, _STALE_LEARNING)
-    except Exception:
-        return _surface("learning", None, _STALE_LEARNING, note="cycle ts unavailable")
-
-
-def market_data_status() -> dict[str, Any]:
-    """Market data provider freshness from cached quote state."""
-    try:
-        from .market_data import _quote_cache_ts, _quote_cache_provider  # type: ignore[attr-defined]
-        ts = _quote_cache_ts if isinstance(_quote_cache_ts, (int, float)) else None
-        provider = _quote_cache_provider if isinstance(_quote_cache_provider, str) else "unknown"
-        return _surface("market_data", ts, _STALE_MARKET_DATA, extra={"provider": provider})
-    except Exception:
-        return _surface("market_data", None, _STALE_MARKET_DATA, note="quote cache ts unavailable")
-
-
-def regime_status() -> dict[str, Any]:
-    """Market regime freshness and current composite reading."""
-    try:
-        from .market_data import _regime_cache, _regime_cache_ts  # type: ignore[attr-defined]
-        ts = _regime_cache_ts if isinstance(_regime_cache_ts, (int, float)) else None
-        regime = _regime_cache or {}
-        return _surface(
-            "regime",
-            ts,
-            _STALE_REGIME,
-            extra={
-                "composite": regime.get("regime", "unknown"),
-                "vix_regime": regime.get("vix_regime", "unknown"),
-                "spy_direction": regime.get("spy_direction", "unknown"),
-            },
+def scanner_status(db: Session) -> dict[str, Any]:
+    latest_ok = (
+        db.query(BrainBatchJob)
+        .filter(
+            BrainBatchJob.job_type.in_(_SCANNER_JOB_TYPES),
+            BrainBatchJob.status == "ok",
         )
+        .order_by(BrainBatchJob.ended_at.desc().nullslast(), BrainBatchJob.started_at.desc())
+        .first()
+    )
+    stale_running_since = datetime.utcnow() - timedelta(seconds=_STALE_SCANNER)
+    stale_running = (
+        db.query(BrainBatchJob)
+        .filter(
+            BrainBatchJob.job_type.in_(_SCANNER_JOB_TYPES),
+            BrainBatchJob.status == "running",
+            BrainBatchJob.started_at < stale_running_since,
+        )
+        .count()
+    )
+    if stale_running:
+        latest_ts = latest_ok.ended_at if latest_ok is not None else None
+        return _surface(
+            "scanner",
+            stale_threshold=_STALE_SCANNER,
+            as_of=_parse_dt(latest_ts),
+            state="error",
+            extra={
+                "latest_job_type": latest_ok.job_type if latest_ok is not None else None,
+                "stale_running_jobs": int(stale_running),
+            },
+            note="stale running scanner job(s) detected",
+        )
+    if latest_ok is None:
+        return _surface("scanner", stale_threshold=_STALE_SCANNER, state="no_data")
+    payload = dict(latest_ok.payload_json or {})
+    extra = {
+        "latest_job_type": latest_ok.job_type,
+        "latest_job_id": latest_ok.id,
+        "source": "brain_batch_jobs",
+        "payload": payload,
+    }
+    return _surface(
+        "scanner",
+        stale_threshold=_STALE_SCANNER,
+        as_of=_parse_dt(latest_ok.ended_at or latest_ok.started_at),
+        state="ok",
+        extra=extra,
+    )
+
+
+def predictions_status(db: Session) -> dict[str, Any]:
+    return _surface_from_runtime_row(
+        db,
+        surface="predictions",
+        stale_threshold=_STALE_PREDICTIONS,
+    )
+
+
+def broker_status(db: Session) -> dict[str, Any]:
+    row = read_runtime_surface_state(db, surface="broker")
+    session_row = (
+        db.query(BrokerSession)
+        .filter(BrokerSession.broker == "robinhood")
+        .order_by(BrokerSession.updated_at.desc())
+        .first()
+    )
+    session_as_of = _parse_dt(session_row.updated_at if session_row is not None else None)
+    if row is None:
+        return _surface(
+            "broker",
+            stale_threshold=_STALE_BROKER_SYNC,
+            state="no_data",
+            extra={"session_as_of": _iso(session_as_of)},
+        )
+    as_of = _parse_dt(row.get("as_of") or row.get("updated_at"))
+    extra = {k: v for k, v in row.items() if k not in {"state", "as_of", "updated_at", "surface"}}
+    extra["session_as_of"] = _iso(session_as_of)
+    return _surface(
+        "broker",
+        stale_threshold=_STALE_BROKER_SYNC,
+        as_of=as_of,
+        state=row.get("state"),
+        extra=extra,
+    )
+
+
+def learning_status(db: Session) -> dict[str, Any]:
+    ctrl = db.query(BrainWorkerControl).filter(BrainWorkerControl.id == 1).first()
+    if ctrl is None or ctrl.last_heartbeat_at is None:
+        return _surface("learning", stale_threshold=_STALE_LEARNING, state="no_data")
+    phase = None
+    try:
+        payload = json.loads(ctrl.learning_live_json) if ctrl.learning_live_json else {}
+        phase = payload.get("phase") or payload.get("state")
     except Exception:
-        return _surface("regime", None, _STALE_REGIME, note="regime cache unavailable")
+        phase = None
+    return _surface(
+        "learning",
+        stale_threshold=_STALE_LEARNING,
+        as_of=_parse_dt(ctrl.last_heartbeat_at),
+        state="ok",
+        extra={"phase": phase, "source": "brain_worker_control"},
+    )
+
+
+def market_data_status(db: Session) -> dict[str, Any]:
+    return _surface_from_runtime_row(
+        db,
+        surface="market_data",
+        stale_threshold=_STALE_MARKET_DATA,
+    )
+
+
+def regime_status(db: Session) -> dict[str, Any]:
+    return _surface_from_runtime_row(
+        db,
+        surface="regime",
+        stale_threshold=_STALE_REGIME,
+    )
 
 
 def circuit_breaker_status() -> dict[str, Any]:
-    """Circuit breaker state."""
     try:
         from .portfolio_risk import get_breaker_status
-        s = get_breaker_status()
-        return {
-            "surface": "circuit_breaker",
-            "ok": not s["tripped"],
-            "tripped": s["tripped"],
-            "reason": s.get("reason"),
-        }
-    except Exception as e:
-        return {
-            "surface": "circuit_breaker",
-            "ok": False,
-            "tripped": False,
-            "note": str(e),
-        }
+
+        status = get_breaker_status()
+        return _surface(
+            "circuit_breaker",
+            state="ok" if not status.get("tripped") else "error",
+            extra={
+                "tripped": bool(status.get("tripped")),
+                "reason": status.get("reason"),
+            },
+        )
+    except Exception as exc:
+        return _surface("circuit_breaker", state="error", note=str(exc))
 
 
 def kill_switch_status() -> dict[str, Any]:
-    """Kill-switch (global halt) state."""
     try:
-        from .governance import is_kill_switch_active, get_kill_switch_reason  # type: ignore[attr-defined]
-        active = is_kill_switch_active()
-        reason = get_kill_switch_reason() if active else None
-        return {
-            "surface": "kill_switch",
-            "ok": not active,
-            "active": active,
-            "reason": reason,
-        }
-    except Exception:
-        return {
-            "surface": "kill_switch",
-            "ok": True,
-            "active": False,
-            "note": "kill switch unavailable",
-        }
+        from .governance import get_kill_switch_reason, is_kill_switch_active
+
+        active = bool(is_kill_switch_active())
+        return _surface(
+            "kill_switch",
+            state="ok" if not active else "error",
+            extra={"active": active, "reason": get_kill_switch_reason() if active else None},
+        )
+    except Exception as exc:
+        return _surface("kill_switch", state="error", note=str(exc))
 
 
-# ── Aggregate view ──────────────────────────────────────────────────────────
-
-def get_runtime_overview() -> dict[str, Any]:
-    """Return a full runtime health snapshot across all surfaces.
-
-    Suitable for the operator dashboard endpoint. Never raises — errors are
-    absorbed into per-surface ``ok: false`` entries.
-    """
+def get_runtime_overview(db: Session) -> dict[str, Any]:
     surfaces = [
-        scanner_status(),
-        predictions_status(),
-        broker_status(),
-        learning_status(),
-        market_data_status(),
-        regime_status(),
+        scanner_status(db),
+        predictions_status(db),
+        broker_status(db),
+        learning_status(db),
+        market_data_status(db),
+        regime_status(db),
         circuit_breaker_status(),
         kill_switch_status(),
     ]
-    degraded = [s["surface"] for s in surfaces if not s.get("ok", True)]
+    degraded = [s["surface"] for s in surfaces if not s.get("ok", False)]
     return {
-        "as_of": datetime.now(tz=timezone.utc).isoformat(),
+        "as_of": _iso(datetime.now(UTC)),
         "healthy": len(degraded) == 0,
         "degraded_surfaces": degraded,
         "surfaces": {s["surface"]: s for s in surfaces},
     }
 
 
-def get_freshness_summary() -> dict[str, Any]:
-    """Lightweight freshness-only view (no connectivity checks).
-
-    Used by the UI to show data-age banners without full health polling.
-    """
+def get_freshness_summary(db: Session) -> dict[str, Any]:
     items = []
-    for fn in (scanner_status, predictions_status, market_data_status, regime_status, learning_status):
-        try:
-            s = fn()
-            items.append({
-                "surface": s["surface"],
-                "as_of": s.get("as_of"),
-                "age_seconds": s.get("age_seconds"),
-                "is_stale": s.get("is_stale", True),
-            })
-        except Exception:
-            pass
+    for entry in (
+        scanner_status(db),
+        predictions_status(db),
+        market_data_status(db),
+        regime_status(db),
+        learning_status(db),
+        broker_status(db),
+    ):
+        items.append(
+            {
+                "surface": entry["surface"],
+                "state": entry.get("state"),
+                "as_of": entry.get("as_of"),
+                "age_seconds": entry.get("age_seconds"),
+                "is_stale": entry.get("is_stale", entry.get("state") == "stale"),
+            }
+        )
     return {
-        "as_of": datetime.now(tz=timezone.utc).isoformat(),
-        "surfaces": items,
+        "as_of": _iso(datetime.now(UTC)),
+        "items": items,
     }

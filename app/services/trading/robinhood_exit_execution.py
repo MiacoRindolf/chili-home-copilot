@@ -375,6 +375,7 @@ def _record_autotrader_run(
         ticker=(trade.ticker or "").upper(),
         decision=decision,
         reason=reason,
+        management_scope=trade.management_scope,
         trade_id=int(trade.id),
         rule_snapshot=dict(snapshot or {}),
     )

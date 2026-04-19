@@ -90,6 +90,7 @@ class Trade(Base):
     stop_model: Optional[str] = Column(String(30), nullable=True)
     exit_reason: Optional[str] = Column(String(50), nullable=True)
     trade_type: Optional[str] = Column(String(30), nullable=True)
+    management_scope: Optional[str] = Column(String(40), nullable=True, index=True)
     related_alert_id: Optional[int] = Column(
         Integer, ForeignKey("trading_breakout_alerts.id", ondelete="SET NULL"), nullable=True, index=True
     )
@@ -126,6 +127,7 @@ class AutoTraderRun(Base):
     reason: Optional[str] = Column(Text, nullable=True)
     rule_snapshot: Optional[dict] = Column(JSONB, nullable=True)
     llm_snapshot: Optional[dict] = Column(JSONB, nullable=True)
+    management_scope: Optional[str] = Column(String(40), nullable=True, index=True)
     trade_id: Optional[int] = Column(
         Integer, ForeignKey("trading_trades.id", ondelete="SET NULL"), nullable=True, index=True
     )

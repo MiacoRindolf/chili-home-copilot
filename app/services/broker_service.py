@@ -947,6 +947,8 @@ def _get_exit_price(ticker: str, fallback_entry: float | None) -> float:
 def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
     """Sync Robinhood positions into local Trade model."""
     from ..models.trading import Trade
+    from .trading.management_scope import MANAGEMENT_SCOPE_BROKER_SYNC
+    from .trading.runtime_surface_state import upsert_runtime_surface_state
 
     if not is_connected():
         return {"created": 0, "updated": 0, "closed": 0}
@@ -987,6 +989,8 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             existing.quantity = qty
             existing.entry_price = avg_price
             existing.last_broker_sync = datetime.utcnow()
+            if not existing.management_scope:
+                existing.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
             if not existing.indicator_snapshot:
                 existing.indicator_snapshot = _compute_trade_snapshot(ticker, avg_price)
             updated += 1
@@ -1002,6 +1006,7 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
                 status="open",
                 broker_source="robinhood",
                 tags="robinhood-sync",
+                management_scope=MANAGEMENT_SCOPE_BROKER_SYNC,
                 indicator_snapshot=snapshot,
                 last_broker_sync=datetime.utcnow(),
                 stop_model="atr_crypto_breakout" if is_crypto else "atr_swing",
@@ -1096,8 +1101,29 @@ def sync_positions_to_db(db: Session, user_id: int | None) -> dict[str, int]:
             on_broker_reconciled_close(db, trade, source="sync_positions_to_db")
         except Exception:
             pass
+        if not trade.management_scope:
+            trade.management_scope = MANAGEMENT_SCOPE_BROKER_SYNC
         closed += 1
 
+    db.commit()
+    global _last_sync_ts
+    _last_sync_ts = time.time()
+    upsert_runtime_surface_state(
+        db,
+        surface="broker",
+        state="ok",
+        source="sync_positions_to_db",
+        as_of=datetime.utcnow(),
+        details={
+            "broker": "robinhood",
+            "user_id": int(user_id) if user_id is not None else None,
+            "created": int(created),
+            "updated": int(updated),
+            "closed": int(closed),
+            "deduped": int(cleanup["cancelled"]),
+        },
+        updated_by="broker_service",
+    )
     db.commit()
     logger.info(
         "[broker] Position sync: %d created, %d updated, %d closed, %d duplicates cancelled",
@@ -1752,6 +1778,28 @@ def sync_orders_to_db(db: Session, user_id: int | None) -> dict[str, int]:
 
     global _last_sync_ts
     _last_sync_ts = time.time()
+    try:
+        from .trading.runtime_surface_state import upsert_runtime_surface_state
+
+        upsert_runtime_surface_state(
+            db,
+            surface="broker",
+            state="ok",
+            source="sync_orders_to_db",
+            as_of=datetime.utcnow(),
+            details={
+                "broker": "robinhood",
+                "user_id": int(user_id) if user_id is not None else None,
+                "synced": int(synced),
+                "filled": int(filled),
+                "cancelled": int(cancelled),
+                "errors": int(errors),
+            },
+            updated_by="broker_service",
+        )
+        db.commit()
+    except Exception:
+        logger.debug("[broker] failed to persist broker runtime surface", exc_info=True)
 
     logger.info(
         f"[broker] Order sync: {synced} checked, {filled} filled, "

@@ -31,7 +31,7 @@ router = APIRouter(prefix="/api/trading", tags=["trading-operator"])
 # ── Status / health ─────────────────────────────────────────────────────────
 
 @router.get("/status/overview")
-def operator_status_overview():
+def operator_status_overview(db: Session = Depends(get_db)):
     """Full runtime health snapshot across all key surfaces.
 
     Returns per-surface ok/stale flags so the operator dashboard can
@@ -39,14 +39,14 @@ def operator_status_overview():
     """
     try:
         from ...services.trading.public_api import get_runtime_overview
-        return JSONResponse(get_runtime_overview())
+        return JSONResponse(get_runtime_overview(db))
     except Exception as e:
         logger.exception("[operator] status/overview error")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 
 
 @router.get("/status/freshness")
-def operator_status_freshness():
+def operator_status_freshness(db: Session = Depends(get_db)):
     """Lightweight data-age summary for UI stale-data banners.
 
     Returns as_of and age_seconds for each major cache surface without
@@ -54,7 +54,7 @@ def operator_status_freshness():
     """
     try:
         from ...services.trading.public_api import get_freshness_summary
-        return JSONResponse(get_freshness_summary())
+        return JSONResponse(get_freshness_summary(db))
     except Exception as e:
         logger.exception("[operator] status/freshness error")
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)

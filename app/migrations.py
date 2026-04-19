@@ -8490,6 +8490,71 @@ def _migration_149_schema_drift_repairs(conn) -> None:
     conn.commit()
 
 
+def _migration_151_trade_management_scope(conn) -> None:
+    """Add explicit provenance/management scope to live trade and audit rows."""
+    tables = _tables(conn)
+
+    if "trading_trades" in tables:
+        cols = _columns(conn, "trading_trades")
+        if "management_scope" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_trades "
+                    "ADD COLUMN management_scope VARCHAR(40)"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_trades_management_scope "
+                "ON trading_trades (management_scope)"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE trading_trades
+                   SET management_scope = CASE
+                       WHEN COALESCE(auto_trader_version, '') = 'v1' THEN 'auto_trader_v1'
+                       WHEN COALESCE(tags, '') ILIKE '%sync%' AND broker_source IS NOT NULL THEN 'broker_sync'
+                       WHEN broker_source IS NOT NULL AND broker_source IN ('robinhood', 'coinbase') THEN 'broker_sync'
+                       ELSE 'manual'
+                   END
+                 WHERE management_scope IS NULL
+                """
+            )
+        )
+
+    if "trading_autotrader_runs" in tables:
+        cols = _columns(conn, "trading_autotrader_runs")
+        if "management_scope" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE trading_autotrader_runs "
+                    "ADD COLUMN management_scope VARCHAR(40)"
+                )
+            )
+        conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_trading_autotrader_runs_management_scope "
+                "ON trading_autotrader_runs (management_scope)"
+            )
+        )
+        conn.execute(
+            text(
+                """
+                UPDATE trading_autotrader_runs
+                   SET management_scope = CASE
+                       WHEN decision IN ('adopt_manual', 'unadopt_manual') THEN 'adopted_position'
+                       ELSE 'auto_trader_v1'
+                   END
+                 WHERE management_scope IS NULL
+                """
+            )
+        )
+
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -8642,6 +8707,7 @@ MIGRATIONS = [
     ("148_trade_pending_exit_columns", _migration_148_trade_pending_exit_columns),
     ("149_schema_drift_repairs", _migration_149_schema_drift_repairs),
     ("150_venue_order_idempotency", _migration_150_venue_order_idempotency),
+    ("151_trade_management_scope", _migration_151_trade_management_scope),
 ]
 
 
