@@ -281,11 +281,12 @@ class TestExecuteProposalStatus:
         p.executed_at = None
         return p
 
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.place_buy_order")
     @patch("app.services.trading.alerts.dispatch_alert")
-    def test_limit_order_placed_sets_working(self, mock_alert, mock_buy, mock_conn, mock_bp):
+    def test_limit_order_placed_sets_working(self, mock_alert, mock_buy, mock_conn, mock_bp, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         mock_buy.return_value = {
@@ -307,11 +308,12 @@ class TestExecuteProposalStatus:
         assert proposal.broker_order_id == "order-abc"
         assert proposal.executed_at is None
 
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.place_buy_order")
     @patch("app.services.trading.alerts.dispatch_alert")
-    def test_market_order_instant_fill_sets_executed(self, mock_alert, mock_buy, mock_conn, mock_bp):
+    def test_market_order_instant_fill_sets_executed(self, mock_alert, mock_buy, mock_conn, mock_bp, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         mock_buy.return_value = {
@@ -332,8 +334,9 @@ class TestExecuteProposalStatus:
         assert proposal.status == "executed"
         assert proposal.executed_at is not None
 
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.broker_service.is_connected", return_value=False)
-    def test_no_broker_records_locally(self, mock_conn):
+    def test_no_broker_records_locally(self, mock_conn, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         proposal = self._make_proposal()
