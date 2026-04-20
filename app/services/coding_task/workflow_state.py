@@ -13,6 +13,7 @@ the backfill source and ``apply_transition`` the write path.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Literal
 
 from sqlalchemy.orm import Session
@@ -24,6 +25,7 @@ from ...models.coding_task import (
     CodingTaskValidationRun,
     PlanTaskCodingProfile,
 )
+from ...models.project_domain import ProjectDomainRun
 from .workspaces import lookup_workspace_repo_for_profile
 
 
@@ -31,10 +33,10 @@ from .workspaces import lookup_workspace_repo_for_profile
 # saves a new snapshot after an apply) but must never cross a gate without the
 # required prerequisite signal.
 STATES = (
-    "not_bound",
-    "bound",
-    "indexed",
-    "suggested",
+    "unbound",
+    "bound_unindexed",
+    "ready_to_suggest",
+    "suggested_unsaved",
     "snapshot_saved",
     "dry_run_passed",
     "applied",
@@ -42,10 +44,10 @@ STATES = (
 )
 
 State = Literal[
-    "not_bound",
-    "bound",
-    "indexed",
-    "suggested",
+    "unbound",
+    "bound_unindexed",
+    "ready_to_suggest",
+    "suggested_unsaved",
     "snapshot_saved",
     "dry_run_passed",
     "applied",
@@ -75,6 +77,7 @@ class WorkflowSnapshot:
     state: State
     workspace_bound: bool
     workspace_indexed: bool
+    has_suggested_unsaved: bool
     has_saved_snapshot: bool
     last_dry_run_passed: bool
     last_real_apply_passed: bool
@@ -95,7 +98,16 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
     )
     repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
     bound = repo is not None
-    indexed = bool(bound and repo and (repo.last_indexed or (repo.file_count or 0) > 0))
+    indexed = bool(
+        bound
+        and repo
+        and not repo.last_index_error
+        and (
+            repo.last_successful_indexed_at
+            or repo.last_indexed
+            or (repo.last_successful_file_count or repo.file_count or 0) > 0
+        )
+    )
 
     has_snapshot = (
         db.query(CodingAgentSuggestion.id)
@@ -103,9 +115,28 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
         .first()
         is not None
     )
-    # For suggest we count a saved snapshot as evidence the suggest step ran;
-    # we do not persist the raw suggest-only success separately today.
-    has_suggested = has_snapshot
+    latest_snapshot = (
+        db.query(CodingAgentSuggestion.created_at)
+        .filter(CodingAgentSuggestion.task_id == task.id)
+        .order_by(CodingAgentSuggestion.created_at.desc(), CodingAgentSuggestion.id.desc())
+        .first()
+    )
+    latest_suggest = (
+        db.query(ProjectDomainRun.started_at)
+        .filter(
+            ProjectDomainRun.task_id == task.id,
+            ProjectDomainRun.run_kind == "suggest",
+            ProjectDomainRun.status == "completed",
+        )
+        .order_by(ProjectDomainRun.started_at.desc(), ProjectDomainRun.id.desc())
+        .first()
+    )
+    latest_snapshot_at = latest_snapshot[0] if latest_snapshot else None
+    latest_suggest_at = latest_suggest[0] if latest_suggest else None
+    has_suggested_unsaved = bool(
+        latest_suggest_at
+        and (latest_snapshot_at is None or latest_suggest_at > latest_snapshot_at)
+    )
 
     last_dry_run_passed = (
         db.query(CodingAgentSuggestionApply.id)
@@ -146,19 +177,20 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
         state = "dry_run_passed"
     elif has_snapshot:
         state = "snapshot_saved"
-    elif has_suggested:
-        state = "suggested"
+    elif has_suggested_unsaved:
+        state = "suggested_unsaved"
     elif indexed:
-        state = "indexed"
+        state = "ready_to_suggest"
     elif bound:
-        state = "bound"
+        state = "bound_unindexed"
     else:
-        state = "not_bound"
+        state = "unbound"
 
     return WorkflowSnapshot(
         state=state,
         workspace_bound=bound,
         workspace_indexed=indexed,
+        has_suggested_unsaved=has_suggested_unsaved,
         has_saved_snapshot=has_snapshot,
         last_dry_run_passed=last_dry_run_passed,
         last_real_apply_passed=last_real_apply_passed,
@@ -169,11 +201,11 @@ def compute_state(db: Session, task: PlanTask, *, user_id: int | None = None) ->
 # Action -> minimum required state. An action is allowed when the current
 # state is equal to or later than the required state in ``STATES``.
 REQUIRED_STATE_FOR_ACTION: dict[str, State] = {
-    "suggest": "indexed",
-    "save_snapshot": "indexed",
+    "suggest": "ready_to_suggest",
+    "save_snapshot": "ready_to_suggest",
     "dry_run": "snapshot_saved",
     "apply": "dry_run_passed",
-    "validate": "bound",
+    "validate": "bound_unindexed",
 }
 
 
@@ -200,4 +232,17 @@ def assert_transition_allowed(
         return snap
     if _state_index(snap.state) < _state_index(required):
         raise WorkflowTransitionBlocked(action=action, current=snap.state, required=required)
+    return snap
+
+
+def sync_task_workflow_state(
+    db: Session,
+    task: PlanTask,
+    *,
+    user_id: int | None = None,
+) -> WorkflowSnapshot:
+    snap = compute_state(db, task, user_id=user_id)
+    task.coding_workflow_state = snap.state
+    task.coding_workflow_state_updated_at = datetime.utcnow()
+    db.flush()
     return snap

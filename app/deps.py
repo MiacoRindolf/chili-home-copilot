@@ -50,6 +50,20 @@ def require_paired(request: Request, db: Session = Depends(get_db)):
     return ctx
 
 
+def require_paired_identity(request: Request, db: Session = Depends(get_db)):
+    """Fail closed for routes that should only run for paired users."""
+    ctx = get_identity_ctx(request, db)
+    if ctx["is_guest"] or ctx["user_id"] is None:
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "ok": False,
+                "message": "Pair this device to use the project workspace.",
+            },
+        )
+    return ctx
+
+
 def require_project_domain_enabled() -> None:
     """Kill switch for the /brain?domain=project developer cockpit.
 

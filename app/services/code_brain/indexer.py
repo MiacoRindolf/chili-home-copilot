@@ -9,10 +9,17 @@ from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional
 
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from ...config import settings
 from ...models.code_brain import CodeRepo, CodeSnapshot
+from .runtime import (
+    current_runtime_reachable,
+    infer_repo_runtime_fields,
+    mark_runtime_reachability,
+    resolve_repo_runtime_path,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +110,55 @@ def _detect_frameworks(repo_path: Path) -> List[str]:
     return detected
 
 
+def get_accessible_repo_query(
+    db: Session,
+    user_id: int,
+    *,
+    include_shared: bool = True,
+):
+    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
+    if include_shared:
+        return q.filter((CodeRepo.user_id == user_id) | (CodeRepo.user_id.is_(None)))
+    return q.filter(CodeRepo.user_id == user_id)
+
+
+def get_accessible_repos(
+    db: Session,
+    user_id: int,
+    *,
+    include_shared: bool = True,
+) -> List[CodeRepo]:
+    return get_accessible_repo_query(db, user_id, include_shared=include_shared).all()
+
+
+def get_accessible_repo_ids(
+    db: Session,
+    user_id: int,
+    *,
+    include_shared: bool = True,
+) -> List[int]:
+    return [
+        int(row.id)
+        for row in get_accessible_repo_query(db, user_id, include_shared=include_shared)
+        .order_by(CodeRepo.id.asc())
+        .all()
+    ]
+
+
+def get_accessible_repo(
+    db: Session,
+    repo_id: int,
+    user_id: int,
+    *,
+    include_shared: bool = True,
+) -> Optional[CodeRepo]:
+    return (
+        get_accessible_repo_query(db, user_id, include_shared=include_shared)
+        .filter(CodeRepo.id == repo_id)
+        .first()
+    )
+
+
 def _count_lines(path: Path) -> int:
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -117,9 +173,19 @@ def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = Path(repo.path)
-    if not repo_path.is_dir():
-        return {"error": f"Path not found: {repo.path}"}
+    repo_path = resolve_repo_runtime_path(repo)
+    if repo_path is None or not repo_path.is_dir():
+        repo.last_index_error = (
+            "Registered workspace is not reachable from the current runtime. "
+            "Check host/container path mapping before indexing."
+        )
+        repo.file_count = 0
+        repo.total_lines = 0
+        repo.last_indexed = None
+        mark_runtime_reachability(repo, False)
+        db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo_id).delete()
+        db.commit()
+        return {"error": repo.last_index_error}
 
     cap = max_files or settings.code_brain_max_files
     lang_counter: Counter = Counter()
@@ -172,6 +238,10 @@ def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
     repo.file_count = file_count
     repo.total_lines = total_lines
     repo.last_indexed = datetime.utcnow()
+    repo.last_index_error = None
+    repo.last_successful_indexed_at = repo.last_indexed
+    repo.last_successful_file_count = file_count
+    mark_runtime_reachability(repo, True)
     db.commit()
 
     return {
@@ -182,22 +252,37 @@ def scan_repo(db: Session, repo_id: int, max_files: int = 0) -> Dict:
     }
 
 
-def get_registered_repos(db: Session, user_id: Optional[int] = None) -> List[Dict]:
-    q = db.query(CodeRepo).filter(CodeRepo.active.is_(True))
+def get_registered_repos(
+    db: Session,
+    user_id: Optional[int] = None,
+    *,
+    include_shared: bool = False,
+) -> List[Dict]:
     if user_id is not None:
-        q = q.filter(CodeRepo.user_id == user_id)
-    repos = q.all()
+        repos = get_accessible_repos(db, user_id, include_shared=include_shared)
+    else:
+        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
     result = []
     for r in repos:
         result.append({
             "id": r.id,
             "path": r.path,
+            "host_path": r.host_path,
+            "container_path": r.container_path,
             "name": r.name,
             "file_count": r.file_count,
             "total_lines": r.total_lines,
             "language_stats": json.loads(r.language_stats) if r.language_stats else {},
             "framework_tags": r.framework_tags.split(",") if r.framework_tags else [],
             "last_indexed": r.last_indexed.isoformat() if r.last_indexed else None,
+            "last_index_error": r.last_index_error,
+            "last_successful_indexed_at": (
+                r.last_successful_indexed_at.isoformat() if r.last_successful_indexed_at else None
+            ),
+            "last_successful_file_count": r.last_successful_file_count,
+            "reachable_in_web": bool(r.reachable_in_web),
+            "reachable_in_scheduler": bool(r.reachable_in_scheduler),
+            "reachable_in_current_runtime": current_runtime_reachable(r),
         })
     return result
 
@@ -208,27 +293,47 @@ def register_repo(db: Session, path: str, name: Optional[str] = None, user_id: O
     if not p.is_dir():
         return {"error": f"Directory not found: {path}"}
 
-    existing = db.query(CodeRepo).filter(CodeRepo.path == str(p)).first()
+    runtime_fields = infer_repo_runtime_fields(p)
+    filters = [CodeRepo.path == str(p), CodeRepo.host_path == str(p)]
+    if runtime_fields.get("container_path"):
+        filters.append(CodeRepo.container_path == runtime_fields.get("container_path"))
+    existing = db.query(CodeRepo).filter(or_(*filters)).first()
     if existing:
+        existing.host_path = runtime_fields.get("host_path")
+        existing.container_path = runtime_fields.get("container_path")
+        mark_runtime_reachability(existing, True)
         if not existing.active:
             existing.active = True
             db.commit()
             return {"id": existing.id, "name": existing.name, "reactivated": True}
+        db.commit()
         return {"error": "Repo already registered", "id": existing.id}
 
     repo = CodeRepo(
         path=str(p),
+        host_path=runtime_fields.get("host_path"),
+        container_path=runtime_fields.get("container_path"),
         name=name or p.name,
         user_id=user_id,
     )
+    mark_runtime_reachability(repo, True)
     db.add(repo)
     db.commit()
     db.refresh(repo)
-    return {"id": repo.id, "name": repo.name, "path": str(p)}
+    return {
+        "id": repo.id,
+        "name": repo.name,
+        "path": str(p),
+        "host_path": repo.host_path,
+        "container_path": repo.container_path,
+    }
 
 
-def unregister_repo(db: Session, repo_id: int) -> Dict:
-    repo = db.query(CodeRepo).filter(CodeRepo.id == repo_id).first()
+def unregister_repo(db: Session, repo_id: int, user_id: Optional[int] = None) -> Dict:
+    q = db.query(CodeRepo).filter(CodeRepo.id == repo_id)
+    if user_id is not None:
+        q = q.filter(CodeRepo.user_id == user_id)
+    repo = q.first()
     if not repo:
         return {"error": "Repo not found"}
     repo.active = False

@@ -47,7 +47,7 @@ def test_brain_project_feed_static_not_switch_copy(paired_client) -> None:
     r = client.get("/brain?domain=project")
     assert r.status_code == 200
     snip = _snippet_after_agent_feed(r.text)
-    assert "Loading agent messages" in snip
+    assert "Loading operator timeline" in snip
     assert "data-agent-feed-off-project" not in snip
     assert "Switch to the Project domain" not in snip
 

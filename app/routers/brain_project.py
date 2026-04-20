@@ -12,7 +12,12 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, get_identity_ctx, require_project_domain_enabled
+from ..deps import (
+    get_db,
+    get_identity_ctx,
+    require_paired_identity,
+    require_project_domain_enabled,
+)
 from ..services.code_brain import deps_scanner as cb_deps
 from ..services.code_brain import graph as cb_graph
 from ..services.code_brain import indexer as cb_indexer
@@ -22,12 +27,14 @@ from ..services.code_brain import lenses as cb_lenses
 from ..services.code_brain import reviewer as cb_reviewer
 from ..services.code_brain import search as cb_search
 from ..services.code_brain import trends as cb_trends
+from ..services import project_analysis
+from ..services.project_domain_runs import list_timeline, record_completed_run, status_payload
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 
 router = APIRouter(
     tags=["brain"],
-    dependencies=[Depends(require_project_domain_enabled)],
+    dependencies=[Depends(require_project_domain_enabled), Depends(require_paired_identity)],
 )
 
 
@@ -48,11 +55,38 @@ def _parse_json_array(raw: str | None) -> list:
         return []
 
 
-def _first_active_repo_id(db: Session) -> int | None:
-    from ..models.code_brain import CodeRepo
+def _not_found(message: str) -> JSONResponse:
+    return JSONResponse({"ok": False, "message": message}, status_code=404)
 
-    first = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).first()
-    return first.id if first else None
+
+def _visible_repo_ids(db: Session, user_id: int) -> list[int]:
+    return cb_indexer.get_accessible_repo_ids(db, user_id, include_shared=True)
+
+
+def _resolve_visible_repo_id(db: Session, user_id: int, repo_id: int | None = None) -> int | None:
+    if repo_id is not None:
+        repo = cb_indexer.get_accessible_repo(db, repo_id, user_id, include_shared=True)
+        return int(repo.id) if repo is not None else None
+    visible_ids = _visible_repo_ids(db, user_id)
+    return visible_ids[0] if visible_ids else None
+
+
+def _timeline_messages(db: Session, user_id: int | None) -> list[dict]:
+    messages = []
+    for item in list_timeline(db, user_id=user_id, limit=30):
+        messages.append(
+            {
+                "id": item["id"],
+                "from": "system",
+                "to": "operator",
+                "type": item["run_kind"],
+                "summary": item.get("title") or item["run_kind"],
+                "status": item.get("status"),
+                "acknowledged": True,
+                "created_at": item.get("created_at"),
+            }
+        )
+    return messages
 
 
 # Code Brain domain
@@ -92,12 +126,17 @@ def api_brain_code_learn(
 
 
 @router.get("/api/brain/code/hotspots")
-def api_brain_code_hotspots(db: Session = Depends(get_db)):
-    """Top files by churn x complexity across all repos."""
+def api_brain_code_hotspots(request: Request, db: Session = Depends(get_db)):
+    """Top files by churn x complexity across visible repos."""
     from ..models.code_brain import CodeHotspot
 
+    ctx = get_identity_ctx(request, db)
+    repo_ids = _visible_repo_ids(db, ctx["user_id"])
+    if not repo_ids:
+        return JSONResponse({"ok": True, "hotspots": []})
     hotspots = (
         db.query(CodeHotspot)
+        .filter(CodeHotspot.repo_id.in_(repo_ids))
         .order_by(CodeHotspot.combined_score.desc())
         .limit(30)
         .all()
@@ -124,12 +163,22 @@ def api_brain_code_hotspots(db: Session = Depends(get_db)):
 
 @router.get("/api/brain/code/insights")
 def api_brain_code_insights(
+    request: Request,
     db: Session = Depends(get_db),
     category: str | None = None,
     repo_id: int | None = None,
 ):
     """Discovered patterns and conventions."""
-    data = cb_insights.get_insights(db, repo_id=repo_id, category=category)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    data = cb_insights.get_insights(
+        db,
+        repo_id=resolved_repo_id if repo_id is not None else None,
+        repo_ids=None if repo_id is not None else _visible_repo_ids(db, ctx["user_id"]),
+        category=category,
+    )
     return JSONResponse({"ok": True, "insights": data})
 
 
@@ -137,7 +186,7 @@ def api_brain_code_insights(
 def api_brain_code_repos(request: Request, db: Session = Depends(get_db)):
     """List registered repos with stats."""
     ctx = get_identity_ctx(request, db)
-    repos = cb_indexer.get_registered_repos(db, user_id=ctx["user_id"])
+    repos = cb_indexer.get_registered_repos(db, user_id=ctx["user_id"], include_shared=True)
     return JSONResponse({"ok": True, "repos": repos})
 
 
@@ -161,46 +210,74 @@ def api_brain_code_add_repo(
 
 
 @router.delete("/api/brain/code/repos/{repo_id}")
-def api_brain_code_remove_repo(repo_id: int, db: Session = Depends(get_db)):
+def api_brain_code_remove_repo(repo_id: int, request: Request, db: Session = Depends(get_db)):
     """Deactivate a repo."""
-    result = cb_indexer.unregister_repo(db, repo_id)
+    ctx = get_identity_ctx(request, db)
+    result = cb_indexer.unregister_repo(db, repo_id, user_id=ctx["user_id"])
     if "error" in result:
         return JSONResponse({"ok": False, "message": result["error"]}, status_code=404)
     return JSONResponse({"ok": True})
 
 
 @router.get("/api/brain/code/graph")
-def api_brain_code_graph(repo_id: int = Query(...), db: Session = Depends(get_db)):
+def api_brain_code_graph(request: Request, repo_id: int = Query(...), db: Session = Depends(get_db)):
     """Return the architecture dependency graph for a repo."""
-    data = cb_graph.get_graph_data(db, repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    data = cb_graph.get_graph_data(db, resolved_repo_id)
     return JSONResponse({"ok": True, **data})
 
 
 @router.get("/api/brain/code/trends")
-def api_brain_code_trends(repo_id: int = Query(...), db: Session = Depends(get_db)):
+def api_brain_code_trends(request: Request, repo_id: int = Query(...), db: Session = Depends(get_db)):
     """Quality trend time series and deltas."""
-    series = cb_trends.get_quality_trends(db, repo_id, limit=30)
-    deltas = cb_trends.compute_trend_deltas(db, repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if resolved_repo_id is None:
+        return _not_found("Repo not found")
+    series = cb_trends.get_quality_trends(db, resolved_repo_id, limit=30)
+    deltas = cb_trends.compute_trend_deltas(db, resolved_repo_id)
     return JSONResponse({"ok": True, "series": series, "deltas": deltas})
 
 
 @router.get("/api/brain/code/reviews")
 def api_brain_code_reviews(
+    request: Request,
     repo_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """Recent LLM code reviews."""
-    reviews = cb_reviewer.get_recent_reviews(db, repo_id=repo_id, limit=20)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    reviews = cb_reviewer.get_recent_reviews(
+        db,
+        repo_id=resolved_repo_id if repo_id is not None else None,
+        repo_ids=None if repo_id is not None else _visible_repo_ids(db, ctx["user_id"]),
+        limit=20,
+    )
     return JSONResponse({"ok": True, "reviews": reviews})
 
 
 @router.get("/api/brain/code/deps")
 def api_brain_code_deps(
+    request: Request,
     repo_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """Dependency health alerts."""
-    health = cb_deps.get_dep_health(db, repo_id=repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    health = cb_deps.get_dep_health(
+        db,
+        repo_id=resolved_repo_id if repo_id is not None else None,
+        repo_ids=None if repo_id is not None else _visible_repo_ids(db, ctx["user_id"]),
+    )
     return JSONResponse({"ok": True, **health})
 
 
@@ -217,16 +294,37 @@ def api_brain_code_search(
     db: Session = Depends(get_db),
 ):
     """Search code symbols and optionally ask the LLM."""
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id)
+    if body.repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    # When the caller narrows to a specific repo, pass ``repo_id`` (singular)
+    # so the search is scoped to exactly that repo. When no repo was
+    # specified, pass the full ``repo_ids`` list — do NOT pass
+    # ``resolved_repo_id`` in this branch: ``search_code`` treats ``repo_id``
+    # as precedence over ``repo_ids``, so passing both silently narrowed
+    # the search to the first visible repo and dropped shared repos.
+    if body.repo_id is not None:
+        search_repo_id: int | None = resolved_repo_id
+        visible_repo_ids: list[int] | None = None
+    else:
+        search_repo_id = None
+        visible_repo_ids = _visible_repo_ids(db, ctx["user_id"])
     if body.use_llm:
-        ctx = get_identity_ctx(request, db)
         result = cb_search.search_with_llm(
             db,
             body.query,
-            repo_id=body.repo_id,
+            repo_id=search_repo_id,
             user_id=ctx["user_id"],
+            repo_ids=visible_repo_ids,
         )
     else:
-        results = cb_search.search_code(db, body.query, repo_id=body.repo_id)
+        results = cb_search.search_code(
+            db,
+            body.query,
+            repo_id=search_repo_id,
+            repo_ids=visible_repo_ids,
+        )
         result = {"query": body.query, "results": results}
     return JSONResponse({"ok": True, **result})
 
@@ -245,6 +343,8 @@ async def api_brain_code_agent(
 ):
     """Run the Code Agent: analyze request -> gather context -> propose changes."""
     ctx = get_identity_ctx(request, db)
+    if body.repo_id is not None and _resolve_visible_repo_id(db, ctx["user_id"], body.repo_id) is None:
+        return _not_found("Repo not found")
     from ..services.code_brain.agent import run_code_agent
 
     result = await run_code_agent(db, body.prompt, repo_id=body.repo_id, user_id=ctx["user_id"])
@@ -265,21 +365,26 @@ def api_brain_project_lenses():
 @router.get("/api/brain/project/lens/{lens_name}/metrics")
 def api_brain_project_lens_metrics(
     lens_name: str,
+    request: Request,
     repo_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """Metrics filtered through a specific role lens."""
     if not cb_lenses.get_lens(lens_name):
         return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
-    resolved_repo_id = repo_id if repo_id is not None else _first_active_repo_id(db)
-    metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=resolved_repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    lens_repo_id = resolved_repo_id if resolved_repo_id is not None else -1
+    metrics = cb_lenses.get_lens_metrics(db, lens_name, repo_id=lens_repo_id)
     planner_data = None
     lens_obj = cb_lenses.get_lens(lens_name)
     if lens_obj and lens_obj.planner_integration:
         try:
             from ..services import planner_service
 
-            planner_data = planner_service.get_all_users_task_summary(db)
+            planner_data = planner_service.get_user_task_summary_stats(db, ctx["user_id"])
         except Exception:
             planner_data = None
     return JSONResponse({"ok": True, **metrics, "planner": planner_data})
@@ -288,26 +393,44 @@ def api_brain_project_lens_metrics(
 @router.get("/api/brain/project/lens/{lens_name}/hotspots")
 def api_brain_project_lens_hotspots(
     lens_name: str,
+    request: Request,
     repo_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """Hotspots filtered by lens file patterns."""
     if not cb_lenses.get_lens(lens_name):
         return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
-    data = cb_lenses.get_lens_hotspots(db, lens_name, repo_id=repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    data = cb_lenses.get_lens_hotspots(
+        db,
+        lens_name,
+        repo_id=resolved_repo_id if resolved_repo_id is not None else -1,
+    )
     return JSONResponse({"ok": True, "hotspots": data})
 
 
 @router.get("/api/brain/project/lens/{lens_name}/insights")
 def api_brain_project_lens_insights(
     lens_name: str,
+    request: Request,
     repo_id: int | None = Query(None),
     db: Session = Depends(get_db),
 ):
     """Insights filtered by lens categories."""
     if not cb_lenses.get_lens(lens_name):
         return JSONResponse({"ok": False, "message": f"Unknown lens: {lens_name}"}, status_code=404)
-    data = cb_lenses.get_lens_insights(db, lens_name, repo_id=repo_id)
+    ctx = get_identity_ctx(request, db)
+    resolved_repo_id = _resolve_visible_repo_id(db, ctx["user_id"], repo_id)
+    if repo_id is not None and resolved_repo_id is None:
+        return _not_found("Repo not found")
+    data = cb_lenses.get_lens_insights(
+        db,
+        lens_name,
+        repo_id=resolved_repo_id if resolved_repo_id is not None else -1,
+    )
     return JSONResponse({"ok": True, "insights": data})
 
 
@@ -316,9 +439,27 @@ def api_brain_project_lens_insights(
 
 @router.get("/api/brain/project/agents")
 def api_brain_project_agents(request: Request, db: Session = Depends(get_db)):
-    """List all agents with their status and metrics."""
+    """List analysis perspectives while keeping the historical route surface alive."""
     ctx = get_identity_ctx(request, db)
-    agents = [agent.get_metrics(db, ctx["user_id"]) for agent in pb_registry.AGENT_REGISTRY.values()]
+    latest = project_analysis.latest_analysis_snapshot(db, user_id=ctx["user_id"])
+    if latest is None:
+        agents = [
+            {"agent": key, "name": key, "label": label, "active": True}
+            for key, label, _lens in project_analysis.PERSPECTIVE_ORDER
+        ]
+        return JSONResponse({"ok": True, "agents": agents})
+    agents = []
+    for key, payload in (latest.get("perspectives") or {}).items():
+        agents.append(
+            {
+                "agent": key,
+                "name": key,
+                "label": payload.get("label", key.title()),
+                "active": True,
+                "status": payload.get("status"),
+                "headline": payload.get("headline"),
+            }
+        )
     return JSONResponse({"ok": True, "agents": agents})
 
 
@@ -465,10 +606,13 @@ def api_brain_project_agent_cycle(
 
 @router.get("/api/brain/project/messages")
 def api_brain_project_messages(request: Request, db: Session = Depends(get_db)):
-    """Inter-agent message feed."""
+    """Operator timeline feed (adapter on the historical route)."""
     ctx = get_identity_ctx(request, db)
-    feed = pb_registry.get_message_feed(db, ctx["user_id"])
-    return JSONResponse({"ok": True, "messages": feed})
+    return JSONResponse({"ok": True, "messages": _timeline_messages(db, ctx["user_id"])})
+
+
+class _ProjectAnalysisRunBody(BaseModel):
+    planner_task_id: int | None = None
 
 
 # Product owner endpoints
@@ -538,24 +682,31 @@ class _POAnswerBody(BaseModel):
 
 
 @router.post("/api/brain/project/agent/product_owner/question/{question_id}/answer")
-def api_brain_po_answer(question_id: int, body: _POAnswerBody, db: Session = Depends(get_db)):
+def api_brain_po_answer(
+    question_id: int,
+    body: _POAnswerBody,
+    request: Request,
+    db: Session = Depends(get_db),
+):
     """Submit an answer to a PO question."""
+    ctx = get_identity_ctx(request, db)
     po = pb_registry.get_agent("product_owner")
     if not po:
         return _agent_not_found("product_owner", label="PO")
-    q = po.answer_question(db, question_id, body.answer)
+    q = po.answer_question(db, ctx["user_id"], question_id, body.answer)
     if not q:
         return JSONResponse({"ok": False, "message": "Question not found"}, status_code=404)
     return JSONResponse({"ok": True, "question": {"id": q.id, "status": q.status, "answer": q.answer}})
 
 
 @router.post("/api/brain/project/agent/product_owner/question/{question_id}/skip")
-def api_brain_po_skip(question_id: int, db: Session = Depends(get_db)):
+def api_brain_po_skip(question_id: int, request: Request, db: Session = Depends(get_db)):
     """Skip a PO question."""
+    ctx = get_identity_ctx(request, db)
     po = pb_registry.get_agent("product_owner")
     if not po:
         return _agent_not_found("product_owner", label="PO")
-    q = po.skip_question(db, question_id)
+    q = po.skip_question(db, ctx["user_id"], question_id)
     if not q:
         return JSONResponse({"ok": False, "message": "Question not found"}, status_code=404)
     return JSONResponse({"ok": True})
@@ -623,11 +774,12 @@ def api_brain_po_req_to_task(
 
 
 @router.get("/api/brain/project/planner-projects")
-def api_brain_planner_projects(db: Session = Depends(get_db)):
-    """List all planner projects in the household for the project picker."""
+def api_brain_planner_projects(request: Request, db: Session = Depends(get_db)):
+    """List planner projects visible to the paired user for the project picker."""
     from ..services import planner_service
 
-    projects = planner_service.list_all_projects(db)
+    ctx = get_identity_ctx(request, db)
+    projects = planner_service.list_projects(db, ctx["user_id"])
     return JSONResponse({"ok": True, "projects": projects})
 
 
@@ -684,21 +836,103 @@ def api_brain_arch_health(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/api/brain/project/cycle")
 def api_brain_project_cycle_all(request: Request, db: Session = Depends(get_db)):
-    """Trigger a learning cycle for all active agents."""
-    from ..db import SessionLocal
-    from ..services.project_brain.learning import run_project_brain_cycle_background
-
+    """Historical adapter: trigger a single analysis run for the current operator."""
     ctx = get_identity_ctx(request, db)
-    run_project_brain_cycle_background(SessionLocal, ctx["user_id"])
-    return JSONResponse({"ok": True, "message": "All-agent cycle started in background"})
+    payload = project_analysis.build_analysis_payload(db, user_id=ctx["user_id"])
+    summary = payload.get("summary") or {}
+    repo_id = summary.get("repo_id")
+    run = record_completed_run(
+        db,
+        "analysis",
+        status="completed",
+        user_id=ctx["user_id"],
+        repo_id=repo_id,
+        title="Refresh project analysis",
+        detail=summary,
+    )
+    snapshot = project_analysis.store_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=None,
+        repo_id=repo_id,
+        source_run_id=run.id,
+        payload=payload,
+    )
+    db.commit()
+    return JSONResponse({"ok": True, "message": "Project analysis refreshed", "snapshot_id": snapshot.id})
 
 
 @router.get("/api/brain/project/status")
-def api_brain_project_status():
-    """Global Project Brain status (running, progress, last run)."""
-    from ..services.project_brain.learning import get_project_brain_status
+def api_brain_project_status(request: Request, db: Session = Depends(get_db)):
+    """Durable project-domain status backed by persisted run records."""
+    ctx = get_identity_ctx(request, db)
+    return JSONResponse({"ok": True, **status_payload(db, user_id=ctx["user_id"])})
 
-    return JSONResponse({"ok": True, **get_project_brain_status()})
+
+@router.post("/api/brain/project/analysis/run")
+def api_brain_project_analysis_run(
+    request: Request,
+    body: _ProjectAnalysisRunBody | None = None,
+    db: Session = Depends(get_db),
+):
+    """Run a single advisory report across all perspectives and persist it."""
+    ctx = get_identity_ctx(request, db)
+    planner_task_id = body.planner_task_id if body else None
+    payload = project_analysis.build_analysis_payload(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    summary = payload.get("summary") or {}
+    repo_id = summary.get("repo_id")
+    run = record_completed_run(
+        db,
+        "analysis",
+        status="completed",
+        user_id=ctx["user_id"],
+        task_id=planner_task_id,
+        repo_id=repo_id,
+        title="Run project analysis",
+        detail=summary,
+    )
+    snapshot = project_analysis.store_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+        repo_id=repo_id,
+        source_run_id=run.id,
+        payload=payload,
+    )
+    db.commit()
+    latest = project_analysis.latest_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    return JSONResponse({"ok": True, "snapshot": latest, "snapshot_id": snapshot.id})
+
+
+@router.get("/api/brain/project/analysis/latest")
+def api_brain_project_analysis_latest(
+    request: Request,
+    db: Session = Depends(get_db),
+    planner_task_id: int | None = Query(default=None),
+):
+    """Return the latest stored analysis snapshot, or build an ephemeral one if none exists yet."""
+    ctx = get_identity_ctx(request, db)
+    latest = project_analysis.latest_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    if latest is None:
+        payload = project_analysis.build_analysis_payload(
+            db,
+            user_id=ctx["user_id"],
+            planner_task_id=planner_task_id,
+        )
+        return JSONResponse({"ok": True, "snapshot": {"status": "ephemeral", **payload}})
+    return JSONResponse({"ok": True, "snapshot": latest})
 
 
 @router.get("/api/brain/project/metrics")

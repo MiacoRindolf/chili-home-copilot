@@ -8,16 +8,18 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, or_
 
 from ...config import settings
 from ...models.code_brain import (
     CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
-    CodeLearningEvent, CodeRepo, CodeReview, CodeSnapshot,
+    CodeLearningEvent, CodeRepo, CodeReview, CodeSearchEntry, CodeSnapshot,
 )
+from ..project_domain_runs import finish_run, record_completed_run, start_run
 from . import indexer, analyzer, git_miner, insights as insights_mod
 from . import graph as graph_mod, trends as trends_mod, reviewer as reviewer_mod
 from . import deps_scanner as deps_mod, search as search_mod
+from .runtime import mark_runtime_reachability, resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,19 @@ def _log_event(db: Session, repo_id: Optional[int], event_type: str, description
         db.rollback()
 
 
+def _mark_repo_stale(db: Session, repo: CodeRepo, reason: str) -> None:
+    repo.last_index_error = reason[:4000]
+    repo.file_count = 0
+    repo.total_lines = 0
+    repo.last_indexed = None
+    db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo.id).delete()
+    db.query(CodeHotspot).filter(CodeHotspot.repo_id == repo.id).delete()
+    db.query(CodeDependency).filter(CodeDependency.repo_id == repo.id).delete()
+    db.query(CodeSearchEntry).filter(CodeSearchEntry.repo_id == repo.id).delete()
+    db.query(CodeInsight).filter(CodeInsight.repo_id == repo.id).update({"active": False})
+    db.flush()
+
+
 def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[str, Any]:
     """Full code brain learning cycle: index -> analyze -> mine git -> discover insights."""
     if _learning_status["running"]:
@@ -80,7 +95,10 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
     report: Dict[str, Any] = {}
 
     try:
-        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+        if user_id is not None:
+            repos = indexer.get_accessible_repos(db, user_id, include_shared=True)
+        else:
+            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
 
         if not repos and settings.code_brain_repos:
             for rp in settings.code_brain_repos.split(","):
@@ -88,7 +106,10 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
                 if rp:
                     result = indexer.register_repo(db, rp, user_id=user_id)
                     logger.info("[code-brain] Auto-registered repo: %s -> %s", rp, result)
-            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+            if user_id is not None:
+                repos = indexer.get_accessible_repos(db, user_id, include_shared=True)
+            else:
+                repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
 
         if not repos:
             _learning_status["running"] = False
@@ -96,11 +117,71 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             _learning_status["error"] = "No repos registered"
             return {"ok": False, "reason": "No repos registered. Add repos via Brain UI or CODE_BRAIN_REPOS in .env"}
 
+        # Deduplicate repos that resolve to the same runtime path in this process.
+        unique_repos: list[CodeRepo] = []
+        seen_runtime_paths: dict[str, int] = {}
+        for repo in repos:
+            runtime_path = resolve_repo_runtime_path(repo)
+            if runtime_path is None:
+                unique_repos.append(repo)
+                continue
+            key = str(runtime_path)
+            if key in seen_runtime_paths:
+                repo.last_index_error = (
+                    f"Skipped duplicate runtime path; canonical repo id {seen_runtime_paths[key]} owns {key}."
+                )
+                mark_runtime_reachability(repo, True)
+                db.flush()
+                record_completed_run(
+                    db,
+                    "index",
+                    status="skipped",
+                    user_id=user_id,
+                    repo_id=repo.id,
+                    title=f"Skipped duplicate repo {repo.name}",
+                    detail={"duplicate_of_repo_id": seen_runtime_paths[key], "runtime_path": key},
+                )
+                db.commit()
+                continue
+            seen_runtime_paths[key] = repo.id
+            unique_repos.append(repo)
+
+        repos = unique_repos
         report["repo_count"] = len(repos)
         total_insights = 0
 
         for i, repo in enumerate(repos):
             logger.info("[code-brain] Processing repo %d/%d: %s", i + 1, len(repos), repo.name)
+            runtime_path = resolve_repo_runtime_path(repo)
+            if runtime_path is None:
+                reason = (
+                    "Registered workspace is not reachable from this runtime. "
+                    "Indexing requires a shared host/container path mapping."
+                )
+                mark_runtime_reachability(repo, False)
+                _mark_repo_stale(db, repo, reason)
+                record_completed_run(
+                    db,
+                    "index",
+                    status="failed",
+                    user_id=user_id,
+                    repo_id=repo.id,
+                    title=f"Index {repo.name}",
+                    error_message=reason,
+                )
+                db.commit()
+                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id)
+                continue
+
+            run = start_run(
+                db,
+                "index",
+                user_id=user_id,
+                repo_id=repo.id,
+                title=f"Index {repo.name}",
+                detail={"runtime_path": str(runtime_path)},
+            )
+            db.commit()
 
             # Step 1: Index
             _learning_status["phase"] = "indexing"
@@ -109,6 +190,20 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             idx_result = indexer.scan_repo(db, repo.id)
             _learning_status["step_timings"][f"index_{repo.name}"] = round(time.time() - t0, 1)
             logger.info("[code-brain] Indexed %s: %s", repo.name, idx_result)
+            if idx_result.get("error"):
+                reason = str(idx_result.get("error"))
+                _mark_repo_stale(db, repo, reason)
+                mark_runtime_reachability(repo, False)
+                finish_run(
+                    db,
+                    run,
+                    status="failed",
+                    detail={"runtime_path": str(runtime_path), "error": reason},
+                    error_message=reason,
+                )
+                db.commit()
+                _log_event(db, repo.id, "index_error", f"{repo.name}: {reason}", user_id)
+                continue
 
             # Step 2: Analyze
             _learning_status["phase"] = "analyzing"
@@ -188,6 +283,17 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
             except Exception as se:
                 logger.warning("[code-brain] Symbol indexing failed for %s: %s", repo.name, se)
 
+            finish_run(
+                db,
+                run,
+                status="completed",
+                detail={
+                    "runtime_path": str(runtime_path),
+                    "file_count": idx_result.get("file_count", 0),
+                    "insights": insight_result.get("discovered", 0),
+                },
+            )
+            db.commit()
             _learning_status["repos_processed"] = i + 1
             _log_event(db, repo.id, "index", f"Completed learning cycle for {repo.name}: {idx_result.get('file_count', 0)} files, {insight_result.get('discovered', 0)} insights", user_id)
 
@@ -218,18 +324,36 @@ def run_code_learning_cycle(db: Session, user_id: Optional[int] = None) -> Dict[
 
 def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[str, Any]:
     """Aggregate metrics for the Code Brain dashboard."""
-    repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+    if user_id is not None:
+        repos = indexer.get_accessible_repos(db, user_id, include_shared=True)
+    else:
+        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+    repo_ids = [repo.id for repo in repos]
     total_files = sum(r.file_count for r in repos)
     total_lines = sum(r.total_lines for r in repos)
 
-    insight_count = db.query(func.count(CodeInsight.id)).filter(CodeInsight.active.is_(True)).scalar() or 0
-    hotspot_count = db.query(func.count(CodeHotspot.id)).scalar() or 0
-
-    avg_complexity = (
-        db.query(func.avg(CodeSnapshot.complexity_score))
-        .filter(CodeSnapshot.complexity_score > 0)
-        .scalar()
-    ) or 0.0
+    if repo_ids:
+        insight_count = (
+            db.query(func.count(CodeInsight.id))
+            .filter(CodeInsight.active.is_(True), CodeInsight.repo_id.in_(repo_ids))
+            .scalar()
+            or 0
+        )
+        hotspot_count = (
+            db.query(func.count(CodeHotspot.id))
+            .filter(CodeHotspot.repo_id.in_(repo_ids))
+            .scalar()
+            or 0
+        )
+        avg_complexity = (
+            db.query(func.avg(CodeSnapshot.complexity_score))
+            .filter(CodeSnapshot.repo_id.in_(repo_ids), CodeSnapshot.complexity_score > 0)
+            .scalar()
+        ) or 0.0
+    else:
+        insight_count = 0
+        hotspot_count = 0
+        avg_complexity = 0.0
 
     lang_totals: Dict[str, int] = {}
     for r in repos:
@@ -241,23 +365,48 @@ def get_code_brain_metrics(db: Session, user_id: Optional[int] = None) -> Dict[s
             except Exception:
                 pass
 
-    top_hotspots = (
-        db.query(CodeHotspot)
-        .order_by(CodeHotspot.combined_score.desc())
-        .limit(10)
-        .all()
-    )
+    if repo_ids:
+        top_hotspots = (
+            db.query(CodeHotspot)
+            .filter(CodeHotspot.repo_id.in_(repo_ids))
+            .order_by(CodeHotspot.combined_score.desc())
+            .limit(10)
+            .all()
+        )
+        recent_events_q = db.query(CodeLearningEvent).filter(
+            or_(
+                CodeLearningEvent.repo_id.in_(repo_ids),
+                CodeLearningEvent.user_id == user_id,
+            )
+        )
+        circular_count = (
+            db.query(func.count(CodeDependency.id))
+            .filter(CodeDependency.repo_id.in_(repo_ids), CodeDependency.is_circular.is_(True))
+            .scalar()
+            or 0
+        )
+        dep_alert_count = (
+            db.query(func.count(CodeDepAlert.id))
+            .filter(CodeDepAlert.repo_id.in_(repo_ids), CodeDepAlert.resolved.is_(False))
+            .scalar()
+            or 0
+        )
+        review_count = (
+            db.query(func.count(CodeReview.id))
+            .filter(CodeReview.repo_id.in_(repo_ids))
+            .scalar()
+            or 0
+        )
+    else:
+        top_hotspots = []
+        recent_events_q = db.query(CodeLearningEvent)
+        if user_id is not None:
+            recent_events_q = recent_events_q.filter(CodeLearningEvent.user_id == user_id)
+        circular_count = 0
+        dep_alert_count = 0
+        review_count = 0
 
-    recent_events = (
-        db.query(CodeLearningEvent)
-        .order_by(CodeLearningEvent.created_at.desc())
-        .limit(20)
-        .all()
-    )
-
-    circular_count = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True)).scalar() or 0
-    dep_alert_count = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False)).scalar() or 0
-    review_count = db.query(func.count(CodeReview.id)).scalar() or 0
+    recent_events = recent_events_q.order_by(CodeLearningEvent.created_at.desc()).limit(20).all()
 
     trend_deltas = {}
     if repos:
@@ -306,16 +455,23 @@ def get_code_chat_context(db: Session, user_id: Optional[int] = None) -> str:
     Designed to be appended to the LLM system prompt so Chili has persistent
     knowledge of the user's codebases without re-scanning on every request.
     """
-    repos = (
-        db.query(CodeRepo)
-        .filter(CodeRepo.active.is_(True))
-        .order_by(CodeRepo.name.asc())
-        .all()
-    )
+    if user_id is not None:
+        repos = sorted(
+            indexer.get_accessible_repos(db, user_id, include_shared=True),
+            key=lambda repo: (repo.name or "").lower(),
+        )
+    else:
+        repos = (
+            db.query(CodeRepo)
+            .filter(CodeRepo.active.is_(True))
+            .order_by(CodeRepo.name.asc())
+            .all()
+        )
     if not repos:
         return ""
 
     metrics = get_code_brain_metrics(db, user_id=user_id)
+    repo_ids = [repo.id for repo in repos]
     parts: list[str] = []
 
     # Repos overview
@@ -393,7 +549,7 @@ def get_code_chat_context(db: Session, user_id: Optional[int] = None) -> str:
 
     # Recent review findings
     try:
-        reviews = reviewer_mod.get_recent_reviews(db, limit=3)
+        reviews = reviewer_mod.get_recent_reviews(db, repo_ids=repo_ids, limit=3)
         critical_findings = []
         for rev in reviews:
             for f in (rev.get("findings") or []):
@@ -417,8 +573,12 @@ def get_project_metrics(db: Session, user_id: Optional[int] = None, lens: Option
     """Return metrics, optionally filtered through a role lens."""
     if lens:
         from .lenses import get_lens_metrics
-        repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
-        repo_id = repos[0].id if repos else None
+        if user_id is not None:
+            repos = indexer.get_accessible_repos(db, user_id, include_shared=True)
+            repo_id = repos[0].id if repos else -1
+        else:
+            repos = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).all()
+            repo_id = repos[0].id if repos else None
         return get_lens_metrics(db, lens, repo_id=repo_id)
     return get_code_brain_metrics(db, user_id=user_id)
 

@@ -61,6 +61,8 @@ class PlanTask(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     coding_workflow_mode = Column(String(32), default="tracked", nullable=False)
     coding_readiness_state = Column(String(40), default="not_started", nullable=False)
+    coding_workflow_state = Column(String(40), default="unbound", nullable=False)
+    coding_workflow_state_updated_at = Column(DateTime, default=datetime.utcnow, nullable=False)
 
     project = relationship("PlanProject", back_populates="tasks")
     assignee = relationship("User", foreign_keys=[assigned_to])

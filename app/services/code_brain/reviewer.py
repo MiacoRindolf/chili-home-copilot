@@ -11,6 +11,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeInsight, CodeRepo, CodeReview
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -120,9 +121,10 @@ def review_recent_commits(db: Session, repo_id: int, user_id: Optional[int] = No
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = repo.path
-    if not Path(repo_path).is_dir():
-        return {"error": f"Path not found: {repo_path}"}
+    runtime_path = resolve_repo_runtime_path(repo)
+    if runtime_path is None or not runtime_path.is_dir():
+        return {"error": "Registered workspace is not reachable from the current runtime."}
+    repo_path = str(runtime_path)
 
     commits = _get_recent_commits(repo_path, repo.last_commit_hash, max_commits=5)
     if not commits:
@@ -178,10 +180,19 @@ def review_recent_commits(db: Session, repo_id: int, user_id: Optional[int] = No
     return {"reviewed": reviewed_count, "skipped": len(already_reviewed)}
 
 
-def get_recent_reviews(db: Session, repo_id: Optional[int] = None, limit: int = 20) -> List[Dict[str, Any]]:
+def get_recent_reviews(
+    db: Session,
+    repo_id: Optional[int] = None,
+    repo_ids: Optional[List[int]] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
     q = db.query(CodeReview).order_by(CodeReview.reviewed_at.desc())
     if repo_id is not None:
         q = q.filter(CodeReview.repo_id == repo_id)
+    elif repo_ids is not None:
+        if not repo_ids:
+            return []
+        q = q.filter(CodeReview.repo_id.in_(repo_ids))
     rows = q.limit(limit).all()
     return [
         {

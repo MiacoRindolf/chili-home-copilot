@@ -702,33 +702,38 @@ def get_user_project_summary(db: Session, user_id: int) -> str:
     return "\n".join(lines)
 
 
+def get_user_task_summary_stats(db: Session, user_id: int) -> dict:
+    member_projects = (
+        db.query(PlanProject)
+        .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
+        .filter(ProjectMember.user_id == user_id)
+        .all()
+    )
+    total_tasks = 0
+    done_tasks = 0
+    overdue_tasks = 0
+    today = date.today()
+    for p in member_projects:
+        for t in p.tasks:
+            total_tasks += 1
+            if t.status == "done":
+                done_tasks += 1
+            elif t.end_date and t.end_date < today and t.status != "done":
+                overdue_tasks += 1
+    return {
+        "user_id": user_id,
+        "project_count": len(member_projects),
+        "total_tasks": total_tasks,
+        "done_tasks": done_tasks,
+        "overdue_tasks": overdue_tasks,
+    }
+
+
 def get_all_users_task_summary(db: Session) -> list[dict]:
     users = db.query(User).all()
     result = []
     for u in users:
-        member_projects = (
-            db.query(PlanProject)
-            .join(ProjectMember, ProjectMember.project_id == PlanProject.id)
-            .filter(ProjectMember.user_id == u.id)
-            .all()
-        )
-        total_tasks = 0
-        done_tasks = 0
-        overdue_tasks = 0
-        today = date.today()
-        for p in member_projects:
-            for t in p.tasks:
-                total_tasks += 1
-                if t.status == "done":
-                    done_tasks += 1
-                elif t.end_date and t.end_date < today and t.status != "done":
-                    overdue_tasks += 1
-        result.append({
-            "user_id": u.id,
-            "user_name": u.name,
-            "project_count": len(member_projects),
-            "total_tasks": total_tasks,
-            "done_tasks": done_tasks,
-            "overdue_tasks": overdue_tasks,
-        })
+        summary = get_user_task_summary_stats(db, u.id)
+        summary["user_name"] = u.name
+        result.append(summary)
     return result

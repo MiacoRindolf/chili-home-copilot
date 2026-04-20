@@ -18,6 +18,7 @@ from ...models.code_brain import (
     CodeDepAlert, CodeDependency, CodeHotspot, CodeInsight,
     CodeLearningEvent, CodeRepo, CodeReview, CodeSnapshot,
 )
+from .indexer import get_accessible_repos
 
 logger = logging.getLogger(__name__)
 
@@ -192,10 +193,19 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
     if repo_id:
         repo_filter = [CodeHotspot.repo_id == repo_id]
 
-    all_hotspots = db.query(CodeHotspot).filter(*repo_filter).order_by(CodeHotspot.combined_score.desc()).limit(100).all()
+    all_hotspots = (
+        db.query(CodeHotspot)
+        .filter(*repo_filter)
+        .order_by(CodeHotspot.combined_score.desc())
+        .limit(100)
+        .all()
+    )
     filtered_hotspots = [h for h in all_hotspots if _matches_any(h.file_path, lens.file_patterns)]
 
-    all_insights = db.query(CodeInsight).filter(CodeInsight.active.is_(True)).all()
+    insight_q = db.query(CodeInsight).filter(CodeInsight.active.is_(True))
+    if repo_id is not None:
+        insight_q = insight_q.filter(CodeInsight.repo_id == repo_id)
+    all_insights = insight_q.all()
     filtered_insights = [i for i in all_insights if i.category in lens.insight_categories]
 
     all_snapshots_q = db.query(CodeSnapshot)
@@ -213,18 +223,25 @@ def get_lens_metrics(db: Session, lens_name: str, repo_id: Optional[int] = None)
     dep_alerts = 0
     circular_count = 0
     if lens_name in ("architect", "devops", "security", "pm"):
-        dep_alerts = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False)).scalar() or 0
+        dep_alert_q = db.query(func.count(CodeDepAlert.id)).filter(CodeDepAlert.resolved.is_(False))
+        if repo_id is not None:
+            dep_alert_q = dep_alert_q.filter(CodeDepAlert.repo_id == repo_id)
+        dep_alerts = dep_alert_q.scalar() or 0
     if lens_name in ("architect", "pm"):
-        circular_count = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True)).scalar() or 0
+        circular_q = db.query(func.count(CodeDependency.id)).filter(CodeDependency.is_circular.is_(True))
+        if repo_id is not None:
+            circular_q = circular_q.filter(CodeDependency.repo_id == repo_id)
+        circular_count = circular_q.scalar() or 0
 
-    review_count = db.query(func.count(CodeReview.id)).scalar() or 0
+    review_q = db.query(func.count(CodeReview.id))
+    if repo_id is not None:
+        review_q = review_q.filter(CodeReview.repo_id == repo_id)
+    review_count = review_q.scalar() or 0
 
-    recent_events = (
-        db.query(CodeLearningEvent)
-        .order_by(CodeLearningEvent.created_at.desc())
-        .limit(10)
-        .all()
-    )
+    recent_events_q = db.query(CodeLearningEvent)
+    if repo_id is not None:
+        recent_events_q = recent_events_q.filter(CodeLearningEvent.repo_id == repo_id)
+    recent_events = recent_events_q.order_by(CodeLearningEvent.created_at.desc()).limit(10).all()
 
     return {
         "lens": lens_name,
@@ -321,7 +338,11 @@ def get_lens_chat_context(db: Session, lens_name: str, user_id: Optional[int] = 
     if not lens:
         return ""
 
-    metrics = get_lens_metrics(db, lens_name)
+    resolved_repo_id: Optional[int] = None
+    if user_id is not None:
+        repos = get_accessible_repos(db, user_id, include_shared=True)
+        resolved_repo_id = repos[0].id if repos else -1
+    metrics = get_lens_metrics(db, lens_name, repo_id=resolved_repo_id)
     parts: List[str] = [
         f"[Project Brain — {lens.label} perspective]",
         lens.context_role,

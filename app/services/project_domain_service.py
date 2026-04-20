@@ -1,17 +1,14 @@
 """Workspace-first bootstrap payloads for the Project Brain domain."""
 from __future__ import annotations
 
-from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..models import PlanTask
-from ..models.project_brain import AgentMessage
 from . import planner_service
 from .code_brain import indexer as cb_indexer
-from .code_brain import learning as cb_learning
 from .coding_task.service import build_handoff_dict
-from .project_brain import learning as pb_learning
-from .project_brain import registry as pb_registry
+from .project_analysis import latest_analysis_snapshot
+from .project_domain_runs import kind_status_payload, list_timeline, status_payload
 
 
 def _capability(enabled: bool, reason: str | None = None) -> dict:
@@ -42,15 +39,20 @@ def build_project_bootstrap_payload(
     is_guest: bool,
     planner_task_id: int | None = None,
 ) -> dict:
-    code_status = cb_learning.get_code_learning_status()
-    project_status = pb_learning.get_project_brain_status()
+    code_status = kind_status_payload(db, "index", user_id=user_id)
+    project_status = status_payload(db, user_id=user_id)
 
     repos = [] if is_guest else cb_indexer.get_registered_repos(db, user_id=user_id)
     repo_count = len(repos)
     indexed_repo_count = sum(
         1
         for repo in repos
-        if repo.get("last_indexed") or (repo.get("file_count") or 0) > 0
+        if not repo.get("last_index_error")
+        and (
+            repo.get("last_successful_indexed_at")
+            or repo.get("last_indexed")
+            or (repo.get("last_successful_file_count") or repo.get("file_count") or 0) > 0
+        )
     )
 
     task = _task_for_bootstrap(
@@ -66,19 +68,10 @@ def build_project_bootstrap_payload(
     workspace_indexed = bool(ops_hints.get("workspace_indexed"))
     cwd_resolvable = bool(ops_hints.get("cwd_resolvable"))
 
-    unread_messages = None
-    recent_feed_count = 0
-    if user_id is not None and not is_guest:
-        unread_messages = (
-            db.query(func.count(AgentMessage.id))
-            .filter(
-                AgentMessage.user_id == user_id,
-                AgentMessage.acknowledged.is_(False),
-            )
-            .scalar()
-            or 0
-        )
-        recent_feed_count = len(pb_registry.get_message_feed(db, user_id, limit=20))
+    timeline = [] if is_guest else list_timeline(db, user_id=user_id, limit=20)
+    latest_analysis = None if is_guest else latest_analysis_snapshot(
+        db, user_id=user_id, planner_task_id=planner_task_id
+    )
 
     checklist = [
         {
@@ -137,6 +130,8 @@ def build_project_bootstrap_payload(
             "indexed_repo_count": indexed_repo_count,
             "repos": repos,
             "empty_state": repo_count == 0,
+            "web_reachable_count": sum(1 for repo in repos if repo.get("reachable_in_web")),
+            "scheduler_reachable_count": sum(1 for repo in repos if repo.get("reachable_in_scheduler")),
             "setup_checklist": checklist,
         },
         "planner_handoff": {
@@ -146,13 +141,18 @@ def build_project_bootstrap_payload(
             "summary": handoff,
         },
         "agents": {
-            "registered_count": len(pb_registry.AGENT_REGISTRY),
-            "active_count": sum(1 for agent in pb_registry.AGENT_REGISTRY.values() if agent.active),
+            "registered_count": 8,
+            "active_count": 8,
             "running": bool(project_status.get("running")),
-            "unread_messages": unread_messages,
+            "unread_messages": 0,
         },
         "feed": {
-            "recent_count": recent_feed_count,
+            "recent_count": len(timeline),
+            "timeline": timeline,
+        },
+        "analysis": {
+            "available": latest_analysis is not None,
+            "latest": latest_analysis,
         },
         "capabilities": {
             "register_repo": _capability(not is_guest, "Pair this device to register workspaces."),

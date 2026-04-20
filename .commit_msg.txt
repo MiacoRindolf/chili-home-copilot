@@ -1,12 +1,36 @@
-feat(brain): thorough learning cycle overhaul + 11 Cursor rules
+Repair neural network FKs, re-evolve stubs, assign patterns to open trades
 
-Complete trading brain refactor: structured mining with rules_json DSL,
-lifecycle state machine, backtest/live parity via indicator_core.py,
-ensemble promotion gates, alpha decay monitoring, paper trading,
-risk management (Kelly/drawdown breaker), governance (kill switch/approval),
-regime detection, multi-timeframe consensus, intraday signals, daily playbook,
-ML model registry, execution quality tracking, and brain.html UI enhancements.
+Post-reset follow-up to the Telegram-based pattern recovery. Three
+problems were still left over from today's scan_patterns wipe:
 
-Added 14 new service modules, 4 new DB tables (migrations 066-069),
-1 parity test suite, and 17 Cursor rule files covering agent behavior
-and trading brain domain knowledge.
+1. Neural network had dangling pattern references
+   - trading_hypotheses.related_pattern_id  : 139 orphan rows
+   - trading_proposals.scan_pattern_id      : 128 orphan rows
+   All 267 orphan IDs existed in the Apr 7 backup, so
+   repair_neural_fks.sql builds an old_id -> name -> new_id map via
+   dblink and rewrites every orphan FK. Post-repair: 0 orphans, 144
+   hypotheses + 137 proposals now correctly linked.
+
+2. The 6 recovered Telegram stub patterns had empty rules_json
+   reevolve_telegram_stubs.sql seeds each with 5 plausible starter
+   conditions derived from the pattern name + Telegram description +
+   TA convention. Stubs stay active=false with
+   lifecycle_stage='candidate' and backtest_priority=1 so the brain
+   worker validates them via its ensemble promotion gate before the
+   scanner uses them; if the rules don't earn edge, lifecycle.py
+   retires them.
+
+3. 20 open trades had no scan_pattern_id
+   assign_patterns_to_open_trades.py builds the same indicator
+   snapshot the live scanner uses (scanner.py:1034-1057) and runs
+   evaluate_patterns() + evaluate_patterns_soft() fallback against
+   the 47 active patterns, then assigns the highest-ranked match.
+   12 of 20 now auto-assigned (4x Momentum Breakout, 4x Intraday
+   Squeeze + Declining Volume, 3x BB Squeeze Breakout, 1x capitulation
+   bounce). 8 remain unmatched even under soft rules — those tickers
+   are genuinely in no-signal / insufficient-data states today.
+
+Result for user 13: 22 / 30 open trades now have a scan_pattern_id
+(up from 2), neural-network reasoning tables are FK-clean, and the
+brain worker is already in queue_backtesting phase and will pick up
+the 6 priority-1 stubs on its next cycle.
