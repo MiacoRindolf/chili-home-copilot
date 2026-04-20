@@ -231,23 +231,71 @@ def check_duplicate_position(ticker: str) -> list[str]:
 
 # ── Sync all ─────────────────────────────────────────────────────────
 
+def _resolve_rh_session_owner(db: Session) -> int | None:
+    """Return the user_id that owns the live RH session (from broker_sessions
+    → users.email), or None if the session can't be mapped to a known user."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text(
+                "SELECT u.id FROM broker_sessions bs "
+                "JOIN users u ON lower(u.email) = lower(bs.username) "
+                "WHERE bs.broker = 'robinhood' "
+                "ORDER BY bs.updated_at DESC LIMIT 1"
+            )
+        ).fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
+def _resolve_cb_cred_owner(db: Session) -> int | None:
+    """Return the user_id that owns the live Coinbase credentials."""
+    from sqlalchemy import text
+    try:
+        row = db.execute(
+            text(
+                "SELECT user_id FROM broker_credentials "
+                "WHERE broker = 'coinbase' "
+                "ORDER BY updated_at DESC LIMIT 1"
+            )
+        ).fetchone()
+        return int(row[0]) if row else None
+    except Exception:
+        return None
+
+
 def sync_all(db: Session, user_id: int | None) -> dict[str, Any]:
-    """Sync orders and positions from all connected brokers."""
+    """Sync orders and positions from connected brokers.
+
+    Per-broker user scoping: each broker writes positions under the user who
+    owns its credentials/session (RH session owner vs CB credential owner),
+    NOT the caller's ``user_id``. Prior behavior wrote both under whichever
+    user was calling this — so any HTTP endpoint hit by user 1 attached CB
+    positions to user 1 even though the CB credential belongs to user 7,
+    silently re-creating phantom CB rows on every page load. The caller's
+    ``user_id`` is retained only for the watchlist auto-add (that one is
+    correctly per-caller: add brokers' tickers to MY watchlist).
+    """
     result: dict[str, Any] = {}
     wl_tickers: set[str] = set()
 
     if broker_service.is_connected():
-        result["robinhood_orders"] = broker_service.sync_orders_to_db(db, user_id)
-        pos_result = broker_service.sync_positions_to_db(db, user_id)
+        rh_uid = _resolve_rh_session_owner(db) or user_id
+        result["robinhood_sync_user_id"] = rh_uid
+        result["robinhood_orders"] = broker_service.sync_orders_to_db(db, rh_uid)
+        pos_result = broker_service.sync_positions_to_db(db, rh_uid)
         live_tickers = pos_result.pop("_live_tickers", set())
         result["robinhood_positions"] = pos_result
-        result["robinhood_manual"] = broker_service.cleanup_manual_trades(db, user_id, live_tickers)
-        result["robinhood_backfill"] = broker_service.backfill_closed_trade_pnl(db, user_id)
+        result["robinhood_manual"] = broker_service.cleanup_manual_trades(db, rh_uid, live_tickers)
+        result["robinhood_backfill"] = broker_service.backfill_closed_trade_pnl(db, rh_uid)
         wl_tickers.update(live_tickers)
 
     if coinbase_service.is_connected():
-        result["coinbase_orders"] = coinbase_service.sync_orders_to_db(db, user_id)
-        cb_result = coinbase_service.sync_positions_to_db(db, user_id)
+        cb_uid = _resolve_cb_cred_owner(db) or user_id
+        result["coinbase_sync_user_id"] = cb_uid
+        result["coinbase_orders"] = coinbase_service.sync_orders_to_db(db, cb_uid)
+        cb_result = coinbase_service.sync_positions_to_db(db, cb_uid)
         cb_live = cb_result.pop("_live_tickers", set())
         result["coinbase_positions"] = cb_result
         wl_tickers.update(cb_live)
