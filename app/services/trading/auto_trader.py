@@ -622,11 +622,39 @@ def _execute_new_entry(
     live: bool,
     out: dict[str, Any],
 ) -> None:
-    notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
     if px <= 0:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason="bad_px", rule_snapshot=snap)
         out["skipped"] += 1
         return
+
+    # Phase 3: notional = min(dial-scaled equity slice, env fallback).
+    # The flat ``chili_autotrader_per_trade_notional_usd=300`` was blind to
+    # equity and to pattern quality. Prefer a percent-of-equity sizing that
+    # scales with the risk dial, falling back to the env dollar amount only
+    # when live equity is unreachable.
+    from .auto_trader_rules import (
+        resolve_brain_risk_context,
+        resolve_effective_capital,
+    )
+
+    env_notional = float(getattr(settings, "chili_autotrader_per_trade_notional_usd", 300.0))
+    per_trade_pct = float(getattr(settings, "chili_autotrader_per_trade_risk_pct", 1.0))
+    equity, cap_source = resolve_effective_capital(db, settings)
+    brain_ctx = resolve_brain_risk_context(db, user_id=uid)
+    dial = float(brain_ctx.get("dial_value", 1.0))
+
+    if equity > 0 and per_trade_pct > 0:
+        dyn_notional = equity * (per_trade_pct / 100.0) * dial
+        notional = dyn_notional
+        snap["notional_source"] = "equity_pct_dial"
+    else:
+        notional = env_notional * dial
+        snap["notional_source"] = "env_dollar_dial"
+    snap["notional_env"] = env_notional
+    snap["notional_effective"] = round(notional, 2)
+    snap["notional_dial"] = dial
+    snap["notional_capital_source"] = cap_source
+
     qty = notional / px
 
     if live:

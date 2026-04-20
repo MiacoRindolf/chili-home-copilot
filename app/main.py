@@ -588,7 +588,7 @@ def _restore_broker_sessions():
         from .db import SessionLocal
         from .models.core import BrokerCredential
         from .services.credential_vault import decrypt_credentials
-        from .services import coinbase_service, broker_manager
+        from .services import coinbase_service, broker_service, broker_manager
 
         db = SessionLocal()
         try:
@@ -612,18 +612,53 @@ def _restore_broker_sessions():
                         _log.info("[startup] Coinbase auto-reconnect: %s", result.get("status"))
                         connected = result.get("status") == "connected"
                     if connected:
+                        # CB-cred-owner syncs ONLY CB. Prior code called
+                        # broker_manager.sync_all(db, cb_cred.user_id) which
+                        # syncs RH too — attaching RH positions to whichever
+                        # user happens to hold a CB credential instead of the
+                        # RH session owner. That was the root cause of 60+
+                        # phantom RH rows under the wrong user_id.
                         uid = cb_cred.user_id
-                        sync_result = broker_manager.sync_all(db, uid)
-                        _log.info("[startup] Broker sync user_id=%s: cb=%s, rh=%s, wl=%s",
-                            uid,
-                            sync_result.get("coinbase_positions"),
-                            sync_result.get("robinhood_positions"),
-                            sync_result.get("watchlist_added"),
+                        try:
+                            cb_orders = coinbase_service.sync_orders_to_db(db, uid)
+                            cb_pos = coinbase_service.sync_positions_to_db(db, uid)
+                            _log.info(
+                                "[startup] CB sync (cred_owner=%s): orders=%s pos=%s",
+                                uid, cb_orders, cb_pos,
+                            )
+                        except Exception:
+                            _log.debug("[startup] CB sync failed", exc_info=True)
+
+            # RH sync: attribute to the RH session owner (from
+            # broker_sessions.username → users.email), regardless of
+            # whether any CB cred exists.
+            if broker_service.is_connected():
+                from sqlalchemy import text
+                row = db.execute(
+                    text(
+                        "SELECT u.id FROM broker_sessions bs "
+                        "JOIN users u ON lower(u.email) = lower(bs.username) "
+                        "WHERE bs.broker = 'robinhood' "
+                        "ORDER BY bs.updated_at DESC LIMIT 1"
+                    )
+                ).fetchone()
+                rh_uid = int(row[0]) if row else None
+                if rh_uid is None:
+                    _log.warning("[startup] RH sync skipped: no session owner mapping")
+                else:
+                    try:
+                        rh_orders = broker_service.sync_orders_to_db(db, rh_uid)
+                        rh_pos = broker_service.sync_positions_to_db(db, rh_uid)
+                        _log.info(
+                            "[startup] RH sync (session_owner=%s): orders=%s pos=%s",
+                            rh_uid, rh_orders, rh_pos,
                         )
+                    except Exception:
+                        _log.debug("[startup] RH sync failed", exc_info=True)
         finally:
             db.close()
     except Exception:
-        _log.debug("[startup] Coinbase auto-reconnect failed", exc_info=True)
+        _log.debug("[startup] Broker session restore failed", exc_info=True)
 
 
 def _start_massive_ws():

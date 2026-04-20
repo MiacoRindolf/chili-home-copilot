@@ -765,13 +765,56 @@ class DrawdownLimits:
     cooldown_hours: int = 24       # how long the breaker stays tripped
 
 
-def get_drawdown_limits(settings: Any | None = None) -> DrawdownLimits:
+# Phase 2: regime multipliers applied to the base drawdown thresholds.
+# The baseline (env / default) matches the prior behavior in ``cautious``.
+# ``risk_on`` tolerates more normal-volatility drawdown before tripping;
+# ``risk_off`` trips earlier because early-stage losses in choppy regimes
+# are stronger danger signals.
+_REGIME_DD_MULTIPLIERS: dict[str, float] = {
+    "risk_on": 1.5,
+    "cautious": 1.0,
+    "risk_off": 0.75,
+}
+
+
+def _read_current_regime(db: Session) -> str | None:
+    try:
+        from .runtime_surface_state import read_runtime_surface_state
+
+        surface = read_runtime_surface_state(db, surface="regime")
+        if not surface:
+            return None
+        r = str(surface.get("regime") or "").strip().lower()
+        return r if r in _REGIME_DD_MULTIPLIERS else None
+    except Exception:
+        return None
+
+
+def get_drawdown_limits(
+    settings: Any | None = None,
+    *,
+    db: Session | None = None,
+) -> DrawdownLimits:
+    """Resolve effective drawdown limits, regime-scaled when a DB is supplied.
+
+    Backwards-compatible: callers who don't pass ``db`` get the static
+    settings-driven limits (same as before). The circuit-breaker path now
+    always supplies ``db`` so thresholds track the brain's regime surface
+    instead of being a flat env constant.
+    """
     if settings is None:
         from ...config import settings as _s
         settings = _s
+    base_5d = float(getattr(settings, "brain_risk_max_5d_dd_pct", 3.0))
+    base_30d = float(getattr(settings, "brain_risk_max_30d_dd_pct", 8.0))
+    mult = 1.0
+    if db is not None:
+        regime = _read_current_regime(db)
+        if regime is not None:
+            mult = _REGIME_DD_MULTIPLIERS.get(regime, 1.0)
     return DrawdownLimits(
-        max_5day_dd_pct=float(getattr(settings, "brain_risk_max_5d_dd_pct", 3.0)),
-        max_30day_dd_pct=float(getattr(settings, "brain_risk_max_30d_dd_pct", 8.0)),
+        max_5day_dd_pct=base_5d * mult,
+        max_30day_dd_pct=base_30d * mult,
         max_consecutive_losses=int(getattr(settings, "brain_risk_max_consec_losses", 5)),
         cooldown_hours=int(getattr(settings, "brain_risk_cooldown_hours", 24)),
     )
@@ -824,7 +867,9 @@ def check_drawdown_breaker(
     from datetime import datetime, timedelta
 
     if limits is None:
-        limits = get_drawdown_limits()
+        # Phase 2: pass db so the regime multiplier kicks in (risk_off trips
+        # earlier, risk_on more tolerant). Unchanged when no regime surface.
+        limits = get_drawdown_limits(db=db)
 
     now = datetime.utcnow()
 
