@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session
 from ...models.code_brain import CodeHotspot, CodeInsight, CodeRepo, CodeSnapshot
 from . import insights as insights_mod
 from .indexer import get_registered_repos
+from .runtime import resolve_repo_runtime_path
 from .search import search_code
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,8 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
         context["repos"].append({
             "id": repo.id,
             "name": repo.name,
-            "path": repo.path,
+            "path": repo.host_path or repo.path,
+            "runtime_path": str(resolve_repo_runtime_path(repo) or ""),
             "file_count": repo.file_count,
             "total_lines": repo.total_lines,
             "languages": lang_stats,
@@ -83,7 +85,7 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
                 context["relevant_files"].append({
                     "file": fp,
                     "repo": repo.name,
-                    "repo_path": repo.path,
+                    "repo_path": str(resolve_repo_runtime_path(repo) or repo.host_path or repo.path),
                     "language": None,
                     "lines": 0,
                     "complexity": 0,
@@ -105,7 +107,7 @@ def _gather_context(db: Session, repo_id: Optional[int], prompt: str) -> Dict[st
                     context["relevant_files"].append({
                         "file": snap.file_path,
                         "repo": repo.name,
-                        "repo_path": repo.path,
+                        "repo_path": str(resolve_repo_runtime_path(repo) or repo.host_path or repo.path),
                         "language": snap.language,
                         "lines": snap.line_count,
                         "complexity": snap.complexity_score,

@@ -26,6 +26,7 @@ from .po_v2 import (
     sync_readiness,
 )
 from .validator_runner import run_phase1_validation
+from .workflow_state import sync_task_workflow_state
 from .workspaces import (
     bind_profile_workspace,
     build_workspace_binding_dict,
@@ -93,7 +94,15 @@ def _ops_hints_dict(db: Session, task: PlanTask, *, user_id: int | None = None) 
         "code_repos_configured_count": repo_count_q.count(),
         "repo_index_valid": repo_index_valid,
         "workspace_bound": repo is not None,
-        "workspace_indexed": bool(repo and (repo.last_indexed or (repo.file_count or 0) > 0)),
+        "workspace_indexed": bool(
+            repo
+            and not repo.last_index_error
+            and (
+                repo.last_successful_indexed_at
+                or repo.last_indexed
+                or (repo.last_successful_file_count or repo.file_count or 0) > 0
+            )
+        ),
         "workspace_reason": workspace_binding_reason(db, p, user_id=user_id),
         "cwd_resolvable": cwd_resolvable,
     }
@@ -170,6 +179,7 @@ def update_coding_profile(
     if sub_path is not None:
         p.sub_path = sub_path.strip().replace("\\", "/")
     p.updated_at = datetime.utcnow()
+    sync_task_workflow_state(db, task, user_id=user_id)
     db.commit()
     db.refresh(task)
     return _profile_dict(db, task.id, user_id=user_id)
@@ -283,6 +293,7 @@ def run_validation_for_task(
             task.coding_readiness_state = "blocked"
 
     task.updated_at = datetime.utcnow()
+    sync_task_workflow_state(db, task, user_id=user_id)
     db.commit()
     db.refresh(run)
     db.refresh(task)

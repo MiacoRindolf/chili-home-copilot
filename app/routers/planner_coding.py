@@ -17,9 +17,11 @@ from ..services.coding_task.workspaces import WorkspaceUnbound
 from ..services.coding_task.workflow_state import (
     WorkflowTransitionBlocked,
     assert_transition_allowed,
+    sync_task_workflow_state,
 )
 from ..services.coding_task.agent_suggest import run_agent_suggest_for_task
 from ..services.coding_task.telemetry import log_event as _log_coding_event, timed_step as _coding_timed
+from ..services.project_domain_runs import record_completed_run
 from ..services.coding_task.agent_suggestion_store import (
     bound_payload_for_save,
     coerce_list_limit,
@@ -405,7 +407,6 @@ def api_run_validation(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     try:
-        assert_transition_allowed(db, t, "validate", user_id=identity["user_id"])
         with _coding_timed("validate", task_id=task_id, user_id=identity["user_id"]):
             result = run_validation_for_task(
                 db,
@@ -413,17 +414,51 @@ def api_run_validation(
                 user_id=identity["user_id"],
                 trigger_source=body.trigger_source,
             )
-    except WorkflowTransitionBlocked as e:
-        _log_coding_event("validate", "blocked", task_id=task_id, user_id=identity["user_id"], current_state=e.current, required_state=e.required)
-        return JSONResponse(_workflow_blocked_payload(e), status_code=409)
+        run_row = result.get("run") or {}
+        run_status = "completed" if (run_row.get("status") == "completed" and (run_row.get("exit_code") in (0, None))) else "failed"
+        record_completed_run(
+            db,
+            "validate",
+            status=run_status,
+            user_id=identity["user_id"],
+            task_id=task_id,
+            trigger_source=body.trigger_source,
+            title=f"Validation for task #{task_id}",
+            detail=run_row,
+            error_message=run_row.get("error_message"),
+        )
+        db.commit()
     except WorkspaceUnbound as e:
         _log_coding_event("validate", "blocked", task_id=task_id, user_id=identity["user_id"], reason="workspace_unbound")
+        record_completed_run(
+            db,
+            "validate",
+            status="failed",
+            user_id=identity["user_id"],
+            task_id=task_id,
+            trigger_source=body.trigger_source,
+            title=f"Validation for task #{task_id}",
+            error_message=str(e),
+            detail={"workspace_unbound": True},
+        )
+        db.commit()
         payload = _preflight_error_payload(db, t, str(e))
         payload["workspace_unbound"] = True
         payload["workspace_reason"] = e.reason
         return JSONResponse(payload, status_code=409)
     except ValueError as e:
         _log_coding_event("validate", "failed", task_id=task_id, user_id=identity["user_id"], reason=str(e)[:200])
+        record_completed_run(
+            db,
+            "validate",
+            status="failed",
+            user_id=identity["user_id"],
+            task_id=task_id,
+            trigger_source=body.trigger_source,
+            title=f"Validation for task #{task_id}",
+            error_message=str(e),
+        )
+        db.commit()
         return JSONResponse(_preflight_error_payload(db, t, str(e)), status_code=400)
     return {"ok": True, **result}
 
@@ -468,11 +503,6 @@ async def api_agent_suggest(
     if not t:
         return JSONResponse({"error": "Not found"}, status_code=404)
     extra = body.extra_instructions if body else None
-    try:
-        assert_transition_allowed(db, t, "suggest", user_id=identity["user_id"])
-    except WorkflowTransitionBlocked as e:
-        _log_coding_event("suggest", "blocked", task_id=task_id, user_id=identity["user_id"], current_state=e.current, required_state=e.required)
-        return JSONResponse(_workflow_blocked_payload(e), status_code=409)
     import time as _t
     _start = _t.monotonic()
     result = await run_agent_suggest_for_task(db, t, identity["user_id"], extra_instructions=extra)
@@ -480,6 +510,17 @@ async def api_agent_suggest(
     if result.get("error"):
         outcome = "blocked" if result.get("workspace_unbound") else "failed"
         _log_coding_event("suggest", outcome, task_id=task_id, user_id=identity["user_id"], duration_ms=_duration_ms, reason=result.get("workspace_reason") or result["error"][:200])
+        record_completed_run(
+            db,
+            "suggest",
+            status="failed",
+            user_id=identity["user_id"],
+            task_id=task_id,
+            title=f"Suggest for task #{task_id}",
+            error_message=result.get("workspace_reason") or result["error"],
+            detail={"duration_ms": _duration_ms, "workspace_unbound": bool(result.get("workspace_unbound"))},
+        )
+        db.commit()
         status = 409 if result.get("workspace_unbound") else 400
         body_out = {"ok": False, "message": result["error"]}
         if result.get("workspace_unbound"):
@@ -487,6 +528,20 @@ async def api_agent_suggest(
             body_out["workspace_reason"] = result.get("workspace_reason") or result["error"]
         return JSONResponse(body_out, status_code=status)
     _log_coding_event("suggest", "ok", task_id=task_id, user_id=identity["user_id"], duration_ms=_duration_ms)
+    record_completed_run(
+        db,
+        "suggest",
+        status="completed",
+        user_id=identity["user_id"],
+        task_id=task_id,
+        title=f"Suggest for task #{task_id}",
+        detail={
+            "duration_ms": _duration_ms,
+            "files_changed": result.get("files_changed") or [],
+            "model": result.get("model"),
+        },
+    )
+    db.commit()
     return JSONResponse({"ok": True, **result})
 
 
@@ -509,6 +564,7 @@ def api_save_agent_suggestion(
         return JSONResponse({"ok": False, "message": err}, status_code=400)
     assert cols is not None
     sid = insert_suggestion(db, task_id, identity["user_id"], cols)
+    sync_task_workflow_state(db, t, user_id=identity["user_id"])
     db.commit()
     return JSONResponse({"ok": True, "id": sid}, status_code=201)
 
@@ -600,6 +656,18 @@ def api_apply_agent_suggestion(
         duration_ms=_duration_ms,
         http_status=status,
     )
+    sync_task_workflow_state(db, t, user_id=identity["user_id"])
+    record_completed_run(
+        db,
+        step_name,
+        status="completed" if status == 200 else "failed",
+        user_id=identity["user_id"],
+        task_id=task_id,
+        title=f"{step_name} for task #{task_id}",
+        detail=payload,
+        error_message=payload.get("message") if status != 200 else None,
+    )
+    db.commit()
     return JSONResponse(payload, status_code=status)
 
 

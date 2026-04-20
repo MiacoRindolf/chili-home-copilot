@@ -8716,6 +8716,104 @@ def _migration_160_exec_events_venue_ts_index(conn) -> None:
 # (version_id, callable that receives conn and runs migration)
 
 
+def _migration_162_project_domain_recovery(conn) -> None:
+    """Project-domain recovery: runtime-aware repos, durable runs, and analysis snapshots."""
+    tables = _tables(conn)
+
+    if "code_repos" in tables:
+        cols = _columns(conn, "code_repos")
+        additions = {
+            "host_path": "TEXT",
+            "container_path": "TEXT",
+            "reachable_in_web": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "reachable_in_scheduler": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "last_index_error": "TEXT",
+            "last_successful_indexed_at": "TIMESTAMP",
+            "last_successful_file_count": "INTEGER",
+        }
+        for col_name, col_type in additions.items():
+            if col_name not in cols:
+                conn.execute(text(f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_type}"))
+        conn.execute(
+            text(
+                "UPDATE code_repos "
+                "SET host_path = COALESCE(host_path, path), "
+                "container_path = COALESCE(container_path, CASE WHEN path LIKE '/%' THEN path ELSE NULL END), "
+                "last_successful_indexed_at = COALESCE(last_successful_indexed_at, last_indexed), "
+                "last_successful_file_count = COALESCE(last_successful_file_count, CASE WHEN file_count > 0 THEN file_count ELSE NULL END)"
+            )
+        )
+        conn.commit()
+
+    if "plan_tasks" in tables:
+        cols = _columns(conn, "plan_tasks")
+        if "coding_workflow_state" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE plan_tasks ADD COLUMN coding_workflow_state "
+                    "VARCHAR(40) NOT NULL DEFAULT 'unbound'"
+                )
+            )
+        if "coding_workflow_state_updated_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE plan_tasks ADD COLUMN coding_workflow_state_updated_at "
+                    "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                )
+            )
+        conn.commit()
+
+    if "project_domain_runs" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE project_domain_runs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    task_id INTEGER NULL REFERENCES plan_tasks(id) ON DELETE SET NULL,
+                    repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                    run_kind VARCHAR(32) NOT NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'running',
+                    trigger_source VARCHAR(32) NOT NULL DEFAULT 'manual',
+                    title VARCHAR(200) NULL,
+                    detail_json TEXT NULL,
+                    error_message TEXT NULL,
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_kind ON project_domain_runs(run_kind)"))
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_status ON project_domain_runs(status)"))
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_user_created ON project_domain_runs(user_id, created_at DESC)"))
+        conn.commit()
+
+    if "project_analysis_snapshots" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE project_analysis_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    task_id INTEGER NULL REFERENCES plan_tasks(id) ON DELETE SET NULL,
+                    repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                    source_run_id INTEGER NULL REFERENCES project_domain_runs(id) ON DELETE SET NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'completed',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    perspectives_json TEXT NOT NULL DEFAULT '{}',
+                    timeline_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_project_analysis_snapshots_user_created ON project_analysis_snapshots(user_id, created_at DESC)"))
+        conn.execute(text("CREATE INDEX ix_project_analysis_snapshots_task_created ON project_analysis_snapshots(task_id, created_at DESC)"))
+        conn.commit()
+
+
 def _migration_152_operational_clusters(conn) -> None:
     """Phase 2A: Add operational clusters for the L1-L7 spine.
 
@@ -9755,6 +9853,7 @@ MIGRATIONS = [
     ("159_order_state_log", _migration_159_order_state_log),
     ("160_exec_events_venue_ts_index", _migration_160_exec_events_venue_ts_index),
     ("161_trade_broker_order_id_unique", _migration_161_trade_broker_order_id_unique),
+    ("162_project_domain_recovery", _migration_162_project_domain_recovery),
 ]
 
 

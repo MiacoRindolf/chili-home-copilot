@@ -1,14 +1,14 @@
 <div id="project-cockpit-pane-feed" data-project-pane="feed" style="display:none">
   <div class="brain-section project-section-card" id="agent-msg-feed-section">
     <div class="brain-section-title" style="display:flex;align-items:center;gap:4px">
-      <span class="bs-icon">&#x1F4AC;</span> Agent Collaboration Feed
+      <span class="bs-icon">&#x1F4CB;</span> Operator Timeline
       <button onclick="loadAgentMessageFeed()" class="brain-act-btn project-mini-btn alt" style="margin-left:auto;">Refresh</button>
     </div>
     <div class="msg-feed" id="agent-msg-feed">
       {% if _bd == 'project' %}
-      <div style="font-size:11px;color:var(--text-muted)">Loading agent messages...</div>
+      <div style="font-size:11px;color:var(--text-muted)">Loading operator timeline...</div>
       {% else %}
-      <div style="font-size:11px;color:var(--text-muted)" data-agent-feed-off-project="1">Switch to the Project domain to see agent messages...</div>
+      <div style="font-size:11px;color:var(--text-muted)" data-agent-feed-off-project="1">Switch to the Project domain to see the operator timeline...</div>
       {% endif %}
     </div>
   </div>

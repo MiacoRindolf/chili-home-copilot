@@ -16,13 +16,20 @@ class CodeRepo(Base):
     id: int = Column(Integer, primary_key=True, index=True)
     user_id: Optional[int] = Column(Integer, nullable=True, index=True)
     path: str = Column(String(500), nullable=False, unique=True)
+    host_path: Optional[str] = Column(String(500), nullable=True)
+    container_path: Optional[str] = Column(String(500), nullable=True)
     name: str = Column(String(200), nullable=False)
     language_stats: Optional[str] = Column(Text, nullable=True)       # JSON: {"python": 42, "javascript": 18, ...}
     framework_tags: Optional[str] = Column(String(500), nullable=True)  # comma-separated: "fastapi,sqlalchemy,jinja2"
     file_count: int = Column(Integer, default=0)
     total_lines: int = Column(Integer, default=0)
     last_indexed: Optional[datetime] = Column(DateTime, nullable=True)
+    last_index_error: Optional[str] = Column(Text, nullable=True)
+    last_successful_indexed_at: Optional[datetime] = Column(DateTime, nullable=True)
+    last_successful_file_count: Optional[int] = Column(Integer, nullable=True)
     last_commit_hash: Optional[str] = Column(String(50), nullable=True)
+    reachable_in_web: bool = Column(Boolean, default=False, nullable=False)
+    reachable_in_scheduler: bool = Column(Boolean, default=False, nullable=False)
     created_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
     active: bool = Column(Boolean, default=True, nullable=False)
 

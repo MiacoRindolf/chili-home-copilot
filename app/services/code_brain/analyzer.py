@@ -9,6 +9,7 @@ from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeRepo, CodeSnapshot
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -130,9 +131,12 @@ def analyze_repo_files(db: Session, repo_id: int) -> Dict:
     analyzed = 0
     all_func_names: List[str] = []
     all_class_names: List[str] = []
+    repo_path = resolve_repo_runtime_path(repo)
+    if repo_path is None:
+        return {"error": "Registered workspace is not reachable from the current runtime."}
 
     for snap in snapshots:
-        full_path = Path(repo.path) / snap.file_path
+        full_path = repo_path / snap.file_path
         if not full_path.is_file():
             continue
 

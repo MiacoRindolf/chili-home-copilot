@@ -112,6 +112,7 @@ from .project_brain import (
     QATestCase,
     QATestRun,
 )
+from .project_domain import ProjectAnalysisSnapshot, ProjectDomainRun
 from .trading_brain_phase1 import (
     BrainCycleLease,
     BrainIntegrationEvent,
@@ -233,6 +234,8 @@ __all__ = [
     "QATestCase",
     "QATestRun",
     "QABugReport",
+    "ProjectDomainRun",
+    "ProjectAnalysisSnapshot",
     "BrainLearningCycleRun",
     "BrainStageJob",
     "BrainCycleLease",

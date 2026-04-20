@@ -12,6 +12,7 @@ import requests
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeDepAlert, CodeRepo
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -153,9 +154,9 @@ def scan_dependencies(db: Session, repo_id: int) -> Dict[str, Any]:
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = Path(repo.path)
-    if not repo_path.is_dir():
-        return {"error": f"Path not found: {repo.path}"}
+    repo_path = resolve_repo_runtime_path(repo)
+    if repo_path is None or not repo_path.is_dir():
+        return {"error": "Registered workspace is not reachable from the current runtime."}
 
     all_deps = _parse_requirements(repo_path) + _parse_package_json(repo_path)
     if not all_deps:
