@@ -595,6 +595,15 @@ def check_sector_concentration(
     if not open_trades:
         return True, "ok"
 
+    # Skip the sector cap entirely when the proposed trade has no known
+    # sector. Treating "unknown" as a real sector bucket causes false
+    # rejections whenever existing positions (e.g. broker-sync imported
+    # rows without sector enrichment) dominate the "unknown" bucket. The
+    # concentration gate exists to limit exposure to a REAL named sector;
+    # "unknown" is a data-quality artifact, not a risk dimension.
+    if sector == "unknown":
+        return True, "ok"
+
     total_after = len(open_trades) + 1
     same_sector = sum(
         1 for t in open_trades

@@ -106,17 +106,28 @@ def _session():
 
 
 def _db_is_duplicate(key: str) -> bool:
-    """Return True if ``key`` exists in ``venue_order_idempotency`` and its
-    TTL has not expired. On any DB error, return False (fail-open is safer
-    than blocking a legitimate retry — the in-memory guard still covers the
-    hot path, and the venue itself rejects duplicates server-side for CB)."""
+    """Return True if ``key`` exists in ``venue_order_idempotency``, has not
+    expired, AND has a real broker-assigned ``broker_order_id``. When
+    ``broker_order_id`` is NULL the prior submission was recorded locally but
+    the broker never confirmed it (or the confirmation was lost before being
+    persisted). Retrying in that case is safe — the broker has no record of
+    the order. Blocking on the orphan record would permanently strand the
+    trade because the deterministic ``client_order_id`` (``atv1-<trade>-exit-<reason>``)
+    never changes across retries.
+
+    On any DB error, return False (fail-open — the venue itself rejects
+    duplicates server-side for CB; RH has no server-side dedup but the
+    in-memory guard still covers the hot path within a single process)."""
     try:
         sess = _session()
         try:
             row = sess.execute(
                 text(
                     "SELECT 1 FROM venue_order_idempotency "
-                    "WHERE client_order_id = :k AND ttl_expires_at > NOW()"
+                    "WHERE client_order_id = :k "
+                    "  AND ttl_expires_at > NOW() "
+                    "  AND broker_order_id IS NOT NULL "
+                    "  AND broker_order_id <> ''"
                 ),
                 {"k": key},
             ).first()
