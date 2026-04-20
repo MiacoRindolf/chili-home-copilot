@@ -279,16 +279,37 @@ def test_close_position_now_paper(paired_client, db: Session) -> None:
 # ───────────────────────── close-now live path ────────────────────────────
 
 
+# Canned regular-hours execution window shared by the live close-now tests.
+# Avoids the MagicMock ``adapter.get_product(ticker)`` trap in
+# ``describe_robinhood_equity_execution_window`` (the real helper expects a
+# ``(product, fresh)`` 2-tuple; a bare MagicMock silently short-circuits the
+# submit path). Also sidesteps the real-wall-clock market-hours lookup so
+# these tests don't flake depending on when they're run.
+_REGULAR_HOURS_WINDOW = {
+    "ticker": None,
+    "session": "regular_hours",
+    "session_label": "Regular session",
+    "market_hours": "regular_hours",
+    "next_eligible_session_at": None,
+    "overnight_eligible": False,
+    "can_submit_now": True,
+    "execution_reason": "Regular session",
+}
+
+
 def test_close_position_now_live(paired_client, db: Session) -> None:
     _c, user = paired_client
     t = _mk_autotrader_trade(db, user.id, "CLT1")
 
     fake_adapter = MagicMock()
     fake_adapter.is_enabled.return_value = True
+    # Include ``state="filled"`` so submit_robinhood_trade_exit finalizes the
+    # close inline (default would be ``"submitted"`` → trade stays open
+    # pending broker confirmation).
     fake_adapter.place_market_order.return_value = {
         "ok": True,
-        "order_id": "rh-42",
         "state": "filled",
+        "order_id": "rh-42",
         "raw": {"average_price": "11.25", "state": "filled"},
     }
     fake_adapter.get_product.return_value = ({"market_hours_mic": "XNAS", "tradable": True, "tick_size": 0.01}, False)
@@ -307,8 +328,9 @@ def test_close_position_now_live(paired_client, db: Session) -> None:
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
         return_value=fake_adapter,
     ), patch(
-        "app.services.trading.robinhood_exit_execution.describe_robinhood_equity_execution_window",
-        return_value=rth_window,
+        "app.services.trading.robinhood_exit_execution."
+        "describe_robinhood_equity_execution_window",
+        return_value=dict(_REGULAR_HOURS_WINDOW, ticker="CLT1"),
     ):
         res = close_position_now(db, kind="trade", trade_id=int(t.id))
 
@@ -341,10 +363,11 @@ def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None
 
     fake_adapter = MagicMock()
     fake_adapter.is_enabled.return_value = True
+    # See note in test_close_position_now_live about state="filled".
     fake_adapter.place_market_order.return_value = {
         "ok": True,
-        "order_id": "rh-plan-42",
         "state": "filled",
+        "order_id": "rh-plan-42",
         "raw": {"average_price": "9.10", "state": "filled"},
     }
     fake_adapter.get_product.return_value = ({"market_hours_mic": "XNAS", "tradable": True, "tick_size": 0.01}, False)
@@ -363,8 +386,9 @@ def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
         return_value=fake_adapter,
     ), patch(
-        "app.services.trading.robinhood_exit_execution.describe_robinhood_equity_execution_window",
-        return_value=rth_window,
+        "app.services.trading.robinhood_exit_execution."
+        "describe_robinhood_equity_execution_window",
+        return_value=dict(_REGULAR_HOURS_WINDOW, ticker="CLP2"),
     ):
         res = close_position_now(db, kind="trade", trade_id=int(t.id))
 

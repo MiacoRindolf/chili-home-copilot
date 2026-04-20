@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Any, Optional
 
-from sqlalchemy import or_
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session, aliased
 
 from ...config import settings
@@ -34,6 +34,70 @@ from .management_scope import MANAGEMENT_SCOPE_AUTO_TRADER_V1
 logger = logging.getLogger(__name__)
 
 AUTOTRADER_VERSION = "v1"
+
+# Namespace byte for advisory locks so we can't collide with other
+# subsystems that also use pg_advisory_lock on alert-shaped ints. The
+# lock key is (NAMESPACE << 32) | breakout_alert_id — fits a signed
+# bigint and is deterministic per alert.
+_ALERT_CLAIM_LOCK_NAMESPACE = 0x4154  # "AT"
+
+
+def _alert_claim_lock_key(alert_id: int) -> int:
+    return (_ALERT_CLAIM_LOCK_NAMESPACE << 32) | (int(alert_id) & 0xFFFFFFFF)
+
+
+def _try_claim_alert(db: Session, alert_id: int) -> bool:
+    """Acquire a Postgres advisory lock on this alert so only one worker
+    processes it. Released when the session closes (or explicitly via
+    :func:`_release_alert_claim`). Returns False if another session holds
+    the lock — caller should skip.
+
+    Safer than TOCTOU around ``breakout_alert_already_processed``: that
+    check reads the AutoTraderRun audit table, but two workers can both
+    pass it concurrently before either writes. SQLite (tests) doesn't
+    have advisory locks, so we fail open on non-Postgres dialects — the
+    existing audit-row dedupe still covers the single-process case the
+    test fixtures use.
+    """
+    try:
+        dialect = db.bind.dialect.name if db.bind else ""
+    except Exception:
+        dialect = ""
+    if dialect != "postgresql":
+        return True
+    try:
+        got = db.execute(
+            text("SELECT pg_try_advisory_lock(:k)"),
+            {"k": _alert_claim_lock_key(alert_id)},
+        ).scalar()
+        return bool(got)
+    except Exception:
+        # DB-level failure must not block the loop; treat as 'claimed'
+        # and rely on the audit-row check + idempotency_store as fallback.
+        logger.warning(
+            "[autotrader] advisory lock acquire failed for alert=%s; falling back",
+            alert_id, exc_info=True,
+        )
+        return True
+
+
+def _release_alert_claim(db: Session, alert_id: int) -> None:
+    try:
+        dialect = db.bind.dialect.name if db.bind else ""
+    except Exception:
+        dialect = ""
+    if dialect != "postgresql":
+        return
+    try:
+        db.execute(
+            text("SELECT pg_advisory_unlock(:k)"),
+            {"k": _alert_claim_lock_key(alert_id)},
+        )
+    except Exception:
+        logger.debug(
+            "[autotrader] advisory unlock failed for alert=%s; will release on session close",
+            alert_id, exc_info=True,
+        )
 
 
 def _resolve_user_id() -> Optional[int]:
@@ -145,17 +209,28 @@ def run_auto_trader_tick(db: Session) -> dict[str, Any]:
     out: dict[str, Any] = {"processed": 0, "placed": 0, "scaled_in": 0, "skipped": 0}
 
     for alert in candidates:
-        # Re-check race (another worker may have inserted)
-        db.expire_all()
-        if breakout_alert_already_processed(db, int(alert.id)):
+        # P0.2 — acquire advisory lock before the TOCTOU window. Without
+        # this, two ticks (different scheduler replicas) can both pass the
+        # audit-row check and both call place_market_order. The lock is
+        # held until we explicitly unlock or the session closes.
+        if not _try_claim_alert(db, int(alert.id)):
             continue
 
         try:
-            _process_one_alert(db, uid, alert, out, rt)
-        except Exception as e:
-            logger.exception("[autotrader] alert %s failed: %s", alert.id, e)
-            _audit(db, user_id=uid, alert=alert, decision="error", reason=str(e)[:500])
-        out["processed"] += 1
+            # Re-check race (another worker may have inserted between the
+            # outer candidate query and our claim).
+            db.expire_all()
+            if breakout_alert_already_processed(db, int(alert.id)):
+                continue
+
+            try:
+                _process_one_alert(db, uid, alert, out, rt)
+            except Exception as e:
+                logger.exception("[autotrader] alert %s failed: %s", alert.id, e)
+                _audit(db, user_id=uid, alert=alert, decision="error", reason=str(e)[:500])
+            out["processed"] += 1
+        finally:
+            _release_alert_claim(db, int(alert.id))
 
     return {"ok": True, **out}
 
@@ -235,6 +310,36 @@ def _process_one_alert(
 
     for_new = scale_plan is None
 
+    # P1.2 — venue health circuit breaker. Cheaper than autopilot_mutex
+    # (one rolling-window aggregate) and the more fundamental signal: if
+    # the venue is observably sick we shouldn't fire ANY new orders there
+    # regardless of ownership. Fails open: if the feature flag is off or
+    # we can't compute a summary, treat as healthy. Only gates live paths
+    # — paper writes nothing to the event stream so would always show
+    # insufficient_data anyway.
+    if live:
+        try:
+            from .venue.venue_health import is_venue_degraded, venue_degraded_reason
+            if is_venue_degraded(db, venue="robinhood"):
+                reason_detail = venue_degraded_reason(db, venue="robinhood") or "unknown"
+                _audit(
+                    db,
+                    user_id=uid,
+                    alert=alert,
+                    decision="blocked",
+                    reason=f"venue_degraded:robinhood:{reason_detail}"[:255],
+                )
+                out["skipped"] += 1
+                return
+        except Exception:
+            # Defensive: venue-health module failure must never block the
+            # autotrader loop. Fall through to the remaining gates, but
+            # log loudly — a silent check failure defeats the circuit breaker.
+            logger.warning(
+                "[autotrader] venue_health check failed for alert=%s ticker=%s; failing open",
+                alert.id, alert.ticker, exc_info=True,
+            )
+
     # P0.4 — autopilot mutual exclusion. Only gate LIVE orders: the lease
     # signal for momentum_neural is a mode="live" TradingAutomationSession,
     # so paper v1 can't contend on the schema level. For live v1:
@@ -288,11 +393,127 @@ def _process_one_alert(
             out["skipped"] += 1
             return
 
+    # P1.4 — runtime feature-parity assertion at entry. Fetches a fresh
+    # OHLCV frame, computes the live indicator snapshot, and verifies it
+    # matches the canonical compute_all_from_df output on the same frame.
+    # Fails open (flag off / no frame / compute exception) so an unwired
+    # environment behaves unchanged. In ``soft`` mode always allows through
+    # — just records a TradingExecutionEvent with event_type='feature_parity_drift'
+    # and emits an alert. In ``hard`` mode blocks entry on critical drift.
+    # Only gates live paths: paper skip is cheap and paper drift still
+    # records for auditing below.
+    if live:
+        _parity_blocked = _maybe_check_feature_parity(
+            db,
+            ticker=alert.ticker,
+            scan_pattern_id=alert.scan_pattern_id,
+            venue="robinhood",
+            source="auto_trader_v1",
+        )
+        if _parity_blocked is not None:
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason=_parity_blocked[:255],
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            return
+
     if scale_plan is not None:
         _execute_scale_in(db, uid, alert, scale_plan, px, snap, llm_snap, live, out)
         return
 
     _execute_new_entry(db, uid, alert, px, snap, llm_snap, live, out)
+
+
+def _maybe_check_feature_parity(
+    db: Session,
+    *,
+    ticker: str,
+    scan_pattern_id: int | None,
+    venue: str,
+    source: str,
+) -> str | None:
+    """Run the P1.4 parity check. Returns a ``reason`` string when hard-mode
+    blocks entry, ``None`` otherwise (including soft-mode drift, disabled,
+    compute failures). Never raises.
+
+    **Short-circuits on the feature flag BEFORE any OHLCV fetch / compute
+    work.** The flag is off by default, so this function must be near-zero
+    cost when unwired — otherwise every live alert pays a network fetch for
+    nothing, which in a Windows test environment has been observed to exhaust
+    the ephemeral socket pool (WinError 10055).
+    """
+    if not bool(getattr(settings, "chili_feature_parity_enabled", False)):
+        return None
+
+    try:
+        from .feature_parity import (
+            DEFAULT_FEATURES,
+            check_entry_feature_parity,
+        )
+        from .indicator_core import compute_all_from_df
+        from .market_data import fetch_ohlcv_df
+    except Exception:
+        logger.warning(
+            "[autotrader] feature_parity imports unavailable; failing open for %s",
+            ticker, exc_info=True,
+        )
+        return None
+
+    try:
+        df = fetch_ohlcv_df(ticker, "1d", "6mo")
+    except Exception:
+        logger.warning(
+            "[autotrader] feature_parity OHLCV fetch failed for %s; failing open",
+            ticker, exc_info=True,
+        )
+        return None
+    if df is None or df.empty:
+        return None
+
+    try:
+        arrays = compute_all_from_df(df, needed=set(DEFAULT_FEATURES))
+    except Exception:
+        logger.warning(
+            "[autotrader] feature_parity indicator compute failed for %s; failing open",
+            ticker, exc_info=True,
+        )
+        return None
+    live_snap: dict[str, Any] = {}
+    for key, vec in arrays.items():
+        if not isinstance(vec, list) or not vec:
+            continue
+        v = vec[-1]
+        if v is None:
+            continue
+        live_snap[key] = v
+
+    try:
+        result = check_entry_feature_parity(
+            db,
+            ticker=ticker,
+            live_snap=live_snap,
+            reference_df=df,
+            features=DEFAULT_FEATURES,
+            source=source,
+            scan_pattern_id=scan_pattern_id,
+            venue=venue,
+        )
+    except Exception:
+        logger.warning(
+            "[autotrader] feature_parity check raised for %s; failing open",
+            ticker, exc_info=True,
+        )
+        return None
+    if result.ok:
+        return None
+    # Hard-mode critical block.
+    return f"feature_parity:{result.reason or result.severity}"
 
 
 def _execute_scale_in(
@@ -309,10 +530,28 @@ def _execute_scale_in(
     t = plan.trade
     add_q = float(plan.added_quantity)
     if live:
-        from .venue.robinhood_spot import RobinhoodSpotAdapter
+        from .governance import is_kill_switch_active
+        from .venue.factory import get_adapter
 
-        ad = RobinhoodSpotAdapter()
-        if not ad.is_enabled():
+        # P0.5 — re-check kill switch immediately before submitting. The
+        # initial check at tick entry can go stale if an operator flips the
+        # switch while gates are evaluating (feature_parity / LLM can take
+        # seconds). Cheap (in-memory lock + bool), so no reason not to.
+        if is_kill_switch_active():
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason="kill_switch_activated_mid_flight",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            return
+
+        ad = get_adapter("robinhood")
+        if ad is None or not ad.is_enabled():
             _audit(
                 db,
                 user_id=uid,
@@ -389,10 +628,26 @@ def _execute_new_entry(
     qty = notional / px
 
     if live:
-        from .venue.robinhood_spot import RobinhoodSpotAdapter
+        from .governance import is_kill_switch_active
+        from .venue.factory import get_adapter
 
-        ad = RobinhoodSpotAdapter()
-        if not ad.is_enabled():
+        # P0.5 — re-check kill switch immediately before submitting (see
+        # note in _execute_scale_in).
+        if is_kill_switch_active():
+            _audit(
+                db,
+                user_id=uid,
+                alert=alert,
+                decision="blocked",
+                reason="kill_switch_activated_mid_flight",
+                rule_snapshot=snap,
+                llm_snapshot=llm_snap,
+            )
+            out["skipped"] += 1
+            return
+
+        ad = get_adapter("robinhood")
+        if ad is None or not ad.is_enabled():
             _audit(
                 db,
                 user_id=uid,

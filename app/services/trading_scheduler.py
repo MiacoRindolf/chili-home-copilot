@@ -1559,6 +1559,65 @@ def _run_auto_trader_monitor_job():
         db.close()
 
 
+def _run_stuck_order_watchdog_job():
+    """P0.7 — cancel orders stuck in non-terminal broker states past timeout.
+
+    Standalone from the autotrader gates since it also covers trades from
+    broker_sync / manual sources, not just AutoTrader v1.
+    """
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.stuck_order_watchdog import tick_stuck_order_watchdog
+
+    if not getattr(_settings, "chili_stuck_order_watchdog_enabled", True):
+        return
+
+    db = SessionLocal()
+    try:
+        tick_stuck_order_watchdog(db)
+    except Exception:
+        logger.exception("[scheduler] stuck_order_watchdog tick failed")
+    finally:
+        db.close()
+
+
+def _run_execution_event_lag_job():
+    """P0.6 — execution-event lag gauge (recorded_at - event_at P95)."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.execution_event_lag import run_execution_event_lag_tick
+
+    if not getattr(_settings, "chili_execution_event_lag_enabled", True):
+        return
+
+    db = SessionLocal()
+    try:
+        run_execution_event_lag_tick(db)
+    except Exception:
+        logger.exception("[scheduler] execution_event_lag tick failed")
+    finally:
+        db.close()
+
+
+def _run_drift_escalation_watchdog_job():
+    """P0.8 — alert when the same intent has been in the same non-agree
+    kind for N consecutive sweeps. Opt-in via feature flag."""
+    from ..config import settings as _settings
+    from ..db import SessionLocal
+    from .trading.drift_escalation_watchdog import run_drift_escalation_watchdog
+
+    if not getattr(_settings, "chili_drift_escalation_enabled", False):
+        return
+
+    db = SessionLocal()
+    try:
+        run_drift_escalation_watchdog(db)
+    except Exception:
+        logger.exception("[scheduler] drift_escalation_watchdog tick failed")
+    finally:
+        db.close()
+
+
 _crypto_alert_cooldown: dict[str, float] = {}
 _stock_alert_cooldown: dict[str, float] = {}
 
@@ -2763,6 +2822,48 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
                 next_run_time=datetime.now() + timedelta(seconds=30),
+            )
+
+            _stuck_s = max(
+                15,
+                int(getattr(settings, "chili_stuck_order_watchdog_interval_seconds", 60)),
+            )
+            _scheduler.add_job(
+                _run_stuck_order_watchdog_job,
+                trigger=IntervalTrigger(seconds=_stuck_s),
+                id="stuck_order_watchdog",
+                name=f"Stuck-order watchdog (every {_stuck_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=45),
+            )
+
+            _eel_s = max(
+                15,
+                int(getattr(settings, "chili_execution_event_lag_interval_seconds", 60)),
+            )
+            _scheduler.add_job(
+                _run_execution_event_lag_job,
+                trigger=IntervalTrigger(seconds=_eel_s),
+                id="execution_event_lag",
+                name=f"Execution-event lag gauge (every {_eel_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=50),
+            )
+
+            _de_s = max(
+                30,
+                int(getattr(settings, "chili_drift_escalation_interval_seconds", 120)),
+            )
+            _scheduler.add_job(
+                _run_drift_escalation_watchdog_job,
+                trigger=IntervalTrigger(seconds=_de_s),
+                id="drift_escalation_watchdog",
+                name=f"Drift escalation watchdog (every {_de_s}s)",
+                replace_existing=True,
+                max_instances=1,
+                next_run_time=datetime.now() + timedelta(seconds=90),
             )
 
         if include_web_light:

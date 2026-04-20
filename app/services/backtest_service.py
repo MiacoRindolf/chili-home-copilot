@@ -2297,6 +2297,386 @@ def benchmark_walk_forward_evaluate(
     }
 
 
+# ── P1.3 — date-based walk-forward ───────────────────────────────────
+#
+# Why a second walk-forward function when `benchmark_walk_forward_evaluate`
+# already exists:
+#
+#   * `benchmark_walk_forward_evaluate` splits the dataset into N EQUAL
+#     contiguous chunks and runs each as a standalone backtest. No
+#     train/test split per fold, no embargo, and fold boundaries depend
+#     on the dataset length — same pattern rerun a month later moves all
+#     boundaries. It's a regime-coverage sanity check.
+#
+#   * `run_walk_forward` (this function) splits by CALENDAR DAYS with a
+#     train/test/embargo schedule. Fold k has a fixed-length train +
+#     test window; the gap between train-end and test-start (embargo)
+#     prevents daily-pattern labels from leaking forward across the
+#     boundary. Fold boundaries are anchored to absolute dates, so a
+#     pattern's walk-forward report is comparable across reruns.
+#
+# The promotion gate uses THIS function because the calendar-anchored
+# slices + embargo give the clean "this pattern survived N independently
+# held-out months" signal.
+
+
+def _walk_forward_fold_windows(
+    df: "pd.DataFrame",
+    *,
+    train_days: int,
+    test_days: int,
+    step_days: int,
+    embargo_days: int,
+) -> list[dict[str, Any]]:
+    """Enumerate fold (train, test) index pairs against a DatetimeIndex df.
+
+    Treats calendar-day parameters as bar counts when the dataframe is
+    1-bar-per-day — which is how daily-pattern backtests run. Intraday
+    timeframes are supported by the caller passing bar-equivalent values
+    (e.g. ``train_days=180`` with 1h bars = 180 × 6.5 = ~1170 bars).
+    Each fold dict carries integer index slices so the caller can
+    ``df.iloc[train_start_idx:train_end_idx]`` without re-parsing dates.
+
+    Returns [] when the dataset is too short for even one fold — caller
+    handles the "not enough history" branch.
+    """
+    if df is None or df.empty:
+        return []
+    n = len(df)
+    # Need at least one train + embargo + test span to form a fold.
+    min_span = max(1, int(train_days)) + max(0, int(embargo_days)) + max(1, int(test_days))
+    if n < min_span:
+        return []
+
+    folds: list[dict[str, Any]] = []
+    # Fold 0 starts at the earliest index such that train+embargo+test
+    # fits. Subsequent folds step forward by ``step_days``. The LAST
+    # viable fold is the one whose test window ends at or before n-1.
+    train_start = 0
+    fold_idx = 0
+    while True:
+        train_end = train_start + int(train_days)  # exclusive
+        test_start = train_end + int(embargo_days)
+        test_end = test_start + int(test_days)  # exclusive
+        if test_end > n:
+            break
+        folds.append({
+            "fold_index": fold_idx,
+            "train_start_idx": int(train_start),
+            "train_end_idx": int(train_end),
+            "test_start_idx": int(test_start),
+            "test_end_idx": int(test_end),
+        })
+        fold_idx += 1
+        train_start += int(step_days)
+    return folds
+
+
+def _walk_forward_fold_passes(
+    *,
+    test_win_rate: float | None,
+    test_trade_count: int | None,
+    min_win_rate: float,
+    min_trades: int,
+) -> bool:
+    """A fold passes iff the test window produced ≥ ``min_trades`` trades
+    and test win-rate ≥ ``min_win_rate``. Zero-trade folds DON'T pass —
+    a pattern that can't fire during the test window is not robust to
+    that regime.
+    """
+    if test_trade_count is None or int(test_trade_count) < int(min_trades):
+        return False
+    if test_win_rate is None:
+        return False
+    try:
+        return float(test_win_rate) >= float(min_win_rate)
+    except (TypeError, ValueError):
+        return False
+
+
+def _walk_forward_resolve_settings() -> dict[str, Any]:
+    """Read P1.3 settings LIVE so tests' monkeypatch takes effect per call.
+
+    Returns a dict with the same keys the caller can pass as explicit
+    overrides — explicit args win. Pattern mirrors
+    ``venue_health._resolve_thresholds`` so the two P1 modules read the
+    same way operationally.
+    """
+    try:
+        return {
+            "enabled": bool(getattr(settings, "chili_walk_forward_enabled", False)),
+            "train_days": int(getattr(settings, "chili_walk_forward_train_days", 180)),
+            "test_days": int(getattr(settings, "chili_walk_forward_test_days", 30)),
+            "step_days": int(getattr(settings, "chili_walk_forward_step_days", 30)),
+            "embargo_days": int(getattr(settings, "chili_walk_forward_embargo_days", 2)),
+            "min_folds": int(getattr(settings, "chili_walk_forward_min_folds", 3)),
+            "min_fold_win_rate": float(
+                getattr(settings, "chili_walk_forward_min_fold_win_rate", 0.45)
+            ),
+            "min_pass_fraction": float(
+                getattr(settings, "chili_walk_forward_min_pass_fraction", 0.6)
+            ),
+        }
+    except Exception:
+        return {
+            "enabled": False,
+            "train_days": 180,
+            "test_days": 30,
+            "step_days": 30,
+            "embargo_days": 2,
+            "min_folds": 3,
+            "min_fold_win_rate": 0.45,
+            "min_pass_fraction": 0.6,
+        }
+
+
+def run_walk_forward(
+    ticker: str,
+    conditions: list[dict[str, Any]],
+    *,
+    pattern_name: str | None = None,
+    period: str = "5y",
+    interval: str = "1d",
+    cash: float = 100_000,
+    commission: float | None = None,
+    spread: float | None = None,
+    exit_atr_mult: float | None = None,
+    exit_max_bars: int | None = None,
+    exit_config: dict[str, Any] | None = None,
+    train_days: int | None = None,
+    test_days: int | None = None,
+    step_days: int | None = None,
+    embargo_days: int | None = None,
+    min_folds: int | None = None,
+    min_fold_win_rate: float | None = None,
+    min_pass_fraction: float | None = None,
+    min_trades_per_fold: int = 3,
+    df_override: "pd.DataFrame | None" = None,
+    scan_pattern_id: int | None = None,
+) -> dict[str, Any]:
+    """Date-based walk-forward backtest for a pattern against a single ticker.
+
+    Slices the ticker's OHLCV into rolling (train, embargo, test) folds
+    and runs the pattern's conditions on EACH test window, then returns
+    per-fold metrics + an aggregate pass/fail signal. ``passes_gate`` is
+    True iff:
+
+        1. We completed ≥ ``min_folds`` folds, and
+        2. ≥ ``min_pass_fraction`` of those folds met both the
+           ``min_fold_win_rate`` floor AND the ``min_trades_per_fold``
+           activity floor (zero-trade folds are NOT passing — a pattern
+           that can't fire during the test window isn't regime-robust).
+
+    Why the ``min_trades_per_fold`` floor — a pattern with 1 winning
+    trade per fold could trivially show 100% win rate but tell us
+    nothing about robustness. 3 trades = enough to be non-accidental.
+
+    Returns a frozen-shape dict; ``passes_gate=False`` on any failure
+    path (not enough data, backtest error, too few folds, too few passes).
+    The caller passes ``passes_gate`` into
+    ``brain_apply_oos_promotion_gate(..., walk_forward_passes_gate=...)``.
+    """
+    cfg = _walk_forward_resolve_settings()
+    t_train = int(train_days) if train_days is not None else cfg["train_days"]
+    t_test = int(test_days) if test_days is not None else cfg["test_days"]
+    t_step = int(step_days) if step_days is not None else cfg["step_days"]
+    t_embargo = int(embargo_days) if embargo_days is not None else cfg["embargo_days"]
+    m_folds = int(min_folds) if min_folds is not None else cfg["min_folds"]
+    m_wr = float(min_fold_win_rate) if min_fold_win_rate is not None else cfg["min_fold_win_rate"]
+    m_pf = float(min_pass_fraction) if min_pass_fraction is not None else cfg["min_pass_fraction"]
+
+    params = {
+        "train_days": t_train,
+        "test_days": t_test,
+        "step_days": t_step,
+        "embargo_days": t_embargo,
+        "min_folds": m_folds,
+        "min_fold_win_rate": m_wr,
+        "min_pass_fraction": m_pf,
+        "min_trades_per_fold": int(min_trades_per_fold),
+    }
+
+    if not pattern_name:
+        pattern_name = generate_strategy_name(conditions)
+
+    # Fetch once if caller didn't hand us a frame. period="5y" gives us
+    # enough history for 5+ non-overlapping 30-day tests even with a
+    # 180-day train window.
+    if df_override is not None:
+        df = df_override.copy()
+    else:
+        df = _fetch_ohlcv_df(ticker, period=period, interval=interval)
+
+    if df is None or df.empty:
+        return {
+            "ok": False,
+            "error": f"no data for {ticker}",
+            "passes_gate": False,
+            "ticker": ticker,
+            "pattern_name": pattern_name,
+            "params": params,
+            "folds": [],
+            "aggregate": None,
+        }
+    df.index = pd.to_datetime(df.index)
+    if df.index.tz is not None:
+        df.index = df.index.tz_localize(None)
+
+    fold_windows = _walk_forward_fold_windows(
+        df, train_days=t_train, test_days=t_test,
+        step_days=t_step, embargo_days=t_embargo,
+    )
+    if not fold_windows:
+        return {
+            "ok": False,
+            "error": (
+                f"insufficient history: need ≥ {t_train + t_embargo + t_test} "
+                f"bars, have {len(df)}"
+            ),
+            "passes_gate": False,
+            "ticker": ticker,
+            "pattern_name": pattern_name,
+            "params": params,
+            "folds": [],
+            "aggregate": None,
+        }
+
+    # Resolve spread/commission/exit params ONCE so every fold uses the
+    # same cost assumptions. ``run_pattern_backtest`` does this inline;
+    # we short-circuit its cost-scaling to avoid per-fold drift.
+    if commission is None:
+        commission = float(settings.backtest_commission)
+    if spread is None:
+        spread = float(settings.backtest_spread)
+
+    folds_out: list[dict[str, Any]] = []
+    for fw in fold_windows:
+        test_slice = df.iloc[fw["test_start_idx"]:fw["test_end_idx"]]
+        # Fold might be "empty" at the test cutover if daily data has gaps;
+        # skip but record so the caller sees exactly which folds ran.
+        if test_slice.empty or len(test_slice) < 5:
+            folds_out.append({
+                **fw,
+                "train_start": str(df.index[fw["train_start_idx"]].date()),
+                "train_end": str(df.index[fw["train_end_idx"] - 1].date()),
+                "test_start": str(test_slice.index[0].date()) if not test_slice.empty else None,
+                "test_end": str(test_slice.index[-1].date()) if not test_slice.empty else None,
+                "ok": False,
+                "error": "test slice too short",
+                "test_win_rate": None,
+                "test_return_pct": None,
+                "test_trade_count": 0,
+                "test_sharpe": None,
+                "test_max_drawdown": None,
+                "passed": False,
+            })
+            continue
+
+        # Reuse the single-slice runner to keep fold semantics identical
+        # to a non-walk-forward run (ATR exit, BOS, etc.).
+        res = run_pattern_backtest(
+            ticker=ticker,
+            conditions=conditions,
+            pattern_name=pattern_name,
+            period=period,
+            interval=interval,
+            cash=cash,
+            commission=commission,
+            spread=spread,
+            exit_atr_mult=exit_atr_mult,
+            exit_max_bars=exit_max_bars,
+            exit_config=exit_config,
+            df_override=test_slice,
+            oos_holdout_fraction=None,  # fold-internal OOS not wanted here
+            scan_pattern_id=scan_pattern_id,
+        )
+
+        fold_passed = _walk_forward_fold_passes(
+            test_win_rate=res.get("win_rate"),
+            test_trade_count=res.get("trade_count"),
+            min_win_rate=m_wr,
+            min_trades=int(min_trades_per_fold),
+        )
+
+        folds_out.append({
+            **fw,
+            "train_start": str(df.index[fw["train_start_idx"]].date()),
+            "train_end": str(df.index[fw["train_end_idx"] - 1].date()),
+            "test_start": str(test_slice.index[0].date()),
+            "test_end": str(test_slice.index[-1].date()),
+            "ok": bool(res.get("ok", False)),
+            "error": res.get("error"),
+            "test_win_rate": res.get("win_rate"),
+            "test_return_pct": res.get("return_pct"),
+            "test_trade_count": res.get("trade_count"),
+            "test_sharpe": res.get("sharpe"),
+            "test_max_drawdown": res.get("max_drawdown"),
+            "passed": bool(fold_passed),
+        })
+
+    # Aggregate.
+    ok_folds = [f for f in folds_out if f.get("ok")]
+    passing_folds = [f for f in folds_out if f.get("passed")]
+    n_folds = len(folds_out)
+    n_ok = len(ok_folds)
+    n_passed = len(passing_folds)
+    pass_fraction = (n_passed / n_folds) if n_folds else 0.0
+
+    def _mean(xs: list[float]) -> float | None:
+        xs = [float(x) for x in xs if x is not None]
+        return (sum(xs) / len(xs)) if xs else None
+
+    def _std(xs: list[float]) -> float | None:
+        xs = [float(x) for x in xs if x is not None]
+        if len(xs) < 2:
+            return None
+        mean = sum(xs) / len(xs)
+        return float((sum((x - mean) ** 2 for x in xs) / (len(xs) - 1)) ** 0.5)
+
+    test_wrs = [f["test_win_rate"] for f in ok_folds if f.get("test_win_rate") is not None]
+    test_rets = [f["test_return_pct"] for f in ok_folds if f.get("test_return_pct") is not None]
+    test_trades = sum(int(f.get("test_trade_count") or 0) for f in ok_folds)
+
+    aggregate = {
+        "n_folds": int(n_folds),
+        "n_folds_ok": int(n_ok),
+        "n_folds_passed": int(n_passed),
+        "pass_fraction": round(pass_fraction, 4),
+        "mean_test_win_rate": _mean(test_wrs),
+        "std_test_win_rate": _std(test_wrs),
+        "mean_test_return_pct": _mean(test_rets),
+        "total_test_trades": int(test_trades),
+    }
+
+    # Gate decision: two floors AND'd. Both must hold for the pattern
+    # to "pass walk-forward".
+    gate_enough_folds = n_folds >= m_folds
+    gate_enough_passes = pass_fraction >= m_pf
+    passes_gate = bool(gate_enough_folds and gate_enough_passes)
+
+    gate_reason: str | None = None
+    if not gate_enough_folds:
+        gate_reason = f"too_few_folds:{n_folds}<{m_folds}"
+    elif not gate_enough_passes:
+        gate_reason = (
+            f"pass_fraction_low:{pass_fraction:.2f}<{m_pf:.2f} "
+            f"({n_passed}/{n_folds} folds passed)"
+        )
+
+    return {
+        "ok": True,
+        "ticker": ticker,
+        "pattern_name": pattern_name,
+        "period": period,
+        "interval": interval,
+        "params": params,
+        "folds": folds_out,
+        "aggregate": aggregate,
+        "passes_gate": passes_gate,
+        "gate_reason": gate_reason,
+    }
+
+
 # ── Legacy generic-strategy fallback for backtest_pattern ────────────
 
 _PATTERN_STRATEGY_MAP = {

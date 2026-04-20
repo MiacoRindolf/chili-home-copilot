@@ -18,10 +18,20 @@ edge-tts==7.2.7
 openwakeword==0.6.0
 numpy>=1.24.0,<3
 pandas>=2.0.0
-yfinance>=0.2.40
+# yfinance is pinned to <2 to stop silent behavior changes on a provider
+# we can't rescue from. The custom rate-limiter in app/services/yf_session.py
+# assumes 0.2.x / 1.x request semantics; when we need to move to 2.x we
+# should re-test the rate-limiter's accounting.
+yfinance>=1.2.0,<2
 requests-cache>=1.0.0
-requests-ratelimiter>=0.7.0
-pyrate-limiter>=3.0.0
+# pyrate-limiter + requests-ratelimiter removed 2026-04-19: pyrate-limiter's
+# Limiter spawns a daemon Leaker thread that calls asyncio.run(...) on a loop,
+# leaking ProactorEventLoop IOCP handles on Windows and eventually exhausting
+# the non-paged kernel pool (WinError 10055 during psycopg2.connect).
+# Replaced by a pure-Python sliding window in app/services/yf_session.py.
+# requests-ratelimiter dropped alongside — zero callers (grep clean) and it
+# depends transitively on pyrate-limiter, so keeping it would risk the same
+# thread leak resurfacing through a future import.
 scikit-learn>=1.3.0
 lightgbm>=4.0.0  # optional GPU meta-learner when BRAIN_USE_GPU_ML=true
 ta>=0.11.0
@@ -30,7 +40,10 @@ backtesting>=0.3.3
 apscheduler>=3.10.0
 tzdata>=2024.1  # zoneinfo IANA data; required on slim Docker images (no bundled tz database)
 pyyaml>=6.0
-robin-stocks>=3.0.0
+# robin-stocks pinned to <4 — any major bump ships breaking API changes
+# (auth flow, order payload shape) that could silently break the live
+# Robinhood path. Currently 3.4.0 in the env; upgrade deliberately.
+robin-stocks>=3.4.0,<4
 pyotp>=2.9.0
 coinbase-advanced-py>=1.2.0
 authlib>=1.3.0

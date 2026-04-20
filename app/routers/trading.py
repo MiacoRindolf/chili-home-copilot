@@ -1620,42 +1620,17 @@ def api_take_snapshots(
 # Real-time WebSocket: live chart ticks + global alert push
 # ---------------------------------------------------------------------------
 
-import threading as _th
-
-_live_clients: set[WebSocket] = set()
-_live_clients_tlock = _th.Lock()
-
-
-async def broadcast_trading_alert(alert_data: dict[str, Any]) -> None:
-    """Push an alert to every connected live-trading WebSocket client."""
-    msg = json.dumps({"type": "alert", **alert_data})
-    with _live_clients_tlock:
-        clients = list(_live_clients)
-    stale: list[WebSocket] = []
-    for ws_c in clients:
-        try:
-            await ws_c.send_text(msg)
-        except Exception:
-            stale.append(ws_c)
-    if stale:
-        with _live_clients_tlock:
-            for ws_c in stale:
-                _live_clients.discard(ws_c)
-
-
-def _broadcast_alert_sync(alert_data: dict[str, Any]) -> None:
-    """Thread-safe wrapper so scheduler / alert code can call from sync context."""
-    try:
-        loop = asyncio.get_running_loop()
-    except RuntimeError:
-        loop = None
-    if loop and loop.is_running():
-        loop.create_task(broadcast_trading_alert(alert_data))
-    else:
-        try:
-            asyncio.run(broadcast_trading_alert(alert_data))
-        except RuntimeError:
-            pass
+# Shared broadcast registry lives in the services layer so
+# ``app/services/trading/alerts.py`` can push events directly without a
+# services→routers back-import. Re-exported here under their original
+# names for backwards compatibility with any caller that was importing
+# them from ``app.routers.trading``.
+from ..services.trading.alert_broadcast import (
+    broadcast_alert_sync as _broadcast_alert_sync,
+    broadcast_trading_alert,
+    register_client as _register_live_client,
+    unregister_client as _unregister_live_client,
+)
 
 
 @router.websocket("/ws/trading/live")
@@ -1667,8 +1642,7 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
     await ws.accept()
     logger.info("[live-ws] Client connected for %s (candle_interval=%d)", ticker, interval)
 
-    with _live_clients_tlock:
-        _live_clients.add(ws)
+    _register_live_client(ws)
 
     tick_queue: asyncio.Queue = asyncio.Queue(maxsize=500)
     massive_available = False
@@ -1799,8 +1773,7 @@ async def ws_trading_live(ws: WebSocket, ticker: str = "AAPL", interval: int = 0
                     unregister_candle_listener(m_ticker, interval, _on_candle)
             except Exception:
                 pass
-        with _live_clients_tlock:
-            _live_clients.discard(ws)
+        _unregister_live_client(ws)
         logger.info("[live-ws] Client disconnected for %s", ticker)
 
 

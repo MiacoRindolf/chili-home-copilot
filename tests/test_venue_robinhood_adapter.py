@@ -162,6 +162,55 @@ def test_place_market_order_sell(mock_conn, mock_sell, monkeypatch):
     mock_sell.assert_called_once_with("AAPL", 5.0, order_type="market")
 
 
+@patch("app.services.broker_service.place_buy_order")
+@patch("app.services.broker_service.is_connected", return_value=True)
+def test_place_market_order_duplicate_client_order_id_short_circuits(
+    mock_conn, mock_buy, db, monkeypatch
+):
+    """P0.1 — the idempotency store must refuse a retry BEFORE the adapter
+    calls the broker. A network-flake retry of an already-submitted order
+    would otherwise double-buy.
+    """
+    from sqlalchemy import text
+
+    from app.config import settings
+    from app.services.trading.venue import idempotency_store
+
+    monkeypatch.setattr(settings, "chili_robinhood_spot_adapter_enabled", True, raising=False)
+    mock_buy.return_value = {"ok": True, "order_id": "ord-dupe-1", "raw": {}}
+
+    cid = "test-dupe-check-1"
+    db.execute(
+        text("DELETE FROM venue_order_idempotency WHERE client_order_id = :k"),
+        {"k": cid},
+    )
+    db.commit()
+    idempotency_store.reset_for_tests()
+
+    adapter = RobinhoodSpotAdapter()
+
+    first = adapter.place_market_order(
+        product_id="AAPL", side="buy", base_size="1", client_order_id=cid,
+    )
+    assert first["ok"] is True
+    assert mock_buy.call_count == 1
+
+    # Second call with the same client_order_id must NOT reach the broker.
+    second = adapter.place_market_order(
+        product_id="AAPL", side="buy", base_size="1", client_order_id=cid,
+    )
+    assert second["ok"] is False
+    assert second.get("error") == "duplicate_client_order_id"
+    assert mock_buy.call_count == 1, "broker was called again on duplicate — idempotency failed"
+
+    db.execute(
+        text("DELETE FROM venue_order_idempotency WHERE client_order_id = :k"),
+        {"k": cid},
+    )
+    db.commit()
+    idempotency_store.reset_for_tests()
+
+
 @patch("app.services.broker_service.get_order_by_id")
 @patch("app.services.broker_service.is_connected", return_value=True)
 def test_get_order_found(mock_conn, mock_get, monkeypatch):

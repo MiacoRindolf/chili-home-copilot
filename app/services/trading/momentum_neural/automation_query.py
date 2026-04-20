@@ -411,6 +411,8 @@ def _runner_health_for_mode(
 
     hb_at = _latest_scheduler_heartbeat_at(db)
     hb_age = (now - hb_at).total_seconds() if hb_at else None
+    kill = get_kill_switch_status()
+    kill_active = bool(kill.get("active"))
     blocked_reason = None
     if not enabled:
         blocked_reason = f"{m}_runner_disabled"
@@ -420,6 +422,18 @@ def _runner_health_for_mode(
         blocked_reason = "scheduler_worker_heartbeat_missing"
     elif hb_age > max(420.0, float(interval_minutes) * 120.0):
         blocked_reason = "scheduler_worker_stale"
+    elif kill_active:
+        blocked_reason = "kill_switch_active"
+    elif m == "live":
+        # Live runner is only truly "Ready" if the execution venue is actually connected.
+        try:
+            live_readiness = build_momentum_operator_readiness(execution_family="coinbase_spot")
+        except Exception:
+            live_readiness = {}
+        if not live_readiness.get("broker_coinbase_connected"):
+            blocked_reason = "broker_not_connected"
+        elif not live_readiness.get("runnable_live_now"):
+            blocked_reason = "live_execution_not_ready"
 
     last_tick = _last_tick_from_snapshot(sess) if sess is not None else None
     if last_tick is None:
@@ -431,9 +445,21 @@ def _runner_health_for_mode(
         )
         last_tick = _last_tick_from_snapshot(latest) if latest is not None else None
 
-    next_tick_eta_seconds = None
+    # When no session has ticked yet, fall back to the scheduler heartbeat so the
+    # UI shows that the scheduler is actually running instead of a misleading "n/a".
+    last_tick_source = "session" if last_tick else None
+    if last_tick is None and hb_at is not None:
+        last_tick = hb_at.isoformat()
+        last_tick_source = "scheduler_heartbeat"
+
+    next_tick_eta_seconds: int | None = None
+    next_tick_overdue_seconds: int | None = None
     if enabled and scheduler_enabled and hb_at is not None:
-        next_tick_eta_seconds = max(0, int(interval_minutes * 60 - max(0.0, hb_age or 0.0)))
+        remaining = int(interval_minutes * 60 - max(0.0, hb_age or 0.0))
+        if remaining >= 0:
+            next_tick_eta_seconds = remaining
+        else:
+            next_tick_overdue_seconds = -remaining
 
     return {
         "mode": m,
@@ -441,8 +467,10 @@ def _runner_health_for_mode(
         "scheduler_enabled": scheduler_enabled,
         "interval_minutes": interval_minutes,
         "last_tick_utc": last_tick,
+        "last_tick_source": last_tick_source,
         "scheduler_heartbeat_utc": hb_at.isoformat() if hb_at else None,
         "next_tick_eta_seconds": next_tick_eta_seconds,
+        "next_tick_overdue_seconds": next_tick_overdue_seconds,
         "blocked_reason": blocked_reason,
     }
 

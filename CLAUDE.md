@@ -118,7 +118,7 @@ These come from `.cursor/rules/` and are non-negotiable:
 - **One logical change at a time.** Make it, test it, then proceed. Don't stack fixes.
 - **Restart the server between changes.** Kill the existing process, start clean.
 - **Parity testing for dual code paths.** Feed identical input to both (backtest vs live); assert equal output at each step. See `tests/test_entry_feature_parity.py`.
-- **Respect frozen plans.** If implementation conflicts with a frozen checklist, stop and report the conflict rather than improvising.
+- **Flag conflicts in frozen scopes, don't veto.** The only authority contract that is truly frozen is the prediction mirror (Hard Rule 5). For everything else — rollout plans, feature-flag ramps, phased migrations — flag the conflict in one sentence, ask if unclear, then proceed with the user's explicit authorization. Don't treat internal rollout docs as hard gates; they exist as defaults, not vetoes. If the user says "flip it," flip it.
 
 ## Conventions
 

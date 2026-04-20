@@ -20,9 +20,28 @@ from typing import Any
 import requests
 from sqlalchemy.orm import Session
 
+from ...config import settings
 from ...models.trading import ScanPattern
 from ..llm_caller import call_llm
 from .pattern_engine import create_pattern, list_patterns
+
+# ──────────────────────────────────────────────────────────────────────────
+# P1.3 production wiring — walk-forward aggregation constants
+# ──────────────────────────────────────────────────────────────────────────
+# Minimum number of tickers that must return ``ok=True`` from
+# ``run_walk_forward`` before we're willing to call a pattern-level verdict.
+# Below this floor we return ``None`` (pending) so the gate tri-state picks
+# ``pending_walk_forward`` + ``allow_active=True`` rather than forcing a
+# hard reject on insufficient evidence.
+_WALK_FORWARD_MIN_TICKERS = 2
+
+# Simple-majority threshold across successful per-ticker walk-forward runs.
+# Intentionally more permissive than ``chili_walk_forward_min_pass_fraction``
+# (which is FOLD-level, 0.6 default). Applying 0.6 at both layers would
+# produce a joint ~0.36 bar — too harsh for a 5-ticker test panel. Majority
+# (≥0.5) across tickers ∧ 0.6 within-ticker gives a ~0.3 joint pass-rate
+# which empirically matches operator expectations for "works across regimes".
+_WALK_FORWARD_MIN_TICKER_PASS_FRACTION = 0.5
 
 logger = logging.getLogger(__name__)
 
@@ -337,6 +356,119 @@ def _extract_patterns_from_content(
         return []
 
 
+def _walk_forward_verdict_for_pattern(
+    pattern: ScanPattern,
+    tickers: list[str],
+    *,
+    interval: str,
+) -> tuple[bool | None, dict[str, Any]]:
+    """Aggregate per-ticker walk-forward verdicts into a pattern-level gate input.
+
+    Returns ``(verdict, audit)`` where:
+
+    * ``verdict`` is the tri-state value passed into
+      ``brain_apply_oos_promotion_gate(walk_forward_passes_gate=...)``:
+          ``True``   — majority of tickers that ran WF passed their gate
+          ``False``  — not enough tickers passed (hard reject)
+          ``None``   — flag OFF, WF failed to run on enough tickers, or any
+                      exception — lets the gate tri-state to
+                      ``pending_walk_forward`` / ``allow_active=True`` rather
+                      than rejecting on missing evidence
+    * ``audit`` is a dict suitable to merge into ``oos_validation_json``
+      for operator forensics. Always present, even when the verdict is
+      ``None``, so the reason for a pending/skip decision is recoverable.
+
+    Fail-open on every exception: we never let a walk-forward problem
+    derail the existing promotion flow. The worst-case for a buggy WF run
+    is the pattern is evaluated exactly as it would have been pre-P1.3.
+
+    Short-circuits on ``chili_walk_forward_enabled=False`` BEFORE importing
+    anything or fetching OHLCV. This is critical — the flag defaults OFF,
+    so every discovered pattern hits this function, and paying a 5-ticker
+    network fetch per call for a no-op default would exhaust the Windows
+    ephemeral-socket pool under load (same root cause we hit in P1.4's
+    first wiring pass; see that section of the plan for the post-mortem).
+    """
+    if not bool(getattr(settings, "chili_walk_forward_enabled", False)):
+        return None, {"enabled": False, "reason": "flag_off"}
+
+    audit: dict[str, Any] = {
+        "enabled": True,
+        "tickers_requested": list(tickers),
+        "tickers_ran": 0,
+        "tickers_passed": 0,
+        "per_ticker": [],
+    }
+    try:
+        # Local import — keep the module import-time surface clean even
+        # when walk-forward is shipped-but-idle. The import is trivial but
+        # we don't want to re-run it per discovered pattern.
+        from ..backtest_service import run_walk_forward
+
+        conditions: list[dict[str, Any]] = []
+        try:
+            rules = json.loads(pattern.rules_json) if pattern.rules_json else {}
+            conditions = rules.get("conditions", []) if isinstance(rules, dict) else []
+        except (json.JSONDecodeError, TypeError):
+            conditions = []
+        if not conditions:
+            audit["reason"] = "no_conditions"
+            return None, audit
+
+        for ticker in tickers:
+            per_ticker: dict[str, Any] = {"ticker": ticker, "ok": False, "passes_gate": None}
+            try:
+                wf = run_walk_forward(
+                    ticker=ticker,
+                    conditions=conditions,
+                    pattern_name=pattern.name,
+                    interval=interval,
+                )
+                per_ticker["ok"] = bool(wf.get("ok"))
+                per_ticker["passes_gate"] = wf.get("passes_gate")
+                per_ticker["gate_reason"] = wf.get("gate_reason")
+                agg = wf.get("aggregate") or {}
+                per_ticker["n_folds"] = agg.get("n_folds")
+                per_ticker["n_passes"] = agg.get("n_passes")
+                per_ticker["pass_fraction"] = agg.get("pass_fraction")
+                per_ticker["mean_test_win_rate"] = agg.get("mean_test_win_rate")
+                if per_ticker["ok"]:
+                    audit["tickers_ran"] += 1
+                    if per_ticker["passes_gate"] is True:
+                        audit["tickers_passed"] += 1
+            except Exception as e:
+                per_ticker["error"] = f"{type(e).__name__}: {e}"
+            audit["per_ticker"].append(per_ticker)
+
+        n_ran = int(audit["tickers_ran"])
+        n_passed = int(audit["tickers_passed"])
+        audit["n_ran"] = n_ran
+        audit["n_passed"] = n_passed
+
+        if n_ran < _WALK_FORWARD_MIN_TICKERS:
+            audit["reason"] = "insufficient_ticker_coverage"
+            audit["verdict"] = None
+            return None, audit
+
+        pass_fraction = n_passed / n_ran if n_ran > 0 else 0.0
+        audit["ticker_pass_fraction"] = round(pass_fraction, 3)
+        audit["ticker_pass_threshold"] = _WALK_FORWARD_MIN_TICKER_PASS_FRACTION
+
+        if pass_fraction >= _WALK_FORWARD_MIN_TICKER_PASS_FRACTION:
+            audit["reason"] = "majority_passed"
+            audit["verdict"] = True
+            return True, audit
+        else:
+            audit["reason"] = "majority_failed"
+            audit["verdict"] = False
+            return False, audit
+    except Exception as e:
+        logger.warning("[web_research] walk-forward aggregation failed: %s", e)
+        audit["reason"] = f"exception:{type(e).__name__}"
+        audit["verdict"] = None
+        return None, audit
+
+
 def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
     """Run a quick backtest on the newly discovered pattern and update confidence."""
     from ..backtest_service import (
@@ -424,12 +556,24 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
         avg_return = sum(returns) / len(returns) if returns else 0
         confidence = max(0.1, min(0.8, ticker_vote_wr / 100))
 
+        # P1.3 production wiring — run date-based walk-forward on each
+        # ticker and fold the aggregate verdict into the gate. Flag-off
+        # (``chili_walk_forward_enabled=False``, the default) short-circuits
+        # to ``None`` and the gate treats it as a pass-through, preserving
+        # legacy behavior for unwired environments.
+        wf_verdict, wf_audit = _walk_forward_verdict_for_pattern(
+            pattern,
+            test_tickers,
+            interval=bt_params["interval"],
+        )
+
         _oos_kw = brain_oos_gate_kwargs_for_pattern(pattern, oos_trade_sum)
         prom_stat, allow_active = brain_apply_oos_promotion_gate(
             origin=getattr(pattern, "origin", "") or "",
             mean_is_win_rate=mean_is_wr,
             mean_oos_win_rate=mean_oos_wr,
             oos_tickers_with_result=oos_ticker_hits,
+            walk_forward_passes_gate=wf_verdict,
             **_oos_kw,
         )
 
@@ -446,6 +590,7 @@ def _quick_backtest_pattern(db: Session, pattern: ScanPattern) -> None:
             **prev_ov,
             "evaluated_at": datetime.utcnow().isoformat() + "Z",
             "research_integrity": ri_agg,
+            "walk_forward": wf_audit,
         }
 
         patch: dict[str, Any] = {

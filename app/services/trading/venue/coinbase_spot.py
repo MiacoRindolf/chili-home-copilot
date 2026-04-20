@@ -9,13 +9,14 @@ from typing import Any, Callable, Optional
 
 from ....config import settings
 from ... import coinbase_service as cb
-from . import idempotency_store, rate_limiter
+from . import idempotency_store, order_state_machine, rate_limiter, venue_health
 from .protocol import (
     FreshnessMeta,
     NormalizedFill,
     NormalizedOrder,
     NormalizedProduct,
     NormalizedTicker,
+    VenueAdapter,
     VenueAdapterError,
 )
 
@@ -172,8 +173,13 @@ def _to_product_id(symbol: str) -> str:
     return t
 
 
-class CoinbaseSpotAdapter:
-    """Coinbase spot execution + market data normalization."""
+class CoinbaseSpotAdapter(VenueAdapter):
+    """Coinbase spot execution + market data normalization.
+
+    Explicitly declares the ``VenueAdapter`` protocol so static type
+    checkers validate every method signature — mirroring
+    :class:`RobinhoodSpotAdapter`.
+    """
 
     def __init__(
         self,
@@ -448,8 +454,29 @@ class CoinbaseSpotAdapter:
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record the rate-limit exhaustion as an execution event so
+            # the venue-health breaker can see hot-loop retry storms.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=product_id, source="cb_place_market",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
         pid = _to_product_id(product_id)
+        # P1.1 — about to hit the broker; pre-submit SUBMITTING transition so
+        # the state machine sees the order exist before any ACK. Safe no-op
+        # when the feature flag is off (standalone helper short-circuits).
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.SUBMITTING,
+                venue=_VENUE,
+                source="cb_place_market",
+                client_order_id=cid,
+                raw_payload={"product_id": pid, "side": side.lower(), "base_size": str(base_size)},
+            )
+        except Exception:
+            pass
         try:
             c = self._require_client()
             side_l = side.lower()
@@ -473,9 +500,35 @@ class CoinbaseSpotAdapter:
                     broker_order_id=oid if oid != cid else None,
                     status="submitted",
                 )
+                # Broker accepted → emit ACK transition keyed on the
+                # (now-known) broker order_id plus client_order_id.
+                try:
+                    order_state_machine.record_transition_standalone(
+                        to_state=order_state_machine.OrderState.ACK,
+                        venue=_VENUE,
+                        source="cb_place_market",
+                        order_id=oid if oid != cid else None,
+                        client_order_id=cid,
+                        broker_status="accepted",
+                        raw_payload={"product_id": pid, "order_id": oid},
+                    )
+                except Exception:
+                    pass
                 cb.clear_cache()
                 return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
             er = _as_dict(rd.get("error_response"))
+            # Broker refused at submit — REJECTED.
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.REJECTED,
+                    venue=_VENUE,
+                    source="cb_place_market",
+                    client_order_id=cid,
+                    broker_status="rejected",
+                    raw_payload={"error": er.get("message") or er.get("error") or ""},
+                )
+            except Exception:
+                pass
             return {"ok": False, "error": er.get("message") or er.get("error") or str(rd), "client_order_id": cid}
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e), "client_order_id": cid}
@@ -499,8 +552,31 @@ class CoinbaseSpotAdapter:
             return {"ok": False, "error": "duplicate client_order_id (recent)", "client_order_id": cid}
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record rate-limit exhaustion for the health breaker.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=product_id, source="cb_place_limit",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after, client_order_id=cid)
         pid = _to_product_id(product_id)
+        # P1.1 — SUBMITTING before broker call.
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.SUBMITTING,
+                venue=_VENUE,
+                source="cb_place_limit",
+                client_order_id=cid,
+                raw_payload={
+                    "product_id": pid,
+                    "side": side.lower(),
+                    "base_size": str(base_size),
+                    "limit_price": str(limit_price),
+                },
+            )
+        except Exception:
+            pass
         try:
             c = self._require_client()
             side_l = side.lower()
@@ -534,9 +610,32 @@ class CoinbaseSpotAdapter:
                     broker_order_id=oid if oid != cid else None,
                     status="submitted",
                 )
+                try:
+                    order_state_machine.record_transition_standalone(
+                        to_state=order_state_machine.OrderState.ACK,
+                        venue=_VENUE,
+                        source="cb_place_limit",
+                        order_id=oid if oid != cid else None,
+                        client_order_id=cid,
+                        broker_status="accepted",
+                        raw_payload={"product_id": pid, "order_id": oid},
+                    )
+                except Exception:
+                    pass
                 cb.clear_cache()
                 return {"ok": True, "order_id": oid, "client_order_id": cid, "raw": rd}
             er = _as_dict(rd.get("error_response"))
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.REJECTED,
+                    venue=_VENUE,
+                    source="cb_place_limit",
+                    client_order_id=cid,
+                    broker_status="rejected",
+                    raw_payload={"error": er.get("message") or er.get("error") or ""},
+                )
+            except Exception:
+                pass
             return {"ok": False, "error": er.get("message") or er.get("error") or str(rd), "client_order_id": cid}
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e), "client_order_id": cid}
@@ -549,12 +648,34 @@ class CoinbaseSpotAdapter:
             return {"ok": False, "error": "adapter disabled"}
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record rate-limit exhaustion for the health breaker.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, source="cb_cancel",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after)
         try:
             c = self._require_client()
             resp = c.cancel_orders(order_ids=[order_id])
             d = _as_dict(resp)
             cb.clear_cache()
+            # P1.1 — record CANCELLED transition so reconciliation / latency
+            # rollups can see the order's terminal state. Broker-side cancel
+            # might be async; we're optimistic here (the transition table
+            # treats CANCELLED as terminal so any later ACK re-poll is a no-op).
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.CANCELLED,
+                    venue=_VENUE,
+                    source="cb_cancel",
+                    order_id=order_id,
+                    broker_status="cancelled",
+                    raw_payload={"cancel_response": d},
+                )
+            except Exception:
+                pass
             return {"ok": True, "raw": d}
         except VenueAdapterError as e:
             return {"ok": False, "error": str(e)}

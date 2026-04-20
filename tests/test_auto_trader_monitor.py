@@ -265,6 +265,10 @@ def test_monitor_manages_non_v1_pattern_linked_trade(db):
     ad = MagicMock()
     ad.is_enabled.return_value = True
     ad.get_quote_price.return_value = 8.0
+    # Opt out of the helper's MagicMock side-effect dispatch (which
+    # hasattr-truthy on any MagicMock) so _fake_submit takes the regular
+    # place_market_order path.
+    ad._submit_side_effect = None
     ad.place_market_order.return_value = {
         "ok": True,
         "order_id": "oid-linked",
@@ -310,6 +314,8 @@ def test_monitor_manages_plan_level_trade_without_pattern_link(db):
     ad = MagicMock()
     ad.is_enabled.return_value = True
     ad.get_quote_price.return_value = 8.0
+    # See note in test_monitor_manages_non_v1_pattern_linked_trade above.
+    ad._submit_side_effect = None
     ad.place_market_order.return_value = {
         "ok": True,
         "order_id": "oid-plan",

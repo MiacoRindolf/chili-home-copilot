@@ -1099,6 +1099,240 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("CHILI_VENUE_RATE_LIMIT_ENABLED"),
     )
 
+    # Bracket reconciler watchdog (P0.5) — opt-in background scan that fires
+    # alerts when a reconciler row is older than the staleness threshold for
+    # a trade that still appears to be missing its stop (or carries an
+    # orphaned broker stop). Default off during Phase G so the reconciler can
+    # accumulate observation data before the watchdog starts paging. Flip on
+    # once the reconciler's healthy-state distribution is understood.
+    chili_bracket_watchdog_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_ENABLED"),
+    )
+    # Minimum age (seconds) a non-agree reconciler observation must have
+    # before the watchdog treats it as stale. Bounded low at 30s to prevent
+    # alert-storms from transient mid-fill discrepancies; high at 1 hour.
+    chili_bracket_watchdog_stale_after_sec: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_BRACKET_WATCHDOG_STALE_AFTER_SEC"),
+    )
+
+    # Runtime feature-parity assertion (P1.4) — canary that reruns
+    # ``indicator_core.compute_all_from_df`` at the moment of a live entry and
+    # diffs the snap against whatever the live decision-path supplied. Default
+    # off so shipping the module changes nothing until an operator flips the
+    # flag. Drift rows persist to ``TradingExecutionEvent`` with
+    # ``event_type='feature_parity_drift'`` — same surface as P1.2 rate-limit
+    # events, so dashboards can reuse the rolling-window query pattern.
+    chili_feature_parity_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_ENABLED"),
+    )
+    # Parity enforcement mode:
+    #   "disabled" — assertion is a no-op (belt-and-suspenders on top of
+    #                the feature flag above).
+    #   "soft"     — records drift + (optionally) alerts, never blocks.
+    #   "hard"     — records drift AND blocks the entry when severity ==
+    #                critical. Safe to flip once soft-mode telemetry has
+    #                sized the critical_mismatch_count floor empirically.
+    # Invalid values silently normalize to "soft" inside ``_resolve_settings``
+    # so an operator typo can't accidentally disable the canary.
+    chili_feature_parity_mode: str = Field(
+        default="soft",
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_MODE"),
+    )
+    # Absolute tolerance for numeric-feature comparison. Pass iff
+    # ``abs_delta <= epsilon_abs`` OR the relative-tolerance check passes.
+    # OR semantics (not AND) — small-magnitude features like ``bb_pct`` (0..1)
+    # need the absolute floor; large-magnitude features like ``price`` need
+    # the relative floor. Using AND would reject both edge cases.
+    chili_feature_parity_epsilon_abs: float = Field(
+        default=1e-6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_EPSILON_ABS"),
+    )
+    # Relative tolerance (fraction of reference value). Applied only when
+    # the reference is non-zero. Default 0.5% is a middle-of-the-road floor
+    # that tolerates timing jitter on a live quote without masking a real
+    # feature-builder regression.
+    chili_feature_parity_epsilon_rel: float = Field(
+        default=0.005,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_EPSILON_REL"),
+    )
+    # Total-mismatch count at which severity escalates to critical. Any
+    # boolean mismatch is ALWAYS critical regardless of this floor — a bool
+    # flip is a semantic-contract violation, not a rounding drift.
+    chili_feature_parity_critical_mismatch_count: int = Field(
+        default=3,
+        ge=1,
+        le=64,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_CRITICAL_MISMATCH_COUNT"),
+    )
+    # Operator toggle to suppress warn-level alert noise during shakedown
+    # without changing drift persistence. When False, only critical-severity
+    # parity events fire an alert; warn rows still persist.
+    chili_feature_parity_alert_on_warn: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_FEATURE_PARITY_ALERT_ON_WARN"),
+    )
+
+    # Order state machine (P1.1) — projects broker-native status strings onto
+    # a single canonical state per order, writing one transition row per
+    # state change to ``trading_order_state_log``. The ``TradingExecutionEvent``
+    # stream stays authoritative; this is a second-order projection used by
+    # P1.2 venue-health (ack-to-fill P95) and dashboards. Default off so
+    # shipping changes nothing until flipped. Re-read live.
+    chili_order_state_machine_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_ORDER_STATE_MACHINE_ENABLED"),
+    )
+
+    # Venue health circuit breaker (P1.2) — read-only projection over the
+    # ``TradingExecutionEvent`` stream plus rate-limit exhaustion events.
+    # When a venue's rolling-window health is degraded, entry gates block
+    # new orders on that venue (paper-switch optional). Thresholds re-read
+    # live so monkeypatch/env changes apply without restart — same pattern
+    # as rate_limiter / order_state_machine.
+    chili_venue_health_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ENABLED"),
+    )
+    # Rolling window (seconds) over which venue-health aggregates latency +
+    # error-rate. 5 minutes by default — long enough to smooth per-request
+    # jitter, short enough that a recovering venue re-opens quickly.
+    chili_venue_health_window_sec: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_WINDOW_SEC"),
+    )
+    # Minimum lifecycle samples (any event) in the window before degraded /
+    # healthy classification is applied. Below this floor the venue reports
+    # ``insufficient_data`` and gates pass through (fail-open).
+    chili_venue_health_min_samples: int = Field(
+        default=5,
+        ge=1,
+        le=1000,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_MIN_SAMPLES"),
+    )
+    # P95 ack-to-fill latency (ms) above which the venue trips degraded.
+    # 5000ms is a loose bound — equities typically clear in <200ms; crypto
+    # <500ms. Operator dashboards should show the live P95 so this knob can
+    # be tightened against observed distribution.
+    chili_venue_health_ack_to_fill_p95_ms: int = Field(
+        default=5000,
+        ge=100,
+        le=60000,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ACK_TO_FILL_P95_MS"),
+    )
+    # P95 submit-to-ack latency (ms). Lower than ack-to-fill because ack is
+    # typically much faster than fill. 3000ms catches network/API issues
+    # upstream of matching.
+    chili_venue_health_submit_to_ack_p95_ms: int = Field(
+        default=3000,
+        ge=100,
+        le=60000,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_SUBMIT_TO_ACK_P95_MS"),
+    )
+    # Error-rate threshold (fraction 0..1) — rejection + rate-limit events
+    # divided by total lifecycle events in the window. 10% default ensures
+    # a venue rejecting every other order trips the breaker.
+    chili_venue_health_error_rate_pct: float = Field(
+        default=0.10,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_ERROR_RATE_PCT"),
+    )
+    # When True + venue is degraded + the session is live, flip the session
+    # to paper mode instead of just blocking. Useful for keeping the
+    # decision path alive for analysis without routing to a broken venue.
+    chili_venue_health_auto_switch_to_paper: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_VENUE_HEALTH_AUTO_SWITCH_TO_PAPER"),
+    )
+
+    # Walk-forward backtest gate (P1.3) — date-based train/embargo/test
+    # window enumeration on top of the existing pattern backtest, aggregated
+    # into a single pass/fail verdict threaded into the promotion gate.
+    # Tri-state wiring in ``brain_apply_oos_promotion_gate``:
+    #   True  → pass-through (continues to other gates)
+    #   False → hard reject with status ``rejected_walk_forward``
+    #   None  → pending; status ``pending_walk_forward``, allow_active=True
+    # Flag defaults OFF and any value is silently ignored when the flag is
+    # off — the migration safety guarantee.
+    chili_walk_forward_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_ENABLED"),
+    )
+    # Rolling training window size per fold (days). Default 180 = ~9 months
+    # of daily bars; long enough for regime-bridging patterns to train
+    # meaningfully. Bounded 30..1825 (1 month .. 5 years).
+    chili_walk_forward_train_days: int = Field(
+        default=180,
+        ge=30,
+        le=1825,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_TRAIN_DAYS"),
+    )
+    # Held-out test window per fold (days). Default 30 ≈ 1 month — one fold
+    # covers enough trading days to build a reliable win-rate estimate
+    # while still fitting many folds in a reasonable history.
+    chili_walk_forward_test_days: int = Field(
+        default=30,
+        ge=5,
+        le=365,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_TEST_DAYS"),
+    )
+    # Anchor advancement per fold (days). When step_days < test_days,
+    # tests overlap — more folds, less statistical independence. Default
+    # equal to test_days for non-overlapping clean folds.
+    chili_walk_forward_step_days: int = Field(
+        default=30,
+        ge=1,
+        le=365,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_STEP_DAYS"),
+    )
+    # Embargo gap between train end and test start (days). Neutralizes
+    # label leakage when forward-bar targets overlap the train/test
+    # boundary. Default 2 days is enough for the typical 5-bar forward
+    # window used by pattern imminent-alert models.
+    chili_walk_forward_embargo_days: int = Field(
+        default=2,
+        ge=0,
+        le=30,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_EMBARGO_DAYS"),
+    )
+    # Minimum successful folds required before the gate emits a True/False
+    # verdict — fewer than this auto-fails regardless of fold outcomes so
+    # a single lucky fold cannot promote a pattern.
+    chili_walk_forward_min_folds: int = Field(
+        default=3,
+        ge=2,
+        le=24,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_FOLDS"),
+    )
+    # Per-fold win-rate floor — a fold passes its local gate only if its
+    # test-set win rate is >= this. 0.45 roughly corresponds to "a bit
+    # better than coin flip after fees" for 2-bar momentum patterns.
+    chili_walk_forward_min_fold_win_rate: float = Field(
+        default=0.45,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_FOLD_WIN_RATE"),
+    )
+    # Fraction of folds that must individually pass for the overall gate
+    # to pass. 0.6 = 3/5 folds under defaults — a genuine majority.
+    chili_walk_forward_min_pass_fraction: float = Field(
+        default=0.6,
+        ge=0.0,
+        le=1.0,
+        validation_alias=AliasChoices("CHILI_WALK_FORWARD_MIN_PASS_FRACTION"),
+    )
+
     # Autopilot mutual exclusion (P0.4) — only one autopilot path may "own"
     # entries for a given symbol at a time. The primary is authoritative;
     # the non-primary is read-only/analysis until promoted. Both paths
@@ -1441,6 +1675,112 @@ class Settings(BaseSettings):
         ge=5,
         le=600,
         validation_alias=AliasChoices("CHILI_AUTOTRADER_MONITOR_INTERVAL_SECONDS"),
+    )
+
+    # P0.7 — stuck-order watchdog. Auto-cancels orders that the broker
+    # has acknowledged but never filled/rejected within the timeout. The
+    # market timeout is short because a market order that hasn't filled
+    # in minutes usually indicates a broker-side queue issue; the limit
+    # timeout is longer since limits are explicitly resting orders.
+    chili_stuck_order_watchdog_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_STUCK_ORDER_WATCHDOG_ENABLED"),
+    )
+    chili_stuck_order_watchdog_interval_seconds: int = Field(
+        default=60,
+        ge=15,
+        le=600,
+        validation_alias=AliasChoices("CHILI_STUCK_ORDER_WATCHDOG_INTERVAL_SECONDS"),
+    )
+    chili_stuck_order_market_timeout_seconds: int = Field(
+        default=300,  # 5 minutes
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_STUCK_ORDER_MARKET_TIMEOUT_SECONDS"),
+    )
+    chili_stuck_order_limit_timeout_seconds: int = Field(
+        default=1800,  # 30 minutes
+        ge=60,
+        le=86400,
+        validation_alias=AliasChoices("CHILI_STUCK_ORDER_LIMIT_TIMEOUT_SECONDS"),
+    )
+
+    # P0.6 — execution-event lag telemetry. Measures recorded_at - event_at
+    # lag on trading_execution_events; warns when the P95 lag crosses
+    # warn_p95_ms and errors (and flips breach='error') at error_p95_ms.
+    # Scheduler runs this on interval_seconds; disabled flag lets us kill
+    # the metric without touching the scheduler.
+    chili_execution_event_lag_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_ENABLED"),
+    )
+    chili_execution_event_lag_interval_seconds: int = Field(
+        default=60,
+        ge=15,
+        le=600,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_INTERVAL_SECONDS"),
+    )
+    chili_execution_event_lag_lookback_seconds: int = Field(
+        default=300,
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_LOOKBACK_SECONDS"),
+    )
+    chili_execution_event_lag_warn_p95_ms: float = Field(
+        default=15_000.0,
+        ge=100.0,
+        le=600_000.0,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_WARN_P95_MS"),
+    )
+    chili_execution_event_lag_error_p95_ms: float = Field(
+        default=60_000.0,
+        ge=500.0,
+        le=3_600_000.0,
+        validation_alias=AliasChoices("CHILI_EXECUTION_EVENT_LAG_ERROR_P95_MS"),
+    )
+
+    # P0.8 — drift escalation watchdog. Alerts when the same bracket
+    # intent is classified as the same non-agree kind for N consecutive
+    # sweeps. Opt-in (default off) because it's new alerting surface —
+    # operators should turn it on explicitly after tuning the threshold
+    # for their sweep cadence.
+    chili_drift_escalation_enabled: bool = Field(
+        default=False,
+        validation_alias=AliasChoices("CHILI_DRIFT_ESCALATION_ENABLED"),
+    )
+    chili_drift_escalation_interval_seconds: int = Field(
+        default=120,
+        ge=30,
+        le=3600,
+        validation_alias=AliasChoices("CHILI_DRIFT_ESCALATION_INTERVAL_SECONDS"),
+    )
+    chili_drift_escalation_min_count: int = Field(
+        default=5,
+        ge=2,
+        le=100,
+        validation_alias=AliasChoices("CHILI_DRIFT_ESCALATION_MIN_COUNT"),
+    )
+    chili_drift_escalation_lookback_minutes: int = Field(
+        default=60,
+        ge=5,
+        le=1440,
+        validation_alias=AliasChoices("CHILI_DRIFT_ESCALATION_LOOKBACK_MINUTES"),
+    )
+
+    # Phase G.2 — bracket writer. Top-level flag gates the module;
+    # per-action flags enable individual repairs. Override via env
+    # (CHILI_BRACKET_WRITER_G2_*) if you need to disable in a hurry.
+    chili_bracket_writer_g2_enabled: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BRACKET_WRITER_G2_ENABLED"),
+    )
+    chili_bracket_writer_g2_partial_fill_resize: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BRACKET_WRITER_G2_PARTIAL_FILL_RESIZE"),
+    )
+    chili_bracket_writer_g2_place_missing_stop: bool = Field(
+        default=True,
+        validation_alias=AliasChoices("CHILI_BRACKET_WRITER_G2_PLACE_MISSING_STOP"),
     )
     chili_autotrader_rth_only: bool = Field(
         default=True,
