@@ -46,57 +46,98 @@ class ProductOwnerAgent(AgentBase):
     # ── 8-Step Learning Cycle ─────────────────────────────────────────
 
     def run_cycle(self, db: Session, user_id: int) -> Dict[str, Any]:
+        """A6: each mutating step runs inside its own savepoint so a mid-cycle
+        failure rolls back only that step instead of persisting half-written
+        agent state. The overall outer transaction stays open — read-only steps
+        share it, and the report records which steps failed for ops visibility.
+        """
+        import logging
+        _log = logging.getLogger("chili.project_brain.product_owner")
+
         steps_done = 0
+        failed_steps: List[str] = []
         report: Dict[str, Any] = {}
 
-        # 1. Review context
+        # Read-only step — no savepoint needed.
         context = self._review_context(db, user_id)
         steps_done += 1
 
-        # 2. Identify gaps
-        gaps = self._identify_gaps(db, user_id, context)
+        def _savepoint(step_name: str, fn, *args, **kwargs):
+            """Run ``fn`` inside a nested transaction (SAVEPOINT); on failure
+            rollback only that step, mark the step as failed, and continue.
+            """
+            nonlocal steps_done
+            try:
+                with db.begin_nested():
+                    result = fn(*args, **kwargs)
+                steps_done += 1
+                return result
+            except Exception as exc:
+                _log.warning("PO cycle step %s failed: %s", step_name, exc)
+                failed_steps.append(step_name)
+                return None
+
+        # 2. Identify gaps (read-only + potential small write during caching)
+        gaps = _savepoint("identify_gaps", self._identify_gaps, db, user_id, context) or []
         report["gaps"] = len(gaps)
-        steps_done += 1
 
-        # 2b. Upgrade legacy questions (add options to old pending questions)
-        upgraded = self._upgrade_optionless_questions(db, user_id, context)
-        report["upgraded_questions"] = upgraded
+        # 2b. Upgrade legacy questions (mutates POQuestion rows)
+        upgraded = _savepoint(
+            "upgrade_optionless_questions",
+            self._upgrade_optionless_questions, db, user_id, context,
+        )
+        report["upgraded_questions"] = upgraded or 0
 
-        # 3. Generate questions
-        new_qs = self._generate_questions(db, user_id, gaps, context)
-        report["new_questions"] = new_qs
-        steps_done += 1
+        # 3. Generate questions (mutates POQuestion rows)
+        new_qs = _savepoint(
+            "generate_questions",
+            self._generate_questions, db, user_id, gaps, context,
+        )
+        report["new_questions"] = new_qs or 0
 
-        # 4. Research tech
-        research_count = self._research_tech(db, user_id, context)
-        report["research_done"] = research_count
-        steps_done += 1
+        # 4. Research tech (mutates agent research rows)
+        research_count = _savepoint(
+            "research_tech", self._research_tech, db, user_id, context,
+        )
+        report["research_done"] = research_count or 0
 
-        # 5. Synthesize requirements
-        new_reqs = self._synthesize_requirements(db, user_id)
-        report["new_requirements"] = new_reqs
-        steps_done += 1
+        # 5. Synthesize requirements (mutates PORequirement rows)
+        new_reqs = _savepoint(
+            "synthesize_requirements",
+            self._synthesize_requirements, db, user_id,
+        )
+        report["new_requirements"] = new_reqs or 0
 
-        # 6. Update state
+        # 6. Update state (mutates agent state row)
         old_conf = self._get_confidence(db, user_id)
-        new_conf = self._update_state(db, user_id, context, report)
+        new_conf = _savepoint(
+            "update_state", self._update_state, db, user_id, context, report,
+        )
+        # If step failed, keep prior confidence so evolve check below sees no change.
+        if new_conf is None:
+            new_conf = old_conf
         report["confidence"] = new_conf
-        steps_done += 1
 
-        # 7. Generate recommendations
-        findings = self._generate_recommendations(db, user_id, context)
-        report["new_findings"] = findings
-        steps_done += 1
+        # 7. Generate recommendations (mutates findings rows)
+        findings = _savepoint(
+            "generate_recommendations",
+            self._generate_recommendations, db, user_id, context,
+        )
+        report["new_findings"] = findings or 0
 
-        # 8. Publish to bus
-        self._publish_to_bus(db, user_id, report)
-        steps_done += 1
+        # 8. Publish to bus (mutates message-feed rows)
+        _savepoint("publish_to_bus", self._publish_to_bus, db, user_id, report)
 
         if abs(new_conf - old_conf) > 0.01:
-            self.evolve(db, user_id, "overall_understanding",
-                        f"Cycle completed: {report}",
-                        old_conf, new_conf, trigger="learning_cycle")
+            _savepoint(
+                "evolve",
+                self.evolve, db, user_id, "overall_understanding",
+                f"Cycle completed: {report}",
+                old_conf, new_conf, trigger="learning_cycle",
+            )
 
+        if failed_steps:
+            report["failed_steps"] = failed_steps
         return {"steps": steps_done, **report}
 
     # ── Step implementations ──────────────────────────────────────────
@@ -680,6 +721,24 @@ class ProductOwnerAgent(AgentBase):
                 return {"ok": False, "error": "Task creation failed (permission denied or invalid project)"}
             req.status = "in_planner"
             db.commit()
+
+            # B2: publish event so Feed + Handoff panes can react without
+            # re-polling. Handlers are inline and exception-safe.
+            try:
+                from ..events import PlannerRequirementPushed, publish
+
+                publish(
+                    PlannerRequirementPushed(
+                        user_id=user_id,
+                        requirement_id=requirement_id,
+                        planner_project_id=int(project_id),
+                        planner_task_id=int(task.get("id")),
+                        title=req.title or "",
+                    )
+                )
+            except Exception as _evt_exc:  # pragma: no cover - defensive
+                logger.warning("[po] event publish failed: %s", _evt_exc)
+
             return {"ok": True, "task_id": task.get("id")}
         except Exception as e:
             logger.warning("[po] push_to_planner failed: %s", e)

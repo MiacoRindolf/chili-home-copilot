@@ -4,6 +4,48 @@ window._activeAgent = window._activeAgent || 'product_owner';
 window._activeProjectAgent = window._activeProjectAgent || 'product_owner';
 window._agentPanelLoaded = window._agentPanelLoaded || {};
 
+/* Shared fetch error handling: prevents silent network failures by logging
+   to the console and surfacing a short non-blocking toast in the bottom-right.
+   Use _agentsOnErr('<label>') as the .catch callback on every fetch chain. */
+function _agentsEnsureToastRoot() {
+  var el = document.getElementById('proj-agents-toast-root');
+  if (el) return el;
+  el = document.createElement('div');
+  el.id = 'proj-agents-toast-root';
+  el.style.cssText = 'position:fixed;right:12px;bottom:12px;z-index:9999;display:flex;flex-direction:column;gap:6px;pointer-events:none;';
+  document.body && document.body.appendChild(el);
+  return el;
+}
+function _agentsToast(label, message) {
+  try {
+    var root = _agentsEnsureToastRoot();
+    if (!root) return;
+    var node = document.createElement('div');
+    node.style.cssText = 'background:var(--error-bg,#4a1414);color:var(--error,#ffb3b3);border:1px solid var(--error,#ff6b6b);padding:8px 12px;border-radius:6px;font-size:12px;max-width:320px;box-shadow:0 2px 8px rgba(0,0,0,0.4);pointer-events:auto;';
+    node.textContent = '⚠ ' + label + ': ' + (message || 'request failed');
+    root.appendChild(node);
+    setTimeout(function() { try { node.remove(); } catch (_) {} }, 6000);
+  } catch (_) { /* swallow — last-resort UI */ }
+}
+function _agentsOnErr(label) {
+  return function(err) {
+    var msg = (err && err.message) ? err.message : String(err || 'network error');
+    try { console.warn('[brain-project-agents] ' + label + ':', err); } catch (_) {}
+    _agentsToast(label, msg);
+  };
+}
+/* Wrap fetch so non-2xx responses become rejections that _agentsOnErr can surface. */
+function _agentsFetch(url, opts) {
+  return fetch(url, opts).then(function(r) {
+    if (!r.ok) {
+      var err = new Error('HTTP ' + r.status);
+      err.status = r.status;
+      throw err;
+    }
+    return r;
+  });
+}
+
 function initProjectAgentBar() {
   fetch('/api/brain/project/agents').then(function(r){return r.json();}).then(function(d) {
     if (!d.ok) return;
@@ -41,7 +83,7 @@ function initProjectAgentBar() {
     if (activeNames[window._activeAgent]) {
       switchProjectAgent(window._activeAgent);
     }
-  });
+  }).catch(_agentsOnErr('agents'));
 }
 
 function switchProjectAgent(agentName) {
@@ -183,7 +225,7 @@ function _loadGenericMetrics(agentName) {
     el.innerHTML = kpis.map(function(k) {
       return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 function _loadGenericFindings(agentName) {
@@ -200,7 +242,7 @@ function _loadGenericFindings(agentName) {
         '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 function _loadGenericResearch(agentName) {
@@ -226,7 +268,7 @@ function _loadGenericResearch(agentName) {
         sources +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 function _loadGenericGoals(agentName) {
@@ -246,7 +288,7 @@ function _loadGenericGoals(agentName) {
         '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#a78bfa;border-radius:2px"></div></div>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 function _loadGenericEvolution(agentName) {
@@ -269,7 +311,7 @@ function _loadGenericEvolution(agentName) {
         '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 function _loadQATestCases() {
@@ -286,7 +328,7 @@ function _loadQATestCases() {
         '<span style="font-size:9px;color:var(--text-muted)">' + c.priority + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/qa/test-cases'));
 }
 
 function _loadQABugReports() {
@@ -306,7 +348,7 @@ function _loadQABugReports() {
         (b.description ? '<div style="font-size:10px;color:var(--text-muted)">' + b.description.substring(0, 150) + '</div>' : '') +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/qa/bug-reports'));
 }
 
 function _loadSecurityRisk(agentName) {
@@ -322,7 +364,7 @@ function _loadSecurityRisk(agentName) {
       '<span class="sec-risk-badge ' + level + '">' + risk.toFixed(1) + ' / 10</span>' +
       '<span style="font-size:11px;color:var(--text-muted)">Overall Security Risk Score</span>' +
     '</div>';
-  });
+  }).catch(_agentsOnErr('agent'));
 }
 
 /* ── Agent message feed ───────────────────────── */
@@ -353,7 +395,7 @@ function loadPOMetrics() {
     el.innerHTML = kpis.map(function(k) {
       return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/metrics'));
 }
 
 var _poSelectedOptions = {};
@@ -417,7 +459,7 @@ function loadPOQuestions() {
 
     html += '<button onclick="triggerAgentCycle(\'product_owner\')" class="brain-act-btn" style="margin-top:10px;background:linear-gradient(135deg,#8b5cf6,#6d28d9)">&#x1F451; Run PO Cycle</button>';
     el.innerHTML = html;
-  });
+  }).catch(_agentsOnErr('agent/product_owner/questions'));
 
   _loadPOAnswered();
 }
@@ -440,7 +482,7 @@ function _loadPOAnswered() {
     });
     html += '</div>';
     el.innerHTML += html;
-  });
+  }).catch(_agentsOnErr('agent/product_owner/questions'));
 }
 
 function refreshPOOptions() {
@@ -450,8 +492,9 @@ function refreshPOOptions() {
   .then(function(r){return r.json();}).then(function(d) {
     if (d.ok) loadPOQuestions();
     else if (btn) { btn.disabled = false; btn.textContent = 'Generate Smart Options'; }
-  }).catch(function() {
+  }).catch(function(err) {
     if (btn) { btn.disabled = false; btn.textContent = 'Generate Smart Options'; }
+    _agentsOnErr('product_owner/refresh-options')(err);
   });
 }
 
@@ -508,7 +551,7 @@ function submitPOAnswer(questionId) {
       loadPOQuestions();
       loadPOMetrics();
     } else if (card) { card.style.opacity = '1'; }
-  });
+  }).catch(_agentsOnErr('agent/product_owner/question'));
 }
 
 function skipPOQuestion(questionId) {
@@ -518,6 +561,9 @@ function skipPOQuestion(questionId) {
   .then(function(r){return r.json();}).then(function(d) {
     if (d.ok) loadPOQuestions();
     else if (card) card.style.opacity = '1';
+  }).catch(function(err) {
+    if (card) card.style.opacity = '1';
+    _agentsOnErr('product_owner/question/skip')(err);
   });
 }
 
@@ -537,7 +583,7 @@ function loadPORequirements() {
           '<button class="po-req-push" data-push-req="' + r.id + '" onclick="pushReqToPlanner(' + r.id + ')">&#x1F4CB; To Planner</button>' : '') +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/requirements'));
 }
 
 function pushReqToPlanner(reqId) {
@@ -569,7 +615,7 @@ function pushReqToPlanner(reqId) {
     setTimeout(function(){ document.addEventListener('click', function _close(e) {
       if (!picker.contains(e.target)) { picker.remove(); document.removeEventListener('click', _close); }
     }); }, 0);
-  });
+  }).catch(_agentsOnErr('planner-projects'));
 }
 
 function _doPushReq(reqId, projectId) {
@@ -583,7 +629,7 @@ function _doPushReq(reqId, projectId) {
   .then(function(r){return r.json();}).then(function(d) {
     if (d.ok) { loadPORequirements(); }
     else { alert(d.error || d.message || 'Could not push to planner.'); }
-  });
+  }).catch(_agentsOnErr('agent/product_owner/requirement'));
 }
 
 function loadPOResearch() {
@@ -609,7 +655,7 @@ function loadPOResearch() {
         sources +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/research'));
 }
 
 function loadPOFindings() {
@@ -626,7 +672,7 @@ function loadPOFindings() {
         '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/findings'));
 }
 
 function loadPOGoals() {
@@ -646,7 +692,7 @@ function loadPOGoals() {
         '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#a78bfa;border-radius:2px"></div></div>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/goals'));
 }
 
 function loadPOEvolution() {
@@ -669,7 +715,7 @@ function loadPOEvolution() {
         '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/product_owner/evolution'));
 }
 
 /* ── Project Manager Panel ────────────────────── */
@@ -703,7 +749,7 @@ function loadPMMetrics() {
     el.innerHTML = kpis.map(function(k) {
       return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/project_manager/metrics'));
 }
 
 function loadPMVelocity() {
@@ -733,7 +779,7 @@ function loadPMVelocity() {
         '<div class="agent-stat"><div class="agent-stat-val" style="color:#f59e0b">' + (d.blocked || 0) + '</div><div class="agent-stat-lbl">Blocked</div></div>' +
         '<div class="agent-stat"><div class="agent-stat-val" style="color:#ef4444">' + (d.overdue || 0) + '</div><div class="agent-stat-lbl">Overdue</div></div>' +
       '</div>';
-  });
+  }).catch(_agentsOnErr('agent/project_manager/velocity'));
 }
 
 function loadPMBreakdown() {
@@ -784,7 +830,7 @@ function loadPMBreakdown() {
       '</div>';
     }).join('');
     el.innerHTML += '<button onclick="triggerAgentCycle(\'project_manager\')" class="brain-act-btn" style="margin-top:8px;background:linear-gradient(135deg,#06b6d4,#0891b2)">\uD83D\uDCCB Run PM Cycle</button>';
-  });
+  }).catch(_agentsOnErr('agent/project_manager/breakdown'));
 }
 
 function loadPMFindings() {
@@ -801,7 +847,7 @@ function loadPMFindings() {
         '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/project_manager/findings'));
 }
 
 function loadPMResearch() {
@@ -827,7 +873,7 @@ function loadPMResearch() {
         sources +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/project_manager/research'));
 }
 
 function loadPMGoals() {
@@ -847,7 +893,7 @@ function loadPMGoals() {
         '<div style="width:50px;height:4px;background:var(--border);border-radius:2px;overflow:hidden"><div style="height:100%;width:' + pct + '%;background:#06b6d4;border-radius:2px"></div></div>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/project_manager/goals'));
 }
 
 function loadPMEvolution() {
@@ -870,7 +916,7 @@ function loadPMEvolution() {
         '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/project_manager/evolution'));
 }
 
 /* ── Architect Panel ──────────────────────────── */
@@ -908,7 +954,7 @@ function loadArchMetrics() {
     el.innerHTML = kpis.map(function(k) {
       return '<div class="agent-stat"><div class="agent-stat-val">' + k.val + '</div><div class="agent-stat-lbl">' + k.lbl + '</div></div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/architect/metrics'));
 }
 
 function loadArchHealth() {
@@ -981,7 +1027,7 @@ function loadArchHealth() {
           }).join('');
       }
     }
-  });
+  }).catch(_agentsOnErr('agent/architect/health'));
 }
 
 function loadArchFindings() {
@@ -998,7 +1044,7 @@ function loadArchFindings() {
         '<span style="font-size:9px;color:var(--text-muted);white-space:nowrap">' + f.category + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/architect/findings'));
 }
 
 function loadArchResearch() {
@@ -1024,7 +1070,7 @@ function loadArchResearch() {
         sources +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/architect/research'));
 }
 
 function loadArchEvolution() {
@@ -1047,7 +1093,7 @@ function loadArchEvolution() {
         '<span style="font-size:9px;color:var(--text-muted)">' + (e.created_at ? timeSince(new Date(e.created_at)) + ' ago' : '') + '</span>' +
       '</div>';
     }).join('');
-  });
+  }).catch(_agentsOnErr('agent/architect/evolution'));
 }
 
 function triggerAgentCycle(agentName) {
@@ -1066,7 +1112,7 @@ function triggerAgentCycle(agentName) {
     } else {
       alert(d.message || 'Could not start cycle');
     }
-  });
+  }).catch(_agentsOnErr('agent/cycle'));
 }
 
 /* Lens functions removed — Code Brain merged into agent panels */

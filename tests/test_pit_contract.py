@@ -176,8 +176,11 @@ class TestBuiltinPatternCoverage:
     this test fails."""
 
     def test_builtin_patterns_classify_pit(self):
-        from app.services.trading.pattern_engine import _BUILTIN_PATTERNS
-        for bp in _BUILTIN_PATTERNS:
+        from app.services.trading.pattern_engine import (
+            _BUILTIN_INTRADAY_PATTERNS,
+            _BUILTIN_PATTERNS,
+        )
+        for bp in (*_BUILTIN_PATTERNS, *_BUILTIN_INTRADAY_PATTERNS):
             result = pit.classify_rules(bp.get("rules_json"))
             assert result["non_pit"] == [], (
                 f"pattern {bp.get('name')!r} has non_pit fields: {result['non_pit']}"

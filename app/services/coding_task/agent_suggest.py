@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 from ...models import PlanTask
 from .envelope import truncate_text
 from .service import build_handoff_dict
-from .workspaces import lookup_workspace_repo_for_profile
+from .workspaces import lookup_workspace_repo_for_profile, workspace_binding_reason
 
 # Prompt bounds (allowlist-only context; no full clarifications / artifacts / raw logs)
 _BRIDGE_TITLE_MAX_BYTES = 1500
@@ -115,11 +115,14 @@ async def run_agent_suggest_for_task(
     profile = task.coding_profile
     repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is None:
+        reason = workspace_binding_reason(db, profile, user_id=user_id) or (
+            "No active registered workspace matches this task profile. Bind the task to a Project workspace "
+            "with code_repo_id or a registered legacy repo_index before running agent suggest."
+        )
         return {
-            "error": (
-                "No active registered workspace matches this task profile. Bind the task to a Project workspace "
-                "with code_repo_id or a registered legacy repo_index before running agent suggest."
-            )
+            "error": reason,
+            "workspace_unbound": True,
+            "workspace_reason": reason,
         }
 
     prompt = build_bounded_implementation_prompt(handoff, extra_instructions)

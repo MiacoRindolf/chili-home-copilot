@@ -1,4 +1,4 @@
-"""Migration 154 — partial UNIQUE index on trading_trades.broker_order_id.
+"""Migration 161 — partial UNIQUE index on trading_trades.broker_order_id.
 
 Verifies:
   * The index exists on the test database.
@@ -29,7 +29,7 @@ def test_unique_index_exists(db):
         "  AND tablename = 'trading_trades' "
         "  AND indexname = 'ix_trading_trades_broker_order_id_unique'"
     )).fetchone()
-    assert row is not None, "migration 154 did not create the unique index"
+    assert row is not None, "migration 161 did not create the unique index"
 
 
 def test_duplicate_broker_order_id_is_rejected(db):

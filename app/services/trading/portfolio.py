@@ -181,6 +181,15 @@ def close_trade(
     except Exception:
         pass
 
+    # Phase 2C: neural mesh plasticity hook. Safe no-op when
+    # chili_mesh_plasticity_enabled is False (the default).
+    try:
+        from .brain_neural_mesh.plasticity import handle_trade_close_plasticity
+
+        handle_trade_close_plasticity(db, trade)
+    except Exception:
+        pass
+
     db.commit()
     db.refresh(trade)
     return trade

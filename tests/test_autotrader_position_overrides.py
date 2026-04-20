@@ -115,6 +115,7 @@ def test_monitor_skips_live_trade_when_monitor_paused(
     monkeypatch.setattr(_s, "chili_autotrader_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_live_enabled", True)
     monkeypatch.setattr(_s, "chili_autotrader_rth_only", False)
+    monkeypatch.setattr(_s, "chili_autotrader_user_id", int(user.id))
 
     t = _mk_autotrader_trade(db, user.id, "PAUS")
     # Pause monitor
@@ -311,7 +312,18 @@ def test_close_position_now_live(paired_client, db: Session) -> None:
         "order_id": "rh-42",
         "raw": {"average_price": "11.25", "state": "filled"},
     }
+    fake_adapter.get_product.return_value = ({"market_hours_mic": "XNAS", "tradable": True, "tick_size": 0.01}, False)
 
+    rth_window = {
+        "ticker": "CLT1",
+        "session": "regular_hours",
+        "session_label": "Regular session",
+        "market_hours": "regular_hours",
+        "next_eligible_session_at": None,
+        "overnight_eligible": False,
+        "can_submit_now": True,
+        "execution_reason": "Regular session",
+    }
     with patch(
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
         return_value=fake_adapter,
@@ -358,7 +370,18 @@ def test_close_position_now_live_plan_levels(paired_client, db: Session) -> None
         "order_id": "rh-plan-42",
         "raw": {"average_price": "9.10", "state": "filled"},
     }
+    fake_adapter.get_product.return_value = ({"market_hours_mic": "XNAS", "tradable": True, "tick_size": 0.01}, False)
 
+    rth_window = {
+        "ticker": "CLP2",
+        "session": "regular_hours",
+        "session_label": "Regular session",
+        "market_hours": "regular_hours",
+        "next_eligible_session_at": None,
+        "overnight_eligible": False,
+        "can_submit_now": True,
+        "execution_reason": "Regular session",
+    }
     with patch(
         "app.services.trading.venue.robinhood_spot.RobinhoodSpotAdapter",
         return_value=fake_adapter,

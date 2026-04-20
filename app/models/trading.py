@@ -101,6 +101,9 @@ class Trade(Base):
     pending_exit_requested_at: Optional[datetime] = Column(DateTime, nullable=True)
     pending_exit_reason: Optional[str] = Column(String(50), nullable=True)
     pending_exit_limit_price: Optional[float] = Column(Float, nullable=True)
+    # Phase 2C: neural mesh correlation id for the entry signal. Plasticity uses
+    # this to look up the activation path on close.
+    mesh_entry_correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
 
 
 class AutoTraderRun(Base):
@@ -1044,6 +1047,62 @@ class BrainGraphMetric(Base):
     value_num: float = Column(Float, nullable=False, default=0.0)
     extra: Optional[dict] = Column(JSONB, nullable=True)
     updated_at: datetime = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+
+
+class BrainGraphEdgeMutation(Base):
+    """Phase 2C: audit row for every edge weight / gate change.
+
+    Source of truth for plasticity rollback. ``reason`` records what drove the
+    change ('trade_outcome' | 'learning_cycle' | 'manual' | 'budget_capped').
+    ``evidence_ref`` carries enough context (trade_id, pnl, correlation_id) to
+    reconstruct the update after the fact.
+    """
+
+    __tablename__ = "brain_graph_edge_mutations"
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    edge_id: int = Column(
+        Integer,
+        ForeignKey("brain_graph_edges.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    old_weight: float = Column(Float, nullable=False)
+    new_weight: float = Column(Float, nullable=False)
+    old_min_source_confidence: Optional[float] = Column(Float, nullable=True)
+    new_min_source_confidence: Optional[float] = Column(Float, nullable=True)
+    reason: str = Column(String(40), nullable=False)
+    evidence_ref: Optional[dict] = Column(JSONB, nullable=True)
+    delta_source: str = Column(String(40), nullable=False)
+    applied: bool = Column(Boolean, nullable=False, default=True)
+    dry_run: bool = Column(Boolean, nullable=False, default=False)
+    correlation_id: Optional[str] = Column(String(64), nullable=True, index=True)
+    applied_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False, index=True)
+
+
+class BrainActivationPathLog(Base):
+    """Phase 2C: per-hop record of propagation paths that terminated at an action node.
+
+    Enables plasticity to trace which edges carried the signal for a trade's
+    entry correlation_id and reinforce/attenuate those specific edges.
+    """
+
+    __tablename__ = "brain_activation_path_log"
+
+    correlation_id: str = Column(String(64), primary_key=True)
+    hop_idx: int = Column(Integer, primary_key=True)
+    source_node_id: str = Column(String(80), nullable=False, index=True)
+    target_node_id: str = Column(String(80), nullable=False, index=True)
+    edge_id: Optional[int] = Column(
+        Integer,
+        ForeignKey("brain_graph_edges.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    activation_before: float = Column(Float, nullable=False, default=0.0)
+    activation_after: float = Column(Float, nullable=False, default=0.0)
+    confidence_at_hop: float = Column(Float, nullable=False, default=0.5)
+    recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
 class MomentumStrategyVariant(Base):

@@ -1,8 +1,9 @@
 """Shared FastAPI dependencies for CHILI routes."""
-from fastapi import Depends, Request
+from fastapi import Depends, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 
+from .config import settings
 from .db import SessionLocal
 from .pairing import DEVICE_COOKIE_NAME, get_identity, get_identity_record
 
@@ -47,3 +48,21 @@ def require_paired(request: Request, db: Session = Depends(get_db)):
     if ctx["is_guest"]:
         return None
     return ctx
+
+
+def require_project_domain_enabled() -> None:
+    """Kill switch for the /brain?domain=project developer cockpit.
+
+    Returns 503 when ``settings.project_domain_enabled`` is False so
+    mutations and bootstrap both fail closed without a redeploy.
+    """
+    if not settings.project_domain_enabled:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "ok": False,
+                "disabled": True,
+                "domain": "project",
+                "message": "The project domain is currently disabled.",
+            },
+        )

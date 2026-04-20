@@ -8555,7 +8555,7 @@ def _migration_151_trade_management_scope(conn) -> None:
     conn.commit()
 
 
-def _migration_152_order_state_log(conn) -> None:
+def _migration_159_order_state_log(conn) -> None:
     """P1.1 — formal order state machine log.
 
     Canonical states:
@@ -8606,7 +8606,7 @@ def _migration_152_order_state_log(conn) -> None:
     conn.commit()
 
 
-def _migration_154_trade_broker_order_id_unique(conn) -> None:
+def _migration_161_trade_broker_order_id_unique(conn) -> None:
     """P0.3 — partial UNIQUE index on ``trading_trades.broker_order_id``.
 
     Without this, two concurrent AutoTrader ticks (or a tick racing with
@@ -8653,7 +8653,7 @@ def _migration_154_trade_broker_order_id_unique(conn) -> None:
     if dupes:
         dup_ids = [int(r[0]) for r in dupes]
         logger.warning(
-            "[migration_154] dedup quarantined %d trading_trades with duplicate "
+            "[migration_161] dedup quarantined %d trading_trades with duplicate "
             "broker_order_id; ids=%s",
             len(dup_ids), dup_ids,
         )
@@ -8682,7 +8682,7 @@ def _migration_154_trade_broker_order_id_unique(conn) -> None:
     conn.commit()
 
 
-def _migration_153_exec_events_venue_ts_index(conn) -> None:
+def _migration_160_exec_events_venue_ts_index(conn) -> None:
     """P1.2 — composite ``(venue, recorded_at)`` index on execution events.
 
     The venue-health circuit breaker queries ``trading_execution_events``
@@ -8710,6 +8710,885 @@ def _migration_153_exec_events_venue_ts_index(conn) -> None:
             "CREATE INDEX ix_trading_execution_events_venue_ts "
             "ON trading_execution_events (venue, recorded_at)"
         ))
+    conn.commit()
+
+
+# (version_id, callable that receives conn and runs migration)
+
+
+def _migration_152_operational_clusters(conn) -> None:
+    """Phase 2A: Add operational clusters for the L1-L7 spine.
+
+    Mirrors the L8 learning-cycle cluster pattern on the operational side so
+    every operational node belongs to a named cluster. Additive:
+    - Inserts 8 operational cluster nodes at layer 8, node_type='operational_cluster'.
+    - Stamps display_meta.operational_cluster_id on each member node.
+    - Adds structural edges (member<->cluster) with unique signal_types
+      ('cluster_roll_up' / 'cluster_wake') that no existing code emits, so
+      propagation behavior is unchanged. Future phases may start emitting them.
+    """
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    # (cluster_id, label, description, member_node_ids)
+    operational_clusters: list[tuple[str, str, str, list[str]]] = [
+        (
+            "nm_c_sensing",
+            "Sensing",
+            "Market-data ingestion and per-venue provider truth.",
+            [
+                "nm_snap_daily", "nm_snap_intraday", "nm_snap_crypto", "nm_universe_scan",
+                "nm_venue_truth_coinbase", "nm_venue_truth_robinhood",
+            ],
+        ),
+        (
+            "nm_c_features",
+            "Feature Extraction",
+            "Technical features derived from snapshots (volatility, momentum, liquidity, breadth, intermarket).",
+            [
+                "nm_volatility", "nm_momentum", "nm_anomaly",
+                "nm_liquidity_state", "nm_breadth_state", "nm_intermarket_state",
+            ],
+        ),
+        (
+            "nm_c_market_state",
+            "Latent Market State",
+            "Working memory, regime, thesis, and confidence accumulators.",
+            [
+                "nm_event_bus", "nm_working_memory", "nm_regime", "nm_contradiction",
+                "nm_active_thesis_state", "nm_confidence_accumulator",
+                "nm_memory_freshness", "nm_exec_liquidity_regime",
+            ],
+        ),
+        (
+            "nm_c_pattern_inference",
+            "Pattern Inference",
+            "Pattern discovery, similarity, and trade-context association.",
+            ["nm_pattern_disc", "nm_similarity", "nm_trade_context"],
+        ),
+        (
+            "nm_c_evidence",
+            "Evidence & Verification",
+            "Backtest, replay, counterfactual, and execution-quality verification.",
+            [
+                "nm_evidence_bt", "nm_evidence_replay", "nm_evidence_quality",
+                "nm_counterfactual_challenger", "nm_contradiction_verifier",
+                "nm_exec_spread_quality",
+            ],
+        ),
+        (
+            "nm_c_decision",
+            "Decision & Expression",
+            "Action signals, alerts, risk gating, sizing, and observer outputs.",
+            [
+                "nm_action_signals", "nm_action_alerts", "nm_risk_gate",
+                "nm_sizing_policy", "nm_exec_readiness_gate",
+                "nm_observer_journal", "nm_observer_playbook",
+            ],
+        ),
+        (
+            "nm_c_reactive_sensors",
+            "Reactive Sensors",
+            "Real-time trading sensors (stop eval, pattern health, imminent eval).",
+            ["nm_stop_eval", "nm_pattern_health", "nm_imminent_eval"],
+        ),
+        (
+            "nm_c_meta_ops",
+            "Operational Meta",
+            "Ops-side meta (reweight, decay, threshold tuner, promotion monitor). Distinct from L8 learning-cycle meta.",
+            [
+                "nm_meta_reweight", "nm_meta_decay",
+                "nm_threshold_tuner", "nm_promotion_demotion_monitor",
+            ],
+        ),
+    ]
+
+    # 1. Insert cluster nodes (layer 8, high fire_threshold so they effectively never fire on their own)
+    for cid, label, desc, _members in operational_clusters:
+        dmeta = {
+            "role": "operational_cluster",
+            "cluster_kind": "operational",
+            "operational_cluster_id": cid,
+            "description": desc,
+            "remarks": "Phase 2A operational cluster. Groups L1-L7 spine nodes for audit and future cluster-level activation.",
+        }
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, 'operational_cluster', 8, :label,
+                    0.99, 60, TRUE, 1, FALSE,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"id": cid, "domain": dom, "gv": gv, "label": label, "dmeta": json.dumps(dmeta)},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": cid},
+        )
+
+    # 2. Stamp operational_cluster_id on member nodes (skip missing nodes silently)
+    for cid, _label, _desc, members in operational_clusters:
+        for mid in members:
+            conn.execute(
+                text(
+                    """
+                    UPDATE brain_graph_nodes
+                    SET display_meta = jsonb_set(
+                        COALESCE(display_meta, '{}'::jsonb),
+                        '{operational_cluster_id}',
+                        cast(:cid_json as jsonb)
+                    ),
+                    updated_at = CURRENT_TIMESTAMP
+                    WHERE id = :nid
+                    """
+                ),
+                {"nid": mid, "cid_json": f'"{cid}"'},
+            )
+
+    # 3. Structural edges: member -> cluster (roll_up) and cluster -> member (wake).
+    #    signal_types are unique to this migration so no existing emitter activates them.
+    for cid, _label, _desc, members in operational_clusters:
+        for mid in members:
+            for (src, tgt, sig) in (
+                (mid, cid, "cluster_roll_up"),
+                (cid, mid, "cluster_wake"),
+            ):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO brain_graph_edges (
+                            source_node_id, target_node_id, signal_type, weight, polarity,
+                            delay_ms, min_confidence, enabled, graph_version, gate_config,
+                            edge_type, min_source_confidence,
+                            created_at, updated_at
+                        )
+                        SELECT :src, :tgt, :sig, 0.3, 'excitatory',
+                            0, 0.0, TRUE, :gv, NULL,
+                            'control', 0.0,
+                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                          AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                          AND NOT EXISTS (
+                            SELECT 1 FROM brain_graph_edges e
+                            WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                              AND e.signal_type = :sig AND e.graph_version = :gv
+                          )
+                        """
+                    ),
+                    {"src": src, "tgt": tgt, "sig": sig, "gv": gv},
+                )
+
+    conn.commit()
+
+
+def _migration_153_portfolio_and_exit_clusters(conn) -> None:
+    """Phase 2B: Portfolio and exit execution sub-graph.
+
+    Adds two operational clusters plus their member nodes so the mesh has a
+    first-class representation of portfolio state and exit lifecycle:
+
+    - nm_c_portfolio: portfolio_state, exposure_heat, trade_lifecycle_hub,
+      pending_orders, pdt_state.
+    - nm_c_exit_execution: exit_policy, trail_engine, target_engine, exit_trigger.
+
+    Adds behavioral edge nm_exposure_heat -> nm_risk_gate (veto) and
+    nm_pdt_state -> nm_risk_gate (veto). These activate only when callers start
+    publishing exposure_update / trade_lifecycle events, so propagation stays
+    quiet until Phase B integration hooks are wired in.
+    """
+    import json
+
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+    dom = "trading"
+
+    # 1. New cluster nodes (layer 8, operational_cluster)
+    new_clusters = [
+        ("nm_c_portfolio", "Portfolio State",
+         "Open trades, exposure, pending orders, regulatory status. Bridge between decisions and their outcomes."),
+        ("nm_c_exit_execution", "Exit Execution",
+         "Exit policy, trail/target engines, terminal exit trigger. Symmetric to entry execution."),
+    ]
+    for cid, label, desc in new_clusters:
+        dmeta = {
+            "role": "operational_cluster",
+            "cluster_kind": "operational",
+            "operational_cluster_id": cid,
+            "description": desc,
+            "remarks": "Phase 2B operational cluster (portfolio / exit axis).",
+        }
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, 'operational_cluster', 8, :label,
+                    0.99, 60, TRUE, 1, FALSE,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {"id": cid, "domain": dom, "gv": gv, "label": label, "dmeta": json.dumps(dmeta)},
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": cid},
+        )
+
+    # 2. Member nodes: (id, layer, node_type, label, fire_th, cooldown_s, cluster_id, description, remarks)
+    member_nodes = [
+        # nm_c_portfolio members
+        ("nm_portfolio_state", 3, "portfolio_aggregator", "Portfolio state", 0.45, 30,
+         "nm_c_portfolio",
+         "Rolls up open trades: count, notional, per-venue split, unrealized pnl.",
+         "L3 latent state aggregating live Trade rows. Fed by trade_lifecycle updates."),
+        ("nm_exposure_heat", 5, "portfolio_risk", "Exposure heat", 0.50, 30,
+         "nm_c_portfolio",
+         "Sector / venue / correlation heat vs. configured budget. Fires when over limit.",
+         "L5 evidence. Inhibits risk_gate when exposure exceeds budget."),
+        ("nm_trade_lifecycle_hub", 6, "trade_lifecycle", "Trade lifecycle hub", 0.40, 15,
+         "nm_c_portfolio",
+         "Fires on any open trade transition (entry, scale-in, scale-out, close).",
+         "L6 action. Central source of trade-state activation for the mesh."),
+        ("nm_pending_orders", 3, "order_book_state", "Pending orders", 0.45, 30,
+         "nm_c_portfolio",
+         "Working / unfilled orders per venue. Tracks broker order-book commitments.",
+         "L3 latent state. Fed by venue_truth refresh + order placement events."),
+        ("nm_pdt_state", 2, "regulatory_state", "PDT state", 0.60, 120,
+         "nm_c_portfolio",
+         "Pattern day trader rule status (equities). Inhibits new entries when at the PDT limit.",
+         "L2 feature. Equities-only; crypto venues are unaffected."),
+        # nm_c_exit_execution members
+        ("nm_exit_policy", 6, "exit_policy", "Exit policy", 0.45, 30,
+         "nm_c_exit_execution",
+         "Aggregates stop model / target / trail rules per open trade.",
+         "L6 action. Reads stop_eval and pattern_health, emits to trail/target engines."),
+        ("nm_trail_engine", 5, "exit_trail", "Trail engine", 0.50, 30,
+         "nm_c_exit_execution",
+         "Computes trailing-stop moves from high-watermark and configured trail logic.",
+         "L5 evidence. Fires when trail should move; feeds exit_trigger."),
+        ("nm_target_engine", 5, "exit_target", "Target engine", 0.50, 30,
+         "nm_c_exit_execution",
+         "Fires when take-profit thresholds cross.",
+         "L5 evidence. Fires on TP hit; feeds exit_trigger."),
+        ("nm_exit_trigger", 6, "exit_decision", "Exit trigger", 0.55, 15,
+         "nm_c_exit_execution",
+         "Terminal: fires exit order; signals action_signals with exit intent.",
+         "L6 action. Downstream of trail/target engines and exit policy."),
+    ]
+    for nid, layer, ntype, label, fth, cd, cid, desc, remarks in member_nodes:
+        dmeta = {
+            "role": ntype,
+            "operational_cluster_id": cid,
+            "description": desc,
+            "remarks": remarks,
+        }
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, FALSE,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid, "domain": dom, "gv": gv, "ntype": ntype,
+                "layer": layer, "label": label, "fth": fth, "cd": cd,
+                "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # 3. Edges
+    edges = [
+        # Portfolio flow
+        ("nm_trade_lifecycle_hub", "nm_portfolio_state", "trade_lifecycle", 0.75, "excitatory", "dataflow"),
+        ("nm_portfolio_state", "nm_exposure_heat", "portfolio_update", 0.75, "excitatory", "evidence"),
+        ("nm_exposure_heat", "nm_risk_gate", "exposure_exceeded", 0.90, "inhibitory", "veto"),
+        ("nm_pdt_state", "nm_risk_gate", "pdt_blocked", 0.90, "inhibitory", "veto"),
+        # Venue truth informs pending orders (tradability, quotes)
+        ("nm_venue_truth_coinbase", "nm_pending_orders", "venue_refresh", 0.60, "excitatory", "dataflow"),
+        ("nm_venue_truth_robinhood", "nm_pending_orders", "venue_refresh", 0.60, "excitatory", "dataflow"),
+        # Exit execution chain
+        ("nm_stop_eval", "nm_exit_policy", "stop_eval", 0.70, "excitatory", "dataflow"),
+        ("nm_pattern_health", "nm_exit_policy", "pattern_health_change", 0.65, "excitatory", "evidence"),
+        ("nm_trade_lifecycle_hub", "nm_exit_policy", "trade_lifecycle", 0.55, "excitatory", "dataflow"),
+        ("nm_exit_policy", "nm_trail_engine", "exit_policy", 0.70, "excitatory", "control"),
+        ("nm_exit_policy", "nm_target_engine", "exit_policy", 0.70, "excitatory", "control"),
+        ("nm_trail_engine", "nm_exit_trigger", "trail_move", 0.75, "excitatory", "evidence"),
+        ("nm_target_engine", "nm_exit_trigger", "target_hit", 0.80, "excitatory", "evidence"),
+        ("nm_exit_trigger", "nm_action_signals", "exit_intent", 0.75, "excitatory", "control"),
+    ]
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    # 4. Structural cluster edges (roll_up / wake) for the new clusters' members.
+    cluster_members = {
+        "nm_c_portfolio": [
+            "nm_portfolio_state", "nm_exposure_heat", "nm_trade_lifecycle_hub",
+            "nm_pending_orders", "nm_pdt_state",
+        ],
+        "nm_c_exit_execution": [
+            "nm_exit_policy", "nm_trail_engine", "nm_target_engine", "nm_exit_trigger",
+        ],
+    }
+    for cid, members in cluster_members.items():
+        for mid in members:
+            for (src, tgt, sig) in (
+                (mid, cid, "cluster_roll_up"),
+                (cid, mid, "cluster_wake"),
+            ):
+                conn.execute(
+                    text(
+                        """
+                        INSERT INTO brain_graph_edges (
+                            source_node_id, target_node_id, signal_type, weight, polarity,
+                            delay_ms, min_confidence, enabled, graph_version, gate_config,
+                            edge_type, min_source_confidence,
+                            created_at, updated_at
+                        )
+                        SELECT :src, :tgt, :sig, 0.3, 'excitatory',
+                            0, 0.0, TRUE, :gv, NULL,
+                            'control', 0.0,
+                            CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                          AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                          AND NOT EXISTS (
+                            SELECT 1 FROM brain_graph_edges e
+                            WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                              AND e.signal_type = :sig AND e.graph_version = :gv
+                          )
+                        """
+                    ),
+                    {"src": src, "tgt": tgt, "sig": sig, "gv": gv},
+                )
+
+    conn.commit()
+
+
+def _migration_154_spine_to_learning_feedback_edges(conn) -> None:
+    """Phase 2D: feedback edges from operational spine into the learning cycle.
+
+    Migration 108 added causal edges from learning-cycle step nodes to the spine;
+    this migration closes the loop the other direction so the learning cycle
+    ingests real operational state.
+
+    All edges are ``feedback`` type with modest weight (0.5). They only activate
+    when the source nodes fire — they do not create new pipeline hops.
+    """
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+
+    edges = [
+        # Trade outcomes feed meta-learning (every close is training signal).
+        ("nm_trade_lifecycle_hub", "nm_lc_c_meta_learning", "trade_lifecycle",
+         0.50, "excitatory", "feedback"),
+        # Exposure heat informs cycle control (risk status can gate cycle progress).
+        ("nm_exposure_heat", "nm_lc_c_control", "exposure_exceeded",
+         0.50, "excitatory", "feedback"),
+        # Decisioning outputs can adjust edge thresholds via the meta-reweight node.
+        ("nm_lc_c_decisioning", "nm_meta_reweight", "cluster_completed",
+         0.50, "excitatory", "feedback"),
+    ]
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    conn.commit()
+
+
+def _migration_155_plasticity_tables_and_nodes(conn) -> None:
+    """Phase 2C: plasticity audit tables + engine/budget mesh nodes.
+
+    Creates:
+    - brain_graph_edge_mutations: append-only audit of every (proposed or applied)
+      edge weight / gate change.
+    - brain_activation_path_log: per-hop record of correlation paths that
+      terminated at an action node; enables plasticity to find which edges
+      carried a trade's signal.
+    - nm_plasticity_engine, nm_plasticity_budget mesh nodes (in nm_c_meta_ops).
+
+    The engine runs behind a feature flag (chili_mesh_plasticity_enabled) with
+    dry_run defaulting to True, so this migration does not on its own change any
+    edge weights.
+    """
+    import json
+
+    tables = _tables(conn)
+
+    # 1. brain_graph_edge_mutations
+    if "brain_graph_edge_mutations" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_edge_mutations (
+                    id BIGSERIAL PRIMARY KEY,
+                    edge_id INTEGER NOT NULL REFERENCES brain_graph_edges(id) ON DELETE CASCADE,
+                    old_weight DOUBLE PRECISION NOT NULL,
+                    new_weight DOUBLE PRECISION NOT NULL,
+                    old_min_source_confidence DOUBLE PRECISION NULL,
+                    new_min_source_confidence DOUBLE PRECISION NULL,
+                    reason VARCHAR(40) NOT NULL,
+                    evidence_ref JSONB NULL,
+                    delta_source VARCHAR(40) NOT NULL,
+                    applied BOOLEAN NOT NULL DEFAULT TRUE,
+                    dry_run BOOLEAN NOT NULL DEFAULT FALSE,
+                    correlation_id VARCHAR(64) NULL,
+                    applied_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_bgem_edge ON brain_graph_edge_mutations(edge_id)"))
+        conn.execute(text("CREATE INDEX ix_bgem_applied_at ON brain_graph_edge_mutations(applied_at)"))
+        conn.execute(text("CREATE INDEX ix_bgem_correlation ON brain_graph_edge_mutations(correlation_id)"))
+
+    # 2. brain_activation_path_log
+    if "brain_activation_path_log" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_activation_path_log (
+                    correlation_id VARCHAR(64) NOT NULL,
+                    hop_idx INTEGER NOT NULL,
+                    source_node_id VARCHAR(80) NOT NULL,
+                    target_node_id VARCHAR(80) NOT NULL,
+                    edge_id INTEGER NULL REFERENCES brain_graph_edges(id) ON DELETE SET NULL,
+                    activation_before DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    activation_after DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+                    confidence_at_hop DOUBLE PRECISION NOT NULL DEFAULT 0.5,
+                    recorded_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (correlation_id, hop_idx)
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_bapl_src ON brain_activation_path_log(source_node_id)"))
+        conn.execute(text("CREATE INDEX ix_bapl_tgt ON brain_activation_path_log(target_node_id)"))
+        conn.execute(text("CREATE INDEX ix_bapl_edge ON brain_activation_path_log(edge_id)"))
+
+    # 3. Plasticity nodes (in nm_c_meta_ops)
+    if "brain_graph_nodes" not in tables:
+        conn.commit()
+        return
+    gv = 1
+    dom = "trading"
+
+    nodes = [
+        ("nm_plasticity_engine", 7, "plasticity_engine", "Plasticity engine",
+         0.55, 60, "nm_c_meta_ops",
+         "Owns the Hebbian update: on trade close, reweight edges along the activation path.",
+         "Fires only when chili_mesh_plasticity_enabled=True. Dry-run writes audit rows without mutating weights."),
+        ("nm_plasticity_budget", 7, "plasticity_budget", "Plasticity budget",
+         0.70, 300, "nm_c_meta_ops",
+         "Caps total |Δw| per day per edge-type. Fires (inhibitory) when budget is exhausted.",
+         "Hard safety net. Daily cap defaults to 0.5 (chili_mesh_plasticity_daily_budget)."),
+    ]
+    for nid, layer, ntype, label, fth, cd, cid, desc, remarks in nodes:
+        dmeta = {
+            "role": ntype,
+            "operational_cluster_id": cid,
+            "description": desc,
+            "remarks": remarks,
+        }
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_nodes (
+                    id, domain, graph_version, node_type, layer, label,
+                    fire_threshold, cooldown_seconds, enabled, version, is_observer,
+                    display_meta, created_at, updated_at
+                ) VALUES (
+                    :id, :domain, :gv, :ntype, :layer, :label,
+                    :fth, :cd, TRUE, 1, FALSE,
+                    CAST(:dmeta AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                ON CONFLICT (id) DO NOTHING
+                """
+            ),
+            {
+                "id": nid, "domain": dom, "gv": gv, "ntype": ntype,
+                "layer": layer, "label": label, "fth": fth, "cd": cd,
+                "dmeta": json.dumps(dmeta),
+            },
+        )
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_node_states (
+                    node_id, activation_score, confidence, local_state,
+                    last_activated_at, updated_at
+                )
+                VALUES (:nid, 0.0, 0.5, '{}'::jsonb, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                ON CONFLICT (node_id) DO NOTHING
+                """
+            ),
+            {"nid": nid},
+        )
+
+    # 4. Structural cluster membership: add to nm_c_meta_ops
+    for mid in ("nm_plasticity_engine", "nm_plasticity_budget"):
+        for (src, tgt, sig) in (
+            (mid, "nm_c_meta_ops", "cluster_roll_up"),
+            ("nm_c_meta_ops", mid, "cluster_wake"),
+        ):
+            conn.execute(
+                text(
+                    """
+                    INSERT INTO brain_graph_edges (
+                        source_node_id, target_node_id, signal_type, weight, polarity,
+                        delay_ms, min_confidence, enabled, graph_version, gate_config,
+                        edge_type, min_source_confidence,
+                        created_at, updated_at
+                    )
+                    SELECT :src, :tgt, :sig, 0.3, 'excitatory',
+                        0, 0.0, TRUE, :gv, NULL,
+                        'control', 0.0,
+                        CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                    WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                      AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                      AND NOT EXISTS (
+                        SELECT 1 FROM brain_graph_edges e
+                        WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                          AND e.signal_type = :sig AND e.graph_version = :gv
+                      )
+                    """
+                ),
+                {"src": src, "tgt": tgt, "sig": sig, "gv": gv},
+            )
+
+    # 5. Plasticity behavioral edges:
+    #    - nm_trade_lifecycle_hub -> nm_plasticity_engine (close events trigger updates)
+    #    - nm_plasticity_budget -> nm_plasticity_engine (inhibitory veto when over budget)
+    #    - nm_plasticity_engine -> nm_meta_reweight (informs downstream reweight node)
+    edges = [
+        ("nm_trade_lifecycle_hub", "nm_plasticity_engine", "trade_lifecycle",
+         0.70, "excitatory", "feedback"),
+        ("nm_plasticity_budget", "nm_plasticity_engine", "budget_exhausted",
+         0.90, "inhibitory", "veto"),
+        ("nm_plasticity_engine", "nm_meta_reweight", "plasticity_applied",
+         0.60, "excitatory", "control"),
+    ]
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    conn.commit()
+
+
+def _migration_156_observers_and_momentum_bridge(conn) -> None:
+    """Phase 2E: Observer feedback + momentum-neural bridge to main spine.
+
+    Two small changes:
+    1. Observers (nm_observer_journal, nm_observer_playbook) are no longer
+       write-only: clear is_observer and add feedback edges to nm_lc_c_journal.
+    2. Bridge momentum-neural hub (nm_momentum_crypto_intel) to the main-spine
+       momentum node (nm_momentum) so crypto momentum intelligence informs the
+       mainline regime/momentum signals instead of staying parallel.
+    """
+    if "brain_graph_nodes" not in _tables(conn):
+        conn.commit()
+        return
+
+    gv = 1
+
+    # 1. Observers: clear is_observer so they can participate in propagation downstream
+    for observer_id in ("nm_observer_journal", "nm_observer_playbook"):
+        conn.execute(
+            text(
+                "UPDATE brain_graph_nodes "
+                "SET is_observer = FALSE, updated_at = CURRENT_TIMESTAMP "
+                "WHERE id = :id AND is_observer = TRUE"
+            ),
+            {"id": observer_id},
+        )
+
+    # 2. Observer feedback edges into the learning-cycle journal cluster
+    #    and bridge edges from momentum hub to main-spine nm_momentum.
+    edges = [
+        # Observers → learning-cycle journal (so observations feed the market journal).
+        ("nm_observer_journal", "nm_lc_c_journal", "observer_note",
+         0.40, "excitatory", "feedback"),
+        ("nm_observer_playbook", "nm_lc_c_journal", "observer_note",
+         0.40, "excitatory", "feedback"),
+        # Momentum-neural hub → main-spine momentum feature. Typed dataflow so
+        # crypto momentum deltas reach the regime/pattern inference layers.
+        ("nm_momentum_crypto_intel", "nm_momentum", "momentum_context_refresh",
+         0.55, "excitatory", "dataflow"),
+        # And momentum-neural hub → regime (so crypto regime mapping informs main regime)
+        ("nm_momentum_crypto_intel", "nm_regime", "momentum_context_refresh",
+         0.40, "excitatory", "evidence"),
+    ]
+    for src, tgt, sig, w, pol, etype in edges:
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_edges (
+                    source_node_id, target_node_id, signal_type, weight, polarity,
+                    delay_ms, min_confidence, enabled, graph_version, gate_config,
+                    edge_type, min_source_confidence,
+                    created_at, updated_at
+                )
+                SELECT :src, :tgt, :sig, :w, :pol,
+                    0, 0.0, TRUE, :gv, NULL,
+                    :etype, 0.0,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                WHERE EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :src)
+                  AND EXISTS (SELECT 1 FROM brain_graph_nodes n WHERE n.id = :tgt)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM brain_graph_edges e
+                    WHERE e.source_node_id = :src AND e.target_node_id = :tgt
+                      AND e.signal_type = :sig AND e.graph_version = :gv
+                  )
+                """
+            ),
+            {"src": src, "tgt": tgt, "sig": sig, "w": w, "pol": pol, "gv": gv, "etype": etype},
+        )
+
+    conn.commit()
+
+
+def _migration_157_trade_mesh_entry_correlation(conn) -> None:
+    """Phase 2C integration: add Trade.mesh_entry_correlation_id.
+
+    The neural mesh correlation_id for the entry signal that triggered a trade.
+    When the trade closes, plasticity uses this to look up the activation path
+    in brain_activation_path_log and reinforce/attenuate the edges that carried
+    the signal.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+    if "mesh_entry_correlation_id" in _columns(conn, "trading_trades"):
+        conn.commit()
+        return
+    conn.execute(
+        text("ALTER TABLE trading_trades ADD COLUMN mesh_entry_correlation_id VARCHAR(64)")
+    )
+    conn.execute(
+        text(
+            "CREATE INDEX IF NOT EXISTS ix_trading_trades_mesh_corr "
+            "ON trading_trades(mesh_entry_correlation_id)"
+        )
+    )
+    conn.commit()
+
+
+def _migration_158_plasticity_pre_live_snapshot(conn) -> None:
+    """Phase 2C go-live: capture baseline edge weights before plasticity mutates anything.
+
+    Creates brain_graph_edge_weight_baseline with every enabled edge's weight at
+    the moment this migration runs. Plasticity reads this baseline for the
+    weight-drift circuit breaker (chili_mesh_plasticity_drift_cap). Also writes
+    a full JSON snapshot to brain_graph_snapshots for point-in-time rollback.
+    """
+    import json
+
+    tables = _tables(conn)
+    if "brain_graph_edges" not in tables:
+        conn.commit()
+        return
+
+    # Baseline table: one row per edge with the weight at go-live time.
+    if "brain_graph_edge_weight_baseline" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE brain_graph_edge_weight_baseline (
+                    edge_id INTEGER PRIMARY KEY REFERENCES brain_graph_edges(id) ON DELETE CASCADE,
+                    baseline_weight DOUBLE PRECISION NOT NULL,
+                    baseline_min_source_confidence DOUBLE PRECISION NULL,
+                    baseline_label VARCHAR(64) NOT NULL DEFAULT 'plasticity_go_live',
+                    captured_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+    # Seed baseline from current weights. ON CONFLICT DO NOTHING keeps the first
+    # captured weight as the baseline even if this migration were re-run.
+    conn.execute(
+        text(
+            """
+            INSERT INTO brain_graph_edge_weight_baseline (
+                edge_id, baseline_weight, baseline_min_source_confidence, baseline_label
+            )
+            SELECT id, weight, min_source_confidence, 'plasticity_go_live'
+            FROM brain_graph_edges
+            WHERE enabled = TRUE
+            ON CONFLICT (edge_id) DO NOTHING
+            """
+        )
+    )
+
+    # Optional full snapshot to brain_graph_snapshots for rollback / audit.
+    if "brain_graph_snapshots" in tables:
+        rows = conn.execute(
+            text(
+                """
+                SELECT id, source_node_id, target_node_id, signal_type,
+                       weight, polarity, edge_type, min_source_confidence
+                FROM brain_graph_edges
+                WHERE graph_version = 1 AND enabled = TRUE
+                """
+            )
+        ).fetchall()
+        snap = {
+            "label": "plasticity_go_live",
+            "migration": "157",
+            "edge_count": len(rows),
+            "edges": [
+                {
+                    "id": int(r[0]),
+                    "source": r[1],
+                    "target": r[2],
+                    "signal_type": r[3],
+                    "weight": float(r[4]),
+                    "polarity": r[5],
+                    "edge_type": r[6],
+                    "min_source_confidence": float(r[7] or 0.0),
+                }
+                for r in rows
+            ],
+        }
+        conn.execute(
+            text(
+                """
+                INSERT INTO brain_graph_snapshots (graph_version, domain, snapshot_json, created_at)
+                VALUES (1, 'trading', CAST(:s AS jsonb), CURRENT_TIMESTAMP)
+                """
+            ),
+            {"s": json.dumps(snap)},
+        )
+
     conn.commit()
 
 
@@ -8866,9 +9745,16 @@ MIGRATIONS = [
     ("149_schema_drift_repairs", _migration_149_schema_drift_repairs),
     ("150_venue_order_idempotency", _migration_150_venue_order_idempotency),
     ("151_trade_management_scope", _migration_151_trade_management_scope),
-    ("152_order_state_log", _migration_152_order_state_log),
-    ("153_exec_events_venue_ts_index", _migration_153_exec_events_venue_ts_index),
-    ("154_trade_broker_order_id_unique", _migration_154_trade_broker_order_id_unique),
+    ("152_operational_clusters", _migration_152_operational_clusters),
+    ("153_portfolio_and_exit_clusters", _migration_153_portfolio_and_exit_clusters),
+    ("154_spine_to_learning_feedback_edges", _migration_154_spine_to_learning_feedback_edges),
+    ("155_plasticity_tables_and_nodes", _migration_155_plasticity_tables_and_nodes),
+    ("156_observers_and_momentum_bridge", _migration_156_observers_and_momentum_bridge),
+    ("157_trade_mesh_entry_correlation", _migration_157_trade_mesh_entry_correlation),
+    ("158_plasticity_pre_live_snapshot", _migration_158_plasticity_pre_live_snapshot),
+    ("159_order_state_log", _migration_159_order_state_log),
+    ("160_exec_events_venue_ts_index", _migration_160_exec_events_venue_ts_index),
+    ("161_trade_broker_order_id_unique", _migration_161_trade_broker_order_id_unique),
 ]
 
 

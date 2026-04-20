@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, get_identity_ctx
+from ..deps import get_db, get_identity_ctx, require_project_domain_enabled
 from ..services.code_brain import deps_scanner as cb_deps
 from ..services.code_brain import graph as cb_graph
 from ..services.code_brain import indexer as cb_indexer
@@ -25,7 +25,10 @@ from ..services.code_brain import trends as cb_trends
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 
-router = APIRouter(tags=["brain"])
+router = APIRouter(
+    tags=["brain"],
+    dependencies=[Depends(require_project_domain_enabled)],
+)
 
 
 def _agent_not_found(name: str, *, label: str | None = None) -> JSONResponse:

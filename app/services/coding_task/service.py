@@ -186,9 +186,14 @@ def run_validation_for_task(
         trigger_source = "manual"
     assert_ready_for_validation(db, task)
     prof = get_or_create_profile(db, task.id)
+    # Fail-closed preflight: resolve cwd BEFORE mutating any state so a stale
+    # workspace binding surfaces as 409 with no task-state side effects.
     cwd = resolve_profile_cwd(db, prof, user_id=user_id)
 
-    task.coding_readiness_state = "validation_pending"
+    # Persist the run row before the task state transition so the run id
+    # always anchors the "validation_pending" window. The transition is only
+    # visible to other readers after the final commit below — the finally
+    # guard below guarantees we never commit with a non-terminal pair.
     run = CodingTaskValidationRun(
         task_id=task.id,
         trigger_source=trigger_source,
@@ -197,70 +202,85 @@ def run_validation_for_task(
     )
     db.add(run)
     db.flush()
+    task.coding_readiness_state = "validation_pending"
 
     try:
-        steps = run_phase1_validation(cwd)
-        for s in steps:
-            merged = ""
-            if s.stdout:
-                merged += "=== stdout ===\n" + s.stdout
-            if s.stderr:
-                merged += "\n=== stderr ===\n" + s.stderr
-            if s.skip_reason:
-                merged += f"\n[skipped: {s.skip_reason}]"
-            text, blen = truncate_text(merged or "(no output)")
+        try:
+            steps = run_phase1_validation(cwd)
+            for s in steps:
+                merged = ""
+                if s.stdout:
+                    merged += "=== stdout ===\n" + s.stdout
+                if s.stderr:
+                    merged += "\n=== stderr ===\n" + s.stderr
+                if s.skip_reason:
+                    merged += f"\n[skipped: {s.skip_reason}]"
+                text, blen = truncate_text(merged or "(no output)")
+                db.add(
+                    CodingValidationArtifact(
+                        run_id=run.id,
+                        step_key=s.step_key,
+                        kind="skip" if s.skipped else "log",
+                        content=text,
+                        byte_length=blen,
+                    )
+                )
+            record_blockers_for_run(db, task_id=task.id, run_id=run.id, steps=steps)
+            any_timeout = any(s.timed_out for s in steps)
+            failed = any((not s.skipped and (s.timed_out or s.exit_code != 0)) for s in steps)
+            run.timed_out = any_timeout
+            run.exit_code = 1 if failed else 0
+            run.status = "completed"
+            run.finished_at = datetime.utcnow()
+            if failed:
+                task.coding_readiness_state = "blocked"
+            else:
+                task.coding_readiness_state = "ready_for_future_impl"
+        except ValueError as e:
+            run.status = "failed"
+            run.exit_code = 1
+            run.error_message = str(e)[:4000]
+            run.finished_at = datetime.utcnow()
+            task.coding_readiness_state = "blocked"
+            msg, blen = truncate_text(str(e))
             db.add(
                 CodingValidationArtifact(
                     run_id=run.id,
-                    step_key=s.step_key,
-                    kind="skip" if s.skipped else "log",
-                    content=text,
+                    step_key="envelope",
+                    kind="error",
+                    content=msg,
                     byte_length=blen,
                 )
             )
-        record_blockers_for_run(db, task_id=task.id, run_id=run.id, steps=steps)
-        any_timeout = any(s.timed_out for s in steps)
-        failed = any((not s.skipped and (s.timed_out or s.exit_code != 0)) for s in steps)
-        run.timed_out = any_timeout
-        run.exit_code = 1 if failed else 0
-        run.status = "completed"
-        run.finished_at = datetime.utcnow()
-        if failed:
+        except Exception as e:
+            run.status = "failed"
+            run.exit_code = 1
+            run.error_message = str(e)[:4000]
+            run.finished_at = datetime.utcnow()
             task.coding_readiness_state = "blocked"
-        else:
-            task.coding_readiness_state = "ready_for_future_impl"
-    except ValueError as e:
-        run.status = "failed"
-        run.exit_code = 1
-        run.error_message = str(e)[:4000]
-        run.finished_at = datetime.utcnow()
-        task.coding_readiness_state = "blocked"
-        msg, blen = truncate_text(str(e))
-        db.add(
-            CodingValidationArtifact(
-                run_id=run.id,
-                step_key="envelope",
-                kind="error",
-                content=msg,
-                byte_length=blen,
+            msg, blen = truncate_text(str(e))
+            db.add(
+                CodingValidationArtifact(
+                    run_id=run.id,
+                    step_key="internal",
+                    kind="error",
+                    content=msg,
+                    byte_length=blen,
+                )
             )
-        )
-    except Exception as e:
-        run.status = "failed"
-        run.exit_code = 1
-        run.error_message = str(e)[:4000]
-        run.finished_at = datetime.utcnow()
-        task.coding_readiness_state = "blocked"
-        msg, blen = truncate_text(str(e))
-        db.add(
-            CodingValidationArtifact(
-                run_id=run.id,
-                step_key="internal",
-                kind="error",
-                content=msg,
-                byte_length=blen,
-            )
-        )
+    finally:
+        # Terminal-state guarantee: if any handler above leaves the run or task
+        # in a non-terminal state (e.g. an exception raised inside an except
+        # block), coerce both to the blocked/failed terminus before commit so
+        # the (task_state, run_status) pair can never observe as
+        # (validation_pending, running) outside this transaction.
+        if run.status == "running":
+            run.status = "failed"
+            run.exit_code = 1 if run.exit_code is None else run.exit_code
+            run.error_message = run.error_message or "validation run ended without a terminal status"
+            run.finished_at = run.finished_at or datetime.utcnow()
+        if task.coding_readiness_state == "validation_pending":
+            task.coding_readiness_state = "blocked"
 
     task.updated_at = datetime.utcnow()
     db.commit()
@@ -434,7 +454,8 @@ def build_handoff_dict(db: Session, task: PlanTask, *, user_id: int | None = Non
         )
 
     readiness_context = {
-        "coding_readiness_state": task.coding_readiness_state or "not_started",
+        # A4: single source of truth — same derivation as get_coding_summary_dict.
+        "coding_readiness_state": preview_readiness(db, task),
         "open_clarification_count": open_clarification_count(db, task.id),
         "brief_approved_at": prof.brief_approved_at.isoformat() if prof and prof.brief_approved_at else None,
     }

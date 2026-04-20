@@ -13,9 +13,11 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ..deps import get_db, get_identity_ctx
+from ..config import settings
+from ..deps import get_db, get_identity_ctx, require_project_domain_enabled
 from ..schemas.trading import TradingBrainAssistantChatResponse
 from ..services import project_domain_service
+from ..services.coding_task.telemetry import log_event as _log_coding_event
 from ..services import trading_service as ts
 from ..services.code_brain import learning as cb_learning
 from ..services.code_brain import lenses as cb_lenses
@@ -97,6 +99,10 @@ def brain_page(
     if brain_initial_domain == "jobs":
         return RedirectResponse(url="/app/jobs", status_code=302)
 
+    project_domain_enabled = bool(settings.project_domain_enabled)
+    if brain_initial_domain == "project" and not project_domain_enabled:
+        brain_initial_domain = "hub"
+
     ctx = get_identity_ctx(request, db)
     desk = desk_graph_boot_config()
     neural_first_paint = bool(desk.get("mesh_enabled") and desk.get("effective_graph_mode") == "neural")
@@ -111,6 +117,7 @@ def brain_page(
             "brain_initial_domain": brain_initial_domain,
             "trading_brain_desk_config": desk,
             "trading_brain_neural_first_paint": neural_first_paint,
+            "project_domain_enabled": project_domain_enabled,
         },
     )
     # Large inline script in template — avoid stale UI after deploy (Pine export, etc.).
@@ -150,18 +157,19 @@ def api_brain_domains(db: Session = Depends(get_db)):
     code_st = cb_learning.get_code_learning_status()
     reasoning_st = rb_learning.get_reasoning_status()
     jobs_st = _scheduler_worker_jobs_status(db)
-    return JSONResponse({
-        "ok": True,
-        "domains": [
-            {
-                "id": "trading",
-                "label": "Trading",
-                "icon": "\U0001f4c8",
-                "description": "Patterns, backtests, learning cycles, and desk metrics for your watchlists.",
-                "status": "learning" if trading_st.get("running") else "idle",
-                "last_run": trading_st.get("last_run"),
-                "phase": trading_st.get("phase", "idle"),
-            },
+    domains: list[dict] = [
+        {
+            "id": "trading",
+            "label": "Trading",
+            "icon": "\U0001f4c8",
+            "description": "Patterns, backtests, learning cycles, and desk metrics for your watchlists.",
+            "status": "learning" if trading_st.get("running") else "idle",
+            "last_run": trading_st.get("last_run"),
+            "phase": trading_st.get("phase", "idle"),
+        },
+    ]
+    if settings.project_domain_enabled:
+        domains.append(
             {
                 "id": "project",
                 "label": "Project",
@@ -172,28 +180,30 @@ def api_brain_domains(db: Session = Depends(get_db)):
                 "phase": code_st.get("phase", "idle"),
                 "lenses": [l["name"] for l in cb_lenses.list_lenses()],
                 "agents": pb_registry.list_agents(),
-            },
-            {
-                "id": "reasoning",
-                "label": "Reasoning",
-                "icon": "\U0001f9e0",
-                "description": "User model, interests, research threads, and proactive insight chat.",
-                "status": "learning" if reasoning_st.get("running") else "idle",
-                "last_run": reasoning_st.get("last_run"),
-                "phase": reasoning_st.get("phase", "idle"),
-            },
-            {
-                "id": "jobs",
-                "label": "Jobs",
-                "icon": "\U0001f4cb",
-                "description": "Scheduled batch runs, scan payloads, and scheduler-worker heartbeat.",
-                "navigate_url": "/app/jobs",
-                "status": "learning" if jobs_st.get("running") else "idle",
-                "last_run": jobs_st.get("last_run"),
-                "phase": jobs_st.get("phase", "idle"),
-            },
-        ],
-    })
+            }
+        )
+    domains.extend([
+        {
+            "id": "reasoning",
+            "label": "Reasoning",
+            "icon": "\U0001f9e0",
+            "description": "User model, interests, research threads, and proactive insight chat.",
+            "status": "learning" if reasoning_st.get("running") else "idle",
+            "last_run": reasoning_st.get("last_run"),
+            "phase": reasoning_st.get("phase", "idle"),
+        },
+        {
+            "id": "jobs",
+            "label": "Jobs",
+            "icon": "\U0001f4cb",
+            "description": "Scheduled batch runs, scan payloads, and scheduler-worker heartbeat.",
+            "navigate_url": "/app/jobs",
+            "status": "learning" if jobs_st.get("running") else "idle",
+            "last_run": jobs_st.get("last_run"),
+            "phase": jobs_st.get("phase", "idle"),
+        },
+    ])
+    return JSONResponse({"ok": True, "domains": domains})
 
 
 @router.get("/api/brain/status")
@@ -229,14 +239,29 @@ def api_brain_project_bootstrap(
     request: Request,
     db: Session = Depends(get_db),
     planner_task_id: int | None = Query(default=None, ge=1),
+    _: None = Depends(require_project_domain_enabled),
 ):
     """Workspace-first bootstrap payload for the Project domain."""
     ctx = get_identity_ctx(request, db)
+    import time as _t
+    _start = _t.monotonic()
     payload = project_domain_service.build_project_bootstrap_payload(
         db,
         user_id=ctx["user_id"],
         is_guest=bool(ctx["is_guest"]),
         planner_task_id=planner_task_id,
+    )
+    _duration_ms = int((_t.monotonic() - _start) * 1000)
+    _log_coding_event(
+        "bootstrap",
+        "ok",
+        duration_ms=_duration_ms,
+        user_id=ctx["user_id"],
+        task_id=planner_task_id,
+        is_guest=bool(ctx["is_guest"]),
+        workspace_bound=bool(
+            (payload.get("planner_handoff") or {}).get("summary", {}).get("profile", {}).get("workspace_bound")
+        ) if planner_task_id else None,
     )
     return JSONResponse({"ok": True, **payload})
 
