@@ -49,6 +49,27 @@ def main() -> None:
     except Exception as _e:
         logger.warning("[scheduler_worker] Broker session restore failed: %s", _e)
 
+    # Restore kill-switch state before scheduler starts (Hard Rule 1/2:
+    # a tripped breaker must survive process restarts — otherwise the safety
+    # guarantee silently evaporates on every redeploy).
+    try:
+        from app.services.trading.governance import (
+            get_kill_switch_status,
+            restore_kill_switch_from_db,
+        )
+
+        restore_kill_switch_from_db()
+        status = get_kill_switch_status()
+        if status.get("active"):
+            logger.warning(
+                "[scheduler_worker] Kill switch restored ACTIVE: %s — autotrader blocked until manual reset",
+                status.get("reason"),
+            )
+        else:
+            logger.info("[scheduler_worker] Kill switch restored: inactive")
+    except Exception as _e:
+        logger.warning("[scheduler_worker] Kill switch restore failed: %s", _e)
+
     start_scheduler()
     logger.info("[scheduler_worker] Started (CHILI_SCHEDULER_ROLE=%s)", os.environ.get("CHILI_SCHEDULER_ROLE"))
     try:
