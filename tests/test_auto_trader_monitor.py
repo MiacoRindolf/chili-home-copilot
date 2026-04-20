@@ -270,6 +270,7 @@ def test_monitor_manages_non_v1_pattern_linked_trade(db):
         "order_id": "oid-linked",
         "raw": {"average_price": 8.0, "cumulative_quantity": 5},
     }
+    ad._submit_side_effect = None
 
     _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
@@ -314,6 +315,7 @@ def test_monitor_manages_plan_level_trade_without_pattern_link(db):
         "order_id": "oid-plan",
         "raw": {"average_price": 8.0, "cumulative_quantity": 5},
     }
+    ad._submit_side_effect = None
 
     _patch_monitor_settings(chili_autotrader_user_id=u.id, brain_default_user_id=u.id)
     try:
