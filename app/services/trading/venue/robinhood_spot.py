@@ -10,13 +10,14 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from . import idempotency_store, rate_limiter
+from . import idempotency_store, order_state_machine, rate_limiter, venue_health
 from .protocol import (
     FreshnessMeta,
     NormalizedFill,
     NormalizedOrder,
     NormalizedProduct,
     NormalizedTicker,
+    VenueAdapter,
     VenueAdapterError,
 )
 
@@ -96,8 +97,14 @@ def _normalize_rh_fill(od: dict[str, Any]) -> NormalizedFill:
 # ── Adapter ────────────────────────────────────────────────────────────
 
 
-class RobinhoodSpotAdapter:
-    """VenueAdapter for Robinhood equities via broker_service + robin_stocks."""
+class RobinhoodSpotAdapter(VenueAdapter):
+    """VenueAdapter for Robinhood equities via broker_service + robin_stocks.
+
+    Explicitly declares the ``VenueAdapter`` protocol so static type
+    checkers validate every method signature — a mismatch here shows up
+    at import time instead of as a silent method-not-found at the next
+    live fill.
+    """
 
     def is_enabled(self) -> bool:
         from ....config import settings
@@ -365,9 +372,29 @@ class RobinhoodSpotAdapter:
 
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record rate-limit exhaustion for the health breaker.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=ticker, source="rh_place_market",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(
                 _VENUE, retry_after, client_order_id=client_order_id
             )
+
+        # P1.1 — SUBMITTING state before broker call (RH has no
+        # native client_order_id, so we use whatever the caller supplied).
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.SUBMITTING,
+                venue=_VENUE,
+                source="rh_place_market",
+                client_order_id=client_order_id,
+                raw_payload={"ticker": ticker, "side": side.lower(), "qty": qty},
+            )
+        except Exception:
+            pass
 
         from ...broker_service import place_buy_order, place_sell_order
 
@@ -403,12 +430,37 @@ class RobinhoodSpotAdapter:
             )
 
         if result.get("ok"):
+            oid = result.get("order_id", "") or None
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.ACK,
+                    venue=_VENUE,
+                    source="rh_place_market",
+                    order_id=oid,
+                    client_order_id=client_order_id,
+                    broker_status="accepted",
+                    raw_payload={"ticker": ticker, "order_id": oid},
+                )
+            except Exception:
+                pass
             return {
                 "ok": True,
                 "order_id": result.get("order_id", ""),
                 "client_order_id": client_order_id,
                 "raw": result.get("raw", {}),
             }
+        # Non-ok from broker_service → REJECTED.
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.REJECTED,
+                venue=_VENUE,
+                source="rh_place_market",
+                client_order_id=client_order_id,
+                broker_status="rejected",
+                raw_payload={"ticker": ticker, "error": str(result.get("error") or "")},
+            )
+        except Exception:
+            pass
         return result
 
     def place_limit_order_gtc(
@@ -431,9 +483,28 @@ class RobinhoodSpotAdapter:
 
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record rate-limit exhaustion for the health breaker.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=ticker, source="rh_place_limit",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(
                 _VENUE, retry_after, client_order_id=client_order_id
             )
+
+        # P1.1 — SUBMITTING state before broker call.
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.SUBMITTING,
+                venue=_VENUE,
+                source="rh_place_limit",
+                client_order_id=client_order_id,
+                raw_payload={"ticker": ticker, "side": side.lower(), "qty": qty, "limit_price": price},
+            )
+        except Exception:
+            pass
 
         from ...broker_service import place_buy_order, place_sell_order
 
@@ -471,22 +542,65 @@ class RobinhoodSpotAdapter:
             )
 
         if result.get("ok"):
+            oid = result.get("order_id", "") or None
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.ACK,
+                    venue=_VENUE,
+                    source="rh_place_limit",
+                    order_id=oid,
+                    client_order_id=client_order_id,
+                    broker_status="accepted",
+                    raw_payload={"ticker": ticker, "order_id": oid},
+                )
+            except Exception:
+                pass
             return {
                 "ok": True,
                 "order_id": result.get("order_id", ""),
                 "client_order_id": client_order_id,
                 "raw": result.get("raw", {}),
             }
+        try:
+            order_state_machine.record_transition_standalone(
+                to_state=order_state_machine.OrderState.REJECTED,
+                venue=_VENUE,
+                source="rh_place_limit",
+                client_order_id=client_order_id,
+                broker_status="rejected",
+                raw_payload={"ticker": ticker, "error": str(result.get("error") or "")},
+            )
+        except Exception:
+            pass
         return result
 
     def cancel_order(self, order_id: str) -> dict[str, Any]:
         allowed, retry_after = rate_limiter.try_acquire(_VENUE)
         if not allowed:
+            # P1.2 — record rate-limit exhaustion for the health breaker.
+            try:
+                venue_health.record_rate_limit_event(
+                    venue=_VENUE, ticker=None, source="rh_cancel",
+                )
+            except Exception:
+                pass
             return rate_limiter.rate_limited_response(_VENUE, retry_after)
         try:
             import robin_stocks.robinhood as rh
 
             result = rh.orders.cancel_stock_order(order_id)
+            # P1.1 — record CANCELLED transition for the cancel request.
+            try:
+                order_state_machine.record_transition_standalone(
+                    to_state=order_state_machine.OrderState.CANCELLED,
+                    venue=_VENUE,
+                    source="rh_cancel",
+                    order_id=order_id,
+                    broker_status="cancelled",
+                    raw_payload={"cancel_response": result or {}},
+                )
+            except Exception:
+                pass
             return {"ok": True, "raw": result or {}}
         except Exception as e:
             logger.warning("[rh_adapter] cancel_order(%s) failed: %s", order_id, e)

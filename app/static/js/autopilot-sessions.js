@@ -9,6 +9,13 @@
   var runtimeLabel = AP.runtimeLabel;
   var dateLabel = AP.dateLabel;
   var etaLabel = AP.etaLabel;
+  var runnerEtaLabel = AP.runnerEtaLabel || function(h) {
+    var e = h && h.next_tick_eta_seconds;
+    return e == null ? 'n/a' : etaLabel(e);
+  };
+  var runnerTickLabel = AP.runnerTickLabel || function(h) {
+    return h && h.last_tick_utc ? dateLabel(h.last_tick_utc) : 'n/a';
+  };
   var badge = AP.badge;
   var jsonPreview = AP.jsonPreview;
   var runnerStateText = AP.runnerStateText;
@@ -131,7 +138,7 @@
       + '    <div class="ap-metric"><label>Runtime</label><b>' + esc(runtimeLabel(row.runtime || {})) + '</b><small>Lane ' + esc(row.lane || 'simulation') + '</small></div>'
       + '    <div class="ap-metric"><label>Confidence</label><b>' + esc(pct(row.confidence)) + '</b><small>Conviction ' + esc(pct(row.conviction)) + '</small></div>'
       + '    <div class="ap-metric"><label>Sim P&amp;L</label><b class="' + pnlCls + '">' + esc(money(row.simulated_pnl)) + '</b><small>Trades ' + esc(row.trade_count || 0) + '</small></div>'
-      + '    <div class="ap-metric"><label>Runner</label><b>' + esc(runnerStateText(runner)) + '</b><small>Last tick ' + esc(dateLabel(runner.last_tick_utc)) + '</small></div>'
+      + '    <div class="ap-metric"><label>Runner</label><b>' + esc(runnerStateText(runner)) + '</b><small>Last tick ' + esc(runnerTickLabel(runner)) + '</small></div>'
       + '  </div>'
       + '  <div class="ap-session-card__callouts">'
       + '    <div class="ap-callout"><strong>Thesis</strong>' + esc(row.thesis || 'Awaiting next bounded decision update.') + '</div>'
@@ -176,7 +183,7 @@
       + '      </div>'
       + '      <div class="ap-callout"><strong>Runner Health</strong>'
       + '        Blocked: ' + esc((runner.blocked_reason || 'none').replace(/_/g, ' '))
-      + '        <br>ETA: ' + esc(etaLabel(runner.next_tick_eta_seconds))
+      + '        <br>ETA: ' + esc(runnerEtaLabel(runner))
       + '        <br>Heartbeat: ' + esc(dateLabel(runner.scheduler_heartbeat_utc))
       + '      </div>'
       + '      <pre id="ap-runtime-' + sid + '" class="ap-pre">'
@@ -258,7 +265,7 @@
       if (metrics[3]) {
         metrics[3].querySelector('b').textContent = runnerStateText(runner);
         var runSmall = metrics[3].querySelector('small');
-        if (runSmall) runSmall.textContent = 'Last tick ' + dateLabel(runner.last_tick_utc);
+        if (runSmall) runSmall.textContent = 'Last tick ' + runnerTickLabel(runner);
       }
     });
   }

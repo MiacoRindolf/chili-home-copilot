@@ -1881,6 +1881,46 @@ class BracketReconciliationLog(Base):
     observed_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
 
 
+class OrderStateLog(Base):
+    """P1.1 — formal order state machine log.
+
+    Append-only transition log keyed on the venue's ``broker_order_id``
+    (or ``client_order_id`` when we haven't yet learned the broker id).
+    Each row is a single transition from one canonical :class:`OrderState`
+    to another, as produced by
+    ``app.services.trading.venue.order_state_machine``.
+
+    The canonical states are
+    ``DRAFT → SUBMITTING → ACK → PARTIAL → FILLED | CANCELLED | REJECTED | EXPIRED``.
+    Illegal transitions (e.g. ``FILLED → PARTIAL``) are suppressed by the
+    writer and never land here — the invariant that enables clean
+    latency/state metrics downstream (P1.2 venue health).
+    """
+
+    __tablename__ = "trading_order_state_log"
+    __table_args__ = (
+        Index("ix_order_state_log_order", "order_id", "recorded_at"),
+        Index("ix_order_state_log_client", "client_order_id", "recorded_at"),
+        Index("ix_order_state_log_venue_ts", "venue", "recorded_at"),
+        Index("ix_order_state_log_to_state_ts", "to_state", "recorded_at"),
+    )
+
+    id: int = Column(BigInteger, primary_key=True, autoincrement=True)
+    # One of order_id / client_order_id is always set; venue bookkeeping may
+    # know only the client id until the adapter resolves the broker id.
+    order_id: Optional[str] = Column(String(128), nullable=True)
+    client_order_id: Optional[str] = Column(String(128), nullable=True)
+    venue: str = Column(String(32), nullable=False)
+    from_state: Optional[str] = Column(String(16), nullable=True)
+    to_state: str = Column(String(16), nullable=False)
+    # Where this transition observation came from:
+    #   poll_loop | webhook | reconciler | submit | manual | test
+    source: str = Column(String(32), nullable=False)
+    broker_status: Optional[str] = Column(String(32), nullable=True)
+    raw_payload: dict = Column(JSONB, nullable=False, default=lambda: {})
+    recorded_at: datetime = Column(DateTime, default=datetime.utcnow, nullable=False)
+
+
 class PositionSizerLog(Base):
     """Phase H: append-only shadow log for the canonical position sizer.
 

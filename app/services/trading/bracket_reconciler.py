@@ -188,16 +188,58 @@ def classify_discrepancy(
         )
 
     # ── qty drift ────────────────────────────────────────────────
+    # P0.5: Enrich the delta payload with a partial-fill hint so a Phase G.2
+    # writer can resize the stop to the *actually filled* quantity rather than
+    # the intended quantity. The stop must protect what is *actually on the
+    # book* — sizing it to the intended qty over-hedges when a partial fill
+    # leaves us short, and under-hedges if the broker ends up with extra shares
+    # (shouldn't happen, but the payload captures it either way).
     if trade_open and local.quantity is not None and broker.position_quantity is not None:
-        diff = abs(float(local.quantity) - float(broker.position_quantity))
+        local_q = float(local.quantity)
+        broker_q = float(broker.position_quantity)
+        diff = abs(local_q - broker_q)
         if diff > tolerances.qty_drift_abs:
+            # fill_ratio is broker/local; 0 when local is 0 to avoid div-by-zero.
+            fill_ratio: Optional[float]
+            if local_q > 0:
+                fill_ratio = broker_q / local_q
+            else:
+                fill_ratio = None
+            # is_partial_fill: broker holds *some* but less than intended. This is
+            # the actionable case — rewrite the stop to broker_q. An over-fill
+            # (broker > local) or total miss (broker == 0) are separate signals.
+            is_partial_fill = (
+                broker_q > 0.0
+                and local_q > 0.0
+                and broker_q + tolerances.qty_drift_abs < local_q
+            )
+            # expected_stop_qty tells a future authoritative writer exactly how
+            # many shares/units to place the stop on.
+            expected_stop_qty = broker_q if broker_q > 0.0 else None
+            # Over-fill is highly anomalous (error); partial fill is warn
+            # because the position is still protected at the broker-qty level
+            # once the writer resizes. Full miss (broker==0 while local>0) is
+            # error — our local state thinks we're long but the broker isn't.
+            if broker_q > local_q + tolerances.qty_drift_abs:
+                sev: Severity = "error"
+                drift_kind = "over_fill"
+            elif broker_q == 0.0 and local_q > 0.0:
+                sev = "error"
+                drift_kind = "broker_flat"
+            else:
+                sev = "warn"
+                drift_kind = "partial_fill"
             return ReconciliationDecision(
                 kind="qty_drift",
-                severity="error",
+                severity=sev,
                 delta_payload={
-                    "local_qty": float(local.quantity),
-                    "broker_qty": float(broker.position_quantity),
+                    "local_qty": local_q,
+                    "broker_qty": broker_q,
                     "abs_diff": diff,
+                    "fill_ratio": fill_ratio,
+                    "is_partial_fill": is_partial_fill,
+                    "expected_stop_qty": expected_stop_qty,
+                    "drift_kind": drift_kind,
                 },
             )
 

@@ -3,12 +3,20 @@
 Modern yfinance (>=0.2.40) uses curl_cffi internally and rejects injected
 requests-cache sessions.  Instead we rate-limit and cache at the wrapper level:
 
-- A ``pyrate_limiter.Limiter`` gates all Yahoo Finance requests to 12 per 5 seconds.
+- A sliding-window token bucket gates all Yahoo Finance requests to 12 per 5
+  seconds. Pure-Python (``threading.Lock`` + ``collections.deque``) with no
+  background threads — previous ``pyrate_limiter`` implementation spawned a
+  daemon ``Leaker`` thread that called ``asyncio.run(...)`` on a loop, which
+  on Windows leaked ``ProactorEventLoop`` IOCP handles and self-pipe sockets
+  into the non-paged kernel pool. Over long sessions this accumulated to
+  ``WinError 10055`` socket-pool exhaustion that blocked every subsequent
+  ``socket.connect()`` — including the test suite's psycopg2 DB connections.
 - An in-memory TTL cache avoids re-fetching recently-seen data.
 - ``get_ticker(symbol)`` is the single entry-point used by all services.
 """
 from __future__ import annotations
 
+import collections
 import logging
 import threading
 import time
@@ -19,37 +27,57 @@ import yfinance as yf
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Rate limiter — 2 requests per 5 seconds (Yahoo's safe threshold)
+# Rate limiter — 12 requests per 5 seconds (Yahoo's safe threshold)
+#
+# Sliding-window semantics: we track the timestamps of the last ``_RATE_MAX``
+# acquisitions; a new acquisition is allowed iff the oldest tracked timestamp
+# is older than ``_RATE_WINDOW_S`` seconds. On exhaustion we sleep just long
+# enough for that oldest timestamp to age out, then retry.
+#
+# Trade-offs vs the previous pyrate_limiter-based implementation:
+# * No background threads, no asyncio event loops, no kernel handle churn.
+# * Slightly coarser semantics (sliding window vs leaky bucket) — fine for
+#   our ~12 req/5s target; the yfinance backend has its own throttles anyway.
+# * Process-local only. Acceptable: we run a single scheduler process.
 # ---------------------------------------------------------------------------
-_limiter = None
-_limiter_lock = threading.Lock()
+_RATE_MAX = 12
+_RATE_WINDOW_S = 5.0
+
+_hits: collections.deque[float] = collections.deque(maxlen=_RATE_MAX)
+_hits_lock = threading.Lock()
 
 
-def _get_limiter():
-    global _limiter
-    if _limiter is not None:
-        return _limiter
-    with _limiter_lock:
-        if _limiter is not None:
-            return _limiter
-        try:
-            from pyrate_limiter import Duration, Rate, Limiter
-            _limiter = Limiter(Rate(12, Duration.SECOND * 5))
-            logger.info("[yf_session] Rate limiter active (12 req/5s)")
-        except ImportError:
-            _limiter = None
-            logger.warning("[yf_session] pyrate-limiter not installed — no rate limiting")
-        return _limiter
+def _reset_limiter_for_tests() -> None:
+    """Clear acquisition history. Intended for unit tests only."""
+    with _hits_lock:
+        _hits.clear()
 
 
 def acquire() -> None:
-    """Block until a rate-limit token is available."""
-    lim = _get_limiter()
-    if lim is not None:
-        try:
-            lim.try_acquire("yfinance")
-        except Exception:
-            time.sleep(2.5)
+    """Block (cooperatively, via ``time.sleep``) until a rate-limit token is
+    available. Always returns when a slot becomes free — never raises.
+
+    Semantics
+    ---------
+    Sliding window: allows up to ``_RATE_MAX`` acquisitions within any
+    ``_RATE_WINDOW_S`` interval. If the limit is currently hit, sleeps just
+    long enough for the oldest acquisition to fall out of the window.
+    """
+    while True:
+        with _hits_lock:
+            now = time.monotonic()
+            # Drop stale entries from the front of the deque.
+            while _hits and (now - _hits[0]) >= _RATE_WINDOW_S:
+                _hits.popleft()
+            if len(_hits) < _RATE_MAX:
+                _hits.append(now)
+                return
+            # Full — compute how long until the oldest entry ages out.
+            wait_s = _RATE_WINDOW_S - (now - _hits[0])
+        if wait_s > 0:
+            # Cap the sleep so a clock jump or bookkeeping glitch can't
+            # stall us forever. The loop retries after the sleep.
+            time.sleep(min(wait_s, _RATE_WINDOW_S))
 
 
 # ---------------------------------------------------------------------------

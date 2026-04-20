@@ -8555,6 +8555,164 @@ def _migration_151_trade_management_scope(conn) -> None:
     conn.commit()
 
 
+def _migration_152_order_state_log(conn) -> None:
+    """P1.1 — formal order state machine log.
+
+    Canonical states:
+      DRAFT → SUBMITTING → ACK → PARTIAL → FILLED | CANCELLED | REJECTED | EXPIRED
+
+    Written by ``app.services.trading.venue.order_state_machine.record_transition``
+    whenever the venue poll loop or the reconciler observes a new state. The
+    writer enforces the allowed-transition table so only legal transitions land.
+
+    Indexes support the three access patterns we need:
+      * "current state for this order" — (order_id, recorded_at DESC)
+      * "resolve client_order_id before broker fills it in" —
+        (client_order_id, recorded_at DESC)
+      * "recent transitions per venue" — (venue, recorded_at DESC)
+      * "how many orders are in ACK right now" — (to_state, recorded_at DESC)
+    """
+    if "trading_order_state_log" not in _tables(conn):
+        conn.execute(text("""
+            CREATE TABLE trading_order_state_log (
+                id BIGSERIAL PRIMARY KEY,
+                order_id VARCHAR(128) NULL,
+                client_order_id VARCHAR(128) NULL,
+                venue VARCHAR(32) NOT NULL,
+                from_state VARCHAR(16) NULL,
+                to_state VARCHAR(16) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                broker_status VARCHAR(32) NULL,
+                raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_order "
+            "ON trading_order_state_log (order_id, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_client "
+            "ON trading_order_state_log (client_order_id, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_venue_ts "
+            "ON trading_order_state_log (venue, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_to_state_ts "
+            "ON trading_order_state_log (to_state, recorded_at)"
+        ))
+    conn.commit()
+
+
+def _migration_154_trade_broker_order_id_unique(conn) -> None:
+    """P0.3 — partial UNIQUE index on ``trading_trades.broker_order_id``.
+
+    Without this, two concurrent AutoTrader ticks (or a tick racing with
+    broker_position_sync) can INSERT two Trade rows pointing at the same
+    live broker order. Once that happens the reconciler can't tell which
+    row is authoritative and exits may fire twice — the idempotency_store
+    blocks the duplicate *order submission* at the venue adapter, but the
+    Trade row is written AFTER the broker ACK, so a retry of just the DB
+    write is still possible.
+
+    Partial because legacy rows have empty or NULL broker_order_id —
+    those must remain unconstrained. We additionally dedupe existing
+    conflicts by appending ``#dup{id}`` to collisions (keeping the
+    lowest-id row untouched) so the index can be created cleanly. Any
+    touched rows are logged so an operator can investigate.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Find duplicate broker_order_id groups. Keep the smallest id as the
+    # canonical row; rename later duplicates so the unique index can land.
+    dupes = conn.execute(text(
+        """
+        WITH dup_groups AS (
+            SELECT broker_order_id
+            FROM trading_trades
+            WHERE broker_order_id IS NOT NULL AND broker_order_id <> ''
+            GROUP BY broker_order_id
+            HAVING COUNT(*) > 1
+        ),
+        ranked AS (
+            SELECT t.id, t.broker_order_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY t.broker_order_id ORDER BY t.id ASC
+                   ) AS rn
+            FROM trading_trades t
+            JOIN dup_groups g ON g.broker_order_id = t.broker_order_id
+        )
+        SELECT id, broker_order_id FROM ranked WHERE rn > 1
+        """
+    )).fetchall()
+
+    if dupes:
+        dup_ids = [int(r[0]) for r in dupes]
+        logger.warning(
+            "[migration_154] dedup quarantined %d trading_trades with duplicate "
+            "broker_order_id; ids=%s",
+            len(dup_ids), dup_ids,
+        )
+        conn.execute(
+            text(
+                "UPDATE trading_trades "
+                "SET broker_order_id = broker_order_id || '#dup' || id "
+                "WHERE id = ANY(:ids)"
+            ),
+            {"ids": dup_ids},
+        )
+
+    existing = {
+        row[0] for row in conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = 'public' "
+            "  AND tablename = 'trading_trades'"
+        )).fetchall()
+    }
+    if "ix_trading_trades_broker_order_id_unique" not in existing:
+        conn.execute(text(
+            "CREATE UNIQUE INDEX ix_trading_trades_broker_order_id_unique "
+            "ON trading_trades (broker_order_id) "
+            "WHERE broker_order_id IS NOT NULL AND broker_order_id <> ''"
+        ))
+    conn.commit()
+
+
+def _migration_153_exec_events_venue_ts_index(conn) -> None:
+    """P1.2 — composite ``(venue, recorded_at)`` index on execution events.
+
+    The venue-health circuit breaker queries ``trading_execution_events``
+    with both a venue filter AND a rolling-window time filter
+    (``recorded_at >= NOW() - INTERVAL '5 minutes'``). The existing single-
+    column indexes on ``venue`` and ``recorded_at`` each individually
+    satisfy only half the predicate; PostgreSQL would bitmap-AND them or
+    fall back to a sequential scan under load. This composite index serves
+    the breaker's hot path directly.
+
+    Note: the venue column is already indexed alone (from the ORM's
+    ``index=True`` on the column def); this index is complementary, not a
+    replacement. We keep both so queries that filter on venue alone (e.g.
+    ops-health snapshot) still hit the single-column index.
+    """
+    existing = {
+        row[0] for row in conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = 'public' "
+            "  AND tablename = 'trading_execution_events'"
+        )).fetchall()
+    }
+    if "ix_trading_execution_events_venue_ts" not in existing:
+        conn.execute(text(
+            "CREATE INDEX ix_trading_execution_events_venue_ts "
+            "ON trading_execution_events (venue, recorded_at)"
+        ))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
 MIGRATIONS = [
     ("001_add_email", _migration_001_add_email),
@@ -8708,6 +8866,9 @@ MIGRATIONS = [
     ("149_schema_drift_repairs", _migration_149_schema_drift_repairs),
     ("150_venue_order_idempotency", _migration_150_venue_order_idempotency),
     ("151_trade_management_scope", _migration_151_trade_management_scope),
+    ("152_order_state_log", _migration_152_order_state_log),
+    ("153_exec_events_venue_ts_index", _migration_153_exec_events_venue_ts_index),
+    ("154_trade_broker_order_id_unique", _migration_154_trade_broker_order_id_unique),
 ]
 
 

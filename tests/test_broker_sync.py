@@ -281,11 +281,22 @@ class TestExecuteProposalStatus:
         p.executed_at = None
         return p
 
+    # NOTE on risk-gate mock: ``_execute_proposal`` calls
+    # ``check_new_trade_allowed(db, ...)`` inline with the test's MagicMock db.
+    # Inside that helper ``db.query(Trade).filter(...).count()`` returns a
+    # MagicMock (not an int) and the downstream ``>=`` comparison against a
+    # real int raises TypeError — which the outer except swallows and turns
+    # into ``{"status": "blocked", "error": "risk gate check failed"}``.
+    # These unit tests are exercising the broker-placement branch, not the
+    # risk gate, so we patch it to a permissive stub. Patched at the
+    # ``portfolio_risk`` origin module because ``_execute_proposal`` imports
+    # the symbol inline via ``from .portfolio_risk import check_new_trade_allowed``.
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.place_buy_order")
     @patch("app.services.trading.alerts.dispatch_alert")
-    def test_limit_order_placed_sets_working(self, mock_alert, mock_buy, mock_conn, mock_bp):
+    def test_limit_order_placed_sets_working(self, mock_alert, mock_buy, mock_conn, mock_bp, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         mock_buy.return_value = {
@@ -307,11 +318,12 @@ class TestExecuteProposalStatus:
         assert proposal.broker_order_id == "order-abc"
         assert proposal.executed_at is None
 
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.trading.alerts._get_buying_power", return_value=10000)
     @patch("app.services.broker_service.is_connected", return_value=True)
     @patch("app.services.broker_service.place_buy_order")
     @patch("app.services.trading.alerts.dispatch_alert")
-    def test_market_order_instant_fill_sets_executed(self, mock_alert, mock_buy, mock_conn, mock_bp):
+    def test_market_order_instant_fill_sets_executed(self, mock_alert, mock_buy, mock_conn, mock_bp, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         mock_buy.return_value = {
@@ -332,8 +344,9 @@ class TestExecuteProposalStatus:
         assert proposal.status == "executed"
         assert proposal.executed_at is not None
 
+    @patch("app.services.trading.portfolio_risk.check_new_trade_allowed", return_value=(True, None))
     @patch("app.services.broker_service.is_connected", return_value=False)
-    def test_no_broker_records_locally(self, mock_conn):
+    def test_no_broker_records_locally(self, mock_conn, mock_risk):
         from app.services.trading.alerts import _execute_proposal
 
         proposal = self._make_proposal()
