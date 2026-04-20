@@ -156,6 +156,8 @@ _PROJECT_DOMAIN_TARGETED_TABLES = frozenset(
         "qa_test_cases",
         "qa_test_runs",
         "qa_bug_reports",
+        "project_domain_runs",
+        "project_analysis_snapshots",
     }
 )
 _PROJECT_DOMAIN_TARGETED_TESTS = (

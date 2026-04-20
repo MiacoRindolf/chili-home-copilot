@@ -8555,7 +8555,263 @@ def _migration_151_trade_management_scope(conn) -> None:
     conn.commit()
 
 
+def _migration_159_order_state_log(conn) -> None:
+    """P1.1 — formal order state machine log.
+
+    Canonical states:
+      DRAFT → SUBMITTING → ACK → PARTIAL → FILLED | CANCELLED | REJECTED | EXPIRED
+
+    Written by ``app.services.trading.venue.order_state_machine.record_transition``
+    whenever the venue poll loop or the reconciler observes a new state. The
+    writer enforces the allowed-transition table so only legal transitions land.
+
+    Indexes support the three access patterns we need:
+      * "current state for this order" — (order_id, recorded_at DESC)
+      * "resolve client_order_id before broker fills it in" —
+        (client_order_id, recorded_at DESC)
+      * "recent transitions per venue" — (venue, recorded_at DESC)
+      * "how many orders are in ACK right now" — (to_state, recorded_at DESC)
+    """
+    if "trading_order_state_log" not in _tables(conn):
+        conn.execute(text("""
+            CREATE TABLE trading_order_state_log (
+                id BIGSERIAL PRIMARY KEY,
+                order_id VARCHAR(128) NULL,
+                client_order_id VARCHAR(128) NULL,
+                venue VARCHAR(32) NOT NULL,
+                from_state VARCHAR(16) NULL,
+                to_state VARCHAR(16) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                broker_status VARCHAR(32) NULL,
+                raw_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
+                recorded_at TIMESTAMP NOT NULL DEFAULT NOW()
+            )
+        """))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_order "
+            "ON trading_order_state_log (order_id, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_client "
+            "ON trading_order_state_log (client_order_id, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_venue_ts "
+            "ON trading_order_state_log (venue, recorded_at)"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_order_state_log_to_state_ts "
+            "ON trading_order_state_log (to_state, recorded_at)"
+        ))
+    conn.commit()
+
+
+def _migration_161_trade_broker_order_id_unique(conn) -> None:
+    """P0.3 — partial UNIQUE index on ``trading_trades.broker_order_id``.
+
+    Without this, two concurrent AutoTrader ticks (or a tick racing with
+    broker_position_sync) can INSERT two Trade rows pointing at the same
+    live broker order. Once that happens the reconciler can't tell which
+    row is authoritative and exits may fire twice — the idempotency_store
+    blocks the duplicate *order submission* at the venue adapter, but the
+    Trade row is written AFTER the broker ACK, so a retry of just the DB
+    write is still possible.
+
+    Partial because legacy rows have empty or NULL broker_order_id —
+    those must remain unconstrained. We additionally dedupe existing
+    conflicts by appending ``#dup{id}`` to collisions (keeping the
+    lowest-id row untouched) so the index can be created cleanly. Any
+    touched rows are logged so an operator can investigate.
+    """
+    if "trading_trades" not in _tables(conn):
+        conn.commit()
+        return
+
+    # Find duplicate broker_order_id groups. Keep the smallest id as the
+    # canonical row; rename later duplicates so the unique index can land.
+    dupes = conn.execute(text(
+        """
+        WITH dup_groups AS (
+            SELECT broker_order_id
+            FROM trading_trades
+            WHERE broker_order_id IS NOT NULL AND broker_order_id <> ''
+            GROUP BY broker_order_id
+            HAVING COUNT(*) > 1
+        ),
+        ranked AS (
+            SELECT t.id, t.broker_order_id,
+                   ROW_NUMBER() OVER (
+                       PARTITION BY t.broker_order_id ORDER BY t.id ASC
+                   ) AS rn
+            FROM trading_trades t
+            JOIN dup_groups g ON g.broker_order_id = t.broker_order_id
+        )
+        SELECT id, broker_order_id FROM ranked WHERE rn > 1
+        """
+    )).fetchall()
+
+    if dupes:
+        dup_ids = [int(r[0]) for r in dupes]
+        logger.warning(
+            "[migration_161] dedup quarantined %d trading_trades with duplicate "
+            "broker_order_id; ids=%s",
+            len(dup_ids), dup_ids,
+        )
+        conn.execute(
+            text(
+                "UPDATE trading_trades "
+                "SET broker_order_id = broker_order_id || '#dup' || id "
+                "WHERE id = ANY(:ids)"
+            ),
+            {"ids": dup_ids},
+        )
+
+    existing = {
+        row[0] for row in conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = 'public' "
+            "  AND tablename = 'trading_trades'"
+        )).fetchall()
+    }
+    if "ix_trading_trades_broker_order_id_unique" not in existing:
+        conn.execute(text(
+            "CREATE UNIQUE INDEX ix_trading_trades_broker_order_id_unique "
+            "ON trading_trades (broker_order_id) "
+            "WHERE broker_order_id IS NOT NULL AND broker_order_id <> ''"
+        ))
+    conn.commit()
+
+
+def _migration_160_exec_events_venue_ts_index(conn) -> None:
+    """P1.2 — composite ``(venue, recorded_at)`` index on execution events.
+
+    The venue-health circuit breaker queries ``trading_execution_events``
+    with both a venue filter AND a rolling-window time filter
+    (``recorded_at >= NOW() - INTERVAL '5 minutes'``). The existing single-
+    column indexes on ``venue`` and ``recorded_at`` each individually
+    satisfy only half the predicate; PostgreSQL would bitmap-AND them or
+    fall back to a sequential scan under load. This composite index serves
+    the breaker's hot path directly.
+
+    Note: the venue column is already indexed alone (from the ORM's
+    ``index=True`` on the column def); this index is complementary, not a
+    replacement. We keep both so queries that filter on venue alone (e.g.
+    ops-health snapshot) still hit the single-column index.
+    """
+    existing = {
+        row[0] for row in conn.execute(text(
+            "SELECT indexname FROM pg_indexes "
+            "WHERE schemaname = 'public' "
+            "  AND tablename = 'trading_execution_events'"
+        )).fetchall()
+    }
+    if "ix_trading_execution_events_venue_ts" not in existing:
+        conn.execute(text(
+            "CREATE INDEX ix_trading_execution_events_venue_ts "
+            "ON trading_execution_events (venue, recorded_at)"
+        ))
+    conn.commit()
+
+
 # (version_id, callable that receives conn and runs migration)
+
+
+def _migration_162_project_domain_recovery(conn) -> None:
+    """Project-domain recovery: runtime-aware repos, durable runs, and analysis snapshots."""
+    tables = _tables(conn)
+
+    if "code_repos" in tables:
+        cols = _columns(conn, "code_repos")
+        additions = {
+            "host_path": "TEXT",
+            "container_path": "TEXT",
+            "reachable_in_web": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "reachable_in_scheduler": "BOOLEAN NOT NULL DEFAULT FALSE",
+            "last_index_error": "TEXT",
+            "last_successful_indexed_at": "TIMESTAMP",
+            "last_successful_file_count": "INTEGER",
+        }
+        for col_name, col_type in additions.items():
+            if col_name not in cols:
+                conn.execute(text(f"ALTER TABLE code_repos ADD COLUMN {col_name} {col_type}"))
+        conn.execute(
+            text(
+                "UPDATE code_repos "
+                "SET host_path = COALESCE(host_path, path), "
+                "container_path = COALESCE(container_path, CASE WHEN path LIKE '/%' THEN path ELSE NULL END), "
+                "last_successful_indexed_at = COALESCE(last_successful_indexed_at, last_indexed), "
+                "last_successful_file_count = COALESCE(last_successful_file_count, CASE WHEN file_count > 0 THEN file_count ELSE NULL END)"
+            )
+        )
+        conn.commit()
+
+    if "plan_tasks" in tables:
+        cols = _columns(conn, "plan_tasks")
+        if "coding_workflow_state" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE plan_tasks ADD COLUMN coding_workflow_state "
+                    "VARCHAR(40) NOT NULL DEFAULT 'unbound'"
+                )
+            )
+        if "coding_workflow_state_updated_at" not in cols:
+            conn.execute(
+                text(
+                    "ALTER TABLE plan_tasks ADD COLUMN coding_workflow_state_updated_at "
+                    "TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP"
+                )
+            )
+        conn.commit()
+
+    if "project_domain_runs" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE project_domain_runs (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    task_id INTEGER NULL REFERENCES plan_tasks(id) ON DELETE SET NULL,
+                    repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                    run_kind VARCHAR(32) NOT NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'running',
+                    trigger_source VARCHAR(32) NOT NULL DEFAULT 'manual',
+                    title VARCHAR(200) NULL,
+                    detail_json TEXT NULL,
+                    error_message TEXT NULL,
+                    started_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    finished_at TIMESTAMP NULL,
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_kind ON project_domain_runs(run_kind)"))
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_status ON project_domain_runs(status)"))
+        conn.execute(text("CREATE INDEX ix_project_domain_runs_user_created ON project_domain_runs(user_id, created_at DESC)"))
+        conn.commit()
+
+    if "project_analysis_snapshots" not in tables:
+        conn.execute(
+            text(
+                """
+                CREATE TABLE project_analysis_snapshots (
+                    id SERIAL PRIMARY KEY,
+                    user_id INTEGER NULL REFERENCES users(id) ON DELETE SET NULL,
+                    task_id INTEGER NULL REFERENCES plan_tasks(id) ON DELETE SET NULL,
+                    repo_id INTEGER NULL REFERENCES code_repos(id) ON DELETE SET NULL,
+                    source_run_id INTEGER NULL REFERENCES project_domain_runs(id) ON DELETE SET NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'completed',
+                    summary_json TEXT NOT NULL DEFAULT '{}',
+                    perspectives_json TEXT NOT NULL DEFAULT '{}',
+                    timeline_json TEXT NOT NULL DEFAULT '[]',
+                    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+        conn.execute(text("CREATE INDEX ix_project_analysis_snapshots_user_created ON project_analysis_snapshots(user_id, created_at DESC)"))
+        conn.execute(text("CREATE INDEX ix_project_analysis_snapshots_task_created ON project_analysis_snapshots(task_id, created_at DESC)"))
+        conn.commit()
 
 
 def _migration_152_operational_clusters(conn) -> None:
@@ -9594,6 +9850,10 @@ MIGRATIONS = [
     ("156_observers_and_momentum_bridge", _migration_156_observers_and_momentum_bridge),
     ("157_trade_mesh_entry_correlation", _migration_157_trade_mesh_entry_correlation),
     ("158_plasticity_pre_live_snapshot", _migration_158_plasticity_pre_live_snapshot),
+    ("159_order_state_log", _migration_159_order_state_log),
+    ("160_exec_events_venue_ts_index", _migration_160_exec_events_venue_ts_index),
+    ("161_trade_broker_order_id_unique", _migration_161_trade_broker_order_id_unique),
+    ("162_project_domain_recovery", _migration_162_project_domain_recovery),
 ]
 
 

@@ -22,6 +22,8 @@ from ..services.code_brain import lenses as cb_lenses
 from ..services.code_brain import reviewer as cb_reviewer
 from ..services.code_brain import search as cb_search
 from ..services.code_brain import trends as cb_trends
+from ..services import project_analysis
+from ..services.project_domain_runs import list_timeline, record_completed_run, status_payload
 from ..services.project_brain import learning as pb_learning
 from ..services.project_brain import registry as pb_registry
 
@@ -53,6 +55,24 @@ def _first_active_repo_id(db: Session) -> int | None:
 
     first = db.query(CodeRepo).filter(CodeRepo.active.is_(True)).first()
     return first.id if first else None
+
+
+def _timeline_messages(db: Session, user_id: int | None) -> list[dict]:
+    messages = []
+    for item in list_timeline(db, user_id=user_id, limit=30):
+        messages.append(
+            {
+                "id": item["id"],
+                "from": "system",
+                "to": "operator",
+                "type": item["run_kind"],
+                "summary": item.get("title") or item["run_kind"],
+                "status": item.get("status"),
+                "acknowledged": True,
+                "created_at": item.get("created_at"),
+            }
+        )
+    return messages
 
 
 # Code Brain domain
@@ -316,9 +336,27 @@ def api_brain_project_lens_insights(
 
 @router.get("/api/brain/project/agents")
 def api_brain_project_agents(request: Request, db: Session = Depends(get_db)):
-    """List all agents with their status and metrics."""
+    """List analysis perspectives while keeping the historical route surface alive."""
     ctx = get_identity_ctx(request, db)
-    agents = [agent.get_metrics(db, ctx["user_id"]) for agent in pb_registry.AGENT_REGISTRY.values()]
+    latest = project_analysis.latest_analysis_snapshot(db, user_id=ctx["user_id"])
+    if latest is None:
+        agents = [
+            {"agent": key, "name": key, "label": label, "active": True}
+            for key, label, _lens in project_analysis.PERSPECTIVE_ORDER
+        ]
+        return JSONResponse({"ok": True, "agents": agents})
+    agents = []
+    for key, payload in (latest.get("perspectives") or {}).items():
+        agents.append(
+            {
+                "agent": key,
+                "name": key,
+                "label": payload.get("label", key.title()),
+                "active": True,
+                "status": payload.get("status"),
+                "headline": payload.get("headline"),
+            }
+        )
     return JSONResponse({"ok": True, "agents": agents})
 
 
@@ -465,10 +503,13 @@ def api_brain_project_agent_cycle(
 
 @router.get("/api/brain/project/messages")
 def api_brain_project_messages(request: Request, db: Session = Depends(get_db)):
-    """Inter-agent message feed."""
+    """Operator timeline feed (adapter on the historical route)."""
     ctx = get_identity_ctx(request, db)
-    feed = pb_registry.get_message_feed(db, ctx["user_id"])
-    return JSONResponse({"ok": True, "messages": feed})
+    return JSONResponse({"ok": True, "messages": _timeline_messages(db, ctx["user_id"])})
+
+
+class _ProjectAnalysisRunBody(BaseModel):
+    planner_task_id: int | None = None
 
 
 # Product owner endpoints
@@ -684,21 +725,103 @@ def api_brain_arch_health(request: Request, db: Session = Depends(get_db)):
 
 @router.post("/api/brain/project/cycle")
 def api_brain_project_cycle_all(request: Request, db: Session = Depends(get_db)):
-    """Trigger a learning cycle for all active agents."""
-    from ..db import SessionLocal
-    from ..services.project_brain.learning import run_project_brain_cycle_background
-
+    """Historical adapter: trigger a single analysis run for the current operator."""
     ctx = get_identity_ctx(request, db)
-    run_project_brain_cycle_background(SessionLocal, ctx["user_id"])
-    return JSONResponse({"ok": True, "message": "All-agent cycle started in background"})
+    payload = project_analysis.build_analysis_payload(db, user_id=ctx["user_id"])
+    summary = payload.get("summary") or {}
+    repo_id = summary.get("repo_id")
+    run = record_completed_run(
+        db,
+        "analysis",
+        status="completed",
+        user_id=ctx["user_id"],
+        repo_id=repo_id,
+        title="Refresh project analysis",
+        detail=summary,
+    )
+    snapshot = project_analysis.store_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=None,
+        repo_id=repo_id,
+        source_run_id=run.id,
+        payload=payload,
+    )
+    db.commit()
+    return JSONResponse({"ok": True, "message": "Project analysis refreshed", "snapshot_id": snapshot.id})
 
 
 @router.get("/api/brain/project/status")
-def api_brain_project_status():
-    """Global Project Brain status (running, progress, last run)."""
-    from ..services.project_brain.learning import get_project_brain_status
+def api_brain_project_status(request: Request, db: Session = Depends(get_db)):
+    """Durable project-domain status backed by persisted run records."""
+    ctx = get_identity_ctx(request, db)
+    return JSONResponse({"ok": True, **status_payload(db, user_id=ctx["user_id"])})
 
-    return JSONResponse({"ok": True, **get_project_brain_status()})
+
+@router.post("/api/brain/project/analysis/run")
+def api_brain_project_analysis_run(
+    request: Request,
+    body: _ProjectAnalysisRunBody | None = None,
+    db: Session = Depends(get_db),
+):
+    """Run a single advisory report across all perspectives and persist it."""
+    ctx = get_identity_ctx(request, db)
+    planner_task_id = body.planner_task_id if body else None
+    payload = project_analysis.build_analysis_payload(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    summary = payload.get("summary") or {}
+    repo_id = summary.get("repo_id")
+    run = record_completed_run(
+        db,
+        "analysis",
+        status="completed",
+        user_id=ctx["user_id"],
+        task_id=planner_task_id,
+        repo_id=repo_id,
+        title="Run project analysis",
+        detail=summary,
+    )
+    snapshot = project_analysis.store_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+        repo_id=repo_id,
+        source_run_id=run.id,
+        payload=payload,
+    )
+    db.commit()
+    latest = project_analysis.latest_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    return JSONResponse({"ok": True, "snapshot": latest, "snapshot_id": snapshot.id})
+
+
+@router.get("/api/brain/project/analysis/latest")
+def api_brain_project_analysis_latest(
+    request: Request,
+    db: Session = Depends(get_db),
+    planner_task_id: int | None = Query(default=None),
+):
+    """Return the latest stored analysis snapshot, or build an ephemeral one if none exists yet."""
+    ctx = get_identity_ctx(request, db)
+    latest = project_analysis.latest_analysis_snapshot(
+        db,
+        user_id=ctx["user_id"],
+        planner_task_id=planner_task_id,
+    )
+    if latest is None:
+        payload = project_analysis.build_analysis_payload(
+            db,
+            user_id=ctx["user_id"],
+            planner_task_id=planner_task_id,
+        )
+        return JSONResponse({"ok": True, "snapshot": {"status": "ephemeral", **payload}})
+    return JSONResponse({"ok": True, "snapshot": latest})
 
 
 @router.get("/api/brain/project/metrics")

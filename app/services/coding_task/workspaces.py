@@ -8,6 +8,7 @@ from sqlalchemy.orm import Query, Session
 
 from ...models.code_brain import CodeRepo
 from ...models.coding_task import PlanTaskCodingProfile
+from ..code_brain.runtime import resolve_repo_runtime_path
 from . import envelope
 
 
@@ -136,6 +137,8 @@ def workspace_binding_reason(
 ) -> str | None:
     repo = lookup_workspace_repo_for_profile(db, profile, user_id=user_id)
     if repo is not None:
+        if resolve_repo_runtime_path(repo) is None:
+            return "The bound workspace is registered but not reachable from this runtime."
         return None
     if profile is None:
         return "No workspace is bound to this task yet."
@@ -162,7 +165,7 @@ def build_workspace_binding_dict(
         "code_repo_id": effective_repo_id,
         "repo_name": repo.name if repo is not None else None,
         "repo_path": (
-            str(Path(repo.path).resolve())
+            str(Path(repo.host_path or repo.path).resolve())
             if repo is not None
             else (str(legacy_root) if legacy_root is not None else None)
         ),
@@ -249,9 +252,13 @@ def resolve_profile_cwd(
         )
         raise WorkspaceUnbound(reason)
     try:
-        root = Path(repo.path).resolve()
+        root = resolve_repo_runtime_path(repo)
     except OSError as exc:
         raise ValueError("Bound workspace path could not be resolved.") from exc
+    if root is None:
+        raise WorkspaceUnbound(
+            "The bound workspace is registered but not reachable from this runtime."
+        )
     rel = ((profile.sub_path if profile is not None else "") or "").strip().replace("\\", "/").strip("/")
     if not rel:
         cwd = root

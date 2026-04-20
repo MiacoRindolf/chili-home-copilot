@@ -109,9 +109,9 @@ def test_brain_template_project_contract(brain_jinja_env) -> None:
         r'id="domain-trading"[^>]*style="[^"]*display:\s*none',
         text,
     ), "trading root should be display:none on project route"
-    assert "Loading agent messages" in text
+    assert "Loading operator timeline" in text
     assert re.search(
-        r'id="agent-msg-feed"[^>]*>[\s\S]{0,400}?Loading agent messages',
+        r'id="agent-msg-feed"[^>]*>[\s\S]{0,400}?Loading operator timeline',
         text,
     )
     assert "function loadAgentMessageFeed()" not in text

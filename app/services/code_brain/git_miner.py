@@ -11,6 +11,7 @@ from typing import Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeHotspot, CodeRepo, CodeSnapshot
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -44,9 +45,10 @@ def mine_git_history(db: Session, repo_id: int, max_commits: int = _MAX_COMMITS)
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = repo.path
-    if not Path(repo_path).is_dir():
-        return {"error": f"Path not found: {repo_path}"}
+    runtime_path = resolve_repo_runtime_path(repo)
+    if runtime_path is None or not runtime_path.is_dir():
+        return {"error": "Registered workspace is not reachable from the current runtime."}
+    repo_path = str(runtime_path)
 
     head_hash = _get_head_hash(repo_path)
     repo.last_commit_hash = head_hash

@@ -242,10 +242,10 @@
     if (!feed) return;
     if (window._activeDomain !== "project") {
       feed.innerHTML =
-        '<div class="project-inline-muted" data-agent-feed-off-project="1">Switch to the Project domain to see agent messages...</div>';
+        '<div class="project-inline-muted" data-agent-feed-off-project="1">Switch to the Project domain to see the operator timeline...</div>';
       return;
     }
-    feed.innerHTML = '<div class="project-inline-muted">Loading agent messages...</div>';
+    feed.innerHTML = '<div class="project-inline-muted">Loading operator timeline...</div>';
     fetch("/api/brain/project/messages", { credentials: "same-origin" })
       .then(function (response) {
         return response.json().then(
@@ -261,13 +261,13 @@
         if (!feed || window._activeDomain !== "project") return;
         if (!result.ok || !result.data || result.data.ok !== true) {
           feed.innerHTML =
-            '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load agent messages. Try Refresh.</div>';
+            '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load the operator timeline. Try Refresh.</div>';
           return;
         }
         var messages = result.data.messages || [];
         if (!messages.length) {
           feed.innerHTML =
-            '<div style="font-size:11px;color:var(--text-muted)">No inter-agent messages yet. Run an agent cycle.</div>';
+            '<div style="font-size:11px;color:var(--text-muted)">No operator timeline events yet. Run analysis.</div>';
           return;
         }
         feed.innerHTML = messages
@@ -280,12 +280,10 @@
               ack +
               ">" +
               '<span class="msg-feed-agents">' +
-              escHtml(message.from) +
-              " &#x2192; " +
-              escHtml(message.to) +
+              escHtml(message.summary || message.type || "Event") +
               "</span>" +
               '<span class="msg-feed-type">' +
-              escHtml(message.type) +
+              escHtml(message.status || message.type) +
               "</span>" +
               '<span class="msg-feed-time">' +
               escHtml(ts) +
@@ -298,7 +296,7 @@
       .catch(function () {
         if (!feed || window._activeDomain !== "project") return;
         feed.innerHTML =
-          '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load agent messages (network error). Try Refresh.</div>';
+          '<div style="font-size:11px;color:var(--danger,#dc2626)">Could not load the operator timeline (network error). Try Refresh.</div>';
       });
   }
 

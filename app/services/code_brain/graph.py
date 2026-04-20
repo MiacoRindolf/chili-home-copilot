@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeDependency, CodeRepo, CodeSnapshot
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -147,9 +148,9 @@ def build_dependency_graph(db: Session, repo_id: int) -> Dict[str, Any]:
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = Path(repo.path)
-    if not repo_path.is_dir():
-        return {"error": f"Path not found: {repo.path}"}
+    repo_path = resolve_repo_runtime_path(repo)
+    if repo_path is None or not repo_path.is_dir():
+        return {"error": "Registered workspace is not reachable from the current runtime."}
 
     snapshots = db.query(CodeSnapshot).filter(CodeSnapshot.repo_id == repo_id).all()
     db.query(CodeDependency).filter(CodeDependency.repo_id == repo_id).delete()

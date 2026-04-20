@@ -13,6 +13,7 @@ from ...models.coding_task import (
     CodingAgentSuggestionApply,
     PlanTaskCodingProfile,
 )
+from ..code_brain.runtime import resolve_repo_runtime_path
 from .envelope import subprocess_safe_env, truncate_text
 from .workspaces import (
     WorkspaceUnbound,
@@ -45,10 +46,7 @@ def _repo_root_for_task(db: Session, task: PlanTask, user_id: int) -> Path | Non
     repo = lookup_workspace_repo_for_profile(db, prof, user_id=user_id)
     if repo is None:
         return None
-    try:
-        return Path(repo.path).resolve()
-    except OSError:
-        return None
+    return resolve_repo_runtime_path(repo)
 
 
 def _combine_diffs(diffs: list[str]) -> bytes:

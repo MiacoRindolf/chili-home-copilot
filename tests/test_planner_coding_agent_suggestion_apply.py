@@ -132,9 +132,10 @@ def test_apply_success_records_audit(paired_client, db):
     after = db.query(CodingAgentSuggestion).filter(CodingAgentSuggestion.id == sid).first()
     assert after.diffs_json == raw
     audits = db.query(CodingAgentSuggestionApply).filter(CodingAgentSuggestionApply.suggestion_id == sid).all()
-    assert len(audits) == 1
-    assert audits[0].status == "completed"
-    assert audits[0].dry_run is False
+    assert len(audits) == 2
+    real_applies = [row for row in audits if row.dry_run is False]
+    assert len(real_applies) == 1
+    assert real_applies[0].status == "completed"
 
 
 def test_apply_check_fail_audit_failed(paired_client, db):

@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy.orm import Session
 
 from ...models.code_brain import CodeInsight, CodeRepo, CodeSearchEntry, CodeSnapshot
+from .runtime import resolve_repo_runtime_path
 
 logger = logging.getLogger(__name__)
 
@@ -113,9 +114,9 @@ def index_symbols(db: Session, repo_id: int) -> Dict[str, Any]:
     if not repo:
         return {"error": "Repo not found"}
 
-    repo_path = Path(repo.path)
-    if not repo_path.is_dir():
-        return {"error": f"Path not found: {repo.path}"}
+    repo_path = resolve_repo_runtime_path(repo)
+    if repo_path is None or not repo_path.is_dir():
+        return {"error": "Registered workspace is not reachable from the current runtime."}
 
     db.query(CodeSearchEntry).filter(CodeSearchEntry.repo_id == repo_id).delete()
 
