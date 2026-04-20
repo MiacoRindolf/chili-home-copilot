@@ -38,3 +38,23 @@ routes_dump.txt
 
 # large local refresh logs
 backtest_refresh_scheduled.log
+
+# All log files from local runs — pytest, phase test captures, debug
+# dumps, brain worker, etc. Never commit logs; they bloat the repo and
+# frequently contain credentials or user data.
+*.log
+
+# Local DB backups (pg_dump output). Treat as secret — full state of the
+# live trading DB. Keep them out of git even if a commit slips through.
+backups/
+*.dump
+
+# Local test / debug captures (running pytest via the Claude harness
+# emits transcripts to the repo root; same for quick one-off JSON dumps
+# like dm.json / rq.json used by interactive debugging).
+debug-*.log
+dm.json
+rq.json
+
+# Local scratch shell commits
+.commit_msg.txt
