@@ -101,9 +101,25 @@ def _opened_today_et(entry_date: datetime | None) -> bool:
 
 
 def has_active_pending_exit(trade: Trade) -> bool:
+    """Return True only when the trade has a *recoverable* pending exit.
+
+    Requires BOTH a broker-assigned ``pending_exit_order_id`` and an active
+    status. ``status='submitted' + order_id=NULL`` is corrupt state (happens
+    when the broker submission succeeded but the audit write failed and no
+    order_id was retained) — treating those as "active" would strand the
+    trade permanently, because the deterministic ``client_order_id`` makes
+    retry fail with ``duplicate_client_order_id``. Returning False here lets
+    the next monitor tick detect the corrupt state upstream and clean it up.
+    """
     return (trade.pending_exit_order_id or "") != "" and (
         (trade.pending_exit_status or "").strip().lower() in _ACTIVE_PENDING_EXIT_STATES
     )
+
+
+def has_stranded_pending_exit(trade: Trade) -> bool:
+    """Corrupt state: status looks active but no broker order_id was captured."""
+    status = (trade.pending_exit_status or "").strip().lower()
+    return (trade.pending_exit_order_id or "") == "" and status in _ACTIVE_PENDING_EXIT_STATES
 
 
 def clear_pending_exit_fields(trade: Trade) -> None:
@@ -360,6 +376,26 @@ def _finalize_filled_exit(
     return round(pnl, 4)
 
 
+def _json_safe(obj: Any) -> Any:
+    """Best-effort JSON coercion: datetimes → isoformat strings, dates → isoformat,
+    dataclass-like objects → vars(), everything else passes through. Postgres JSONB
+    via psycopg2 can't serialize ``datetime`` natively and the monitor's execution
+    window includes ``next_eligible_session_at`` as a datetime — without this
+    coercion the entire monitor transaction rolls back and no exit ever executes.
+    """
+    import datetime as _dt
+
+    if obj is None or isinstance(obj, (bool, int, float, str)):
+        return obj
+    if isinstance(obj, (_dt.datetime, _dt.date, _dt.time)):
+        return obj.isoformat()
+    if isinstance(obj, dict):
+        return {str(k): _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [_json_safe(v) for v in obj]
+    return str(obj)
+
+
 def _record_autotrader_run(
     db: Session,
     trade: Trade,
@@ -377,7 +413,7 @@ def _record_autotrader_run(
         reason=reason,
         management_scope=trade.management_scope,
         trade_id=int(trade.id),
-        rule_snapshot=dict(snapshot or {}),
+        rule_snapshot=_json_safe(dict(snapshot or {})),
     )
     db.add(row)
     db.commit()

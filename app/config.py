@@ -328,6 +328,27 @@ class Settings(BaseSettings):
     brain_risk_dial_drawdown_trigger_pct: float = 10.0
     brain_risk_dial_ceiling: float = 1.5
 
+    # Drawdown circuit breaker thresholds. ``portfolio_risk.get_drawdown_limits``
+    # already reads these via ``getattr``; declaring them here lets pydantic
+    # surface them as env-override-able (``BRAIN_RISK_MAX_5D_DD_PCT`` etc.).
+    # Regime multipliers (risk_on × 1.5 / cautious × 1.0 / risk_off × 0.75)
+    # are applied on top of these base values inside get_drawdown_limits.
+    brain_risk_max_5d_dd_pct: float = 3.0
+    brain_risk_max_30d_dd_pct: float = 8.0
+    brain_risk_max_consec_losses: int = 5
+    brain_risk_cooldown_hours: int = 24
+
+    # Portfolio-level position + heat caps. ``portfolio_risk.get_risk_limits``
+    # reads these via ``getattr`` but prior code had no pydantic field so env
+    # overrides were silently ignored. Declaring here surfaces them as
+    # ``BRAIN_RISK_MAX_POSITIONS`` / ``BRAIN_RISK_MAX_HEAT_PCT`` etc.
+    brain_risk_max_positions: int = 10
+    brain_risk_max_crypto: int = 5
+    brain_risk_max_stocks: int = 8
+    brain_risk_max_heat_pct: float = 6.0
+    brain_risk_max_risk_per_trade_pct: float = 1.0
+    brain_risk_max_same_ticker: int = 2
+
     brain_capital_reweight_mode: str = "off"
     brain_capital_reweight_ops_log_enabled: bool = True
     brain_capital_reweight_cron_day_of_week: str = "sun"

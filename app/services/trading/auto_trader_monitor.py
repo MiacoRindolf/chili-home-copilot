@@ -295,8 +295,10 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
     from .auto_trader_position_overrides import list_position_overrides
     from .robinhood_exit_execution import (
         cancel_pending_exit_order,
+        clear_pending_exit_fields,
         describe_robinhood_equity_execution_window,
         has_active_pending_exit,
+        has_stranded_pending_exit,
         submit_robinhood_trade_exit,
     )
 
@@ -358,6 +360,22 @@ def tick_auto_trader_monitor(db: Session) -> dict[str, Any]:
                 t.ticker,
             )
             continue
+        # Self-heal: if the trade is marked ``pending_exit_status=submitted``
+        # but the broker's order_id was never captured (e.g. prior JSON-serialize
+        # audit crash lost the order_id), clear the pending state so a fresh
+        # submission can go through. The deterministic client_order_id would
+        # otherwise make retries permanently fail with duplicate_client_order_id.
+        if has_stranded_pending_exit(t):
+            logger.warning(
+                "[autotrader_monitor] stranded pending_exit cleared trade=%s ticker=%s "
+                "(status=%s, order_id empty)",
+                t.id, t.ticker, t.pending_exit_status,
+            )
+            clear_pending_exit_fields(t)
+            db.add(t)
+            db.commit()
+            summary.setdefault("stranded_cleared", []).append(int(t.id))
+
         hit_stop = stop > 0 and px <= stop
         hit_target = tgt > 0 and px >= tgt
         monitor_exit_meta = _fresh_monitor_exit_meta(
