@@ -41,11 +41,18 @@ def passes_rule_gate(
     settings: Any,
     ctx: RuleGateContext,
     for_new_entry: bool,
+    fallback_user_id: Optional[int] = None,
 ) -> Tuple[bool, str, dict[str, Any]]:
     """Return (ok, reason, snapshot_dict).
 
     When *for_new_entry* is True, enforces check_new_trade_allowed and max concurrent.
     When False (scale-in path), caller should enforce synergy / notional separately.
+
+    *fallback_user_id* is used for ``portfolio_risk`` checks when the alert is
+    system-scope (``alert.user_id is None`` — pattern_imminent alerts are written
+    this way by the imminent scanner in single-tenant mode). The autotrader
+    resolves its owning user from settings; pass it here so the rule gate can
+    attribute the portfolio check to the right account.
     """
     snap: dict[str, Any] = {
         "ticker": alert.ticker,
@@ -122,7 +129,7 @@ def passes_rule_gate(
         if ctx.autotrader_open_count >= max_c:
             return False, "max_concurrent_autotrader", snap
 
-        uid = alert.user_id
+        uid = alert.user_id if alert.user_id is not None else fallback_user_id
         if uid is None:
             return False, "missing_user_id_on_alert", snap
 

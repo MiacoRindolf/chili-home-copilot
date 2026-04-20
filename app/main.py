@@ -516,6 +516,21 @@ def _run_deferred_startup() -> None:
         # Robinhood restore can block on device approval / MFA — must not run in lifespan
         # before yield or HTTP never becomes ready (empty reply / TLS handshake failure).
         _restore_broker_sessions()
+        # Hard Rule 1/2: kill-switch state must survive restarts. Without this,
+        # a tripped breaker silently disarms on every redeploy.
+        try:
+            from .services.trading.governance import (
+                get_kill_switch_status,
+                restore_kill_switch_from_db,
+            )
+            restore_kill_switch_from_db()
+            _ks = get_kill_switch_status()
+            if _ks.get("active"):
+                _log.warning(
+                    "[startup] Kill switch restored ACTIVE: %s", _ks.get("reason")
+                )
+        except Exception:
+            _log.debug("[startup] Kill-switch restore failed", exc_info=True)
         if _sched_role != "none":
             _dedup_backtests()
         _repair_wrongly_deactivated()
@@ -628,6 +643,7 @@ def _start_massive_ws():
 
 def _start_price_bus():
     """Start the unified price bus if configured — bridges Massive + Coinbase WS."""
+    _log = logging.getLogger("chili.startup")
     try:
         from .config import settings
         if not settings.chili_autopilot_price_bus_enabled:

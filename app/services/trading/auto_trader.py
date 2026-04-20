@@ -364,7 +364,9 @@ def _process_one_alert(
             out["skipped"] += 1
             return
 
-    ok, reason, snap = passes_rule_gate(db, alert, settings=settings, ctx=ctx, for_new_entry=for_new)
+    ok, reason, snap = passes_rule_gate(
+        db, alert, settings=settings, ctx=ctx, for_new_entry=for_new, fallback_user_id=uid,
+    )
     if not ok:
         _audit(db, user_id=uid, alert=alert, decision="skipped", reason=reason, rule_snapshot=snap)
         out["skipped"] += 1

@@ -338,6 +338,67 @@ def _run_momentum_live_runner_batch_job():
     run_scheduler_job_guarded("momentum_live_runner_batch", _work)
 
 
+def _run_neural_mesh_drain_job():
+    """Drain the neural-mesh activation queue.
+
+    Without this, enqueued events (stop_eval, pattern_health, learning-cycle
+    completions, brain_work_outcome, …) pile up until MAX_PENDING_QUEUE_DEPTH
+    (500) is reached, at which point every subsequent enqueue is rejected and
+    the mesh stops receiving signals. The runner was previously only reachable
+    via POST /api/trading/brain/graph/propagate, so in practice nothing drained
+    it and the queue saturated within ~36h of live traffic.
+    """
+
+    def _work() -> None:
+        from sqlalchemy import text
+
+        from ..db import SessionLocal
+        from .trading.brain_neural_mesh.activation_runner import run_activation_batch
+
+        db = SessionLocal()
+        try:
+            # Recover orphaned 'processing' rows (claimed by a worker that
+            # crashed before marking them done). Without this, a process
+            # crash permanently removes events from circulation.
+            orphaned = db.execute(
+                text(
+                    "UPDATE brain_activation_events "
+                    "SET status='pending' "
+                    "WHERE status='processing' "
+                    "  AND created_at < now() - interval '10 minutes'"
+                )
+            ).rowcount
+            if orphaned:
+                logger.warning(
+                    "[scheduler] neural_mesh_drain: recovered %d orphaned processing rows",
+                    orphaned,
+                )
+                db.commit()
+
+            summary = run_activation_batch(db, time_budget_sec=3.0, max_events=32)
+            db.commit()
+            if summary.get("processed", 0) > 0:
+                logger.info(
+                    "[scheduler] neural_mesh_drain: processed=%d fires=%d inhibitions=%d "
+                    "downstream=%d took_ms=%.1f",
+                    summary.get("processed", 0),
+                    summary.get("fires", 0),
+                    summary.get("inhibitions", 0),
+                    summary.get("downstream", 0),
+                    float(summary.get("took_ms", 0.0)),
+                )
+        except Exception:
+            logger.exception("[scheduler] neural_mesh_drain failed")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        finally:
+            db.close()
+
+    run_scheduler_job_guarded("neural_mesh_drain", _work)
+
+
 def _run_bracket_reconciliation_job():
     """Phase G - periodic shadow-mode bracket reconciliation sweep."""
 
@@ -1208,38 +1269,79 @@ def _run_weekly_review_job():
 
 
 def _run_broker_sync_job():
-    """Sync Robinhood + Coinbase orders and positions for all users with open trades."""
+    """Sync Robinhood + Coinbase orders and positions for the session owner.
+
+    Previously this job iterated over ``distinct(Trade.user_id)`` of open
+    trades, which self-perpetuates duplicate rows when the scheduler writes
+    position copies under every user that ever had an open trade. The RH
+    session is tied to a single account (``broker_sessions.username``), so
+    all broker-sourced rows must be attributed to that one user.
+    """
     from . import broker_service, coinbase_service
+
+    def _resolve_rh_user_id(db) -> int | None:
+        """Return the user_id that owns the live RH session, or None."""
+        from sqlalchemy import text
+        try:
+            row = db.execute(
+                text(
+                    "SELECT u.id FROM broker_sessions bs "
+                    "JOIN users u ON lower(u.email) = lower(bs.username) "
+                    "WHERE bs.broker = 'robinhood' "
+                    "ORDER BY bs.updated_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            return int(row[0]) if row else None
+        except Exception:
+            logger.debug("[scheduler] broker_sync: RH user lookup failed", exc_info=True)
+            return None
+
+    def _resolve_cb_user_id(db) -> int | None:
+        """Return the user_id that has live Coinbase credentials, or None."""
+        from sqlalchemy import text
+        try:
+            row = db.execute(
+                text(
+                    "SELECT user_id FROM broker_credentials "
+                    "WHERE broker = 'coinbase' "
+                    "ORDER BY updated_at DESC LIMIT 1"
+                )
+            ).fetchone()
+            return int(row[0]) if row else None
+        except Exception:
+            logger.debug("[scheduler] broker_sync: CB user lookup failed", exc_info=True)
+            return None
 
     def _work() -> None:
         from ..db import SessionLocal
-        from ..models.trading import Trade
-        from sqlalchemy import distinct
 
         db = SessionLocal()
         try:
-            user_ids = [
-                r[0] for r in db.query(distinct(Trade.user_id))
-                .filter(Trade.status == "open", Trade.broker_source.in_(["robinhood", "coinbase"]))
-                .all()
-            ]
-            if not user_ids:
-                user_ids = [None]
+            if broker_service.is_connected():
+                rh_uid = _resolve_rh_user_id(db)
+                if rh_uid is None:
+                    logger.warning(
+                        "[scheduler] RH sync skipped: no broker_sessions row maps to a known user"
+                    )
+                else:
+                    logger.info("[scheduler] RH sync for user_id=%s (session owner)", rh_uid)
+                    order_result = broker_service.sync_orders_to_db(db, user_id=rh_uid)
+                    logger.info("[scheduler] RH order sync (user=%s): %s", rh_uid, order_result)
+                    pos_result = broker_service.sync_positions_to_db(db, user_id=rh_uid)
+                    logger.info("[scheduler] RH position sync (user=%s): %s", rh_uid, pos_result)
 
-            for uid in user_ids:
-                if broker_service.is_connected():
-                    logger.info("[scheduler] RH sync for user_id=%s", uid)
-                    order_result = broker_service.sync_orders_to_db(db, user_id=uid)
-                    logger.info("[scheduler] RH order sync (user=%s): %s", uid, order_result)
-                    pos_result = broker_service.sync_positions_to_db(db, user_id=uid)
-                    logger.info("[scheduler] RH position sync (user=%s): %s", uid, pos_result)
-
-                if coinbase_service.is_connected():
-                    logger.info("[scheduler] CB sync for user_id=%s", uid)
-                    cb_order = coinbase_service.sync_orders_to_db(db, user_id=uid)
-                    logger.info("[scheduler] CB order sync (user=%s): %s", uid, cb_order)
-                    cb_pos = coinbase_service.sync_positions_to_db(db, user_id=uid)
-                    logger.info("[scheduler] CB position sync (user=%s): %s", uid, cb_pos)
+            if coinbase_service.is_connected():
+                cb_uid = _resolve_cb_user_id(db)
+                if cb_uid is None:
+                    logger.warning(
+                        "[scheduler] CB sync skipped: no broker_credentials row for coinbase"
+                    )
+                else:
+                    logger.info("[scheduler] CB sync for user_id=%s (credential owner)", cb_uid)
+                    cb_order = coinbase_service.sync_orders_to_db(db, user_id=cb_uid)
+                    logger.info("[scheduler] CB order sync (user=%s): %s", cb_uid, cb_order)
+                    cb_pos = coinbase_service.sync_positions_to_db(db, user_id=cb_uid)
+                    logger.info("[scheduler] CB position sync (user=%s): %s", cb_uid, cb_pos)
         finally:
             db.close()
 
@@ -2625,6 +2727,26 @@ def start_scheduler():
             emit_worker_heartbeat,
         )
 
+        # Hard Rule 1/2: restore persisted kill-switch state before the first
+        # job runs. Without this, a tripped breaker silently disarms on every
+        # process restart — opposite of the intended safety guarantee.
+        try:
+            from .trading.governance import (
+                get_kill_switch_status,
+                restore_kill_switch_from_db,
+            )
+            restore_kill_switch_from_db()
+            _ks = get_kill_switch_status()
+            if _ks.get("active"):
+                logger.warning(
+                    "[scheduler] Kill switch restored ACTIVE: %s — autotrader blocked until manual reset",
+                    _ks.get("reason"),
+                )
+            else:
+                logger.info("[scheduler] Kill switch restored: inactive")
+        except Exception:
+            logger.warning("[scheduler] Kill-switch restore failed", exc_info=True)
+
         if include_web_light and getattr(settings, "brain_prescreen_scheduler_enabled", True):
             _scheduler.add_job(
                 _run_daily_prescreen_job,
@@ -3009,6 +3131,24 @@ def start_scheduler():
                 replace_existing=True,
                 max_instances=1,
             )
+
+        # Neural-mesh activation queue drain. The runner was previously only
+        # reachable via HTTP; without this job the pending queue saturates at
+        # 500 and every enqueue is rejected (stop_eval, pattern_health,
+        # learning-cycle signals all silently dropped).
+        try:
+            if include_heavy:
+                _scheduler.add_job(
+                    _run_neural_mesh_drain_job,
+                    trigger=IntervalTrigger(seconds=30),
+                    id="neural_mesh_drain",
+                    name="Neural mesh activation drain (every 30s)",
+                    replace_existing=True,
+                    max_instances=1,
+                    next_run_time=datetime.now() + timedelta(seconds=10),
+                )
+        except Exception:
+            logger.exception("[scheduler] failed to register neural_mesh_drain job")
 
         # Phase G: bracket reconciliation sweep (shadow mode only).
         # Gated by brain_live_brackets_mode != off; authoritative is blocked

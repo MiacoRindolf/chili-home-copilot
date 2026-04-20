@@ -777,12 +777,23 @@ def get_portfolio() -> dict[str, Any]:
     try:
         import robin_stocks.robinhood as rh
 
-        profile = rh.load_phoenix_account()
-        if not profile:
-            return {}
+        # phoenix.robinhood.com/accounts/unified has been intermittently
+        # unreachable (TLS handshake rejected by AWS edge). It's only a
+        # liveness probe — the real data comes from api.robinhood.com
+        # endpoints below. Treat phoenix failure as advisory, not fatal,
+        # so portfolio / buying-power stay fresh during phoenix outages.
+        try:
+            rh.load_phoenix_account()
+        except Exception as phx_err:
+            logger.warning(
+                "[broker] phoenix precheck failed (continuing with api.robinhood.com): %s",
+                str(phx_err)[:200],
+            )
 
         account_info = rh.load_account_profile()
         portfolio_info = rh.load_portfolio_profile()
+        if not account_info and not portfolio_info:
+            return {}
 
         result = {
             "equity": _safe_float(portfolio_info.get("equity")),

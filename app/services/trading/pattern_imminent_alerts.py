@@ -754,6 +754,29 @@ def run_pattern_imminent_scan(
 
         delivered = do_dry
         if not do_dry:
+            # Persist the BreakoutAlert row BEFORE attempting external
+            # delivery. The autotrader consumes these rows directly — its
+            # availability must not depend on Telegram/SMS egress. Prior
+            # behavior gated persistence on dispatch_alert's bool, so a
+            # network-unreachable Telegram silently starved the autotrader.
+            try:
+                _insert_imminent_breakout_alert(
+                    db,
+                    user_id,
+                    pat,
+                    ticker,
+                    sc,
+                    c["flat"],
+                    composite=float(c["composite"]),
+                    score_breakdown=dict(c["score_breakdown"]),
+                    readiness=float(c["readiness"]),
+                    coverage_ratio=float(c["coverage_ratio"]),
+                    eta_lo=float(c["eta_lo"]),
+                    eta_hi=float(c["eta_hi"]),
+                )
+            except Exception as e:
+                logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
+
             delivered = dispatch_alert(
                 db,
                 user_id,
@@ -766,30 +789,14 @@ def run_pattern_imminent_scan(
                 scan_pattern_id=pat.id,
                 confidence=min(0.95, 0.55 + 0.5 * float(c["composite"])),
             )
-            if delivered:
-                try:
-                    _insert_imminent_breakout_alert(
-                        db,
-                        user_id,
-                        pat,
-                        ticker,
-                        sc,
-                        c["flat"],
-                        composite=float(c["composite"]),
-                        score_breakdown=dict(c["score_breakdown"]),
-                        readiness=float(c["readiness"]),
-                        coverage_ratio=float(c["coverage_ratio"]),
-                        eta_lo=float(c["eta_lo"]),
-                        eta_hi=float(c["eta_hi"]),
-                    )
-                except Exception as e:
-                    logger.warning("[pattern_imminent] BreakoutAlert insert failed: %s", e)
-            else:
+            if not delivered:
                 delivery_failed += 1
         per_ticker[ticker] = per_ticker.get(ticker, 0) + 1
         per_pattern[pat.id] = per_pattern.get(pat.id, 0) + 1
-        if delivered:
-            sent += 1
+        # Count as sent whenever we persisted the DB row — that is the
+        # autotrader's contract. delivery_failed separately tracks the
+        # external-channel outcome for observability.
+        sent += 1
 
     summary: dict[str, Any] = {
         **meta,
